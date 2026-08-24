@@ -6,9 +6,20 @@ license.workspace = true
 repository.workspace = true
 description = "Personal agent orchestration node: supervises harnesses, enforces the gate, serves the interface."
 
+[lib]
+name = "tracon"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tracon"
 path = "src/main.rs"
+
+# Test-only ACP agent. Declared as a bin so cargo builds it and hands
+# `CARGO_BIN_EXE_fake_agent` to the integration tests. It lives under
+# tests/support/ so cargo does not also treat it as a test target.
+[[bin]]
+name = "fake_agent"
+path = "tests/support/fake_agent.rs"
 
 [dependencies]
 anyhow.workspace = true
