@@ -1,4 +1,4 @@
-use tracon::http;
+use tracon::{boundary, config, http};
 
 use std::net::SocketAddr;
 
@@ -41,7 +41,28 @@ async fn main() -> Result<()> {
 
     match Cli::parse().command {
         Command::Serve { listen } => http::serve(listen).await,
-        Command::Setup => anyhow::bail!("setup: not implemented yet"),
-        Command::CheckBoundary { .. } => anyhow::bail!("check-boundary: not implemented yet"),
+        Command::Setup => {
+            let cfg = config::Config::load();
+            boundary::setup(&cfg).await?;
+            println!("network, allowlist, and gateway are in place");
+            Ok(())
+        }
+        Command::CheckBoundary { deep } => {
+            let cfg = config::Config::load();
+            let report = boundary::check_all(&cfg, deep).await;
+            for c in &report.checks {
+                println!(
+                    "{} {:<22} {}",
+                    if c.ok { "ok  " } else { "FAIL" },
+                    c.id.as_str(),
+                    c.detail
+                );
+            }
+            match report.first_failure() {
+                None => Ok(()),
+                // Refusal is the honest state: name the check and exit non-zero.
+                Some(f) => anyhow::bail!("boundary check failed: {}", f.id.as_str()),
+            }
+        }
     }
 }
