@@ -2,6 +2,8 @@
 //! boundary; `LocalRunner` (tests only) runs the argv on the host so the adapter
 //! can be exercised without containers.
 
+pub mod podman;
+
 use async_trait::async_trait;
 use tokio::process::Child;
 

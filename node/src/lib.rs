@@ -3,6 +3,8 @@
 
 pub mod acp;
 pub mod adapter;
+pub mod boundary;
+pub mod config;
 pub mod http;
 pub mod runner;
 pub mod store;
