@@ -1,4 +1,13 @@
+// The store, adapter, and runner are exercised by their own tests but not yet
+// driven by a supervisor; that lands with sessions. Until then their public
+// surface is legitimately unused from `main`.
+#![allow(dead_code)]
+
+mod acp;
+mod adapter;
 mod http;
+mod runner;
+mod store;
 
 use std::net::SocketAddr;
 

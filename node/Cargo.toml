@@ -4,11 +4,18 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+autotests = false
 description = "Personal agent orchestration node: supervises harnesses, enforces the gate, serves the interface."
 
 [[bin]]
 name = "tracon"
 path = "src/main.rs"
+
+# Test-only ACP agent. Built so `CARGO_BIN_EXE_fake_agent` is available to the
+# adapter tests; never installed (only `tracon` is shipped).
+[[bin]]
+name = "fake_agent"
+path = "tests/fake_agent/main.rs"
 
 [dependencies]
 anyhow.workspace = true
