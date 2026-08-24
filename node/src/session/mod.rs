@@ -1,0 +1,327 @@
+//! Session lifecycle: create a worktree, materialize config, spawn the harness
+//! inside the boundary, and hand it to a supervisor.
+
+pub mod chunks;
+pub mod materialize;
+pub mod state;
+pub mod supervisor;
+pub mod worktree;
+
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration, time::Instant};
+
+use serde_json::json;
+use tokio::sync::{mpsc, oneshot, Mutex};
+
+use crate::{
+    adapter::{HarnessAdapter, LaunchSpec},
+    config::Config,
+    runner::{podman::PodmanRunner, podman::RunSpec, Runner},
+    session::{
+        state::{event_kind as ek, EndReason, SessionState},
+        supervisor::{Command, Supervisor},
+    },
+    store::{now_ms, NewEvent, SessionPatch, SessionRow, Store},
+    stream::{Frame, Hub},
+};
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct NewSession {
+    pub channel: String,
+    pub repo_path: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub work_item_id: Option<String>,
+    /// Required, with no default: a session without an explicit model is a
+    /// validation failure rather than a silent choice.
+    pub model: String,
+    #[serde(default)]
+    pub budget_tokens: Option<i64>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error("model is required")]
+    ModelRequired,
+    #[error("budget must be greater than zero")]
+    BadBudget,
+    #[error("node refuses to run harnesses: {0}")]
+    NodeRefused(String),
+    #[error("harness version mismatch: node expects {pinned}, host has {found}")]
+    VersionMismatch { found: String, pinned: String },
+    #[error("session not found")]
+    NotFound,
+    #[error("{0}")]
+    Rejected(String),
+    #[error(transparent)]
+    Store(#[from] crate::store::StoreError),
+}
+
+/// Running sessions, by id. A session that has ended leaves the map; its rows
+/// and events stay in the store.
+#[derive(Clone)]
+pub struct Manager {
+    store: Arc<Store>,
+    hub: Hub,
+    cfg: Arc<Config>,
+    node_id: String,
+    live: Arc<Mutex<HashMap<String, mpsc::Sender<Command>>>>,
+}
+
+impl Manager {
+    pub fn new(store: Arc<Store>, hub: Hub, cfg: Arc<Config>, node_id: String) -> Self {
+        Self {
+            store,
+            hub,
+            cfg,
+            node_id,
+            live: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn store(&self) -> &Arc<Store> {
+        &self.store
+    }
+
+    pub fn hub(&self) -> &Hub {
+        &self.hub
+    }
+
+    /// Validate, insert the row, and start the session in the background. The
+    /// row exists before the harness does, so the interface can show a session
+    /// that is still starting.
+    pub async fn create(
+        &self,
+        spec: NewSession,
+        adapter: Arc<dyn HarnessAdapter>,
+    ) -> Result<SessionRow, SessionError> {
+        if spec.model.trim().is_empty() {
+            return Err(SessionError::ModelRequired);
+        }
+        let budget = spec.budget_tokens.unwrap_or(self.cfg.session.budget_tokens);
+        if budget <= 0 {
+            return Err(SessionError::BadBudget);
+        }
+        if let Some(node) = self.store.get_node(&self.node_id)? {
+            if node.state != "ready" {
+                return Err(SessionError::NodeRefused(
+                    node.failed_detail
+                        .or(node.failed_check)
+                        .unwrap_or_else(|| "boundary check failed".into()),
+                ));
+            }
+            if let Some(found) = node.harness_found.filter(|f| f != &node.harness_pinned) {
+                return Err(SessionError::VersionMismatch {
+                    found,
+                    pinned: node.harness_pinned,
+                });
+            }
+        }
+
+        let id = uuid::Uuid::now_v7().to_string();
+        let slug = id.split('-').next_back().unwrap_or("session").to_string();
+        let branch = spec
+            .branch
+            .clone()
+            .unwrap_or_else(|| format!("feat/tracon-{slug}"));
+        let row = SessionRow {
+            id: id.clone(),
+            node_id: self.node_id.clone(),
+            channel: spec.channel.clone(),
+            work_item_id: spec.work_item_id.clone(),
+            repo_path: spec.repo_path.clone(),
+            worktree_path: None,
+            branch: branch.clone(),
+            harness_id: adapter.id().to_string(),
+            harness_version: adapter.pinned_version().to_string(),
+            harness_session_id: None,
+            container_name: None,
+            model: spec.model.clone(),
+            budget_tokens: budget,
+            tokens_used: 0,
+            cost_usd: None,
+            context_used: None,
+            context_size: None,
+            state: SessionState::Starting.as_str().into(),
+            end_reason: None,
+            last_error: None,
+            turn_active: 0,
+            draft: None,
+            draft_updated_ms: None,
+            created_ms: now_ms(),
+            started_mono_ms: Some(0),
+            ended_mono_ms: None,
+            updated_ms: now_ms(),
+        };
+        self.store.insert_session(&row)?;
+        self.hub.publish(Frame::Session(Box::new(row.clone())));
+
+        let this = self.clone();
+        let started = Instant::now();
+        tokio::spawn(async move {
+            if let Err(e) = this.start(&id, spec, branch, slug, adapter, started).await {
+                tracing::error!(session = %id, error = %e, "session failed to start");
+                let _ = this.store.update_session(
+                    &id,
+                    SessionPatch {
+                        state: Some(SessionState::Failed.as_str().into()),
+                        end_reason: Some(EndReason::Error.as_str().into()),
+                        last_error: Some(e.to_string()),
+                        ended_mono_ms: Some(started.elapsed().as_millis() as i64),
+                        ..Default::default()
+                    },
+                );
+                let _ = this.store.append_event(&NewEvent {
+                    session_id: id.clone(),
+                    work_item_id: None,
+                    kind: ek::ERROR.into(),
+                    ref_id: None,
+                    payload: json!({ "error": e.to_string() }),
+                    at_ms: now_ms(),
+                    mono_ms: started.elapsed().as_millis() as i64,
+                });
+                if let Ok(Some(row)) = this.store.get_session(&id) {
+                    this.hub.publish(Frame::Session(Box::new(row)));
+                }
+            }
+        });
+        Ok(row)
+    }
+
+    async fn start(
+        &self,
+        id: &str,
+        spec: NewSession,
+        branch: String,
+        slug: String,
+        adapter: Arc<dyn HarnessAdapter>,
+        started: Instant,
+    ) -> anyhow::Result<()> {
+        let repo = PathBuf::from(&spec.repo_path);
+        let wt = worktree::create(&repo, &self.cfg.session.worktree_root, &branch, &slug).await?;
+        self.store.update_session(
+            id,
+            SessionPatch {
+                worktree_path: Some(wt.path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        )?;
+        self.store.append_event(&NewEvent {
+            session_id: id.to_string(),
+            work_item_id: None,
+            kind: ek::WORKTREE.into(),
+            ref_id: None,
+            payload: json!({
+                "path": wt.path, "branch": wt.branch, "base": wt.base,
+                "main_checkout_dirty": wt.main_checkout_dirty
+            }),
+            at_ms: now_ms(),
+            mono_ms: started.elapsed().as_millis() as i64,
+        })?;
+
+        let scratch = materialize::scratch_for(id, &wt.path)?;
+        let selinux = crate::boundary::selinux_enabled().await;
+        let mut run_spec = RunSpec::from_config(&self.cfg, selinux);
+        run_spec.extra_mounts = scratch.mounts;
+        let container = format!("tracon-h-{slug}");
+        let runner: Arc<dyn Runner> = Arc::new(PodmanRunner::new(run_spec));
+
+        let (handle, events) = adapter
+            .launch(
+                runner.as_ref(),
+                LaunchSpec {
+                    cwd_in_runner: "/work".into(),
+                    model: spec.model.clone(),
+                    container_name: container.clone(),
+                },
+            )
+            .await?;
+
+        self.store.update_session(
+            id,
+            SessionPatch {
+                container_name: Some(container.clone()),
+                harness_session_id: Some(handle.harness_session_id().to_string()),
+                ..Default::default()
+            },
+        )?;
+        self.store.append_event(&NewEvent {
+            session_id: id.to_string(),
+            work_item_id: None,
+            kind: ek::SESSION_STARTED.into(),
+            ref_id: None,
+            payload: json!({ "model": spec.model, "harness": adapter.id() }),
+            at_ms: now_ms(),
+            mono_ms: started.elapsed().as_millis() as i64,
+        })?;
+
+        let (cmd_tx, cmd_rx) = mpsc::channel(16);
+        let cmd_tx_for_turns = cmd_tx.clone();
+        self.live.lock().await.insert(id.to_string(), cmd_tx);
+
+        let sup = Supervisor::new(
+            id.to_string(),
+            self.store.clone(),
+            self.hub.clone(),
+            Arc::from(handle),
+            started,
+            Duration::from_secs(self.cfg.session.permission_timeout_secs),
+            cmd_tx_for_turns,
+            runner,
+            container.clone(),
+        );
+        let live = self.live.clone();
+        let sid = id.to_string();
+        tokio::spawn(async move {
+            sup.run(events, cmd_rx).await;
+            live.lock().await.remove(&sid);
+            materialize::remove(&sid);
+        });
+        Ok(())
+    }
+
+    async fn send(&self, id: &str, cmd: Command) -> Result<(), SessionError> {
+        let tx = self.live.lock().await.get(id).cloned();
+        match tx {
+            Some(tx) => tx
+                .send(cmd)
+                .await
+                .map_err(|_| SessionError::Rejected("session is no longer running".into())),
+            None => Err(SessionError::Rejected(
+                "session is not running on this node".into(),
+            )),
+        }
+    }
+
+    pub async fn prompt(&self, id: &str, text: String) -> Result<(), SessionError> {
+        let (ack, wait) = oneshot::channel();
+        self.send(id, Command::Prompt { text, ack }).await?;
+        wait.await
+            .map_err(|_| SessionError::Rejected("session stopped".into()))?
+            .map_err(SessionError::Rejected)
+    }
+
+    pub async fn answer(&self, id: &str, option_id: String) -> Result<(), SessionError> {
+        let perm = self
+            .store
+            .get_permission(id)?
+            .ok_or(SessionError::NotFound)?;
+        let (ack, wait) = oneshot::channel();
+        self.send(
+            &perm.session_id,
+            Command::Answer {
+                permission_id: id.to_string(),
+                option_id,
+                ack,
+            },
+        )
+        .await?;
+        wait.await
+            .map_err(|_| SessionError::Rejected("session stopped".into()))?
+            .map_err(SessionError::Rejected)
+    }
+
+    pub async fn kill(&self, id: &str) -> Result<(), SessionError> {
+        self.send(id, Command::Kill).await
+    }
+}
