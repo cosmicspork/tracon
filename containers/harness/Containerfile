@@ -1,0 +1,11 @@
+# Harness runner: omp at a pinned version, git, CA certificates. No network at run time;
+# everything the harness reaches goes through the tracon gateway.
+FROM docker.io/library/debian:bookworm-slim
+ARG OMP_VERSION=18.0.4
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; case "${TARGETARCH}" in amd64) a=x64 ;; arm64) a=arm64 ;; *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; esac; \
+    curl -fsSL -o /usr/local/bin/omp "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/omp-linux-${a}"; \
+    chmod +x /usr/local/bin/omp; /usr/local/bin/omp --version
+WORKDIR /work
