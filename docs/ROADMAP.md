@@ -76,28 +76,30 @@ checks and completes the phase.
 
 Node:
 
-- [ ] Rust binary, static musl, `x86_64` and `aarch64`
-- [ ] Host boundary as code: internal network, gateway container with the allowlist
+- [ ] Rust binary, static musl, `x86_64` and `aarch64`. Builds natively on
+      `aarch64-apple-darwin` today; the musl cross-build is not wired up yet.
+- [x] Host boundary as code: internal network, gateway container with the allowlist
       proxy and node-socket forward, harness container. Exactly what Phase 0 established
       by hand on Bazzite, generalized behind capability checks.
-- [ ] Startup boundary check; refusal to run harnesses surfaced with the failed check
-- [ ] ACP adapter for omp, with a harness adapter trait from day one. One harness until
+- [x] Startup boundary check; refusal to run harnesses surfaced with the failed check
+- [x] ACP adapter for omp, with a harness adapter trait from day one. One harness until
       a concrete task needs a second; adapters are the part that rots.
-- [ ] Session lifecycle: worktree creation and branch, git identity materialized,
+- [x] Session lifecycle: worktree creation and branch, git identity materialized,
       spawn inside the boundary, stream, teardown
-- [ ] Config materialized to a scratch directory, nothing written to the repo
+- [x] Config materialized to a scratch directory, nothing written to the repo
 - [ ] Embedded SPA (`rust-embed`), served locally: queue, session screen with streaming
       output and prompt input, approval detail, nodes, new-session form with a required
-      model field
-- [ ] Local SQLite: `node`, `session`, `event` tables
-- [ ] `work_item_id` nullable column on `session` and `event` from the start, even
+      model field. The embedding and the HTTP surface the screens need exist; the SPA
+      itself is still a placeholder page. Design settled 2026-08-24 (Ledger × Tonal).
+- [x] Local SQLite: `node`, `session`, `event` tables
+- [x] `work_item_id` nullable column on `session` and `event` from the start, even
       though the ledger does not exist yet. Adding the graph later is additive; not
       having the column forces a rewrite.
-- [ ] Durations recorded monotonically on the node that observed them
+- [x] Durations recorded monotonically on the node that observed them
 
 Gate:
 
-- [ ] Permission handling: ACP `session/request_permission` routed to the queue
+- [x] Permission handling: ACP `session/request_permission` routed to the queue
       (Claude Code `control_request` when that adapter lands)
 - [ ] Local policy evaluation, signed bundles, fail closed on approve
 - [ ] Credential broker, sealed, harness has no read path
@@ -114,6 +116,16 @@ Gate:
 - [ ] Tool surface reduction before gating (`--tools`, `--disallowedTools`)
 - [ ] Encode the five working agreements as policy: worktree not main checkout, review
       before publish, no merge, no transition, no production deploy
+
+Session budgets are enforced in tokens, accumulated from each turn's reported usage and
+checked when the turn ends. A single long turn can therefore overshoot: ACP reports usage
+per turn, not continuously. Mid-turn enforcement needs a usage snapshot the adapter does
+not have yet, and per-channel ceilings are Phase 5.
+
+Progress, 2026-08-24: the node establishes and verifies its boundary, spawns `omp` inside
+it, runs a session end to end (worktree, prompt, permission request routed to the queue,
+answer, budget kill, teardown), and streams events over SSE. Everything under Gate below
+except permission handling is still ahead, and so is the interface.
 
 Exit criteria: a full task is driven from the browser against one boundary-capable node,
 start to finish, with `gh` and the consulta credential reachable only through the node.
