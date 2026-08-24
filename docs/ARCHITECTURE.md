@@ -50,22 +50,22 @@ coding agents. It does not implement an agent loop.
                         │   channel            │
                         └──────────┬───────────┘
                                    │
-                 ┌─────────────────┼─────────────────┐
-                 │                 │                 │
-           ┌─────▼──────┐   ┌──────▼─────┐   ┌───────▼────┐
-           │ work node  │   │ personal   │   │  PWA /     │
-           │ (Coder pod)│   │ node       │   │  desktop   │
-           │            │   │ (Bazzite)  │   │  clients   │
-           └─────┬──────┘   └────────────┘   └────────────┘
-                 │ docker exec
-           ┌─────▼──────────┐
-           │  devcontainer  │
-           │  (harness)     │
-           └────────────────┘
+                       ┌───────────┴───────────┐
+                 ┌─────▼──────────┐   ┌────────▼───────┐
+                 │ eligible nodes │   │ PWA / desktop  │
+                 │ any host that  │   │ clients        │
+                 │ passes checks  │   │                │
+                 └─────┬──────────┘   └────────────────┘
+                       │ supervised exec
+                 ┌─────▼──────────┐
+                 │ isolated       │
+                 │ harness runner │
+                 └────────────────┘
 ```
 
-Every node dials out to the hub. Nothing accepts inbound connections. A Coder
-workspace with no ingress and a laptop are identical to the mesh.
+Every admitted node dials out to the hub. Nothing accepts inbound connections. Host
+location does not determine admission: a laptop, Coder workspace, or managed environment
+is a node only when it can establish and verify the harness boundary.
 
 **The hub is the relay.** An earlier draft had a separate opaque relay in front of the
 hub. Both must be always-on, both would live in the same cluster, and the hub already
@@ -120,6 +120,18 @@ requires a dotfiles change.
 tool execution, and interactive permissions over JSON-RPC on stdio, and provides
 filesystem routing, terminal routing, and permission prompts without bespoke glue.
 
+Phase 0 validated these assumptions against `omp acp` 18.0.4. The
+[`session/new` and update capture](reference/acp-omp-18.0.4-session.jsonl) includes model
+selection, permission requests, tool updates, and usage events. A
+[`restricted-session` capture](reference/acp-omp-restricted-session.jsonl) and its
+[`driver`](reference/acp-drive-restricted.py) show omp accepting denied egress and absent
+publishing tools without retrying, routing around the gate, or reporting false success.
+
+The node declares ACP filesystem reads unavailable so omp reads inside its isolated
+runner rather than turning the node into a file server. `session/request_permission` is
+the gate input. Usage events include cost, and budget accounting includes the large,
+mostly cached startup context rather than counting only the visible prompt.
+
 | Harness | Mode | Notes |
 |---|---|---|
 | omp | `omp acp` | Also exposes `_omp/*` for session discovery and reopen. Non-spec. |
@@ -159,9 +171,9 @@ Model credentials stay in the harness's own store (`~/.omp/agent/agent.db`,
 `~/.local/share/opencode/auth.json`). The node does not broker them. Session refresh is
 the harness's problem.
 
-Because the harness runs in an ephemeral devcontainer, that state directory must be a
-volume the node owns and mounts. `omp-docker` establishes this pattern with
-`OMP_STATE_DIR`; copy it rather than inventing one.
+Because the harness runs in an ephemeral runner container, that state directory must be
+a volume the node owns and mounts. `OMP_STATE_DIR` establishes this pattern; copy it
+rather than inventing one.
 
 Work-side model access is through the employer's provider subscription via
 omp/opencode. Subscription access and API-platform access are separate systems at
@@ -177,41 +189,60 @@ The review server becomes a real gate rather than an advisory one.
 The gate only works if the harness cannot reach what the node holds. **Every node
 establishes this boundary or does not run harnesses.** There is no advisory mode.
 
-In the work topology the boundary is the existing docker-in-docker layout:
+The boundary is capability-driven, not tied to an operating system or product. A host
+qualifies when it can run the long-lived node, give the node exclusive control of an
+isolated harness runner, persist node and harness state, serve the SPA, and pass the
+startup checks below.
 
-- Node runs in the outer Coder pod
-- Harness runs in the inner devcontainer
-- Node spawns the harness via `docker exec -i` and holds the pipe
-- Node keeps the Docker client; the inner container never gets one
+The current Coder template does **not** qualify. It produces one Envbuilder-built
+devcontainer that carries the Coder agent and the harness together. Its Kubernetes
+container is `privileged`, the `coder` user has passwordless `sudo`, and root has the
+full capability set. It has no Docker CLI or mounted Docker socket, but that is
+irrelevant: the harness can become privileged root in the node's own container.
 
-On the personal machine (Bazzite) the same shape is built with rootless podman, and it
-was proven by hand in Phase 0 (see `VALIDATION.md`). The node owns three things:
+Work-side enforcement therefore requires a replacement topology: an unprivileged harness
+runner separated from the node, with the node holding its exec pipe and being its only
+permitted network route.
+
+Phase 0 established one working topology on Bazzite with rootless Podman. The node owns:
 
 - an **internal network** (`--internal --disable-dns`), which has no route to the
-  internet and, in rootless podman, none to the host either;
+  internet and, in rootless Podman, none to the host either;
 - a **gateway container** on both that network and the default one, running an HTTP
   CONNECT proxy with a default-deny allowlist of model provider hosts, and forwarding
-  one internal port to the node's unix socket;
+  one internal port to the node's Unix socket; and
 - the **harness container** on the internal network only, `--cap-drop=ALL`,
-  `no-new-privileges`, `HTTPS_PROXY` pointed at the gateway, node holding the exec pipe.
+  `no-new-privileges`, `HTTPS_PROXY` pointed at the gateway, with the node holding the
+  exec pipe.
 
 The harness therefore reaches exactly two things: allowlisted provider hosts through
-the proxy, and the node through the gateway. A unix socket mounted straight into the
+the proxy, and the node through the gateway. A Unix socket mounted straight into the
 harness does not work under SELinux without `label=disable`, which is why the gateway
-carries it instead. The hub runs no harnesses and needs no boundary.
+carries it instead. The verified proxy configuration is
+[`reference/gateway-tinyproxy.conf`](reference/gateway-tinyproxy.conf). The hub runs no
+harnesses and needs no boundary.
 
-Three things collapse this boundary and must be verified per environment:
+The proof also established operational constraints that belong in the implementation:
+disable the internal network's DNS so its resolver does not answer `NXDOMAIN` for every
+external name, keep the node socket under `$XDG_RUNTIME_DIR` to stay below the Unix
+socket path limit, and mount the socket only into the trusted gateway. omp honored the
+gateway's `HTTPS_PROXY`: the provider host was reachable and an unlisted host was denied.
 
-1. **Docker socket in the devcontainer.** The docker-in-docker or
-   docker-outside-of-docker devcontainer features, or a mounted
-   `/var/run/docker.sock`, give the agent the daemon API and therefore everything.
-   Devcontainer templates enable this by reflex. Check first.
-2. **Privileged inner container.** The outer pod needs privilege for DinD; the inner one
-   must not have it.
-3. **Egress.** The devcontainer goes on an internal Docker network with the node as the
-   only reachable address. Without this, the agent does not need brokered credentials for
-   anything it can do with a token found in repo history. Image build needs network;
-   open at build, closed at run.
+Bazzite is evidence for the design, not a Phase 1 platform requirement. macOS with a
+Podman VM, another Linux host, or a managed web environment qualifies only if it can
+provide the same capabilities and pass the same checks. Claude Code for web can be used
+to implement Phase 1; it is not a Phase 1 runtime unless its environment can host the
+persistent node, isolated runner, state, and reachable SPA.
+
+Three things collapse the boundary and must be verified per environment:
+
+1. **Runtime control in the harness.** A Docker or Podman socket, Docker-in-Docker, or
+   another path to the node's container runtime gives the harness control of the gate.
+2. **A shared privilege domain.** The harness must be unprivileged and isolated from the
+   node. Root or equivalent capabilities in the node's container fail the boundary even
+   when no runtime socket is mounted.
+3. **Direct egress.** The harness runner must be on an internal network with the node
+   gateway as its only reachable route. Image build may use network; execution may not.
 
 ### Boundary check
 
@@ -470,6 +501,12 @@ the floor, not a stopgap.
 Pin the embedding model. Store model name and dimension on every vector row, or
 incremental migration is impossible and stale vectors are undetectable.
 
+Phase 0 found that DigitalOcean exposes embeddings synchronously but does not include
+embeddings in batch inference, and its reranker is a knowledge-base feature rather than
+a standalone endpoint. If vectors become necessary, evaluate BGE-M3 or Qwen3 Embedding
+0.6B at that time; model availability and pricing are operational facts, not permanent
+architecture.
+
 ### Curation
 
 Auto-retain produces volume. Memory promotion is routed through the existing approval
@@ -677,19 +714,17 @@ Kritee stays in the business tool domain. tracon owns node, session, event,
 work item, memory, document, and policy. It does not grow clients, invoicing, or a
 business domain. Project separation is channels, not a `Client` table.
 
-### Nothing in project repos
-
-No `.claude/`, no `AGENTS.md`, no `.beads/`, no tracon files of any kind.
-
 ### Bootstrap
 
-The node is developed using agents that run inside the node. A documented path to
-running a harness directly, outside the system, must be maintained, or a bad deploy locks
-out the tool needed to fix it.
+Once bootstrapped, the node is developed using agents that run inside the node. A
+documented path to running a harness directly, outside the system, must be maintained,
+or a bad deploy locks out the tool needed to fix it.
 
-Phase 1 is built directly on the host; tracon builds tracon from Phase 2 on. Rebuilding
-and restarting the node is a host-side recipe, never something a session does, so a
-session that breaks the build cannot lock the operator out of the running node.
+Phase 1 may be implemented by an external harness on any environment that can modify
+and test the repository; that environment need not be the Phase 1 runtime host. tracon
+builds tracon after Phase 1 exits. Rebuilding and restarting the node remains a host-side
+recipe, never something a session does, so a session that breaks the build cannot lock
+the operator out of the running node.
 
 ## Data lifecycle
 

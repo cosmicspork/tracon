@@ -6,17 +6,20 @@ and existing coding agents, driven from a browser instead of a terminal.
 Named for TRACON, terminal radar approach control: the facility sequences traffic and
 issues clearances, and it never flies anything.
 
-**Status: planning.** No implementation yet. See [docs/ROADMAP.md](docs/ROADMAP.md) for phasing,
+**Status: planning.** Phase 0 validation is complete. The work Coder template cannot
+enforce the gate as configured; Phase 3 requires a new, unprivileged runner topology.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for phasing,
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design record, and
-[docs/VALIDATION.md](docs/VALIDATION.md) for Phase 0 results.
+[docs/DESIGN.md](docs/DESIGN.md) for the interface.
 
 ## What it is
 
-A single statically linked Rust binary that runs as a node on every machine where agent
-work happens: laptops, Coder workspaces, homelab Kubernetes pods. Each node supervises
-local agent harnesses, enforces policy, brokers credentials and tools, and serves an
-embedded SPA. Nodes dial out to an always-on hub that relays end-to-end encrypted
-frames, so any node's interface can see and control work happening on any other.
+A single statically linked Rust binary that can run as a node on any machine able to
+establish the harness boundary: laptops, replacement Coder runners, or homelab
+Kubernetes pods. Each node supervises local agent harnesses, enforces policy, brokers
+credentials and tools, and serves an embedded SPA. Nodes dial out to an always-on hub
+that relays end-to-end encrypted frames, so any node's interface can see and control
+work happening on any other.
 
 ## What it is not
 
@@ -52,21 +55,23 @@ Four problems, in the order they hurt:
                         │  ciphertext          │
                         └──────────┬───────────┘
                                    │
-                 ┌─────────────────┼─────────────────┐
-           ┌─────▼──────┐   ┌──────▼─────┐   ┌───────▼────┐
-           │ work node  │   │ personal   │   │  PWA /     │
-           │ (Coder pod)│   │ node       │   │  desktop   │
-           └─────┬──────┘   └────────────┘   └────────────┘
-                 │ docker exec
-           ┌─────▼──────────┐
-           │  devcontainer  │
-           │  (harness)     │
-           └────────────────┘
+                       ┌───────────┴───────────┐
+                 ┌─────▼──────────┐   ┌────────▼───────┐
+                 │ eligible nodes │   │ PWA / desktop  │
+                 │ any host that  │   │ clients        │
+                 │ passes checks  │   │                │
+                 └─────┬──────────┘   └────────────────┘
+                       │ supervised exec
+                 ┌─────▼──────────┐
+                 │ isolated       │
+                 │ harness runner │
+                 └────────────────┘
 ```
 
 Nothing accepts inbound connections. The hub is also the relay; work channels pass
-through it as ciphertext it cannot read. The harness runs one privilege boundary below
-the node, which is what makes the credential gate real rather than advisory.
+through it as ciphertext it cannot read. A host runs harnesses only after proving that
+the isolated runner is one privilege boundary below the node. That boundary makes the
+credential gate real rather than advisory.
 
 ## Design commitments
 
@@ -101,11 +106,10 @@ These constrain everything else and are unlikely to change.
 2. [docs/ROADMAP.md](docs/ROADMAP.md) for what gets built when, and what is deliberately
    deferred or excluded
 3. [docs/DESIGN.md](docs/DESIGN.md) for the interface: principles, jobs, states, flows
-4. [docs/VALIDATION.md](docs/VALIDATION.md) for what Phase 0 proved and what is still
-   pending on the work side
 
-Phase 0 of the roadmap is validation, not code. Several assumptions in the architecture
-are load-bearing and cheap to check, and at least one of them (whether the work-side
-devcontainer exposes a Docker socket) determines whether the gate can be enforced at all
-on that machine. Phase 1 is the gate on one machine; browser-over-TUI is already
-settled from using opencode web and Claude Code web, so no phase re-proves it.
+Phase 0 established the ACP message shapes, restricted-harness behavior, and one working
+boundary on Bazzite. The current work Coder template's single Envbuilder container is
+privileged and grants passwordless `sudo`; it cannot host a gated harness. Phase 3 must
+replace that topology before work-side enforcement is possible. Phase 1 is the gate on
+any one machine that passes the boundary check; browser-over-TUI is already settled from
+using opencode web and Claude Code web, so no phase re-proves it.
