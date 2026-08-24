@@ -1,0 +1,49 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Node / SPA
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.sock
+
+# Runtime state, never committed
+/data/
+/state/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+
+# Tooling scratch
+.direnv/
+.venv/
+__pycache__/
+*.pyc
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Harness files: the project promises never to carry these
+.claude/
+.omp/
+.opencode/
+AGENTS.md
+CLAUDE.md
