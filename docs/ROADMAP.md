@@ -14,55 +14,72 @@ else provides is enforcement, then cross-machine reach; those come first.
 
 ## Phase 0: Validate the assumptions
 
-No code. Everything below is load-bearing for the design and cheap to check. Results
-and the exact commands for the remaining work-side checks are in `VALIDATION.md`.
+Validation work completed on 2026-08-24. The ACP, restricted-harness, and Bazzite
+boundary assumptions passed. The assumed work Coder boundary failed: the current
+single-container template cannot enforce the gate. Evidence remains in the
+[`ACP capture`](reference/acp-omp-18.0.4-session.jsonl),
+[`restricted-session capture`](reference/acp-omp-restricted-session.jsonl),
+[`restricted-session driver`](reference/acp-drive-restricted.py), and
+[`gateway configuration`](reference/gateway-tinyproxy.conf).
 
-- [x] **Read a real ACP session end to end.** ACP framing is one JSON object per line, so
-      tee both directions through named pipes into log files and read an `omp acp`
-      session before writing any Rust.
-- [x] **Drive one real task with the harness under restriction.** Network closed, no
-      `gh` / `glab` / `acli` on PATH, no `.env`. The gate assumes the harness can be told
-      "these actions go through a tool" and will cooperate rather than fight. Find out
-      whether omp / opencode / Claude Code degrade gracefully or thrash before the
-      broker is built around that assumption.
-- [ ] **Check the devcontainer Docker socket situation.** If `devcontainer.json` enables
-      the docker-in-docker or docker-outside-of-docker feature, or mounts
-      `/var/run/docker.sock`, the harness has the daemon API and the gate cannot be
-      enforced. It has to be removable; there is no advisory mode to fall back to.
-- [ ] **Find the Coder autostop policy.** If workspaces stop aggressively, background
-      work at work is off the table regardless of what gets built.
-- [ ] **Confirm the inner devcontainer is not privileged** and has no excessive caps.
-- [x] **Stand up the personal boundary by hand.** Rootless podman on Bazzite, harness in
-      a container on an internal network, node-side process holding the exec pipe.
+- [x] **Read a real ACP session end to end.** `omp acp` 18.0.4 uses newline-delimited
+      JSON-RPC. The capture establishes session configuration, tool and permission
+      updates, streaming output, and usage events needed by the adapter.
+- [x] **Drive one real task with the harness under restriction.** With network closed,
+      no publishing CLIs, and no `.env`, omp completed local work, reported denied
+      publishing accurately, and stopped without retries or attempts to route around
+      the gate.
+- [x] **Check the devcontainer Docker socket situation.** The current template exposes
+      neither Docker CLI nor `/var/run/docker.sock`, and the sampled devcontainer files
+      declare neither Docker feature nor socket mount. That does not establish a
+      boundary: the template's sole Envbuilder container is privileged.
+- [x] **Find the Coder autostop policy.** The configured autostop duration is 8 hours.
+      Background work therefore needs an active workspace or explicit restart handling.
+- [x] **Check the container privilege and capabilities.** This fails the original
+      topology assumption: the template sets `privileged = true`; `coder` has
+      passwordless `sudo`; root has `CapEff: 000001ffffffffff`. There is no separate
+      inner runner, so this topology cannot run a gated harness.
+- [x] **Stand up one host boundary by hand.** Rootless Podman on Bazzite, harness in a
+      container on an internal network, node-side process holding the exec pipe.
       Confirm the harness can still reach the model provider through the node and
       nothing else.
-- [ ] **Confirm Python and `uv` are available in the outer Coder pod**, or can be
-      fetched by the bootstrap. The consulta sidecar runs there, not in the
-      devcontainer.
-- [x] **Confirm the DigitalOcean embeddings and reranking models** available on
-      serverless inference, and price a batch inference job against synchronous for
-      nightly backfill.
+- [x] **Check Python and `uv` in the Coder environment.** The template creates no
+      separate outer pod: Coder runs in the Envbuilder devcontainer. It has Python
+      3.9.2; `uv` is absent but its installer is reachable. The replacement topology
+      must provision sidecar dependencies independently.
+- [x] **Check DigitalOcean embeddings, reranking, and batch inference.** Embeddings use
+      synchronous endpoints and are not supported by batch inference. Reranking is a
+      knowledge-base feature, not a standalone endpoint. Candidate embedding models are
+      deferred to Phase 4, after FTS demonstrates a need.
 - [x] **Decide the human-time signal.** Claim/release on approval items. Browser
       heartbeat measures tab focus, not attention, and puts the SPA in the loop for a
       metric. Decided here because it changes the event schema and is expensive to
       retrofit.
 
-Exit criteria: the privilege boundary is known to be achievable on both the work pod
-and the personal machine, the harness is known to tolerate restriction, and the ACP
-message shapes are understood well enough to write the adapter.
+Outcome: the adapter, restricted-harness, and Bazzite boundary checks passed. The
+original work-boundary criterion failed and produced the Phase 3 replacement-topology
+requirement. It did not create an advisory mode or establish the current Coder workspace
+as a valid node.
 
 ## Phase 1: Node and gate, one machine, no mesh
 
-The smallest thing that changes behavior. Personal machine only; the work node comes
-in Phase 3. Built directly on the host with Claude Code or omp; that path is kept
-forever as the bootstrap escape hatch. Dogfooding starts once this phase exits.
+The smallest thing that changes behavior. Phase 1 runs on any one machine that can host
+the persistent node and isolated runner, retain state, expose the SPA to the operator,
+and pass the startup boundary check. Bazzite proved one implementation; it is not the
+required platform. macOS, another Linux host, or a managed environment qualifies by
+capability, not product name.
+
+Claude Code for web, omp, or another harness may be used outside tracon to implement
+this phase. That is the bootstrap escape hatch, not a claim that the implementation
+environment can run the node. Dogfooding starts once one eligible machine passes the
+checks and completes the phase.
 
 Node:
 
 - [ ] Rust binary, static musl, `x86_64` and `aarch64`
-- [ ] Personal boundary as code: internal network, gateway container with the
-      allowlist proxy and node-socket forward, harness container. Exactly what
-      `VALIDATION.md` proved by hand.
+- [ ] Host boundary as code: internal network, gateway container with the allowlist
+      proxy and node-socket forward, harness container. Exactly what Phase 0 established
+      by hand on Bazzite, generalized behind capability checks.
 - [ ] Startup boundary check; refusal to run harnesses surfaced with the failed check
 - [ ] ACP adapter for omp, with a harness adapter trait from day one. One harness until
       a concrete task needs a second; adapters are the part that rots.
@@ -98,9 +115,9 @@ Gate:
 - [ ] Encode the five working agreements as policy: worktree not main checkout, review
       before publish, no merge, no transition, no production deploy
 
-Exit criteria: a full task is driven from the browser on the personal machine, start to
-finish, with `gh` and the consulta credential reachable only through the node. From
-here on, tracon is built through tracon.
+Exit criteria: a full task is driven from the browser against one boundary-capable node,
+start to finish, with `gh` and the consulta credential reachable only through the node.
+From here on, tracon is built through tracon.
 
 ## Phase 2: Mesh
 
@@ -110,20 +127,24 @@ here on, tracon is built through tracon.
 - [ ] Node keypair on first run, enrollment via short-lived code from an enrolled node
 - [ ] Channel model and key scoping
 - [ ] Policy signing key generated and kept off the hub
-- [ ] Second node in a Coder workspace, bootstrapped by one-line binary fetch, not
-      dotfiles
+- [ ] Second boundary-capable node on another host, bootstrapped by one-line binary
+      fetch, not dotfiles
 - [ ] Harness state directory as a node-owned volume (the `OMP_STATE_DIR` pattern)
 - [ ] SPA connects to the mesh regardless of which node served it
 
-Exit criteria: a session running in a Coder workspace is visible and controllable from
-the browser on the personal machine, and the latency complaint is resolved.
+Exit criteria: a session running on either eligible node is visible and controllable
+from the browser served by the other, proving cross-machine reach without depending on
+the blocked work topology.
 
 ## Phase 3: The work node enforces
 
-The work topology has the privilege boundary the personal machine lacks. Use it.
+The current work topology is privileged and cannot enforce the gate. Phase 3 replaces
+it with a boundary the node can verify.
 
-- [ ] Node in the outer Coder pod, harness in the inner devcontainer via `docker exec -i`
-- [ ] Devcontainer on an internal Docker network with the node as the only route out
+- [ ] Replace the privileged single-container Envbuilder workspace with a node-owned,
+      unprivileged harness runner topology
+- [ ] Node outside the harness container, with a node-owned exec pipe
+- [ ] Harness runner on an internal network with the node as its only route out
 - [ ] Startup boundary check passes on the live pod
 - [ ] Broker holds `glab`, `acli`; consulta bound to the work channel and the work node
 - [ ] Work-channel policy: no merge, no transition, no production deploy, enforced at
@@ -241,7 +262,7 @@ Recorded so they are not rediscovered as good ideas.
 | Hub becomes load-bearing | Degraded mode specified and tested, not assumed. Relay outage: auto-allow continues, approvals block |
 | Hub compromise | Work channel opaque to it, policy signing key never on it, per-client keys |
 | Bootstrap lockout | Documented path to running a harness outside the system, maintained |
-| A node cannot establish its boundary | Phase 0 proves it by hand on both machines; the startup check refuses rather than degrades |
+| A node cannot establish its boundary | Every host must pass the startup check; the current Coder topology is deferred until Phase 3 rather than degraded |
 | Corpus lock-in | Boring schemas, plain-text export for every kind; vectors deferred |
 | Cost runaway | Per-session budget and per-channel daily ceiling, enforced not monitored |
 | Retiring Switchboard too early | It retires last, after supervision has moved |
