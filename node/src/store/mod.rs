@@ -74,6 +74,14 @@ impl Store {
         Ok(())
     }
 
+    /// The single node row this process owns, if it has run before.
+    pub fn get_node_id(&self) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT id FROM node LIMIT 1", [], |r| r.get(0))
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn get_node(&self, id: &str) -> Result<Option<NodeRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row("SELECT * FROM node WHERE id=?1", [id], NodeRow::from_row)

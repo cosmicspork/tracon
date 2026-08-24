@@ -6,11 +6,19 @@ and existing coding agents, driven from a browser instead of a terminal.
 Named for TRACON, terminal radar approach control: the facility sequences traffic and
 issues clearances, and it never flies anything.
 
-**Status: planning.** Phase 0 validation is complete. The work Coder template cannot
-enforce the gate as configured; Phase 3 requires a new, unprivileged runner topology.
+**Status: Phase 1 in progress.** The node runs gated sessions on one macOS host with a
+Podman machine: it establishes and verifies its boundary, spawns `omp` inside it, routes
+permission requests to a queue, enforces a token budget, and streams the session over
+HTTP. What is not built yet is the interface (the SPA is a placeholder), the credential
+broker and its brokered tools, the review contract, and the mesh. Phase 0 validation is
+complete; the work Coder template cannot enforce the gate as configured, so Phase 3
+requires a new, unprivileged runner topology.
+
 See [docs/ROADMAP.md](docs/ROADMAP.md) for phasing,
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design record, and
-[docs/DESIGN.md](docs/DESIGN.md) for the interface.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design record,
+[docs/DESIGN.md](docs/DESIGN.md) for the interface, and
+[docs/reference/phase-1-spikes.md](docs/reference/phase-1-spikes.md) for what the
+implementation learned that the design did not predict.
 
 ## What it is
 
@@ -99,6 +107,42 @@ These constrain everything else and are unlikely to change.
 `pager` is kept and becomes the notification sink for personal and client channels.
 `svastha` contributes the relay and trust-binding patterns. `homelab` hosts the hub.
 `kritee` is unaffected.
+
+## Running the node
+
+Requires a container runtime the node can own (rootless Podman; a Podman machine on
+macOS), `just`, a Rust toolchain, and Bun for the interface.
+
+```sh
+just images     # build the gateway and harness images
+just setup      # create the internal network, allowlist, and gateway
+just boundary   # verify the boundary, including an egress probe from inside it
+just build      # build the SPA, then the release binary
+./target/release/tracon serve
+```
+
+`tracon check-boundary` prints each check and exits non-zero naming the first failure.
+A node that fails refuses to run harnesses; it still serves the interface and says which
+check failed. That refusal is the design working, not a bug to route around.
+
+The harness reaches exactly two things: allowlisted provider hosts through the gateway's
+proxy, and the node through the gateway's forward. The allowlist is generated from
+`[gateway] allow_hosts` in `~/.config/tracon/node.toml`; a provider that is not listed is
+denied, which shows up as a model call that cannot connect.
+
+### Bootstrap escape hatch
+
+The node is developed using agents that run inside the node, so a bad build must not
+lock the operator out of the tool needed to fix it. The path out is to run the harness
+directly, outside tracon:
+
+```sh
+omp                                    # the harness, unsupervised, in any checkout
+git worktree add /private/tmp/<slug> -b <branch> origin/main
+```
+
+Nothing in tracon is required to do this, and rebuilding or restarting the node is a
+host-side recipe rather than something a session performs.
 
 ## Reading order
 

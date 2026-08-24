@@ -27,6 +27,7 @@ async-trait.workspace = true
 axum.workspace = true
 clap.workspace = true
 dirs.workspace = true
+futures-core = "0.3.34"
 mime_guess.workspace = true
 rusqlite.workspace = true
 rust-embed.workspace = true
@@ -41,3 +42,6 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5.3", features = ["util"] }

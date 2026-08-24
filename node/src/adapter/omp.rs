@@ -119,7 +119,9 @@ struct OmpSession {
 
 impl OmpSession {
     async fn start(child: tokio::process::Child) -> Result<Self, AdapterError> {
-        Self::start_in(child, ".").await
+        // ACP requires an absolute cwd; the image's workdir is the safe choice
+        // for a probe that mounts no worktree.
+        Self::start_in(child, "/work").await
     }
 
     async fn start_in(mut child: tokio::process::Child, cwd: &str) -> Result<Self, AdapterError> {

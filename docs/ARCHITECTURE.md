@@ -228,9 +228,35 @@ external name, keep the node socket under `$XDG_RUNTIME_DIR` to stay below the U
 socket path limit, and mount the socket only into the trusted gateway. omp honored the
 gateway's `HTTPS_PROXY`: the provider host was reachable and an unlisted host was denied.
 
+#### What implementing it changed
+
+Three things the design assumed did not survive contact, recorded here so they are not
+re-decided. Evidence is in
+[`reference/phase-1-spikes.md`](reference/phase-1-spikes.md).
+
+- **The node-to-harness forward is TCP on a Podman machine, not a Unix socket.** A host
+  socket cannot be bind-mounted into the VM, so the gateway's `socat` forward points at
+  `host.containers.internal`. A host listener bound to loopback is reachable that way
+  under `applehv`, so the node does not have to expose a non-loopback port. On a Linux
+  node the Unix socket described above still applies. The forward carries a per-session
+  bearer token either way.
+- **The harness image ships its own harness binary.** The operator's `omp` is a darwin
+  executable and cannot be mounted into a Linux runner, so the image installs the pinned
+  Linux release instead. The version is checked twice against the pin: once by running
+  `omp --version` in the runner, and again from `initialize.agentInfo.version`.
+- **The harness state directory is node-owned, and only the credential database is
+  mounted into it.** Mounting the operator's whole `~/.omp` drags in its `AGENTS.md`,
+  which is a symlink into the workspace, and **a bind mount over a symlink does not mask
+  it**. The node therefore builds an otherwise-empty state directory and mounts only
+  `agent.db` (and its WAL and shared-memory files) plus a materialized `config.yml`. This
+  is the same "nothing in project repos" commitment applied in the other direction:
+  nothing of the operator's leaks into a session either.
+
 Bazzite is evidence for the design, not a Phase 1 platform requirement. macOS with a
 Podman VM, another Linux host, or a managed web environment qualifies only if it can
-provide the same capabilities and pass the same checks. Claude Code for web can be used
+provide the same capabilities and pass the same checks. **macOS with a Podman machine was
+the first implemented node** and qualifies: the boundary holds inside the VM, and the
+implementation notes below record where it differs from the Bazzite proof. Claude Code for web can be used
 to implement Phase 1; it is not a Phase 1 runtime unless its environment can host the
 persistent node, isolated runner, state, and reachable SPA.
 
@@ -251,6 +277,12 @@ container runtime is reachable, the harness image is not privileged, no daemon s
 mounted into it, and the harness network has no route except the node. If any check
 fails, the node refuses to run harnesses and says which check failed. It still serves
 the SPA and still relays, so the operator can see the refusal from anywhere.
+
+The checks run against **the same run specification a session uses**, rendered onto a
+probe container that is created but never started. A second description of what a session
+runs would drift from the first; this way what is verified is what runs. `--deep` adds an
+active probe from inside the boundary: no direct egress, an allowlisted host reachable
+through the proxy, an unlisted host refused.
 
 An earlier draft had a second mode, `observing`, for nodes that could not establish the
 boundary. It was dropped: a node that cannot enforce should not be quietly running
@@ -595,6 +627,18 @@ Two rules:
   message carries `total_cost_usd` and token counts, so the meter is free.
 
 Harness-level routing (omp roles) is a second layer, not the control.
+
+**The budget is denominated in tokens, and dollars are derived.** Most sessions run on a
+subscription, where there is no per-session dollar cost to enforce against; tokens are
+what every harness reports and what the node can act on alone. A channel's provider
+binding may carry a price, and only then does a cost appear. "Cost per accepted change"
+in [Metrics](#metrics) is therefore tokens per accepted change, priced where priceable.
+
+**Enforcement is at turn end.** ACP reports usage when a turn completes, not
+continuously, so one long turn can overshoot its budget before the node can act. This is
+a property of what the harness reports rather than a gap to paper over: the interface
+says the budget is checked at turn end, and mid-turn enforcement waits on a usage
+snapshot the adapter does not have. Per-channel daily ceilings are Phase 5.
 
 ### Supervision
 
