@@ -1,0 +1,129 @@
+<script lang="ts">
+  import { api } from '../lib/api'
+  import { formatAge, formatExpiry } from '../lib/format'
+  import { permissionOptions, type Permission } from '../lib/types'
+  import { store } from '../lib/store.svelte'
+
+  let { permission, inline = false }: { permission: Permission; inline?: boolean } = $props()
+
+  let busy = $state(false)
+  let error = $state<string | null>(null)
+
+  const options = $derived(permissionOptions(permission))
+  const command = $derived.by(() => {
+    try {
+      const input = JSON.parse(permission.raw_input ?? 'null')
+      return typeof input?.command === 'string' ? input.command : null
+    } catch {
+      return null
+    }
+  })
+
+  async function answer(optionId: string) {
+    busy = true
+    error = null
+    try {
+      await api.answer(permission.id, optionId)
+      await store.refetch()
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e)
+    } finally {
+      busy = false
+    }
+  }
+
+  function label(kind: string, name: string): string {
+    // Only the two once-options are offered: "always" is a policy decision the
+    // gate does not delegate to a card.
+    return { allow_once: 'Allow', reject_once: 'Deny' }[kind] ?? name
+  }
+</script>
+
+<div class="card" class:inline>
+  <span class="bar"></span>
+  {#if !inline}
+    <span class="mono head">{formatAge(permission.created_ms)}</span>
+  {/if}
+  <span class="t">
+    <em>Permission</em>
+    {permission.title}
+    <small
+      >{permission.kind ?? 'tool'} · {formatExpiry(permission.expires_ms)}{command &&
+      command !== permission.title
+        ? ` · ${command}`
+        : ''}{error ? ` · ${error}` : ''}</small
+    >
+  </span>
+  <span class="act">
+    {#each options.filter((o) => o.kind === 'reject_once') as o (o.option_id)}
+      <button class="lnk d" disabled={busy} onclick={() => answer(o.option_id)}
+        >{label(o.kind, o.name)}</button
+      >
+    {/each}
+    {#each options.filter((o) => o.kind === 'allow_once') as o (o.option_id)}
+      <button class="btn p" disabled={busy} onclick={() => answer(o.option_id)}
+        >{label(o.kind, o.name)}</button
+      >
+    {/each}
+  </span>
+</div>
+
+<style>
+  .card {
+    display: grid;
+    grid-template-columns: 3px 72px minmax(0, 1fr) auto;
+    gap: 0 14px;
+    align-items: center;
+    background: linear-gradient(90deg, var(--wash-wait), var(--s1) 42%);
+    border-radius: 4px;
+    padding: 10px 14px 10px 0;
+    overflow: hidden;
+  }
+  .card.inline {
+    grid-template-columns: 3px minmax(0, 1fr) auto;
+    border-radius: 0 4px 4px 0;
+  }
+  .bar {
+    align-self: stretch;
+    background: var(--wait);
+    border-radius: 2px 0 0 2px;
+  }
+  .head {
+    color: var(--dim);
+  }
+  .t {
+    font-weight: 500;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .t em {
+    font-style: normal;
+    font-weight: 400;
+    color: var(--wait);
+  }
+  .t small {
+    display: block;
+    font: 12px var(--mono);
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 2px;
+  }
+  .act {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    white-space: nowrap;
+  }
+  @media (max-width: 700px) {
+    .card {
+      grid-template-columns: 3px minmax(0, 1fr) auto;
+    }
+    .head {
+      display: none;
+    }
+  }
+</style>

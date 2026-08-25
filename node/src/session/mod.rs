@@ -188,6 +188,22 @@ impl Manager {
         Ok(row)
     }
 
+    /// Persist a lifecycle event and publish it on the stream, so a client
+    /// watching live sees the same log a reload rebuilds.
+    fn record(&self, e: NewEvent) {
+        match self.store.append_event(&e) {
+            Ok(seq) => self.hub.publish(Frame::Event {
+                seq,
+                session_id: e.session_id,
+                kind: e.kind,
+                ref_id: e.ref_id,
+                payload: e.payload,
+                at_ms: e.at_ms,
+            }),
+            Err(err) => tracing::error!(error = %err, "failed to persist event"),
+        }
+    }
+
     async fn start(
         &self,
         id: &str,
@@ -206,7 +222,7 @@ impl Manager {
                 ..Default::default()
             },
         )?;
-        self.store.append_event(&NewEvent {
+        self.record(NewEvent {
             session_id: id.to_string(),
             work_item_id: None,
             kind: ek::WORKTREE.into(),
@@ -217,7 +233,7 @@ impl Manager {
             }),
             at_ms: now_ms(),
             mono_ms: started.elapsed().as_millis() as i64,
-        })?;
+        });
 
         let scratch = materialize::scratch_for(id, &wt.path)?;
         let selinux = crate::boundary::selinux_enabled().await;
@@ -245,7 +261,7 @@ impl Manager {
                 ..Default::default()
             },
         )?;
-        self.store.append_event(&NewEvent {
+        self.record(NewEvent {
             session_id: id.to_string(),
             work_item_id: None,
             kind: ek::SESSION_STARTED.into(),
@@ -253,7 +269,7 @@ impl Manager {
             payload: json!({ "model": spec.model, "harness": adapter.id() }),
             at_ms: now_ms(),
             mono_ms: started.elapsed().as_millis() as i64,
-        })?;
+        });
 
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
         let cmd_tx_for_turns = cmd_tx.clone();
@@ -324,4 +340,77 @@ impl Manager {
     pub async fn kill(&self, id: &str) -> Result<(), SessionError> {
         self.send(id, Command::Kill).await
     }
+
+    /// Graceful shutdown: ask every live session to end and wait briefly.
+    /// Containers are removed by each supervisor's teardown.
+    pub async fn shutdown_all(&self) {
+        let ids: Vec<String> = self.live.lock().await.keys().cloned().collect();
+        for id in &ids {
+            let _ = self.send(id, Command::Kill).await;
+        }
+        for _ in 0..50 {
+            if self.live.lock().await.is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        tracing::warn!("some sessions did not stop in time");
+    }
+}
+
+/// A restarted node owns no running harnesses: rows a previous process left
+/// non-terminal are closed honestly, their open permission requests expired,
+/// and their containers removed. Without this, an orphaned harness keeps the
+/// credential store open and the model probe fails underneath it.
+pub async fn reconcile_after_restart(store: &Store) -> Vec<String> {
+    let mut cleaned = Vec::new();
+    let Ok(sessions) = store.list_sessions(None) else {
+        return cleaned;
+    };
+    for s in sessions {
+        if state::SessionState::from_stored(&s.state).is_terminal() {
+            continue;
+        }
+        for p in store.open_permissions().unwrap_or_default() {
+            if p.session_id == s.id {
+                let _ = store.resolve_permission(&p.id, "expired", None, 0);
+                let _ = store.append_event(&NewEvent {
+                    session_id: s.id.clone(),
+                    work_item_id: None,
+                    kind: ek::PERMISSION_EXPIRED.into(),
+                    ref_id: Some(p.id.clone()),
+                    payload: json!({ "permission_id": p.id, "reason": "denied: node restarted" }),
+                    at_ms: now_ms(),
+                    mono_ms: 0,
+                });
+            }
+        }
+        if let Some(container) = &s.container_name {
+            let _ = tokio::process::Command::new("podman")
+                .args(["rm", "-f", "-i", container])
+                .output()
+                .await;
+        }
+        let _ = store.update_session(
+            &s.id,
+            SessionPatch {
+                state: Some(state::SessionState::Closed.as_str().into()),
+                end_reason: Some(state::EndReason::HarnessExit.as_str().into()),
+                last_error: Some("node restarted while the session was live".into()),
+                turn_active: Some(false),
+                ..Default::default()
+            },
+        );
+        let _ = store.append_event(&NewEvent {
+            session_id: s.id.clone(),
+            work_item_id: None,
+            kind: ek::STATE.into(),
+            ref_id: None,
+            payload: json!({ "state": "closed", "end_reason": "harness_exit", "reason": "node restarted" }),
+            at_ms: now_ms(),
+            mono_ms: 0,
+        });
+        cleaned.push(s.id);
+    }
+    cleaned
 }

@@ -87,10 +87,10 @@ Node:
 - [x] Session lifecycle: worktree creation and branch, git identity materialized,
       spawn inside the boundary, stream, teardown
 - [x] Config materialized to a scratch directory, nothing written to the repo
-- [ ] Embedded SPA (`rust-embed`), served locally: queue, session screen with streaming
+- [x] Embedded SPA (`rust-embed`), served locally: queue, session screen with streaming
       output and prompt input, approval detail, nodes, new-session form with a required
-      model field. The embedding and the HTTP surface the screens need exist; the SPA
-      itself is still a placeholder page. Design settled 2026-08-24 (Ledger × Tonal).
+      model field. Built in the Ledger × Tonal direction settled 2026-08-24. The approval
+      screen is a stub until the review contract lands; there is nothing to approve yet.
 - [x] Local SQLite: `node`, `session`, `event` tables
 - [x] `work_item_id` nullable column on `session` and `event` from the start, even
       though the ledger does not exist yet. Adding the graph later is additive; not
@@ -122,10 +122,14 @@ checked when the turn ends. A single long turn can therefore overshoot: ACP repo
 per turn, not continuously. Mid-turn enforcement needs a usage snapshot the adapter does
 not have yet, and per-channel ceilings are Phase 5.
 
-Progress, 2026-08-24: the node establishes and verifies its boundary, spawns `omp` inside
-it, runs a session end to end (worktree, prompt, permission request routed to the queue,
-answer, budget kill, teardown), and streams events over SSE. Everything under Gate below
-except permission handling is still ahead, and so is the interface.
+Progress, 2026-08-25: a task can now be driven from the browser. The node establishes and
+verifies its boundary, spawns `omp` inside it, runs a session end to end (worktree, prompt,
+permission request routed to the queue, answer, budget kill, teardown), streams events over
+SSE, and serves the interface those screens were designed for. What remains in Phase 1 is
+the gate's other half: the credential broker, consulta and `gh` behind it, the review
+contract and `/revise`, signed policy, and tool-surface reduction. Until the broker exists
+the harness reaches nothing it could not reach before; what is enforced today is the
+boundary, permissions, and the budget.
 
 Exit criteria: a full task is driven from the browser against one boundary-capable node,
 start to finish, with `gh` and the consulta credential reachable only through the node.

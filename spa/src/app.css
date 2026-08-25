@@ -1,10 +1,155 @@
+/* tracon interface tokens: the Ledger × Tonal direction, dark first.
+   State is carried by a 3px bar and a wash; nothing has an outline. Amber means
+   waiting on you and nothing else; red is refusal and failure. */
+
 :root {
+  --bg: #141517;
+  --s1: #1b1c1f;
+  --s2: #222327;
+  --s3: #2b2c31;
+  --ink: #e4e3de;
+  --ink2: #a6a7a2;
+  --dim: #6e716f;
+  --rule: #2a2c2f;
+  --acc: #7fa6c9;
+  --acc-ink: #0f1418;
+  --wait: #d9a441;
+  --crit: #d96b60;
+  --ok: #7fb59a;
+  --wash-wait: rgba(217, 164, 65, 0.12);
+  --wash-crit: rgba(217, 107, 96, 0.11);
+  --wash-run: rgba(127, 166, 201, 0.07);
+  --wash-ok: rgba(127, 181, 154, 0.1);
+  --sans: 'Instrument Sans', 'Helvetica Neue', Arial, sans-serif;
+  --mono: 'Fragment Mono', Menlo, Consolas, monospace;
   color-scheme: dark;
-  font-family: system-ui, sans-serif;
 }
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f2f2f0;
+    --s1: #ffffff;
+    --s2: #ebebe8;
+    --s3: #dededa;
+    --ink: #1d1e21;
+    --ink2: #54565b;
+    --dim: #8a8c90;
+    --rule: #d6d6d2;
+    --acc: #3d6e9a;
+    --acc-ink: #ffffff;
+    --wait: #a8731a;
+    --crit: #b8463b;
+    --ok: #3b7f5e;
+    --wash-wait: rgba(168, 115, 26, 0.1);
+    --wash-crit: rgba(184, 70, 59, 0.09);
+    --wash-run: rgba(61, 110, 154, 0.07);
+    --wash-ok: rgba(59, 127, 94, 0.09);
+    color-scheme: light;
+  }
+}
+
+* { box-sizing: border-box; }
+
 body {
   margin: 0;
-  padding: 2rem;
-  background: #141517;
-  color: #e4e3de;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.5 var(--sans);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
 }
+
+button { font: inherit; }
+a { color: var(--acc); }
+code { font-family: var(--mono); font-size: 0.92em; }
+
+/* Shared primitives, matching the approved screens. */
+
+.h4 {
+  font: 500 12px var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin: 6px 0 2px;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+.h4 b { font-weight: 400; color: var(--ink2); }
+
+.mono {
+  font: 12.5px var(--mono);
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.btn {
+  font: 500 13px var(--sans);
+  background: var(--s3);
+  color: var(--ink);
+  border: 0;
+  border-radius: 4px;
+  padding: 7px 14px;
+  cursor: pointer;
+}
+.btn.p { background: var(--acc); color: var(--acc-ink); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.lnk {
+  color: var(--acc);
+  text-decoration: none;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  background: none;
+  padding: 2px 0;
+  cursor: pointer;
+  font: 500 13px var(--sans);
+}
+.lnk:hover { border-bottom-color: currentColor; }
+.lnk.d { color: var(--crit); }
+.lnk:disabled { color: var(--dim); pointer-events: none; }
+
+.btn:focus-visible, .lnk:focus-visible, a:focus-visible,
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
+}
+
+.banner {
+  background: linear-gradient(90deg, var(--wash-wait), var(--s1) 50%);
+  border-left: 3px solid var(--wait);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font: 12.5px var(--mono);
+  color: var(--wait);
+}
+.banner b { font-weight: 400; color: var(--ink); }
+.banner.crit {
+  background: linear-gradient(90deg, var(--wash-crit), var(--s1) 50%);
+  border-left-color: var(--crit);
+  color: var(--crit);
+}
+
+.empty {
+  background: var(--s1);
+  border-radius: 4px;
+  padding: 20px;
+  text-align: center;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 12px var(--mono);
+  color: var(--ink2);
+}
+.chip::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.chip.off { color: var(--dim); }
+.chip.off::before { background: var(--dim); }
+.chip.bad { color: var(--crit); }
+.chip.bad::before { background: var(--crit); }
