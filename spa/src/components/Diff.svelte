@@ -1,18 +1,10 @@
 <script lang="ts">
-  import { splitDiff } from '../lib/diff'
+  import { classifyLines, splitDiff } from '../lib/diff'
 
   let { diff, perFile = false }: { diff: string; perFile?: boolean } = $props()
 
   const files = $derived(splitDiff(diff))
-
-  function kind(line: string): string {
-    if (line.startsWith('@@')) return 'hunk'
-    if (line.startsWith('+++') || line.startsWith('---')) return 'meta'
-    if (line.startsWith('diff ') || line.startsWith('index ')) return 'meta'
-    if (line.startsWith('+')) return 'add'
-    if (line.startsWith('-')) return 'del'
-    return 'ctx'
-  }
+  const whole = $derived(classifyLines(diff.split('\n')))
 </script>
 
 {#if perFile}
@@ -26,8 +18,8 @@
           <span class="stat">+{f.added} −{f.removed}</span>
         </summary>
         <div class="diff">
-          {#each f.lines as line, i (i)}
-            <div class={kind(line)}>{line || ' '}</div>
+          {#each classifyLines(f.lines) as line, i (i)}
+            <div class={line.kind}>{line.text || ' '}</div>
           {/each}
         </div>
       </details>
@@ -35,8 +27,8 @@
   </div>
 {:else}
   <div class="diff whole">
-    {#each diff.split('\n') as line, i (i)}
-      <div class={kind(line)}>{line || ' '}</div>
+    {#each whole as line, i (i)}
+      <div class={line.kind}>{line.text || ' '}</div>
     {/each}
   </div>
 {/if}

@@ -111,7 +111,7 @@ export type Frame =
   | ({ type: 'session' } & Session)
   | { type: 'queue'; waiting: Permission[] }
   | { type: 'reviews'; waiting: Review[] }
-  | { type: 'node' }
+  | ({ type: 'node' } & NodeInfo)
 
 export const TERMINAL_STATES: SessionState[] = ['closed', 'killed_budget', 'failed']
 

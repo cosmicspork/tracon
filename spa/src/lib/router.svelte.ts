@@ -7,17 +7,21 @@ class Router {
   start() {
     window.addEventListener('popstate', () => (this.path = location.pathname))
     document.addEventListener('click', (e) => {
+      // Leave modified clicks, downloads, and already-handled events to the
+      // browser: shift/alt/meta/ctrl open new windows or save, and hijacking
+      // them would break that.
+      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
       const a = (e.target as HTMLElement).closest('a')
-      if (!a || a.origin !== location.origin || a.target || e.metaKey || e.ctrlKey) return
+      if (!a || a.origin !== location.origin || a.target || a.hasAttribute('download')) return
       e.preventDefault()
-      this.go(a.pathname)
+      this.go(a.pathname + a.search + a.hash)
     })
   }
 
   go(path: string) {
-    if (path === this.path) return
+    if (path === this.path + location.search + location.hash) return
     history.pushState(null, '', path)
-    this.path = path
+    this.path = location.pathname
   }
 }
 
