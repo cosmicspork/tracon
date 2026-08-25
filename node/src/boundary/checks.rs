@@ -78,7 +78,13 @@ pub async fn check_all(cfg: &Config, deep: bool) -> BoundaryReport {
     }
 
     let selinux = super::selinux_enabled().await;
-    let spec = RunSpec::from_config(cfg, selinux);
+    let mut spec = RunSpec::from_config(cfg, selinux);
+    // Verify the same mount set a session runs, not a bare spec: the socket
+    // check is only meaningful against what is actually mounted. The persistent
+    // mounts (the harness state dir and credential db) are what every session
+    // carries and are added here; the per-session worktree and git-dir mounts
+    // are node-constructed from fixed paths and carry no daemon socket.
+    spec.extra_mounts = crate::session::materialize::state_mounts().unwrap_or_default();
     match create_probe(&spec).await {
         Ok(inspect) => {
             checks.push(check_unprivileged(&inspect));
@@ -338,6 +344,9 @@ async fn check_egress(cfg: &Config, selinux: bool) -> CheckResult {
         argv: vec!["sh".into(), "-c".into(), script],
         ..Default::default()
     };
+    // Clear a leftover of the same name from a crashed prior `--deep` run, or
+    // this run fails with a name conflict instead of re-probing.
+    let _ = podman(&["rm", "-f", "-i", "tracon-egress-probe"]).await;
     let args = spec.podman_args("tracon-egress-probe", &cmd, false);
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = match podman(&argv).await {

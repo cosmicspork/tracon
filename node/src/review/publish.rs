@@ -79,16 +79,24 @@ pub enum PublishError {
     Spawn { cli: String, source: std::io::Error },
     #[error("{cli} refused: {stderr}")]
     Refused { cli: String, stderr: String },
+    #[error("the branch moved after approval (reviewed {reviewed:.8}, now {now:.8}); re-review before publishing")]
+    BranchMoved { reviewed: String, now: String },
 }
 
 /// Push the branch and open the change, with the approved title and body.
 /// Returns whatever the CLI printed, which is the URL for both of these.
+///
+/// `head_sha` is the commit that was reviewed. The push pins to it — a branch
+/// that moved between approval and publish cannot ride out unreviewed, which is
+/// the TOCTOU the approve-time staleness check alone would leave open.
+#[allow(clippy::too_many_arguments)]
 pub async fn publish(
     broker: &Broker,
     cfg: &Config,
     channel: &str,
     worktree: &str,
     target: &Target,
+    head_sha: &str,
     title: &str,
     body: &str,
 ) -> Result<String, PublishError> {
@@ -99,13 +107,36 @@ pub async fn publish(
         .env_for(provider.credential(), channel)
         .map_err(|e| PublishError::Broker(e.to_string()))?;
 
+    // Re-assert the tip is still the reviewed commit. The staleness check ran at
+    // approve time; a commit landed in the interval must stop the publish rather
+    // than be carried out under an approval it never had.
+    let now = head_of(&cfg.publish.git, worktree).await?;
+    if now != head_sha {
+        return Err(PublishError::BranchMoved {
+            reviewed: head_sha.to_string(),
+            now,
+        });
+    }
+
     // The push carries the credential too: a branch the forge cannot see is not
-    // a change anyone can review.
+    // a change anyone can review. It pushes the reviewed commit by sha, not the
+    // live branch tip, and runs with hooks and fsmonitor disabled. No force: a
+    // new branch is created, a fast-forward updates, and a diverged remote
+    // branch is rejected rather than clobbered.
+    let refspec = format!("{head_sha}:refs/heads/{}", target.branch);
     run(
         cfg.publish.git.clone(),
         worktree,
         &env,
-        &["push", "--set-upstream", "origin", &target.branch],
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=",
+            "push",
+            "origin",
+            &refspec,
+        ],
     )
     .await?;
 
@@ -144,6 +175,35 @@ pub async fn publish(
     };
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     run(provider.command(cfg), worktree, &env, &argv).await
+}
+
+/// The worktree's current HEAD, via the configured git, with hooks and
+/// fsmonitor disabled. Used to confirm the tip is still the reviewed commit.
+async fn head_of(git: &str, dir: &str) -> Result<String, PublishError> {
+    let out = Command::new(git)
+        .args([
+            "-C",
+            dir,
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=",
+            "rev-parse",
+            "HEAD",
+        ])
+        .output()
+        .await
+        .map_err(|source| PublishError::Spawn {
+            cli: git.to_string(),
+            source,
+        })?;
+    if !out.status.success() {
+        return Err(PublishError::Refused {
+            cli: git.to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 async fn run(
@@ -216,6 +276,7 @@ mod tests {
             "work",
             "/tmp",
             &target,
+            "deadbeef",
             "t",
             "b",
         )
@@ -238,6 +299,7 @@ mod tests {
             "work",
             "/tmp",
             &target,
+            "deadbeef",
             "t",
             "b",
         )

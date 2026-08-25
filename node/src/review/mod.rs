@@ -45,10 +45,19 @@ pub struct Capture {
     pub uncommitted: Vec<String>,
 }
 
+/// Global git options that disable every config-driven way a command can run
+/// another program: hooks and the fsmonitor daemon. The node runs git host-side
+/// against a worktree whose `.git` the harness can partly write, so even though
+/// `config`/`hooks`/`info` are mounted read-only (see `materialize`), these
+/// overrides are the second, independent line. Diff commands additionally pass
+/// `--no-ext-diff --no-textconv` at the call site.
+const GIT_SAFE: &[&str] = &["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor="];
+
 async fn git(dir: &str, op: &'static str, args: &[&str]) -> Result<String, ReviewError> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
+        .args(GIT_SAFE)
         .args(args)
         .output()
         .await?;
@@ -62,13 +71,39 @@ async fn git(dir: &str, op: &'static str, args: &[&str]) -> Result<String, Revie
     }
 }
 
+/// The default branch the worktree was cut from, read from `origin/HEAD`. The
+/// worktree shares the repo's refs, so this is resolvable there. Returns the
+/// plain branch name (e.g. `main`), which is the branch a change merges into.
+pub async fn default_base(worktree: &str) -> Result<String, ReviewError> {
+    let head = git(
+        worktree,
+        "symbolic-ref",
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await?;
+    // `origin/main` → `main`. Strip only the `origin/` remote prefix so a
+    // multi-segment branch (`release/2026.1`) survives intact.
+    Ok(head.strip_prefix("origin/").unwrap_or(&head).to_string())
+}
+
 /// Capture what the branch contains beyond its base. Three-dot: the changes the
-/// branch introduces, not everything that happened on the base since.
+/// branch introduces, not everything that happened on the base since. `base_ref`
+/// is a ref the worktree can resolve — a remote-tracking ref like `origin/main`,
+/// so the diff is against what the change will actually merge into rather than a
+/// possibly-stale local branch.
 pub async fn capture(worktree: &str, base_ref: &str, branch: &str) -> Result<Capture, ReviewError> {
     let range = format!("{base_ref}...HEAD");
     let head_sha = git(worktree, "rev-parse", &["rev-parse", "HEAD"]).await?;
 
-    let diff = git(worktree, "diff", &["diff", &range]).await?;
+    // `--no-ext-diff --no-textconv`: an external diff or textconv driver named
+    // by `.gitattributes` would run its configured command; disable both so the
+    // capture cannot be turned into a node-side exec.
+    let diff = git(
+        worktree,
+        "diff",
+        &["diff", "--no-ext-diff", "--no-textconv", &range],
+    )
+    .await?;
     if diff.trim().is_empty() {
         return Err(ReviewError::Empty {
             branch: branch.to_string(),
@@ -76,7 +111,18 @@ pub async fn capture(worktree: &str, base_ref: &str, branch: &str) -> Result<Cap
         });
     }
 
-    let numstat = git(worktree, "diff --numstat", &["diff", "--numstat", &range]).await?;
+    let numstat = git(
+        worktree,
+        "diff --numstat",
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--numstat",
+            &range,
+        ],
+    )
+    .await?;
     let (mut added, mut removed) = (0i64, 0i64);
     let mut paths = Vec::new();
     for line in numstat.lines() {
@@ -193,6 +239,32 @@ mod tests {
         )
         .await;
         dir
+    }
+
+    #[tokio::test]
+    async fn default_base_reads_origin_head_and_keeps_multi_segment_names() {
+        const FN: &str = "default_base_reads_origin_head";
+        let dir = std::env::temp_dir().join(format!("tracon-review-{}-{FN}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A default branch that is not `main` and has a slash in it: the old
+        // `rsplit('/')` would have returned `2026.1`, and the old hardcoded
+        // default returned `main` regardless.
+        sh(
+            &dir,
+            "git init -q --bare -b release/2026.1 origin.git \
+             && git clone -q origin.git wt && cd wt \
+             && git config user.email t@e && git config user.name t \
+             && echo hi > a.txt && git add -A && git commit -qm base \
+             && git push -q origin release/2026.1 \
+             && git remote set-head origin -a",
+        )
+        .await;
+        let wt = dir.join("wt");
+        assert_eq!(
+            default_base(wt.to_str().unwrap()).await.unwrap(),
+            "release/2026.1"
+        );
     }
 
     #[tokio::test]
