@@ -5,6 +5,7 @@
   import { formatBudget, formatTokens } from '../lib/format'
   import { isTerminal } from '../lib/types'
   import { store } from '../lib/store.svelte'
+  import { surface } from '../lib/surface.svelte'
 
   let { id }: { id: string } = $props()
 
@@ -54,7 +55,16 @@
     }
   }
 
+  let confirmingKill = $state(false)
+
   async function kill() {
+    // Immediate in the browser; confirmed on the phone, where a stray thumb is
+    // likely and the session is someone's work in progress.
+    if (surface.phone && !confirmingKill) {
+      confirmingKill = true
+      return
+    }
+    confirmingKill = false
     error = null
     try {
       await api.kill(id)
@@ -92,7 +102,10 @@
       <span class="mono">${session.cost_usd.toFixed(2)}</span>
     {/if}
     {#if !isTerminal(session.state)}
-      <button class="lnk d" onclick={kill}>Kill</button>
+      <button class="lnk d" onclick={kill}>{confirmingKill ? 'Kill — tap again' : 'Kill'}</button>
+      {#if confirmingKill}
+        <button class="lnk" onclick={() => (confirmingKill = false)}>Cancel</button>
+      {/if}
     {/if}
   </header>
 

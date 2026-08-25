@@ -4,6 +4,7 @@
   import { formatAge } from '../lib/format'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
+  import { surface } from '../lib/surface.svelte'
   import type { Review } from '../lib/types'
 
   let { id }: { id: string } = $props()
@@ -33,7 +34,14 @@
         error = e instanceof Error ? e.message : String(e)
         loaded = true
       })
+    // Release on navigating away. The node's sweeper covers a client that
+    // vanishes without getting here.
+    return () => {
+      if (!decided) void api.releaseReview(id).catch(() => {})
+    }
   })
+
+  let decided = $state(false)
 
   const target = $derived.by(() => {
     try {
@@ -59,6 +67,7 @@
     busy = true
     error = null
     try {
+      decided = true
       const res = await api.decideReview(id, {
         verdict,
         reason: verdict === 'approve' ? undefined : reason,
@@ -119,26 +128,32 @@
     </div>
   {/if}
 
-  <div class="h4">Title and body <b>edit before approving if you want to</b></div>
-  <input class="edit" bind:value={title} disabled={busy} />
-  <textarea class="edit body" bind:value={body} disabled={busy}></textarea>
+  <div class="h4">
+    Title and body <b>{surface.phone ? 'edited on the desktop' : 'edit before approving if you want to'}</b>
+  </div>
+  <input class="edit" bind:value={title} disabled={busy || surface.phone} />
+  <textarea class="edit body" bind:value={body} disabled={busy || surface.phone}></textarea>
   {#if edited}
     <div class="note">Edited. Approving publishes what is written here, not what was submitted.</div>
   {/if}
 
   <div class="h4">Files <b>{files.length}</b></div>
-  <div class="files">
-    {#each files as f (f.path)}
-      <div class:moved={stale.includes(f.path)}>
-        <span>{f.path}</span>
-        <span class={stale.includes(f.path) ? 'bad' : 'ok'}
-          >{stale.includes(f.path) ? 'changed since submit' : 'unchanged'}</span
-        >
-      </div>
-    {/each}
-  </div>
+  {#if !surface.phone}
+    <div class="files">
+      {#each files as f (f.path)}
+        <div class:moved={stale.includes(f.path)}>
+          <span>{f.path}</span>
+          <span class={stale.includes(f.path) ? 'bad' : 'ok'}
+            >{stale.includes(f.path) ? 'changed since submit' : 'unchanged'}</span
+          >
+        </div>
+      {/each}
+    </div>
+  {/if}
 
-  <Diff diff={review.diff} />
+  <!-- On the phone the file list is the diff: it decides most reviews, and each
+       file opens to its hunks when it does not. -->
+  <Diff diff={review.diff} perFile={surface.phone} />
 
   {#if error}
     <div class="banner crit">refused <b>· {error}</b></div>

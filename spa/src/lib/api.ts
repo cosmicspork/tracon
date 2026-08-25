@@ -62,6 +62,7 @@ export const api = {
       body?: string
     },
   ) => call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/verdict`, verdict),
+  releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),
   answer: (permissionId: string, optionId: string) =>
     call<void>('POST', `/api/permissions/${permissionId}/answer`, { option_id: optionId }),
 }

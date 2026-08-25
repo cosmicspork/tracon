@@ -1,13 +1,13 @@
 <script lang="ts">
-  let { diff }: { diff: string } = $props()
+  import { splitDiff } from '../lib/diff'
 
-  // A unified diff is already structured text; the interface only needs to
-  // colour it and keep it from scrolling the page sideways.
-  const lines = $derived(diff.split('\n'))
+  let { diff, perFile = false }: { diff: string; perFile?: boolean } = $props()
+
+  const files = $derived(splitDiff(diff))
 
   function kind(line: string): string {
-    if (line.startsWith('+++') || line.startsWith('---')) return 'meta'
     if (line.startsWith('@@')) return 'hunk'
+    if (line.startsWith('+++') || line.startsWith('---')) return 'meta'
     if (line.startsWith('diff ') || line.startsWith('index ')) return 'meta'
     if (line.startsWith('+')) return 'add'
     if (line.startsWith('-')) return 'del'
@@ -15,11 +15,31 @@
   }
 </script>
 
-<div class="diff">
-  {#each lines as line, i (i)}
-    <div class={kind(line)}>{line || ' '}</div>
-  {/each}
-</div>
+{#if perFile}
+  <!-- The phone reads a diff one file at a time: the list decides most reviews,
+       and the hunks are there when they do not. -->
+  <div class="files">
+    {#each files as f (f.path)}
+      <details>
+        <summary>
+          <span class="path">{f.path}</span>
+          <span class="stat">+{f.added} −{f.removed}</span>
+        </summary>
+        <div class="diff">
+          {#each f.lines as line, i (i)}
+            <div class={kind(line)}>{line || ' '}</div>
+          {/each}
+        </div>
+      </details>
+    {/each}
+  </div>
+{:else}
+  <div class="diff whole">
+    {#each diff.split('\n') as line, i (i)}
+      <div class={kind(line)}>{line || ' '}</div>
+    {/each}
+  </div>
+{/if}
 
 <style>
   .diff {
@@ -28,6 +48,8 @@
     font: 12px/1.55 var(--mono);
     overflow-x: auto;
     padding: 8px 0;
+  }
+  .diff.whole {
     max-height: 480px;
     overflow-y: auto;
   }
@@ -44,5 +66,47 @@
   }
   .del {
     background: color-mix(in srgb, var(--crit) 16%, transparent);
+  }
+  .files {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  summary {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: baseline;
+    padding: 10px 12px;
+    background: var(--s1);
+    border-radius: 4px;
+    cursor: pointer;
+    list-style: none;
+    font: 12.5px var(--mono);
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  summary::before {
+    content: '▸';
+    color: var(--dim);
+  }
+  details[open] summary::before {
+    content: '▾';
+  }
+  .path {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ink);
+  }
+  .stat {
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  details[open] .diff {
+    margin-top: 4px;
   }
 </style>

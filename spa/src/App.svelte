@@ -6,8 +6,10 @@
   import Session from './routes/Session.svelte'
   import { router } from './lib/router.svelte'
   import { store } from './lib/store.svelte'
+  import { surface } from './lib/surface.svelte'
 
   router.start()
+  surface.start()
   store.connect()
 
   let collapsed = $state(false)
@@ -91,6 +93,28 @@
       <Queue />
     {/if}
   </main>
+
+  <!-- The phone navigates from the bottom, where a thumb is. Capability is
+       gated by surface, not by width: this is the same four destinations. -->
+  <nav class="tabs">
+    <a href="/" class:on={nav === 'queue'}>
+      <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
+      <span>Queue</span>
+      {#if waiting > 0}<i class="dot"></i>{/if}
+    </a>
+    <a href="/sessions" class:on={nav === 'sessions'}>
+      <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z" /><path d="M8 10l3 2-3 2M13 14h4" /></svg>
+      <span>Sessions</span>
+    </a>
+    <a href="/nodes" class:on={nav === 'nodes'}>
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14.5v2.5" /></svg>
+      <span>Nodes</span>
+    </a>
+    <a href="/new" class:on={nav === 'new'}>
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+      <span>New</span>
+    </a>
+  </nav>
 </div>
 
 <style>
@@ -112,8 +136,42 @@
   .narrow .n { position: absolute; top: 2px; right: 8px; font-size: 10px; }
   .narrow .collapse svg { transform: rotate(180deg); }
   main { padding: 18px 22px 22px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  /* Bottom tabs are the phone's navigation; the rail is the desktop's. */
+  .tabs { display: none; }
+
   @media (max-width: 700px) {
-    .shell, .shell.narrow { grid-template-columns: 52px minmax(0, 1fr); }
-    .shell:not(.narrow) .lbl { display: none; }
+    .shell, .shell.narrow { grid-template-columns: minmax(0, 1fr); }
+    .rail { display: none; }
+    main { padding: 14px 12px calc(72px + env(safe-area-inset-bottom)); }
+    .tabs {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      position: fixed;
+      inset: auto 0 0 0;
+      background: var(--s1);
+      border-top: 1px solid var(--rule);
+      padding-bottom: env(safe-area-inset-bottom);
+      z-index: 10;
+    }
+    .tabs a {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+      padding: 9px 0 11px;
+      color: var(--dim);
+      text-decoration: none;
+      font: 500 11px var(--sans);
+      position: relative;
+    }
+    .tabs a.on { color: var(--ink); box-shadow: inset 0 2px 0 var(--acc); }
+    .tabs svg {
+      width: 19px; height: 19px; stroke: currentColor; fill: none;
+      stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .tabs .dot {
+      position: absolute; top: 7px; right: 50%; margin-right: -16px;
+      width: 6px; height: 6px; border-radius: 50%; background: var(--wait);
+    }
   }
 </style>
