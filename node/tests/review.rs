@@ -50,10 +50,13 @@ async fn fixture(name: &str, credentials: &str) -> Fixture {
     let dir = std::env::temp_dir().join(format!("tracon-review-it-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    sh(&dir, "git init -q --bare origin.git");
+    // `-b main` and an explicit checkout: git's default branch name is a local
+    // setting, and CI does not share this machine's.
+    sh(&dir, "git init -q --bare -b main origin.git");
     sh(
         &dir,
-        "git clone -q origin.git wt && cd wt && git config user.email t@e && git config user.name t \
+        "git clone -q origin.git wt && cd wt && git checkout -qB main \
+         && git config user.email t@e && git config user.name t \
          && echo base > a.txt && git add -A && git commit -qm base && git push -q origin main \
          && git checkout -qb feat/x && echo change >> a.txt && git add -A && git commit -qm work",
     );
