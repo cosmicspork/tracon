@@ -62,6 +62,7 @@ pub enum SessionError {
 #[derive(Clone)]
 pub struct Manager {
     pub(crate) tools: Arc<crate::mcp::Tools>,
+    policy: Arc<crate::policy::Policy>,
     store: Arc<Store>,
     hub: Hub,
     cfg: Arc<Config>,
@@ -80,9 +81,11 @@ impl Manager {
         cfg: Arc<Config>,
         node_id: String,
         tools: Arc<crate::mcp::Tools>,
+        policy: Arc<crate::policy::Policy>,
     ) -> Self {
         Self {
             tools,
+            policy,
             store,
             hub,
             cfg,
@@ -362,6 +365,8 @@ impl Manager {
             cmd_tx_for_turns,
             runner,
             container.clone(),
+            self.policy.clone(),
+            spec.channel.clone(),
         );
         let live = self.live.clone();
         let tokens = self.tokens.clone();

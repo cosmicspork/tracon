@@ -146,6 +146,7 @@ impl Harness {
             cfg.clone(),
             "n1".into(),
             tools.clone(),
+            Default::default(),
         );
         let app = tracon::http::router(AppState {
             manager,
@@ -465,6 +466,8 @@ impl Rig {
             cmd_tx.clone(),
             Arc::new(NoRunner),
             "tracon-h-test".into(),
+            Default::default(),
+            "personal".into(),
         );
         tokio::spawn(sup.run(ev_rx, cmd_rx));
         let rig = Self {
@@ -662,6 +665,7 @@ async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
         cfg.clone(),
         "n1".into(),
         tools.clone(),
+        Default::default(),
     );
     let app = tracon::http::harness_router(AppState {
         manager: manager.clone(),

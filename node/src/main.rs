@@ -28,6 +28,27 @@ enum Command {
         #[arg(long)]
         deep: bool,
     },
+    /// Manage the signed policy bundle.
+    #[command(subcommand)]
+    Policy(PolicyCommand),
+}
+
+#[derive(Subcommand)]
+enum PolicyCommand {
+    /// Generate a signing key. The private half stays on this machine and never
+    /// reaches the hub, so a compromised hub can serve stale policy but not new.
+    Keygen {
+        /// Overwrite an existing key. The old one stops being able to sign.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Write the five working agreements as a starting bundle, and sign it.
+    Init,
+    /// Sign the current bundle, after editing it.
+    Sign,
+    /// Verify the bundle and print what it decides. Exits non-zero if the
+    /// signature does not check out.
+    Show,
 }
 
 #[tokio::main]
@@ -47,6 +68,7 @@ async fn main() -> Result<()> {
             println!("network, allowlist, and gateway are in place");
             Ok(())
         }
+        Command::Policy(cmd) => policy_command(cmd),
         Command::CheckBoundary { deep } => {
             let cfg = config::Config::load();
             let report = boundary::check_all(&cfg, deep).await;
@@ -63,6 +85,66 @@ async fn main() -> Result<()> {
                 // Refusal is the honest state: name the check and exit non-zero.
                 Some(f) => anyhow::bail!("boundary check failed: {}", f.id.as_str()),
             }
+        }
+    }
+}
+
+fn policy_command(cmd: PolicyCommand) -> Result<()> {
+    use tracon::policy::{bundle, Policy, WORKING_AGREEMENTS};
+
+    match cmd {
+        PolicyCommand::Keygen { force } => {
+            if bundle::Paths::signing_key().exists() && !force {
+                anyhow::bail!(
+                    "a signing key already exists at {}; pass --force to replace it",
+                    bundle::Paths::signing_key().display()
+                );
+            }
+            let (signing, verifying) = bundle::generate_key();
+            bundle::write_key(&signing)?;
+            println!("signing key: {}", bundle::Paths::signing_key().display());
+            println!("public key:  {}", hex::encode(verifying.to_bytes()));
+            Ok(())
+        }
+        PolicyCommand::Init => {
+            let path = bundle::Paths::bundle();
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&path, WORKING_AGREEMENTS)?;
+            std::fs::write(
+                bundle::Paths::signature(),
+                bundle::sign(WORKING_AGREEMENTS)?,
+            )?;
+            println!("wrote and signed {}", path.display());
+            Ok(())
+        }
+        PolicyCommand::Sign => {
+            let text = std::fs::read_to_string(bundle::Paths::bundle())?;
+            // Refuse to sign something that will not load, rather than shipping
+            // a signed bundle the node then ignores.
+            let _: Policy = toml::from_str(&text)
+                .map_err(|e| anyhow::anyhow!("the bundle is not valid policy: {e}"))?;
+            std::fs::write(bundle::Paths::signature(), bundle::sign(&text)?)?;
+            println!("signed {}", bundle::Paths::bundle().display());
+            Ok(())
+        }
+        PolicyCommand::Show => {
+            let policy = bundle::load()?;
+            println!("{} rules, version {}", policy.rules.len(), policy.version);
+            for rule in &policy.rules {
+                println!(
+                    "  {:<24} {:?}  {}",
+                    rule.id,
+                    rule.verdict,
+                    if rule.matches.is_empty() {
+                        format!("kinds {:?}", rule.kinds)
+                    } else {
+                        format!("{} patterns", rule.matches.len())
+                    }
+                );
+            }
+            Ok(())
         }
     }
 }

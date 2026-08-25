@@ -8,6 +8,7 @@ pub mod broker;
 pub mod config;
 pub mod http;
 pub mod mcp;
+pub mod policy;
 pub mod review;
 pub mod runner;
 pub mod session;
