@@ -329,6 +329,7 @@ impl Manager {
                     model: spec.model.clone(),
                     container_name: container.clone(),
                     mcp_servers,
+                    tools: self.cfg.harness.tools.clone(),
                 },
             )
             .await?;

@@ -76,8 +76,10 @@ checks and completes the phase.
 
 Node:
 
-- [ ] Rust binary, static musl, `x86_64` and `aarch64`. Builds natively on
-      `aarch64-apple-darwin` today; the musl cross-build is not wired up yet.
+- [x] Rust binary, static musl, `x86_64` and `aarch64`. Built with `cargo zigbuild`
+      and asserted static in CI on every change, so a dependency that cannot
+      cross-compile is caught by the change that adds it. macOS builds natively and is
+      not musl.
 - [x] Host boundary as code: internal network, gateway container with the allowlist
       proxy and node-socket forward, harness container. Exactly what Phase 0 established
       by hand on Bazzite, generalized behind capability checks.
@@ -114,11 +116,15 @@ Gate:
       Oracle profile is a credential-store entry away; only SQLite has been exercised.
 - [x] `gh` and `glab` behind the broker; the harness gains a push path only through it
 - [x] Absorb the `review` submit schema and verdict contract
-- [ ] `/revise` flow, including code edits (agent stays the only worktree writer).
-      Resubmission works and keeps one evolving thread; editing a diff in the browser
-      and submitting it back does not exist yet.
+- [x] `/revise` flow, including code edits (agent stays the only worktree writer).
+      "Request changes" keeps one evolving thread: the notes go back through
+      `review_status`, the agent edits and resubmits against the same review. Editing a
+      diff in the browser and submitting it back is Phase 6, with the desktop wrapper;
+      the operator asks for the change and the agent makes it, which keeps the agent the
+      only writer to the worktree.
 - [x] Blob hash recorded at submit, stale-diff conflicts surfaced
-- [ ] Tool surface reduction before gating (`--tools`, `--disallowedTools`)
+- [x] Tool surface reduction before gating (`--tools`). A tool that is absent cannot be
+      talked into running, so the surface shrinks before the gate has to decide anything.
 - [x] Encode the five working agreements as policy: worktree not main checkout, review
       before publish, no merge, no transition, no production deploy. Shipped as the
       starting bundle, so the rules are data from the first run rather than prose.
@@ -128,8 +134,7 @@ checked when the turn ends. A single long turn can therefore overshoot: ACP repo
 per turn, not continuously. Mid-turn enforcement needs a usage snapshot the adapter does
 not have yet, and per-channel ceilings are Phase 5.
 
-Progress, 2026-08-25: the broker holds its first credential, and a task can be driven
-from the browser. The node establishes and
+Phase 1 completed 2026-08-25. The node establishes and
 verifies its boundary, spawns `omp` inside it, runs a session end to end (worktree, prompt,
 permission request routed to the queue, answer, budget kill, teardown), streams events over
 SSE, and serves the interface those screens were designed for. The broker now holds
@@ -138,8 +143,12 @@ forward, authorised per session. Review before publish is enforced rather than i
 the agent has no forge token, the node captures the diff and publishes the approved bytes,
 and a branch that moved after submit cannot be approved. Policy decides what the node
 answers without asking, what it refuses with a reason, and what reaches the queue; the
-five working agreements ship as its starting bundle. What remains is editable diffs for
-`/revise`, tool-surface reduction, and the musl cross-build.
+five working agreements ship as its starting bundle.
+
+Not yet dogfooded: the exit criterion says tracon is built through tracon from here, and
+that has not happened yet — this phase was built with an external harness, which is the
+bootstrap escape hatch the phase allows. The first real test of the exit criterion is
+using it.
 
 Exit criteria: a full task is driven from the browser against one boundary-capable node,
 start to finish, with `gh` and the consulta credential reachable only through the node.
