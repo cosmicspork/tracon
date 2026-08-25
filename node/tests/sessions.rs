@@ -138,6 +138,7 @@ impl Harness {
         let tools = Arc::new(tracon::mcp::Tools {
             broker: Arc::new(Default::default()),
             cfg: cfg.clone(),
+            session: Default::default(),
         });
         let manager = Manager::new(
             store.clone(),
@@ -653,6 +654,7 @@ async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
     let tools = Arc::new(Tools {
         broker: Arc::new(broker),
         cfg: cfg.clone(),
+        session: Default::default(),
     });
     let manager = Manager::new(
         store.clone(),

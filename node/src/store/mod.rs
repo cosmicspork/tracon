@@ -482,6 +482,76 @@ mod records {
         }
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ReviewRow {
+        pub id: String,
+        pub session_id: String,
+        pub node_id: String,
+        pub channel: String,
+        pub kind: String,
+        pub title: String,
+        pub body: String,
+        pub edited_title: Option<String>,
+        pub edited_body: Option<String>,
+        pub provider: String,
+        pub target: String,
+        pub diff: String,
+        pub files: String,
+        pub head_sha: String,
+        pub base_ref: String,
+        pub added: i64,
+        pub removed: i64,
+        pub state: String,
+        pub verdict_reason: Option<String>,
+        pub publish_result: Option<String>,
+        pub claimed_ms: Option<i64>,
+        pub created_ms: i64,
+        pub created_mono_ms: i64,
+        pub resolved_mono_ms: Option<i64>,
+        pub updated_ms: i64,
+    }
+
+    impl ReviewRow {
+        /// The text a verdict approves: what the operator edited if they did,
+        /// otherwise what the agent wrote.
+        pub fn approved_title(&self) -> &str {
+            self.edited_title.as_deref().unwrap_or(&self.title)
+        }
+        pub fn approved_body(&self) -> &str {
+            self.edited_body.as_deref().unwrap_or(&self.body)
+        }
+
+        pub(super) fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Self> {
+            Ok(Self {
+                id: r.get("id")?,
+                session_id: r.get("session_id")?,
+                node_id: r.get("node_id")?,
+                channel: r.get("channel")?,
+                kind: r.get("kind")?,
+                title: r.get("title")?,
+                body: r.get("body")?,
+                edited_title: r.get("edited_title")?,
+                edited_body: r.get("edited_body")?,
+                provider: r.get("provider")?,
+                target: r.get("target")?,
+                diff: r.get("diff")?,
+                files: r.get("files")?,
+                head_sha: r.get("head_sha")?,
+                base_ref: r.get("base_ref")?,
+                added: r.get("added")?,
+                removed: r.get("removed")?,
+                state: r.get("state")?,
+                verdict_reason: r.get("verdict_reason")?,
+                publish_result: r.get("publish_result")?,
+                claimed_ms: r.get("claimed_ms")?,
+                created_ms: r.get("created_ms")?,
+                created_mono_ms: r.get("created_mono_ms")?,
+                resolved_mono_ms: r.get("resolved_mono_ms")?,
+                updated_ms: r.get("updated_ms")?,
+            })
+        }
+    }
+
     /// Sparse column updates for a session. Only `Some` fields are written.
     #[derive(Debug, Default)]
     pub struct SessionPatch {
@@ -544,6 +614,133 @@ mod records {
             conn.execute(&sql, params.as_slice())?;
             Ok(())
         }
+    }
+}
+
+impl Store {
+    // ---- review ----
+
+    pub fn insert_review(&self, r: &ReviewRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO review (id, session_id, node_id, channel, kind, title, body, edited_title,
+                edited_body, provider, target, diff, files, head_sha, base_ref, added, removed,
+                state, verdict_reason, publish_result, claimed_ms, created_ms, created_mono_ms,
+                resolved_mono_ms, updated_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,
+                ?22,?23,?24,?25)",
+            rusqlite::params![
+                r.id,
+                r.session_id,
+                r.node_id,
+                r.channel,
+                r.kind,
+                r.title,
+                r.body,
+                r.edited_title,
+                r.edited_body,
+                r.provider,
+                r.target,
+                r.diff,
+                r.files,
+                r.head_sha,
+                r.base_ref,
+                r.added,
+                r.removed,
+                r.state,
+                r.verdict_reason,
+                r.publish_result,
+                r.claimed_ms,
+                r.created_ms,
+                r.created_mono_ms,
+                r.resolved_mono_ms,
+                r.updated_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_review(&self, id: &str) -> Result<Option<ReviewRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM review WHERE id=?1",
+            [id],
+            ReviewRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Reviews still waiting on the operator, oldest first. Ordered after
+    /// permission requests in the queue: requests expire, reviews do not.
+    pub fn open_reviews(&self) -> Result<Vec<ReviewRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM review WHERE state IN ('new','claimed') ORDER BY created_ms ASC",
+        )?;
+        let rows = stmt
+            .query_map([], ReviewRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Claim on open, as the design decided: a metric, not a lock.
+    pub fn claim_review(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE review SET state='claimed', claimed_ms=COALESCE(claimed_ms, ?2), updated_ms=?2
+             WHERE id=?1 AND state='new'",
+            rusqlite::params![id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Resolve a review exactly once. Returns false if it was already decided,
+    /// so a second verdict cannot overwrite the first.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_review(
+        &self,
+        id: &str,
+        state: &str,
+        reason: Option<&str>,
+        edited_title: Option<&str>,
+        edited_body: Option<&str>,
+        publish_result: Option<&str>,
+        resolved_mono_ms: i64,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE review SET state=?2, verdict_reason=?3, edited_title=COALESCE(?4, edited_title),
+                edited_body=COALESCE(?5, edited_body), publish_result=?6, resolved_mono_ms=?7,
+                updated_ms=?8
+             WHERE id=?1 AND state IN ('new','claimed')",
+            rusqlite::params![
+                id, state, reason, edited_title, edited_body, publish_result, resolved_mono_ms,
+                now_ms()
+            ],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// A resubmission keeps the same review, so the operator sees one evolving
+    /// thread rather than a new card each time.
+    pub fn revise_review(
+        &self,
+        id: &str,
+        diff: &str,
+        files: &str,
+        head_sha: &str,
+        added: i64,
+        removed: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE review SET diff=?2, files=?3, head_sha=?4, added=?5, removed=?6, state='new',
+                verdict_reason=NULL, claimed_ms=NULL, resolved_mono_ms=NULL, updated_ms=?7
+             WHERE id=?1",
+            rusqlite::params![id, diff, files, head_sha, added, removed, now_ms()],
+        )?;
+        Ok(())
     }
 }
 

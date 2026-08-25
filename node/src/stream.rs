@@ -36,6 +36,9 @@ pub enum Frame {
     Queue {
         waiting: Vec<PermissionRow>,
     },
+    Reviews {
+        waiting: Vec<crate::store::ReviewRow>,
+    },
     Node(Value),
 }
 
@@ -48,6 +51,7 @@ impl Frame {
             Frame::ToolUpdate { .. } => "tool_update",
             Frame::Session(_) => "session",
             Frame::Queue { .. } => "queue",
+            Frame::Reviews { .. } => "reviews",
             Frame::Node(_) => "node",
         }
     }

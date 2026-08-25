@@ -1,23 +1,31 @@
 <script lang="ts">
   import PermissionCard from '../components/PermissionCard.svelte'
+  import ReviewCard from '../components/ReviewCard.svelte'
   import SessionRow from '../components/SessionRow.svelte'
   import { store } from '../lib/store.svelte'
 
   let { only = null }: { only?: 'sessions' | null } = $props()
 
   const waiting = $derived(store.queue.waiting)
+  const reviews = $derived(store.queue.reviews)
   const running = $derived(store.queue.running)
   const ended = $derived(store.queue.ended)
 </script>
 
 {#if !only}
-  <div class="h4">Waiting on you <b>{waiting.length} · requests before reviews · oldest first</b></div>
-  {#if waiting.length === 0}
+  <div class="h4">
+    Waiting on you <b>{waiting.length + reviews.length} · requests before reviews · oldest first</b>
+  </div>
+  {#if waiting.length === 0 && reviews.length === 0}
     <div class="empty">Nothing is waiting on you.</div>
   {:else}
     <div class="rows">
+      <!-- Requests expire; reviews do not. Requests come first. -->
       {#each waiting as p (p.id)}
         <PermissionCard permission={p} />
+      {/each}
+      {#each reviews as r (r.id)}
+        <ReviewCard review={r} />
       {/each}
     </div>
   {/if}

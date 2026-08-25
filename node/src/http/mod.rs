@@ -39,6 +39,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/kill", post(api::kill))
         .route("/api/sessions/{id}/draft", put(api::put_draft))
         .route("/api/permissions/{id}/answer", post(api::answer_permission))
+        .route("/api/reviews/{id}", get(api::get_review))
+        .route("/api/reviews/{id}/verdict", post(api::decide_review))
         .route("/api/queue", get(api::queue))
         .route("/api/stream", get(stream::stream))
         .fallback(spa::serve)
@@ -74,6 +76,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     let tools = Arc::new(crate::mcp::Tools {
         broker,
         cfg: cfg.clone(),
+        session: Default::default(),
     });
 
     let cleaned = crate::session::reconcile_after_restart(&store).await;
@@ -91,6 +94,10 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         node_id.clone(),
         tools.clone(),
     );
+    let _ = tools.session.set(crate::mcp::SessionAccess {
+        store: store.clone(),
+        manager: manager.clone(),
+    });
     let state = AppState {
         manager,
         cfg: cfg.clone(),

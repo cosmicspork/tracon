@@ -73,8 +73,33 @@ export interface Permission {
   expires_ms: number
 }
 
+export interface Review {
+  id: string
+  session_id: string
+  channel: string
+  kind: string
+  title: string
+  body: string
+  edited_title: string | null
+  edited_body: string | null
+  provider: string
+  target: string
+  diff: string
+  files: string
+  head_sha: string
+  base_ref: string
+  added: number
+  removed: number
+  state: 'new' | 'claimed' | 'approved' | 'rejected'
+  verdict_reason: string | null
+  publish_result: string | null
+  claimed_ms: number | null
+  created_ms: number
+}
+
 export interface Queue {
   waiting: Permission[]
+  reviews: Review[]
   running: Session[]
   ended: Session[]
 }
@@ -85,6 +110,7 @@ export type Frame =
   | { type: 'tool_update'; session_id: string; tool_call_id: string; status: string | null }
   | ({ type: 'session' } & Session)
   | { type: 'queue'; waiting: Permission[] }
+  | { type: 'reviews'; waiting: Review[] }
   | { type: 'node' }
 
 export const TERMINAL_STATES: SessionState[] = ['closed', 'killed_budget', 'failed']

@@ -82,6 +82,39 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX perm_open ON permission_request(state, created_ms);
     "#,
+    // 2: the review contract. Reviews are the second thing that can wait on the
+    // operator, and they outlive the turn that submitted them.
+    r#"
+    CREATE TABLE review (
+        id              TEXT PRIMARY KEY,
+        session_id      TEXT NOT NULL REFERENCES session(id),
+        node_id         TEXT NOT NULL,
+        channel         TEXT NOT NULL,
+        kind            TEXT NOT NULL,
+        title           TEXT NOT NULL,
+        body            TEXT NOT NULL,
+        edited_title    TEXT,
+        edited_body     TEXT,
+        provider        TEXT NOT NULL,
+        target          TEXT NOT NULL,
+        diff            TEXT NOT NULL,
+        files           TEXT NOT NULL,
+        head_sha        TEXT NOT NULL,
+        base_ref        TEXT NOT NULL,
+        added           INTEGER NOT NULL DEFAULT 0,
+        removed         INTEGER NOT NULL DEFAULT 0,
+        state           TEXT NOT NULL,
+        verdict_reason  TEXT,
+        publish_result  TEXT,
+        claimed_ms      INTEGER,
+        created_ms      INTEGER NOT NULL,
+        created_mono_ms INTEGER NOT NULL,
+        resolved_mono_ms INTEGER,
+        updated_ms      INTEGER NOT NULL
+    );
+    CREATE INDEX review_open ON review(state, created_ms);
+    CREATE INDEX review_session ON review(session_id);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

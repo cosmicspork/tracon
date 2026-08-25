@@ -1,7 +1,7 @@
 // Typed wrappers over the node's API. Errors surface the node's message so the
 // interface can say what the node said, not "request failed".
 
-import type { Event, NodeInfo, Queue, Session } from './types'
+import type { Event, NodeInfo, Queue, Review, Session } from './types'
 
 export class ApiError extends Error {
   constructor(
@@ -52,6 +52,11 @@ export const api = {
   prompt: (id: string, text: string) => call<void>('POST', `/api/sessions/${id}/prompt`, { text }),
   kill: (id: string) => call<void>('POST', `/api/sessions/${id}/kill`),
   saveDraft: (id: string, text: string) => call<void>('PUT', `/api/sessions/${id}/draft`, { text }),
+  review: (id: string) => call<{ review: Review; stale: string[] }>('GET', `/api/reviews/${id}`),
+  decideReview: (
+    id: string,
+    verdict: { verdict: 'approve' | 'reject'; reason?: string; title?: string; body?: string },
+  ) => call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/verdict`, verdict),
   answer: (permissionId: string, optionId: string) =>
     call<void>('POST', `/api/permissions/${permissionId}/answer`, { option_id: optionId }),
 }

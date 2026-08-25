@@ -218,10 +218,151 @@ pub async fn answer_permission(
     Ok(StatusCode::OK)
 }
 
+#[derive(Deserialize)]
+pub struct VerdictBody {
+    /// "approve" or "reject". Anything else is refused rather than guessed at.
+    verdict: String,
+    #[serde(default)]
+    reason: Option<String>,
+    /// The operator's edits to what gets published, if they made any.
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+}
+
+pub async fn get_review(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    // Claim on open: a metric, not a lock.
+    let _ = s.store().claim_review(&id);
+    let stale = staleness_of(&s, &r).await;
+    s.manager.publish_queue().await;
+    Ok(Json(json!({ "review": r, "stale": stale })))
+}
+
+/// What changed in the worktree since submit. An empty list means the diff
+/// still describes the branch.
+async fn staleness_of(s: &AppState, r: &crate::store::ReviewRow) -> Vec<String> {
+    let Ok(Some(session)) = s.store().get_session(&r.session_id) else {
+        return vec!["the session is gone".into()];
+    };
+    let Some(worktree) = session.worktree_path else {
+        return vec!["the worktree is gone".into()];
+    };
+    let files: Vec<crate::review::FileAtSubmit> =
+        serde_json::from_str(&r.files).unwrap_or_default();
+    crate::review::staleness(&worktree, &r.head_sha, &files).await
+}
+
+pub async fn decide_review(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<VerdictBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    if r.state == "approved" || r.state == "rejected" {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("this review was already {}", r.state),
+        ));
+    }
+
+    match b.verdict.as_str() {
+        "reject" => {
+            // A bare rejection teaches the agent nothing.
+            let reason = b
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .ok_or(ApiError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "a rejection needs a reason".into(),
+                ))?;
+            s.store()
+                .resolve_review(&id, "rejected", Some(reason), None, None, None, 0)?;
+            s.manager.publish_queue().await;
+            Ok(Json(json!({ "state": "rejected" })))
+        }
+        "approve" => {
+            // Stale means the branch is no longer what was reviewed. Approving
+            // it would publish something nobody read.
+            let stale = staleness_of(&s, &r).await;
+            if !stale.is_empty() {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    format!("changed since submit: {}", stale.join(", ")),
+                ));
+            }
+            let session = s
+                .store()
+                .get_session(&r.session_id)?
+                .ok_or(ApiError(StatusCode::CONFLICT, "the session is gone".into()))?;
+            let worktree = session.worktree_path.ok_or(ApiError(
+                StatusCode::CONFLICT,
+                "the worktree is gone".into(),
+            ))?;
+            let target: crate::review::publish::Target = serde_json::from_str(&r.target)
+                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+            let title = b.title.as_deref().unwrap_or(r.approved_title()).to_string();
+            let body = b.body.as_deref().unwrap_or(r.approved_body()).to_string();
+
+            // The node publishes, using a credential the harness never had.
+            let result = crate::review::publish::publish(
+                &s.tools.broker,
+                &s.cfg,
+                &r.channel,
+                &worktree,
+                &target,
+                &title,
+                &body,
+            )
+            .await;
+
+            match result {
+                Ok(published) => {
+                    s.store().resolve_review(
+                        &id,
+                        "approved",
+                        None,
+                        Some(&title),
+                        Some(&body),
+                        Some(&published),
+                        0,
+                    )?;
+                    s.manager.publish_queue().await;
+                    Ok(Json(json!({ "state": "approved", "published": published })))
+                }
+                Err(e) => {
+                    // The review stays open: the operator approved, the forge
+                    // refused, and that is a thing to fix rather than a verdict.
+                    Err(ApiError(StatusCode::BAD_GATEWAY, e.to_string()))
+                }
+            }
+        }
+        other => Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("{other:?} is not a verdict"),
+        )),
+    }
+}
+
 /// The queue, ordered on the node: waiting-on-you first, oldest first within
 /// it. The interface renders this order rather than deciding it.
 pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let waiting = s.store().open_permissions()?;
+    // Permission requests before reviews: requests expire, reviews do not.
+    let reviews = s.store().open_reviews()?;
     let sessions = s.store().list_sessions(None)?;
     let running: Vec<_> = sessions
         .iter()
@@ -235,7 +376,7 @@ pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Valu
         .cloned()
         .collect();
     Ok(Json(
-        json!({ "waiting": waiting, "running": running, "ended": ended }),
+        json!({ "waiting": waiting, "reviews": reviews, "running": running, "ended": ended }),
     ))
 }
 
