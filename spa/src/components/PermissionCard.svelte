@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api'
+  import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
   import { permissionOptions, type Permission } from '../lib/types'
   import { store } from '../lib/store.svelte'
@@ -42,13 +43,13 @@
 <div class="card" class:inline>
   <span class="bar"></span>
   {#if !inline}
-    <span class="mono head">{formatAge(permission.created_ms)}</span>
+    <span class="mono head">{formatAge(permission.created_ms, clock.now)}</span>
   {/if}
   <span class="t">
     <em>Permission</em>
     {permission.title}
     <small
-      >{permission.kind ?? 'tool'} · {formatExpiry(permission.expires_ms)}{command &&
+      >{permission.kind ?? 'tool'} · {formatExpiry(permission.expires_ms, clock.now)}{command &&
       command !== permission.title
         ? ` · ${command}`
         : ''}{error ? ` · ${error}` : ''}</small

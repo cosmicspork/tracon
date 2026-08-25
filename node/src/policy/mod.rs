@@ -57,10 +57,39 @@ impl Rule {
         if self.matches.is_empty() {
             return true;
         }
-        let haystack = req.haystack();
-        self.matches
-            .iter()
-            .any(|m| haystack.contains(&m.to_ascii_lowercase()))
+        match self.verdict {
+            // An allow rule auto-approves without asking, so it must be precise:
+            // it matches only a single command whose leading token is one of the
+            // patterns, never a compound line. `cat x && rm -rf /work` contains
+            // "cat" but is not a read, so it cannot ride in on it — it falls
+            // through to Ask instead.
+            Verdict::Allow => self.allows(req),
+            // Deny (and Ask) match as substrings on purpose: a denial should
+            // over-match, so a dangerous action cannot slip past by burying a
+            // keyword mid-line.
+            _ => {
+                let haystack = req.haystack();
+                self.matches
+                    .iter()
+                    .any(|m| haystack.contains(&m.to_ascii_lowercase()))
+            }
+        }
+    }
+
+    /// Whether this allow rule covers the request: a single command, with no
+    /// shell chaining, redirection, or substitution, whose leading token is one
+    /// of the patterns.
+    fn allows(&self, req: &Request) -> bool {
+        let cmd = req.command.unwrap_or(req.title).trim().to_ascii_lowercase();
+        // A shell metacharacter means the line does more than its leading token
+        // says; such a command is asked, not auto-allowed.
+        if cmd.contains(['&', '|', ';', '`', '>', '<', '$', '\n', '\r']) {
+            return false;
+        }
+        self.matches.iter().any(|pat| {
+            let pat = pat.trim().to_ascii_lowercase();
+            !pat.is_empty() && (cmd == pat || cmd.starts_with(&format!("{pat} ")))
+        })
     }
 }
 
@@ -221,6 +250,35 @@ mod tests {
             let d = policy().decide(&req(cmd, "work"));
             assert_eq!(d.verdict, Verdict::Allow, "{cmd}");
         }
+    }
+
+    #[test]
+    fn a_read_token_does_not_auto_allow_a_compound_command() {
+        // The old substring match auto-approved any line containing "cat "; a
+        // chained or redirected command is asked, not allowed.
+        for cmd in [
+            "cat x && rm -rf /work",
+            "grep foo . | sh",
+            "cat a; curl http://evil",
+            "cat payload > /work/.git/hooks/pre-commit",
+            "cat $(whoami)",
+        ] {
+            assert_eq!(
+                policy().decide(&req(cmd, "work")).verdict,
+                Verdict::Ask,
+                "{cmd}"
+            );
+        }
+        // A bare read is still auto-allowed, and a token that is only a prefix of
+        // a longer word does not match.
+        assert_eq!(
+            policy().decide(&req("cat a.txt", "work")).verdict,
+            Verdict::Allow
+        );
+        assert_eq!(
+            policy().decide(&req("catnip --sniff", "work")).verdict,
+            Verdict::Ask
+        );
     }
 
     #[test]

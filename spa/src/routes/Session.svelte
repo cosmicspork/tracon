@@ -34,6 +34,9 @@
   })
 
   function onDraftInput() {
+    // Typing means this box is the operator's now: a late `api.session` fetch
+    // must not overwrite what they are writing.
+    draftLoaded = true
     clearTimeout(saveTimer)
     saveTimer = setTimeout(() => void api.saveDraft(id, draft).catch(() => {}), 500)
   }
@@ -44,10 +47,12 @@
     if (!text || sending) return
     sending = true
     error = null
+    // Cancel any pending draft save before the prompt clears it on the node; a
+    // save firing mid-request would resurrect the sent text into the box.
+    clearTimeout(saveTimer)
     try {
       await api.prompt(id, text)
       draft = ''
-      clearTimeout(saveTimer)
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)
     } finally {

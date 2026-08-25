@@ -1,5 +1,10 @@
-//! The node's local SQLite store. Single writer, accessed through a mutex; the
-//! HTTP layer calls it via `spawn_blocking`.
+//! The node's local SQLite store. Single writer, accessed through a mutex.
+//!
+//! Calls run synchronously on the async runtime. The database is local, indexed,
+//! and single-operator, so queries are short; the two largest reads (a review
+//! diff, the event replay) are bounded — the replay is paged in batches by the
+//! stream. If a workload ever makes a query long enough to stall a runtime
+//! worker, move that call behind `spawn_blocking`; today none is.
 
 mod schema;
 
@@ -675,6 +680,8 @@ impl Store {
     /// permission requests in the queue: requests expire, reviews do not.
     pub fn open_reviews(&self) -> Result<Vec<ReviewRow>> {
         let conn = self.conn.lock().unwrap();
+        // `publishing` is a transient in-flight state and is deliberately left
+        // out: a review mid-publish is not a card the operator can act on.
         let mut stmt = conn.prepare(
             "SELECT * FROM review WHERE state IN ('new','claimed','revising') \
              ORDER BY created_ms ASC",
@@ -697,7 +704,8 @@ impl Store {
     }
 
     /// Resolve a review exactly once. Returns false if it was already decided,
-    /// so a second verdict cannot overwrite the first.
+    /// so a second verdict cannot overwrite the first. Used for rejection; an
+    /// approval goes through `begin_publish` → `finish_publish`.
     #[allow(clippy::too_many_arguments)]
     pub fn resolve_review(
         &self,
@@ -714,13 +722,57 @@ impl Store {
             "UPDATE review SET state=?2, verdict_reason=?3, edited_title=COALESCE(?4, edited_title),
                 edited_body=COALESCE(?5, edited_body), publish_result=?6, resolved_mono_ms=?7,
                 updated_ms=?8
-             WHERE id=?1 AND state IN ('new','claimed')",
+             WHERE id=?1 AND state IN ('new','claimed','revising')",
             rusqlite::params![
                 id, state, reason, edited_title, edited_body, publish_result, resolved_mono_ms,
                 now_ms()
             ],
         )?;
         Ok(n == 1)
+    }
+
+    /// Claim the publish. Moves a review awaiting a verdict into `publishing` and
+    /// returns whether this call won. Only the winner may push, so two
+    /// concurrent approvals open the change once, not once each.
+    pub fn begin_publish(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE review SET state='publishing', updated_ms=?2
+             WHERE id=?1 AND state IN ('new','claimed','revising')",
+            rusqlite::params![id, now_ms()],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Complete a publish: record the approved bytes and where they landed. Only
+    /// a row this call moved into `publishing` is finished.
+    pub fn finish_publish(
+        &self,
+        id: &str,
+        title: &str,
+        body: &str,
+        publish_result: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE review SET state='approved', edited_title=?2, edited_body=?3,
+                publish_result=?4, resolved_mono_ms=0, updated_ms=?5
+             WHERE id=?1 AND state='publishing'",
+            rusqlite::params![id, title, body, publish_result, now_ms()],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Undo a publish claim when the forge refused, so the review returns to the
+    /// queue rather than being stuck mid-publish.
+    pub fn abort_publish(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE review SET state='claimed', updated_ms=?2
+             WHERE id=?1 AND state='publishing'",
+            rusqlite::params![id, now_ms()],
+        )?;
+        Ok(())
     }
 
     /// Release a claim: the operator navigated away or their client went quiet.
@@ -751,15 +803,16 @@ impl Store {
     }
 
     /// Changes requested: the review stays in the queue, marked so the operator
-    /// can see it is waiting on the agent rather than on them.
-    pub fn request_changes(&self, id: &str, notes: &str) -> Result<()> {
+    /// can see it is waiting on the agent rather than on them. Returns false if
+    /// the review was no longer awaiting a verdict.
+    pub fn request_changes(&self, id: &str, notes: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let n = conn.execute(
             "UPDATE review SET state='revising', verdict_reason=?2, updated_ms=?3
              WHERE id=?1 AND state IN ('new','claimed')",
             rusqlite::params![id, notes, now_ms()],
         )?;
-        Ok(())
+        Ok(n == 1)
     }
 
     /// A resubmission keeps the same review, so the operator sees one evolving

@@ -303,6 +303,18 @@ impl Manager {
         let container = format!("tracon-h-{slug}");
         let runner: Arc<dyn Runner> = Arc::new(PodmanRunner::new(run_spec));
 
+        // Record the container name before it exists: it is deterministic, and a
+        // launch that fails after the container is created would otherwise leave
+        // a credential-mounted harness with no name in the store for
+        // `reconcile_after_restart` to remove.
+        self.store.update_session(
+            id,
+            SessionPatch {
+                container_name: Some(container.clone()),
+                ..Default::default()
+            },
+        )?;
+
         // The harness reaches the node only through the gateway's forward, and
         // only with this session's token. Tools are offered only if the
         // channel has a credential bound to it; otherwise the harness is given
@@ -321,7 +333,7 @@ impl Manager {
             })]
         };
 
-        let (handle, events) = adapter
+        let launched = adapter
             .launch(
                 runner.as_ref(),
                 LaunchSpec {
@@ -332,12 +344,21 @@ impl Manager {
                     tools: self.cfg.harness.tools.clone(),
                 },
             )
-            .await?;
+            .await;
+        let (handle, events) = match launched {
+            Ok(v) => v,
+            Err(e) => {
+                // The container may have been created before launch failed (a
+                // version mismatch or unknown model is reported after start).
+                // Remove it so no credential-mounted harness is left running.
+                let _ = runner.kill(&container).await;
+                return Err(e.into());
+            }
+        };
 
         self.store.update_session(
             id,
             SessionPatch {
-                container_name: Some(container.clone()),
                 harness_session_id: Some(handle.harness_session_id().to_string()),
                 ..Default::default()
             },
@@ -459,7 +480,11 @@ pub async fn reconcile_after_restart(store: &Store) -> Vec<String> {
         }
         for p in store.open_permissions().unwrap_or_default() {
             if p.session_id == s.id {
-                let _ = store.resolve_permission(&p.id, "expired", None, 0);
+                // Monotonic clocks do not survive a restart, so no meaningful
+                // duration exists here. Resolve at the created reading (duration
+                // 0 = not measured) rather than 0, which would go negative
+                // against a nonzero created_mono_ms.
+                let _ = store.resolve_permission(&p.id, "expired", None, p.created_mono_ms);
                 let _ = store.append_event(&NewEvent {
                     session_id: s.id.clone(),
                     work_item_id: None,

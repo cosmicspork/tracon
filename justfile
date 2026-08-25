@@ -15,7 +15,7 @@ dev:
     #!/usr/bin/env sh
     set -e
     trap 'kill 0' EXIT
-    cargo run -- serve &
+    cargo run --bin tracon -- serve &
     cd spa && bun run dev
 
 # Everything CI runs.
@@ -35,11 +35,11 @@ images:
 
 # Create the harness network and gateway the node owns.
 setup: images
-    cargo run -- setup
+    cargo run --bin tracon -- setup
 
 # Verify the boundary, including an egress probe from inside it.
 boundary:
-    cargo run -- check-boundary --deep
+    cargo run --bin tracon -- check-boundary --deep
 
 # Static Linux binaries. musl because the glibc on a host we do not control is
 # not ours to depend on; zig supplies the cross linker without a toolchain per

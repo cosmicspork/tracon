@@ -4,11 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>tracon</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link
-      rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Fragment+Mono&display=swap"
-    />
+    <!-- No web fonts: the node serves this from inside its boundary, so a
+         network fetch on every load would leak a request and fail offline. The
+         CSS falls back to system fonts (see app.css). -->
   </head>
   <body>
     <div id="app"></div>

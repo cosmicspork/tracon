@@ -27,10 +27,17 @@ pub struct Worktree {
     pub main_checkout_dirty: bool,
 }
 
+/// Disable hooks and the fsmonitor daemon on node-side git. The operator's
+/// global config is trusted and still applies (fetch and push auth need it);
+/// this only overrides the config-driven exec paths, which is where a
+/// repo-local value the harness might set would otherwise run a program.
+const GIT_SAFE: &[&str] = &["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor="];
+
 async fn git(repo: &Path, op: &'static str, args: &[&str]) -> Result<String, WorktreeError> {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
+        .args(GIT_SAFE)
         .args(args)
         .output()
         .await?;
@@ -50,20 +57,24 @@ pub async fn default_branch(repo: &Path) -> Result<String, WorktreeError> {
     match git(
         repo,
         "symbolic-ref",
-        &["symbolic-ref", "refs/remotes/origin/HEAD"],
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     )
     .await
     {
-        Ok(s) => Ok(s.rsplit('/').next().unwrap_or("main").to_string()),
+        // `origin/release/2026.1` → `release/2026.1`: strip only the remote
+        // prefix, not everything up to the last slash.
+        Ok(s) => Ok(s.strip_prefix("origin/").unwrap_or(&s).to_string()),
         Err(_) => Ok("main".to_string()),
     }
 }
 
 pub async fn is_dirty(repo: &Path) -> bool {
+    // Fail closed: if `git status` cannot be read, treat the checkout as dirty
+    // and report it rather than silently claiming it is clean.
     git(repo, "status", &["status", "--porcelain"])
         .await
         .map(|s| !s.is_empty())
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// A worktree path that does not collide with an existing one.

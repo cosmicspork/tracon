@@ -164,7 +164,9 @@ pub async fn session_events(
     Path(id): Path<String>,
     Query(q): Query<EventsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let rows = s.store().events_after(&id, q.after, q.limit.min(2000))?;
+    let rows = s
+        .store()
+        .events_after(&id, q.after, q.limit.clamp(0, 2000))?;
     Ok(Json(json!(rows)))
 }
 
@@ -302,7 +304,16 @@ pub async fn decide_review(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "asking for changes needs a note saying what to change".into(),
                 ))?;
-            s.store().request_changes(&id, notes)?;
+            if !s.store().request_changes(&id, notes)? {
+                let now = s.store().get_review(&id)?.map(|r| r.state);
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "this review is no longer awaiting a verdict ({})",
+                        now.as_deref().unwrap_or("gone")
+                    ),
+                ));
+            }
             s.manager.publish_queue().await;
             Ok(Json(json!({ "state": "revising" })))
         }
@@ -317,8 +328,21 @@ pub async fn decide_review(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "a rejection needs a reason".into(),
                 ))?;
-            s.store()
-                .resolve_review(&id, "rejected", Some(reason), None, None, None, 0)?;
+            // The guard is in the UPDATE: if the row is no longer awaiting a
+            // verdict, say so rather than reporting a rejection that did not land.
+            let resolved =
+                s.store()
+                    .resolve_review(&id, "rejected", Some(reason), None, None, None, 0)?;
+            if !resolved {
+                let now = s.store().get_review(&id)?.map(|r| r.state);
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "this review is no longer awaiting a verdict ({})",
+                        now.as_deref().unwrap_or("gone")
+                    ),
+                ));
+            }
             s.manager.publish_queue().await;
             Ok(Json(json!({ "state": "rejected" })))
         }
@@ -346,13 +370,29 @@ pub async fn decide_review(
             let title = b.title.as_deref().unwrap_or(r.approved_title()).to_string();
             let body = b.body.as_deref().unwrap_or(r.approved_body()).to_string();
 
-            // The node publishes, using a credential the harness never had.
+            // Claim the publish atomically: only the transition that moves the
+            // row into `publishing` may push. Two concurrent approves cannot both
+            // win this, so the change is opened once, not once per request.
+            if !s.store().begin_publish(&id)? {
+                let now = s.store().get_review(&id)?.map(|r| r.state);
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "this review is already being decided ({})",
+                        now.as_deref().unwrap_or("gone")
+                    ),
+                ));
+            }
+
+            // The node publishes, using a credential the harness never had, and
+            // pins the push to the reviewed commit.
             let result = crate::review::publish::publish(
                 &s.tools.broker,
                 &s.cfg,
                 &r.channel,
                 &worktree,
                 &target,
+                &r.head_sha,
                 &title,
                 &body,
             )
@@ -360,21 +400,17 @@ pub async fn decide_review(
 
             match result {
                 Ok(published) => {
-                    s.store().resolve_review(
-                        &id,
-                        "approved",
-                        None,
-                        Some(&title),
-                        Some(&body),
-                        Some(&published),
-                        0,
-                    )?;
+                    s.store().finish_publish(&id, &title, &body, &published)?;
                     s.manager.publish_queue().await;
                     Ok(Json(json!({ "state": "approved", "published": published })))
                 }
                 Err(e) => {
-                    // The review stays open: the operator approved, the forge
-                    // refused, and that is a thing to fix rather than a verdict.
+                    // The forge refused: undo the publishing claim so the review
+                    // returns to the queue rather than being stuck mid-publish.
+                    // The operator approved, the forge refused, and that is a
+                    // thing to fix rather than a verdict.
+                    s.store().abort_publish(&id)?;
+                    s.manager.publish_queue().await;
                     Err(ApiError(StatusCode::BAD_GATEWAY, e.to_string()))
                 }
             }
@@ -424,6 +460,11 @@ pub async fn refresh_models(State(s): State<AppState>) -> ApiResult<Json<serde_j
     if let Ok(Some(mut node)) = s.store().get_node(&s.node_id) {
         node.models_json = serde_json::to_string(&models).ok();
         let _ = s.store().put_node(&node);
+        // Push the refreshed node to any live client, so a model list (or a
+        // refused state) reaches the interface without a reload.
+        s.manager
+            .hub()
+            .publish(crate::stream::Frame::Node(node_json(&s)?));
     }
     Ok(Json(serde_json::json!(models)))
 }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { clock } from '../lib/clock.svelte'
   import { formatAge, formatBudget } from '../lib/format'
   import type { Session } from '../lib/types'
 
@@ -30,7 +31,7 @@
 <a class="row {tone}" href="/sessions/{session.id}">
   <span class="bar"></span>
   <span class="mono">{session.node_id.slice(0, 8)}</span>
-  <span class="mono age">{formatAge(session.updated_ms)}</span>
+  <span class="mono age">{formatAge(session.updated_ms, clock.now)}</span>
   <span class="t">
     <em>{kind}</em>
     {session.branch}

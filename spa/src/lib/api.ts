@@ -39,8 +39,24 @@ export const api = {
   sessions: () => call<Session[]>('GET', '/api/sessions'),
   session: (id: string) =>
     call<{ session: Session; waiting: unknown[] }>('GET', `/api/sessions/${id}`),
-  events: (id: string, after = 0) =>
-    call<Event[]>('GET', `/api/sessions/${id}/events?after=${after}&limit=2000`),
+  // Page through the whole history: a long session has more events than one
+  // request returns, and stopping at a fixed cap would show the oldest events
+  // with a gap before the live tail.
+  events: async (id: string): Promise<Event[]> => {
+    const limit = 1000
+    const all: Event[] = []
+    let after = 0
+    for (;;) {
+      const batch = await call<Event[]>(
+        'GET',
+        `/api/sessions/${id}/events?after=${after}&limit=${limit}`,
+      )
+      all.push(...batch)
+      if (batch.length < limit) break
+      after = batch[batch.length - 1].seq
+    }
+    return all
+  },
   createSession: (spec: {
     channel: string
     repo_path: string

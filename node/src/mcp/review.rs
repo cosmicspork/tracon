@@ -95,15 +95,18 @@ async fn submit(
             "{provider} is not a provider this node publishes to"
         ));
     }
-    // The base defaults to what the worktree was branched from, which is what
-    // the operator asked for when the session started.
-    let base = args
-        .get("base")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| default_base(&session.branch));
-
-    let capture = review::capture(&worktree, &base, &session.branch)
+    // The base defaults to what the worktree was branched from — read from the
+    // worktree's `origin/HEAD`, not assumed to be `main`.
+    let base = match args.get("base").and_then(Value::as_str) {
+        Some(b) => b.to_string(),
+        None => review::default_base(&worktree)
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+    // Diff against the remote-tracking ref, so the review shows exactly what the
+    // change introduces over what it will merge into.
+    let range_base = format!("origin/{base}");
+    let capture = review::capture(&worktree, &range_base, &session.branch)
         .await
         .map_err(|e| e.to_string())?;
     let files = serde_json::to_string(&capture.files).unwrap_or_else(|_| "[]".into());
@@ -243,12 +246,6 @@ fn str_arg(args: &Value, key: &str) -> Result<String, String> {
         .filter(|s| !s.trim().is_empty())
         .map(str::to_string)
         .ok_or_else(|| format!("{key} is required"))
-}
-
-/// Worktrees are branched from `origin/<default>`; reviews target that same
-/// branch unless told otherwise.
-fn default_base(_branch: &str) -> String {
-    "main".into()
 }
 
 #[cfg(test)]

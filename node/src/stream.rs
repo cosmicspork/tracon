@@ -7,6 +7,7 @@
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 use crate::store::{PermissionRow, SessionRow};
 
@@ -70,6 +71,10 @@ impl Frame {
 #[derive(Clone)]
 pub struct Hub {
     tx: broadcast::Sender<Frame>,
+    /// Fires when the node is shutting down. SSE streams end when it does, so a
+    /// browser holding one open does not stall graceful shutdown (a keep-alive
+    /// stream never completes on its own).
+    shutdown: CancellationToken,
 }
 
 impl Default for Hub {
@@ -81,7 +86,10 @@ impl Default for Hub {
 impl Hub {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(1024);
-        Self { tx }
+        Self {
+            tx,
+            shutdown: CancellationToken::new(),
+        }
     }
 
     pub fn publish(&self, frame: Frame) {
@@ -91,6 +99,16 @@ impl Hub {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Frame> {
         self.tx.subscribe()
+    }
+
+    /// A handle that resolves when the node begins shutting down.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
+    }
+
+    /// Signal every open stream to end.
+    pub fn begin_shutdown(&self) {
+        self.shutdown.cancel();
     }
 }
 

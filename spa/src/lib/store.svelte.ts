@@ -44,7 +44,15 @@ class Store {
     this.source.onerror = () => {
       this.connected = false
     }
-    for (const name of ['event', 'chunk', 'tool_update', 'session', 'queue', 'reviews'] as const) {
+    for (const name of [
+      'event',
+      'chunk',
+      'tool_update',
+      'session',
+      'queue',
+      'reviews',
+      'node',
+    ] as const) {
       this.source.addEventListener(name, (m) => this.onFrame(JSON.parse((m as MessageEvent).data)))
     }
   }
@@ -128,6 +136,13 @@ class Store {
       }
       case 'reviews': {
         this.queue = { ...this.queue, reviews: frame.waiting }
+        break
+      }
+      case 'node': {
+        // A refreshed node (new model list, or a refused state) reaches a live
+        // client without a reload. The frame carries a `type` field the NodeInfo
+        // shape ignores.
+        this.node = frame
         break
       }
     }

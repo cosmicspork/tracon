@@ -85,12 +85,14 @@ matches = [
     "git remote -v",
 ]
 
+# Leading-token match: the command must *start* with one of these, and carry no
+# shell chaining or redirection, or it is asked rather than auto-allowed.
 [[rule]]
 id = "read-only-shell"
 verdict = "allow"
 reason = "Reading the worktree changes nothing."
 kinds = ["execute"]
-matches = ["ls ", "ls\n", "cat ", "head ", "tail ", "wc ", "file ", "pwd", "which ", "grep "]
+matches = ["ls", "cat", "head", "tail", "wc", "file", "pwd", "which", "grep"]
 
 [[rule]]
 id = "reads-and-thoughts"

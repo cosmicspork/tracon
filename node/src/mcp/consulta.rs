@@ -70,10 +70,19 @@ pub async fn call(
             .get("table")
             .and_then(Value::as_str)
             .ok_or("describe needs a table")?;
-        if !table
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$')
-        {
+        // describe generates its data-dictionary SELECT inside the sidecar, so
+        // the node cannot run that SQL through `assert_read_only` the way it does
+        // a query. The node-side check for this path is therefore the identifier
+        // itself: a bare table name, so nothing can be injected into the
+        // generated statement. consulta's own guard is the second check.
+        let valid = !table.is_empty()
+            && !table.starts_with('.')
+            && !table.ends_with('.')
+            && !table.contains("..")
+            && table
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$');
+        if !valid {
             return Err(format!("{table:?} is not a table name"));
         }
         argv.push("--describe".into());

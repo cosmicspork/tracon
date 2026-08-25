@@ -1,6 +1,7 @@
 <script lang="ts">
   import Diff from '../components/Diff.svelte'
   import { api } from '../lib/api'
+  import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
@@ -95,10 +96,10 @@
 {:else}
   <div class="head" class:stale={stale.length > 0}>
     <span class="bar"></span>
-    <span class="mono">{formatAge(review.created_ms)}</span>
+    <span class="mono">{formatAge(review.created_ms, clock.now)}</span>
     <span class="t">
       <em>{stale.length > 0 ? 'Changed since submit' : 'Review'}</em>
-      {review.title}
+      {title || review.title}
       <small
         >{files.length} files · +{review.added} −{review.removed} · {review.channel}{review.claimed_ms
           ? ' · claimed'

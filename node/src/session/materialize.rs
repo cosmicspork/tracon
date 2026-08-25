@@ -85,9 +85,17 @@ pub fn scratch_for(session_id: &str, worktree: &Path, repo: &Path) -> std::io::R
     // "not a git repository" and the harness can edit files but never commit —
     // which also means it can never submit a review.
     //
-    // This gives the harness write access to the git directory of the repo it
-    // was already given a worktree of, which is what committing requires. It
-    // does not widen its reach beyond that repo.
+    // Committing needs write access to objects, refs, logs, and the worktree's
+    // own state — but NOT to `config`, `hooks`, or `info`. Those three are the
+    // code-execution surface: a writable `.git/config` lets the harness set
+    // `core.fsmonitor`, `core.hooksPath`, `credential.helper`, or an external
+    // diff/textconv command that the node then runs host-side (during capture,
+    // staleness, or publish) as the node's user — outside the boundary. So the
+    // git directory is mounted read-write for commits, and those three paths are
+    // layered back read-only on top so the harness cannot reach them. This is
+    // the "nothing the harness writes can execute on the node" half of the gate;
+    // node-side git is also invoked with hooks and drivers disabled as a second
+    // line (see `review::git` and `worktree::git`).
     let git_dir = repo.join(".git");
     if git_dir.is_dir() {
         mounts.push(Mount {
@@ -95,6 +103,19 @@ pub fn scratch_for(session_id: &str, worktree: &Path, repo: &Path) -> std::io::R
             target: git_dir.to_string_lossy().into_owned(),
             read_only: false,
         });
+        // Read-only overlays on the execution surface. Each exists in a normal
+        // repo (git creates them at init); guard anyway so a bare or unusual
+        // layout does not fail the mount.
+        for leaf in ["config", "hooks", "info"] {
+            let p = git_dir.join(leaf);
+            if p.exists() {
+                mounts.push(Mount {
+                    source: p.to_string_lossy().into_owned(),
+                    target: p.to_string_lossy().into_owned(),
+                    read_only: true,
+                });
+            }
+        }
     }
 
     Ok(Scratch { dir, mounts })
@@ -138,7 +159,9 @@ mod tests {
         // Without this the harness cannot commit, and the review contract
         // depends on commits.
         let repo = std::env::temp_dir().join("tracon-materialize-repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".git/hooks")).unwrap();
+        std::fs::create_dir_all(repo.join(".git/info")).unwrap();
+        std::fs::write(repo.join(".git/config"), "[core]\n").unwrap();
         let s = scratch_for("test-gitdir", Path::new("/tmp/wt"), &repo).unwrap();
         let git_target = repo.join(".git").to_string_lossy().into_owned();
         let mount = s
@@ -149,6 +172,17 @@ mod tests {
         // At the same absolute path, because the worktree's pointer is absolute.
         assert_eq!(mount.source, mount.target);
         assert!(!mount.read_only, "committing writes objects and refs");
+        // config, hooks, and info are layered back read-only: they are the
+        // node-side code-execution surface and the harness must not write them.
+        for leaf in ["config", "hooks", "info"] {
+            let target = repo.join(".git").join(leaf).to_string_lossy().into_owned();
+            let ro = s
+                .mounts
+                .iter()
+                .find(|m| m.target == target)
+                .unwrap_or_else(|| panic!(".git/{leaf} should be mounted"));
+            assert!(ro.read_only, ".git/{leaf} must be read-only to the harness");
+        }
         remove("test-gitdir");
         let _ = std::fs::remove_dir_all(&repo);
     }

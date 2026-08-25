@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import type { Review } from '../lib/types'
 
@@ -16,7 +17,7 @@
 
 <a class="row" class:revising={review.state === 'revising'} href="/reviews/{review.id}">
   <span class="bar"></span>
-  <span class="mono">{formatAge(review.created_ms)}</span>
+  <span class="mono">{formatAge(review.created_ms, clock.now)}</span>
   <span class="t">
     <em>{review.state === 'revising' ? 'Changes requested' : 'Review'}</em>
     {review.title}
