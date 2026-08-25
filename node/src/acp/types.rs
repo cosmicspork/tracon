@@ -164,6 +164,17 @@ pub struct Usage {
     pub cached_read_tokens: u64,
 }
 
+impl Usage {
+    /// Tokens to charge the budget for this turn. `totalTokens` is what the
+    /// harness reports and is preferred, but it is `#[serde(default)]`: a harness
+    /// that reports the parts and omits the total would otherwise charge zero and
+    /// never hit the budget. Fall back to the sum so the meter fails closed.
+    pub fn charged(&self) -> u64 {
+        self.total_tokens
+            .max(self.input_tokens + self.output_tokens + self.cached_read_tokens)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionIdParams {
@@ -330,4 +341,31 @@ pub fn model_choices(options: &[ConfigOption]) -> Option<&ConfigOption> {
     options
         .iter()
         .find(|o| o.id == "model" || o.category.as_deref() == Some("model"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Usage;
+
+    #[test]
+    fn charged_prefers_total_but_falls_back_to_the_sum() {
+        // A harness reporting the total is charged the total.
+        let u = Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 100,
+            cached_read_tokens: 2,
+        };
+        assert_eq!(u.charged(), 100);
+
+        // A harness that omits `totalTokens` (it is `#[serde(default)]`) is
+        // charged the parts, not zero, so the budget still bites.
+        let u = Usage {
+            input_tokens: 40,
+            output_tokens: 30,
+            total_tokens: 0,
+            cached_read_tokens: 5,
+        };
+        assert_eq!(u.charged(), 75);
+    }
 }

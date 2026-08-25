@@ -435,6 +435,11 @@ impl Supervisor {
                 .collect(),
             Err(_) => return,
         };
+        if due.is_empty() {
+            // Nothing expired this tick; do not republish the queue on every
+            // idle heartbeat.
+            return;
+        }
         for id in due {
             if let Some(sender) = self.open.lock().await.remove(&id) {
                 let _ = sender.send(PermissionReply::Selected(
@@ -512,7 +517,7 @@ impl Supervisor {
                             "cached_read_tokens": turn.usage.cached_read_tokens,
                         }
                     }),
-                    turn.usage.total_tokens as i64,
+                    turn.usage.charged() as i64,
                 ),
                 Err(e) => (ek::ERROR, json!({ "error": e.to_string() }), 0),
             };
@@ -639,7 +644,15 @@ fn truncate(v: Option<&serde_json::Value>) -> (Option<String>, bool) {
     let Some(v) = v else { return (None, false) };
     let s = serde_json::to_string(v).unwrap_or_default();
     if s.len() > MAX_TOOL_OUTPUT {
-        (Some(s[..MAX_TOOL_OUTPUT].to_string()), true)
+        // Cut on a char boundary: `serde_json` does not escape non-ASCII, so a
+        // multibyte character can straddle the cap. Slicing mid-character would
+        // panic and take the supervisor task — and the session's cleanup — with
+        // it. `floor_char_boundary` is unstable, so walk down by hand.
+        let mut cut = MAX_TOOL_OUTPUT;
+        while cut > 0 && !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        (Some(s[..cut].to_string()), true)
     } else {
         (Some(s), false)
     }
@@ -658,6 +671,21 @@ mod tests {
         let (small, truncated) = truncate(Some(&json!({ "text": "ok" })));
         assert!(!truncated);
         assert!(small.unwrap().contains("ok"));
+    }
+
+    #[test]
+    fn a_multibyte_character_on_the_cap_does_not_panic() {
+        // `serde_json` emits non-ASCII raw, so a multibyte char can straddle the
+        // cap. This must truncate on a boundary, not panic. `é` is two bytes;
+        // padding so the cap lands inside one exercises the boundary walk.
+        let pad = MAX_TOOL_OUTPUT - "{\"text\":\"".len();
+        let text = format!("{}{}", "a".repeat(pad), "é".repeat(64));
+        let (out, truncated) = truncate(Some(&json!({ "text": text })));
+        assert!(truncated);
+        let out = out.unwrap();
+        assert!(out.len() <= MAX_TOOL_OUTPUT);
+        // It is still valid UTF-8 (the assertion is that we got here at all).
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
 
     #[test]

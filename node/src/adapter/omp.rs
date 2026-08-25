@@ -92,14 +92,15 @@ impl HarnessAdapter for OmpAdapter {
         let mut session =
             OmpSession::start_in(child, &spec.cwd_in_runner, spec.mcp_servers.clone()).await?;
 
-        // Enforce the pin a second time from the initialize handshake.
-        if let Some(v) = &session.agent_version {
-            if v != &self.pinned {
-                return Err(AdapterError::VersionMismatch {
-                    found: v.clone(),
-                    pinned: self.pinned.clone(),
-                });
-            }
+        // Enforce the pin a second time from the initialize handshake. A missing
+        // version is a mismatch, not a pass: this layer is the most likely to
+        // break silently, so it fails closed when it cannot verify.
+        let found = session.agent_version.as_deref().unwrap_or("unknown");
+        if found != self.pinned {
+            return Err(AdapterError::VersionMismatch {
+                found: found.to_string(),
+                pinned: self.pinned.clone(),
+            });
         }
         session.set_model(&spec.model).await?;
 
@@ -124,9 +125,39 @@ impl HarnessAdapter for OmpAdapter {
 struct OmpSession {
     peer: Peer,
     incoming: mpsc::Receiver<Incoming>,
+    /// Inbound notifications and requests that arrived during the handshake,
+    /// before the pump existed. Replayed in order when it starts.
+    buffered: Vec<Incoming>,
     session_id: String,
     config_options: Vec<types::ConfigOption>,
     agent_version: Option<String>,
+}
+
+/// Await a handshake request while draining inbound traffic into `buffered`.
+///
+/// The read loop delivers responses and inbound notifications from one place, so
+/// a startup that emits more than the inbound channel holds (session/update,
+/// available_commands_update, …) before answering would block the read loop on a
+/// full channel and the response would never arrive — a deadlock. Draining
+/// concurrently keeps the channel moving; the buffered items are replayed to the
+/// pump in order, and normal backpressure resumes once the pump owns the stream.
+async fn drain_until<R>(
+    incoming: &mut mpsc::Receiver<Incoming>,
+    buffered: &mut Vec<Incoming>,
+    fut: impl std::future::Future<Output = R>,
+) -> R {
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            r = &mut fut => return r,
+            item = incoming.recv() => match item {
+                Some(item) => buffered.push(item),
+                // The peer's stream closed; the request will resolve (with an
+                // error) on its own.
+                None => return fut.await,
+            },
+        }
+    }
 }
 
 impl OmpSession {
@@ -143,31 +174,41 @@ impl OmpSession {
     ) -> Result<Self, AdapterError> {
         let stdin = child.stdin.take().ok_or(AdapterError::NoPipe)?;
         let stdout = child.stdout.take().ok_or(AdapterError::NoPipe)?;
-        let (peer, incoming, read) = Peer::new(stdin, stdout);
+        let (peer, mut incoming, read) = Peer::new(stdin, stdout);
         tokio::spawn(read);
         // Reap the child when it exits so it is not left as a zombie.
         tokio::spawn(async move {
             let _ = child.wait().await;
         });
 
-        let init: types::InitializeResult = peer
-            .request(methods::INITIALIZE, &types::InitializeParams::node())
-            .await?;
+        // Drain inbound traffic while the handshake requests are in flight, so a
+        // chatty startup cannot deadlock the read loop (see `drain_until`).
+        let mut buffered = Vec::new();
+        let init: types::InitializeResult = drain_until(
+            &mut incoming,
+            &mut buffered,
+            peer.request(methods::INITIALIZE, &types::InitializeParams::node()),
+        )
+        .await?;
         let agent_version = init.agent_info.map(|a| a.version);
 
-        let new: types::NewSessionResult = peer
-            .request(
+        let new: types::NewSessionResult = drain_until(
+            &mut incoming,
+            &mut buffered,
+            peer.request(
                 methods::SESSION_NEW,
                 &types::NewSessionParams {
                     cwd: cwd.to_string(),
                     mcp_servers,
                 },
-            )
-            .await?;
+            ),
+        )
+        .await?;
 
         Ok(Self {
             peer,
             incoming,
+            buffered,
             session_id: new.session_id,
             config_options: new.config_options,
             agent_version,
@@ -199,17 +240,16 @@ impl OmpSession {
         if !known {
             return Err(AdapterError::UnknownModel(model.to_string()));
         }
-        let res: types::SetConfigOptionResult = self
+        let params = types::SetConfigOptionParams {
+            session_id: self.session_id.clone(),
+            config_id: "model".into(),
+            value: model.to_string(),
+        };
+        let req = self
             .peer
-            .request(
-                methods::SESSION_SET_CONFIG_OPTION,
-                &types::SetConfigOptionParams {
-                    session_id: self.session_id.clone(),
-                    config_id: "model".into(),
-                    value: model.to_string(),
-                },
-            )
-            .await?;
+            .request(methods::SESSION_SET_CONFIG_OPTION, &params);
+        let res: types::SetConfigOptionResult =
+            drain_until(&mut self.incoming, &mut self.buffered, req).await?;
         if !res.config_options.is_empty() {
             self.config_options = res.config_options;
         }
@@ -230,21 +270,38 @@ impl OmpSession {
     }
 
     /// Translate inbound notifications and requests into `HarnessEvent`s until
-    /// the peer closes.
+    /// the peer closes. Handshake traffic buffered before the pump existed is
+    /// replayed first, in order.
     async fn pump(mut self, tx: mpsc::Sender<HarnessEvent>) {
+        for msg in std::mem::take(&mut self.buffered) {
+            if !Self::process(msg, &tx).await {
+                return;
+            }
+        }
         while let Some(msg) = self.incoming.recv().await {
+            if !Self::process(msg, &tx).await {
+                return;
+            }
+        }
+        let _ = tx.send(HarnessEvent::Exited { code: None }).await;
+    }
+
+    /// Handle one inbound message. Returns false when the pump should stop (the
+    /// downstream event channel closed).
+    async fn process(msg: Incoming, tx: &mpsc::Sender<HarnessEvent>) -> bool {
+        {
             match msg {
                 Incoming::Notification { method, params } if method == methods::SESSION_UPDATE => {
                     let p: types::SessionUpdateParams = match serde_json::from_value(params) {
                         Ok(p) => p,
                         Err(e) => {
                             tracing::warn!(error=%e, "bad session/update");
-                            continue;
+                            return true;
                         }
                     };
                     if let Some(ev) = update_to_event(p.update) {
                         if tx.send(ev).await.is_err() {
-                            break;
+                            return false;
                         }
                     }
                 }
@@ -261,7 +318,7 @@ impl OmpSession {
                             let _ = reply.send(Err(crate::acp::codec::RpcError::method_not_found(
                                 format!("bad permission request: {e}"),
                             )));
-                            continue;
+                            return true;
                         }
                     };
                     let (answer_tx, answer_rx) = oneshot::channel();
@@ -281,7 +338,7 @@ impl OmpSession {
                         .is_err()
                     {
                         let _ = reply.send(Ok(cancelled_outcome()));
-                        break;
+                        return false;
                     }
                     // Answer the harness once the supervisor decides.
                     tokio::spawn(async move {
@@ -298,7 +355,7 @@ impl OmpSession {
                 }
             }
         }
-        let _ = tx.send(HarnessEvent::Exited { code: None }).await;
+        true
     }
 }
 

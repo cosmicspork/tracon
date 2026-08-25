@@ -7,6 +7,10 @@ use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result};
 use axum::{
+    extract::Request,
+    http::{header, StatusCode},
+    middleware::Next,
+    response::Response,
     routing::{get, post, put},
     Router,
 };
@@ -47,6 +51,57 @@ pub fn router(state: AppState) -> Router {
         .fallback(spa::serve)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// The hostname portion of a `Host`/`Origin` value, minus any scheme, port, or
+/// IPv6 brackets. `http://[::1]:7420` → `::1`, `127.0.0.1:7420` → `127.0.0.1`.
+fn hostname(value: &str) -> &str {
+    let v = value
+        .strip_prefix("http://")
+        .or_else(|| value.strip_prefix("https://"))
+        .unwrap_or(value);
+    if let Some(rest) = v.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    v.rsplit_once(':').map(|(h, _)| h).unwrap_or(v)
+}
+
+/// Whether a `Host`/`Origin` host is one the operator API answers to: loopback,
+/// or the exact address the node was told to bind. This is the DNS-rebinding
+/// defence — a page on `evil.example` that resolves to `127.0.0.1` still sends
+/// `Host: evil.example`, which is refused.
+fn host_is_local(host: Option<&str>, bind: &str) -> bool {
+    match host {
+        // No Host header at all is not a browser (they always send one), so it
+        // is not a rebinding vector; local non-browser clients are allowed.
+        None => true,
+        Some(h) => {
+            let h = hostname(h);
+            matches!(h, "localhost" | "127.0.0.1" | "::1") || h == bind
+        }
+    }
+}
+
+/// Reject cross-origin drivers of the operator API. Applied only to the operator
+/// router; the harness router is reached from the gateway by container name and
+/// must not carry this.
+async fn local_only(bind: Arc<String>, req: Request, next: Next) -> Result<Response, StatusCode> {
+    {
+        let headers = req.headers();
+        let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+        if !host_is_local(host, &bind) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        // An Origin, when present, must also be local: a cross-site POST carries
+        // the attacker's Origin even when the request reaches loopback.
+        let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+        if let Some(origin) = origin {
+            if origin != "null" && !host_is_local(Some(origin), &bind) {
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+    }
+    Ok(next.run(req).await)
 }
 
 /// What the harness can reach: a liveness probe and the node's tools. No
@@ -170,8 +225,25 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
 
     tracing::info!(%listen, "serving");
     let manager = state.manager.clone();
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
+    let hub = manager.hub().clone();
+    // The operator API answers only to loopback callers (and the bind address
+    // itself): a page the operator visits cannot drive it by rebinding a name to
+    // 127.0.0.1, because the browser still sends the attacker's Host.
+    let bind = Arc::new(listen.ip().to_string());
+    let operator = router(state).layer(axum::middleware::from_fn(
+        move |req: Request, next: Next| {
+            let bind = bind.clone();
+            async move { local_only(bind, req, next).await }
+        },
+    ));
+    axum::serve(listener, operator)
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            // End open SSE streams first: a keep-alive stream never completes on
+            // its own, so graceful shutdown would otherwise wait on it until the
+            // supervisor sends SIGKILL and orphans harness containers.
+            hub.begin_shutdown();
+        })
         .await
         .context("http server")?;
     // The listener is closed; end every live session so no harness container
@@ -206,7 +278,19 @@ async fn init_node(
         // silently empty.
         spec.extra_mounts = crate::session::materialize::state_mounts().unwrap_or_default();
         let runner = crate::runner::podman::PodmanRunner::new(spec);
-        let found = adapter.version(&runner).await.ok().map(|v| v.found);
+        // A probe that cannot read the version is not a pass: record "unknown",
+        // which does not equal the pin, so new sessions are blocked with the
+        // version pair shown rather than run against an unverified harness.
+        let found = Some(
+            adapter
+                .version(&runner)
+                .await
+                .map(|v| v.found)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "harness version probe failed; treating as unknown");
+                    "unknown".into()
+                }),
+        );
         let models = adapter.probe_models(&runner).await.unwrap_or_default();
         (found, models)
     } else {
@@ -242,4 +326,34 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     ctrl_c.await.ok();
     tracing::info!("shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{host_is_local, hostname};
+
+    #[test]
+    fn hostname_strips_scheme_port_and_brackets() {
+        assert_eq!(hostname("127.0.0.1:7420"), "127.0.0.1");
+        assert_eq!(hostname("localhost"), "localhost");
+        assert_eq!(hostname("http://[::1]:7420"), "::1");
+        assert_eq!(hostname("http://evil.example"), "evil.example");
+        assert_eq!(hostname("evil.example:80"), "evil.example");
+    }
+
+    #[test]
+    fn loopback_and_the_bind_address_are_allowed_others_are_refused() {
+        let bind = "127.0.0.1";
+        assert!(host_is_local(Some("localhost:7420"), bind));
+        assert!(host_is_local(Some("127.0.0.1:7420"), bind));
+        assert!(host_is_local(Some("[::1]:7420"), bind));
+        // A rebinding attack keeps the attacker's name in Host.
+        assert!(!host_is_local(Some("evil.example"), bind));
+        assert!(!host_is_local(Some("evil.example:7420"), bind));
+        // A non-loopback bind allows its own address.
+        assert!(host_is_local(Some("10.0.0.5:7420"), "10.0.0.5"));
+        assert!(!host_is_local(Some("10.0.0.9:7420"), "10.0.0.5"));
+        // A missing Host is not a browser and is not a rebinding vector.
+        assert!(host_is_local(None, bind));
+    }
 }
