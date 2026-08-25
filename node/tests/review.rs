@@ -406,8 +406,12 @@ async fn without_a_brokered_credential_approval_publishes_nothing() {
         .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(body["error"]["message"].as_str().unwrap().contains("gh"));
-    // The review stays open: the operator approved, the node could not publish.
-    assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "new");
+    // The review stays open and decidable: the operator approved, the node could
+    // not publish, so the publish claim is undone and the card returns to the
+    // queue (as claimed, since the operator just acted on it).
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "claimed");
+    let (_, queue) = f.call("GET", "/api/queue", None).await;
+    assert_eq!(queue["reviews"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -476,6 +480,113 @@ async fn requesting_changes_keeps_one_evolving_thread() {
         body["review"]["verdict_reason"].is_null(),
         "the old note is cleared"
     );
+}
+
+#[tokio::test]
+async fn two_concurrent_approvals_publish_the_change_once() {
+    const FN: &str = "two_concurrent_approvals_publish_the_change_once";
+    let f = fixture(FN, WITH_GH).await;
+    let id = f.submit().await;
+
+    // Two operators (or two taps) approve at once. The publish claim is atomic,
+    // so the change is opened once, not once per request.
+    let body = json!({ "verdict": "approve" });
+    let uri = format!("/api/reviews/{id}/verdict");
+    let (a, b) = tokio::join!(
+        f.call("POST", &uri, Some(body.clone())),
+        f.call("POST", &uri, Some(body.clone())),
+    );
+    let mut statuses = [a.0, b.0];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::CONFLICT],
+        "exactly one approval wins"
+    );
+
+    // The forge was asked to open the change exactly once.
+    let opens = f.gh_log().matches("pr create").count();
+    assert_eq!(opens, 1, "published exactly once");
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "approved");
+}
+
+#[tokio::test]
+async fn a_revising_review_can_be_rejected_and_the_result_is_honest() {
+    const FN: &str = "a_revising_review_can_be_rejected_and_the_result_is_honest";
+    let f = fixture(FN, WITH_GH).await;
+    let id = f.submit().await;
+
+    // Changes requested: the review is now waiting on the agent.
+    let (status, _) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "revise", "reason": "split it" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "revising");
+
+    // The operator can still reject it, and what the API reports is what the
+    // store did — no success returned for a row that did not change.
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "reject", "reason": "abandon this approach" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "rejected");
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "rejected");
+
+    // A second reject now that it is decided is refused, not silently accepted.
+    let (status, _) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "reject", "reason": "again" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
+    const FN: &str = "publish_pins_the_reviewed_commit_and_refuses_a_moved_branch";
+    let f = fixture(FN, WITH_GH).await;
+    let mut cfg = Config::default();
+    cfg.publish.gh = f.dir.join("bin/gh").to_string_lossy().into_owned();
+    let broker: tracon::broker::Broker = toml::from_str(WITH_GH).unwrap();
+    let target = tracon::review::publish::Target {
+        provider: "github".into(),
+        project: "owner/name".into(),
+        base: "main".into(),
+        branch: "feat/x".into(),
+    };
+    // A head_sha that is not the worktree's HEAD stands in for a branch that
+    // moved between approval and publish.
+    let err = tracon::review::publish::publish(
+        &broker,
+        &cfg,
+        "work",
+        &f.worktree,
+        &target,
+        "0000000000000000000000000000000000000000",
+        "t",
+        "b",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            tracon::review::publish::PublishError::BranchMoved { .. }
+        ),
+        "{err}"
+    );
+    // Nothing was pushed or opened.
+    assert!(!f.gh_log().contains("pr create"));
 }
 
 #[tokio::test]
