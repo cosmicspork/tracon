@@ -23,6 +23,8 @@ pub enum BrokerError {
     Io(#[from] std::io::Error),
     #[error("credential store is malformed: {0}")]
     Parse(String),
+    #[error("credential store {path} is readable beyond its owner (mode {mode:o}); chmod 600 it")]
+    TooOpen { path: String, mode: u32 },
 }
 
 /// One credential and the channels allowed to use it. `--profile` in consulta
@@ -65,26 +67,33 @@ impl Broker {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e.into()),
         };
-        Self::warn_if_group_readable(&path);
+        // The whole point of the broker is that nothing but the node's user can
+        // read these secrets. A file group- or world-accessible is refused
+        // rather than loaded: the documented guarantee is enforcement, not
+        // advice. A refused store brokers nothing, which fails closed.
+        Self::refuse_if_too_open(&path)?;
         toml::from_str(&text).map_err(|e| BrokerError::Parse(e.to_string()))
     }
 
     #[cfg(unix)]
-    fn warn_if_group_readable(path: &std::path::Path) {
+    fn refuse_if_too_open(path: &std::path::Path) -> Result<(), BrokerError> {
         use std::os::unix::fs::PermissionsExt;
         if let Ok(meta) = std::fs::metadata(path) {
-            let mode = meta.permissions().mode() & 0o077;
-            if mode != 0 {
-                tracing::warn!(
-                    path = %path.display(),
-                    "credential store is readable beyond its owner; chmod 600 it"
-                );
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                return Err(BrokerError::TooOpen {
+                    path: path.display().to_string(),
+                    mode,
+                });
             }
         }
+        Ok(())
     }
 
     #[cfg(not(unix))]
-    fn warn_if_group_readable(_path: &std::path::Path) {}
+    fn refuse_if_too_open(_path: &std::path::Path) -> Result<(), BrokerError> {
+        Ok(())
+    }
 
     pub fn is_empty(&self) -> bool {
         self.credentials.is_empty()
@@ -182,5 +191,25 @@ mod tests {
         let b = Broker::default();
         assert!(b.is_empty());
         assert!(b.available_to("work").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_group_readable_store_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("tracon-broker-perms-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("credentials.toml");
+        std::fs::write(&path, "[credentials.x]\n").unwrap();
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(
+            Broker::refuse_if_too_open(&path),
+            Err(BrokerError::TooOpen { .. })
+        ));
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(Broker::refuse_if_too_open(&path).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

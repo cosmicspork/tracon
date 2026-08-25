@@ -9,7 +9,7 @@
 //! rejected, which occasionally costs a legitimate query a rewrite.
 
 use sqlparser::{
-    ast::Statement,
+    ast::{Query, SetExpr, Statement},
     dialect::GenericDialect,
     keywords::Keyword,
     tokenizer::{Token, Tokenizer},
@@ -82,14 +82,43 @@ pub fn assert_read_only(sql: &str) -> Result<(), GuardError> {
         return Err(GuardError::NotOneStatement(statements.len()));
     }
     match &statements[0] {
-        Statement::Query(q) => {
-            // `SELECT … FOR UPDATE` parses as a query but takes write locks.
-            if format!("{q}").to_ascii_uppercase().contains("FOR UPDATE") {
-                return Err(GuardError::Forbidden("FOR UPDATE".into()));
-            }
-            Ok(())
-        }
+        Statement::Query(q) => match query_writes(q) {
+            // A query that parses as a SELECT can still write or lock: `SELECT …
+            // INTO t` creates and populates a table on MSSQL (where consulta's
+            // own guard does not reject writes), and a locking clause takes row
+            // locks. Both are refused on the parsed AST, which also means a
+            // string literal containing "FOR UPDATE" no longer trips the guard.
+            Some(what) => Err(GuardError::Forbidden(what.into())),
+            None => Ok(()),
+        },
         other => Err(GuardError::NotAQuery(statement_name(other))),
+    }
+}
+
+/// The reason a query is not read-only, or `None` if it is. Walks CTEs, set
+/// operations, and subqueries so a write nested inside is caught too.
+fn query_writes(q: &Query) -> Option<&'static str> {
+    if !q.locks.is_empty() {
+        return Some("a locking clause (FOR UPDATE / FOR SHARE)");
+    }
+    if let Some(with) = &q.with {
+        for cte in &with.cte_tables {
+            if let Some(w) = query_writes(&cte.query) {
+                return Some(w);
+            }
+        }
+    }
+    body_writes(&q.body)
+}
+
+fn body_writes(body: &SetExpr) -> Option<&'static str> {
+    match body {
+        SetExpr::Select(s) if s.into.is_some() => Some("SELECT … INTO"),
+        SetExpr::Query(q) => query_writes(q),
+        SetExpr::SetOperation { left, right, .. } => {
+            body_writes(left).or_else(|| body_writes(right))
+        }
+        _ => None,
     }
 }
 
@@ -140,7 +169,36 @@ mod tests {
 
     #[test]
     fn locking_reads_are_refused() {
-        assert!(assert_read_only("SELECT * FROM people FOR UPDATE").is_err());
+        for sql in [
+            "SELECT * FROM people FOR UPDATE",
+            "SELECT * FROM people FOR SHARE",
+            "SELECT * FROM people FOR NO KEY UPDATE",
+        ] {
+            assert!(assert_read_only(sql).is_err(), "should refuse: {sql}");
+        }
+    }
+
+    #[test]
+    fn select_into_is_refused() {
+        // Parses as a query, but on MSSQL `SELECT … INTO t` creates and
+        // populates a table — a write the backend's own guard may not catch.
+        for sql in [
+            "SELECT * INTO backup FROM people",
+            "SELECT id INTO #tmp FROM people",
+            "WITH c AS (SELECT 1 AS x) SELECT x INTO keep FROM c",
+        ] {
+            assert!(assert_read_only(sql).is_err(), "should refuse: {sql}");
+        }
+    }
+
+    #[test]
+    fn for_update_inside_a_string_literal_is_allowed() {
+        // The old reserialize-and-substring check refused this; the AST check
+        // does not, because the words are data.
+        assert_eq!(
+            assert_read_only("SELECT * FROM notes WHERE body = 'please FOR UPDATE the row'"),
+            Ok(())
+        );
     }
 
     #[test]

@@ -156,9 +156,20 @@ impl Default for Config {
                 budget_tokens: 2_000_000,
                 permission_timeout_secs: 900,
                 claim_grace_secs: 60,
-                worktree_root: PathBuf::from("/private/tmp"),
+                worktree_root: default_worktree_root(),
             },
         }
+    }
+}
+
+/// Where worktrees go by default. On macOS `/private/tmp` is the real temp dir
+/// and survives across sessions; on a Linux node it usually does not exist for a
+/// non-root user, so fall back to the platform temp dir there.
+fn default_worktree_root() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else {
+        std::env::temp_dir()
     }
 }
 
