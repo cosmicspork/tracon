@@ -6,6 +6,7 @@
 //! node to do, never as something it holds.
 
 pub mod consulta;
+pub mod review;
 
 use std::sync::Arc;
 
@@ -19,6 +20,16 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 pub struct Tools {
     pub broker: Arc<Broker>,
     pub cfg: Arc<Config>,
+    /// Set once the manager exists. Review tools need both, and the manager
+    /// needs the tools to decide what a session is offered, so the cycle is
+    /// broken here rather than by merging the two.
+    pub session: std::sync::OnceLock<SessionAccess>,
+}
+
+#[derive(Clone)]
+pub struct SessionAccess {
+    pub store: Arc<crate::store::Store>,
+    pub manager: crate::session::Manager,
 }
 
 /// What a call knows about who is asking. Channel bindings are enforced here,
@@ -41,6 +52,12 @@ impl Tools {
         {
             out.extend(consulta::definitions());
         }
+        // Review tools need no credential of their own: submitting is always
+        // allowed, and publishing is what needs one. An agent that cannot
+        // publish can still ask for review and be told why it stopped there.
+        if self.session.get().is_some() {
+            out.extend(review::definitions());
+        }
         out
     }
 
@@ -48,6 +65,13 @@ impl Tools {
         match name {
             consulta::QUERY | consulta::DESCRIBE => {
                 consulta::call(&self.broker, &self.cfg, ctx, name, args).await
+            }
+            review::SUBMIT | review::STATUS => {
+                let access = self
+                    .session
+                    .get()
+                    .ok_or("review tools are not available on this node")?;
+                review::call(&access.store, &access.manager, ctx, name, args).await
             }
             other => Err(format!("no tool named {other}")),
         }
@@ -107,6 +131,7 @@ mod tests {
         Tools {
             broker: Arc::new(toml::from_str(store).unwrap()),
             cfg: Arc::new(Config::default()),
+            session: Default::default(),
         }
     }
 

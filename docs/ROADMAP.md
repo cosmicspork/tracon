@@ -112,10 +112,12 @@ Gate:
       Verified against a real harness: the agent queried a database it has no credential
       for, and a `DELETE` was refused by the node before the sidecar was spawned. The
       Oracle profile is a credential-store entry away; only SQLite has been exercised.
-- [ ] `gh` behind the broker; the harness gains a push path only through it
-- [ ] Absorb the `review` submit schema and verdict contract
-- [ ] `/revise` flow, including code edits (agent stays the only worktree writer)
-- [ ] Blob hash recorded at submit, stale-diff conflicts surfaced
+- [x] `gh` and `glab` behind the broker; the harness gains a push path only through it
+- [x] Absorb the `review` submit schema and verdict contract
+- [ ] `/revise` flow, including code edits (agent stays the only worktree writer).
+      Resubmission works and keeps one evolving thread; editing a diff in the browser
+      and submitting it back does not exist yet.
+- [x] Blob hash recorded at submit, stale-diff conflicts surfaced
 - [ ] Tool surface reduction before gating (`--tools`, `--disallowedTools`)
 - [ ] Encode the five working agreements as policy: worktree not main checkout, review
       before publish, no merge, no transition, no production deploy
@@ -131,8 +133,11 @@ verifies its boundary, spawns `omp` inside it, runs a session end to end (worktr
 permission request routed to the queue, answer, budget kill, teardown), streams events over
 SSE, and serves the interface those screens were designed for. The broker now holds
 credentials the harness cannot read, and reaches them out as MCP tools over the gateway
-forward, authorised per session. What remains is `gh` behind the broker, the review
-contract and `/revise`, signed policy, and tool-surface reduction.
+forward, authorised per session. Review before publish is enforced rather than instructed:
+the agent has no forge token, the node captures the diff and publishes the approved bytes,
+and a branch that moved after submit cannot be approved. What remains is signed policy
+with the five working agreements, editable diffs for `/revise`, and tool-surface
+reduction.
 
 Exit criteria: a full task is driven from the browser against one boundary-capable node,
 start to finish, with `gh` and the consulta credential reachable only through the node.

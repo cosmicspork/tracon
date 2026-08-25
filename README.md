@@ -132,6 +132,14 @@ proxy, and the node through the gateway's forward. The allowlist is generated fr
 `[gateway] allow_hosts` in `~/.config/tracon/node.toml`; a provider that is not listed is
 denied, which shows up as a model call that cannot connect.
 
+Configuration and state live where the platform puts them, which on macOS is the same
+directory for both:
+
+| | macOS | Linux |
+|---|---|---|
+| `node.toml` | `~/Library/Application Support/tracon/` | `~/.config/tracon/` |
+| database, credentials, scratch | `~/Library/Application Support/tracon/` | `~/.local/state/tracon/` |
+
 ### Brokered tools
 
 Credentials live in `credentials.toml` under the node's state directory, readable only by
@@ -149,6 +157,25 @@ channels = ["work"]
 DB_BACKEND = "oracle"
 DB_HOST = "…"
 DB_PASSWORD = "…"
+```
+
+### Review before publish
+
+An agent has no forge token and never runs `gh` or `glab`. To get something published it
+commits, calls `submit_review`, and waits: the node captures the diff from the worktree
+itself, so what is reviewed is what the branch contains rather than what the agent says
+it contains. A human approves in the queue — editing the title and body first if they
+want to — and the node publishes *those* bytes with the brokered credential.
+
+Each file's git blob hash is recorded at submit. If the branch moves afterwards, approval
+is refused and the changed files are named: publishing something nobody read is the
+failure this prevents.
+
+```toml
+[credentials.glab]
+channels = ["work"]
+[credentials.glab.env]
+GITLAB_TOKEN = "…"
 ```
 
 `consulta` is the first, and read-only by construction: the node parses the SQL and

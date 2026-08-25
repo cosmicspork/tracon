@@ -25,8 +25,9 @@
     }
   }
 
-  const waiting = $derived(store.queue.waiting.length)
+  const waiting = $derived(store.queue.waiting.length + store.queue.reviews.length)
   const sessionId = $derived(router.path.match(/^\/sessions\/([^/]+)/)?.[1] ?? null)
+  const reviewId = $derived(router.path.match(/^\/reviews\/([^/]+)/)?.[1] ?? null)
   const nav = $derived(
     sessionId || router.path === '/sessions'
       ? 'sessions'
@@ -76,14 +77,14 @@
     {#if store.node?.state === 'refused'}
       <div class="banner crit">refusing to run harnesses <b>· {store.node.failed_check}: {store.node.failed_detail}</b></div>
     {/if}
-    {#if sessionId}
+    {#if reviewId}
+      <Approval id={reviewId} />
+    {:else if sessionId}
       <Session id={sessionId} />
     {:else if nav === 'sessions'}
       <Queue only="sessions" />
     {:else if nav === 'nodes'}
       <Nodes />
-    {:else if router.path.startsWith('/approvals')}
-      <Approval />
     {:else if nav === 'new'}
       <NewSession />
     {:else}

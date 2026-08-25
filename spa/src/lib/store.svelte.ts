@@ -3,13 +3,13 @@
 // crash costs nothing (the client crash invariant).
 
 import { api } from './api'
-import type { Event, Frame, NodeInfo, Permission, Queue, Session } from './types'
+import type { Event, Frame, NodeInfo, Permission, Queue, Review, Session } from './types'
 
 const MAX_LIVE_EVENTS = 3000
 
 class Store {
   node = $state<NodeInfo | null>(null)
-  queue = $state<Queue>({ waiting: [], running: [], ended: [] })
+  queue = $state<Queue>({ waiting: [], reviews: [], running: [], ended: [] })
   sessions = $state<Map<string, Session>>(new Map())
   /** Persisted events for the session that is open on screen. */
   events = $state<Event[]>([])
@@ -44,7 +44,7 @@ class Store {
     this.source.onerror = () => {
       this.connected = false
     }
-    for (const name of ['event', 'chunk', 'tool_update', 'session', 'queue'] as const) {
+    for (const name of ['event', 'chunk', 'tool_update', 'session', 'queue', 'reviews'] as const) {
       this.source.addEventListener(name, (m) => this.onFrame(JSON.parse((m as MessageEvent).data)))
     }
   }
@@ -126,6 +126,10 @@ class Store {
         this.queue = { ...this.queue, waiting: frame.waiting }
         break
       }
+      case 'reviews': {
+        this.queue = { ...this.queue, reviews: frame.waiting }
+        break
+      }
     }
   }
 
@@ -134,6 +138,7 @@ class Store {
     const terminal = ['closed', 'killed_budget', 'failed'].includes(s.state)
     this.queue = {
       waiting: this.queue.waiting,
+      reviews: this.queue.reviews,
       running: terminal ? strip(this.queue.running) : upsert(this.queue.running, s),
       ended: terminal ? upsert(this.queue.ended, s) : strip(this.queue.ended),
     }
@@ -141,6 +146,10 @@ class Store {
 
   waitingFor(sessionId: string): Permission[] {
     return this.queue.waiting.filter((p) => p.session_id === sessionId)
+  }
+
+  reviewsFor(sessionId: string): Review[] {
+    return this.queue.reviews.filter((r) => r.session_id === sessionId)
   }
 }
 

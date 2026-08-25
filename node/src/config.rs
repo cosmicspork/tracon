@@ -13,6 +13,17 @@ pub struct Config {
     pub gateway: Gateway,
     pub session: SessionDefaults,
     pub consulta: Consulta,
+    pub publish: Publish,
+}
+
+/// The publishing CLIs. Names by default, absolute paths where a host keeps
+/// them somewhere unusual.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Publish {
+    pub gh: String,
+    pub glab: String,
+    pub git: String,
 }
 
 /// How the node runs the consulta sidecar. It stays a Python process because
@@ -114,6 +125,11 @@ impl Default for Config {
                 ],
                 timeout_secs: 60,
             },
+            publish: Publish {
+                gh: "gh".into(),
+                glab: "glab".into(),
+                git: "git".into(),
+            },
             session: SessionDefaults {
                 budget_tokens: 2_000_000,
                 permission_timeout_secs: 900,
@@ -141,6 +157,11 @@ impl Default for Gateway {
 impl Default for SessionDefaults {
     fn default() -> Self {
         Config::default().session
+    }
+}
+impl Default for Publish {
+    fn default() -> Self {
+        Config::default().publish
     }
 }
 impl Default for Consulta {

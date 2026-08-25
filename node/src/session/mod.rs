@@ -124,6 +124,16 @@ impl Manager {
         &self.hub
     }
 
+    /// Republish the waiting bay. Called when a review arrives or is decided,
+    /// so the queue updates without the operator refetching.
+    pub async fn publish_queue(&self) {
+        let waiting = self.store.open_permissions().unwrap_or_default();
+        self.hub.publish(Frame::Queue { waiting });
+        if let Ok(reviews) = self.store.open_reviews() {
+            self.hub.publish(Frame::Reviews { waiting: reviews });
+        }
+    }
+
     /// Validate, insert the row, and start the session in the background. The
     /// row exists before the harness does, so the interface can show a session
     /// that is still starting.
@@ -283,7 +293,7 @@ impl Manager {
             mono_ms: started.elapsed().as_millis() as i64,
         });
 
-        let scratch = materialize::scratch_for(id, &wt.path)?;
+        let scratch = materialize::scratch_for(id, &wt.path, &repo)?;
         let selinux = crate::boundary::selinux_enabled().await;
         let mut run_spec = RunSpec::from_config(&self.cfg, selinux);
         run_spec.extra_mounts = scratch.mounts;
