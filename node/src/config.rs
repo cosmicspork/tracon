@@ -42,6 +42,11 @@ pub struct Consulta {
 pub struct Harness {
     /// Harness id. Only `omp` has an adapter.
     pub id: String,
+    /// The tools a session may use at all. Reducing the surface before gating
+    /// means fewer requests to decide on, and a tool that is absent cannot be
+    /// talked into running. Empty means the harness's own default set.
+    #[serde(default)]
+    pub tools: Vec<String>,
     /// Exact version this node runs. Checked twice: `omp --version` in the
     /// runner, and `initialize.agentInfo.version` at session start.
     pub version: String,
@@ -90,6 +95,12 @@ impl Default for Config {
             harness: Harness {
                 id: "omp".into(),
                 version: "18.0.4".into(),
+                // The default set a coding session actually needs. Anything
+                // outside it is not refused at request time; it is not offered.
+                tools: ["read", "write", "edit", "list", "grep", "execute", "todo"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
             },
             boundary: Boundary {
                 network: "tracon-int".into(),

@@ -235,12 +235,13 @@ pub async fn get_review(
     State(s): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Claim on open, then read: a response that showed the row as it stood
+    // before the claim would tell the operator something already untrue.
+    let _ = s.store().claim_review(&id);
     let r = s
         .store()
         .get_review(&id)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
-    // Claim on open: a metric, not a lock.
-    let _ = s.store().claim_review(&id);
     let stale = staleness_of(&s, &r).await;
     s.manager.publish_queue().await;
     Ok(Json(json!({ "review": r, "stale": stale })))
@@ -277,6 +278,23 @@ pub async fn decide_review(
     }
 
     match b.verdict.as_str() {
+        "revise" => {
+            // Changes requested. The review stays open as one evolving thread,
+            // and the notes go back to the agent, which is still the only
+            // writer to the worktree.
+            let notes = b
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .ok_or(ApiError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "asking for changes needs a note saying what to change".into(),
+                ))?;
+            s.store().request_changes(&id, notes)?;
+            s.manager.publish_queue().await;
+            Ok(Json(json!({ "state": "revising" })))
+        }
         "reject" => {
             // A bare rejection teaches the agent nothing.
             let reason = b

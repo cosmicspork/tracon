@@ -54,14 +54,14 @@
     review !== null && (title !== review.title || body !== review.body),
   )
 
-  async function decide(verdict: 'approve' | 'reject') {
+  async function decide(verdict: 'approve' | 'reject' | 'revise') {
     if (!review) return
     busy = true
     error = null
     try {
       const res = await api.decideReview(id, {
         verdict,
-        reason: verdict === 'reject' ? reason : undefined,
+        reason: verdict === 'approve' ? undefined : reason,
         title: verdict === 'approve' ? title : undefined,
         body: verdict === 'approve' ? body : undefined,
       })
@@ -107,6 +107,12 @@
     <dd class="m"><a href="/sessions/{review.session_id}">{review.session_id.slice(0, 8)}</a></dd>
   </dl>
 
+  {#if review.state === 'revising'}
+    <div class="banner ok">
+      changes requested <b>· waiting on the agent to resubmit · {review.verdict_reason}</b>
+    </div>
+  {/if}
+
   {#if stale.length > 0}
     <div class="banner crit">
       changed since submit <b>· {stale.join(', ')} · approve is disabled; ask the agent to resubmit</b>
@@ -144,9 +150,12 @@
     </button>
     <input
       bind:value={reason}
-      placeholder="Reject reason, one line — goes back to the agent"
+      placeholder="What to change, or why you are rejecting — goes back to the agent"
       disabled={busy}
     />
+    <button class="btn" disabled={busy || !reason.trim()} onclick={() => decide('revise')}>
+      Request changes
+    </button>
     <button class="btn d" disabled={busy || !reason.trim()} onclick={() => decide('reject')}>
       Reject
     </button>

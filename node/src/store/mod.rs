@@ -676,7 +676,8 @@ impl Store {
     pub fn open_reviews(&self) -> Result<Vec<ReviewRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT * FROM review WHERE state IN ('new','claimed') ORDER BY created_ms ASC",
+            "SELECT * FROM review WHERE state IN ('new','claimed','revising') \
+             ORDER BY created_ms ASC",
         )?;
         let rows = stmt
             .query_map([], ReviewRow::from_row)?
@@ -720,6 +721,18 @@ impl Store {
             ],
         )?;
         Ok(n == 1)
+    }
+
+    /// Changes requested: the review stays in the queue, marked so the operator
+    /// can see it is waiting on the agent rather than on them.
+    pub fn request_changes(&self, id: &str, notes: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE review SET state='revising', verdict_reason=?2, updated_ms=?3
+             WHERE id=?1 AND state IN ('new','claimed')",
+            rusqlite::params![id, notes, now_ms()],
+        )?;
+        Ok(())
     }
 
     /// A resubmission keeps the same review, so the operator sees one evolving

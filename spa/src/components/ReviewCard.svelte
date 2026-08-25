@@ -14,11 +14,11 @@
   })
 </script>
 
-<a class="row" href="/reviews/{review.id}">
+<a class="row" class:revising={review.state === 'revising'} href="/reviews/{review.id}">
   <span class="bar"></span>
   <span class="mono">{formatAge(review.created_ms)}</span>
   <span class="t">
-    <em>Review</em>
+    <em>{review.state === 'revising' ? 'Changes requested' : 'Review'}</em>
     {review.title}
     <small
       >{noun} · {files} files · +{review.added} −{review.removed} · {review.channel}{review.claimed_ms
@@ -46,6 +46,16 @@
     align-self: stretch;
     background: var(--wait);
     border-radius: 2px 0 0 2px;
+  }
+  /* Waiting on the agent, not on you: the accent, not amber. */
+  .row.revising {
+    background: linear-gradient(90deg, var(--wash-run), var(--s1) 42%);
+  }
+  .row.revising .bar {
+    background: var(--acc);
+  }
+  .row.revising .t em {
+    color: var(--acc);
   }
   .t {
     font-weight: 500;

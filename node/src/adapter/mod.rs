@@ -85,6 +85,8 @@ pub struct LaunchSpec {
     /// MCP servers offered to the harness at session start. The node's own
     /// tools reach it this way and no other.
     pub mcp_servers: Vec<Value>,
+    /// Built-in tools the harness may use. Empty leaves its default set.
+    pub tools: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

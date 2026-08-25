@@ -409,3 +409,71 @@ async fn without_a_brokered_credential_approval_publishes_nothing() {
     // The review stays open: the operator approved, the node could not publish.
     assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "new");
 }
+
+#[tokio::test]
+async fn requesting_changes_keeps_one_evolving_thread() {
+    const FN: &str = "requesting_changes_keeps_one_evolving_thread";
+    let f = fixture(FN, WITH_GH).await;
+    let id = f.submit().await;
+
+    // Asking for changes without saying what to change teaches nothing.
+    let (status, _) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "revise" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "revise", "reason": "name the file for what it holds" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["state"], "revising");
+
+    // It stays in the queue, so the thread is one card rather than two.
+    let (_, queue) = f.call("GET", "/api/queue", None).await;
+    assert_eq!(queue["reviews"].as_array().unwrap().len(), 1);
+    let r = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(r.state, "revising");
+    assert_eq!(
+        r.verdict_reason.as_deref(),
+        Some("name the file for what it holds")
+    );
+
+    // Nothing was published while changes were pending.
+    assert!(!f.gh_log().contains("pr create"));
+
+    // The agent resubmits the same review after doing the work.
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo more >> a.txt && git add -A && git commit -qm revised",
+    );
+    let capture = tracon::review::capture(&f.worktree, "main", "feat/x")
+        .await
+        .unwrap();
+    f.store
+        .revise_review(
+            &id,
+            &capture.diff,
+            &serde_json::to_string(&capture.files).unwrap(),
+            &capture.head_sha,
+            capture.added,
+            capture.removed,
+        )
+        .unwrap();
+
+    // Back to new, and no longer stale: the resubmission is what is reviewed.
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert!(body["stale"].as_array().unwrap().is_empty());
+    assert_eq!(body["review"]["state"], "claimed");
+    assert!(
+        body["review"]["verdict_reason"].is_null(),
+        "the old note is cleared"
+    );
+}

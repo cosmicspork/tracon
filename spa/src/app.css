@@ -126,6 +126,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   color: var(--wait);
 }
 .banner b { font-weight: 400; color: var(--ink); }
+/* Waiting on someone else, not on you. */
+.banner.ok {
+  background: linear-gradient(90deg, var(--wash-run), var(--s1) 50%);
+  border-left-color: var(--acc);
+  color: var(--acc);
+}
 .banner.crit {
   background: linear-gradient(90deg, var(--wash-crit), var(--s1) 50%);
   border-left-color: var(--crit);

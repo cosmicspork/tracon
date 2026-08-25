@@ -26,8 +26,17 @@ impl OmpAdapter {
     }
 
     fn acp_cmd(name: &str) -> RunnerCommand {
+        Self::acp_cmd_with(name, &[])
+    }
+
+    fn acp_cmd_with(name: &str, tools: &[String]) -> RunnerCommand {
+        let mut argv = vec!["omp".to_string()];
+        if !tools.is_empty() {
+            argv.push(format!("--tools={}", tools.join(",")));
+        }
+        argv.push("acp".into());
         RunnerCommand {
-            argv: vec!["omp".into(), "acp".into()],
+            argv,
             name: name.into(),
             ..Default::default()
         }
@@ -77,7 +86,9 @@ impl HarnessAdapter for OmpAdapter {
         runner: &dyn Runner,
         spec: LaunchSpec,
     ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError> {
-        let child = runner.spawn(Self::acp_cmd(&spec.container_name)).await?;
+        let child = runner
+            .spawn(Self::acp_cmd_with(&spec.container_name, &spec.tools))
+            .await?;
         let mut session =
             OmpSession::start_in(child, &spec.cwd_in_runner, spec.mcp_servers.clone()).await?;
 
@@ -398,5 +409,24 @@ impl HarnessHandle for OmpHandle {
             )
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_restricted_tool_list_reaches_the_harness() {
+        // A tool that is absent cannot be talked into running, so the surface
+        // is reduced before the gate has to decide anything.
+        let cmd = OmpAdapter::acp_cmd_with("c", &["read".to_string(), "list".to_string()]);
+        assert_eq!(cmd.argv, ["omp", "--tools=read,list", "acp"]);
+    }
+
+    #[test]
+    fn an_empty_list_leaves_the_harness_default() {
+        let cmd = OmpAdapter::acp_cmd_with("c", &[]);
+        assert_eq!(cmd.argv, ["omp", "acp"]);
     }
 }

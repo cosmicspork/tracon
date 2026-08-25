@@ -6,13 +6,14 @@ and existing coding agents, driven from a browser instead of a terminal.
 Named for TRACON, terminal radar approach control: the facility sequences traffic and
 issues clearances, and it never flies anything.
 
-**Status: Phase 1 in progress.** A task can be driven from the browser against one macOS
+**Status: Phase 1 complete.** A task can be driven from the browser against one macOS
 host with a Podman machine: the node establishes and verifies its boundary, spawns `omp`
 inside it, routes permission requests to a queue you answer, enforces a token budget, and
 streams the session to an embedded interface. Credentials live in a broker the harness
 cannot read and are reached as tools rather than held as secrets; `consulta` is the first.
-What is not built yet is `gh` behind the broker, the review contract, signed policy, and
-the mesh. Phase 0 validation is
+Policy decides what is answered without asking and what is refused with a reason; the five
+working agreements ship as its starting bundle. What is not built yet is the mesh, the
+memory and document corpus, the work ledger, and the clients — Phases 2 through 6. Phase 0 validation is
 complete; the work Coder template cannot enforce the gate as configured, so Phase 3
 requires a new, unprivileged runner topology.
 
@@ -116,6 +117,7 @@ Requires a container runtime the node can own (rootless Podman; a Podman machine
 macOS), `just`, a Rust toolchain, and Bun for the interface.
 
 ```sh
+just cross      # static musl binaries for a Linux node
 just images     # build the gateway and harness images
 just setup      # create the internal network, allowlist, and gateway
 just boundary   # verify the boundary, including an egress probe from inside it

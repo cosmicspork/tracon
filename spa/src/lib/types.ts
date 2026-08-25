@@ -90,7 +90,7 @@ export interface Review {
   base_ref: string
   added: number
   removed: number
-  state: 'new' | 'claimed' | 'approved' | 'rejected'
+  state: 'new' | 'claimed' | 'revising' | 'approved' | 'rejected'
   verdict_reason: string | null
   publish_result: string | null
   claimed_ms: number | null

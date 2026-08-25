@@ -55,7 +55,12 @@ export const api = {
   review: (id: string) => call<{ review: Review; stale: string[] }>('GET', `/api/reviews/${id}`),
   decideReview: (
     id: string,
-    verdict: { verdict: 'approve' | 'reject'; reason?: string; title?: string; body?: string },
+    verdict: {
+      verdict: 'approve' | 'reject' | 'revise'
+      reason?: string
+      title?: string
+      body?: string
+    },
   ) => call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/verdict`, verdict),
   answer: (permissionId: string, optionId: string) =>
     call<void>('POST', `/api/permissions/${permissionId}/answer`, { option_id: optionId }),

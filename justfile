@@ -40,3 +40,11 @@ setup: images
 # Verify the boundary, including an egress probe from inside it.
 boundary:
     cargo run -- check-boundary --deep
+
+# Static Linux binaries. musl because the glibc on a host we do not control is
+# not ours to depend on; zig supplies the cross linker without a toolchain per
+# target. Requires: brew install zig && cargo install cargo-zigbuild.
+cross target="x86_64-unknown-linux-musl": spa
+    rustup target add {{target}}
+    cargo zigbuild --release --target {{target}}
+    @file target/{{target}}/release/tracon

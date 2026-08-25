@@ -205,6 +205,15 @@ async fn status(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<V
             return Err("that review belongs to another session".into());
         }
         match r.state.as_str() {
+            "revising" => {
+                return Ok(json!({
+                    "review_id": r.id,
+                    "state": "changes_requested",
+                    "notes": r.verdict_reason,
+                    "message": "Changes were requested. Make them, commit, then call \
+                                submit_review again with this review_id.",
+                }));
+            }
             "approved" | "rejected" => {
                 return Ok(json!({
                     "review_id": r.id,
