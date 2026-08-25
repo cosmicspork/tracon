@@ -41,6 +41,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/permissions/{id}/answer", post(api::answer_permission))
         .route("/api/reviews/{id}", get(api::get_review))
         .route("/api/reviews/{id}/verdict", post(api::decide_review))
+        .route("/api/reviews/{id}/release", post(api::release_review))
         .route("/api/queue", get(api::queue))
         .route("/api/stream", get(stream::stream))
         .fallback(spa::serve)
@@ -143,6 +144,30 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("bind {listen}"))?;
+    // A claim measures attention. One left behind by a client that vanished
+    // would report a review as attended forever, so claims lapse.
+    {
+        let store = store.clone();
+        let manager = state.manager.clone();
+        let grace = std::time::Duration::from_secs(cfg.session.claim_grace_secs);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+            loop {
+                tick.tick().await;
+                let stale = store
+                    .stale_claims(grace.as_millis() as i64)
+                    .unwrap_or_default();
+                if stale.is_empty() {
+                    continue;
+                }
+                for id in stale {
+                    let _ = store.release_review(&id);
+                }
+                manager.publish_queue().await;
+            }
+        });
+    }
+
     tracing::info!(%listen, "serving");
     let manager = state.manager.clone();
     axum::serve(listener, router(state))

@@ -261,6 +261,17 @@ async fn staleness_of(s: &AppState, r: &crate::store::ReviewRow) -> Vec<String> 
     crate::review::staleness(&worktree, &r.head_sha, &files).await
 }
 
+/// Called when the operator leaves the review screen. Explicit release is the
+/// common case; the sweeper is for clients that vanish without saying so.
+pub async fn release_review(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    s.store().release_review(&id)?;
+    s.manager.publish_queue().await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn decide_review(
     State(s): State<AppState>,
     Path(id): Path<String>,

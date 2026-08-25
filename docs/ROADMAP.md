@@ -123,8 +123,12 @@ Gate:
       the operator asks for the change and the agent makes it, which keeps the agent the
       only writer to the worktree.
 - [x] Blob hash recorded at submit, stale-diff conflicts surfaced
-- [x] Tool surface reduction before gating (`--tools`). A tool that is absent cannot be
-      talked into running, so the surface shrinks before the gate has to decide anything.
+- [x] Tool surface reduction before gating (`--tools`), available per node but **off by
+      default**. omp's `--tools` is a whitelist that does not accept its shell, so any
+      list at all removes the shell, and without a shell the agent cannot commit and the
+      review contract has nothing to carry. Found by running it: the agent did not report
+      being stuck, it began reading `.git/refs` by hand instead. Reduce deliberately once
+      you know what a channel needs; the boundary and policy bound the surface either way.
 - [x] Encode the five working agreements as policy: worktree not main checkout, review
       before publish, no merge, no transition, no production deploy. Shipped as the
       starting bundle, so the rules are data from the first run rather than prose.

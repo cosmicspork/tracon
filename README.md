@@ -9,7 +9,7 @@ issues clearances, and it never flies anything.
 **Status: Phase 1 complete.** A task can be driven from the browser against one macOS
 host with a Podman machine: the node establishes and verifies its boundary, spawns `omp`
 inside it, routes permission requests to a queue you answer, enforces a token budget, and
-streams the session to an embedded interface. Credentials live in a broker the harness
+streams the session to an embedded interface, on the desktop and at phone width. Credentials live in a broker the harness
 cannot read and are reached as tools rather than held as secrets; `consulta` is the first.
 Policy decides what is answered without asking and what is refused with a reason; the five
 working agreements ship as its starting bundle. What is not built yet is the mesh, the

@@ -42,9 +42,19 @@ pub struct Consulta {
 pub struct Harness {
     /// Harness id. Only `omp` has an adapter.
     pub id: String,
-    /// The tools a session may use at all. Reducing the surface before gating
-    /// means fewer requests to decide on, and a tool that is absent cannot be
-    /// talked into running. Empty means the harness's own default set.
+    /// The tools a session may use at all, by the harness's own names. Empty
+    /// means the harness's default set, which is the default here.
+    ///
+    /// Restricting is available but not on by default, and the reason is worth
+    /// knowing: omp's `--tools` is a whitelist, and its shell is not one of the
+    /// names it accepts. Any list at all therefore removes the shell, which
+    /// removes the agent's ability to commit — and without commits there is
+    /// nothing to review, so the whole publish path stops. An agent that loses
+    /// its shell does not report that it is stuck; it starts reading `.git`
+    /// by hand to work around it.
+    ///
+    /// Reduce the surface deliberately, per node, once you know which tools a
+    /// given channel actually needs.
     #[serde(default)]
     pub tools: Vec<String>,
     /// Exact version this node runs. Checked twice: `omp --version` in the
@@ -84,6 +94,9 @@ pub struct Gateway {
 pub struct SessionDefaults {
     pub budget_tokens: i64,
     pub permission_timeout_secs: u64,
+    /// How long a claim survives a client that stopped talking. A dropped socket
+    /// should not zero the attention count; a closed laptop should.
+    pub claim_grace_secs: u64,
     /// Where worktrees are created. Outside any repo, so nothing is gitignored.
     pub worktree_root: PathBuf,
 }
@@ -95,12 +108,10 @@ impl Default for Config {
             harness: Harness {
                 id: "omp".into(),
                 version: "18.0.4".into(),
-                // The default set a coding session actually needs. Anything
-                // outside it is not refused at request time; it is not offered.
-                tools: ["read", "write", "edit", "list", "grep", "execute", "todo"]
-                    .into_iter()
-                    .map(String::from)
-                    .collect(),
+                // Empty: see the field's note. The surface a session actually
+                // runs against is bounded by the boundary and by policy, both
+                // of which hold whatever the harness offers.
+                tools: Vec::new(),
             },
             boundary: Boundary {
                 network: "tracon-int".into(),
@@ -144,6 +155,7 @@ impl Default for Config {
             session: SessionDefaults {
                 budget_tokens: 2_000_000,
                 permission_timeout_secs: 900,
+                claim_grace_secs: 60,
                 worktree_root: PathBuf::from("/private/tmp"),
             },
         }

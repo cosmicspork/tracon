@@ -477,3 +477,41 @@ async fn requesting_changes_keeps_one_evolving_thread() {
         "the old note is cleared"
     );
 }
+
+#[tokio::test]
+async fn a_claim_releases_when_the_operator_leaves() {
+    const FN: &str = "a_claim_releases_when_the_operator_leaves";
+    let f = fixture(FN, WITH_GH).await;
+    let id = f.submit().await;
+
+    f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "claimed");
+
+    let (status, _) = f
+        .call("POST", &format!("/api/reviews/{id}/release"), None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let r = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(r.state, "new");
+    assert!(r.claimed_ms.is_none(), "a released claim measures nothing");
+
+    // Still in the queue: releasing is not deciding.
+    let (_, queue) = f.call("GET", "/api/queue", None).await;
+    assert_eq!(queue["reviews"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_claim_from_a_vanished_client_lapses() {
+    const FN: &str = "a_claim_from_a_vanished_client_lapses";
+    let f = fixture(FN, WITH_GH).await;
+    let id = f.submit().await;
+    f.call("GET", &format!("/api/reviews/{id}"), None).await;
+
+    // Nothing is stale within the grace period.
+    assert!(f.store.stale_claims(60_000).unwrap().is_empty());
+    // Past it, the sweeper finds it.
+    let stale = f.store.stale_claims(-1).unwrap();
+    assert_eq!(stale, std::slice::from_ref(&id));
+    f.store.release_review(&id).unwrap();
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "new");
+}

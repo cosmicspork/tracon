@@ -2,8 +2,14 @@
 
 Interface design record for tracon. Companion to `ARCHITECTURE.md` (what the system
 does) and `ROADMAP.md` (when). This file covers what the operator sees and how the
-interface decides things. Steps 1 through 4 of the design ladder are here; wireframes,
-tokens, and components arrive with Phase 1.
+interface decides things. Steps 1 through 4 of the design ladder are here.
+
+Phase 1 is built. The visual direction was settled on 2026-08-24 and the screens are the
+record rather than a separate wireframe file: `spa/src/app.css` holds the tokens and
+`spa/src/routes/` the five screens. **Ledger × Tonal**: Instrument Sans with Fragment
+Mono for every value, tonal surfaces with no outlines, state carried by a 3px bar and a
+wash on a fixed-column grid, text-link actions, dark first with light derived. What each
+decision below cost or changed in the building is recorded with it.
 
 ## 1. Interface principles
 
@@ -143,8 +149,8 @@ has a one-line answer to "what does the operator see."
 
 | State | What the operator sees |
 |---|---|
-| Read-only | Unified diff, file list, per-file blob hash check. |
-| Editable (browser only) | Same viewer with edit enabled; "submit as `/revise`" replaces the verdict control. |
+| Read-only | Unified diff, file list, per-file blob hash check. On the phone the file list *is* the diff: each file folds open to its hunks, because the list decides most reviews and 390px will not hold both. |
+| Editable (browser only) | *Not built in Phase 1.* "Request changes" sends notes instead: the review stays open as one thread, the agent edits and resubmits against the same id. Editing a diff in place needs `@codemirror/merge` and arrives with the desktop wrapper in Phase 6. Asking rather than editing is also what keeps the agent the only writer to the worktree, which the architecture requires. |
 | Conflicts with worktree | Files that changed are marked; editing disabled for those files. |
 
 ### Work item (Phase 5)
@@ -201,7 +207,8 @@ notification (pager / tray / browser)
   → decide
       approve   → broker posts the approved bytes → session shows result
       reject    → reason (required, one line) → session shows verdict + reason
-      edit      → browser only: editable diff → submit as /revise → session continues
+      changes   → notes, required → review stays open → agent edits and resubmits
+                  (an editable diff in the browser is Phase 6; see below)
   → release, timer stops
   → next item in the queue, or the queue itself if empty
 
@@ -214,9 +221,15 @@ Decisions taken in drawing this:
   not a lock; an explicit "claim" button is friction that measures nothing extra.
   Release happens on decide, on navigating away, or 60 seconds after client
   disconnect, so a dropped socket does not zero the attention count.
+  *Built:* the interface releases when the operator leaves the screen, and a sweeper on
+  the node lapses claims a vanished client left behind. The response to opening a review
+  claims first and reads after, so it never describes a state already untrue.
 - **Reject requires a reason.** The verdict goes back to the agent; a bare reject
   teaches it nothing. One line, required.
 - **Stale and over-cap block approve.** Not a warning. The agent resubmits.
+  *Built:* each file's git blob hash is recorded at submit; approving a branch that moved
+  is refused and the changed files are named. Over-cap is not built — no diff size cap
+  exists yet.
 - **Edit is browser-only and replaces the verdict.** An edited diff is a `/revise`
   submission, not an approval of something the operator changed.
 
@@ -268,6 +281,19 @@ Decisions taken:
 - **The agent is not told about degradation.** FTS-only recall is silent. The operator
   sees it in the banner; the harness does not need to.
 
+## What Phase 1 did not build
+
+Recorded so the gaps are visible rather than assumed closed.
+
+- **Editable diffs.** "Request changes" carries notes; editing the diff itself is Phase 6.
+- **Diff size cap at submit.** Named in the roadmap for Phase 5; the stale check exists,
+  the cap does not.
+- **Node states beyond this machine.** Unreachable and its last-seen treatment need the
+  mesh, so the nodes screen shows ready, refused, and version mismatch only.
+- **`waiting_on_check`.** Defined in the schema and in the states below, and unreachable
+  until deterministic supervision arrives in Phase 5.
+- **The tray.** Phase 6, with the desktop wrapper.
+
 ## Decisions from the flows
 
 Taken 2026-08-24. The first is also recorded in `ARCHITECTURE.md` under the client
@@ -286,3 +312,5 @@ crash invariant.
    Then by age, oldest first.
 5. **Kill confirmation.** Confirm on phone and tray, where a stray tap is likely.
    Immediate in the browser.
+   *Built:* the phone's Kill becomes "Kill — tap again" with a Cancel beside it. The tray
+   arrives with the desktop wrapper in Phase 6.

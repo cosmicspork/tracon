@@ -723,6 +723,33 @@ impl Store {
         Ok(n == 1)
     }
 
+    /// Release a claim: the operator navigated away or their client went quiet.
+    /// A claim measures attention, so one that never releases would report every
+    /// review as attended forever.
+    pub fn release_review(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE review SET state='new', claimed_ms=NULL, updated_ms=?2
+             WHERE id=?1 AND state='claimed'",
+            rusqlite::params![id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Claims older than the grace period, for the sweeper. A dropped socket
+    /// should not zero the attention count; a closed laptop should.
+    pub fn stale_claims(&self, older_than_ms: i64) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = now_ms() - older_than_ms;
+        let mut stmt = conn.prepare(
+            "SELECT id FROM review WHERE state='claimed' AND COALESCE(updated_ms, 0) < ?1",
+        )?;
+        let rows = stmt
+            .query_map([cutoff], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// Changes requested: the review stays in the queue, marked so the operator
     /// can see it is waiting on the agent rather than on them.
     pub fn request_changes(&self, id: &str, notes: &str) -> Result<()> {
