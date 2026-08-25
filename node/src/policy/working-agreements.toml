@@ -1,0 +1,99 @@
+# The five working agreements, as rules the node enforces rather than prose an
+# agent is asked to remember.
+#
+# Denials are deliberate and explained: the agent reads the reason and stops,
+# instead of meeting a confusing auth error and looking for another way round.
+# Anything not matched here is asked, so adding a rule can only ever reduce the
+# number of interruptions, never widen what an agent may do unattended.
+
+version = 1
+
+# --- 1. Worktree, not the main checkout -------------------------------------
+# Structurally true already: the harness only ever sees its own worktree at
+# /work. The rule exists so an attempt to reach outside it is refused with a
+# reason rather than failing as a missing path.
+
+[[rule]]
+id = "worktree-only"
+verdict = "deny"
+reason = "Sessions work in their own worktree. The main checkout may hold work that is not yours."
+matches = ["git -c ", "git --git-dir", "cd /users/", "cd ~/src"]
+
+# --- 2. Review before publish ------------------------------------------------
+# The agent holds no forge token, so these would fail anyway. Denying them makes
+# the refusal legible and points at the tool that does work.
+
+[[rule]]
+id = "review-before-publish"
+verdict = "deny"
+reason = "Publishing goes through review. Commit, then call submit_review; the node publishes what a human approves."
+matches = [
+    "gh pr create",
+    "glab mr create",
+    "git push",
+    "gh release create",
+]
+
+# --- 3. No merge -------------------------------------------------------------
+
+[[rule]]
+id = "no-merge"
+verdict = "deny"
+reason = "Opening the change is yours; merging it is the operator's."
+matches = ["gh pr merge", "glab mr merge", "git merge --no-ff main", "gh pr ready"]
+
+# --- 4. No transition --------------------------------------------------------
+
+[[rule]]
+id = "no-transition"
+verdict = "deny"
+reason = "Moving a ticket's status desyncs what the operator is actually working on. Comment instead."
+matches = ["jira workitem transition", "acli jira workitem transition"]
+
+# --- 5. No production deploy -------------------------------------------------
+
+[[rule]]
+id = "no-production-deploy"
+verdict = "deny"
+reason = "Production pipelines are run by hand."
+matches = [
+    "environment:production",
+    "environment=production",
+    "-prd",
+    "eks-prd",
+    "--context=prd",
+    "kubectl apply",
+]
+
+# --- Reading is free ---------------------------------------------------------
+# Inspection changes nothing and asking about it trains the operator to approve
+# without reading, which is how a gate stops being one.
+
+[[rule]]
+id = "read-only-git"
+verdict = "allow"
+reason = "Inspecting the repository changes nothing."
+kinds = ["execute"]
+matches = [
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+    "git branch --list",
+    "git rev-parse",
+    "git ls-files",
+    "git remote -v",
+]
+
+[[rule]]
+id = "read-only-shell"
+verdict = "allow"
+reason = "Reading the worktree changes nothing."
+kinds = ["execute"]
+matches = ["ls ", "ls\n", "cat ", "head ", "tail ", "wc ", "file ", "pwd", "which ", "grep "]
+
+[[rule]]
+id = "reads-and-thoughts"
+verdict = "allow"
+reason = "Reading a file or updating the plan changes nothing outside the session."
+kinds = ["read", "think"]

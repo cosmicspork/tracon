@@ -87,12 +87,35 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         );
     }
     let node_id = init_node(&store, &cfg, adapter.as_ref()).await?;
+    // A bundle that cannot be verified yields no rules, and no rules means every
+    // request is asked. The failure mode of broken policy is more questions.
+    let policy = Arc::new(match crate::policy::bundle::load() {
+        Ok(p) => {
+            tracing::info!(rules = p.rules.len(), "policy bundle verified");
+            p
+        }
+        Err(crate::policy::bundle::BundleError::Io(e))
+            if e.kind() == std::io::ErrorKind::NotFound =>
+        {
+            tracing::info!(
+                path = %crate::policy::bundle::Paths::bundle().display(),
+                "no policy bundle; every request will be asked"
+            );
+            Default::default()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "policy bundle refused; every request will be asked");
+            Default::default()
+        }
+    });
+
     let manager = Manager::new(
         store.clone(),
         hub.clone(),
         cfg.clone(),
         node_id.clone(),
         tools.clone(),
+        policy,
     );
     let _ = tools.session.set(crate::mcp::SessionAccess {
         store: store.clone(),

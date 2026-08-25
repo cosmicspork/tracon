@@ -78,6 +78,9 @@ pub mod event_kind {
     pub const PERMISSION_REQUEST: &str = "permission_request";
     pub const PERMISSION_ANSWER: &str = "permission_answer";
     pub const PERMISSION_EXPIRED: &str = "permission_expired";
+    /// Answered by policy without interrupting the operator.
+    pub const POLICY_ALLOWED: &str = "policy_allowed";
+    pub const POLICY_DENIED: &str = "policy_denied";
     pub const ERROR: &str = "error";
 }
 

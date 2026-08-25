@@ -183,6 +183,26 @@ refuses anything that is not a single `SELECT`/`WITH` before spawning anything, 
 consulta's own guard refuses again inside the sidecar. Two checks, on opposite sides of
 the privilege boundary.
 
+### Policy
+
+Policy decides what the node answers on its own. Reading is allowed without interrupting
+you; the five working agreements are refused with a reason the agent can read; everything
+else reaches the queue.
+
+```sh
+tracon policy keygen   # the signing key stays here and never reaches the hub
+tracon policy init     # write the working agreements as a bundle, and sign it
+tracon policy show     # verify and print what it decides
+```
+
+Edit `policy.toml` and run `tracon policy sign` again. A bundle that is missing,
+malformed, or badly signed yields no rules — and no rules means every request is asked.
+The failure mode of broken policy is more questions, never fewer.
+
+Denials are not the absence of an allow rule. Refusing `gh pr merge` with "opening the
+change is yours; merging it is the operator's" is what makes the agent stop, rather than
+meet a confusing auth error and look for another way round.
+
 ### Bootstrap escape hatch
 
 The node is developed using agents that run inside the node, so a bad build must not

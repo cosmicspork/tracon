@@ -27,7 +27,9 @@ async-trait.workspace = true
 axum.workspace = true
 clap.workspace = true
 dirs.workspace = true
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures-core = "0.3.34"
+hex = "0.4"
 mime_guess.workspace = true
 rand = "0.9"
 rusqlite.workspace = true

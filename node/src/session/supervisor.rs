@@ -66,6 +66,8 @@ pub struct Supervisor {
     /// left running holds the worktree and the credential mounts open.
     runner: Arc<dyn Runner>,
     container: String,
+    policy: Arc<crate::policy::Policy>,
+    channel: String,
 }
 
 impl Supervisor {
@@ -80,8 +82,12 @@ impl Supervisor {
         self_tx: mpsc::Sender<Command>,
         runner: Arc<dyn Runner>,
         container: String,
+        policy: Arc<crate::policy::Policy>,
+        channel: String,
     ) -> Self {
         Self {
+            policy,
+            channel,
             self_tx,
             runner,
             container,
@@ -312,6 +318,48 @@ impl Supervisor {
         request: PermissionRequest,
         reply: oneshot::Sender<PermissionReply>,
     ) {
+        // Policy first. An auto-answered request never reaches the queue, so
+        // the operator is interrupted only by what actually needs them.
+        let command = request
+            .raw_input
+            .as_ref()
+            .and_then(|v| v.get("command"))
+            .and_then(|c| c.as_str())
+            .map(str::to_string);
+        let decision = self.policy.decide(&crate::policy::Request {
+            channel: &self.channel,
+            kind: request.kind.as_deref(),
+            title: &request.title,
+            command: command.as_deref(),
+        });
+        match decision.verdict {
+            crate::policy::Verdict::Allow | crate::policy::Verdict::Deny => {
+                let allow = decision.verdict == crate::policy::Verdict::Allow;
+                let option = if allow {
+                    crate::acp::types::OPTION_ALLOW_ONCE
+                } else {
+                    crate::acp::types::OPTION_REJECT_ONCE
+                };
+                let _ = reply.send(PermissionReply::Selected(option.into()));
+                self.record(
+                    if allow {
+                        ek::POLICY_ALLOWED
+                    } else {
+                        ek::POLICY_DENIED
+                    },
+                    None,
+                    json!({
+                        "title": request.title,
+                        "kind": request.kind,
+                        "rule": decision.rule_id,
+                        "reason": decision.reason,
+                    }),
+                );
+                return;
+            }
+            crate::policy::Verdict::Ask => {}
+        }
+
         let id = uuid::Uuid::now_v7().to_string();
         let row = PermissionRow {
             id: id.clone(),

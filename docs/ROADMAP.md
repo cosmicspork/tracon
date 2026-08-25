@@ -101,7 +101,7 @@ Gate:
 
 - [x] Permission handling: ACP `session/request_permission` routed to the queue
       (Claude Code `control_request` when that adapter lands)
-- [ ] Local policy evaluation, signed bundles, fail closed on approve
+- [x] Local policy evaluation, signed bundles, fail closed on approve
 - [x] Credential broker, sealed, harness has no read path
 - [x] **consulta absorbed as the first brokered tool.** Node exposes `query` and
       `describe` MCP tools; the Python sidecar is spawned and owned by the node with the
@@ -119,8 +119,9 @@ Gate:
       and submitting it back does not exist yet.
 - [x] Blob hash recorded at submit, stale-diff conflicts surfaced
 - [ ] Tool surface reduction before gating (`--tools`, `--disallowedTools`)
-- [ ] Encode the five working agreements as policy: worktree not main checkout, review
-      before publish, no merge, no transition, no production deploy
+- [x] Encode the five working agreements as policy: worktree not main checkout, review
+      before publish, no merge, no transition, no production deploy. Shipped as the
+      starting bundle, so the rules are data from the first run rather than prose.
 
 Session budgets are enforced in tokens, accumulated from each turn's reported usage and
 checked when the turn ends. A single long turn can therefore overshoot: ACP reports usage
@@ -135,9 +136,10 @@ SSE, and serves the interface those screens were designed for. The broker now ho
 credentials the harness cannot read, and reaches them out as MCP tools over the gateway
 forward, authorised per session. Review before publish is enforced rather than instructed:
 the agent has no forge token, the node captures the diff and publishes the approved bytes,
-and a branch that moved after submit cannot be approved. What remains is signed policy
-with the five working agreements, editable diffs for `/revise`, and tool-surface
-reduction.
+and a branch that moved after submit cannot be approved. Policy decides what the node
+answers without asking, what it refuses with a reason, and what reaches the queue; the
+five working agreements ship as its starting bundle. What remains is editable diffs for
+`/revise`, tool-surface reduction, and the musl cross-build.
 
 Exit criteria: a full task is driven from the browser against one boundary-capable node,
 start to finish, with `gh` and the consulta credential reachable only through the node.
