@@ -12,6 +12,18 @@ pub struct Config {
     pub boundary: Boundary,
     pub gateway: Gateway,
     pub session: SessionDefaults,
+    pub consulta: Consulta,
+}
+
+/// How the node runs the consulta sidecar. It stays a Python process because
+/// Oracle's client is a glibc blob and the node is a static musl binary; the
+/// pure-Python driver is what makes a read-only Oracle path possible at all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Consulta {
+    pub command: String,
+    pub args: Vec<String>,
+    pub timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +58,9 @@ pub struct Gateway {
     pub proxy_port: u16,
     /// Port the gateway forwards from the internal network to the node.
     pub forward_port: u16,
+    /// Where the node listens for the harness. Loopback: the gateway reaches it
+    /// through the Podman machine's host route, and nothing else can.
+    pub harness_listen: std::net::SocketAddr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +98,21 @@ impl Default for Config {
                 ],
                 proxy_port: 8888,
                 forward_port: 7421,
+                harness_listen: "127.0.0.1:7421".parse().expect("valid default address"),
+            },
+            consulta: Consulta {
+                command: "uv".into(),
+                args: vec![
+                    "run".into(),
+                    "--project".into(),
+                    dirs::home_dir()
+                        .unwrap_or_default()
+                        .join("src/consulta")
+                        .to_string_lossy()
+                        .into_owned(),
+                    "consulta".into(),
+                ],
+                timeout_secs: 60,
             },
             session: SessionDefaults {
                 budget_tokens: 2_000_000,
@@ -111,6 +141,11 @@ impl Default for Gateway {
 impl Default for SessionDefaults {
     fn default() -> Self {
         Config::default().session
+    }
+}
+impl Default for Consulta {
+    fn default() -> Self {
+        Config::default().consulta
     }
 }
 

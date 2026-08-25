@@ -135,12 +135,23 @@ impl Harness {
         cfg.session.budget_tokens = budget;
         cfg.session.permission_timeout_secs = 1;
         let cfg = Arc::new(cfg);
-        let manager = Manager::new(store.clone(), Hub::new(), cfg.clone(), "n1".into());
+        let tools = Arc::new(tracon::mcp::Tools {
+            broker: Arc::new(Default::default()),
+            cfg: cfg.clone(),
+        });
+        let manager = Manager::new(
+            store.clone(),
+            Hub::new(),
+            cfg.clone(),
+            "n1".into(),
+            tools.clone(),
+        );
         let app = tracon::http::router(AppState {
             manager,
             cfg,
             adapter,
             node_id: "n1".into(),
+            tools,
         });
         Self { app, store }
     }
@@ -626,4 +637,148 @@ async fn streamed_chunks_are_coalesced_into_one_logged_message() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("no coalesced message event: {:?}", rig.kinds());
+}
+
+// ---- brokered tools -------------------------------------------------------
+
+use axum::http::Request as HttpRequest;
+use tracon::broker::Broker;
+use tracon::mcp::Tools;
+
+/// The MCP surface over its real HTTP route, with the token check in place.
+async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let cfg = Arc::new(Config::default());
+    let broker: Broker = toml::from_str(store_toml).unwrap();
+    let tools = Arc::new(Tools {
+        broker: Arc::new(broker),
+        cfg: cfg.clone(),
+    });
+    let manager = Manager::new(
+        store.clone(),
+        Hub::new(),
+        cfg.clone(),
+        "n1".into(),
+        tools.clone(),
+    );
+    let app = tracon::http::harness_router(AppState {
+        manager: manager.clone(),
+        cfg,
+        adapter: Arc::new(FakeAdapter {
+            tx: Arc::new(Mutex::new(None)),
+            tokens: Arc::new(Mutex::new(0)),
+        }),
+        node_id: "n1".into(),
+        tools,
+    });
+    (app, store, manager)
+}
+
+const BROKER_STORE: &str = r#"
+    [credentials.consulta]
+    channels = ["work"]
+    [credentials.consulta.env]
+    DB_BACKEND = "sqlite"
+"#;
+
+async fn mcp_call(app: &axum::Router, sid: &str, token: &str, body: Value) -> (StatusCode, Value) {
+    let req = HttpRequest::builder()
+        .method("POST")
+        .uri(format!("/mcp/{sid}"))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn a_tool_call_without_a_live_session_is_unauthorized() {
+    let (app, _store, _m) = mcp_harness(BROKER_STORE).await;
+    let (status, _) = mcp_call(
+        &app,
+        "01a0-not-a-session",
+        "anything",
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_registered_session_can_list_tools_and_a_wrong_token_cannot() {
+    let (app, _store, manager) = mcp_harness(BROKER_STORE).await;
+    let sid = "sess-1";
+    let token = manager.register_tool_token_for_test(sid, "work").await;
+
+    let (status, body) = mcp_call(
+        &app,
+        sid,
+        &token,
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"query"));
+
+    // The same session, one character off: refused.
+    let mut wrong = token.clone();
+    wrong.pop();
+    wrong.push('0');
+    let (status, _) = mcp_call(
+        &app,
+        sid,
+        &wrong,
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_write_is_refused_before_the_credential_is_touched() {
+    let (app, _store, manager) = mcp_harness(BROKER_STORE).await;
+    let sid = "sess-2";
+    let token = manager.register_tool_token_for_test(sid, "work").await;
+    let (status, body) = mcp_call(
+        &app,
+        sid,
+        &token,
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+               "params":{"name":"query","arguments":{"sql":"DELETE FROM people"}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["result"]["isError"], true);
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("DELETE"), "{text}");
+}
+
+#[tokio::test]
+async fn a_session_on_an_unbound_channel_is_offered_no_tools() {
+    let (app, _store, manager) = mcp_harness(BROKER_STORE).await;
+    let sid = "sess-3";
+    let token = manager.register_tool_token_for_test(sid, "personal").await;
+    let (_, body) = mcp_call(
+        &app,
+        sid,
+        &token,
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+    )
+    .await;
+    assert!(body["result"]["tools"].as_array().unwrap().is_empty());
 }

@@ -100,6 +100,7 @@ async fn unknown_model_is_refused_before_prompting() {
                 cwd_in_runner: "/work".into(),
                 model: "m/nope".into(),
                 container_name: "t".into(),
+                mcp_servers: Vec::new(),
             },
         )
         .await
@@ -117,6 +118,7 @@ async fn launch_prompt_permission_and_turn_result() {
                 cwd_in_runner: "/work".into(),
                 model: "m/b".into(),
                 container_name: "t".into(),
+                mcp_servers: Vec::new(),
             },
         )
         .await
@@ -164,6 +166,7 @@ async fn denying_a_permission_fails_the_tool_call() {
                 cwd_in_runner: "/work".into(),
                 model: "m/a".into(),
                 container_name: "t".into(),
+                mcp_servers: Vec::new(),
             },
         )
         .await

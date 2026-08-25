@@ -24,7 +24,9 @@ use super::codec::{self, Id, Message, RpcError};
 pub enum RpcClientError {
     #[error("peer closed before responding")]
     PeerClosed,
-    #[error("rpc error {}: {}", .0.code, .0.message)]
+    // The detail a harness puts in `data` is usually the only actionable part;
+    // dropping it leaves the operator with "Internal error".
+    #[error("rpc error {}: {}{}", .0.code, .0.message, detail(&.0.data))]
     Remote(RpcError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -187,5 +189,17 @@ async fn read_loop(
             message: "peer closed".into(),
             data: None,
         }));
+    }
+}
+
+fn detail(data: &Option<Value>) -> String {
+    match data {
+        Some(Value::Object(map)) => map
+            .get("details")
+            .and_then(Value::as_str)
+            .map(|d| format!(" ({d})"))
+            .unwrap_or_default(),
+        Some(v) => format!(" ({v})"),
+        None => String::new(),
     }
 }

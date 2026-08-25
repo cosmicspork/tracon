@@ -61,21 +61,58 @@ pub enum SessionError {
 /// and events stay in the store.
 #[derive(Clone)]
 pub struct Manager {
+    pub(crate) tools: Arc<crate::mcp::Tools>,
     store: Arc<Store>,
     hub: Hub,
     cfg: Arc<Config>,
     node_id: String,
     live: Arc<Mutex<HashMap<String, mpsc::Sender<Command>>>>,
+    /// Session id → (tool token, channel). A token is minted when a session
+    /// starts and dropped when it ends, so it authorises exactly one session
+    /// for exactly as long as that session runs.
+    tokens: Arc<Mutex<HashMap<String, (String, String)>>>,
 }
 
 impl Manager {
-    pub fn new(store: Arc<Store>, hub: Hub, cfg: Arc<Config>, node_id: String) -> Self {
+    pub fn new(
+        store: Arc<Store>,
+        hub: Hub,
+        cfg: Arc<Config>,
+        node_id: String,
+        tools: Arc<crate::mcp::Tools>,
+    ) -> Self {
         Self {
+            tools,
             store,
             hub,
             cfg,
             node_id,
             live: Arc::new(Mutex::new(HashMap::new())),
+            tokens: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Register a tool token directly. Tests drive the MCP route without
+    /// starting a harness; sessions always go through `start`.
+    #[doc(hidden)]
+    pub async fn register_tool_token_for_test(&self, session_id: &str, channel: &str) -> String {
+        let token = mint_token();
+        self.tokens
+            .lock()
+            .await
+            .insert(session_id.to_string(), (token.clone(), channel.to_string()));
+        token
+    }
+
+    /// The channel a tool call may act as, or `None` if the token does not
+    /// match a live session. Compared in constant time: a token is a secret.
+    pub async fn authorize_tool_call(&self, session_id: &str, presented: &str) -> Option<String> {
+        let tokens = self.tokens.lock().await;
+        let (expected, channel) = tokens.get(session_id)?;
+        if constant_time_eq(expected.as_bytes(), presented.as_bytes()) {
+            Some(channel.clone())
+        } else {
+            None
         }
     }
 
@@ -161,6 +198,8 @@ impl Manager {
         tokio::spawn(async move {
             if let Err(e) = this.start(&id, spec, branch, slug, adapter, started).await {
                 tracing::error!(session = %id, error = %e, "session failed to start");
+                // A session that never started holds no capability.
+                this.tokens.lock().await.remove(&id);
                 let _ = this.store.update_session(
                     &id,
                     SessionPatch {
@@ -213,6 +252,15 @@ impl Manager {
         adapter: Arc<dyn HarnessAdapter>,
         started: Instant,
     ) -> anyhow::Result<()> {
+        // Registered before the harness starts: it connects to the node's MCP
+        // server during `session/new`, so a token published afterwards is
+        // published too late and the node refuses its own harness.
+        let token = mint_token();
+        self.tokens
+            .lock()
+            .await
+            .insert(id.to_string(), (token.clone(), spec.channel.clone()));
+
         let repo = PathBuf::from(&spec.repo_path);
         let wt = worktree::create(&repo, &self.cfg.session.worktree_root, &branch, &slug).await?;
         self.store.update_session(
@@ -242,6 +290,24 @@ impl Manager {
         let container = format!("tracon-h-{slug}");
         let runner: Arc<dyn Runner> = Arc::new(PodmanRunner::new(run_spec));
 
+        // The harness reaches the node only through the gateway's forward, and
+        // only with this session's token. Tools are offered only if the
+        // channel has a credential bound to it; otherwise the harness is given
+        // no MCP server at all rather than one that refuses everything.
+        let mcp_servers = if self.tools.list(&spec.channel).is_empty() {
+            Vec::new()
+        } else {
+            vec![json!({
+                "type": "http",
+                "name": "tracon",
+                "url": format!(
+                    "http://{}:{}/mcp/{id}",
+                    self.cfg.boundary.gateway_container, self.cfg.gateway.forward_port
+                ),
+                "headers": [{ "name": "Authorization", "value": format!("Bearer {token}") }],
+            })]
+        };
+
         let (handle, events) = adapter
             .launch(
                 runner.as_ref(),
@@ -249,6 +315,7 @@ impl Manager {
                     cwd_in_runner: "/work".into(),
                     model: spec.model.clone(),
                     container_name: container.clone(),
+                    mcp_servers,
                 },
             )
             .await?;
@@ -287,10 +354,13 @@ impl Manager {
             container.clone(),
         );
         let live = self.live.clone();
+        let tokens = self.tokens.clone();
         let sid = id.to_string();
         tokio::spawn(async move {
             sup.run(events, cmd_rx).await;
             live.lock().await.remove(&sid);
+            // The token dies with the session; a later call with it is refused.
+            tokens.lock().await.remove(&sid);
             materialize::remove(&sid);
         });
         Ok(())
@@ -413,4 +483,21 @@ pub async fn reconcile_after_restart(store: &Store) -> Vec<String> {
         cleaned.push(s.id);
     }
     cleaned
+}
+
+/// A URL-safe random token. Not a session id: ids appear in logs and the
+/// interface, and a capability must not be guessable from something displayed.
+fn mint_token() -> String {
+    use rand::Rng;
+    let mut bytes = [0u8; 32];
+    rand::rng().fill(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Comparison that does not leak how much of a token matched.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }

@@ -82,6 +82,9 @@ pub struct LaunchSpec {
     pub cwd_in_runner: String,
     pub model: String,
     pub container_name: String,
+    /// MCP servers offered to the harness at session start. The node's own
+    /// tools reach it this way and no other.
+    pub mcp_servers: Vec<Value>,
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -9,8 +9,10 @@ issues clearances, and it never flies anything.
 **Status: Phase 1 in progress.** A task can be driven from the browser against one macOS
 host with a Podman machine: the node establishes and verifies its boundary, spawns `omp`
 inside it, routes permission requests to a queue you answer, enforces a token budget, and
-streams the session to an embedded interface. What is not built yet is the credential
-broker and its brokered tools, the review contract, signed policy, and the mesh. Phase 0 validation is
+streams the session to an embedded interface. Credentials live in a broker the harness
+cannot read and are reached as tools rather than held as secrets; `consulta` is the first.
+What is not built yet is `gh` behind the broker, the review contract, signed policy, and
+the mesh. Phase 0 validation is
 complete; the work Coder template cannot enforce the gate as configured, so Phase 3
 requires a new, unprivileged runner topology.
 
@@ -129,6 +131,30 @@ The harness reaches exactly two things: allowlisted provider hosts through the g
 proxy, and the node through the gateway's forward. The allowlist is generated from
 `[gateway] allow_hosts` in `~/.config/tracon/node.toml`; a provider that is not listed is
 denied, which shows up as a model call that cannot connect.
+
+### Brokered tools
+
+Credentials live in `credentials.toml` under the node's state directory, readable only by
+the node's user, and are never given to a harness. What the harness gets is a tool it may
+ask the node to run, over MCP through the gateway's forward, with a token minted for its
+session. A credential names the channels allowed to use it; a channel with none bound is
+offered no tools at all.
+
+```toml
+# ~/.config or ~/Library/Application Support → tracon/credentials.toml, chmod 600
+[credentials.consulta]
+channels = ["work"]
+
+[credentials.consulta.env]
+DB_BACKEND = "oracle"
+DB_HOST = "…"
+DB_PASSWORD = "…"
+```
+
+`consulta` is the first, and read-only by construction: the node parses the SQL and
+refuses anything that is not a single `SELECT`/`WITH` before spawning anything, and
+consulta's own guard refuses again inside the sidecar. Two checks, on opposite sides of
+the privilege boundary.
 
 ### Bootstrap escape hatch
 

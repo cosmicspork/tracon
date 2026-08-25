@@ -1,4 +1,5 @@
 pub mod api;
+mod mcp;
 mod spa;
 mod stream;
 
@@ -45,11 +46,35 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// What the harness can reach: a liveness probe and the node's tools. No
+/// operator API, so a harness that finds the forward cannot drive sessions.
+pub fn harness_router(state: AppState) -> Router {
+    Router::new()
+        .route("/harness/ping", get(|| async { "pong" }))
+        .route("/mcp/{session_id}", post(mcp::handle))
+        .with_state(state)
+}
+
 pub async fn serve(listen: SocketAddr) -> Result<()> {
     let cfg = Arc::new(Config::load());
     let store = Arc::new(Store::open(&Config::db_path()).context("open store")?);
     let hub = Hub::new();
     let adapter: Arc<dyn HarnessAdapter> = Arc::new(OmpAdapter::new(cfg.harness.version.clone()));
+    let broker = Arc::new(crate::broker::Broker::load().unwrap_or_else(|e| {
+        // A broken store must not silently broker nothing: say so loudly and
+        // carry on without credentials.
+        tracing::error!(error = %e, "credential store could not be read; brokering nothing");
+        Default::default()
+    }));
+    if broker.is_empty() {
+        tracing::info!(path = %crate::broker::Broker::path().display(), "no credentials; no tools offered");
+    } else {
+        tracing::info!(credentials = ?broker.names(), "credential broker loaded");
+    }
+    let tools = Arc::new(crate::mcp::Tools {
+        broker,
+        cfg: cfg.clone(),
+    });
 
     let cleaned = crate::session::reconcile_after_restart(&store).await;
     if !cleaned.is_empty() {
@@ -59,13 +84,31 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         );
     }
     let node_id = init_node(&store, &cfg, adapter.as_ref()).await?;
-    let manager = Manager::new(store.clone(), hub.clone(), cfg.clone(), node_id.clone());
+    let manager = Manager::new(
+        store.clone(),
+        hub.clone(),
+        cfg.clone(),
+        node_id.clone(),
+        tools.clone(),
+    );
     let state = AppState {
         manager,
-        cfg,
+        cfg: cfg.clone(),
         adapter,
         node_id,
+        tools,
     };
+
+    // The harness listener is separate from the operator's: it carries only the
+    // MCP surface, and the gateway forwards to it from the internal network.
+    let harness_listener = tokio::net::TcpListener::bind(cfg.gateway.harness_listen)
+        .await
+        .with_context(|| format!("bind {}", cfg.gateway.harness_listen))?;
+    let harness_app = harness_router(state.clone());
+    tracing::info!(listen = %cfg.gateway.harness_listen, "harness listener");
+    tokio::spawn(async move {
+        let _ = axum::serve(harness_listener, harness_app).await;
+    });
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await

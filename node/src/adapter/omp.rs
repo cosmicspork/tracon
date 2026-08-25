@@ -78,7 +78,8 @@ impl HarnessAdapter for OmpAdapter {
         spec: LaunchSpec,
     ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError> {
         let child = runner.spawn(Self::acp_cmd(&spec.container_name)).await?;
-        let mut session = OmpSession::start_in(child, &spec.cwd_in_runner).await?;
+        let mut session =
+            OmpSession::start_in(child, &spec.cwd_in_runner, spec.mcp_servers.clone()).await?;
 
         // Enforce the pin a second time from the initialize handshake.
         if let Some(v) = &session.agent_version {
@@ -121,10 +122,14 @@ impl OmpSession {
     async fn start(child: tokio::process::Child) -> Result<Self, AdapterError> {
         // ACP requires an absolute cwd; the image's workdir is the safe choice
         // for a probe that mounts no worktree.
-        Self::start_in(child, "/work").await
+        Self::start_in(child, "/work", Vec::new()).await
     }
 
-    async fn start_in(mut child: tokio::process::Child, cwd: &str) -> Result<Self, AdapterError> {
+    async fn start_in(
+        mut child: tokio::process::Child,
+        cwd: &str,
+        mcp_servers: Vec<Value>,
+    ) -> Result<Self, AdapterError> {
         let stdin = child.stdin.take().ok_or(AdapterError::NoPipe)?;
         let stdout = child.stdout.take().ok_or(AdapterError::NoPipe)?;
         let (peer, incoming, read) = Peer::new(stdin, stdout);
@@ -144,7 +149,7 @@ impl OmpSession {
                 methods::SESSION_NEW,
                 &types::NewSessionParams {
                     cwd: cwd.to_string(),
-                    mcp_servers: vec![],
+                    mcp_servers,
                 },
             )
             .await?;

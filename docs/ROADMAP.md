@@ -102,13 +102,16 @@ Gate:
 - [x] Permission handling: ACP `session/request_permission` routed to the queue
       (Claude Code `control_request` when that adapter lands)
 - [ ] Local policy evaluation, signed bundles, fail closed on approve
-- [ ] Credential broker, sealed, harness has no read path
-- [ ] **consulta absorbed as the first brokered tool.** Node exposes `query` and
+- [x] Credential broker, sealed, harness has no read path
+- [x] **consulta absorbed as the first brokered tool.** Node exposes `query` and
       `describe` MCP tools; the Python sidecar is spawned and owned by the node with the
       DB credential injected from the broker. Guard ported to Rust (`sqlparser-rs`) so the
       node refuses before spawning; consulta's own guard stays as the second, independent
       check. Smallest blast radius of any credential, read-only by construction, and it
       exercises the whole tool → node → broker → external path before `gh` does.
+      Verified against a real harness: the agent queried a database it has no credential
+      for, and a `DELETE` was refused by the node before the sidecar was spawned. The
+      Oracle profile is a credential-store entry away; only SQLite has been exercised.
 - [ ] `gh` behind the broker; the harness gains a push path only through it
 - [ ] Absorb the `review` submit schema and verdict contract
 - [ ] `/revise` flow, including code edits (agent stays the only worktree writer)
@@ -122,14 +125,14 @@ checked when the turn ends. A single long turn can therefore overshoot: ACP repo
 per turn, not continuously. Mid-turn enforcement needs a usage snapshot the adapter does
 not have yet, and per-channel ceilings are Phase 5.
 
-Progress, 2026-08-25: a task can now be driven from the browser. The node establishes and
+Progress, 2026-08-25: the broker holds its first credential, and a task can be driven
+from the browser. The node establishes and
 verifies its boundary, spawns `omp` inside it, runs a session end to end (worktree, prompt,
 permission request routed to the queue, answer, budget kill, teardown), streams events over
-SSE, and serves the interface those screens were designed for. What remains in Phase 1 is
-the gate's other half: the credential broker, consulta and `gh` behind it, the review
-contract and `/revise`, signed policy, and tool-surface reduction. Until the broker exists
-the harness reaches nothing it could not reach before; what is enforced today is the
-boundary, permissions, and the budget.
+SSE, and serves the interface those screens were designed for. The broker now holds
+credentials the harness cannot read, and reaches them out as MCP tools over the gateway
+forward, authorised per session. What remains is `gh` behind the broker, the review
+contract and `/revise`, signed policy, and tool-surface reduction.
 
 Exit criteria: a full task is driven from the browser against one boundary-capable node,
 start to finish, with `gh` and the consulta credential reachable only through the node.

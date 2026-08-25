@@ -25,6 +25,7 @@ pub struct AppState {
     pub cfg: Arc<Config>,
     pub adapter: Arc<dyn HarnessAdapter>,
     pub node_id: String,
+    pub tools: Arc<crate::mcp::Tools>,
 }
 
 impl AppState {
