@@ -6,11 +6,11 @@ and existing coding agents, driven from a browser instead of a terminal.
 Named for TRACON, terminal radar approach control: the facility sequences traffic and
 issues clearances, and it never flies anything.
 
-**Status: Phase 1 in progress.** The node runs gated sessions on one macOS host with a
-Podman machine: it establishes and verifies its boundary, spawns `omp` inside it, routes
-permission requests to a queue, enforces a token budget, and streams the session over
-HTTP. What is not built yet is the interface (the SPA is a placeholder), the credential
-broker and its brokered tools, the review contract, and the mesh. Phase 0 validation is
+**Status: Phase 1 in progress.** A task can be driven from the browser against one macOS
+host with a Podman machine: the node establishes and verifies its boundary, spawns `omp`
+inside it, routes permission requests to a queue you answer, enforces a token budget, and
+streams the session to an embedded interface. What is not built yet is the credential
+broker and its brokered tools, the review contract, signed policy, and the mesh. Phase 0 validation is
 complete; the work Coder template cannot enforce the gate as configured, so Phase 3
 requires a new, unprivileged runner topology.
 

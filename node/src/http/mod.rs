@@ -26,6 +26,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(api::health))
         .route("/api/node", get(api::get_node))
+        .route("/api/node/refresh-models", post(api::refresh_models))
         .route("/api/nodes", get(api::list_nodes))
         .route(
             "/api/sessions",
@@ -50,6 +51,13 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     let hub = Hub::new();
     let adapter: Arc<dyn HarnessAdapter> = Arc::new(OmpAdapter::new(cfg.harness.version.clone()));
 
+    let cleaned = crate::session::reconcile_after_restart(&store).await;
+    if !cleaned.is_empty() {
+        tracing::info!(
+            sessions = cleaned.len(),
+            "closed sessions left over from a previous run"
+        );
+    }
     let node_id = init_node(&store, &cfg, adapter.as_ref()).await?;
     let manager = Manager::new(store.clone(), hub.clone(), cfg.clone(), node_id.clone());
     let state = AppState {
@@ -63,10 +71,15 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         .await
         .with_context(|| format!("bind {listen}"))?;
     tracing::info!(%listen, "serving");
+    let manager = state.manager.clone();
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .context("http server")
+        .context("http server")?;
+    // The listener is closed; end every live session so no harness container
+    // outlives the process that gates it.
+    manager.shutdown_all().await;
+    Ok(())
 }
 
 /// Verify the boundary and record what this node is. A node that fails the

@@ -238,6 +238,25 @@ pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Valu
     ))
 }
 
+/// Re-probe the harness for its model list, for when the probe failed at
+/// startup or the harness gained providers since.
+pub async fn refresh_models(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let selinux = crate::boundary::selinux_enabled().await;
+    let mut spec = crate::runner::podman::RunSpec::from_config(&s.cfg, selinux);
+    spec.extra_mounts = crate::session::materialize::state_mounts().unwrap_or_default();
+    let runner = crate::runner::podman::PodmanRunner::new(spec);
+    let models = s
+        .adapter
+        .probe_models(&runner)
+        .await
+        .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
+    if let Ok(Some(mut node)) = s.store().get_node(&s.node_id) {
+        node.models_json = serde_json::to_string(&models).ok();
+        let _ = s.store().put_node(&node);
+    }
+    Ok(Json(serde_json::json!(models)))
+}
+
 pub async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }))
 }
