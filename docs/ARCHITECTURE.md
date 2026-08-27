@@ -252,6 +252,15 @@ re-decided. Evidence is in
   is the same "nothing in project repos" commitment applied in the other direction:
   nothing of the operator's leaks into a session either.
 
+- **On Linux the gateway forward is a Unix socket, and the gateway runs unconfined
+  under SELinux.** Found in Phase 2 on the Bazzite node: `host.containers.internal` is
+  a pasta interface address, not loopback, so the TCP forward cannot reach a loopback
+  listener; and SELinux's `connectto` forbids a confined container connecting to an
+  unconfined listener's socket whatever the file is labelled. The gateway is the trusted
+  piece and exists so the harness never touches the socket, so it runs `label=disable`;
+  the harness keeps its confinement. The deep check asserts the forward carries
+  traffic. Evidence in [`reference/phase-2-notes.md`](reference/phase-2-notes.md).
+
 Bazzite is evidence for the design, not a Phase 1 platform requirement. macOS with a
 Podman VM, another Linux host, or a managed web environment qualifies only if it can
 provide the same capabilities and pass the same checks. **macOS with a Podman machine was
@@ -471,6 +480,34 @@ Being the only always-on peer is worth more than the sync:
 Degraded mode is explicit: **hub unreachable means FTS-only recall from the local
 replica, no semantic search.** Naming this prevents the hub from quietly becoming
 load-bearing.
+
+### Mesh frames
+
+Decided in Phase 2; the wire contract is `spec/README.md` and `proto/` pins it with test
+vectors.
+
+A frame is `{ v, id, channel, sender, recipient?, sealing, sent_ms, body, sig }`. The
+hub reads `channel` (the routing key) and `sender`, verifies the signature, and stores
+the rest as bytes. `sealing` is either **channel** — the body is sealed under the
+channel's newest epoch key, readable by every member — or **direct** — sealed to one
+node's X25519 key, which is how enrollment handoffs, policy bundles, and commands
+travel; the hub relays ciphertext either way. Frames are **sealed then signed**: the
+id is a hash of the canonical bytes including the sealed body, the signature covers the
+id, and every receiver verifies before opening, so a tampered frame is dropped without
+the decrypt path running. The channel and epoch (or sender and recipient) are bound into
+the AEAD associated data, so a frame the hub re-labels onto another channel fails to
+open there.
+
+Ordering is the hub's: a per-channel sequence assigned on receipt. Nodes pull from a
+persisted cursor; the hub's SSE stream is a payload-free hint to pull sooner, never the
+source of truth. Replay is closed twice: the hub remembers request signatures within its
+freshness window (the signature is the nonce), and nodes remember frame ids. Rekeying
+is a new keyring epoch handed to the still-trusted members; old epochs stay in the ring
+so retained frames keep opening. The hub keeps fourteen days or 256 MiB per channel; a
+cursor behind that gets `410` and resyncs from the owners' periodic snapshots.
+
+One rule the mirror enforces everywhere: **a node speaks only for itself.** Rows naming
+another node than the verified sender are dropped and counted.
 
 ### Trust asymmetry
 
@@ -719,6 +756,15 @@ would be a lot of platform surface for what is wanted from native.
   diffs, reusing the CodeMirror already present in review and notebook. Edits become
   `/revise` submissions.
 
+### Reach across nodes
+
+The interface talks only to the node that served it. That node mirrors every peer's
+sessions, permission requests, and reviews into its own tables, scoped by node, and
+forwards commands for sessions it does not own to the owner as sealed frames. A verdict
+is executed on the owner, because staleness and publishing need the owner's worktree
+and broker. The hub never talks to a browser; the phone's read-over-the-hub path is a
+later phase.
+
 ### Client crash invariant
 
 Sessions live in the node. A client crash is a reconnect, never lost work. This is the
@@ -786,16 +832,15 @@ data.
 
 ## Open questions
 
-1. **Mesh frame format.** Envelope shape, replay protection, ordering guarantees,
-   rekeying. Unchanged by merging the relay into the hub.
-2. **Retention and tombstone semantics.** Needs deciding before data accumulates.
-3. **Stacked MR handling.** Whether the node owns restacking (the `blocks` edge in the
+1. **Retention and tombstone semantics.** Needs deciding before data accumulates.
+2. **Stacked MR handling.** Whether the node owns restacking (the `blocks` edge in the
    work ledger is already the branch base relationship) or whether feature flags on trunk
    make stacks unnecessary. The trunk plus semantic-release setup favors flags.
 
 Resolved since the first draft: the hub is the relay (see [Topology](#topology)); the
 wrapper delegates supervision to the platform (see [Clients](#clients)); human time is
-claim/release (see [Metrics](#metrics)).
+claim/release (see [Metrics](#metrics)); the mesh frame format (see
+[Mesh frames](#mesh-frames), Phase 2).
 
 ## Prior art and salvage
 

@@ -288,11 +288,34 @@ Recorded so the gaps are visible rather than assumed closed.
 - **Editable diffs.** "Request changes" carries notes; editing the diff itself is Phase 6.
 - **Diff size cap at submit.** Named in the roadmap for Phase 5; the stale check exists,
   the cap does not.
-- **Node states beyond this machine.** Unreachable and its last-seen treatment need the
-  mesh, so the nodes screen shows ready, refused, and version mismatch only.
 - **`waiting_on_check`.** Defined in the schema and in the states below, and unreachable
   until deterministic supervision arrives in Phase 5.
 - **The tray.** Phase 6, with the desktop wrapper.
+
+## What Phase 2 built
+
+Signed off 2026-08-28 against static mockups rendered in the interface's own tokens.
+
+- **Nodes.** A list: this node first, then peers, each with the 3px bar. Unreachable is
+  the new state — the bar and text drop to `--dim`, the card keeps its place, and the
+  second line says when the node was last seen and what it holds that cannot be decided.
+  "Enroll a new node" sits in the header, browser only.
+- **Hub banner.** One persistent, non-dismissable banner in a new quiet treatment,
+  `.banner.dim`: amber stays reserved for waiting-on-you and the accent for the agent
+  working, so degraded is quieter than both. The full sentence wraps on the phone. A
+  transient "hub reconnected · N items delivered" follows the outage.
+- **Node chips.** On every queue card, session row, and session header, in the existing
+  chip style; `you` marks the serving node. When the owner is unreachable the card is
+  *held*: dimmed, actions replaced by the reason, still in the queue.
+- **Remote sessions.** Identical to local ones plus the chip. A prompt typed for an
+  unreachable owner is queued on the serving node and sent when it returns — the box
+  stays open and says so; Kill disables.
+- **New session.** When several nodes carry the channel, radios appear within that set;
+  refused, unreachable, and mismatched nodes are listed but not selectable, with the
+  reason. Bindings decide the set; the operator picks within it.
+- **Enroll.** Three moments on one screen: invite (channels, code shown as `7KQ4 M2XA`,
+  URL, QR, this node's fingerprint, expiry), received (the other node's name and
+  fingerprint; "Fingerprints match, admit" or "They differ — cancel"), enrolled.
 
 ## Decisions from the flows
 
