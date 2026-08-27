@@ -117,12 +117,20 @@ Requires a container runtime the node can own (rootless Podman; a Podman machine
 macOS), `just`, a Rust toolchain, and Bun for the interface.
 
 ```sh
-just cross      # static musl binaries for a Linux node
-just images     # build the gateway and harness images
-just setup      # create the internal network, allowlist, and gateway
-just boundary   # verify the boundary, including an egress probe from inside it
 just build      # build the SPA, then the release binary
+just setup      # build the gateway and harness images, the internal network, allowlist, and gateway
+just boundary   # verify the boundary, including an egress probe and the forward from inside it
 ./target/release/tracon serve
+```
+
+On a host that only needs to run a node, skip the toolchain:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | sh
+tracon setup                        # the container definitions ship inside the binary
+tracon harness import-credentials   # or `tracon harness shell` to log in inside the volume
+tracon check-boundary --deep
+tracon serve
 ```
 
 `tracon check-boundary` prints each check and exits non-zero naming the first failure.
@@ -140,7 +148,43 @@ directory for both:
 | | macOS | Linux |
 |---|---|---|
 | `node.toml` | `~/Library/Application Support/tracon/` | `~/.config/tracon/` |
-| database, credentials, scratch | `~/Library/Application Support/tracon/` | `~/.local/state/tracon/` |
+| database, credentials, identity, harness volume, scratch | `~/Library/Application Support/tracon/` | `~/.local/state/tracon/` |
+| harness socket | (TCP `127.0.0.1:7421` through the VM) | `$XDG_RUNTIME_DIR/tracon/harness.sock` |
+
+The gateway forwards to the node over TCP on a Podman machine and over that Unix socket
+on a Linux host; `[gateway] harness_listen` takes either form.
+
+### The mesh
+
+Nodes see each other through the hub, an always-on relay in the homelab cluster that
+routes sealed frames per channel and can read none of them. Every node dials out;
+nothing accepts inbound connections. A hub outage costs latency: local sessions
+continue, and what was queued is delivered when it returns.
+
+```sh
+# the hub, from source (the release ships ghcr.io/cosmicspork/tracon-hub)
+TRACON_HUB_ADMIT=<first node id> TRACON_HUB_DATA_DIR=/var/lib/tracon-hub tracon-hub
+
+# the first node
+tracon mesh id                              # its id, for TRACON_HUB_ADMIT
+tracon mesh init --hub https://tracon-hub.0x69.xyz
+tracon channel create personal
+tracon serve
+
+# every other node: invite from an enrolled node, accept on the new one
+tracon mesh invite --channels personal      # prints a code, a URL, a QR, and this node's fingerprint
+tracon enroll https://tracon-hub.0x69.xyz/#enroll=7KQ4M2XA   # on the new machine; prints its fingerprint
+```
+
+The inviter shows the new node's name and fingerprint and asks whether it matches what
+the other terminal printed; on `y` it admits the node and hands it the channel keys and
+the policy bundle, sealed to that node. The Nodes screen does the same thing in the
+browser. A channel is a key; a node that was not handed a channel's key cannot read it,
+and a meshed node refuses to start a session on a channel it holds no key for.
+
+Policy is signed where it is written and never by the hub: `tracon policy push` hands a
+new bundle to every member, and a node installs it only if it is signed by the key it
+received at enrollment.
 
 ### Brokered tools
 

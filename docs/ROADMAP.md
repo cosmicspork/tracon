@@ -160,16 +160,65 @@ From here on, tracon is built through tracon.
 
 ## Phase 2: Mesh
 
-- [ ] Hub deployed to the homelab cluster **as the relay**: opaque frame routing, keyed
+- [x] Hub deployed to the homelab cluster **as the relay**: opaque frame routing, keyed
       per channel, modeled on pager and svastha. Sync and processing come in Phase 4;
-      here it only routes.
-- [ ] Node keypair on first run, enrollment via short-lived code from an enrolled node
-- [ ] Channel model and key scoping
-- [ ] Policy signing key generated and kept off the hub
-- [ ] Second boundary-capable node on another host, bootstrapped by one-line binary
-      fetch, not dotfiles
-- [ ] Harness state directory as a node-owned volume (the `OMP_STATE_DIR` pattern)
-- [ ] SPA connects to the mesh regardless of which node served it
+      here it only routes. Built as the `hub/` crate (`tracon-hub`): signed requests
+      with the signature as the replay nonce, per-channel sequence, cursor pull with a
+      `410` resync when behind retention, payload-free SSE pokes, members as routing
+      metadata, enrollment slots. It holds no channel keys and opens no frame. The
+      homelab manifests are `kubernetes/apps/{base,production}/tracon-hub`; the pod
+      goes live with the first release that publishes the image.
+- [x] Node keypair on first run, enrollment via short-lived code from an enrolled node.
+      `<state>/node-identity.seed`; the node id is the Ed25519 public key (a Phase 1
+      database is rekeyed once). `tracon mesh invite` / `tracon enroll`, or the Enroll
+      screen: slot on the hub, public keys and a name in the clear, fingerprints
+      compared by the operator before admission, then keys and policy handed off
+      direct-sealed.
+- [x] Channel model and key scoping. A channel is a keyring of epochs wrapped to each
+      member node; frames seal under the newest epoch with the channel and epoch bound
+      into the AEAD data, so the hub cannot re-label a frame. `tracon channel create`,
+      handoff by enrollment, union merge on re-handoff. Bindings are recorded per
+      channel; only membership is enforced in this phase.
+- [x] Policy signing key generated and kept off the hub. Unchanged where it lives;
+      bundles travel as direct-sealed frames, the public key is trusted only from the
+      enrollment handoff, and a bundle signed by any other key is refused and shown.
+      `tracon policy push` hands a new bundle to every member; it takes effect without
+      a restart.
+- [x] Second boundary-capable node on another host, bootstrapped by one-line binary
+      fetch, not dotfiles. `install.sh` fetches the static musl binary and verifies
+      the release checksum; the container definitions ship inside the binary so
+      `tracon setup` builds the images. Stood up on the Bazzite host: the Linux
+      gateway forward is a Unix socket, and two SELinux constraints were found by
+      running it ([`phase-2-notes`](reference/phase-2-notes.md)).
+- [x] Harness state directory as a node-owned volume (the `OMP_STATE_DIR` pattern).
+      The volume is the only credential store the harness sees; the operator's
+      `~/.omp` is never mounted again. `tracon harness import-credentials` copies a
+      store in once; `tracon harness shell` logs in where none exists. `OMP_STATE_DIR`
+      is set but unverifiable against omp's stripped binary, so the mount stays at
+      `/root/.omp`.
+- [x] SPA connects to the mesh regardless of which node served it. The interface talks
+      only to the node that served it; that node mirrors every peer's sessions,
+      requests, and reviews into the same tables scoped by node, and forwards
+      prompt / answer / kill / verdict / create to the owner as sealed commands. A
+      prompt to an unreachable owner is queued and sent when it returns; the rest fail
+      honestly. Node chips everywhere, held cards for unreachable owners, one quiet
+      hub banner, an Enroll screen, and a node pick within a channel's binding.
+
+Phase 2 implementation completed 2026-08-28. The exit criterion is demonstrated
+end to end in-process (`node/tests/mesh_e2e.rs`: two managers with the fake harness, two
+live mesh clients, one real hub router; a session created on B from A's API, its outcome
+and events mirrored back, a forwarded kill refused as the owner phrases it, a queued
+prompt to an unreachable owner). The two-machine run — hub on the homelab cluster, the
+macOS node and the Bazzite node enrolled, a session on one driven from the other's
+browser — waits on the first release (which publishes the hub image and the node
+binaries) and the homelab merge; the Bazzite node already passes its boundary check with
+the socket forward.
+
+Not built in this phase, recorded so it is not assumed: live chunks and tool progress are
+not forwarded (the remote view is message-granular; the persisted message arrives at
+turn end); drafts are per interface, not mirrored; channel bindings beyond membership
+are recorded but not enforced; `tracon channel rotate` (a new epoch plus re-handoff) is
+a small follow-up on the keyring that already supports it.
 
 Exit criteria: a session running on either eligible node is visible and controllable
 from the browser served by the other, proving cross-machine reach without depending on
