@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/node/refresh-models", post(api::refresh_models))
         .route("/api/nodes", get(api::list_nodes))
         .route("/api/mesh", get(api::get_mesh))
+        .route("/api/channels", get(api::list_channels))
         .route("/api/mesh/invite", post(api::open_invite))
         .route(
             "/api/mesh/invite/{code}",
@@ -200,6 +201,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             policy.clone(),
         );
         bus.with_tap(client.spawn());
+        manager.set_mesh(client.clone());
         tracing::info!(hub = %url, "mesh client started");
         client
     });
@@ -214,6 +216,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         tools,
         mesh,
     };
+    if let Some(m) = &state.mesh {
+        m.set_executor(Arc::new(state.clone()));
+    }
 
     // The harness listener is separate from the operator's: it carries only the
     // MCP surface, and the gateway forwards to it from the internal network.

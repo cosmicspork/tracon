@@ -1,7 +1,7 @@
 // Typed wrappers over the node's API. Errors surface the node's message so the
 // interface can say what the node said, not "request failed".
 
-import type { Event, NodeInfo, Queue, Review, Session } from './types'
+import type { Event, Invite, MeshState, NodeInfo, Queue, Review, Session } from './types'
 
 export class ApiError extends Error {
   constructor(
@@ -33,8 +33,16 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return json as T
 }
 
+export interface ChannelInfo {
+  name: string
+  nodes: string[]
+}
+
 export const api = {
   node: () => call<NodeInfo>('GET', '/api/node'),
+  nodes: () => call<NodeInfo[]>('GET', '/api/nodes'),
+  mesh: () => call<MeshState>('GET', '/api/mesh'),
+  channels: () => call<ChannelInfo[]>('GET', '/api/channels'),
   queue: () => call<Queue>('GET', '/api/queue'),
   sessions: () => call<Session[]>('GET', '/api/sessions'),
   session: (id: string) =>
@@ -64,6 +72,7 @@ export const api = {
     work_item_id?: string
     model: string
     budget_tokens?: number
+    node_id?: string
   }) => call<Session>('POST', '/api/sessions', spec),
   prompt: (id: string, text: string) => call<void>('POST', `/api/sessions/${id}/prompt`, { text }),
   kill: (id: string) => call<void>('POST', `/api/sessions/${id}/kill`),
@@ -81,4 +90,9 @@ export const api = {
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),
   answer: (permissionId: string, optionId: string) =>
     call<void>('POST', `/api/permissions/${permissionId}/answer`, { option_id: optionId }),
+  // Enrollment: browser only.
+  openInvite: (channels: string[]) => call<Invite>('POST', '/api/mesh/invite', { channels }),
+  pollInvite: (code: string) => call<Invite>('GET', `/api/mesh/invite/${code}`),
+  admitInvite: (code: string) => call<Invite>('POST', `/api/mesh/invite/${code}/admit`),
+  cancelInvite: (code: string) => call<void>('DELETE', `/api/mesh/invite/${code}`),
 }

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api'
+  import { eligibleNodes } from '../lib/nodes'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
 
@@ -14,8 +15,16 @@
   let busy = $state(false)
   let error = $state<string | null>(null)
 
-  const node = $derived(store.node)
-  const blocked = $derived(node?.state === 'refused' || node?.harness.mismatch === true)
+  let nodeId = $state<string | null>(null)
+  const channelNames = $derived(store.channels.map((c) => c.name))
+  const bindings = $derived(Object.fromEntries(store.channels.map((c) => [c.name, c.nodes])))
+  // Bindings decide the set; the operator picks within it. The first ready,
+  // reachable node is preselected; this node wins ties.
+  const eligible = $derived(eligibleNodes(store.nodes, bindings, channel))
+  const node = $derived(
+    eligible.find((n) => n.id === nodeId) ?? eligible.find((n) => n.is_self) ?? eligible[0] ?? store.node,
+  )
+  const blocked = $derived(!node || node.state === 'refused' || node.harness.mismatch === true || !node.reachable)
   const ready = $derived(!blocked && repo.trim() !== '' && model !== '' && !busy)
 
   async function start(e: SubmitEvent) {
@@ -30,6 +39,7 @@
         work_item_id: workItem.trim() || undefined,
         model,
         budget_tokens: Number(budget) || undefined,
+        node_id: node && !node.is_self ? node.id : undefined,
       })
       await store.refetch()
       router.go(`/sessions/${s.id}`)
@@ -47,8 +57,9 @@
   <label>
     <span>Channel <em class="req">required</em></span>
     <select bind:value={channel}>
-      <option value="personal">personal</option>
-      <option value="work">work</option>
+      {#each channelNames as c (c)}
+        <option value={c}>{c}</option>
+      {/each}
     </select>
   </label>
   <label>
@@ -82,8 +93,36 @@
     <small>The session is killed at this number, checked at each turn's end.</small>
   </label>
   <div class="runs">
-    <span>Runs on</span>
-    {#if node?.state === 'refused'}
+    <span
+      >Runs on {#if store.nodes.length > 1}<em class="opt"
+          >{eligible.length} of {store.nodes.length} nodes can run {channel}</em
+        >{/if}</span
+    >
+    {#if store.nodes.length > 1}
+      <div class="pick">
+        {#each store.nodes as n (n.id)}
+          {@const ok = eligible.some((e) => e.id === n.id)}
+          <label class:no={!ok}>
+            <input type="radio" name="node" value={n.id} disabled={!ok} checked={node?.id === n.id} onchange={() => (nodeId = n.id)} />
+            <span class="chip" class:self={n.is_self} class:bad={n.state === 'refused' || n.harness.mismatch} class:off={!n.reachable}>{n.name}</span>
+          </label>
+        {/each}
+      </div>
+      <small
+        >{store.nodes
+          .filter((n) => !eligible.some((e) => e.id === n.id))
+          .map((n) =>
+            n.state === 'refused'
+              ? `${n.name} refused: ${n.failed_check}`
+              : !n.reachable
+                ? `${n.name} is unreachable`
+                : n.harness.mismatch
+                  ? `${n.name} has a harness version mismatch`
+                  : `${n.name} is not bound to ${channel}`,
+          )
+          .join(' · ')}</small
+      >
+    {:else if node?.state === 'refused'}
       <span class="chip bad">{node.name}</span>
       <small class="crit">Refused: {node.failed_check}: {node.failed_detail}</small>
     {:else if node?.harness.mismatch}
@@ -91,8 +130,11 @@
       <small class="crit"
         >Version mismatch: node expects {node.harness.pinned}, host has {node.harness.found}.</small
       >
+    {:else if node && !node.reachable}
+      <span class="chip off">{node.name}</span>
+      <small class="crit">Unreachable. Start when it returns.</small>
     {:else if node}
-      <span class="chip">{node.name}</span>
+      <span class="chip" class:self={node.is_self}>{node.name}</span>
       <small>{node.harness.id} {node.harness.found ?? node.harness.pinned} · boundary check passed</small>
     {/if}
   </div>
@@ -157,5 +199,27 @@
   .runs {
     display: grid;
     gap: 5px;
+  }
+  .pick {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    align-items: center;
+  }
+  .pick label {
+    display: inline-flex;
+    gap: 7px;
+    align-items: center;
+    font: 13px var(--sans);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .pick label.no {
+    color: var(--dim);
+    cursor: not-allowed;
+  }
+  .pick input {
+    accent-color: var(--acc);
+    margin: 0;
   }
 </style>

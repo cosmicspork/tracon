@@ -1,6 +1,8 @@
 <script lang="ts">
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatBudget } from '../lib/format'
+  import { nodeById, nodeLabel } from '../lib/nodes'
+  import { store } from '../lib/store.svelte'
   import type { Session } from '../lib/types'
 
   let { session }: { session: Session } = $props()
@@ -26,17 +28,19 @@
     }[session.state],
   )
   const repo = $derived(session.repo_path.split('/').at(-1) ?? session.repo_path)
+  const owner = $derived(nodeById(store.nodes, session.node_id))
+  const stale = $derived(owner !== undefined && !owner.is_self && !owner.reachable)
 </script>
 
-<a class="row {tone}" href="/sessions/{session.id}">
+<a class="row {tone}" class:stale href="/sessions/{session.id}">
   <span class="bar"></span>
-  <span class="mono">{session.node_id.slice(0, 8)}</span>
+  <span class="chip" class:self={owner?.is_self} class:off={stale}>{nodeLabel(store.nodes, session.node_id)}</span>
   <span class="mono age">{formatAge(session.updated_ms, clock.now)}</span>
   <span class="t">
     <em>{kind}</em>
     {session.branch}
     <small
-      >{repo} · {session.model.split('/').at(-1)} · {session.channel}{session.last_error
+      >{stale && owner?.last_seen_ms ? `last seen ${formatAge(owner.last_seen_ms, clock.now)} · ` : ''}{repo} · {session.model.split('/').at(-1)} · {session.channel}{session.last_error
         ? ` · ${session.last_error}`
         : ''}</small
     >
@@ -47,7 +51,7 @@
 <style>
   .row {
     display: grid;
-    grid-template-columns: 3px 72px 48px minmax(0, 1fr) 84px;
+    grid-template-columns: 3px 84px 48px minmax(0, 1fr) 84px;
     gap: 0 14px;
     align-items: center;
     background: var(--s1);
@@ -118,9 +122,16 @@
     text-overflow: ellipsis;
     margin-top: 2px;
   }
+  /* The owner has not been heard from: the row keeps its place but dims. */
+  .row.stale .bar {
+    background: var(--dim);
+  }
+  .row.stale .t em {
+    color: var(--dim);
+  }
   @media (max-width: 700px) {
     .row {
-      grid-template-columns: 3px 64px minmax(0, 1fr);
+      grid-template-columns: 3px 84px minmax(0, 1fr);
     }
     .age,
     .row > .mono:last-child {

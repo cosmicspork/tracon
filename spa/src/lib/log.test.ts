@@ -5,7 +5,7 @@ import type { Event } from './types'
 let seq = 0
 function ev(kind: string, ref_id: string | null = null, payload: Record<string, unknown> = {}): Event {
   seq += 1
-  return { seq, session_id: 's', kind, ref_id, payload, at_ms: 0, mono_ms: seq }
+  return { seq, node_id: 'n', session_id: 's', kind, ref_id, payload, at_ms: 0, mono_ms: seq }
 }
 
 test('consecutive tool calls fold into one group', () => {

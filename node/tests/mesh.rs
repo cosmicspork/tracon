@@ -420,6 +420,7 @@ async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
         work_item_id: None,
         model: "m".into(),
         budget_tokens: None,
+        node_id: None,
     };
     let adapter: Arc<dyn tracon::adapter::HarnessAdapter> =
         Arc::new(tracon::adapter::omp::OmpAdapter::new(String::from("1")));

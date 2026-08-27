@@ -2,13 +2,22 @@
 // On reconnect everything is refetched and ephemeral state dropped, so a client
 // crash costs nothing (the client crash invariant).
 
-import { api } from './api'
-import type { Event, Frame, NodeInfo, Permission, Queue, Review, Session } from './types'
+import { api, type ChannelInfo } from './api'
+import { upsertNode } from './nodes'
+import type { Event, Frame, MeshState, NodeInfo, Permission, Queue, Review, Session } from './types'
 
 const MAX_LIVE_EVENTS = 3000
+const RECONNECTED_BANNER_MS = 8000
 
 class Store {
-  node = $state<NodeInfo | null>(null)
+  /** Every node this one knows, itself first. */
+  nodes = $state<NodeInfo[]>([])
+  /** The hub's reachability; null until the first fetch. */
+  mesh = $state<MeshState | null>(null)
+  /** Channels this node can start sessions on, and who is bound to each. */
+  channels = $state<ChannelInfo[]>([])
+  /** Set briefly after the hub comes back: how many queued items went out. */
+  reconnected = $state<number | null>(null)
   queue = $state<Queue>({ waiting: [], reviews: [], running: [], ended: [] })
   sessions = $state<Map<string, Session>>(new Map())
   /** Persisted events for the session that is open on screen. */
@@ -23,6 +32,12 @@ class Store {
 
   private source: EventSource | null = null
   private wasConnected = false
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined
+
+  /** The node that served this interface. */
+  get node(): NodeInfo | null {
+    return this.nodes.find((n) => n.is_self) ?? null
+  }
 
   connect() {
     if (this.source) return
@@ -52,6 +67,7 @@ class Store {
       'queue',
       'reviews',
       'node',
+      'mesh',
     ] as const) {
       this.source.addEventListener(name, (m) => this.onFrame(JSON.parse((m as MessageEvent).data)))
     }
@@ -59,8 +75,16 @@ class Store {
 
   async refetch() {
     try {
-      const [node, queue, sessions] = await Promise.all([api.node(), api.queue(), api.sessions()])
-      this.node = node
+      const [nodes, mesh, channels, queue, sessions] = await Promise.all([
+        api.nodes(),
+        api.mesh(),
+        api.channels(),
+        api.queue(),
+        api.sessions(),
+      ])
+      this.nodes = nodes.reduce(upsertNode, [] as NodeInfo[])
+      this.mesh = mesh
+      this.channels = channels
       this.queue = queue
       this.sessions = new Map(sessions.map((s) => [s.id, s]))
       if (this.openSession) await this.loadEvents(this.openSession)
@@ -95,7 +119,11 @@ class Store {
         this.lastSeq = Math.max(this.lastSeq, frame.seq)
         if (frame.session_id === this.openSession) {
           if (!this.events.some((e) => e.seq === frame.seq)) {
-            this.events = [...this.events, frame].slice(-MAX_LIVE_EVENTS)
+            // Mirrored history can arrive out of order (a backfill lands after
+            // live events); keep the log sorted by the owner's clock.
+            this.events = [...this.events, frame]
+              .sort((a, b) => a.at_ms - b.at_ms || a.seq - b.seq)
+              .slice(-MAX_LIVE_EVENTS)
           }
           // The persisted event supersedes the live buffer for its message.
           if (frame.kind === 'message' || frame.kind === 'thought') {
@@ -139,13 +167,25 @@ class Store {
         break
       }
       case 'node': {
-        // A refreshed node (new model list, or a refused state) reaches a live
-        // client without a reload. The frame carries a `type` field the NodeInfo
-        // shape ignores.
-        this.node = frame
+        // A refreshed node (new model list, a refused state, a peer arriving or
+        // dimming) reaches a live client without a reload. The frame carries a
+        // `type` field the NodeInfo shape ignores.
+        this.nodes = upsertNode(this.nodes, frame)
+        break
+      }
+      case 'mesh': {
+        const wasDown = this.mesh?.hub.state === 'unreachable'
+        this.mesh = frame
+        if (wasDown && frame.hub.state === 'connected') this.showReconnected(frame.queued)
         break
       }
     }
+  }
+
+  private showReconnected(delivered: number) {
+    this.reconnected = delivered
+    clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = setTimeout(() => (this.reconnected = null), RECONNECTED_BANNER_MS)
   }
 
   private syncQueueSession(s: Session) {

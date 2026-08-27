@@ -1,11 +1,15 @@
 <script lang="ts">
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
+  import { nodeById, nodeLabel, unreachableReason } from '../lib/nodes'
+  import { store } from '../lib/store.svelte'
   import type { Review } from '../lib/types'
 
   let { review }: { review: Review } = $props()
 
   const noun = $derived(review.provider === 'gitlab' ? 'MR' : 'PR')
+  const owner = $derived(nodeById(store.nodes, review.node_id))
+  const held = $derived(unreachableReason(store.nodes, store.mesh, review.node_id))
   const files = $derived.by(() => {
     try {
       return (JSON.parse(review.files) as unknown[]).length
@@ -15,19 +19,19 @@
   })
 </script>
 
-<a class="row" class:revising={review.state === 'revising'} href="/reviews/{review.id}">
+<a class="row" class:revising={review.state === 'revising'} class:held={held !== null} href="/reviews/{review.id}">
   <span class="bar"></span>
   <span class="mono">{formatAge(review.created_ms, clock.now)}</span>
   <span class="t">
     <em>{review.state === 'revising' ? 'Changes requested' : 'Review'}</em>
     {review.title}
     <small
-      >{noun} · {files} files · +{review.added} −{review.removed} · {review.channel}{review.claimed_ms
+      ><span class="chip" class:self={owner?.is_self} class:off={held !== null}>{nodeLabel(store.nodes, review.node_id)}</span> · {noun} · {files} files · +{review.added} −{review.removed} · {review.channel}{review.claimed_ms
         ? ' · claimed'
         : ''}</small
     >
   </span>
-  <span class="act">Open</span>
+  <span class="act">{held !== null ? `${held} · cannot be decided until it returns` : 'Open'}</span>
 </a>
 
 <style>
@@ -80,6 +84,20 @@
     color: var(--acc);
     font-weight: 500;
     white-space: nowrap;
+  }
+  .row.held {
+    background: linear-gradient(90deg, var(--wash-dim), var(--s1) 42%);
+  }
+  .row.held .bar {
+    background: var(--dim);
+  }
+  .row.held .t em,
+  .row.held .act {
+    color: var(--dim);
+    font: 11.5px var(--mono);
+  }
+  .t small .chip {
+    vertical-align: baseline;
   }
   @media (max-width: 700px) {
     .row {

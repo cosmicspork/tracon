@@ -4,6 +4,7 @@ import { permissionOptions, type Permission } from './types'
 const base: Permission = {
   id: 'p',
   session_id: 's',
+  node_id: 'n',
   title: 't',
   kind: 'execute',
   raw_input: null,

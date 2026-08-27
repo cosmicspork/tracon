@@ -12,10 +12,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tower::ServiceExt;
 
 use tracon::{
-    adapter::{
-        AdapterError, HarnessAdapter, HarnessEvent, HarnessHandle, HarnessVersion, LaunchSpec,
-        ModelOption, PermissionReply, TurnResult,
-    },
+    adapter::{HarnessEvent, PermissionReply},
     config::Config,
     http::api::AppState,
     runner::Runner,
@@ -24,84 +21,9 @@ use tracon::{
     stream::Bus,
 };
 
-/// A harness that emits what the test asks it to, so the supervisor's own
-/// behaviour is what is under test.
-struct FakeAdapter {
-    tx: Arc<Mutex<Option<mpsc::Sender<HarnessEvent>>>>,
-    /// Tokens the next turn reports; the budget accumulates these.
-    tokens: Arc<Mutex<u64>>,
-}
-
-struct FakeHandle {
-    prompts: Arc<Mutex<Vec<String>>>,
-    tokens: Arc<Mutex<u64>>,
-    killed: Arc<Mutex<bool>>,
-}
-
-#[async_trait]
-impl HarnessHandle for FakeHandle {
-    fn harness_session_id(&self) -> &str {
-        "fake"
-    }
-    async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError> {
-        self.prompts.lock().await.push(text);
-        let total = *self.tokens.lock().await;
-        Ok(TurnResult {
-            stop_reason: "end_turn".into(),
-            usage: tracon::acp::types::Usage {
-                input_tokens: 10,
-                output_tokens: 5,
-                total_tokens: total,
-                cached_read_tokens: 0,
-            },
-        })
-    }
-    async fn cancel(&self) -> Result<(), AdapterError> {
-        Ok(())
-    }
-    async fn close(&self) -> Result<(), AdapterError> {
-        *self.killed.lock().await = true;
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl HarnessAdapter for FakeAdapter {
-    fn id(&self) -> &'static str {
-        "fake"
-    }
-    fn pinned_version(&self) -> &str {
-        "1.0.0"
-    }
-    async fn version(&self, _r: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
-        Ok(HarnessVersion {
-            found: "1.0.0".into(),
-            pinned: "1.0.0".into(),
-        })
-    }
-    async fn probe_models(&self, _r: &dyn Runner) -> Result<Vec<ModelOption>, AdapterError> {
-        Ok(vec![ModelOption {
-            value: "m/a".into(),
-            name: "A".into(),
-        }])
-    }
-    async fn launch(
-        &self,
-        _r: &dyn Runner,
-        _spec: LaunchSpec,
-    ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError> {
-        let (tx, rx) = mpsc::channel(64);
-        *self.tx.lock().await = Some(tx);
-        Ok((
-            Box::new(FakeHandle {
-                prompts: Arc::new(Mutex::new(Vec::new())),
-                tokens: self.tokens.clone(),
-                killed: Arc::new(Mutex::new(false)),
-            }),
-            rx,
-        ))
-    }
-}
+#[path = "support/fake.rs"]
+mod fake;
+use fake::{FakeAdapter, FakeHandle};
 
 struct Harness {
     app: axum::Router,
