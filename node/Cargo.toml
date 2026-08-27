@@ -23,13 +23,14 @@ path = "tests/support/fake_agent.rs"
 
 [dependencies]
 anyhow.workspace = true
+tracon-proto.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 clap.workspace = true
 dirs.workspace = true
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures-core = "0.3.34"
-hex = "0.4"
+hex.workspace = true
 mime_guess.workspace = true
 rand = "0.9"
 rusqlite.workspace = true
