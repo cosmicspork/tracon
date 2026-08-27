@@ -222,14 +222,30 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
 
     // The harness listener is separate from the operator's: it carries only the
     // MCP surface, and the gateway forwards to it from the internal network.
-    let harness_listener = tokio::net::TcpListener::bind(cfg.gateway.harness_listen)
-        .await
-        .with_context(|| format!("bind {}", cfg.gateway.harness_listen))?;
     let harness_app = harness_router(state.clone());
     tracing::info!(listen = %cfg.gateway.harness_listen, "harness listener");
-    tokio::spawn(async move {
-        let _ = axum::serve(harness_listener, harness_app).await;
-    });
+    match &cfg.gateway.harness_listen {
+        crate::config::HarnessListen::Tcp(addr) => {
+            let l = tokio::net::TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("bind {addr}"))?;
+            tokio::spawn(async move {
+                let _ = axum::serve(l, harness_app).await;
+            });
+        }
+        crate::config::HarnessListen::Unix(path) => {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            // A socket left by a previous run refuses a fresh bind.
+            let _ = std::fs::remove_file(path);
+            let l = tokio::net::UnixListener::bind(path)
+                .with_context(|| format!("bind {}", path.display()))?;
+            tokio::spawn(async move {
+                let _ = axum::serve(l, harness_app).await;
+            });
+        }
+    }
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -317,7 +333,15 @@ async fn init_node(
         tracing::warn!(check = f.id.as_str(), detail = %f.detail, "refusing to run harnesses");
     }
 
-    let (found, models) = if ready {
+    let has_credentials = crate::session::materialize::has_credentials();
+    if ready && !has_credentials {
+        tracing::warn!(
+            path = %Config::harness_state_dir().join("agent/agent.db").display(),
+            "no harness credentials in the node-owned volume; run `tracon harness import-credentials` \
+             or `tracon harness shell` to log in. Sessions will start but the model list is empty."
+        );
+    }
+    let (found, models) = if ready && has_credentials {
         let selinux = boundary::selinux_enabled().await;
         let mut spec = crate::runner::podman::RunSpec::from_config(cfg, selinux);
         // The probe opens a real session, so it needs the credential store the

@@ -130,7 +130,9 @@ pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
             json!({ "id": s.node_id, "state": "unknown", "is_self": true, "reachable": true }),
         );
     };
-    Ok(node_row_json(&n))
+    let mut v = node_row_json(&n);
+    v["harness_credentials"] = json!(crate::session::materialize::has_credentials());
+    Ok(v)
 }
 
 pub(crate) fn node_row_json(n: &crate::store::NodeRow) -> serde_json::Value {

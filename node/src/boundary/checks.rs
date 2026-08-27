@@ -359,6 +359,12 @@ async fn check_egress(cfg: &Config, selinux: bool) -> CheckResult {
     if out.contains("PROXY_UNLISTED") {
         return CheckResult::fail(CheckId::Egress, "gateway allowed an unlisted host");
     }
+    if !out.contains("pong") {
+        return CheckResult::fail(
+            CheckId::Egress,
+            "node not reachable through the gateway forward (is the node serving?)",
+        );
+    }
     if !out.contains("PROXY_ALLOWED") {
         return CheckResult::fail(
             CheckId::Egress,

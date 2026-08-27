@@ -38,6 +38,34 @@ impl Default for Mesh {
     }
 }
 
+/// The harness listener: TCP or a Unix socket, written in TOML as either
+/// `"127.0.0.1:7421"` or `"/run/user/1000/tracon/harness.sock"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum HarnessListen {
+    Tcp(std::net::SocketAddr),
+    Unix(PathBuf),
+}
+
+impl Default for HarnessListen {
+    fn default() -> Self {
+        if cfg!(target_os = "linux") {
+            HarnessListen::Unix(Config::runtime_dir().join("harness.sock"))
+        } else {
+            HarnessListen::Tcp("127.0.0.1:7421".parse().expect("valid default address"))
+        }
+    }
+}
+
+impl std::fmt::Display for HarnessListen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HarnessListen::Tcp(a) => write!(f, "{a}"),
+            HarnessListen::Unix(p) => write!(f, "{}", p.display()),
+        }
+    }
+}
+
 /// The publishing CLIs. Names by default, absolute paths where a host keeps
 /// them somewhere unusual.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,7 +136,11 @@ pub struct Gateway {
     pub forward_port: u16,
     /// Where the node listens for the harness. Loopback: the gateway reaches it
     /// through the Podman machine's host route, and nothing else can.
-    pub harness_listen: std::net::SocketAddr,
+    /// Where the node listens for the gateway's forward. A socket address on
+    /// a Podman machine (the VM reaches the host's loopback); an absolute path
+    /// to a Unix socket on a Linux host, where `host.containers.internal` is
+    /// not loopback and a TCP listener would have to face the LAN.
+    pub harness_listen: HarnessListen,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,7 +186,7 @@ impl Default for Config {
                 ],
                 proxy_port: 8888,
                 forward_port: 7421,
-                harness_listen: "127.0.0.1:7421".parse().expect("valid default address"),
+                harness_listen: HarnessListen::default(),
             },
             consulta: Consulta {
                 command: "uv".into(),
@@ -227,6 +259,21 @@ impl Default for Consulta {
     }
 }
 
+#[cfg(unix)]
+fn uid() -> u32 {
+    // No libc dependency: the runtime dir fallback only needs a stable per-user
+    // suffix, and the environment carries it on every session manager.
+    std::env::var("UID")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+#[cfg(not(unix))]
+fn uid() -> u32 {
+    0
+}
+
 fn hostname() -> String {
     std::process::Command::new("hostname")
         .output()
@@ -254,6 +301,19 @@ impl Config {
 
     pub fn db_path() -> PathBuf {
         Self::state_dir().join("node.db")
+    }
+
+    /// Short-lived runtime state: the harness socket. Under `$XDG_RUNTIME_DIR`
+    /// to stay below the Unix socket path limit and vanish at logout.
+    pub fn runtime_dir() -> PathBuf {
+        dirs::runtime_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join(format!("tracon-{}", uid())))
+            .join("tracon")
+    }
+
+    /// Where `tracon setup` writes the embedded container definitions.
+    pub fn containers_dir() -> PathBuf {
+        Self::state_dir().join("containers")
     }
 
     pub fn allow_file() -> PathBuf {
