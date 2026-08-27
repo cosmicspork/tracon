@@ -478,3 +478,150 @@ pub async fn refresh_models(State(s): State<AppState>) -> ApiResult<Json<serde_j
 pub async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }))
 }
+
+// ---- enrollment, for the "Enroll a new node" screen ----
+
+fn mesh_or_conflict(s: &AppState) -> ApiResult<Arc<crate::mesh::client::MeshClient>> {
+    s.mesh.clone().ok_or(ApiError(
+        StatusCode::CONFLICT,
+        "no hub configured on this node; run tracon mesh init or tracon enroll first".into(),
+    ))
+}
+
+fn enroll_err(e: crate::mesh::enroll::EnrollError) -> ApiError {
+    use crate::mesh::enroll::EnrollError::*;
+    match e {
+        Transport(m) => ApiError(StatusCode::BAD_GATEWAY, format!("hub unreachable: {m}")),
+        Refused { status, body } => ApiError(
+            StatusCode::BAD_GATEWAY,
+            format!("hub refused ({status}): {body}"),
+        ),
+        Local(m) => ApiError(StatusCode::CONFLICT, m),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct InviteBody {
+    #[serde(default)]
+    channels: Vec<String>,
+    #[serde(default)]
+    ttl_secs: Option<u64>,
+}
+
+fn invite_json(inv: &crate::mesh::enroll::Invite) -> serde_json::Value {
+    json!({
+        "code": inv.code,
+        "display_code": inv.display_code(),
+        "url": inv.url,
+        "qr_svg": crate::mesh::enroll::qr_svg(&inv.url),
+        "channels": inv.channels,
+        "expires_at": inv.expires_at,
+        "state": if inv.admitted { "admitted" } else if inv.received.is_some() { "received" } else { "waiting" },
+        "received": inv.received,
+        "received_fingerprint": inv.received_fingerprint(),
+        "own_fingerprint": proto::enroll::fingerprint_hex(&s_node_id_placeholder()),
+    })
+}
+
+fn s_node_id_placeholder() -> String {
+    String::new()
+}
+
+pub async fn open_invite(
+    State(s): State<AppState>,
+    Json(b): Json<InviteBody>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let mesh = mesh_or_conflict(&s)?;
+    let inv =
+        crate::mesh::enroll::open_invite(mesh.identity(), mesh.hub_url(), &b.channels, b.ttl_secs)
+            .await
+            .map_err(enroll_err)?;
+    let mut v = invite_json(&inv);
+    v["own_fingerprint"] = json!(proto::enroll::fingerprint_hex(&s.node_id));
+    mesh.invites().lock().unwrap().insert(inv.code.clone(), inv);
+    Ok((StatusCode::CREATED, Json(v)))
+}
+
+pub async fn poll_invite(
+    State(s): State<AppState>,
+    Path(code): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let mesh = mesh_or_conflict(&s)?;
+    let code = proto::enroll::normalize_code(&code)
+        .ok_or(ApiError(StatusCode::BAD_REQUEST, "malformed code".into()))?;
+    let mut inv = mesh
+        .invites()
+        .lock()
+        .unwrap()
+        .get(&code)
+        .cloned()
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such invitation".into()))?;
+    if inv.received.is_none() {
+        if let Some(req) = crate::mesh::enroll::poll_invite(mesh.identity(), mesh.hub_url(), &code)
+            .await
+            .map_err(enroll_err)?
+        {
+            inv.received = Some(req);
+            mesh.invites()
+                .lock()
+                .unwrap()
+                .insert(code.clone(), inv.clone());
+        }
+    }
+    let mut v = invite_json(&inv);
+    v["own_fingerprint"] = json!(proto::enroll::fingerprint_hex(&s.node_id));
+    Ok(Json(v))
+}
+
+/// The operator compared fingerprints and said they match.
+pub async fn admit_invite(
+    State(s): State<AppState>,
+    Path(code): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let mesh = mesh_or_conflict(&s)?;
+    let code = proto::enroll::normalize_code(&code)
+        .ok_or(ApiError(StatusCode::BAD_REQUEST, "malformed code".into()))?;
+    let inv = mesh
+        .invites()
+        .lock()
+        .unwrap()
+        .get(&code)
+        .cloned()
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such invitation".into()))?;
+    let req = inv.received.clone().ok_or(ApiError(
+        StatusCode::CONFLICT,
+        "the other node has not answered yet".into(),
+    ))?;
+    crate::mesh::enroll::admit(
+        s.store(),
+        mesh.identity(),
+        mesh.hub_url(),
+        &req.node_id,
+        &req.x25519_pub,
+        &req.name,
+        &inv.channels,
+    )
+    .await
+    .map_err(enroll_err)?;
+    let mut done = inv.clone();
+    done.admitted = true;
+    mesh.invites().lock().unwrap().insert(code, done.clone());
+    if let Ok(Some(row)) = s.store().get_node(&req.node_id) {
+        s.manager
+            .bus()
+            .publish_untapped(crate::stream::Frame::Node(row.to_json()));
+    }
+    Ok(Json(invite_json(&done)))
+}
+
+pub async fn cancel_invite(
+    State(s): State<AppState>,
+    Path(code): Path<String>,
+) -> ApiResult<StatusCode> {
+    let mesh = mesh_or_conflict(&s)?;
+    let code = proto::enroll::normalize_code(&code)
+        .ok_or(ApiError(StatusCode::BAD_REQUEST, "malformed code".into()))?;
+    mesh.invites().lock().unwrap().remove(&code);
+    let _ = crate::mesh::enroll::cancel_invite(mesh.identity(), mesh.hub_url(), &code).await;
+    Ok(StatusCode::NO_CONTENT)
+}

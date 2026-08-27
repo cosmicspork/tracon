@@ -67,7 +67,7 @@ pub struct Supervisor {
     /// left running holds the worktree and the credential mounts open.
     runner: Arc<dyn Runner>,
     container: String,
-    policy: Arc<crate::policy::Policy>,
+    policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
     channel: String,
 }
 
@@ -84,7 +84,7 @@ impl Supervisor {
         self_tx: mpsc::Sender<Command>,
         runner: Arc<dyn Runner>,
         container: String,
-        policy: Arc<crate::policy::Policy>,
+        policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
         channel: String,
     ) -> Self {
         Self {
@@ -330,7 +330,7 @@ impl Supervisor {
             .and_then(|v| v.get("command"))
             .and_then(|c| c.as_str())
             .map(str::to_string);
-        let decision = self.policy.decide(&crate::policy::Request {
+        let decision = self.policy.read().unwrap().decide(&crate::policy::Request {
             channel: &self.channel,
             kind: request.kind.as_deref(),
             title: &request.title,

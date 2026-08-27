@@ -125,6 +125,7 @@ fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Node {
         store.clone(),
         bus.clone(),
         Arc::new(cfg),
+        Default::default(),
     );
     Node {
         id,
@@ -375,6 +376,7 @@ async fn outbox_survives_a_hub_outage_and_members_are_learned() {
         a.store.clone(),
         a.bus.clone(),
         Arc::new(cfg),
+        Default::default(),
     );
     assert_eq!(client.drain_once().await.unwrap(), 1);
     assert_eq!(client.snapshot().queued, 0);
