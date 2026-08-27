@@ -2,6 +2,7 @@
 //! peer state, and (later) command forwarding.
 
 pub mod client;
+pub mod enroll;
 pub mod frames;
 pub mod identity;
 pub mod mirror;

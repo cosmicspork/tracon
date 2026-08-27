@@ -64,7 +64,9 @@ pub enum SessionError {
 #[derive(Clone)]
 pub struct Manager {
     pub(crate) tools: Arc<crate::mcp::Tools>,
-    policy: Arc<crate::policy::Policy>,
+    /// Shared with every supervisor and the mesh client, which swaps in a
+    /// bundle handed off by a peer.
+    policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
     store: Arc<Store>,
     bus: Bus,
     cfg: Arc<Config>,
@@ -83,7 +85,7 @@ impl Manager {
         cfg: Arc<Config>,
         node_id: String,
         tools: Arc<crate::mcp::Tools>,
-        policy: Arc<crate::policy::Policy>,
+        policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
     ) -> Self {
         Self {
             tools,
@@ -131,6 +133,10 @@ impl Manager {
 
     pub fn node_id(&self) -> &str {
         &self.node_id
+    }
+
+    pub fn policy(&self) -> &Arc<std::sync::RwLock<crate::policy::Policy>> {
+        &self.policy
     }
 
     /// Republish the waiting bay. Called when a review arrives or is decided,

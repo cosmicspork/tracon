@@ -31,6 +31,16 @@ enum Command {
     /// Manage the signed policy bundle.
     #[command(subcommand)]
     Policy(PolicyCommand),
+    /// Join a hub from an invitation URL or code printed by `tracon mesh invite`.
+    Enroll {
+        invitation: String,
+        /// This node's name as other nodes will see it (default: hostname).
+        #[arg(long)]
+        name: Option<String>,
+        /// The hub URL, if the invitation is a bare code rather than a URL.
+        #[arg(long)]
+        hub: Option<String>,
+    },
     /// The mesh: this node's identity and its hub.
     #[command(subcommand)]
     Mesh(MeshCommand),
@@ -53,6 +63,26 @@ enum MeshCommand {
     },
     /// List the hub's members and their channels.
     Members,
+    /// Invite another node: prints a code and URL, waits for it to answer,
+    /// shows its fingerprint for you to confirm, then admits it and hands off
+    /// the channel keys and this node's policy bundle.
+    Invite {
+        /// Channels to hand off besides `@mesh`, comma-separated.
+        #[arg(long, value_delimiter = ',')]
+        channels: Vec<String>,
+        /// How long the invitation stays open, in seconds (hub caps it).
+        #[arg(long, default_value_t = 600)]
+        ttl: u64,
+        /// Admit without asking, once the fingerprint is shown. For scripts.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Hand channel keys to a node that is already a member.
+    Admit {
+        node_id: String,
+        #[arg(long, value_delimiter = ',')]
+        channels: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -76,6 +106,8 @@ enum PolicyCommand {
     Init,
     /// Sign the current bundle, after editing it.
     Sign,
+    /// Hand the signed bundle to every member of the hub.
+    Push,
     /// Verify the bundle and print what it decides. Exits non-zero if the
     /// signature does not check out.
     Show,
@@ -98,7 +130,27 @@ async fn main() -> Result<()> {
             println!("network, allowlist, and gateway are in place");
             Ok(())
         }
+        Command::Policy(PolicyCommand::Push) => {
+            let cfg = config::Config::load();
+            let hub = cfg
+                .mesh
+                .hub_url
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("no hub configured"))?;
+            let (id, _) = tracon::mesh::identity::load_or_generate()?;
+            let n = tracon::mesh::enroll::push_policy(&id, &hub).await?;
+            println!(
+                "policy bundle handed to {n} member{}",
+                if n == 1 { "" } else { "s" }
+            );
+            Ok(())
+        }
         Command::Policy(cmd) => policy_command(cmd),
+        Command::Enroll {
+            invitation,
+            name,
+            hub,
+        } => enroll_command(invitation, name, hub).await,
         Command::Mesh(cmd) => mesh_command(cmd).await,
         Command::Channel(cmd) => channel_command(cmd),
         Command::CheckBoundary { deep } => {
@@ -161,6 +213,8 @@ fn policy_command(cmd: PolicyCommand) -> Result<()> {
             println!("signed {}", bundle::Paths::bundle().display());
             Ok(())
         }
+        // Handled in `main`, where the async hub call lives.
+        PolicyCommand::Push => unreachable!("push is dispatched before policy_command"),
         PolicyCommand::Show => {
             let policy = bundle::load()?;
             println!("{} rules, version {}", policy.rules.len(), policy.version);
@@ -235,7 +289,156 @@ async fn mesh_command(cmd: MeshCommand) -> Result<()> {
             }
             Ok(())
         }
+        MeshCommand::Invite { channels, ttl, yes } => invite_command(channels, ttl, yes).await,
+        MeshCommand::Admit { node_id, channels } => {
+            let cfg = config::Config::load();
+            let hub = cfg
+                .mesh
+                .hub_url
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("no hub configured"))?;
+            let (id, _) = identity::load_or_generate()?;
+            let store = tracon::store::Store::open(&config::Config::db_path())?;
+            let members =
+                tracon::mesh::client::MeshClient::get_once(&id, &hub, "/v0/members").await?;
+            let m = members
+                .as_array()
+                .and_then(|a| {
+                    a.iter()
+                        .find(|m| m["node_id"].as_str() == Some(node_id.as_str()))
+                })
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("{node_id} is not a member of the hub"))?;
+            tracon::mesh::enroll::admit(
+                &store,
+                &id,
+                &hub,
+                &node_id,
+                m["x25519_pub"].as_str().unwrap_or(""),
+                m["name"].as_str().unwrap_or(""),
+                &channels,
+            )
+            .await?;
+            println!(
+                "handed {} the keys for {}",
+                &node_id[..16],
+                channels.join(", ")
+            );
+            Ok(())
+        }
     }
+}
+
+struct Stderr;
+impl tracon::mesh::enroll::Progress for Stderr {
+    fn say(&self, line: &str) {
+        eprintln!("{line}");
+    }
+}
+
+async fn enroll_command(
+    invitation: String,
+    name: Option<String>,
+    hub: Option<String>,
+) -> Result<()> {
+    let (hub_from_url, code) = proto::enroll::parse_invite(&invitation)
+        .ok_or_else(|| anyhow::anyhow!("that is not an invitation URL or code"))?;
+    let hub = hub_from_url
+        .or(hub)
+        .ok_or_else(|| anyhow::anyhow!("pass the full invitation URL, or --hub with the code"))?;
+    let (id, fresh) = tracon::mesh::identity::load_or_generate()?;
+    if fresh {
+        eprintln!("generated this node's identity");
+    }
+    let mut cfg = config::Config::try_load().map_err(|e| anyhow::anyhow!(e))?;
+    let name = name.unwrap_or_else(|| cfg.node_name.clone());
+    let store = std::sync::Arc::new(tracon::store::Store::open(&config::Config::db_path())?);
+    let facts = format!("{} {}", std::env::consts::ARCH, std::env::consts::OS);
+    let channels = tracon::mesh::enroll::accept(
+        store,
+        &id,
+        &hub,
+        &code,
+        &name,
+        &facts,
+        std::time::Duration::from_secs(600),
+        &Stderr,
+    )
+    .await?;
+    cfg.mesh.hub_url = Some(hub.trim_end_matches('/').to_string());
+    cfg.save()?;
+    println!("enrolled as {name}; channels: {}", channels.join(", "));
+    println!("next: tracon setup, then tracon serve");
+    Ok(())
+}
+
+async fn invite_command(channels: Vec<String>, ttl: u64, yes: bool) -> Result<()> {
+    use tracon::mesh::enroll;
+    let cfg = config::Config::load();
+    let hub = cfg
+        .mesh
+        .hub_url
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("no hub configured; run tracon mesh init first"))?;
+    let (id, _) = tracon::mesh::identity::load_or_generate()?;
+    let store = tracon::store::Store::open(&config::Config::db_path())?;
+    for c in &channels {
+        if store.channel_get(c)?.is_none() {
+            anyhow::bail!(
+                "this node holds no key for channel {c}; tracon channel create {c} first"
+            );
+        }
+    }
+    let inv = enroll::open_invite(&id, &hub, &channels, Some(ttl)).await?;
+    println!("invitation code: {}", inv.display_code());
+    println!("on the new machine:");
+    println!(
+        "  curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | sh"
+    );
+    println!("  tracon enroll {}", inv.url);
+    if let Some(qr) = enroll::qr_text(&inv.url) {
+        println!("{qr}");
+    }
+    println!(
+        "this node's fingerprint: {}   (the other side prints its own)",
+        proto::enroll::fingerprint(&id.verifying_key().to_bytes())
+    );
+    println!("waiting for the other node… (expires in {ttl}s)");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(ttl);
+    let req = loop {
+        if std::time::Instant::now() > deadline {
+            anyhow::bail!("the invitation expired");
+        }
+        if let Some(r) = enroll::poll_invite(&id, &hub, &inv.code).await? {
+            break r;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    };
+    let fp = proto::enroll::fingerprint_hex(&req.node_id).unwrap_or_default();
+    println!();
+    println!("received: {}  ({})", req.name, req.facts);
+    println!("its fingerprint: {fp}");
+    if !yes {
+        eprint!("does that match what the other node printed? [y/N] ");
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if !matches!(line.trim(), "y" | "Y" | "yes") {
+            enroll::cancel_invite(&id, &hub, &inv.code).await.ok();
+            anyhow::bail!("not admitted");
+        }
+    }
+    enroll::admit(
+        &store,
+        &id,
+        &hub,
+        &req.node_id,
+        &req.x25519_pub,
+        &req.name,
+        &inv.channels,
+    )
+    .await?;
+    println!("admitted {} with {}", req.name, inv.channels.join(", "));
+    Ok(())
 }
 
 fn channel_command(cmd: ChannelCommand) -> Result<()> {

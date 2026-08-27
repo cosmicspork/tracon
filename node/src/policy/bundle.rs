@@ -25,6 +25,10 @@ pub enum BundleError {
     NoKey,
     #[error("the key is malformed: {0}")]
     BadKey(String),
+    #[error("the bundle is signed by a key this node does not trust")]
+    KeyMismatch,
+    #[error("no policy key is installed here, and this bundle did not arrive through enrollment")]
+    Untrusted,
 }
 
 /// Where the bundle, its signature, and the keys live.
@@ -101,6 +105,60 @@ pub fn load() -> Result<Policy, BundleError> {
     })?;
     verify(&text, signature_hex.trim(), &key_bytes)?;
     toml::from_str(&text).map_err(|e| BundleError::Parse(e.to_string()))
+}
+
+/// Install a bundle that arrived over the mesh. The public key is trusted only
+/// if it is the one already installed, or — when none is installed —
+/// `trust_new_key` says this is the enrollment handoff, the one moment the
+/// operator has just compared fingerprints. Verified and parsed before any
+/// file is touched; written through temp files so a crash cannot leave a
+/// bundle without its signature.
+pub fn install(
+    bundle: &str,
+    signature_hex: &str,
+    public_key_hex: &str,
+    trust_new_key: bool,
+) -> Result<Policy, BundleError> {
+    let offered: [u8; 32] = hex::decode(public_key_hex.trim())
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| BundleError::BadKey("expected 32 hex bytes".into()))?;
+    match read_hex_key(&Paths::public_key()) {
+        Ok(installed) if installed != offered => return Err(BundleError::KeyMismatch),
+        Ok(_) => {}
+        Err(BundleError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            if !trust_new_key {
+                return Err(BundleError::Untrusted);
+            }
+        }
+        Err(e) => return Err(e),
+    }
+    verify(bundle, signature_hex.trim(), &offered)?;
+    let policy: Policy = toml::from_str(bundle).map_err(|e| BundleError::Parse(e.to_string()))?;
+
+    let dir = Paths::bundle();
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let write_atomic = |path: PathBuf, text: &str| -> Result<(), BundleError> {
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    };
+    write_atomic(Paths::public_key(), &hex::encode(offered))?;
+    write_atomic(Paths::signature(), signature_hex.trim())?;
+    write_atomic(Paths::bundle(), bundle)?;
+    Ok(policy)
+}
+
+/// The bundle, signature, and public key as this node holds them, for handing
+/// to a peer. `None` when this node has no bundle.
+pub fn export() -> Option<(String, String, String)> {
+    let toml = std::fs::read_to_string(Paths::bundle()).ok()?;
+    let sig = std::fs::read_to_string(Paths::signature()).ok()?;
+    let key = std::fs::read_to_string(Paths::public_key()).ok()?;
+    Some((toml, sig.trim().to_string(), key.trim().to_string()))
 }
 
 pub fn verify(bundle: &str, signature_hex: &str, public_key: &[u8; 32]) -> Result<(), BundleError> {

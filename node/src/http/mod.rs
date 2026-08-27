@@ -34,6 +34,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/node/refresh-models", post(api::refresh_models))
         .route("/api/nodes", get(api::list_nodes))
         .route("/api/mesh", get(api::get_mesh))
+        .route("/api/mesh/invite", post(api::open_invite))
+        .route(
+            "/api/mesh/invite/{code}",
+            get(api::poll_invite).delete(api::cancel_invite),
+        )
+        .route("/api/mesh/invite/{code}/admit", post(api::admit_invite))
         .route(
             "/api/sessions",
             get(api::list_sessions).post(api::create_session),
@@ -148,25 +154,27 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     }
     // A bundle that cannot be verified yields no rules, and no rules means every
     // request is asked. The failure mode of broken policy is more questions.
-    let policy = Arc::new(match crate::policy::bundle::load() {
-        Ok(p) => {
-            tracing::info!(rules = p.rules.len(), "policy bundle verified");
-            p
-        }
-        Err(crate::policy::bundle::BundleError::Io(e))
-            if e.kind() == std::io::ErrorKind::NotFound =>
-        {
-            tracing::info!(
-                path = %crate::policy::bundle::Paths::bundle().display(),
-                "no policy bundle; every request will be asked"
-            );
-            Default::default()
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "policy bundle refused; every request will be asked");
-            Default::default()
-        }
-    });
+    let policy = Arc::new(std::sync::RwLock::new(
+        match crate::policy::bundle::load() {
+            Ok(p) => {
+                tracing::info!(rules = p.rules.len(), "policy bundle verified");
+                p
+            }
+            Err(crate::policy::bundle::BundleError::Io(e))
+                if e.kind() == std::io::ErrorKind::NotFound =>
+            {
+                tracing::info!(
+                    path = %crate::policy::bundle::Paths::bundle().display(),
+                    "no policy bundle; every request will be asked"
+                );
+                Default::default()
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "policy bundle refused; every request will be asked");
+                Default::default()
+            }
+        },
+    ));
 
     let manager = Manager::new(
         store.clone(),
@@ -174,7 +182,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         cfg.clone(),
         node_id.clone(),
         tools.clone(),
-        policy,
+        policy.clone(),
     );
     let _ = tools.session.set(crate::mcp::SessionAccess {
         store: store.clone(),
@@ -189,6 +197,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             store.clone(),
             bus.clone(),
             cfg.clone(),
+            policy.clone(),
         );
         bus.with_tap(client.spawn());
         tracing::info!(hub = %url, "mesh client started");

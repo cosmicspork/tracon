@@ -17,7 +17,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, watch, Notify};
 
 use super::mirror::{Applied, Mirror};
-use super::{frames, HubState, MeshState};
+use super::{enroll, frames, HubState, MeshState};
 use crate::config::Config;
 use crate::store::{now_ms, NodeRow, Store};
 use crate::stream::{Bus, Frame};
@@ -54,6 +54,9 @@ pub struct MeshClient {
     undecryptable: AtomicU64,
     /// Peer node id → X25519 public key hex, from the member list and hellos.
     peers: Mutex<HashMap<String, String>>,
+    policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
+    /// Invitations this node has open, by code.
+    invites: Mutex<HashMap<String, enroll::Invite>>,
 }
 
 impl MeshClient {
@@ -63,6 +66,7 @@ impl MeshClient {
         store: Arc<Store>,
         bus: Bus,
         cfg: Arc<Config>,
+        policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
     ) -> Arc<Self> {
         let hub_url = hub_url.trim_end_matches('/').to_string();
         let self_id = identity.node_id();
@@ -94,7 +98,26 @@ impl MeshClient {
             delivered: AtomicUsize::new(0),
             undecryptable: AtomicU64::new(0),
             peers: Mutex::new(HashMap::new()),
+            policy,
+            invites: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub fn hub_url(&self) -> &str {
+        &self.hub_url
+    }
+
+    pub fn store(&self) -> &Arc<Store> {
+        &self.store
+    }
+
+    /// A peer's sealing key, if known.
+    pub fn peer_key(&self, node_id: &str) -> Option<String> {
+        self.peers.lock().unwrap().get(node_id).cloned()
+    }
+
+    pub fn invites(&self) -> &Mutex<HashMap<String, enroll::Invite>> {
+        &self.invites
     }
 
     pub fn node_id(&self) -> String {
@@ -353,6 +376,35 @@ impl MeshClient {
                     .unwrap()
                     .insert(sender.clone(), x.to_string());
             }
+        }
+        // Key and policy handoffs are direct-sealed and change what this node
+        // can read and decide; they never go through the mirror.
+        match &payload {
+            Payload::KeyHandoff { channels } if env.is_direct() => {
+                let n = enroll::apply_key_handoff(&self.store, &self.node_id(), channels);
+                tracing::info!(from = %sender, channels = n, "channel keys received");
+                self.pull_wake.notify_one();
+                return n > 0;
+            }
+            Payload::PolicyBundle {
+                toml,
+                sig_hex,
+                pubkey_hex,
+            } if env.is_direct() => {
+                match crate::policy::bundle::install(toml, sig_hex, pubkey_hex, false) {
+                    Ok(p) => {
+                        tracing::info!(from = %sender, rules = p.rules.len(), "policy bundle installed");
+                        *self.policy.write().unwrap() = p;
+                        return true;
+                    }
+                    Err(e) => {
+                        tracing::warn!(from = %sender, error = %e, "policy bundle refused");
+                        self.note_refusal(format!("policy from {sender}: {e}"));
+                        return false;
+                    }
+                }
+            }
+            _ => {}
         }
         match self.mirror.apply(&sender, &env.channel, payload) {
             Applied::Stored => true,
