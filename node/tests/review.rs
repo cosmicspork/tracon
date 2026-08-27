@@ -18,7 +18,7 @@ use tracon::{
     mcp::Tools,
     session::Manager,
     store::{now_ms, NodeRow, ReviewRow, SessionRow, Store},
-    stream::Hub,
+    stream::Bus,
 };
 
 struct Fixture {
@@ -89,6 +89,10 @@ async fn fixture(name: &str, credentials: &str) -> Fixture {
             harness_found: Some("18.0.4".into()),
             models_json: None,
             checked_at_ms: Some(now_ms()),
+            is_self: 1,
+            x25519_pub: None,
+            last_seen_ms: None,
+            reachable: 1,
         })
         .unwrap();
     store
@@ -135,7 +139,7 @@ async fn fixture(name: &str, credentials: &str) -> Fixture {
     });
     let manager = Manager::new(
         store.clone(),
-        Hub::new(),
+        Bus::new(),
         cfg.clone(),
         "n1".into(),
         tools.clone(),

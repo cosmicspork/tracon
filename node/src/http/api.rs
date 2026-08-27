@@ -77,22 +77,42 @@ pub async fn get_node(State(s): State<AppState>) -> ApiResult<Json<serde_json::V
     Ok(Json(node_json(&s)?))
 }
 
+/// Every node this one knows: itself first, then peers as the mesh reports them.
 pub async fn list_nodes(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    // A list from the start: the mesh adds peers here without changing shape.
-    Ok(Json(json!([node_json(&s)?])))
+    let rows = s.store().list_nodes()?;
+    let mut out: Vec<serde_json::Value> = rows.iter().map(node_row_json).collect();
+    out.sort_by_key(|n| n["is_self"] != true);
+    Ok(Json(json!(out)))
 }
 
-fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
+/// Hub reachability and mesh counters. Until the mesh client lands this
+/// reports `disabled`, which the interface treats as "no hub configured".
+pub async fn get_mesh(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({
+        "hub": "disabled",
+        "hub_url": s.cfg.mesh.hub_url,
+        "node_id": s.node_id,
+        "fingerprint": proto::enroll::fingerprint_hex(&s.node_id),
+    })))
+}
+
+pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
     let row = s.store().get_node(&s.node_id)?;
     let Some(n) = row else {
-        return Ok(json!({ "id": s.node_id, "state": "unknown" }));
+        return Ok(
+            json!({ "id": s.node_id, "state": "unknown", "is_self": true, "reachable": true }),
+        );
     };
+    Ok(node_row_json(&n))
+}
+
+pub(crate) fn node_row_json(n: &crate::store::NodeRow) -> serde_json::Value {
     let models: serde_json::Value = n
         .models_json
         .as_deref()
         .and_then(|m| serde_json::from_str(m).ok())
         .unwrap_or_else(|| json!([]));
-    Ok(json!({
+    json!({
         "id": n.id,
         "name": n.name,
         "state": n.state,
@@ -106,7 +126,11 @@ fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
         },
         "models": models,
         "checked_at_ms": n.checked_at_ms,
-    }))
+        "is_self": n.is_self != 0,
+        "reachable": n.reachable != 0,
+        "last_seen_ms": n.last_seen_ms,
+        "x25519_pub": n.x25519_pub,
+    })
 }
 
 #[derive(Deserialize)]
@@ -463,7 +487,7 @@ pub async fn refresh_models(State(s): State<AppState>) -> ApiResult<Json<serde_j
         // Push the refreshed node to any live client, so a model list (or a
         // refused state) reaches the interface without a reload.
         s.manager
-            .hub()
+            .bus()
             .publish(crate::stream::Frame::Node(node_json(&s)?));
     }
     Ok(Json(serde_json::json!(models)))

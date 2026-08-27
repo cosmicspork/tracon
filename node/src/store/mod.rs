@@ -67,24 +67,59 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO node (id, name, state, failed_check, failed_detail, harness_id,
-                harness_pinned, harness_found, models_json, checked_at_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                harness_pinned, harness_found, models_json, checked_at_ms, is_self, x25519_pub,
+                last_seen_ms, reachable)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
              ON CONFLICT(id) DO UPDATE SET name=?2, state=?3, failed_check=?4, failed_detail=?5,
-                harness_id=?6, harness_pinned=?7, harness_found=?8, models_json=?9, checked_at_ms=?10",
+                harness_id=?6, harness_pinned=?7, harness_found=?8, models_json=?9, checked_at_ms=?10,
+                is_self=?11, x25519_pub=?12, last_seen_ms=?13, reachable=?14",
             rusqlite::params![
                 n.id, n.name, n.state, n.failed_check, n.failed_detail, n.harness_id,
-                n.harness_pinned, n.harness_found, n.models_json, n.checked_at_ms
+                n.harness_pinned, n.harness_found, n.models_json, n.checked_at_ms, n.is_self,
+                n.x25519_pub, n.last_seen_ms, n.reachable
             ],
         )?;
         Ok(())
     }
 
-    /// The single node row this process owns, if it has run before.
-    pub fn get_node_id(&self) -> Result<Option<String>> {
+    /// The row for this node, if it has run before. Peers live in the same
+    /// table, so the self row is the one flagged, never "the first".
+    pub fn self_node_id(&self) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT id FROM node LIMIT 1", [], |r| r.get(0))
-            .optional()
-            .map_err(Into::into)
+        conn.query_row("SELECT id FROM node WHERE is_self=1 LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn list_nodes(&self) -> Result<Vec<NodeRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT * FROM node ORDER BY is_self DESC, name ASC")?;
+        let rows = stmt
+            .query_map([], NodeRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Move this node's identity from `old` to `new` across every table that
+    /// names it, in one transaction. The pre-identity node id was a uuid; the
+    /// mesh id is the Ed25519 key. Also claims permission rows written with an
+    /// empty node id by an earlier build.
+    pub fn rekey_self_node(&self, old: &str, new: &str) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute_batch("PRAGMA defer_foreign_keys = ON")?;
+        tx.execute("UPDATE node SET id=?2 WHERE id=?1", [old, new])?;
+        tx.execute("UPDATE session SET node_id=?2 WHERE node_id=?1", [old, new])?;
+        tx.execute(
+            "UPDATE permission_request SET node_id=?2 WHERE node_id=?1 OR node_id=''",
+            [old, new],
+        )?;
+        tx.execute("UPDATE review SET node_id=?2 WHERE node_id=?1", [old, new])?;
+        tx.execute("UPDATE event SET node_id=?2 WHERE node_id=?1", [old, new])?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn get_node(&self, id: &str) -> Result<Option<NodeRow>> {
@@ -187,9 +222,11 @@ impl Store {
     /// Appends an event and returns its assigned `seq` (also the SSE id).
     pub fn append_event(&self, e: &NewEvent) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
+        // The owning node is the session's; derived here so no call site has
+        // to carry it.
         conn.execute(
-            "INSERT INTO event (session_id, work_item_id, kind, ref_id, payload, at_ms, mono_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            "INSERT INTO event (session_id, work_item_id, kind, ref_id, payload, at_ms, mono_ms, node_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7, (SELECT node_id FROM session WHERE id=?1))",
             rusqlite::params![
                 e.session_id,
                 e.work_item_id,
@@ -211,7 +248,7 @@ impl Store {
     ) -> Result<Vec<EventRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT seq, session_id, work_item_id, kind, ref_id, payload, at_ms, mono_ms
+            "SELECT seq, node_id, session_id, work_item_id, kind, ref_id, payload, at_ms, mono_ms
              FROM event WHERE session_id=?1 AND seq>?2 ORDER BY seq LIMIT ?3",
         )?;
         let rows = stmt
@@ -228,7 +265,7 @@ impl Store {
     pub fn all_events_after(&self, after_seq: i64, limit: i64) -> Result<Vec<EventRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT seq, session_id, work_item_id, kind, ref_id, payload, at_ms, mono_ms
+            "SELECT seq, node_id, session_id, work_item_id, kind, ref_id, payload, at_ms, mono_ms
              FROM event WHERE seq>?1 ORDER BY seq LIMIT ?2",
         )?;
         let rows = stmt
@@ -323,6 +360,20 @@ mod records {
         pub harness_found: Option<String>,
         pub models_json: Option<String>,
         pub checked_at_ms: Option<i64>,
+        /// 1 for the row that is this node; peers are 0.
+        #[serde(default)]
+        pub is_self: i64,
+        #[serde(default)]
+        pub x25519_pub: Option<String>,
+        #[serde(default)]
+        pub last_seen_ms: Option<i64>,
+        /// 0 once the hub has not heard from a peer within the presence window.
+        #[serde(default = "one")]
+        pub reachable: i64,
+    }
+
+    fn one() -> i64 {
+        1
     }
 
     impl NodeRow {
@@ -338,6 +389,10 @@ mod records {
                 harness_found: r.get("harness_found")?,
                 models_json: r.get("models_json")?,
                 checked_at_ms: r.get("checked_at_ms")?,
+                is_self: r.get("is_self")?,
+                x25519_pub: r.get("x25519_pub")?,
+                last_seen_ms: r.get("last_seen_ms")?,
+                reachable: r.get("reachable")?,
             })
         }
     }
@@ -410,6 +465,9 @@ mod records {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct EventRow {
         pub seq: i64,
+        /// The owning node. Empty only for rows older than the column.
+        #[serde(default)]
+        pub node_id: String,
         pub session_id: String,
         pub work_item_id: Option<String>,
         pub kind: String,
@@ -424,6 +482,7 @@ mod records {
             let payload: String = r.get("payload")?;
             Ok(Self {
                 seq: r.get("seq")?,
+                node_id: r.get::<_, Option<String>>("node_id")?.unwrap_or_default(),
                 session_id: r.get("session_id")?,
                 work_item_id: r.get("work_item_id")?,
                 kind: r.get("kind")?,
@@ -853,6 +912,10 @@ mod tests {
             harness_found: Some("18.0.4".into()),
             models_json: None,
             checked_at_ms: Some(now_ms()),
+            is_self: 1,
+            x25519_pub: None,
+            last_seen_ms: None,
+            reachable: 1,
         };
         store.put_node(&n).unwrap();
         n.id
@@ -978,5 +1041,86 @@ mod tests {
         assert_eq!(s.state, "killed_budget");
         assert_eq!(s.tokens_used, 1500);
         assert_eq!(s.branch, "feat/x"); // untouched
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    /// A database as the Phase 1 build left it, migrated forward.
+    #[test]
+    fn v2_database_migrates_and_rekeys() {
+        let conn = Connection::open_in_memory().unwrap();
+        schema::migrate_to(&conn, 2).unwrap();
+        conn.execute_batch(
+            "INSERT INTO node (id, name, state, harness_id, harness_pinned) VALUES ('u1','n','ready','omp','1');
+             INSERT INTO session (id, node_id, channel, repo_path, branch, harness_id, harness_version, model,
+                budget_tokens, state, created_ms, updated_ms)
+                VALUES ('s1','u1','personal','/r','b','omp','1','m',10,'closed',0,0);
+             INSERT INTO event (session_id, kind, payload, at_ms, mono_ms) VALUES ('s1','state','{}',0,0);
+             INSERT INTO permission_request (id, session_id, node_id, rpc_id, title, options, state, created_ms,
+                created_mono_ms, expires_ms) VALUES ('p1','s1','',0,'t','[]','expired',0,0,0);",
+        )
+        .unwrap();
+        schema::migrate(&conn).unwrap();
+        let store = Store {
+            conn: Mutex::new(conn),
+        };
+        assert_eq!(store.self_node_id().unwrap().as_deref(), Some("u1"));
+        let ev = store.events_after("s1", -1, 10).unwrap();
+        assert_eq!(ev[0].node_id, "u1");
+
+        store.rekey_self_node("u1", "abcd").unwrap();
+        assert_eq!(store.self_node_id().unwrap().as_deref(), Some("abcd"));
+        assert_eq!(store.get_session("s1").unwrap().unwrap().node_id, "abcd");
+        assert_eq!(store.events_after("s1", -1, 10).unwrap()[0].node_id, "abcd");
+        assert_eq!(store.get_permission("p1").unwrap().unwrap().node_id, "abcd");
+        // Idempotent.
+        store.rekey_self_node("abcd", "abcd").unwrap();
+        assert_eq!(store.list_nodes().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn append_event_derives_node_id_from_session() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_node(&NodeRow {
+                id: "n1".into(),
+                name: "n".into(),
+                state: "ready".into(),
+                failed_check: None,
+                failed_detail: None,
+                harness_id: "omp".into(),
+                harness_pinned: "1".into(),
+                harness_found: None,
+                models_json: None,
+                checked_at_ms: None,
+                is_self: 1,
+                x25519_pub: None,
+                last_seen_ms: None,
+                reachable: 1,
+            })
+            .unwrap();
+        let conn = store.conn.lock().unwrap();
+        conn.execute_batch(
+            "INSERT INTO session (id, node_id, channel, repo_path, branch, harness_id, harness_version, model,
+                budget_tokens, state, created_ms, updated_ms)
+                VALUES ('s1','n1','personal','/r','b','omp','1','m',10,'running',0,0);",
+        )
+        .unwrap();
+        drop(conn);
+        store
+            .append_event(&NewEvent {
+                session_id: "s1".into(),
+                work_item_id: None,
+                kind: "state".into(),
+                ref_id: None,
+                payload: serde_json::json!({}),
+                at_ms: 0,
+                mono_ms: 0,
+            })
+            .unwrap();
+        assert_eq!(store.all_events_after(-1, 10).unwrap()[0].node_id, "n1");
     }
 }

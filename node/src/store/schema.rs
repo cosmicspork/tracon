@@ -115,7 +115,55 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX review_open ON review(state, created_ms);
     CREATE INDEX review_session ON review(session_id);
     "#,
+    // 3: the mesh. Peers share these tables; rows are scoped by node_id. The
+    // one existing node row is this node.
+    r#"
+    ALTER TABLE node ADD COLUMN is_self      INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE node ADD COLUMN x25519_pub   TEXT;
+    ALTER TABLE node ADD COLUMN last_seen_ms INTEGER;
+    ALTER TABLE node ADD COLUMN reachable    INTEGER NOT NULL DEFAULT 1;
+    UPDATE node SET is_self = 1;
+
+    ALTER TABLE event ADD COLUMN node_id    TEXT;
+    ALTER TABLE event ADD COLUMN origin_seq INTEGER;
+    UPDATE event SET node_id = (SELECT node_id FROM session WHERE session.id = event.session_id);
+    CREATE UNIQUE INDEX event_origin ON event(node_id, origin_seq) WHERE origin_seq IS NOT NULL;
+
+    CREATE TABLE channel (
+        name          TEXT PRIMARY KEY,
+        keyring       BLOB NOT NULL,
+        bindings_json TEXT NOT NULL DEFAULT '{}',
+        created_ms    INTEGER NOT NULL,
+        updated_ms    INTEGER NOT NULL
+    );
+    CREATE TABLE node_channel (
+        node_id TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        PRIMARY KEY (node_id, channel)
+    );
+    CREATE TABLE mesh_cursor (channel TEXT PRIMARY KEY, seq INTEGER NOT NULL);
+    CREATE TABLE mesh_outbox (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel    TEXT NOT NULL,
+        envelope   TEXT NOT NULL,
+        created_ms INTEGER NOT NULL
+    );
+    CREATE TABLE mesh_seen (frame_id TEXT PRIMARY KEY, at_ms INTEGER NOT NULL);
+    CREATE INDEX mesh_seen_at ON mesh_seen(at_ms);
+    "#,
 ];
+
+/// The first N migrations, for tests that build a database as an older build
+/// left it and then migrate it forward.
+#[cfg(test)]
+pub(crate) fn migrate_to(conn: &Connection, version: usize) -> rusqlite::Result<()> {
+    conn.pragma_update(None, "foreign_keys", true)?;
+    for ddl in &MIGRATIONS[..version] {
+        conn.execute_batch(ddl)?;
+    }
+    conn.pragma_update(None, "user_version", version as i64)?;
+    Ok(())
+}
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;

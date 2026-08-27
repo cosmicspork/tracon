@@ -31,6 +31,16 @@ enum Command {
     /// Manage the signed policy bundle.
     #[command(subcommand)]
     Policy(PolicyCommand),
+    /// The mesh: this node's identity and its hub.
+    #[command(subcommand)]
+    Mesh(MeshCommand),
+}
+
+#[derive(Subcommand)]
+enum MeshCommand {
+    /// Print this node's id and fingerprint, generating the identity if needed.
+    /// The id is what a hub's TRACON_HUB_ADMIT takes.
+    Id,
 }
 
 #[derive(Subcommand)]
@@ -69,6 +79,21 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Policy(cmd) => policy_command(cmd),
+        Command::Mesh(MeshCommand::Id) => {
+            let (id, fresh) = tracon::mesh::identity::load_or_generate()?;
+            if fresh {
+                eprintln!(
+                    "generated a new identity at {}",
+                    tracon::mesh::identity::seed_path().display()
+                );
+            }
+            println!("node id:     {}", id.node_id());
+            println!(
+                "fingerprint: {}",
+                proto::enroll::fingerprint(&id.verifying_key().to_bytes())
+            );
+            Ok(())
+        }
         Command::CheckBoundary { deep } => {
             let cfg = config::Config::load();
             let report = boundary::check_all(&cfg, deep).await;

@@ -21,7 +21,7 @@ use tracon::{
     runner::Runner,
     session::Manager,
     store::{now_ms, NodeRow, Store},
-    stream::Hub,
+    stream::Bus,
 };
 
 /// A harness that emits what the test asks it to, so the supervisor's own
@@ -123,6 +123,10 @@ impl Harness {
                 harness_found: Some("1.0.0".into()),
                 models_json: Some(r#"[{"value":"m/a","name":"A"}]"#.into()),
                 checked_at_ms: Some(now_ms()),
+                is_self: 1,
+                x25519_pub: None,
+                last_seen_ms: None,
+                reachable: 1,
             })
             .unwrap();
         let events = Arc::new(Mutex::new(None));
@@ -142,7 +146,7 @@ impl Harness {
         });
         let manager = Manager::new(
             store.clone(),
-            Hub::new(),
+            Bus::new(),
             cfg.clone(),
             "n1".into(),
             tools.clone(),
@@ -209,6 +213,10 @@ async fn a_refused_node_refuses_sessions_and_says_which_check_failed() {
             harness_found: Some("1.0.0".into()),
             models_json: None,
             checked_at_ms: Some(now_ms()),
+            is_self: 1,
+            x25519_pub: None,
+            last_seen_ms: None,
+            reachable: 1,
         })
         .unwrap();
     let (status, body) = h
@@ -244,6 +252,10 @@ async fn a_version_mismatch_blocks_new_sessions() {
             harness_found: Some("1.1.0".into()),
             models_json: None,
             checked_at_ms: Some(now_ms()),
+            is_self: 1,
+            x25519_pub: None,
+            last_seen_ms: None,
+            reachable: 1,
         })
         .unwrap();
     let (status, body) = h
@@ -446,6 +458,10 @@ impl Rig {
                 harness_found: Some("1.0.0".into()),
                 models_json: None,
                 checked_at_ms: Some(now_ms()),
+                is_self: 1,
+                x25519_pub: None,
+                last_seen_ms: None,
+                reachable: 1,
             })
             .unwrap();
         let session_id = insert_running_session(&store, budget);
@@ -458,8 +474,9 @@ impl Rig {
         });
         let sup = Supervisor::new(
             session_id.clone(),
+            "n1".into(),
             store.clone(),
-            Hub::new(),
+            Bus::new(),
             handle,
             Instant::now(),
             permission_timeout,
@@ -661,7 +678,7 @@ async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
     });
     let manager = Manager::new(
         store.clone(),
-        Hub::new(),
+        Bus::new(),
         cfg.clone(),
         "n1".into(),
         tools.clone(),
