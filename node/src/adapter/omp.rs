@@ -38,6 +38,12 @@ impl OmpAdapter {
         RunnerCommand {
             argv,
             name: name.into(),
+            // Explicit even though the image sets it: the mount target and the
+            // harness's idea of its state directory must agree.
+            env: vec![(
+                "OMP_STATE_DIR".into(),
+                crate::session::materialize::HARNESS_STATE_TARGET.into(),
+            )],
             ..Default::default()
         }
     }

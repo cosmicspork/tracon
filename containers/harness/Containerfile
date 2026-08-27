@@ -8,4 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 RUN set -eu; case "${TARGETARCH}" in amd64) a=x64 ;; arm64) a=arm64 ;; *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; esac; \
     curl -fsSL -o /usr/local/bin/omp "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/omp-linux-${a}"; \
     chmod +x /usr/local/bin/omp; /usr/local/bin/omp --version
+# The node mounts its own state volume here and sets the same path in the
+# environment, so a harness that honours OMP_STATE_DIR agrees with the mount.
+ENV OMP_STATE_DIR=/root/.omp
 WORKDIR /work

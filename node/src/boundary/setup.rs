@@ -1,15 +1,55 @@
 //! `tracon setup`: create the network, allowlist, and gateway the node owns.
 //! Idempotent — running it again reconciles rather than failing.
 
-use crate::config::Config;
+use rust_embed::Embed;
+
+use crate::config::{Config, HarnessListen};
 
 use super::{podman, BoundaryError};
 
-pub async fn setup(cfg: &Config) -> Result<(), BoundaryError> {
+/// The gateway and harness definitions, carried inside the binary so a host
+/// that only fetched the release can build the images it needs.
+#[derive(Embed)]
+#[folder = "../containers"]
+struct Containers;
+
+pub async fn setup(cfg: &Config, rebuild: bool) -> Result<(), BoundaryError> {
+    ensure_images(cfg, rebuild).await?;
     ensure_network(cfg).await?;
     write_allowlist(cfg)?;
     ensure_gateway(cfg).await?;
     std::fs::create_dir_all(Config::harness_state_dir())?;
+    Ok(())
+}
+
+/// Write the embedded container definitions out and build any image that is
+/// missing. The harness image fetches the pinned omp release at build time,
+/// the one network fetch a fresh node makes.
+async fn ensure_images(cfg: &Config, rebuild: bool) -> Result<(), BoundaryError> {
+    let root = Config::containers_dir();
+    for path in Containers::iter() {
+        let Some(file) = Containers::get(&path) else {
+            continue;
+        };
+        let dest = root.join(path.as_ref());
+        if let Some(dir) = dest.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&dest, file.data.as_ref())?;
+    }
+    for (image, dir) in [
+        (&cfg.boundary.gateway_image, "gateway"),
+        (&cfg.boundary.harness_image, "harness"),
+    ] {
+        let exists = podman(&["image", "exists", image]).await.is_ok();
+        if exists && !rebuild {
+            tracing::info!(image, "image present");
+            continue;
+        }
+        let ctx = root.join(dir);
+        tracing::info!(image, context = %ctx.display(), "building image");
+        podman(&["build", "-t", image, &ctx.to_string_lossy()]).await?;
+    }
     Ok(())
 }
 
@@ -74,20 +114,45 @@ fn anchor(host: &str) -> String {
 async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
     let _ = podman(&["rm", "-f", "-i", &cfg.boundary.gateway_container]).await;
     let allow = Config::allow_file();
-    let mount = format!("{}:/etc/tinyproxy/allow.txt:ro", allow.display());
     let net_int = format!("{}:ip={}", cfg.boundary.network, cfg.boundary.gateway_ip);
-    // On a Podman machine the node is outside the VM, so the gateway forwards to
-    // the host's loopback listener over TCP via `host.containers.internal`.
-    //
-    // TODO(linux-node): the docs describe a Linux node forwarding over a Unix
-    // socket under $XDG_RUNTIME_DIR mounted into the gateway, which is not yet
-    // implemented — this path is TCP on every platform. macOS (the first node)
-    // is unaffected; a Linux node needs the Unix-socket forward before its node
-    // listener can stay on loopback. Tracked for when a Linux node is stood up.
-    let upstream = format!("TCP:host.containers.internal:{}", cfg.gateway.forward_port);
+    // Two forwards. On a Podman machine the node is outside the VM and gvproxy
+    // reaches the host's loopback, so TCP via `host.containers.internal` works.
+    // On a Linux host that name is a pasta interface address, not loopback, so
+    // the node listens on a Unix socket and the gateway mounts its directory
+    // (see docs/reference/phase-2-notes.md).
+    let selinux = super::selinux_enabled().await;
+    // Under SELinux a plain bind mount is unreadable from the container (the
+    // gateway died on "allow.txt missing" on Bazzite); `:z` relabels the node's
+    // own files, which is fine for state tracon owns.
+    let mount = format!(
+        "{}:/etc/tinyproxy/allow.txt:ro{}",
+        allow.display(),
+        if selinux { ",z" } else { "" }
+    );
+    let (upstream, socket_mount) = match &cfg.gateway.harness_listen {
+        HarnessListen::Tcp(addr) => (
+            format!("TCP:host.containers.internal:{}", addr.port()),
+            None,
+        ),
+        HarnessListen::Unix(path) => {
+            let dir = path
+                .parent()
+                .ok_or_else(|| BoundaryError::Podman("harness socket path has no parent".into()))?;
+            std::fs::create_dir_all(dir)?;
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "harness.sock".into());
+            let label = if selinux { ":z" } else { "" };
+            (
+                format!("UNIX-CONNECT:/run/tracon/{name}"),
+                Some(format!("{}:/run/tracon{label}", dir.display())),
+            )
+        }
+    };
     let upstream_env = format!("TRACON_UPSTREAM={upstream}");
     let listen_env = format!("TRACON_LISTEN_IP={}", cfg.boundary.gateway_ip);
-    podman(&[
+    let mut args: Vec<&str> = vec![
         "run",
         "-d",
         "--name",
@@ -100,13 +165,28 @@ async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
         &net_int,
         "-v",
         &mount,
+    ];
+    if let Some(m) = &socket_mount {
+        args.push("-v");
+        args.push(m);
+        // SELinux forbids a confined container process from connecting to a
+        // socket whose listener is unconfined (`connectto`), whatever the file
+        // is labelled. The gateway is the trusted, node-owned piece — it exists
+        // so the harness never touches the socket — so it runs unconfined; the
+        // harness keeps its label.
+        if selinux {
+            args.push("--security-opt");
+            args.push("label=disable");
+        }
+    }
+    args.extend([
         "-e",
         &upstream_env,
         "-e",
         &listen_env,
         &cfg.boundary.gateway_image,
-    ])
-    .await?;
+    ]);
+    podman(&args).await?;
     tracing::info!(container = %cfg.boundary.gateway_container, "gateway started");
     Ok(())
 }

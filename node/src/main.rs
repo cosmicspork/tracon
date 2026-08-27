@@ -21,7 +21,11 @@ enum Command {
         listen: SocketAddr,
     },
     /// Create the harness network, gateway, and images this node owns.
-    Setup,
+    Setup {
+        /// Rebuild the gateway and harness images even if they exist.
+        #[arg(long)]
+        rebuild: bool,
+    },
     /// Verify the harness boundary and exit non-zero naming the first failed check.
     CheckBoundary {
         /// Also probe egress from inside the boundary.
@@ -47,6 +51,26 @@ enum Command {
     /// Channels: the unit of tenancy, separated by key.
     #[command(subcommand)]
     Channel(ChannelCommand),
+    /// The harness's node-owned state volume and its model credentials.
+    #[command(subcommand)]
+    Harness(HarnessCommand),
+}
+
+#[derive(Subcommand)]
+enum HarnessCommand {
+    /// Copy a model-credential database into the node-owned volume, once.
+    /// Defaults to the operator's own `~/.omp/agent/agent.db`.
+    ImportCredentials {
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
+        /// Replace a store already in the volume.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Run the harness image interactively on the default network with only
+    /// the node-owned volume mounted, to log in where no operator install
+    /// exists. Nothing else of this host is visible to it.
+    Shell,
 }
 
 #[derive(Subcommand)]
@@ -124,12 +148,13 @@ async fn main() -> Result<()> {
 
     match Cli::parse().command {
         Command::Serve { listen } => http::serve(listen).await,
-        Command::Setup => {
+        Command::Setup { rebuild } => {
             let cfg = config::Config::load();
-            boundary::setup(&cfg).await?;
-            println!("network, allowlist, and gateway are in place");
+            boundary::setup(&cfg, rebuild).await?;
+            println!("images, network, allowlist, and gateway are in place");
             Ok(())
         }
+        Command::Harness(cmd) => harness_command(cmd).await,
         Command::Policy(PolicyCommand::Push) => {
             let cfg = config::Config::load();
             let hub = cfg
@@ -487,4 +512,44 @@ fn create_channel(
     }
     store.node_channel_add(&id.node_id(), name)?;
     Ok(())
+}
+
+async fn harness_command(cmd: HarnessCommand) -> Result<()> {
+    use tracon::session::materialize;
+    match cmd {
+        HarnessCommand::ImportCredentials { from, force } => {
+            let from = from.unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".omp/agent/agent.db")
+            });
+            if !from.exists() {
+                anyhow::bail!("{} does not exist; pass --from <agent.db>", from.display());
+            }
+            let dest =
+                materialize::import_credentials(&from, force).map_err(|e| anyhow::anyhow!(e))?;
+            println!("credentials imported to {}", dest.display());
+            Ok(())
+        }
+        HarnessCommand::Shell => {
+            let cfg = config::Config::load();
+            let mounts = materialize::state_mounts()?;
+            let mut c = std::process::Command::new("podman");
+            c.args(["run", "--rm", "-it", "--network", "podman"]);
+            c.args([
+                "-e",
+                &format!("OMP_STATE_DIR={}", materialize::HARNESS_STATE_TARGET),
+            ]);
+            for m in mounts {
+                c.args(["-v", &format!("{}:{}", m.source, m.target)]);
+            }
+            c.args([cfg.boundary.harness_image.as_str(), "sh"]);
+            eprintln!("harness shell: run `omp` to log in; only the node-owned volume is mounted");
+            let status = c.status()?;
+            if !status.success() {
+                anyhow::bail!("shell exited with {status}");
+            }
+            Ok(())
+        }
+    }
 }
