@@ -1,0 +1,135 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Opens/updates a release PR from the conventional-commit history; merging it
+  # tags the release and sets release_created=true.
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      version: ${{ steps.rp.outputs.version }}
+      tag: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # release-please bumps the workspace version but cannot touch Cargo.lock,
+      # so the release PR would fail CI on the stale lockfile. Refresh it here;
+      # pushes with GITHUB_TOKEN do not retrigger workflows, so this cannot loop.
+      - name: Check out the release PR branch
+        if: steps.rp.outputs.prs_created == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJson(steps.rp.outputs.pr).headBranchName }}
+      - name: Install Rust
+        if: steps.rp.outputs.prs_created == 'true'
+        run: rustup toolchain install stable --profile minimal
+      - name: Refresh Cargo.lock
+        if: steps.rp.outputs.prs_created == 'true'
+        run: cargo update --workspace
+      - name: Commit and push the refreshed lockfile
+        if: steps.rp.outputs.prs_created == 'true'
+        run: |
+          if [ -n "$(git status --porcelain Cargo.lock)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.lock
+            git commit -m "chore: refresh Cargo.lock for release"
+            git push origin HEAD:${{ fromJson(steps.rp.outputs.pr).headBranchName }}
+          fi
+
+  # The hub image. Homelab watches GHCR for the new tag.
+  image:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/cosmicspork/tracon-hub:${{ needs.release-please.outputs.version }}
+            ghcr.io/cosmicspork/tracon-hub:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Static node binaries with the SPA embedded, attached to the release. This
+  # is what install.sh fetches.
+  binaries:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Build the SPA
+        working-directory: spa
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: mlugg/setup-zig@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo install cargo-zigbuild --locked
+      - name: Build
+        run: |
+          cargo zigbuild --release --bin tracon --target ${{ matrix.target }}
+          file target/${{ matrix.target }}/release/tracon | grep -q "statically linked"
+          cp target/${{ matrix.target }}/release/tracon tracon-${{ matrix.target }}
+          sha256sum tracon-${{ matrix.target }} > tracon-${{ matrix.target }}.sha256
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ needs.release-please.outputs.tag }}" \
+            tracon-${{ matrix.target }} tracon-${{ matrix.target }}.sha256 --clobber
+
+  # One checksums.txt for install.sh, after both binaries are attached.
+  checksums:
+    needs: [release-please, binaries]
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Assemble checksums.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${{ needs.release-please.outputs.tag }}"
+          gh release download "$tag" --pattern 'tracon-*.sha256'
+          cat tracon-*.sha256 > checksums.txt
+          gh release upload "$tag" checksums.txt --clobber

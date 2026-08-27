@@ -1,0 +1,5 @@
+target
+spa/node_modules
+spa/dist
+docs
+.git

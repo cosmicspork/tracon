@@ -28,6 +28,15 @@ check:
 fmt:
     cargo fmt --all
 
+# Run a hub from source, in memory. Pass the first node's id to admit it:
+# `just hub admit=<node id>`.
+hub admit="":
+    TRACON_HUB_ADMIT={{admit}} cargo run --bin tracon-hub
+
+# Build the hub image as the release pipeline does.
+hub-image:
+    podman build -t localhost/tracon-hub .
+
 # Build the gateway and harness images this node runs.
 images:
     podman build -t localhost/tracon-gateway containers/gateway
