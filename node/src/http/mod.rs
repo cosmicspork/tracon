@@ -138,7 +138,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         session: Default::default(),
     });
 
-    let node_id = init_node(&store, &cfg, adapter.as_ref()).await?;
+    let (node_id, identity) = init_node(&store, &cfg, adapter.as_ref()).await?;
     let cleaned = crate::session::reconcile_after_restart(&store, &node_id).await;
     if !cleaned.is_empty() {
         tracing::info!(
@@ -180,12 +180,30 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         store: store.clone(),
         manager: manager.clone(),
     });
+    // With a hub configured, every frame this node publishes is tapped into
+    // the mesh client's outbox, and peer state is pulled into the same tables.
+    let mesh = cfg.mesh.hub_url.as_ref().map(|url| {
+        let client = crate::mesh::client::MeshClient::new(
+            identity,
+            url,
+            store.clone(),
+            bus.clone(),
+            cfg.clone(),
+        );
+        bus.with_tap(client.spawn());
+        tracing::info!(hub = %url, "mesh client started");
+        client
+    });
+    if mesh.is_none() {
+        tracing::info!("no hub configured; this node is standalone (tracon enroll to join a mesh)");
+    }
     let state = AppState {
         manager,
         cfg: cfg.clone(),
         adapter,
         node_id,
         tools,
+        mesh,
     };
 
     // The harness listener is separate from the operator's: it carries only the
@@ -265,7 +283,7 @@ async fn init_node(
     store: &Arc<Store>,
     cfg: &Arc<Config>,
     adapter: &dyn HarnessAdapter,
-) -> Result<String> {
+) -> Result<(String, proto::keys::Identity)> {
     let (identity, fresh) = crate::mesh::identity::load_or_generate().context("node identity")?;
     let id = identity.node_id();
     if fresh {
@@ -328,7 +346,11 @@ async fn init_node(
         models_json: serde_json::to_string(&models).ok(),
         checked_at_ms: Some(now_ms()),
     })?;
-    Ok(id)
+    // This node is always bound to the channels it holds keys for.
+    for c in store.channel_list()? {
+        store.node_channel_add(&id, &c.name)?;
+    }
+    Ok((id, identity))
 }
 
 async fn shutdown_signal() {

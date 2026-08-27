@@ -29,10 +29,14 @@ axum.workspace = true
 clap.workspace = true
 dirs.workspace = true
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = "2"
 futures-core = "0.3.34"
 hex.workspace = true
 mime_guess.workspace = true
 rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+futures-util = { version = "0.3", default-features = false }
+base64.workspace = true
 rusqlite.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
@@ -49,4 +53,5 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+tracon-hub = { path = "../hub" }
 tower = { version = "0.5.3", features = ["util"] }

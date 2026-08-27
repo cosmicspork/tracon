@@ -51,6 +51,8 @@ pub enum SessionError {
     VersionMismatch { found: String, pinned: String },
     #[error("session not found")]
     NotFound,
+    #[error("channel {0} is not one this node holds keys for; create or enroll it first")]
+    UnknownChannel(String),
     #[error("{0}")]
     Rejected(String),
     #[error(transparent)]
@@ -155,6 +157,12 @@ impl Manager {
         let budget = spec.budget_tokens.unwrap_or(self.cfg.session.budget_tokens);
         if budget <= 0 {
             return Err(SessionError::BadBudget);
+        }
+        // A meshed node seals every frame under the channel's key, so a channel
+        // it has no keyring for cannot carry a session. A standalone node keeps
+        // channels as plain labels.
+        if self.cfg.mesh.hub_url.is_some() && self.store.channel_get(&spec.channel)?.is_none() {
+            return Err(SessionError::UnknownChannel(spec.channel.clone()));
         }
         if let Some(node) = self.store.get_node(&self.node_id)? {
             if node.state != "ready" {

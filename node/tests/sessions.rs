@@ -158,6 +158,7 @@ impl Harness {
             adapter,
             node_id: "n1".into(),
             tools,
+            mesh: None,
         });
         Self { app, store }
     }
@@ -693,6 +694,7 @@ async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
         }),
         node_id: "n1".into(),
         tools,
+        mesh: None,
     });
     (app, store, manager)
 }
