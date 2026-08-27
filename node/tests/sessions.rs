@@ -743,8 +743,8 @@ async fn a_registered_session_can_list_tools_and_a_wrong_token_cannot() {
 
     // The same session, one character off: refused.
     let mut wrong = token.clone();
-    wrong.pop();
-    wrong.push('0');
+    let last = wrong.pop().unwrap();
+    wrong.push(if last == '0' { '1' } else { '0' });
     let (status, _) = mcp_call(
         &app,
         sid,
