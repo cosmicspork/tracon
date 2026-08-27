@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["node"]
+members = ["proto", "node"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +9,10 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/cosmicspork/tracon"
 
 [workspace.dependencies]
+tracon-proto = { path = "proto" }
+base64 = "0.22"
+hex = "0.4"
+sha2 = "0.10"
 anyhow = "1"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["json", "macros"] }
