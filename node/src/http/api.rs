@@ -26,6 +26,8 @@ pub struct AppState {
     pub adapter: Arc<dyn HarnessAdapter>,
     pub node_id: String,
     pub tools: Arc<crate::mcp::Tools>,
+    /// The hub client, when a hub is configured.
+    pub mesh: Option<Arc<crate::mesh::client::MeshClient>>,
 }
 
 impl AppState {
@@ -50,9 +52,9 @@ impl From<SessionError> for ApiError {
     fn from(e: SessionError) -> Self {
         let code = match e {
             // A missing model is a malformed request, not a conflict.
-            SessionError::ModelRequired | SessionError::BadBudget => {
-                StatusCode::UNPROCESSABLE_ENTITY
-            }
+            SessionError::ModelRequired
+            | SessionError::BadBudget
+            | SessionError::UnknownChannel(_) => StatusCode::UNPROCESSABLE_ENTITY,
             SessionError::NotFound => StatusCode::NOT_FOUND,
             // The node refusing to run harnesses, a version mismatch, or a
             // session that will not take the command are all state conflicts.
@@ -88,12 +90,15 @@ pub async fn list_nodes(State(s): State<AppState>) -> ApiResult<Json<serde_json:
 /// Hub reachability and mesh counters. Until the mesh client lands this
 /// reports `disabled`, which the interface treats as "no hub configured".
 pub async fn get_mesh(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(json!({
-        "hub": "disabled",
-        "hub_url": s.cfg.mesh.hub_url,
-        "node_id": s.node_id,
-        "fingerprint": proto::enroll::fingerprint_hex(&s.node_id),
-    })))
+    let state = match &s.mesh {
+        Some(m) => m.snapshot(),
+        None => crate::mesh::MeshState {
+            node_id: s.node_id.clone(),
+            fingerprint: proto::enroll::fingerprint_hex(&s.node_id),
+            ..Default::default()
+        },
+    };
+    Ok(Json(json!(state)))
 }
 
 pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
@@ -107,30 +112,7 @@ pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
 }
 
 pub(crate) fn node_row_json(n: &crate::store::NodeRow) -> serde_json::Value {
-    let models: serde_json::Value = n
-        .models_json
-        .as_deref()
-        .and_then(|m| serde_json::from_str(m).ok())
-        .unwrap_or_else(|| json!([]));
-    json!({
-        "id": n.id,
-        "name": n.name,
-        "state": n.state,
-        "failed_check": n.failed_check,
-        "failed_detail": n.failed_detail,
-        "harness": {
-            "id": n.harness_id,
-            "pinned": n.harness_pinned,
-            "found": n.harness_found,
-            "mismatch": n.harness_found.as_ref().map(|f| f != &n.harness_pinned).unwrap_or(false),
-        },
-        "models": models,
-        "checked_at_ms": n.checked_at_ms,
-        "is_self": n.is_self != 0,
-        "reachable": n.reachable != 0,
-        "last_seen_ms": n.last_seen_ms,
-        "x25519_pub": n.x25519_pub,
-    })
+    n.to_json()
 }
 
 #[derive(Deserialize)]

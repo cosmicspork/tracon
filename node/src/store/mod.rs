@@ -343,10 +343,455 @@ impl Store {
             .collect::<std::result::Result<_, _>>()?;
         Ok(rows)
     }
+
+    // ---- mesh: channels, cursors, outbox, seen ----
+
+    pub fn channel_put(&self, name: &str, keyring: &[u8], bindings_json: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms();
+        conn.execute(
+            "INSERT INTO channel (name, keyring, bindings_json, created_ms, updated_ms)
+             VALUES (?1,?2,?3,?4,?4)
+             ON CONFLICT(name) DO UPDATE SET keyring=?2, bindings_json=?3, updated_ms=?4",
+            rusqlite::params![name, keyring, bindings_json, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn channel_get(&self, name: &str) -> Result<Option<ChannelRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM channel WHERE name=?1",
+            [name],
+            ChannelRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn channel_list(&self) -> Result<Vec<ChannelRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT * FROM channel ORDER BY name")?;
+        let rows = stmt
+            .query_map([], ChannelRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Replace the set of channels a node is bound to.
+    pub fn node_channels_set(&self, node_id: &str, channels: &[String]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM node_channel WHERE node_id=?1", [node_id])?;
+        for c in channels {
+            tx.execute(
+                "INSERT OR IGNORE INTO node_channel (node_id, channel) VALUES (?1,?2)",
+                [node_id, c],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn node_channel_add(&self, node_id: &str, channel: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO node_channel (node_id, channel) VALUES (?1,?2)",
+            [node_id, channel],
+        )?;
+        Ok(())
+    }
+
+    pub fn node_channels(&self, node_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT channel FROM node_channel WHERE node_id=?1 ORDER BY channel")?;
+        let rows = stmt
+            .query_map([node_id], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn nodes_in_channel(&self, channel: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT node_id FROM node_channel WHERE channel=?1 ORDER BY node_id")?;
+        let rows = stmt
+            .query_map([channel], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn cursor_get(&self, channel: &str) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let v: Option<i64> = conn
+            .query_row(
+                "SELECT seq FROM mesh_cursor WHERE channel=?1",
+                [channel],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(v.unwrap_or(0).max(0) as u64)
+    }
+
+    pub fn cursor_set(&self, channel: &str, seq: u64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO mesh_cursor (channel, seq) VALUES (?1,?2)
+             ON CONFLICT(channel) DO UPDATE SET seq=?2",
+            rusqlite::params![channel, seq as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn outbox_push(&self, channel: &str, envelope: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO mesh_outbox (channel, envelope, created_ms) VALUES (?1,?2,?3)",
+            rusqlite::params![channel, envelope, now_ms()],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Oldest first: `(id, channel, envelope)`.
+    pub fn outbox_peek(&self, limit: i64) -> Result<Vec<(i64, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT id, channel, envelope FROM mesh_outbox ORDER BY id LIMIT ?1")?;
+        let rows = stmt
+            .query_map([limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn outbox_delete(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM mesh_outbox WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    pub fn outbox_len(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM mesh_outbox", [], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
+    /// `true` if the frame id was not seen before.
+    pub fn seen_insert(&self, frame_id: &str, at_ms: i64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO mesh_seen (frame_id, at_ms) VALUES (?1,?2)",
+            rusqlite::params![frame_id, at_ms],
+        )?;
+        Ok(n == 1)
+    }
+
+    pub fn seen_prune(&self, older_than_ms: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute("DELETE FROM mesh_seen WHERE at_ms < ?1", [older_than_ms])?;
+        Ok(n)
+    }
+
+    // ---- mesh: mirrored rows ----
+
+    /// A minimal row for a peer we have rows about but no hello from yet, so
+    /// foreign keys hold. A real hello replaces it.
+    pub fn ensure_peer_node(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO node (id, name, state, harness_id, harness_pinned, is_self, reachable)
+             VALUES (?1, '', 'unknown', '', '', 0, 0)",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a peer reachable or not; returns whether the flag changed.
+    pub fn set_reachable(&self, id: &str, reachable: bool) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE node SET reachable=?2 WHERE id=?1 AND reachable<>?2",
+            rusqlite::params![id, reachable as i64],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Insert or fully replace a peer's session, except the local draft.
+    pub fn upsert_session_mirror(&self, s: &SessionRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO session (id, node_id, channel, work_item_id, repo_path, worktree_path,
+                branch, harness_id, harness_version, harness_session_id, container_name, model,
+                budget_tokens, tokens_used, cost_usd, context_used, context_size, state, end_reason,
+                last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
+                ended_mono_ms, updated_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,NULL,
+                NULL,?22,?23,?24,?25)
+             ON CONFLICT(id) DO UPDATE SET node_id=?2, channel=?3, work_item_id=?4, repo_path=?5,
+                worktree_path=?6, branch=?7, harness_id=?8, harness_version=?9,
+                harness_session_id=?10, container_name=?11, model=?12, budget_tokens=?13,
+                tokens_used=?14, cost_usd=?15, context_used=?16, context_size=?17, state=?18,
+                end_reason=?19, last_error=?20, turn_active=?21, created_ms=?22,
+                started_mono_ms=?23, ended_mono_ms=?24, updated_ms=?25",
+            rusqlite::params![
+                s.id,
+                s.node_id,
+                s.channel,
+                s.work_item_id,
+                s.repo_path,
+                s.worktree_path,
+                s.branch,
+                s.harness_id,
+                s.harness_version,
+                s.harness_session_id,
+                s.container_name,
+                s.model,
+                s.budget_tokens,
+                s.tokens_used,
+                s.cost_usd,
+                s.context_used,
+                s.context_size,
+                s.state,
+                s.end_reason,
+                s.last_error,
+                s.turn_active,
+                s.created_ms,
+                s.started_mono_ms,
+                s.ended_mono_ms,
+                s.updated_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Append a peer's event under its origin seq. `None` if already present.
+    pub fn append_mirrored_event(
+        &self,
+        node_id: &str,
+        origin_seq: i64,
+        e: &NewEvent,
+    ) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO event (session_id, work_item_id, kind, ref_id, payload, at_ms,
+                mono_ms, node_id, origin_seq)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            rusqlite::params![
+                e.session_id,
+                e.work_item_id,
+                e.kind,
+                e.ref_id,
+                serde_json::to_string(&e.payload)?,
+                e.at_ms,
+                e.mono_ms,
+                node_id,
+                origin_seq
+            ],
+        )?;
+        Ok((n == 1).then(|| conn.last_insert_rowid()))
+    }
+
+    /// The highest origin seq mirrored for a peer's session, if any.
+    pub fn mirrored_origin_max(&self, session_id: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT MAX(origin_seq) FROM event WHERE session_id=?1",
+            [session_id],
+            |r| r.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn upsert_permission_mirror(&self, p: &PermissionRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO permission_request (id, session_id, node_id, rpc_id, tool_call_id, title,
+                kind, raw_input, options, state, answer_option_id, created_ms, created_mono_ms,
+                resolved_mono_ms, expires_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+             ON CONFLICT(id) DO UPDATE SET state=?10, answer_option_id=?11, resolved_mono_ms=?14,
+                expires_ms=?15, title=?6, options=?9",
+            rusqlite::params![
+                p.id,
+                p.session_id,
+                p.node_id,
+                p.rpc_id,
+                p.tool_call_id,
+                p.title,
+                p.kind,
+                p.raw_input,
+                p.options,
+                p.state,
+                p.answer_option_id,
+                p.created_ms,
+                p.created_mono_ms,
+                p.resolved_mono_ms,
+                p.expires_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Open permission rows of `node_id` in `channel` not in `keep` are
+    /// expired: the owner no longer lists them as waiting.
+    pub fn expire_absent_permissions(
+        &self,
+        node_id: &str,
+        channel: &str,
+        keep: &[String],
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT p.id FROM permission_request p JOIN session s ON s.id = p.session_id
+             WHERE p.node_id=?1 AND s.channel=?2 AND p.state='new'",
+        )?;
+        let open: Vec<String> = stmt
+            .query_map([node_id, channel], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut n = 0;
+        for id in open.into_iter().filter(|id| !keep.contains(id)) {
+            n += conn.execute(
+                "UPDATE permission_request SET state='expired' WHERE id=?1 AND state='new'",
+                [&id],
+            )?;
+        }
+        Ok(n)
+    }
+
+    pub fn upsert_review_mirror(&self, r: &ReviewRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO review (id, session_id, node_id, channel, kind, title, body, edited_title,
+                edited_body, provider, target, diff, files, head_sha, base_ref, added, removed, state,
+                verdict_reason, publish_result, claimed_ms, created_ms, created_mono_ms,
+                resolved_mono_ms, updated_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
+                ?23,?24,?25)
+             ON CONFLICT(id) DO UPDATE SET title=?6, body=?7, edited_title=?8, edited_body=?9,
+                diff=?12, files=?13, head_sha=?14, added=?16, removed=?17, state=?18,
+                verdict_reason=?19, publish_result=?20, claimed_ms=?21, resolved_mono_ms=?24,
+                updated_ms=?25",
+            rusqlite::params![
+                r.id,
+                r.session_id,
+                r.node_id,
+                r.channel,
+                r.kind,
+                r.title,
+                r.body,
+                r.edited_title,
+                r.edited_body,
+                r.provider,
+                r.target,
+                r.diff,
+                r.files,
+                r.head_sha,
+                r.base_ref,
+                r.added,
+                r.removed,
+                r.state,
+                r.verdict_reason,
+                r.publish_result,
+                r.claimed_ms,
+                r.created_ms,
+                r.created_mono_ms,
+                r.resolved_mono_ms,
+                r.updated_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Open reviews of `node_id` in `channel` not in `keep` are marked gone:
+    /// the owner no longer lists them.
+    pub fn gone_absent_reviews(
+        &self,
+        node_id: &str,
+        channel: &str,
+        keep: &[String],
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM review WHERE node_id=?1 AND channel=?2
+             AND state IN ('new','claimed','revising')",
+        )?;
+        let open: Vec<String> = stmt
+            .query_map([node_id, channel], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut n = 0;
+        for id in open.into_iter().filter(|id| !keep.contains(id)) {
+            n += conn.execute(
+                "UPDATE review SET state='gone', updated_ms=?2 WHERE id=?1",
+                rusqlite::params![id, now_ms()],
+            )?;
+        }
+        Ok(n)
+    }
+
+    pub fn sessions_of_node(&self, node_id: &str) -> Result<Vec<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT * FROM session WHERE node_id=?1 ORDER BY created_ms DESC")?;
+        let rows = stmt
+            .query_map([node_id], SessionRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Non-terminal sessions of `node_id` in `channel` absent from its snapshot
+    /// are closed: the owner lost them. Returns the ids closed.
+    pub fn close_absent_sessions(
+        &self,
+        node_id: &str,
+        channel: &str,
+        keep: &[String],
+    ) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM session WHERE node_id=?1 AND channel=?2
+             AND state NOT IN ('closed','killed_budget','failed')",
+        )?;
+        let open: Vec<String> = stmt
+            .query_map([node_id, channel], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut closed = Vec::new();
+        for id in open.into_iter().filter(|id| !keep.contains(id)) {
+            conn.execute(
+                "UPDATE session SET state='closed', end_reason='harness_exit',
+                    last_error='lost on owner', turn_active=0, updated_ms=?2 WHERE id=?1",
+                rusqlite::params![id, now_ms()],
+            )?;
+            closed.push(id);
+        }
+        Ok(closed)
+    }
 }
+
+impl Store {}
 
 mod records {
     use super::*;
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ChannelRow {
+        pub name: String,
+        pub keyring: Vec<u8>,
+        pub bindings_json: String,
+        pub created_ms: i64,
+        pub updated_ms: i64,
+    }
+
+    impl ChannelRow {
+        pub(super) fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Self> {
+            Ok(Self {
+                name: r.get("name")?,
+                keyring: r.get("keyring")?,
+                bindings_json: r.get("bindings_json")?,
+                created_ms: r.get("created_ms")?,
+                updated_ms: r.get("updated_ms")?,
+            })
+        }
+    }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct NodeRow {
@@ -374,6 +819,58 @@ mod records {
 
     fn one() -> i64 {
         1
+    }
+
+    impl NodeRow {
+        /// The wire shape the interface and the mesh share.
+        pub fn to_json(&self) -> Value {
+            let models: Value = self
+                .models_json
+                .as_deref()
+                .and_then(|m| serde_json::from_str(m).ok())
+                .unwrap_or_else(|| serde_json::json!([]));
+            serde_json::json!({
+                "id": self.id,
+                "name": self.name,
+                "state": self.state,
+                "failed_check": self.failed_check,
+                "failed_detail": self.failed_detail,
+                "harness": {
+                    "id": self.harness_id,
+                    "pinned": self.harness_pinned,
+                    "found": self.harness_found,
+                    "mismatch": self.harness_found.as_ref().map(|f| f != &self.harness_pinned).unwrap_or(false),
+                },
+                "models": models,
+                "checked_at_ms": self.checked_at_ms,
+                "is_self": self.is_self != 0,
+                "reachable": self.reachable != 0,
+                "last_seen_ms": self.last_seen_ms,
+                "x25519_pub": self.x25519_pub,
+            })
+        }
+
+        /// A peer's row from its own wire shape. `is_self`, `reachable`, and
+        /// `last_seen_ms` are the receiver's to set, never the sender's.
+        pub fn from_json(v: &Value) -> Option<Self> {
+            let s = |k: &str| v.get(k).and_then(Value::as_str).map(String::from);
+            Some(Self {
+                id: s("id")?,
+                name: s("name").unwrap_or_default(),
+                state: s("state").unwrap_or_else(|| "unknown".into()),
+                failed_check: s("failed_check"),
+                failed_detail: s("failed_detail"),
+                harness_id: v["harness"]["id"].as_str().unwrap_or("").to_string(),
+                harness_pinned: v["harness"]["pinned"].as_str().unwrap_or("").to_string(),
+                harness_found: v["harness"]["found"].as_str().map(String::from),
+                models_json: v.get("models").map(|m| m.to_string()),
+                checked_at_ms: v.get("checked_at_ms").and_then(Value::as_i64),
+                is_self: 0,
+                x25519_pub: s("x25519_pub"),
+                last_seen_ms: None,
+                reachable: 1,
+            })
+        }
     }
 
     impl NodeRow {

@@ -155,6 +155,7 @@ async fn fixture(name: &str, credentials: &str) -> Fixture {
         adapter: Arc::new(tracon::adapter::omp::OmpAdapter::new("18.0.4")),
         node_id: "n1".into(),
         tools,
+        mesh: None,
     });
 
     Fixture {
