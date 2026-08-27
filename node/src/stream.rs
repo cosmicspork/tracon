@@ -4,9 +4,11 @@
 //! snapshots) carry no id: they are superseded by the persisted event or by a
 //! refetch, and replaying them would be noise.
 
+use std::sync::{Arc, Mutex};
+
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::store::{PermissionRow, SessionRow};
@@ -16,6 +18,9 @@ use crate::store::{PermissionRow, SessionRow};
 pub enum Frame {
     Event {
         seq: i64,
+        /// The node that owns the session. Local events carry this node's id;
+        /// mirrored ones carry the owner's.
+        node_id: String,
         session_id: String,
         kind: String,
         ref_id: Option<String>,
@@ -41,6 +46,8 @@ pub enum Frame {
         waiting: Vec<crate::store::ReviewRow>,
     },
     Node(Value),
+    /// Hub reachability and mesh counters, for the banner.
+    Mesh(Value),
 }
 
 impl Frame {
@@ -54,6 +61,7 @@ impl Frame {
             Frame::Queue { .. } => "queue",
             Frame::Reviews { .. } => "reviews",
             Frame::Node(_) => "node",
+            Frame::Mesh(_) => "mesh",
         }
     }
 
@@ -68,32 +76,57 @@ impl Frame {
 
 /// Fan-out to connected clients. Slow clients lag and are told to resync rather
 /// than holding the node's memory.
+///
+/// A tap, when set, receives every frame this node originates so the mesh
+/// client can forward it. Mirrored frames (state that arrived from a peer) are
+/// published untapped, which is what keeps a frame from looping back out.
 #[derive(Clone)]
-pub struct Hub {
+pub struct Bus {
     tx: broadcast::Sender<Frame>,
+    tap: Arc<Mutex<Option<mpsc::Sender<Frame>>>>,
     /// Fires when the node is shutting down. SSE streams end when it does, so a
     /// browser holding one open does not stall graceful shutdown (a keep-alive
     /// stream never completes on its own).
     shutdown: CancellationToken,
 }
 
-impl Default for Hub {
+impl Default for Bus {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Hub {
+impl Bus {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(1024);
         Self {
             tx,
+            tap: Arc::new(Mutex::new(None)),
             shutdown: CancellationToken::new(),
         }
     }
 
+    /// Route every locally originated frame to `tap` as well as to subscribers.
+    pub fn with_tap(&self, tap: mpsc::Sender<Frame>) {
+        *self.tap.lock().unwrap() = Some(tap);
+    }
+
+    /// Publish a frame this node originated: subscribers and the tap.
     pub fn publish(&self, frame: Frame) {
+        if let Some(tap) = self.tap.lock().unwrap().as_ref() {
+            // The tap consumer persists to an outbox promptly; a full buffer
+            // means it has stalled, and dropping here beats blocking a session.
+            if let Err(e) = tap.try_send(frame.clone()) {
+                tracing::warn!(frame = frame.name(), error = %e, "mesh tap dropped a frame");
+            }
+        }
         // An error here only means nobody is listening.
+        let _ = self.tx.send(frame);
+    }
+
+    /// Publish a frame that arrived from a peer: subscribers only, never the
+    /// tap, so mirrored state does not echo back onto the mesh.
+    pub fn publish_untapped(&self, frame: Frame) {
         let _ = self.tx.send(frame);
     }
 
@@ -120,6 +153,7 @@ mod tests {
     fn event(seq: i64) -> Frame {
         Frame::Event {
             seq,
+            node_id: "n".into(),
             session_id: "s".into(),
             kind: "message".into(),
             ref_id: None,
@@ -144,15 +178,29 @@ mod tests {
 
     #[tokio::test]
     async fn subscribers_receive_published_frames() {
-        let hub = Hub::new();
-        let mut rx = hub.subscribe();
-        hub.publish(event(1));
+        let bus = Bus::new();
+        let mut rx = bus.subscribe();
+        bus.publish(event(1));
         let got = rx.recv().await.unwrap();
         assert_eq!(got.id(), Some(1));
     }
 
     #[tokio::test]
     async fn publishing_with_no_subscribers_is_not_an_error() {
-        Hub::new().publish(event(1));
+        Bus::new().publish(event(1));
+    }
+
+    #[tokio::test]
+    async fn tap_sees_published_but_not_untapped_frames() {
+        let bus = Bus::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        bus.with_tap(tx);
+        let mut sub = bus.subscribe();
+        bus.publish(event(1));
+        bus.publish_untapped(event(2));
+        assert_eq!(rx.recv().await.unwrap().id(), Some(1));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(sub.recv().await.unwrap().id(), Some(1));
+        assert_eq!(sub.recv().await.unwrap().id(), Some(2));
     }
 }

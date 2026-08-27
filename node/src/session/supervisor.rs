@@ -19,7 +19,7 @@ use crate::{
         state::{event_kind as ek, EndReason, SessionState},
     },
     store::{now_ms, NewEvent, PermissionRow, SessionPatch, Store},
-    stream::{Frame, Hub},
+    stream::{Bus, Frame},
 };
 
 /// Output of a tool call is capped before it reaches the log; a single read can
@@ -51,8 +51,9 @@ pub enum Command {
 
 pub struct Supervisor {
     pub session_id: String,
+    node_id: String,
     store: Arc<Store>,
-    hub: Hub,
+    bus: Bus,
     handle: Arc<dyn HarnessHandle>,
     started: Instant,
     permission_timeout: Duration,
@@ -74,8 +75,9 @@ impl Supervisor {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: String,
+        node_id: String,
         store: Arc<Store>,
-        hub: Hub,
+        bus: Bus,
         handle: Arc<dyn HarnessHandle>,
         started: Instant,
         permission_timeout: Duration,
@@ -92,8 +94,9 @@ impl Supervisor {
             runner,
             container,
             session_id,
+            node_id,
             store,
-            hub,
+            bus,
             handle,
             started,
             permission_timeout,
@@ -119,8 +122,9 @@ impl Supervisor {
             mono_ms: self.mono_ms(),
         };
         match self.store.append_event(&e) {
-            Ok(seq) => self.hub.publish(Frame::Event {
+            Ok(seq) => self.bus.publish(Frame::Event {
                 seq,
+                node_id: self.node_id.clone(),
                 session_id: e.session_id,
                 kind: e.kind,
                 ref_id: e.ref_id,
@@ -152,14 +156,14 @@ impl Supervisor {
 
     fn publish_session(&self) {
         if let Ok(Some(row)) = self.store.get_session(&self.session_id) {
-            self.hub.publish(Frame::Session(Box::new(row)));
+            self.bus.publish(Frame::Session(Box::new(row)));
         }
         self.publish_queue();
     }
 
     fn publish_queue(&self) {
         if let Ok(open) = self.store.open_permissions() {
-            self.hub.publish(Frame::Queue { waiting: open });
+            self.bus.publish(Frame::Queue { waiting: open });
         }
     }
 
@@ -218,7 +222,7 @@ impl Supervisor {
     async fn on_harness_event(&mut self, ev: HarnessEvent) -> bool {
         match ev {
             HarnessEvent::MessageChunk { message_id, text } => {
-                self.hub.publish(Frame::Chunk {
+                self.bus.publish(Frame::Chunk {
                     session_id: self.session_id.clone(),
                     message_id: message_id.clone(),
                     kind: ek::MESSAGE,
@@ -229,7 +233,7 @@ impl Supervisor {
                 }
             }
             HarnessEvent::ThoughtChunk { message_id, text } => {
-                self.hub.publish(Frame::Chunk {
+                self.bus.publish(Frame::Chunk {
                     session_id: self.session_id.clone(),
                     message_id: message_id.clone(),
                     kind: ek::THOUGHT,
@@ -252,7 +256,7 @@ impl Supervisor {
             }
             HarnessEvent::ToolCallUpdate(t) => {
                 // Updates are cumulative; only the terminal one is worth keeping.
-                self.hub.publish(Frame::ToolUpdate {
+                self.bus.publish(Frame::ToolUpdate {
                     session_id: self.session_id.clone(),
                     tool_call_id: t.tool_call_id.clone(),
                     status: t.status.clone(),
@@ -364,7 +368,7 @@ impl Supervisor {
         let row = PermissionRow {
             id: id.clone(),
             session_id: self.session_id.clone(),
-            node_id: String::new(),
+            node_id: self.node_id.clone(),
             rpc_id: 0,
             tool_call_id: request.tool_call_id.clone(),
             title: request.title.clone(),

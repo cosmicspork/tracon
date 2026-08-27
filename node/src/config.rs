@@ -14,6 +14,28 @@ pub struct Config {
     pub session: SessionDefaults,
     pub consulta: Consulta,
     pub publish: Publish,
+    pub mesh: Mesh,
+}
+
+/// The hub this node dials. Written by `tracon enroll`; absent until then,
+/// which leaves the node standalone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Mesh {
+    pub hub_url: Option<String>,
+    pub heartbeat_secs: u64,
+    pub poll_secs: u64,
+    pub command_timeout_secs: u64,
+}
+impl Default for Mesh {
+    fn default() -> Self {
+        Self {
+            hub_url: None,
+            heartbeat_secs: 60,
+            poll_secs: 30,
+            command_timeout_secs: 15,
+        }
+    }
 }
 
 /// The publishing CLIs. Names by default, absolute paths where a host keeps
@@ -105,6 +127,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             node_name: hostname(),
+            mesh: Mesh::default(),
             harness: Harness {
                 id: "omp".into(),
                 version: "18.0.4".into(),
@@ -248,16 +271,62 @@ impl Config {
         Self::load_from(&Self::config_path())
     }
 
+    /// Lenient load for one-shot commands: a bad file logs and yields defaults.
     pub fn load_from(path: &Path) -> Self {
+        Self::try_load_from(path).unwrap_or_else(|e| {
+            tracing::warn!(path = %path.display(), error = %e, "bad node.toml, using defaults");
+            Self::default()
+        })
+    }
+
+    /// Strict load for `serve`: a file that exists but does not parse is an
+    /// error, so a typo cannot silently drop the whole configuration.
+    pub fn try_load() -> Result<Self, String> {
+        Self::try_load_from(&Self::config_path())
+    }
+
+    pub fn try_load_from(path: &Path) -> Result<Self, String> {
         match std::fs::read_to_string(path) {
-            Ok(text) => match toml::from_str(&text) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "bad node.toml, using defaults");
-                    Self::default()
-                }
-            },
-            Err(_) => Self::default(),
+            Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
+            Err(_) => Ok(Self::default()),
         }
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        self.save_to(&Self::config_path())
+    }
+
+    pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let text = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
+        std::fs::write(path, text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_load_rejects_a_typo_and_round_trips() {
+        let dir = std::env::temp_dir().join(format!("tracon-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node.toml");
+        std::fs::write(
+            &path,
+            "[mesh]\nhub_url = \"https://hub\"\nheartbeat_secs = \"x\"\n",
+        )
+        .unwrap();
+        assert!(Config::try_load_from(&path).is_err());
+        let mut c = Config::default();
+        c.mesh.hub_url = Some("https://hub.example".into());
+        c.save_to(&path).unwrap();
+        let back = Config::try_load_from(&path).unwrap();
+        assert_eq!(back.mesh.hub_url.as_deref(), Some("https://hub.example"));
+        assert_eq!(back.mesh.heartbeat_secs, 60);
+        assert!(Config::try_load_from(&dir.join("missing.toml")).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

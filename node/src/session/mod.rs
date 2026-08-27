@@ -21,7 +21,7 @@ use crate::{
         supervisor::{Command, Supervisor},
     },
     store::{now_ms, NewEvent, SessionPatch, SessionRow, Store},
-    stream::{Frame, Hub},
+    stream::{Bus, Frame},
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -64,7 +64,7 @@ pub struct Manager {
     pub(crate) tools: Arc<crate::mcp::Tools>,
     policy: Arc<crate::policy::Policy>,
     store: Arc<Store>,
-    hub: Hub,
+    bus: Bus,
     cfg: Arc<Config>,
     node_id: String,
     live: Arc<Mutex<HashMap<String, mpsc::Sender<Command>>>>,
@@ -77,7 +77,7 @@ pub struct Manager {
 impl Manager {
     pub fn new(
         store: Arc<Store>,
-        hub: Hub,
+        bus: Bus,
         cfg: Arc<Config>,
         node_id: String,
         tools: Arc<crate::mcp::Tools>,
@@ -87,7 +87,7 @@ impl Manager {
             tools,
             policy,
             store,
-            hub,
+            bus,
             cfg,
             node_id,
             live: Arc::new(Mutex::new(HashMap::new())),
@@ -123,17 +123,21 @@ impl Manager {
         &self.store
     }
 
-    pub fn hub(&self) -> &Hub {
-        &self.hub
+    pub fn bus(&self) -> &Bus {
+        &self.bus
+    }
+
+    pub fn node_id(&self) -> &str {
+        &self.node_id
     }
 
     /// Republish the waiting bay. Called when a review arrives or is decided,
     /// so the queue updates without the operator refetching.
     pub async fn publish_queue(&self) {
         let waiting = self.store.open_permissions().unwrap_or_default();
-        self.hub.publish(Frame::Queue { waiting });
+        self.bus.publish(Frame::Queue { waiting });
         if let Ok(reviews) = self.store.open_reviews() {
-            self.hub.publish(Frame::Reviews { waiting: reviews });
+            self.bus.publish(Frame::Reviews { waiting: reviews });
         }
     }
 
@@ -204,7 +208,7 @@ impl Manager {
             updated_ms: now_ms(),
         };
         self.store.insert_session(&row)?;
-        self.hub.publish(Frame::Session(Box::new(row.clone())));
+        self.bus.publish(Frame::Session(Box::new(row.clone())));
 
         let this = self.clone();
         let started = Instant::now();
@@ -233,7 +237,7 @@ impl Manager {
                     mono_ms: started.elapsed().as_millis() as i64,
                 });
                 if let Ok(Some(row)) = this.store.get_session(&id) {
-                    this.hub.publish(Frame::Session(Box::new(row)));
+                    this.bus.publish(Frame::Session(Box::new(row)));
                 }
             }
         });
@@ -244,8 +248,9 @@ impl Manager {
     /// watching live sees the same log a reload rebuilds.
     fn record(&self, e: NewEvent) {
         match self.store.append_event(&e) {
-            Ok(seq) => self.hub.publish(Frame::Event {
+            Ok(seq) => self.bus.publish(Frame::Event {
                 seq,
+                node_id: self.node_id.clone(),
                 session_id: e.session_id,
                 kind: e.kind,
                 ref_id: e.ref_id,
@@ -379,8 +384,9 @@ impl Manager {
 
         let sup = Supervisor::new(
             id.to_string(),
+            self.node_id.clone(),
             self.store.clone(),
-            self.hub.clone(),
+            self.bus.clone(),
             Arc::from(handle),
             started,
             Duration::from_secs(self.cfg.session.permission_timeout_secs),
@@ -469,13 +475,15 @@ impl Manager {
 /// non-terminal are closed honestly, their open permission requests expired,
 /// and their containers removed. Without this, an orphaned harness keeps the
 /// credential store open and the model probe fails underneath it.
-pub async fn reconcile_after_restart(store: &Store) -> Vec<String> {
+///
+/// Only this node's sessions: a peer's mirrored rows are its to close.
+pub async fn reconcile_after_restart(store: &Store, self_node_id: &str) -> Vec<String> {
     let mut cleaned = Vec::new();
     let Ok(sessions) = store.list_sessions(None) else {
         return cleaned;
     };
     for s in sessions {
-        if state::SessionState::from_stored(&s.state).is_terminal() {
+        if s.node_id != self_node_id || state::SessionState::from_stored(&s.state).is_terminal() {
             continue;
         }
         for p in store.open_permissions().unwrap_or_default() {

@@ -31,6 +31,7 @@ fn to_event(frame: &Frame) -> Result<Event, Infallible> {
 fn row_to_frame(r: crate::store::EventRow) -> Frame {
     Frame::Event {
         seq: r.seq,
+        node_id: r.node_id,
         session_id: r.session_id,
         kind: r.kind,
         ref_id: r.ref_id,
@@ -51,9 +52,9 @@ pub async fn stream(
 
     // Subscribe before replaying, so an event landing mid-replay is buffered on
     // the receiver and delivered after, rather than dropped between the two.
-    let mut live = s.manager.hub().subscribe();
+    let mut live = s.manager.bus().subscribe();
     let store = s.store().clone();
-    let shutdown = s.manager.hub().shutdown_token();
+    let shutdown = s.manager.bus().shutdown_token();
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
     tokio::spawn(async move {
