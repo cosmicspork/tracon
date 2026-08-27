@@ -4,6 +4,9 @@
   import Nodes from './routes/Nodes.svelte'
   import Queue from './routes/Queue.svelte'
   import Session from './routes/Session.svelte'
+  import Enroll from './routes/Enroll.svelte'
+  import { clock } from './lib/clock.svelte'
+  import { formatAge } from './lib/format'
   import { router } from './lib/router.svelte'
   import { store } from './lib/store.svelte'
   import { surface } from './lib/surface.svelte'
@@ -30,15 +33,23 @@
   const waiting = $derived(store.queue.waiting.length + store.queue.reviews.length)
   const sessionId = $derived(router.path.match(/^\/sessions\/([^/]+)/)?.[1] ?? null)
   const reviewId = $derived(router.path.match(/^\/reviews\/([^/]+)/)?.[1] ?? null)
+  const enroll = $derived(router.path === '/nodes/enroll')
   const nav = $derived(
     sessionId || router.path === '/sessions'
       ? 'sessions'
-      : router.path === '/nodes'
+      : router.path === '/nodes' || enroll
         ? 'nodes'
         : router.path === '/new'
           ? 'new'
           : 'queue',
   )
+  const hubDown = $derived(store.mesh?.hub.state === 'unreachable')
+  const hubLabel = $derived.by(() => {
+    const hub = store.mesh?.hub
+    if (!hub || hub.state === 'disabled') return 'no hub'
+    if (hub.state === 'connected') return 'hub ok'
+    return `hub down ${formatAge(hub.since_ms, clock.now)}`
+  })
 </script>
 
 <div class="shell" class:narrow={collapsed}>
@@ -65,7 +76,7 @@
       <span class="lbl">New session</span>
     </a>
     <span class="sp"></span>
-    <div class="foot lbl">{store.node?.name ?? '…'} · {store.connected ? 'connected' : 'offline'}</div>
+    <div class="foot lbl">{store.node?.name ?? '…'} · {store.connected ? 'connected' : 'offline'} · {hubLabel}</div>
     <button class="collapse" type="button" onclick={toggleRail} title="Collapse">
       <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" /></svg>
       <span class="lbl">Collapse</span>
@@ -79,12 +90,20 @@
     {#if store.node?.state === 'refused'}
       <div class="banner crit">refusing to run harnesses <b>· {store.node.failed_check}: {store.node.failed_detail}</b></div>
     {/if}
+    <!-- Degraded is a state, not an error: quiet, persistent, not dismissable. -->
+    {#if hubDown}
+      <div class="banner dim">hub unreachable <b>· local sessions continue; approvals will be delivered when it returns; search is text-only</b></div>
+    {:else if store.reconnected !== null}
+      <div class="banner ok">hub reconnected <b>· {store.reconnected} item{store.reconnected === 1 ? '' : 's'} delivered</b></div>
+    {/if}
     {#if reviewId}
       <Approval id={reviewId} />
     {:else if sessionId}
       <Session id={sessionId} />
     {:else if nav === 'sessions'}
       <Queue only="sessions" />
+    {:else if enroll}
+      <Enroll />
     {:else if nav === 'nodes'}
       <Nodes />
     {:else if nav === 'new'}

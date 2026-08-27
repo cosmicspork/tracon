@@ -40,8 +40,10 @@ pub enum HubError {
 pub struct MeshClient {
     identity: Arc<Identity>,
     hub_url: String,
-    store: Arc<Store>,
-    bus: Bus,
+    pub(super) store: Arc<Store>,
+    pub(super) bus: Bus,
+    /// A handle to ourselves for tasks spawned from `&self` paths.
+    pub(super) weak: std::sync::Weak<MeshClient>,
     cfg: Arc<Config>,
     http: reqwest::Client,
     state: watch::Sender<MeshState>,
@@ -57,6 +59,11 @@ pub struct MeshClient {
     policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
     /// Invitations this node has open, by code.
     invites: Mutex<HashMap<String, enroll::Invite>>,
+    /// Commands this node sent and is waiting on, by command id.
+    pub(super) pending: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Result<Value, String>>>>,
+    /// Who runs commands addressed to this node. Set once the session manager
+    /// exists; until then commands are answered with an error.
+    pub(super) executor: std::sync::OnceLock<Arc<dyn super::forward::CommandExecutor>>,
 }
 
 impl MeshClient {
@@ -77,7 +84,8 @@ impl MeshClient {
             fingerprint: proto::enroll::fingerprint_hex(&self_id),
             ..Default::default()
         });
-        Arc::new(Self {
+        Arc::new_cyclic(|weak| Self {
+            weak: weak.clone(),
             identity: Arc::new(identity),
             hub_url,
             store: store.clone(),
@@ -100,7 +108,24 @@ impl MeshClient {
             peers: Mutex::new(HashMap::new()),
             policy,
             invites: Mutex::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
+            executor: std::sync::OnceLock::new(),
         })
+    }
+
+    pub fn set_executor(&self, executor: Arc<dyn super::forward::CommandExecutor>) {
+        let _ = self.executor.set(executor);
+    }
+
+    /// Is the hub connected and the peer recently heard from?
+    pub fn peer_reachable(&self, node_id: &str) -> bool {
+        matches!(self.state.borrow().hub, HubState::Connected)
+            && self
+                .store
+                .get_node(node_id)
+                .ok()
+                .flatten()
+                .is_some_and(|n| n.reachable != 0)
     }
 
     pub fn hub_url(&self) -> &str {
@@ -403,6 +428,32 @@ impl MeshClient {
                         return false;
                     }
                 }
+            }
+            Payload::Command { cmd_id, command } if env.is_direct() => {
+                self.run_command(sender.clone(), cmd_id.clone(), command.clone());
+                return true;
+            }
+            Payload::Ack { cmd_id, ok, err } if env.is_direct() => {
+                if let Some(tx) = self.pending.lock().unwrap().remove(cmd_id) {
+                    let _ = tx.send(match err {
+                        Some(e) => Err(e.clone()),
+                        None => Ok(ok.clone().unwrap_or(Value::Null)),
+                    });
+                }
+                return true;
+            }
+            Payload::EventsRequest {
+                session_id,
+                after_origin_seq,
+            } if env.is_direct() => {
+                self.answer_events_request(&sender, session_id, *after_origin_seq);
+                return true;
+            }
+            Payload::EventsBatch {
+                session_id, events, ..
+            } if env.is_direct() => {
+                let n = self.apply_events_batch(&sender, session_id, events);
+                return n > 0;
             }
             _ => {}
         }

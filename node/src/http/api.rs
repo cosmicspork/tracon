@@ -56,6 +56,8 @@ impl From<SessionError> for ApiError {
             | SessionError::BadBudget
             | SessionError::UnknownChannel(_) => StatusCode::UNPROCESSABLE_ENTITY,
             SessionError::NotFound => StatusCode::NOT_FOUND,
+            SessionError::PeerUnreachable(_) => StatusCode::GATEWAY_TIMEOUT,
+            SessionError::Remote(..) | SessionError::NoMesh => StatusCode::CONFLICT,
             // The node refusing to run harnesses, a version mismatch, or a
             // session that will not take the command are all state conflicts.
             SessionError::NodeRefused(_)
@@ -84,6 +86,26 @@ pub async fn list_nodes(State(s): State<AppState>) -> ApiResult<Json<serde_json:
     let rows = s.store().list_nodes()?;
     let mut out: Vec<serde_json::Value> = rows.iter().map(node_row_json).collect();
     out.sort_by_key(|n| n["is_self"] != true);
+    Ok(Json(json!(out)))
+}
+
+/// The channels this node holds keys for, and which nodes are bound to each.
+/// A standalone node (no hub) reports the two Phase 1 labels so the form has
+/// something to offer.
+pub async fn list_channels(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let mut out = Vec::new();
+    let rows = s.store().channel_list()?;
+    if rows.is_empty() {
+        for name in ["personal", "work"] {
+            out.push(json!({ "name": name, "nodes": [s.node_id] }));
+        }
+    }
+    for c in rows {
+        if c.name.starts_with('@') {
+            continue;
+        }
+        out.push(json!({ "name": c.name, "nodes": s.store().nodes_in_channel(&c.name)? }));
+    }
     Ok(Json(json!(out)))
 }
 
@@ -144,6 +166,13 @@ pub async fn get_session(
         .store()
         .get_session(&id)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no such session".into()))?;
+    // Opening a peer's session: ask its owner for whatever history this node
+    // has not mirrored yet. The answer arrives as events on the stream.
+    if row.node_id != s.node_id {
+        if let Some(mesh) = &s.mesh {
+            mesh.request_backfill(&row.node_id, &id);
+        }
+    }
     let waiting: Vec<_> = s
         .store()
         .open_permissions()?
@@ -226,17 +255,17 @@ pub async fn answer_permission(
     Ok(StatusCode::OK)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct VerdictBody {
     /// "approve" or "reject". Anything else is refused rather than guessed at.
-    verdict: String,
+    pub verdict: String,
     #[serde(default)]
-    reason: Option<String>,
+    pub reason: Option<String>,
     /// The operator's edits to what gets published, if they made any.
     #[serde(default)]
-    title: Option<String>,
+    pub title: Option<String>,
     #[serde(default)]
-    body: Option<String>,
+    pub body: Option<String>,
 }
 
 pub async fn get_review(
@@ -289,6 +318,57 @@ pub async fn decide_review(
         .store()
         .get_review(&id)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    // A verdict is node-local by construction: staleness and publishing need
+    // the worktree and the broker on the owner. Forward it there.
+    if r.node_id != s.node_id {
+        let mesh = s.mesh.as_ref().ok_or(ApiError(
+            StatusCode::CONFLICT,
+            "this review belongs to another node and this node is not on a mesh".into(),
+        ))?;
+        if !mesh.peer_reachable(&r.node_id) {
+            return Err(ApiError(
+                StatusCode::GATEWAY_TIMEOUT,
+                "the node that owns this review is unreachable; it cannot be decided until it returns".into(),
+            ));
+        }
+        let timeout = std::time::Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1));
+        return match mesh
+            .command(
+                &r.node_id,
+                proto::frame::Command::Verdict {
+                    review_id: id.clone(),
+                    verdict: b.verdict.clone(),
+                    reason: b.reason.clone(),
+                    title: b.title.clone(),
+                    body: b.body.clone(),
+                },
+                timeout,
+            )
+            .await
+        {
+            Ok(v) => Ok(Json(v)),
+            Err(crate::mesh::forward::CommandError::Timeout) => Err(ApiError(
+                StatusCode::GATEWAY_TIMEOUT,
+                "the node that owns this review did not answer".into(),
+            )),
+            Err(e) => Err(ApiError(StatusCode::CONFLICT, e.to_string())),
+        };
+    }
+    decide_local(&s, &id, b).await.map(Json)
+}
+
+/// The verdict as executed on the owning node.
+pub(crate) async fn decide_local(
+    s: &AppState,
+    id: &str,
+    b: VerdictBody,
+) -> ApiResult<serde_json::Value> {
+    let s = s.clone();
+    let id = id.to_string();
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
     if r.state == "approved" || r.state == "rejected" {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -321,7 +401,7 @@ pub async fn decide_review(
                 ));
             }
             s.manager.publish_queue().await;
-            Ok(Json(json!({ "state": "revising" })))
+            Ok(json!({ "state": "revising" }))
         }
         "reject" => {
             // A bare rejection teaches the agent nothing.
@@ -350,7 +430,7 @@ pub async fn decide_review(
                 ));
             }
             s.manager.publish_queue().await;
-            Ok(Json(json!({ "state": "rejected" })))
+            Ok(json!({ "state": "rejected" }))
         }
         "approve" => {
             // Stale means the branch is no longer what was reviewed. Approving
@@ -408,7 +488,7 @@ pub async fn decide_review(
                 Ok(published) => {
                     s.store().finish_publish(&id, &title, &body, &published)?;
                     s.manager.publish_queue().await;
-                    Ok(Json(json!({ "state": "approved", "published": published })))
+                    Ok(json!({ "state": "approved", "published": published }))
                 }
                 Err(e) => {
                     // The forge refused: undo the publishing claim so the review
@@ -624,4 +704,63 @@ pub async fn cancel_invite(
     mesh.invites().lock().unwrap().remove(&code);
     let _ = crate::mesh::enroll::cancel_invite(mesh.identity(), mesh.hub_url(), &code).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Commands other nodes forward to this one run exactly as local requests do.
+#[async_trait::async_trait]
+impl crate::mesh::forward::CommandExecutor for AppState {
+    async fn execute(&self, command: proto::frame::Command) -> Result<serde_json::Value, String> {
+        use proto::frame::Command as C;
+        let r: Result<serde_json::Value, ApiError> = match command {
+            C::Create { spec } => {
+                let spec: NewSession = serde_json::from_value(spec).map_err(|e| e.to_string())?;
+                self.manager
+                    .create(spec, self.adapter.clone())
+                    .await
+                    .map(|row| json!(row))
+                    .map_err(Into::into)
+            }
+            C::Prompt { session_id, text } => self
+                .manager
+                .prompt(&session_id, text)
+                .await
+                .map(|_| json!({ "accepted": true }))
+                .map_err(Into::into),
+            C::Answer {
+                permission_id,
+                option_id,
+            } => self
+                .manager
+                .answer(&permission_id, option_id)
+                .await
+                .map(|_| json!({ "answered": true }))
+                .map_err(Into::into),
+            C::Kill { session_id } => self
+                .manager
+                .kill(&session_id)
+                .await
+                .map(|_| json!({ "killed": true }))
+                .map_err(Into::into),
+            C::Verdict {
+                review_id,
+                verdict,
+                reason,
+                title,
+                body,
+            } => {
+                decide_local(
+                    self,
+                    &review_id,
+                    VerdictBody {
+                        verdict,
+                        reason,
+                        title,
+                        body,
+                    },
+                )
+                .await
+            }
+        };
+        r.map_err(|e| e.1)
+    }
 }

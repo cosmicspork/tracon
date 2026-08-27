@@ -10,11 +10,44 @@ export interface NodeInfo {
   harness: { id: string; pinned: string; found: string | null; mismatch: boolean }
   models: ModelOption[]
   checked_at_ms: number | null
+  /** The node that served this interface. */
+  is_self: boolean
+  /** False once the hub has not heard from a peer within the presence window. */
+  reachable: boolean
+  last_seen_ms: number | null
+  x25519_pub?: string | null
 }
 
 export interface ModelOption {
   value: string
   name: string
+}
+
+/** Hub reachability, from `/api/mesh` and the `mesh` stream event. */
+export interface MeshState {
+  hub: { state: 'disabled' } | { state: 'connected' } | { state: 'unreachable'; since_ms: number }
+  hub_url: string | null
+  node_id: string
+  fingerprint: string | null
+  last_ok_ms: number | null
+  queued: number
+  delivered_since_reconnect: number
+  undecryptable: number
+  last_error: string | null
+  last_refusal: string | null
+}
+
+export interface Invite {
+  code: string
+  display_code: string
+  url: string
+  qr_svg: string | null
+  channels: string[]
+  expires_at: number
+  state: 'waiting' | 'received' | 'admitted'
+  received: { node_id: string; x25519_pub: string; name: string; contract: number; facts: string } | null
+  received_fingerprint: string | null
+  own_fingerprint: string | null
 }
 
 export type SessionState =
@@ -53,6 +86,7 @@ export interface Session {
 
 export interface Event {
   seq: number
+  node_id: string
   session_id: string
   kind: string
   ref_id: string | null
@@ -64,6 +98,7 @@ export interface Event {
 export interface Permission {
   id: string
   session_id: string
+  node_id: string
   title: string
   kind: string | null
   raw_input: string | null
@@ -76,6 +111,7 @@ export interface Permission {
 export interface Review {
   id: string
   session_id: string
+  node_id: string
   channel: string
   kind: string
   title: string
@@ -90,7 +126,7 @@ export interface Review {
   base_ref: string
   added: number
   removed: number
-  state: 'new' | 'claimed' | 'revising' | 'approved' | 'rejected'
+  state: 'new' | 'claimed' | 'revising' | 'approved' | 'rejected' | 'gone'
   verdict_reason: string | null
   publish_result: string | null
   claimed_ms: number | null
@@ -112,6 +148,7 @@ export type Frame =
   | { type: 'queue'; waiting: Permission[] }
   | { type: 'reviews'; waiting: Review[] }
   | ({ type: 'node' } & NodeInfo)
+  | ({ type: 'mesh' } & MeshState)
 
 export const TERMINAL_STATES: SessionState[] = ['closed', 'killed_budget', 'failed']
 

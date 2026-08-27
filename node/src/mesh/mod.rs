@@ -3,6 +3,7 @@
 
 pub mod client;
 pub mod enroll;
+pub mod forward;
 pub mod frames;
 pub mod identity;
 pub mod mirror;

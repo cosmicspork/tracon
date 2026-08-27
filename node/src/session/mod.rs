@@ -24,7 +24,7 @@ use crate::{
     stream::{Bus, Frame},
 };
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NewSession {
     pub channel: String,
     pub repo_path: String,
@@ -37,6 +37,10 @@ pub struct NewSession {
     pub model: String,
     #[serde(default)]
     pub budget_tokens: Option<i64>,
+    /// The node to run on. Absent or this node: here. Another node: forwarded
+    /// to it, which validates and starts the session.
+    #[serde(default)]
+    pub node_id: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -53,6 +57,13 @@ pub enum SessionError {
     NotFound,
     #[error("channel {0} is not one this node holds keys for; create or enroll it first")]
     UnknownChannel(String),
+    /// The session belongs to another node: `(node_id, channel)`.
+    #[error("session is owned by node {0}")]
+    Remote(String, String),
+    #[error("node {0} did not answer; it may be unreachable")]
+    PeerUnreachable(String),
+    #[error("this node is not on a mesh; the session's owner cannot be reached")]
+    NoMesh,
     #[error("{0}")]
     Rejected(String),
     #[error(transparent)]
@@ -76,6 +87,9 @@ pub struct Manager {
     /// starts and dropped when it ends, so it authorises exactly one session
     /// for exactly as long as that session runs.
     tokens: Arc<Mutex<HashMap<String, (String, String)>>>,
+    /// The hub client, once one exists: commands for sessions other nodes own
+    /// are forwarded through it.
+    mesh: Arc<std::sync::OnceLock<Arc<crate::mesh::client::MeshClient>>>,
 }
 
 impl Manager {
@@ -96,6 +110,42 @@ impl Manager {
             node_id,
             live: Arc::new(Mutex::new(HashMap::new())),
             tokens: Arc::new(Mutex::new(HashMap::new())),
+            mesh: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    pub fn set_mesh(&self, mesh: Arc<crate::mesh::client::MeshClient>) {
+        let _ = self.mesh.set(mesh);
+    }
+
+    pub fn mesh(&self) -> Option<&Arc<crate::mesh::client::MeshClient>> {
+        self.mesh.get()
+    }
+
+    /// Run a command on the node that owns a session. A prompt to an owner
+    /// that is unreachable is queued and delivered when it returns (the
+    /// operator asked for it; the outbox keeps it); anything else must be
+    /// answered now or fail, because the operator is waiting on the result.
+    async fn forward(
+        &self,
+        node_id: &str,
+        command: proto::frame::Command,
+        queue_if_unreachable: bool,
+    ) -> Result<serde_json::Value, SessionError> {
+        let mesh = self.mesh.get().ok_or(SessionError::NoMesh)?;
+        let timeout = Duration::from_secs(self.cfg.mesh.command_timeout_secs.max(1));
+        if queue_if_unreachable && !mesh.peer_reachable(node_id) {
+            mesh.send_command(node_id, command)
+                .map_err(|e| SessionError::Rejected(e.to_string()))?;
+            return Ok(json!({ "queued": true }));
+        }
+        match mesh.command(node_id, command, timeout).await {
+            Ok(v) => Ok(v),
+            Err(crate::mesh::forward::CommandError::Timeout) => {
+                Err(SessionError::PeerUnreachable(node_id.to_string()))
+            }
+            Err(crate::mesh::forward::CommandError::Refused(m)) => Err(SessionError::Rejected(m)),
+            Err(crate::mesh::forward::CommandError::Local(m)) => Err(SessionError::Rejected(m)),
         }
     }
 
@@ -159,6 +209,28 @@ impl Manager {
     ) -> Result<SessionRow, SessionError> {
         if spec.model.trim().is_empty() {
             return Err(SessionError::ModelRequired);
+        }
+        // Asked to run elsewhere: the owner validates and starts it; its row
+        // arrives back both in the ack and, shortly, as a mirrored session.
+        if let Some(node) = spec.node_id.as_deref().filter(|n| *n != self.node_id) {
+            let mut remote = spec.clone();
+            remote.node_id = None;
+            let v = self
+                .forward(
+                    node,
+                    proto::frame::Command::Create {
+                        spec: json!(remote),
+                    },
+                    false,
+                )
+                .await?;
+            let row: SessionRow =
+                serde_json::from_value(v).map_err(|e| SessionError::Rejected(e.to_string()))?;
+            let _ = self.store.ensure_peer_node(node);
+            self.store.upsert_session_mirror(&row)?;
+            self.bus
+                .publish_untapped(Frame::Session(Box::new(row.clone())));
+            return Ok(row);
         }
         let budget = spec.budget_tokens.unwrap_or(self.cfg.session.budget_tokens);
         if budget <= 0 {
@@ -241,7 +313,9 @@ impl Manager {
                         ..Default::default()
                     },
                 );
-                let _ = this.store.append_event(&NewEvent {
+                // Recorded through the bus, not just the store: a client
+                // watching (here or on a peer) should see why it never started.
+                this.record(NewEvent {
                     session_id: id.clone(),
                     work_item_id: None,
                     kind: ek::ERROR.into(),
@@ -430,18 +504,47 @@ impl Manager {
                 .send(cmd)
                 .await
                 .map_err(|_| SessionError::Rejected("session is no longer running".into())),
-            None => Err(SessionError::Rejected(
-                "session is not running on this node".into(),
-            )),
+            // Not live here. Someone else's, or one of ours that has ended.
+            None => match self.store.get_session(id)? {
+                Some(row) if row.node_id != self.node_id => {
+                    Err(SessionError::Remote(row.node_id, row.channel))
+                }
+                _ => Err(SessionError::Rejected(
+                    "session is not running on this node".into(),
+                )),
+            },
         }
     }
 
     pub async fn prompt(&self, id: &str, text: String) -> Result<(), SessionError> {
         let (ack, wait) = oneshot::channel();
-        self.send(id, Command::Prompt { text, ack }).await?;
-        wait.await
-            .map_err(|_| SessionError::Rejected("session stopped".into()))?
-            .map_err(SessionError::Rejected)
+        match self
+            .send(
+                id,
+                Command::Prompt {
+                    text: text.clone(),
+                    ack,
+                },
+            )
+            .await
+        {
+            Ok(()) => wait
+                .await
+                .map_err(|_| SessionError::Rejected("session stopped".into()))?
+                .map_err(SessionError::Rejected),
+            Err(SessionError::Remote(node, _)) => self
+                .forward(
+                    &node,
+                    proto::frame::Command::Prompt {
+                        session_id: id.to_string(),
+                        text,
+                    },
+                    true,
+                )
+                .await
+                .map(|_| ()),
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn answer(&self, id: &str, option_id: String) -> Result<(), SessionError> {
@@ -450,22 +553,50 @@ impl Manager {
             .get_permission(id)?
             .ok_or(SessionError::NotFound)?;
         let (ack, wait) = oneshot::channel();
-        self.send(
-            &perm.session_id,
-            Command::Answer {
-                permission_id: id.to_string(),
-                option_id,
-                ack,
-            },
-        )
-        .await?;
-        wait.await
-            .map_err(|_| SessionError::Rejected("session stopped".into()))?
-            .map_err(SessionError::Rejected)
+        match self
+            .send(
+                &perm.session_id,
+                Command::Answer {
+                    permission_id: id.to_string(),
+                    option_id: option_id.clone(),
+                    ack,
+                },
+            )
+            .await
+        {
+            Ok(()) => wait
+                .await
+                .map_err(|_| SessionError::Rejected("session stopped".into()))?
+                .map_err(SessionError::Rejected),
+            Err(SessionError::Remote(node, _)) => self
+                .forward(
+                    &node,
+                    proto::frame::Command::Answer {
+                        permission_id: id.to_string(),
+                        option_id,
+                    },
+                    false,
+                )
+                .await
+                .map(|_| ()),
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn kill(&self, id: &str) -> Result<(), SessionError> {
-        self.send(id, Command::Kill).await
+        match self.send(id, Command::Kill).await {
+            Err(SessionError::Remote(node, _)) => self
+                .forward(
+                    &node,
+                    proto::frame::Command::Kill {
+                        session_id: id.to_string(),
+                    },
+                    false,
+                )
+                .await
+                .map(|_| ()),
+            other => other,
+        }
     }
 
     /// Graceful shutdown: ask every live session to end and wait briefly.

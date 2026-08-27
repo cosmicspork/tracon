@@ -2,6 +2,7 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
+  import { nodeById, nodeLabel, unreachableReason } from '../lib/nodes'
   import { permissionOptions, type Permission } from '../lib/types'
   import { store } from '../lib/store.svelte'
 
@@ -11,6 +12,8 @@
   let error = $state<string | null>(null)
 
   const options = $derived(permissionOptions(permission))
+  const owner = $derived(nodeById(store.nodes, permission.node_id))
+  const held = $derived(unreachableReason(store.nodes, store.mesh, permission.node_id))
   const command = $derived.by(() => {
     try {
       const input = JSON.parse(permission.raw_input ?? 'null')
@@ -40,7 +43,7 @@
   }
 </script>
 
-<div class="card" class:inline>
+<div class="card" class:inline class:held={held !== null}>
   <span class="bar"></span>
   {#if !inline}
     <span class="mono head">{formatAge(permission.created_ms, clock.now)}</span>
@@ -49,23 +52,27 @@
     <em>Permission</em>
     {permission.title}
     <small
-      >{permission.kind ?? 'tool'} · {formatExpiry(permission.expires_ms, clock.now)}{command &&
+      ><span class="chip" class:self={owner?.is_self} class:off={held !== null}>{nodeLabel(store.nodes, permission.node_id)}</span> · {permission.kind ?? 'tool'} · {formatExpiry(permission.expires_ms, clock.now)}{command &&
       command !== permission.title
         ? ` · ${command}`
         : ''}{error ? ` · ${error}` : ''}</small
     >
   </span>
   <span class="act">
-    {#each options.filter((o) => o.kind === 'reject_once') as o (o.option_id)}
-      <button class="lnk d" disabled={busy} onclick={() => answer(o.option_id)}
-        >{label(o.kind, o.name)}</button
-      >
-    {/each}
-    {#each options.filter((o) => o.kind === 'allow_once') as o (o.option_id)}
-      <button class="btn p" disabled={busy} onclick={() => answer(o.option_id)}
-        >{label(o.kind, o.name)}</button
-      >
-    {/each}
+    {#if held !== null}
+      <span class="why">{held} · cannot be decided until it returns</span>
+    {:else}
+      {#each options.filter((o) => o.kind === 'reject_once') as o (o.option_id)}
+        <button class="lnk d" disabled={busy} onclick={() => answer(o.option_id)}
+          >{label(o.kind, o.name)}</button
+        >
+      {/each}
+      {#each options.filter((o) => o.kind === 'allow_once') as o (o.option_id)}
+        <button class="btn p" disabled={busy} onclick={() => answer(o.option_id)}
+          >{label(o.kind, o.name)}</button
+        >
+      {/each}
+    {/if}
   </span>
 </div>
 
@@ -118,6 +125,23 @@
     gap: 12px;
     align-items: center;
     white-space: nowrap;
+  }
+  .why {
+    font: 11.5px var(--mono);
+    color: var(--dim);
+  }
+  /* Held: the owner cannot be reached, so nothing here is on you yet. */
+  .card.held {
+    background: linear-gradient(90deg, var(--wash-dim), var(--s1) 42%);
+  }
+  .card.held .bar {
+    background: var(--dim);
+  }
+  .card.held .t em {
+    color: var(--dim);
+  }
+  .t small .chip {
+    vertical-align: baseline;
   }
   @media (max-width: 700px) {
     .card {

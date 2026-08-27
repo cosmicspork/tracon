@@ -2,7 +2,9 @@
   import Log from '../components/Log.svelte'
   import PermissionCard from '../components/PermissionCard.svelte'
   import { api } from '../lib/api'
-  import { formatBudget, formatTokens } from '../lib/format'
+  import { clock } from '../lib/clock.svelte'
+  import { formatAge, formatBudget, formatTokens } from '../lib/format'
+  import { nodeById, nodeLabel, unreachableReason } from '../lib/nodes'
   import { isTerminal } from '../lib/types'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
@@ -18,6 +20,9 @@
   const session = $derived(store.sessions.get(id))
   const waiting = $derived(store.waitingFor(id))
   const busy = $derived(session?.turn_active === 1)
+  const owner = $derived(session ? nodeById(store.nodes, session.node_id) : undefined)
+  const remote = $derived(owner !== undefined && !owner.is_self)
+  const unreachable = $derived(session ? unreachableReason(store.nodes, store.mesh, session.node_id) : null)
 
   $effect(() => {
     void store.open(id)
@@ -86,6 +91,15 @@
     if (session.tokens_used >= session.budget_tokens) return 'over budget'
     return null
   })
+  // A prompt to an unreachable owner is queued on this node and sent when it
+  // returns; the box stays open and says so.
+  const placeholder = $derived(
+    unreachable !== null
+      ? `${unreachable} — the prompt is sent when it returns`
+      : inputReason
+        ? `Input disabled: ${inputReason}`
+        : 'Send a prompt. Drafts are held on the node.',
+  )
 </script>
 
 {#if !session}
@@ -94,6 +108,11 @@
   <header class="sess">
     <a class="lnk" href="/">‹ Queue</a>
     <span class="model">{session.model}</span>
+    <span class="chip" class:self={owner?.is_self} class:off={unreachable !== null}
+      >{nodeLabel(store.nodes, session.node_id)}{unreachable !== null && owner?.last_seen_ms
+        ? ` · last seen ${formatAge(owner.last_seen_ms, clock.now)}`
+        : ''}</span
+    >
     <span class="mono">{session.worktree_path ?? session.repo_path}</span>
     <span class="mono">{session.branch}</span>
     <span class="sp"></span>
@@ -107,7 +126,7 @@
       <span class="mono">${session.cost_usd.toFixed(2)}</span>
     {/if}
     {#if !isTerminal(session.state)}
-      <button class="lnk d" onclick={kill}>{confirmingKill ? 'Kill — tap again' : 'Kill'}</button>
+      <button class="lnk d" onclick={kill} disabled={unreachable !== null}>{confirmingKill ? 'Kill — tap again' : 'Kill'}</button>
       {#if confirmingKill}
         <button class="lnk" onclick={() => (confirmingKill = false)}>Cancel</button>
       {/if}
@@ -123,6 +142,9 @@
     </div>
   {:else if session.state === 'failed'}
     <div class="banner crit">failed <b>· {session.last_error ?? 'harness error'}</b></div>
+  {/if}
+  {#if remote && unreachable !== null}
+    <div class="banner dim">{unreachable} <b>· the log resumes when {owner?.name ?? 'it'} returns</b></div>
   {/if}
 
   <Log events={store.events} openChunks={store.openChunks} toolProgress={store.toolProgress} />
@@ -140,7 +162,7 @@
       <textarea
         bind:value={draft}
         oninput={onDraftInput}
-        placeholder={inputReason ? `Input disabled: ${inputReason}` : 'Send a prompt. Drafts are held on the node.'}
+        {placeholder}
         disabled={inputReason !== null && !busy}
         onkeydown={(e) => {
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void send()
