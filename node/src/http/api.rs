@@ -28,6 +28,8 @@ pub struct AppState {
     pub tools: Arc<crate::mcp::Tools>,
     /// The hub client, when a hub is configured.
     pub mesh: Option<Arc<crate::mesh::client::MeshClient>>,
+    /// Who the operator API answers to.
+    pub auth: Arc<super::auth::AuthState>,
 }
 
 impl AppState {
@@ -37,6 +39,12 @@ impl AppState {
 }
 
 pub struct ApiError(StatusCode, String);
+
+impl ApiError {
+    pub fn new(code: StatusCode, message: impl Into<String>) -> Self {
+        Self(code, message.into())
+    }
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {

@@ -84,6 +84,7 @@ impl Harness {
             node_id: "n1".into(),
             tools,
             mesh: None,
+            auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
         });
         Self { app, store }
     }
@@ -795,6 +796,7 @@ async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
         node_id: "n1".into(),
         tools,
         mesh: None,
+        auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
     });
     (app, store, manager)
 }
@@ -1109,6 +1111,7 @@ async fn a_session_starts_with_its_orientation_recorded() {
         node_id: "n1".into(),
         tools: tools.clone(),
         mesh: None,
+        auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
     };
     let harness_app = tracon::http::harness_router(state);
     let token = manager

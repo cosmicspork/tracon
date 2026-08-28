@@ -176,6 +176,7 @@ async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> 
         node_id: "n1".into(),
         tools,
         mesh: None,
+        auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
     };
     let app = tracon::http::router(state.clone());
     let harness = tracon::http::harness_router(state);

@@ -135,6 +135,7 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
         node_id: id.node_id(),
         tools,
         mesh: Some(client.clone()),
+        auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
     };
     client.set_executor(Arc::new(state.clone()));
     Node {

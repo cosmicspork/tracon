@@ -61,6 +61,8 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 }
 
 export const api = {
+  login: (token: string) => call<{ ok: boolean }>('POST', '/api/login', { token }),
+  logout: () => call<{ ok: boolean }>('POST', '/api/logout'),
   node: () => call<NodeInfo>('GET', '/api/node'),
   nodes: () => call<NodeInfo[]>('GET', '/api/nodes'),
   mesh: () => call<MeshState>('GET', '/api/mesh'),

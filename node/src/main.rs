@@ -63,6 +63,9 @@ enum Command {
     /// The work ledger: items, dependencies, ready work.
     #[command(subcommand)]
     Work(WorkCommand),
+    /// Who may reach this node's API from off this machine.
+    #[command(subcommand)]
+    Auth(AuthCommand),
     /// Approvals and tokens per accepted change, human and agent time.
     Metrics {
         #[arg(long)]
@@ -113,6 +116,18 @@ enum DocCommand {
         #[arg(long, default_value = "personal")]
         channel: String,
     },
+}
+
+#[derive(Subcommand)]
+enum AuthCommand {
+    /// Issue an operator token, printed once. Until one exists this node
+    /// answers only to loopback; with one, a client that presents it gets a
+    /// cookie and can reach the node from anywhere.
+    Issue,
+    /// Remove the operator token and log every client out: loopback only again.
+    Revoke,
+    /// What is logged in, and whether a token is set at all.
+    Sessions,
 }
 
 #[derive(Subcommand)]
@@ -326,6 +341,7 @@ async fn main() -> Result<()> {
         Command::Doc(cmd) => doc_command(cmd).await,
         Command::Memory(cmd) => memory_command(cmd).await,
         Command::Work(cmd) => work_command(cmd).await,
+        Command::Auth(cmd) => auth_command(cmd).await,
         Command::Metrics { channel, days } => {
             use reqwest::Method;
             let since = tracon::store::now_ms() - days.max(1) * 86_400_000;
@@ -810,6 +826,14 @@ async fn node_call(
 ) -> Result<serde_json::Value> {
     let url = format!("{}{path}", node_url());
     let mut req = reqwest::Client::new().request(method, &url);
+    // A node on this machine knows the caller is the operator by the loopback
+    // address. One reached over the network wants the token; the CLI holds no
+    // cookie jar, so it presents the token itself.
+    if let Ok(token) = std::env::var("TRACON_TOKEN") {
+        if !token.is_empty() {
+            req = req.bearer_auth(token);
+        }
+    }
     if let Some(b) = body {
         req = req.json(&b);
     }
@@ -828,6 +852,61 @@ async fn node_call(
         anyhow::bail!("{status}: {msg}");
     }
     Ok(v)
+}
+
+async fn auth_command(cmd: AuthCommand) -> Result<()> {
+    use reqwest::Method;
+    match cmd {
+        AuthCommand::Issue => {
+            use base64::Engine;
+            use rand::RngCore;
+            let mut raw = [0u8; 32];
+            rand::rng().fill_bytes(&mut raw);
+            let token = format!(
+                "trc1.{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+            );
+            // Only the hash is sent. The node cannot show the token again, and
+            // a database read cannot recover it.
+            let hash = tracon::http::auth::hash(&token);
+            node_call(
+                Method::POST,
+                "/api/auth/token",
+                Some(serde_json::json!({ "token_hash": hash })),
+                None,
+            )
+            .await?;
+            println!("{token}");
+            println!();
+            println!("Shown once. Any client that presents it gets a cookie for this node.");
+            println!("Every client logged in with the previous token has been logged out.");
+            Ok(())
+        }
+        AuthCommand::Revoke => {
+            node_call(Method::DELETE, "/api/auth/token", None, None).await?;
+            println!("token removed; this node answers only to loopback again");
+            Ok(())
+        }
+        AuthCommand::Sessions => {
+            let v = node_call(Method::GET, "/api/auth/sessions", None, None).await?;
+            if v["configured"].as_bool() != Some(true) {
+                println!("no operator token set; this node answers only to loopback");
+            }
+            let clients = v["clients"].as_array().cloned().unwrap_or_default();
+            if clients.is_empty() {
+                println!("no clients logged in");
+            }
+            for c in clients {
+                println!(
+                    "{}  last seen {}  {}",
+                    c["id"].as_str().unwrap_or(""),
+                    c["last_seen_ms"].as_i64().unwrap_or(0),
+                    c["user_agent"].as_str().unwrap_or("-"),
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn doc_command(cmd: DocCommand) -> Result<()> {

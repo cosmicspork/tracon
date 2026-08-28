@@ -2,7 +2,7 @@
 // On reconnect everything is refetched and ephemeral state dropped, so a client
 // crash costs nothing (the client crash invariant).
 
-import { api } from './api'
+import { api, ApiError } from './api'
 import { upsertNode } from './nodes'
 import type {
   ChannelInfo,
@@ -45,6 +45,8 @@ class Store {
   /** Latest ephemeral status per tool call. */
   toolProgress = $state<Map<string, string>>(new Map())
   connected = $state(false)
+  /** The node wants a login: show the gate rather than an empty interface. */
+  authRequired = $state(false)
   lastSeq = 0
 
   private source: EventSource | null = null
@@ -75,6 +77,9 @@ class Store {
     }
     this.source.onerror = () => {
       this.connected = false
+      // EventSource reports no status, so a node that wants a login looks
+      // exactly like a node that is down. Ask a request that can answer.
+      void this.probeAuth()
     }
     for (const name of [
       'event',
@@ -110,9 +115,46 @@ class Store {
       this.queue = queue
       this.sessions = new Map(sessions.map((s) => [s.id, s]))
       if (this.openSession) await this.loadEvents(this.openSession)
-    } catch {
-      // The node is unreachable; the stream's error handler shows it.
+      this.authRequired = false
+    } catch (e) {
+      // A node asking for a login is not a node that is down, and the two want
+      // different screens.
+      if (e instanceof ApiError && e.status === 401) this.authRequired = true
+      // Otherwise the node is unreachable; the stream's error handler shows it.
     }
+  }
+
+  /** Distinguish "log in" from "unreachable" after the stream drops. */
+  private async probeAuth() {
+    try {
+      await api.node()
+      this.authRequired = false
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        this.authRequired = true
+        // Stop reconnecting at a door that will not open until the operator
+        // logs in; `signIn` reconnects.
+        this.source?.close()
+        this.source = null
+      }
+    }
+  }
+
+  /** Exchange the operator token for a cookie, then start over. */
+  async signIn(token: string) {
+    await api.login(token)
+    this.authRequired = false
+    this.source?.close()
+    this.source = null
+    this.wasConnected = false
+    this.connect()
+  }
+
+  async signOut() {
+    await api.logout()
+    this.source?.close()
+    this.source = null
+    this.authRequired = true
   }
 
   async open(sessionId: string) {

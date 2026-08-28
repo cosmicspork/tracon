@@ -131,6 +131,7 @@ async fn harness(broker_toml: &str, allow: &[&str]) -> Harness {
         node_id: "n1".into(),
         tools,
         mesh: None,
+        auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
     });
     Harness {
         app,
@@ -434,6 +435,7 @@ async fn a_channel_at_its_daily_ceiling_is_refused_and_told_once_per_session() {
                 session: Default::default(),
             }),
             mesh: None,
+            auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
         });
         let req = Request::builder()
             .method("GET")
