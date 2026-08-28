@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.0](https://github.com/cosmicspork/tracon/compare/v0.2.2...v0.3.0) (2026-08-28)
+
+
+### Features
+
+* **broker:** seal the credential store and hand credentials off over the mesh ([#37](https://github.com/cosmicspork/tracon/issues/37)) ([38c86c8](https://github.com/cosmicspork/tracon/commit/38c86c847b26cd075b8f05b20f646dec0b82b8dd))
+* **corpus:** memory and document tools, bundle v3, corpus API and CLI ([#44](https://github.com/cosmicspork/tracon/issues/44)) ([92d3fc6](https://github.com/cosmicspork/tracon/commit/92d3fc6ee646abb8a902bd7c3775ea08894e42eb))
+* **corpus:** per-session orientation from the corpus, the node, and the policy ([#45](https://github.com/cosmicspork/tracon/issues/45)) ([77ed9c5](https://github.com/cosmicspork/tracon/commit/77ed9c5e6d62ffa81e23d7c6475dccb6cb9fb223))
+* **corpus:** replicated documents and memory, recall, project identity, mesh sync ([#43](https://github.com/cosmicspork/tracon/issues/43)) ([16ceccf](https://github.com/cosmicspork/tracon/commit/16ceccf6f4d97d43ada0d7387a74e570a81e6d4c))
+* **gateway:** broker model credentials through a node-owned gateway ([#39](https://github.com/cosmicspork/tracon/issues/39)) ([6f47c4e](https://github.com/cosmicspork/tracon/commit/6f47c4ef23cb7a5cbe71624ca3677ce628d3a665))
+* **hub:** encrypted snapshots to object storage, and restore ([#48](https://github.com/cosmicspork/tracon/issues/48)) ([39a910c](https://github.com/cosmicspork/tracon/commit/39a910cc155a0f58719dadddd9ccddd1ec587c69))
+* **hub:** the hub as a replica for channels it is handed ([#46](https://github.com/cosmicspork/tracon/issues/46)) ([82037b1](https://github.com/cosmicspork/tracon/commit/82037b19ded793be13632ebb3ad19602b471fa9f))
+* **memory:** nightly promotion batches through the approval queue ([#47](https://github.com/cosmicspork/tracon/issues/47)) ([a0fe86e](https://github.com/cosmicspork/tracon/commit/a0fe86e05f9472c2aa643de30de557a5428ac40c))
+* **proto:** record changesets and contract version 2 ([#41](https://github.com/cosmicspork/tracon/issues/41)) ([036309f](https://github.com/cosmicspork/tracon/commit/036309f2dde7a0bc5cd70f2046d68adb4d3731f8))
+* **providers:** connect a model provider through the harness's own login ([#40](https://github.com/cosmicspork/tracon/issues/40)) ([55e96ac](https://github.com/cosmicspork/tracon/commit/55e96acf0fa070f5480fef0850dedef986650f9b))
+* **spa:** documents screen with search, markdown view, and a conflict-aware editor ([#49](https://github.com/cosmicspork/tracon/issues/49)) ([62e00b1](https://github.com/cosmicspork/tracon/commit/62e00b1e3255791bed15c56daa22bc68506cb2d9))
+* **sync:** shared record schema, HLC, and last-writer-wins changesets ([#42](https://github.com/cosmicspork/tracon/issues/42)) ([ce74f49](https://github.com/cosmicspork/tracon/commit/ce74f49e3887ee8dfefa8df6bb9f330dec2ccc81))
+
 ## [0.2.2](https://github.com/cosmicspork/tracon/compare/v0.2.1...v0.2.2) (2026-08-28)
 
 
