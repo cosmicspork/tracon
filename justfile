@@ -62,3 +62,14 @@ cross target="x86_64-unknown-linux-musl": spa
     rustup target add {{target}}
     cargo zigbuild --release --target {{target}}
     @file target/{{target}}/release/tracon
+
+# The desktop wrapper: its own workspace, and it needs webkit and gtk headers.
+# On an immutable host, build it in a container that has them:
+#   distrobox create --name tracon-build --image registry.fedoraproject.org/fedora:44 --yes
+#   distrobox enter tracon-build -- sudo dnf install -y \
+#     webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel rust cargo clippy rustfmt
+wrapper:
+    distrobox enter tracon-build -- bash -c 'cd {{justfile_directory()}}/wrapper && cargo build --release'
+
+wrapper-check:
+    distrobox enter tracon-build -- bash -c 'cd {{justfile_directory()}}/wrapper && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test'

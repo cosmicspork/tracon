@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["proto", "sync", "node", "hub"]
+# The desktop wrapper is its own workspace: building it needs webkit2gtk and
+# gtk development headers, and the node and hub must stay buildable on a
+# machine that has neither.
+exclude = ["wrapper"]
 
 [workspace.package]
 version = "0.4.0"

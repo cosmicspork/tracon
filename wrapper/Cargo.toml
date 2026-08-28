@@ -1,0 +1,26 @@
+# Its own workspace, deliberately: building this needs webkit2gtk and gtk
+# development headers, and the node and hub must stay buildable on a machine
+# that has neither. `cargo test` at the repo root never reaches here.
+[package]
+name = "tracon-wrapper"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+repository = "https://github.com/cosmicspork/tracon"
+description = "Tray client for a tracon node that is already running"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+futures-util = "0.3"
+
+[profile.release]
+strip = true
