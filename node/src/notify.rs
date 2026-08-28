@@ -52,12 +52,15 @@ impl Kind {
 
     /// What a run of them is called when there are too many to list.
     fn plural(&self, n: usize) -> String {
-        let noun = match self {
-            Kind::Permission => "approval",
-            Kind::Review => "review",
-            Kind::Promotion => "memory batch",
+        let noun = match (self, n) {
+            (Kind::Permission, 1) => "approval",
+            (Kind::Permission, _) => "approvals",
+            (Kind::Review, 1) => "review",
+            (Kind::Review, _) => "reviews",
+            (Kind::Promotion, 1) => "memory batch",
+            (Kind::Promotion, _) => "memory batches",
         };
-        format!("{n} {noun}{} waiting", if n == 1 { "" } else { "s" })
+        format!("{n} {noun} waiting")
     }
 }
 
