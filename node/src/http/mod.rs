@@ -33,6 +33,19 @@ pub fn router(state: AppState) -> Router {
         .route("/api/node", get(api::get_node))
         .route("/api/node/refresh-models", post(api::refresh_models))
         .route("/api/usage", get(api::usage))
+        .route("/api/docs", get(api::list_docs))
+        .route(
+            "/api/docs/{channel}/{slug}",
+            get(api::get_doc).put(api::put_doc).delete(api::delete_doc),
+        )
+        .route(
+            "/api/memories",
+            get(api::list_memories).post(api::add_memory),
+        )
+        .route(
+            "/api/memories/{id}",
+            axum::routing::delete(api::delete_memory),
+        )
         .route("/api/providers", get(api::list_providers))
         .route("/api/providers/{name}/connect", post(api::connect_provider))
         .route("/api/providers/{name}/code", post(api::provider_code))

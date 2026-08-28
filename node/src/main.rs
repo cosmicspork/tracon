@@ -54,6 +54,83 @@ enum Command {
     /// The credential store: what the node brokers, sealed under its identity.
     #[command(subcommand)]
     Credential(CredentialCommand),
+    /// Documents on the running node's corpus (talks to `tracon serve`).
+    #[command(subcommand)]
+    Doc(DocCommand),
+    /// Memories on the running node's corpus (talks to `tracon serve`).
+    #[command(subcommand)]
+    Memory(MemoryCommand),
+}
+
+#[derive(Subcommand)]
+enum DocCommand {
+    /// Import a notebook directory: flat `<kind>-<slug>.md` files.
+    Import {
+        dir: std::path::PathBuf,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
+    /// List documents, optionally on one channel.
+    Ls {
+        #[arg(long)]
+        channel: Option<String>,
+    },
+    /// Print a document's body.
+    Get {
+        slug: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
+    /// Create or replace a document from a file (or stdin with `-`).
+    Put {
+        slug: String,
+        file: std::path::PathBuf,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
+    /// Delete a document.
+    Rm {
+        slug: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
+    /// Write every document on a channel to a directory as `<slug>.md`.
+    Export {
+        dir: std::path::PathBuf,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryCommand {
+    /// List memories on a channel.
+    Ls {
+        #[arg(long, default_value = "personal")]
+        channel: String,
+        #[arg(long)]
+        state: Option<String>,
+    },
+    /// Add a directive (or another kind with --kind).
+    Add {
+        body: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+        #[arg(long, default_value = "directive")]
+        kind: String,
+        #[arg(long, default_value = "global")]
+        scope: String,
+        #[arg(long)]
+        scope_ref: Option<String>,
+    },
+    /// Remove a memory by id.
+    Rm { id: String },
+    /// Recall, as a session would.
+    Recall {
+        query: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -157,6 +234,8 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Credential(cmd) => credential_command(cmd).await,
+        Command::Doc(cmd) => doc_command(cmd).await,
+        Command::Memory(cmd) => memory_command(cmd).await,
         Command::Policy(PolicyCommand::Push) => {
             let cfg = config::Config::load();
             let hub = cfg
@@ -532,6 +611,251 @@ fn create_channel(
     }
     store.node_channel_add(&id.node_id(), name)?;
     Ok(())
+}
+
+/// The running node's operator API. The CLI goes through it rather than the
+/// store so every write is published to the mesh like any other.
+fn node_url() -> String {
+    std::env::var("TRACON_URL").unwrap_or_else(|_| "http://127.0.0.1:7420".into())
+}
+
+async fn node_call(
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+    if_match: Option<&str>,
+) -> Result<serde_json::Value> {
+    let url = format!("{}{path}", node_url());
+    let mut req = reqwest::Client::new().request(method, &url);
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    if let Some(h) = if_match {
+        req = req.header("if-match", h);
+    }
+    let res = req
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("{url}: {e} (is `tracon serve` running? set TRACON_URL)"))?;
+    let status = res.status();
+    let text = res.text().await.unwrap_or_default();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    if !status.is_success() {
+        let msg = v["error"]["message"].as_str().unwrap_or(&text).to_string();
+        anyhow::bail!("{status}: {msg}");
+    }
+    Ok(v)
+}
+
+async fn doc_command(cmd: DocCommand) -> Result<()> {
+    use reqwest::Method;
+    match cmd {
+        DocCommand::Import { dir, channel } => {
+            let (docs, skipped) = tracon::corpus::import::read_dir(&dir)?;
+            for s in &skipped {
+                eprintln!("skipped {s}");
+            }
+            let mut n = 0;
+            for d in docs {
+                node_call(
+                    Method::PUT,
+                    &format!("/api/docs/{channel}/{}", d.slug),
+                    Some(serde_json::json!({ "body": d.body })),
+                    None,
+                )
+                .await?;
+                println!("{:<14} {}", d.kind, d.slug);
+                n += 1;
+            }
+            println!(
+                "{n} document{} imported into {channel}",
+                if n == 1 { "" } else { "s" }
+            );
+            Ok(())
+        }
+        DocCommand::Ls { channel } => {
+            let q = channel.map(|c| format!("?channel={c}")).unwrap_or_default();
+            let v = node_call(Method::GET, &format!("/api/docs{q}"), None, None).await?;
+            for d in v["docs"].as_array().cloned().unwrap_or_default() {
+                println!(
+                    "{:<10} {:<14} {:<36} {}",
+                    d["channel"].as_str().unwrap_or(""),
+                    d["kind"].as_str().unwrap_or(""),
+                    d["slug"].as_str().unwrap_or(""),
+                    d["title"].as_str().unwrap_or("")
+                );
+            }
+            Ok(())
+        }
+        DocCommand::Get { slug, channel } => {
+            let v = node_call(
+                Method::GET,
+                &format!("/api/docs/{channel}/{slug}"),
+                None,
+                None,
+            )
+            .await?;
+            print!("{}", v["body"].as_str().unwrap_or(""));
+            Ok(())
+        }
+        DocCommand::Put {
+            slug,
+            file,
+            channel,
+        } => {
+            let body = if file.as_os_str() == "-" {
+                let mut s = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+                s
+            } else {
+                std::fs::read_to_string(&file)?
+            };
+            let v = node_call(
+                Method::PUT,
+                &format!("/api/docs/{channel}/{slug}"),
+                Some(serde_json::json!({ "body": body })),
+                None,
+            )
+            .await?;
+            println!("{slug} {}", v["hash"].as_str().unwrap_or(""));
+            Ok(())
+        }
+        DocCommand::Rm { slug, channel } => {
+            node_call(
+                Method::DELETE,
+                &format!("/api/docs/{channel}/{slug}"),
+                None,
+                None,
+            )
+            .await?;
+            println!("removed {slug}");
+            Ok(())
+        }
+        DocCommand::Export { dir, channel } => {
+            std::fs::create_dir_all(&dir)?;
+            let v = node_call(
+                Method::GET,
+                &format!("/api/docs?channel={channel}"),
+                None,
+                None,
+            )
+            .await?;
+            let mut n = 0;
+            for d in v["docs"].as_array().cloned().unwrap_or_default() {
+                let slug = d["slug"].as_str().unwrap_or("").to_string();
+                let full = node_call(
+                    Method::GET,
+                    &format!("/api/docs/{channel}/{slug}"),
+                    None,
+                    None,
+                )
+                .await?;
+                std::fs::write(
+                    dir.join(format!("{slug}.md")),
+                    full["body"].as_str().unwrap_or(""),
+                )?;
+                n += 1;
+            }
+            println!(
+                "{n} document{} written to {}",
+                if n == 1 { "" } else { "s" },
+                dir.display()
+            );
+            Ok(())
+        }
+    }
+}
+
+async fn memory_command(cmd: MemoryCommand) -> Result<()> {
+    use reqwest::Method;
+    match cmd {
+        MemoryCommand::Ls { channel, state } => {
+            let q = state.map(|s| format!("&state={s}")).unwrap_or_default();
+            let v = node_call(
+                Method::GET,
+                &format!("/api/memories?channel={channel}{q}"),
+                None,
+                None,
+            )
+            .await?;
+            for m in v["memories"].as_array().cloned().unwrap_or_default() {
+                println!(
+                    "{}  {:<9} {:<9} {:<8} {:.2}  {}",
+                    &m["id"].as_str().unwrap_or("")[..8.min(m["id"].as_str().unwrap_or("").len())],
+                    m["kind"].as_str().unwrap_or(""),
+                    m["state"].as_str().unwrap_or(""),
+                    m["scope"].as_str().unwrap_or(""),
+                    m["confidence"].as_f64().unwrap_or(0.0),
+                    m["body"]
+                        .as_str()
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                );
+            }
+            Ok(())
+        }
+        MemoryCommand::Add {
+            body,
+            channel,
+            kind,
+            scope,
+            scope_ref,
+        } => {
+            let v = node_call(
+                Method::POST,
+                "/api/memories",
+                Some(serde_json::json!({ "channel": channel, "kind": kind, "scope": scope, "scope_ref": scope_ref, "body": body })),
+                None,
+            )
+            .await?;
+            println!("{}", v["id"].as_str().unwrap_or(""));
+            Ok(())
+        }
+        MemoryCommand::Rm { id } => {
+            node_call(Method::DELETE, &format!("/api/memories/{id}"), None, None).await?;
+            println!("removed {id}");
+            Ok(())
+        }
+        MemoryCommand::Recall { query, channel } => {
+            let q = urlencoding(&query);
+            let v = node_call(
+                Method::GET,
+                &format!("/api/memories?channel={channel}&q={q}"),
+                None,
+                None,
+            )
+            .await?;
+            for h in v["hits"].as_array().cloned().unwrap_or_default() {
+                println!(
+                    "{:<9} {:<28} {}",
+                    h["kind"].as_str().unwrap_or(""),
+                    h["slug"].as_str().unwrap_or(""),
+                    h["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn urlencoding(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 async fn credential_command(cmd: CredentialCommand) -> Result<()> {

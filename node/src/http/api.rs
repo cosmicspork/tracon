@@ -534,6 +534,195 @@ pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Valu
     ))
 }
 
+// ---- corpus: documents, memories, recall ----
+
+#[derive(Deserialize, Default)]
+pub struct DocQuery {
+    pub channel: Option<String>,
+    pub q: Option<String>,
+    pub kind: Option<String>,
+}
+
+/// `GET /api/docs?channel=&q=&kind=`: the list (no bodies), or search hits.
+pub async fn list_docs(
+    State(s): State<AppState>,
+    Query(q): Query<DocQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if let Some(text) = q.q.as_deref().filter(|t| !t.trim().is_empty()) {
+        let hits = s
+            .store()
+            .doc_search(q.channel.as_deref(), q.kind.as_deref(), text, 50)?;
+        return Ok(Json(json!({ "hits": hits })));
+    }
+    let docs = s.store().doc_list(q.channel.as_deref())?;
+    let docs: Vec<_> = docs
+        .into_iter()
+        .filter(|d| q.kind.as_deref().is_none_or(|k| k == d.kind))
+        .collect();
+    Ok(Json(json!({ "docs": docs })))
+}
+
+pub async fn get_doc(
+    State(s): State<AppState>,
+    Path((channel, slug)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let doc = s.store().doc_get(&channel, &slug)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        format!("no document {slug} on {channel}"),
+    ))?;
+    Ok(Json(json!(doc)))
+}
+
+#[derive(Deserialize)]
+pub struct PutDoc {
+    pub body: String,
+}
+
+/// `PUT /api/docs/{channel}/{slug}` with `If-Match: <hash>` to refuse
+/// overwriting an edit not yet seen; a conflict returns 412 with the current
+/// hash and body, like the notebook did.
+pub async fn put_doc(
+    State(s): State<AppState>,
+    Path((channel, slug)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<PutDoc>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let if_match = headers
+        .get("if-match")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim_matches('"').to_string());
+    match crate::mcp::docs::write_document(
+        s.store(),
+        s.manager.bus(),
+        &s.node_id,
+        &channel,
+        &slug,
+        &body.body,
+        if_match.as_deref(),
+    ) {
+        Ok(doc) => Json(json!(doc)).into_response(),
+        Err(crate::mcp::docs::WriteError::Conflict { hash, body }) => (
+            StatusCode::PRECONDITION_FAILED,
+            Json(json!({ "error": { "message": "the document changed since it was read" }, "hash": hash, "body": body })),
+        )
+            .into_response(),
+        Err(crate::mcp::docs::WriteError::Slug(m)) => {
+            ApiError(StatusCode::BAD_REQUEST, format!("slug {m:?} is not usable")).into_response()
+        }
+        Err(crate::mcp::docs::WriteError::Store(e)) => ApiError::from(e).into_response(),
+    }
+}
+
+pub async fn delete_doc(
+    State(s): State<AppState>,
+    Path((channel, slug)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let removed =
+        crate::mcp::docs::delete_document(s.store(), s.manager.bus(), &s.node_id, &channel, &slug)?;
+    if !removed {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no document {slug} on {channel}"),
+        ));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize, Default)]
+pub struct MemoryQuery {
+    pub channel: Option<String>,
+    pub state: Option<String>,
+    pub q: Option<String>,
+    pub project_id: Option<String>,
+}
+
+/// `GET /api/memories?channel=&state=` lists; with `q=` it recalls.
+pub async fn list_memories(
+    State(s): State<AppState>,
+    Query(q): Query<MemoryQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let channel = q.channel.clone().ok_or(ApiError(
+        StatusCode::BAD_REQUEST,
+        "channel is required".into(),
+    ))?;
+    if let Some(text) = q.q.as_deref().filter(|t| !t.trim().is_empty()) {
+        let hits = s
+            .store()
+            .recall(&channel, text, q.project_id.as_deref(), None, None, 20)?;
+        return Ok(Json(json!({ "hits": hits })));
+    }
+    let rows = s.store().memory_list(&channel, q.state.as_deref(), 200)?;
+    Ok(Json(json!({ "memories": rows })))
+}
+
+#[derive(Deserialize)]
+pub struct NewMemory {
+    pub channel: String,
+    /// `directive` is the operator's kind; anything else is allowed too.
+    #[serde(default = "directive")]
+    pub kind: String,
+    #[serde(default = "global")]
+    pub scope: String,
+    #[serde(default)]
+    pub scope_ref: Option<String>,
+    pub body: String,
+}
+fn directive() -> String {
+    "directive".into()
+}
+fn global() -> String {
+    "global".into()
+}
+
+/// `POST /api/memories`: the operator writes a memory, a directive by default.
+pub async fn add_memory(
+    State(s): State<AppState>,
+    Json(m): Json<NewMemory>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if m.body.trim().is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "body is required".into()));
+    }
+    let id = crate::corpus::new_id();
+    let now = crate::store::now_ms();
+    crate::corpus::write(
+        s.store(),
+        s.manager.bus(),
+        &s.node_id,
+        &m.channel,
+        "memory",
+        tracon_sync::ChangeOp::Upsert,
+        &id,
+        json!({
+            "channel": m.channel, "scope": m.scope, "scope_ref": m.scope_ref, "kind": m.kind, "body": m.body.trim(),
+            "source_session": null, "source_node": s.node_id, "confidence": 1.0, "state": "active",
+            "created_ms": now, "updated_ms": now,
+        }),
+    )?;
+    Ok(Json(json!({ "id": id })))
+}
+
+pub async fn delete_memory(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let row = s
+        .store()
+        .memory_get(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such memory".into()))?;
+    crate::corpus::write(
+        s.store(),
+        s.manager.bus(),
+        &s.node_id,
+        &row.channel,
+        "memory",
+        tracon_sync::ChangeOp::Delete,
+        &id,
+        serde_json::Value::Null,
+    )?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 // ---- providers ----
 
 fn providers_of(s: &AppState) -> ApiResult<Arc<crate::providers::Providers>> {

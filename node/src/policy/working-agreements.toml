@@ -6,7 +6,7 @@
 # Anything not matched here is asked, so adding a rule can only ever reduce the
 # number of interruptions, never widen what an agent may do unattended.
 
-version = 2
+version = 3
 
 # --- 1. Worktree, not the main checkout -------------------------------------
 # Structurally true already: the harness only ever sees its own worktree at
@@ -121,3 +121,14 @@ verdict = "allow"
 reason = "A comment is the agent's voice on the forge and the tracker; it moves nothing."
 kinds = ["tool"]
 matches = ["mr_comment", "issue_comment"]
+
+# Memory and documents are the node's own corpus. Reading it is free; what
+# the agent retains is bounded by kind (a lesson waits for the nightly batch)
+# rather than by asking every time. Writing a document is not named here, so
+# it is asked: a document is the operator's artifact.
+[[rule]]
+id = "corpus-reads-and-retain"
+verdict = "allow"
+reason = "Recalling what is known, reading a document, or retaining a fact changes nothing the operator has not agreed to."
+kinds = ["tool"]
+matches = ["recall", "retain", "doc_read", "doc_search"]
