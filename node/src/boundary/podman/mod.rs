@@ -57,6 +57,10 @@ impl Backend for PodmanBackend {
         self.cfg.boundary.gateway_container.clone()
     }
 
+    fn harness_home(&self) -> String {
+        crate::session::materialize::PODMAN_HARNESS_HOME.into()
+    }
+
     async fn reconcile(&self, names: &[String]) {
         for name in names {
             let _ = podman(&["rm", "-f", "-i", name]).await;

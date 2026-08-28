@@ -8,6 +8,7 @@
 //! `[runtime] kind`.
 
 pub mod checks;
+pub mod kubernetes;
 pub mod podman;
 
 use std::sync::Arc;
@@ -46,6 +47,14 @@ pub trait Backend: Send + Sync {
     /// The name by which a harness reaches the node (the MCP endpoint and the
     /// deep probe's ping).
     fn harness_host(&self) -> String;
+    /// The harness user's home inside its runner; state and gitconfig are
+    /// mounted under it.
+    fn harness_home(&self) -> String;
+    /// The port the node itself serves the CONNECT allowlist proxy on, when
+    /// no gateway container carries it.
+    fn proxy_port(&self) -> Option<u16> {
+        None
+    }
     /// Remove harnesses left over from a previous run, by name.
     async fn reconcile(&self, names: &[String]);
 }
@@ -55,5 +64,6 @@ pub trait Backend: Send + Sync {
 pub async fn backend_for(cfg: &Config) -> Arc<dyn Backend> {
     match cfg.runtime.kind {
         RuntimeKind::Podman => Arc::new(podman::PodmanBackend::detect(cfg).await),
+        RuntimeKind::Kubernetes => Arc::new(kubernetes::KubeBackend::new(cfg)),
     }
 }

@@ -37,7 +37,7 @@ pub async fn check_all(cfg: &Config, selinux: bool, deep: bool) -> BoundaryRepor
     // mounts (the harness state dir and credential db) are what every session
     // carries and are added here; the per-session worktree and git-dir mounts
     // are node-constructed from fixed paths and carry no daemon socket.
-    spec.extra_mounts = crate::session::materialize::state_mounts().unwrap_or_default();
+    spec.extra_mounts = crate::session::materialize::state_mounts(&spec.home).unwrap_or_default();
     match create_probe(&spec).await {
         Ok(inspect) => {
             checks.push(check_unprivileged(&inspect));

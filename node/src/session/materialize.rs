@@ -13,18 +13,23 @@ pub struct Scratch {
 /// Where the harness keeps its state inside the runner. The node-owned volume
 /// is mounted here; `OMP_STATE_DIR` is set to the same path so a harness that
 /// honours it agrees with the mount.
-pub const HARNESS_STATE_TARGET: &str = "/root/.omp";
+pub const PODMAN_HARNESS_HOME: &str = "/root";
+
+/// Where the harness's state directory is mounted, under its home.
+pub fn state_target(home: &str) -> String {
+    format!("{home}/.omp")
+}
 
 /// The node-owned harness state directory, and nothing else. Model credentials
 /// live in it (`agent/agent.db`), put there once by `tracon harness
 /// import-credentials` or a login through `tracon harness shell`; the node
 /// never reaches into the operator's own `~/.omp`.
-pub fn state_mounts() -> std::io::Result<Vec<Mount>> {
+pub fn state_mounts(home: &str) -> std::io::Result<Vec<Mount>> {
     let state = Config::harness_state_dir();
     std::fs::create_dir_all(state.join("agent"))?;
     Ok(vec![Mount {
         source: state.to_string_lossy().into_owned(),
-        target: HARNESS_STATE_TARGET.into(),
+        target: state_target(home),
         read_only: false,
     }])
 }
@@ -83,7 +88,12 @@ pub fn import_credentials(from: &Path, force: bool) -> Result<PathBuf, String> {
 /// The harness state directory is node-owned and otherwise empty. Mounting the
 /// operator's whole `~/.omp` would drag in its `AGENTS.md`, which is a symlink
 /// to the workspace README, and a bind mount over a symlink does not mask it.
-pub fn scratch_for(session_id: &str, worktree: &Path, repo: &Path) -> std::io::Result<Scratch> {
+pub fn scratch_for(
+    session_id: &str,
+    worktree: &Path,
+    repo: &Path,
+    home: &str,
+) -> std::io::Result<Scratch> {
     let dir = Config::state_dir().join("sessions").join(session_id);
     std::fs::create_dir_all(dir.join("omp"))?;
 
@@ -99,16 +109,16 @@ pub fn scratch_for(session_id: &str, worktree: &Path, repo: &Path) -> std::io::R
          [safe]\n\tdirectory = /work\n[advice]\n\tdetachedHead = false\n",
     )?;
 
-    let mut mounts = state_mounts()?;
+    let mut mounts = state_mounts(home)?;
     mounts.extend([
         Mount {
             source: dir.join("omp/config.yml").to_string_lossy().into_owned(),
-            target: "/root/.omp/agent/config.yml".into(),
+            target: format!("{}/agent/config.yml", state_target(home)),
             read_only: true,
         },
         Mount {
             source: dir.join("gitconfig").to_string_lossy().into_owned(),
-            target: "/root/.gitconfig".into(),
+            target: format!("{home}/.gitconfig"),
             read_only: true,
         },
         Mount {
@@ -175,6 +185,7 @@ mod tests {
             "test-materialize",
             Path::new("/tmp/wt"),
             Path::new("/tmp/repo"),
+            PODMAN_HARNESS_HOME,
         )
         .unwrap();
         let targets: Vec<&str> = s.mounts.iter().map(|m| m.target.as_str()).collect();
@@ -207,7 +218,13 @@ mod tests {
         std::fs::create_dir_all(repo.join(".git/hooks")).unwrap();
         std::fs::create_dir_all(repo.join(".git/info")).unwrap();
         std::fs::write(repo.join(".git/config"), "[core]\n").unwrap();
-        let s = scratch_for("test-gitdir", Path::new("/tmp/wt"), &repo).unwrap();
+        let s = scratch_for(
+            "test-gitdir",
+            Path::new("/tmp/wt"),
+            &repo,
+            PODMAN_HARNESS_HOME,
+        )
+        .unwrap();
         let git_target = repo.join(".git").to_string_lossy().into_owned();
         let mount = s
             .mounts

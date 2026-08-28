@@ -536,10 +536,10 @@ pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Valu
 /// Re-probe the harness for its model list, for when the probe failed at
 /// startup or the harness gained providers since.
 pub async fn refresh_models(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    let runner = s
-        .manager
-        .backend()
-        .runner(crate::session::materialize::state_mounts().unwrap_or_default());
+    let backend = s.manager.backend();
+    let runner = backend.runner(
+        crate::session::materialize::state_mounts(&backend.harness_home()).unwrap_or_default(),
+    );
     let models = s
         .adapter
         .probe_models(runner.as_ref())

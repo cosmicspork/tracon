@@ -397,7 +397,7 @@ impl Manager {
             mono_ms: started.elapsed().as_millis() as i64,
         });
 
-        let scratch = materialize::scratch_for(id, &wt.path, &repo)?;
+        let scratch = materialize::scratch_for(id, &wt.path, &repo, &self.backend.harness_home())?;
         let container = format!("tracon-h-{slug}");
         let runner: Arc<dyn Runner> = self.backend.runner(scratch.mounts);
 

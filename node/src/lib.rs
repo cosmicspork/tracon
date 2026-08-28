@@ -6,6 +6,7 @@ pub mod adapter;
 pub mod boundary;
 pub mod broker;
 pub mod config;
+pub mod gateway;
 pub mod http;
 pub mod mcp;
 pub mod mesh;

@@ -540,12 +540,15 @@ async fn harness_command(cmd: HarnessCommand) -> Result<()> {
             if cfg.runtime.kind != config::RuntimeKind::Podman {
                 anyhow::bail!("`harness shell` needs the podman runtime; log in on a laptop and import the store");
             }
-            let mounts = materialize::state_mounts()?;
+            let mounts = materialize::state_mounts(materialize::PODMAN_HARNESS_HOME)?;
             let mut c = std::process::Command::new("podman");
             c.args(["run", "--rm", "-it", "--network", "podman"]);
             c.args([
                 "-e",
-                &format!("OMP_STATE_DIR={}", materialize::HARNESS_STATE_TARGET),
+                &format!(
+                    "OMP_STATE_DIR={}",
+                    materialize::state_target(materialize::PODMAN_HARNESS_HOME)
+                ),
             ]);
             for m in mounts {
                 c.args(["-v", &format!("{}:{}", m.source, m.target)]);
