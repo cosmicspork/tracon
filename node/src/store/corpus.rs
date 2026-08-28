@@ -37,6 +37,18 @@ pub struct DocumentRow {
     pub updated_ms: i64,
 }
 
+#[derive(Debug)]
+pub enum DocumentWrite {
+    Written {
+        row: Box<DocumentRow>,
+        change: Change,
+    },
+    Conflict {
+        hash: String,
+        body: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryRow {
     pub id: String,
@@ -220,6 +232,76 @@ impl Store {
         let mut conn = self.conn.lock().unwrap();
         tracon_sync::write_change(&mut conn, site, channel, table, op, id, row, now_ms())
             .map_err(sync_err)
+    }
+
+    /// Check a document edit precondition and write its replicated change
+    /// while holding the store's single writer transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_document_change(
+        &self,
+        site: &str,
+        channel: &str,
+        slug: &str,
+        kind: &str,
+        title: &str,
+        body: &str,
+        hash: &str,
+        if_hash: Option<&str>,
+        create_only: bool,
+        new_id: &str,
+    ) -> Result<DocumentWrite> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let existing = tx
+            .query_row(
+                "SELECT * FROM document WHERE channel = ?1 AND slug = ?2 AND deleted = 0
+                 ORDER BY hlc_ms DESC, hlc_ctr DESC LIMIT 1",
+                params![channel, slug],
+                DocumentRow::from_row,
+            )
+            .optional()?;
+        let hash_mismatch = if_hash
+            .is_some_and(|want| existing.as_ref().map(|cur| cur.hash.as_str()) != Some(want));
+        if (create_only && existing.is_some()) || hash_mismatch {
+            let (hash, body) = existing.map(|cur| (cur.hash, cur.body)).unwrap_or_default();
+            return Ok(DocumentWrite::Conflict { hash, body });
+        }
+
+        let now = now_ms();
+        let mut row = DocumentRow {
+            id: existing
+                .as_ref()
+                .map(|d| d.id.clone())
+                .unwrap_or_else(|| new_id.to_string()),
+            channel: channel.to_string(),
+            slug: slug.to_string(),
+            kind: kind.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            hash: hash.to_string(),
+            site: site.to_string(),
+            hlc_ms: 0,
+            deleted: 0,
+            created_ms: existing.as_ref().map(|d| d.created_ms).unwrap_or(now),
+            updated_ms: now,
+        };
+        let change = tracon_sync::apply::write_change_in_tx(
+            &tx,
+            site,
+            channel,
+            "document",
+            ChangeOp::Upsert,
+            &row.id,
+            row.to_change_row(),
+            now,
+        )
+        .map_err(sync_err)?;
+        row.hlc_ms = change.hlc_ms;
+        tx.commit()?;
+        Ok(DocumentWrite::Written {
+            row: Box::new(row),
+            change,
+        })
     }
 
     pub fn apply_changes(

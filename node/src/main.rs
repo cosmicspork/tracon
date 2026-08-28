@@ -170,6 +170,12 @@ enum MeshCommand {
     },
     /// List the hub's members and their channels.
     Members,
+    /// Revoke a member on the hub (a lost or retired node). Allowed for the
+    /// node that admitted it, or for the node itself.
+    Remove {
+        /// The member's node id.
+        node_id: String,
+    },
     /// Invite another node: prints a code and URL, waits for it to answer,
     /// shows its fingerprint for you to confirm, then admits it and hands off
     /// the channel keys and this node's policy bundle.
@@ -387,6 +393,16 @@ async fn mesh_command(cmd: MeshCommand) -> Result<()> {
             println!("node id:     {}", id.node_id());
             println!("admit it on the hub with TRACON_HUB_ADMIT={}", id.node_id());
             println!("then `tracon serve`; other nodes join with `tracon mesh invite`");
+            Ok(())
+        }
+        MeshCommand::Remove { node_id } => {
+            let cfg = config::Config::load();
+            let hub = cfg.mesh.hub_url.clone().ok_or_else(|| {
+                anyhow::anyhow!("no hub configured; run tracon mesh init or tracon enroll")
+            })?;
+            let (id, _) = identity::load_or_generate()?;
+            tracon::mesh::enroll::remove_member(&id, &hub, &node_id).await?;
+            println!("removed {node_id}");
             Ok(())
         }
         MeshCommand::Members => {

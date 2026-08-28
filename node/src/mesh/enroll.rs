@@ -69,6 +69,25 @@ impl Invite {
     }
 }
 
+/// Revoke a member on the hub: `DELETE /v0/admit/{node_id}`. The hub allows
+/// it for the member itself or the node that admitted it.
+pub async fn remove_member(
+    identity: &Identity,
+    hub_url: &str,
+    node_id: &str,
+) -> Result<(), EnrollError> {
+    let path = format!("/v0/admit/{}", node_id.to_ascii_lowercase());
+    let (st, text) = send(identity, hub_url, "DELETE", &path, None).await?;
+    if st == 204 {
+        Ok(())
+    } else {
+        Err(EnrollError::Refused {
+            status: st,
+            body: text,
+        })
+    }
+}
+
 // ----------------------------------------------------------------- transport
 
 async fn send(

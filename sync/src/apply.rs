@@ -37,13 +37,32 @@ pub fn write_change(
     row: Value,
     now_ms: i64,
 ) -> Result<Change> {
+    let tx = conn.transaction()?;
+    let change = write_change_in_tx(&tx, site, channel, table, op, id, row, now_ms)?;
+    tx.commit()?;
+    Ok(change)
+}
+
+/// The transactional half of [`write_change`], for callers that must make a
+/// precondition check and the replicated write indivisible.
+#[allow(clippy::too_many_arguments)]
+pub fn write_change_in_tx(
+    conn: &Connection,
+    site: &str,
+    channel: &str,
+    table: &str,
+    op: ChangeOp,
+    id: &str,
+    row: Value,
+    now_ms: i64,
+) -> Result<Change> {
     columns_of(table)
         .ok_or_else(|| SyncError::Malformed(format!("no replicated table {table}")))?;
-    let tx = conn.transaction()?;
-    let mut hlc = Hlc::load(&tx)?;
-    let (hlc_ms, hlc_ctr) = hlc.tick(now_ms);
-    hlc.store(&tx)?;
-    let site_seq: i64 = tx.query_row(
+    let mut hlc = Hlc::load(conn)?;
+    let (hlc_ms, hlc_ctr) = hlc
+        .tick(now_ms)
+        .ok_or_else(|| SyncError::Malformed("hybrid logical clock exhausted".into()))?;
+    let site_seq: i64 = conn.query_row(
         "SELECT COALESCE(MAX(site_seq), 0) + 1 FROM change_log WHERE site = ?1",
         [site],
         |r| r.get(0),
@@ -62,9 +81,10 @@ pub fn write_change(
             row
         },
     };
-    put_row(&tx, &change)?;
-    log_change(&tx, channel, &change, true, now_ms)?;
-    tx.commit()?;
+    validate_channel(conn, channel, &change)?;
+    put_row(conn, channel, &change)?;
+    log_change(conn, channel, &change, true, now_ms)?;
+    hlc.store(conn)?;
     Ok(change)
 }
 
@@ -85,7 +105,15 @@ pub fn apply_changes(
     let mut hlc = Hlc::load(&tx)?;
     let mut out = Vec::with_capacity(changes.len());
     for c in changes {
-        if columns_of(&c.table).is_none() || (c.op == ChangeOp::Upsert && !c.row.is_object()) {
+        if columns_of(&c.table).is_none()
+            || (c.op == ChangeOp::Upsert && !c.row.is_object())
+            || validate_channel(&tx, channel, c).is_err()
+        {
+            out.push(Applied::Malformed);
+            continue;
+        }
+        let mut observed = hlc;
+        if observed.observe(now_ms, (c.hlc_ms, c.hlc_ctr)).is_none() {
             out.push(Applied::Malformed);
             continue;
         }
@@ -109,7 +137,7 @@ pub fn apply_changes(
             out.push(Applied::Duplicate);
             continue;
         }
-        hlc.observe(now_ms, (c.hlc_ms, c.hlc_ctr));
+        hlc = observed;
         let local: Option<(i64, i64, String)> = tx
             .query_row(
                 &format!(
@@ -127,7 +155,7 @@ pub fn apply_changes(
             }
         };
         if wins {
-            put_row(&tx, c)?;
+            put_row(&tx, channel, c)?;
             tx.execute(
                 "UPDATE change_log SET applied = 1 WHERE site = ?1 AND site_seq = ?2",
                 params![c.site, c.site_seq],
@@ -176,10 +204,39 @@ fn log_change(
     Ok(())
 }
 
+/// A record's channel is authenticated by its encrypted envelope, never by
+/// mutable row JSON. Existing ids may not be moved between channels either.
+fn validate_channel(conn: &Connection, channel: &str, c: &Change) -> Result<()> {
+    let Some(_) = columns_of(&c.table) else {
+        return Err(SyncError::Malformed(format!(
+            "no replicated table {}",
+            c.table
+        )));
+    };
+    if c.op == ChangeOp::Upsert && c.row.get("channel").and_then(Value::as_str) != Some(channel) {
+        return Err(SyncError::Malformed(
+            "row channel does not match envelope".into(),
+        ));
+    }
+    let existing: Option<String> = conn
+        .query_row(
+            &format!("SELECT channel FROM {} WHERE id = ?1", c.table),
+            [&c.id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if existing.as_deref().is_some_and(|stored| stored != channel) {
+        return Err(SyncError::Malformed(
+            "record id already belongs to another channel".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Write the row a change describes: the full record for an upsert, a
 /// tombstone (stamps updated, content cleared) for a delete. A delete of a
 /// record never seen inserts the tombstone so a later, older upsert loses.
-fn put_row(conn: &Connection, c: &Change) -> Result<()> {
+fn put_row(conn: &Connection, channel: &str, c: &Change) -> Result<()> {
     let cols = columns_of(&c.table).expect("checked by caller");
     match c.op {
         ChangeOp::Upsert => {
@@ -187,7 +244,9 @@ fn put_row(conn: &Connection, c: &Change) -> Result<()> {
                 .row
                 .as_object()
                 .ok_or_else(|| SyncError::Malformed("upsert without a row".into()))?;
-            let mut names = vec!["id", "site", "site_seq", "hlc_ms", "hlc_ctr", "deleted"];
+            let mut names = vec![
+                "id", "site", "site_seq", "hlc_ms", "hlc_ctr", "deleted", "channel",
+            ];
             let mut vals: Vec<rusqlite::types::Value> = vec![
                 c.id.clone().into(),
                 c.site.clone().into(),
@@ -195,8 +254,12 @@ fn put_row(conn: &Connection, c: &Change) -> Result<()> {
                 c.hlc_ms.into(),
                 (c.hlc_ctr as i64).into(),
                 0i64.into(),
+                channel.to_string().into(),
             ];
             for col in cols {
+                if *col == "channel" {
+                    continue;
+                }
                 if let Some(v) = obj.get(*col) {
                     names.push(col);
                     vals.push(json_to_sql(v));
@@ -230,10 +293,10 @@ fn put_row(conn: &Connection, c: &Change) -> Result<()> {
             };
             let updated = conn.execute(
                 &format!(
-                    "UPDATE {} SET site = ?1, site_seq = ?2, hlc_ms = ?3, hlc_ctr = ?4, deleted = 1{set} WHERE id = ?5",
+                    "UPDATE {} SET site = ?1, site_seq = ?2, hlc_ms = ?3, hlc_ctr = ?4, deleted = 1{set} WHERE id = ?5 AND channel = ?6",
                     c.table
                 ),
-                params![c.site, c.site_seq, c.hlc_ms, c.hlc_ctr as i64, c.id],
+                params![c.site, c.site_seq, c.hlc_ms, c.hlc_ctr as i64, c.id, channel],
             )?;
             if updated == 0 {
                 // Tombstone for a record this replica never held: the NOT NULL
@@ -251,7 +314,11 @@ fn put_row(conn: &Connection, c: &Change) -> Result<()> {
                 ];
                 for col in cols {
                     match *col {
-                        "channel" | "slug" | "kind" => {
+                        "channel" => {
+                            names.push(col);
+                            vals.push(channel.to_string().into());
+                        }
+                        "slug" | "kind" => {
                             names.push(col);
                             vals.push(String::new().into());
                         }
@@ -538,7 +605,98 @@ mod tests {
         );
         // The receiver's clock moved past what it saw.
         let mut h = Hlc::load(&b).unwrap();
-        assert!(h.tick(0) > (1000, 0));
+        assert!(h.tick(0).unwrap() > (1000, 0));
+    }
+
+    #[test]
+    fn envelope_channel_is_the_record_channel_boundary() {
+        let mut a = db();
+        let mut b = db();
+        let local = write_change(
+            &mut a,
+            "A",
+            "personal",
+            "document",
+            ChangeOp::Upsert,
+            "d1",
+            doc("x", "safe"),
+            1000,
+        )
+        .unwrap();
+
+        let mut crossed = local.clone();
+        crossed.site_seq = 2;
+        crossed.row["channel"] = json!("work");
+        assert_eq!(
+            apply_changes(&mut b, "A", "personal", &[crossed], 2000).unwrap(),
+            vec![Applied::Malformed]
+        );
+        assert!(dump(&b).is_empty());
+        assert_eq!(change_log_max(&b, "A", "personal").unwrap(), 0);
+
+        assert!(write_change(
+            &mut a,
+            "A",
+            "personal",
+            "document",
+            ChangeOp::Upsert,
+            "d2",
+            json!({"channel": "work"}),
+            1001,
+        )
+        .is_err());
+
+        apply_changes(&mut b, "A", "personal", &[local], 2000).unwrap();
+        let moved = Change {
+            table: "document".into(),
+            op: ChangeOp::Upsert,
+            id: "d1".into(),
+            site: "C".into(),
+            site_seq: 1,
+            hlc_ms: 3000,
+            hlc_ctr: 0,
+            row: json!({"channel": "work", "slug": "x", "kind": "guide"}),
+        };
+        assert_eq!(
+            apply_changes(&mut b, "C", "work", &[moved], 3000).unwrap(),
+            vec![Applied::Malformed]
+        );
+        let stored_channel: String = b
+            .query_row("SELECT channel FROM document WHERE id='d1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored_channel, "personal");
+    }
+
+    #[test]
+    fn invalid_remote_clock_is_rejected_without_poisoning_local_writes() {
+        let mut b = db();
+        let poisoned = Change {
+            table: "document".into(),
+            op: ChangeOp::Upsert,
+            id: "d1".into(),
+            site: "A".into(),
+            site_seq: 1,
+            hlc_ms: i64::MAX,
+            hlc_ctr: u32::MAX,
+            row: doc("x", "poison"),
+        };
+        assert_eq!(
+            apply_changes(&mut b, "A", "personal", &[poisoned], 2000).unwrap(),
+            vec![Applied::Malformed]
+        );
+        assert!(write_change(
+            &mut b,
+            "B",
+            "personal",
+            "document",
+            ChangeOp::Upsert,
+            "d2",
+            doc("x", "safe"),
+            2001,
+        )
+        .is_ok());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, DocConflict } from '../lib/api'
+  import { api, ApiError, DocConflict } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { render } from '../lib/markdown'
@@ -17,11 +17,13 @@
   let hash = $state<string | undefined>(undefined)
   let busy = $state(false)
   let error = $state<string | null>(null)
+  let loadError = $state<string | null>(null)
   let conflict = $state<{ hash: string; body: string } | null>(null)
   let changedElsewhere = $state(false)
   let loaded = $state(false)
 
   async function load(keepDraft = false) {
+    loadError = null
     try {
       const d = await api.doc(channel, slug)
       doc = d
@@ -32,12 +34,17 @@
       }
     } catch (e) {
       doc = null
-      missing = true
-      if (!keepDraft) {
-        draft = `# ${slug.replace(/^[a-z]+-/, '').replace(/-/g, ' ')}\n\n`
-        hash = undefined
+      if (e instanceof ApiError && e.status === 404) {
+        missing = true
+        if (!keepDraft) {
+          draft = `# ${slug.replace(/^[a-z]+-/, '').replace(/-/g, ' ')}\n\n`
+          hash = undefined
+        }
+      } else {
+        missing = false
+        editing = false
+        loadError = e instanceof Error ? e.message : String(e)
       }
-      void e
     } finally {
       loaded = true
     }
@@ -125,7 +132,7 @@
     <span class="sep">/</span>
     {slug}
     <b>{channel}{doc ? ` · ${formatAge(doc.updated_ms, clock.now)}` : ' · new'}{doc ? ` · ${doc.hash.slice(0, 8)}` : ''}</b>
-    {#if !surface.phone && !editing}
+    {#if !surface.phone && !editing && !loadError}
       <span class="r">
         <button class="lnk" onclick={() => (editing = true)}>{doc ? 'Edit' : 'Write it'}</button>
         {#if doc}<button class="lnk d" onclick={remove} disabled={busy}>Delete</button>{/if}
@@ -144,12 +151,14 @@
     {/if}
     <textarea bind:value={draft} spellcheck="false"></textarea>
     <div class="send">
-      <button class="btn p" onclick={save} disabled={busy || draft === (doc?.body ?? '')}>Save</button>
+      <button class="btn p" onclick={save} disabled={busy || loadError !== null || draft === (doc?.body ?? '')}>Save</button>
       <button class="lnk" onclick={() => { editing = false; draft = doc?.body ?? draft; if (!doc) router.go('/docs') }}>Cancel</button>
       {#if error}<span class="err">{error}</span>{/if}
     </div>
   {:else if missing}
     <div class="empty">No document <code>{slug}</code> on {channel}.{#if !surface.phone} <button class="lnk" onclick={() => (editing = true)}>Write it.</button>{/if}</div>
+  {:else if loadError}
+    <div class="empty err">Could not load this document: {loadError}</div>
   {:else}
     <article class="md">{@html html}</article>
   {/if}
