@@ -103,6 +103,12 @@ export const api = {
   kill: (id: string) => call<void>('POST', `/api/sessions/${id}/kill`),
   saveDraft: (id: string, text: string) => call<void>('PUT', `/api/sessions/${id}/draft`, { text }),
   review: (id: string) => call<{ review: Review; stale: string[] }>('GET', `/api/reviews/${id}`),
+  /** One reviewed file as it was submitted, for the diff editor. */
+  reviewFile: (id: string, path: string) =>
+    call<{ path: string; text: string | null }>(
+      'GET',
+      `/api/reviews/${id}/file?path=${encodeURIComponent(path)}`,
+    ),
   decideReview: (
     id: string,
     verdict: {
@@ -110,6 +116,7 @@ export const api = {
       reason?: string
       title?: string
       body?: string
+      patch?: string
     },
   ) => call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/verdict`, verdict),
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),

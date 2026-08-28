@@ -176,6 +176,44 @@ pub async fn capture(worktree: &str, base_ref: &str, branch: &str) -> Result<Cap
 
 /// What changed in the worktree since the review was submitted. Empty means the
 /// diff still describes the branch.
+/// One reviewed file's contents as they were submitted, read by blob hash so
+/// what comes back is what the diff was taken against — not whatever the
+/// worktree holds now. A file the diff created has no blob at the base, and a
+/// binary one has nothing worth editing; both answer `None`.
+pub async fn file_at_submit(
+    worktree: &str,
+    files: &[FileAtSubmit],
+    path: &str,
+) -> Result<Option<String>, ReviewError> {
+    let Some(f) = files.iter().find(|f| f.path == path) else {
+        return Ok(None);
+    };
+    if f.blob == "absent" {
+        return Ok(None);
+    }
+    // Not `git`: that trims, and a file's trailing newline is part of the
+    // file. Losing it here would make the editor build a patch that quietly
+    // strips it.
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(GIT_SAFE)
+        .args(["cat-file", "blob", &f.blob])
+        .output()
+        .await?;
+    if !out.status.success() {
+        return Err(ReviewError::Git {
+            op: "cat-file",
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
+    }
+    // A file the operator can edit is text; anything else is not for this.
+    let Ok(text) = String::from_utf8(out.stdout) else {
+        return Ok(None);
+    };
+    Ok(Some(text))
+}
+
 pub async fn staleness(worktree: &str, head_sha: &str, files: &[FileAtSubmit]) -> Vec<String> {
     let now = match git(worktree, "rev-parse", &["rev-parse", "HEAD"]).await {
         Ok(sha) => sha,

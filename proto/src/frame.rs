@@ -231,6 +231,10 @@ pub enum Command {
         title: Option<String>,
         #[serde(default)]
         body: Option<String>,
+        /// A hand-edited diff accompanying "revise". Additive and optional, so
+        /// a node on an older build reads the rest of the verdict unchanged.
+        #[serde(default)]
+        patch: Option<String>,
     },
 }
 

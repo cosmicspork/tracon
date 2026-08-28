@@ -7,6 +7,7 @@
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
   import { reviewChecks, reviewVerdict, type Review } from '../lib/types'
+  import { baseFromDiff, buildPatch, fileSection } from '../lib/patch'
 
   let { id }: { id: string } = $props()
 
@@ -44,6 +45,97 @@
 
   let decided = $state(false)
 
+  // Editing the diff, desktop only. The phone directs; it does not edit.
+  let editing = $state(false)
+  // CodeMirror is most of a megabyte and the phone never opens it, so it is
+  // fetched when the operator asks to edit rather than on every page load.
+  let DiffEditor = $state<typeof import('../components/DiffEditor.svelte').default | null>(null)
+  let loadingFiles = $state(false)
+  let fileError = $state<string | null>(null)
+  /** path → { original: before the change, head: as submitted, now: edited } */
+  let editable = $state<Map<string, { original: string; head: string; now: string }>>(new Map())
+
+  const draftKey = $derived(review ? `tracon-edit-${review.id}-${review.head_sha}` : '')
+  const patch = $derived.by(() =>
+    buildPatch(
+      [...editable.entries()]
+        .filter(([, f]) => f.now !== f.head)
+        .map(([path, f]) => ({ path, before: f.head, after: f.now })),
+    ),
+  )
+  const editedFiles = $derived([...editable.entries()].filter(([, f]) => f.now !== f.head).length)
+
+  /** Fetch each reviewed file as submitted and rebuild what it changed from. */
+  async function startEditing() {
+    if (!review) return
+    editing = true
+    loadingFiles = true
+    fileError = null
+    try {
+      DiffEditor ??= (await import('../components/DiffEditor.svelte')).default
+    } catch (e) {
+      fileError = e instanceof Error ? e.message : String(e)
+      loadingFiles = false
+      return
+    }
+    if (editable.size > 0) {
+      loadingFiles = false
+      return
+    }
+    const next = new Map<string, { original: string; head: string; now: string }>()
+    try {
+      let drafts: Record<string, string> = {}
+      try {
+        drafts = JSON.parse(localStorage.getItem(draftKey) ?? '{}')
+      } catch {
+        /* blocked or corrupt storage: start from the submitted text */
+      }
+      for (const f of files) {
+        if (stale.includes(f.path)) continue
+        const got = await api.reviewFile(id, f.path)
+        if (got.text === null) continue
+        const section = fileSection(review.diff, f.path)
+        // Without a base the change cannot be shown, so the file is left to
+        // the read-only diff below rather than opened with a guess.
+        const original = section ? baseFromDiff(got.text, section) : null
+        if (original === null) continue
+        next.set(f.path, { original, head: got.text, now: drafts[f.path] ?? got.text })
+      }
+      editable = next
+    } catch (e) {
+      fileError = e instanceof Error ? e.message : String(e)
+    } finally {
+      loadingFiles = false
+    }
+  }
+
+  function onFileChange(path: string, text: string) {
+    const f = editable.get(path)
+    if (!f) return
+    editable.set(path, { ...f, now: text })
+    editable = new Map(editable)
+    // An unsent edit is the one piece of state the node does not hold, so it
+    // is kept where it is least likely to be lost.
+    try {
+      const drafts: Record<string, string> = {}
+      for (const [p, v] of editable) if (v.now !== v.head) drafts[p] = v.now
+      if (Object.keys(drafts).length) localStorage.setItem(draftKey, JSON.stringify(drafts))
+      else localStorage.removeItem(draftKey)
+    } catch {
+      /* blocked storage: the edit still stands in this tab */
+    }
+  }
+
+  function discardEdits() {
+    editable = new Map([...editable].map(([p, f]) => [p, { ...f, now: f.head }]))
+    try {
+      localStorage.removeItem(draftKey)
+    } catch {
+      /* nothing to clear */
+    }
+    editing = false
+  }
+
   const target = $derived.by(() => {
     try {
       return JSON.parse(review?.target ?? 'null')
@@ -78,7 +170,17 @@
         reason: verdict === 'approve' ? undefined : reason,
         title: verdict === 'approve' ? title : undefined,
         body: verdict === 'approve' ? body : undefined,
+        // An edit is a request for changes, never an approval of something
+        // the operator changed: the agent applies it and resubmits.
+        patch: verdict === 'revise' && patch ? patch : undefined,
       })
+      if (verdict !== 'approve') {
+        try {
+          localStorage.removeItem(draftKey)
+        } catch {
+          /* nothing to clear */
+        }
+      }
       await store.refetch()
       if (res.published) {
         router.go(`/sessions/${review.session_id}`)
@@ -191,7 +293,53 @@
 
   <!-- On the phone the file list is the diff: it decides most reviews, and each
        file opens to its hunks when it does not. -->
-  <Diff diff={review.diff} perFile={surface.phone} />
+  {#if editing}
+    {#if loadingFiles}
+      <div class="empty">Opening the files…</div>
+    {:else if fileError}
+      <div class="banner crit">could not open the files <b>· {fileError}</b></div>
+    {:else if editable.size === 0}
+      <div class="banner dim">
+        nothing here can be edited <b>· every file changed since submit, or is new or binary</b>
+      </div>
+    {:else}
+      {#each [...editable] as [path, f] (path)}
+        <div class="filehead">
+          <span class="p">{path}</span>
+          {#if f.now !== f.head}<span class="chip warn">edited</span>{/if}
+        </div>
+        {#if DiffEditor}
+          <DiffEditor {path} original={f.original} head={f.head} onchange={onFileChange} />
+        {/if}
+      {/each}
+      {#if stale.length > 0}
+        <p class="note">
+          {stale.length} file{stale.length === 1 ? '' : 's'} changed since submit and cannot be
+          edited; {stale.join(', ')}
+        </p>
+      {/if}
+    {/if}
+  {:else}
+    <Diff diff={review.diff} perFile={surface.phone} />
+  {/if}
+
+  {#if !surface.phone}
+    <div class="editbar">
+      {#if !editing}
+        <button class="btn" disabled={busy} onclick={startEditing}>Edit the diff</button>
+        <span class="note">Edits go back as a request for changes; the agent applies them.</span>
+      {:else}
+        <button class="btn" disabled={busy} onclick={discardEdits}>Discard edits</button>
+        <span class="note"
+          >{editedFiles === 0
+            ? 'No edits yet.'
+            : `${editedFiles} file${editedFiles === 1 ? '' : 's'} edited · sent with Request changes`}</span
+        >
+      {/if}
+    </div>
+  {:else}
+    <p class="note">Editing a diff needs a keyboard and a wide screen — open this on the desktop.</p>
+  {/if}
 
   {#if error}
     <div class="banner crit">refused <b>· {error}</b></div>
@@ -207,7 +355,7 @@
       disabled={busy}
     />
     <button class="btn" disabled={busy || !reason.trim()} onclick={() => decide('revise')}>
-      Request changes
+      {editedFiles > 0 ? 'Send edits and request changes' : 'Request changes'}
     </button>
     <button class="btn d" disabled={busy || !reason.trim()} onclick={() => decide('reject')}>
       Reject
@@ -405,6 +553,32 @@
   }
   .note {
     font-size: 12.5px;
+    color: var(--wait);
+  }
+  .editbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .editbar .note {
+    color: var(--dim);
+  }
+  .filehead {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .filehead .p {
+    font: 12.5px var(--mono);
+    color: var(--ink2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .filehead .chip.warn {
+    background: var(--wash-wait);
     color: var(--wait);
   }
   .files {
