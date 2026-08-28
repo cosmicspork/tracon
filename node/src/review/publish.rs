@@ -94,6 +94,7 @@ pub async fn publish(
     broker: &Broker,
     cfg: &Config,
     channel: &str,
+    node_id: &str,
     worktree: &str,
     target: &Target,
     head_sha: &str,
@@ -104,7 +105,7 @@ pub async fn publish(
         provider: target.provider.clone(),
     })?;
     let env = broker
-        .env_for(provider.credential(), channel)
+        .env_for(provider.credential(), channel, node_id)
         .map_err(|e| PublishError::Broker(e.to_string()))?;
 
     // Re-assert the tip is still the reviewed commit. The staleness check ran at
@@ -274,6 +275,7 @@ mod tests {
             &broker,
             &Config::default(),
             "work",
+            "n1",
             "/tmp",
             &target,
             "deadbeef",
@@ -297,6 +299,7 @@ mod tests {
             &Broker::default(),
             &Config::default(),
             "work",
+            "n1",
             "/tmp",
             &target,
             "deadbeef",

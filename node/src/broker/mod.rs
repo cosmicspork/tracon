@@ -19,6 +19,8 @@ pub enum BrokerError {
     Unknown(String),
     #[error("credential {name} is not bound to channel {channel}")]
     NotBound { name: String, channel: String },
+    #[error("credential {name} is not bound to this node")]
+    NotOnThisNode { name: String },
     #[error("credential store: {0}")]
     Io(#[from] std::io::Error),
     #[error("credential store is malformed: {0}")]
@@ -38,11 +40,21 @@ pub struct Credential {
     /// an unbound credential is unusable rather than universal.
     #[serde(default)]
     pub channels: Vec<String>,
+    /// Nodes permitted to use it, by node id. Empty means the node holding
+    /// this file, which is the only node that can read it anyway; a list pins
+    /// it further, so a store copied to another machine brokers nothing there.
+    /// "consulta on the work node only" is this field.
+    #[serde(default)]
+    pub nodes: Vec<String>,
 }
 
 impl Credential {
     pub fn allows(&self, channel: &str) -> bool {
         self.channels.iter().any(|c| c == channel)
+    }
+
+    pub fn allows_node(&self, node_id: &str) -> bool {
+        self.nodes.is_empty() || self.nodes.iter().any(|n| n == node_id)
     }
 }
 
@@ -110,6 +122,7 @@ impl Broker {
         &self,
         name: &str,
         channel: &str,
+        node_id: &str,
     ) -> Result<BTreeMap<String, String>, BrokerError> {
         let cred = self
             .credentials
@@ -121,15 +134,20 @@ impl Broker {
                 channel: channel.to_string(),
             });
         }
+        if !cred.allows_node(node_id) {
+            return Err(BrokerError::NotOnThisNode {
+                name: name.to_string(),
+            });
+        }
         Ok(cred.env.clone())
     }
 
-    /// Whether a channel may use a credential at all, for deciding which tools
-    /// to offer a session before it asks.
-    pub fn available_to(&self, channel: &str) -> Vec<&str> {
+    /// Whether a channel may use a credential on this node at all, for
+    /// deciding which tools to offer a session before it asks.
+    pub fn available_to(&self, channel: &str, node_id: &str) -> Vec<&str> {
         self.credentials
             .iter()
-            .filter(|(_, c)| c.allows(channel))
+            .filter(|(_, c)| c.allows(channel) && c.allows_node(node_id))
             .map(|(n, _)| n.as_str())
             .collect()
     }
@@ -151,6 +169,12 @@ mod tests {
             [credentials.orphan]
             [credentials.orphan.env]
             TOKEN = "secret"
+
+            [credentials.pinned]
+            channels = ["work"]
+            nodes = ["node-b"]
+            [credentials.pinned.env]
+            TOKEN = "secret"
             "#,
         )
         .unwrap()
@@ -158,13 +182,15 @@ mod tests {
 
     #[test]
     fn a_bound_channel_gets_the_environment() {
-        let env = broker().env_for("warehouse", "work").unwrap();
+        let env = broker().env_for("warehouse", "work", "node-a").unwrap();
         assert_eq!(env.get("DB_BACKEND").map(String::as_str), Some("sqlite"));
     }
 
     #[test]
     fn another_channel_is_refused() {
-        let err = broker().env_for("warehouse", "personal").unwrap_err();
+        let err = broker()
+            .env_for("warehouse", "personal", "node-a")
+            .unwrap_err();
         assert!(matches!(err, BrokerError::NotBound { .. }));
     }
 
@@ -172,16 +198,32 @@ mod tests {
     fn an_unbound_credential_is_unusable_not_universal() {
         // The dangerous default would be "no channels listed means any channel".
         for channel in ["work", "personal", ""] {
-            assert!(broker().env_for("orphan", channel).is_err());
+            assert!(broker().env_for("orphan", channel, "node-a").is_err());
         }
-        assert!(broker().available_to("work").contains(&"warehouse"));
-        assert!(!broker().available_to("work").contains(&"orphan"));
+        assert!(broker()
+            .available_to("work", "node-a")
+            .contains(&"warehouse"));
+        assert!(!broker().available_to("work", "node-a").contains(&"orphan"));
+    }
+
+    #[test]
+    fn a_credential_pinned_to_a_node_is_unusable_elsewhere() {
+        // The store may be copied to another machine; the binding travels
+        // with it and refuses there. "consulta on the work node only".
+        let b = broker();
+        assert!(b.env_for("pinned", "work", "node-b").is_ok());
+        assert!(matches!(
+            b.env_for("pinned", "work", "node-a").unwrap_err(),
+            BrokerError::NotOnThisNode { .. }
+        ));
+        assert!(b.available_to("work", "node-b").contains(&"pinned"));
+        assert!(!b.available_to("work", "node-a").contains(&"pinned"));
     }
 
     #[test]
     fn an_unknown_credential_is_refused() {
         assert!(matches!(
-            broker().env_for("nope", "work").unwrap_err(),
+            broker().env_for("nope", "work", "node-a").unwrap_err(),
             BrokerError::Unknown(_)
         ));
     }
@@ -190,7 +232,7 @@ mod tests {
     fn a_missing_store_brokers_nothing() {
         let b = Broker::default();
         assert!(b.is_empty());
-        assert!(b.available_to("work").is_empty());
+        assert!(b.available_to("work", "node-a").is_empty());
     }
 
     #[cfg(unix)]

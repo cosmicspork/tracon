@@ -39,6 +39,13 @@ pub enum Command {
         ack: oneshot::Sender<Result<(), String>>,
     },
     Kill,
+    /// A permission request that did not come from the harness: a brokered
+    /// tool call the policy wants the operator to decide. Same queue, same
+    /// expiry, same answer path.
+    Permission {
+        request: PermissionRequest,
+        reply: oneshot::Sender<PermissionReply>,
+    },
     /// Sent by a turn task when the harness finishes a turn. The supervisor
     /// records it rather than the task, so buffered text is flushed first and
     /// `turn_end` lands after the message it concludes.
@@ -200,6 +207,9 @@ impl Supervisor {
                         if self.check_budget().await {
                             break;
                         }
+                    }
+                    Some(Command::Permission { request, reply }) => {
+                        self.on_permission(request, reply).await;
                     }
                     Some(Command::Kill) => {
                         killed_by_us = true;

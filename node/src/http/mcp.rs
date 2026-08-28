@@ -39,6 +39,7 @@ pub async fn handle(
     let ctx = CallContext {
         session_id,
         channel,
+        node_id: s.node_id.clone(),
     };
     match s.tools.handle(&ctx, &msg).await {
         Some(response) => (StatusCode::OK, Json(response)),

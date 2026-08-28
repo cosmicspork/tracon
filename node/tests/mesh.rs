@@ -403,6 +403,7 @@ async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
     let tools = Arc::new(tracon::mcp::Tools {
         broker: Default::default(),
         cfg: Arc::new(cfg.clone()),
+        policy: tracon::policy::Policy::shipped_shared(),
         session: Default::default(),
     });
     let manager = Manager::new(

@@ -192,12 +192,19 @@ Credentials live in `credentials.toml` under the node's state directory, readabl
 the node's user, and are never given to a harness. What the harness gets is a tool it may
 ask the node to run, over MCP through the gateway's forward, with a token minted for its
 session. A credential names the channels allowed to use it; a channel with none bound is
-offered no tools at all.
+offered no tools at all. It may also name the nodes allowed to use it, by node id, so a
+store copied to another machine brokers nothing there ("consulta on the work node only").
+
+Every tool call is decided by the policy bundle before the broker is touched, under the
+kind `tool`: a rule that names the tool allows it, a deny rule returns its reason, and a
+tool the bundle does not mention is put to the operator on the session's queue. Adding a
+tool never widens what runs unattended.
 
 ```toml
 # ~/.config or ~/Library/Application Support → tracon/credentials.toml, chmod 600
 [credentials.consulta]
 channels = ["work"]
+nodes = ["2b310f36c18605ac9ab367ec3abe4fe9aaa6aee04e64db98b0ea364e5e6b3013"]
 
 [credentials.consulta.env]
 DB_BACKEND = "oracle"

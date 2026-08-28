@@ -135,6 +135,7 @@ async fn fixture(name: &str, credentials: &str) -> Fixture {
     let tools = Arc::new(Tools {
         broker: Arc::new(toml::from_str(credentials).unwrap()),
         cfg: cfg.clone(),
+        policy: tracon::policy::Policy::shipped_shared(),
         session: Default::default(),
     });
     let manager = Manager::new(
@@ -576,6 +577,7 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
         &broker,
         &cfg,
         "work",
+        "n1",
         &f.worktree,
         &target,
         "0000000000000000000000000000000000000000",
