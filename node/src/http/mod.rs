@@ -167,6 +167,10 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         broker,
         cfg: cfg.clone(),
         policy: policy.clone(),
+        http: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("http client"),
         session: Default::default(),
     });
 

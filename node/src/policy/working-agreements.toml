@@ -111,4 +111,13 @@ id = "brokered-reads"
 verdict = "allow"
 reason = "A read-only query, a data-dictionary lookup, or a review submission changes nothing the operator has not agreed to."
 kinds = ["tool"]
-matches = ["query", "describe", "submit_review", "review_status"]
+matches = ["query", "describe", "submit_review", "review_status", "mr_status", "issue"]
+
+# Comments are visible, attributable, and reversible; they are what the agent
+# does instead of transitioning a ticket or merging a change.
+[[rule]]
+id = "brokered-comments"
+verdict = "allow"
+reason = "A comment is the agent's voice on the forge and the tracker; it moves nothing."
+kinds = ["tool"]
+matches = ["mr_comment", "issue_comment"]

@@ -101,6 +101,7 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
         broker: Default::default(),
         cfg: cfg.clone(),
         policy: tracon::policy::Policy::shipped_shared(),
+        http: reqwest::Client::new(),
         session: Default::default(),
     });
     let manager = Manager::new(
