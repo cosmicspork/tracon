@@ -30,6 +30,7 @@ const RIGHTS: &[(&str, &str, &str, &str)] = &[
     ("", "pods", "", "list"),
     ("", "pods", "", "delete"),
     ("", "pods", "attach", "create"),
+    ("", "pods", "attach", "get"),
     ("", "pods", "log", "get"),
     ("networking.k8s.io", "networkpolicies", "", "get"),
 ];
