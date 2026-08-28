@@ -150,8 +150,9 @@ async fn main() -> Result<()> {
         Command::Serve { listen } => http::serve(listen).await,
         Command::Setup { rebuild } => {
             let cfg = config::Config::load();
-            boundary::setup(&cfg, rebuild).await?;
-            println!("images, network, allowlist, and gateway are in place");
+            let backend = boundary::backend_for(&cfg).await;
+            backend.setup(&cfg, rebuild).await?;
+            println!("{} boundary is in place", backend.kind());
             Ok(())
         }
         Command::Harness(cmd) => harness_command(cmd).await,
@@ -180,7 +181,10 @@ async fn main() -> Result<()> {
         Command::Channel(cmd) => channel_command(cmd),
         Command::CheckBoundary { deep } => {
             let cfg = config::Config::load();
-            let report = boundary::check_all(&cfg, deep).await;
+            let report = boundary::backend_for(&cfg)
+                .await
+                .check_all(&cfg, deep)
+                .await;
             for c in &report.checks {
                 println!(
                     "{} {:<22} {}",
@@ -533,6 +537,9 @@ async fn harness_command(cmd: HarnessCommand) -> Result<()> {
         }
         HarnessCommand::Shell => {
             let cfg = config::Config::load();
+            if cfg.runtime.kind != config::RuntimeKind::Podman {
+                anyhow::bail!("`harness shell` needs the podman runtime; log in on a laptop and import the store");
+            }
             let mounts = materialize::state_mounts()?;
             let mut c = std::process::Command::new("podman");
             c.args(["run", "--rm", "-it", "--network", "podman"]);

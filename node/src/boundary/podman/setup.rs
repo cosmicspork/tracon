@@ -5,7 +5,8 @@ use rust_embed::Embed;
 
 use crate::config::{Config, HarnessListen};
 
-use super::{podman, BoundaryError};
+use super::podman;
+use crate::boundary::BoundaryError;
 
 /// The gateway and harness definitions, carried inside the binary so a host
 /// that only fetched the release can build the images it needs.
@@ -100,7 +101,7 @@ fn write_allowlist(cfg: &Config) -> Result<(), BoundaryError> {
 
 /// Anchor a tinyproxy allowlist entry at both ends so it matches a whole host,
 /// not a substring. Already-anchored entries are left as they are.
-fn anchor(host: &str) -> String {
+pub fn anchor(host: &str) -> String {
     let mut s = host.to_string();
     if !s.starts_with('^') {
         s.insert(0, '^');

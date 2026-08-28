@@ -12,7 +12,7 @@ use crate::acp::{
     rpc::{Incoming, Peer},
     types::{self, methods},
 };
-use crate::runner::{Runner, RunnerCommand};
+use crate::runner::{Runner, RunnerCommand, Spawned};
 
 pub struct OmpAdapter {
     pinned: String,
@@ -167,25 +167,21 @@ async fn drain_until<R>(
 }
 
 impl OmpSession {
-    async fn start(child: tokio::process::Child) -> Result<Self, AdapterError> {
+    async fn start(child: Spawned) -> Result<Self, AdapterError> {
         // ACP requires an absolute cwd; the image's workdir is the safe choice
         // for a probe that mounts no worktree.
         Self::start_in(child, "/work", Vec::new()).await
     }
 
     async fn start_in(
-        mut child: tokio::process::Child,
+        child: Spawned,
         cwd: &str,
         mcp_servers: Vec<Value>,
     ) -> Result<Self, AdapterError> {
-        let stdin = child.stdin.take().ok_or(AdapterError::NoPipe)?;
-        let stdout = child.stdout.take().ok_or(AdapterError::NoPipe)?;
-        let (peer, mut incoming, read) = Peer::new(stdin, stdout);
+        let (peer, mut incoming, read) = Peer::new(child.stdin, child.stdout);
         tokio::spawn(read);
-        // Reap the child when it exits so it is not left as a zombie.
-        tokio::spawn(async move {
-            let _ = child.wait().await;
-        });
+        // Await the exit so a child process is reaped and not left as a zombie.
+        tokio::spawn(child.done);
 
         // Drain inbound traffic while the handshake requests are in flight, so a
         // chatty startup cannot deadlock the read loop (see `drain_until`).

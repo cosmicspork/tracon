@@ -109,6 +109,7 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
         id.node_id(),
         tools.clone(),
         Default::default(),
+        Arc::new(tracon::runner::local::LocalBackend),
     );
     let client = MeshClient::new(
         identity(seed),

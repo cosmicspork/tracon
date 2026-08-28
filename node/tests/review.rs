@@ -144,6 +144,7 @@ async fn fixture(name: &str, credentials: &str) -> Fixture {
         "n1".into(),
         tools.clone(),
         Default::default(),
+        Arc::new(tracon::runner::local::LocalBackend),
     );
     let _ = tools.session.set(tracon::mcp::SessionAccess {
         store: store.clone(),

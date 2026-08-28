@@ -13,10 +13,14 @@ use std::{
 use serde::Serialize;
 use serde_json::Value;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{ChildStdin, ChildStdout},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     sync::{mpsc, oneshot, Mutex},
 };
+
+/// The peer's write half. A child's stdin or a pod attach look the same here.
+pub type Writer = Box<dyn AsyncWrite + Send + Unpin>;
+/// The peer's read half.
+pub type Reader = Box<dyn AsyncRead + Send + Unpin>;
 
 use super::codec::{self, Id, Message, RpcError};
 
@@ -53,7 +57,7 @@ type Pending = Arc<Mutex<HashMap<Id, oneshot::Sender<Result<Value, RpcError>>>>>
 
 #[derive(Clone)]
 pub struct Peer {
-    stdin: Arc<Mutex<ChildStdin>>,
+    stdin: Arc<Mutex<Writer>>,
     next_id: Arc<AtomicI64>,
     pending: Pending,
 }
@@ -62,8 +66,8 @@ impl Peer {
     /// Wire a child's stdio into a peer. Returns the peer, a receiver of inbound
     /// requests/notifications, and the read-loop future (spawn it).
     pub fn new(
-        stdin: ChildStdin,
-        stdout: ChildStdout,
+        stdin: Writer,
+        stdout: Reader,
     ) -> (
         Self,
         mpsc::Receiver<Incoming>,
@@ -119,7 +123,7 @@ impl Peer {
     }
 }
 
-async fn respond(stdin: &Arc<Mutex<ChildStdin>>, id: &Id, result: Result<Value, RpcError>) {
+async fn respond(stdin: &Arc<Mutex<Writer>>, id: &Id, result: Result<Value, RpcError>) {
     let line = codec::encode_response(id, result);
     let mut w = stdin.lock().await;
     let _ = w.write_all(line.as_bytes()).await;
@@ -128,10 +132,10 @@ async fn respond(stdin: &Arc<Mutex<ChildStdin>>, id: &Id, result: Result<Value, 
 }
 
 async fn read_loop(
-    stdout: ChildStdout,
+    stdout: Reader,
     pending: Pending,
     incoming: mpsc::Sender<Incoming>,
-    stdin: Arc<Mutex<ChildStdin>>,
+    stdin: Arc<Mutex<Writer>>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = lines.next_line().await {
