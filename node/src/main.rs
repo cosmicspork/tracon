@@ -178,7 +178,7 @@ async fn main() -> Result<()> {
             hub,
         } => enroll_command(invitation, name, hub).await,
         Command::Mesh(cmd) => mesh_command(cmd).await,
-        Command::Channel(cmd) => channel_command(cmd),
+        Command::Channel(cmd) => channel_command(cmd).await,
         Command::CheckBoundary { deep } => {
             let cfg = config::Config::load();
             let report = boundary::backend_for(&cfg)
@@ -470,7 +470,7 @@ async fn invite_command(channels: Vec<String>, ttl: u64, yes: bool) -> Result<()
     Ok(())
 }
 
-fn channel_command(cmd: ChannelCommand) -> Result<()> {
+async fn channel_command(cmd: ChannelCommand) -> Result<()> {
     let store = tracon::store::Store::open(&config::Config::db_path())?;
     match cmd {
         ChannelCommand::Create { name } => {
@@ -479,6 +479,19 @@ fn channel_command(cmd: ChannelCommand) -> Result<()> {
             }
             let (id, _) = tracon::mesh::identity::load_or_generate()?;
             create_channel(&store, &id, &name)?;
+            let cfg = config::Config::load();
+            if let Some(hub) = &cfg.mesh.hub_url {
+                // So an invite can hand it off: the hub only lets a node grant
+                // a channel it is recorded in.
+                match tracon::mesh::enroll::sync_own_channels(&store, &id, hub, &cfg.node_name)
+                    .await
+                {
+                    Ok(_) => println!("hub record updated"),
+                    Err(e) => {
+                        println!("hub record not updated ({e}); it is synced on the next invite")
+                    }
+                }
+            }
             println!("created channel {name}; hand its key to other nodes with tracon mesh invite");
             Ok(())
         }

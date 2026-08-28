@@ -216,6 +216,37 @@ pub fn handoff_payload(
 /// node's policy bundle, direct-sealed so the hub relays ciphertext. Posted
 /// straight to the hub: the operator is waiting, and the frames must land
 /// even if no node is running here.
+/// Tell the hub which channels this node holds. The hub's record of a node
+/// is routing metadata it learns only from admits, so a channel created after
+/// `mesh init` is unknown to it until this runs — and the hub refuses to let
+/// a node grant a channel it is not recorded in. A member may always extend
+/// its own record (the hub is not the authority on keys), so this is safe to
+/// call whenever the local list may have moved: before inviting or admitting,
+/// and on `channel create`.
+pub async fn sync_own_channels(
+    store: &Store,
+    identity: &Identity,
+    hub_url: &str,
+    name: &str,
+) -> Result<Vec<String>, EnrollError> {
+    let mut chans: Vec<String> = vec![MESH_CHANNEL.to_string()];
+    for c in store.channel_list().map_err(local)? {
+        if !chans.contains(&c.name) {
+            chans.push(c.name);
+        }
+    }
+    let body = serde_json::to_vec(&json!({
+        "node_id": identity.node_id(),
+        "x25519_pub": identity.x25519_hex(),
+        "name": name,
+        "channels": chans,
+    }))
+    .map_err(local)?;
+    let (st, text) = send(identity, hub_url, "POST", "/v0/admit", Some(body)).await?;
+    ok(st, text)?;
+    Ok(chans)
+}
+
 pub async fn admit(
     store: &Store,
     identity: &Identity,
@@ -225,6 +256,14 @@ pub async fn admit(
     name: &str,
     channels: &[String],
 ) -> Result<(), EnrollError> {
+    // The hub must know this node holds what it is about to grant.
+    let own_name = crate::config::Config::load().node_name;
+    sync_own_channels(store, identity, hub_url, &own_name).await?;
+    if node_id.eq_ignore_ascii_case(&identity.node_id()) {
+        // Extending our own record is the whole job; there is no one to hand
+        // keys to.
+        return Ok(());
+    }
     let grantee = key32(x25519_pub)
         .map(x25519_dalek::PublicKey::from)
         .ok_or_else(|| EnrollError::Local("the node's sealing key is malformed".into()))?;
