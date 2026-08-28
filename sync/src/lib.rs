@@ -1,5 +1,5 @@
 //! What the node and the hub share about records: the tables that replicate
-//! (`document`, `memory`, `promotion`), the change log that makes a change
+//! (`document`, `memory`, `promotion`, `work_item`), the change log that makes a change
 //! idempotent, the hybrid logical clock that orders writes across sites, and
 //! the last-writer-wins rule that applies them. One crate so the replica in
 //! the hub is the same code as the replica in a node, and neither drags the
@@ -12,6 +12,7 @@ pub mod apply;
 pub mod batch;
 pub mod hlc;
 pub mod schema;
+pub mod work;
 
 pub use apply::{apply_changes, write_change, Applied};
 pub use hlc::Hlc;
@@ -69,6 +70,24 @@ pub const TABLES: &[(&str, &[&str])] = &[
             "decided_by",
             "decided_ms",
             "created_ms",
+        ],
+    ),
+    (
+        "work_item",
+        &[
+            "channel",
+            "project_id",
+            "title",
+            "body",
+            "state",
+            "priority",
+            "deps_json",
+            "discovered_from",
+            "discovered_by_session",
+            "phase_plan_slug",
+            "closed_by_session",
+            "created_ms",
+            "updated_ms",
         ],
     ),
 ];

@@ -2868,9 +2868,11 @@ dependencies = [
 name = "tracon-sync"
 version = "0.3.0"
 dependencies = [
+ "hex",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror",
  "tracon-proto",
 ]
