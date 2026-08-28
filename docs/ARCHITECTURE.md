@@ -210,6 +210,15 @@ This supersedes the "model-proxied credentials" entry in the roadmap's deferred 
 which objected to TLS interception; header injection on the internal network is not
 that.
 
+*Built (Phase 4):* `gateway/model.rs` on the harness listener, `[providers.<name>]`
+in `node.toml` (`credential`, `upstream`, `shape`, `login`), the broker's `inject_for`
+(an `api_key` becomes `x-api-key` or a bearer by shape; an `oauth` credential a bearer
+with the OAuth beta flag merged), `model_usage` counted off the streamed response, and
+`providers.rs` running the harness's login against `<state>/providers/<provider>/`. The
+spike found omp needs `ANTHROPIC_BASE_URL` for Anthropic and a materialized
+`models.json` provider override for OpenAI, and that the sign-in URL is pasted back
+because the login's localhost callback is unreachable from the operator's browser.
+
 Work-side model access is through the employer's provider subscription via
 omp/opencode. Subscription access and API-platform access are separate systems at
 every major provider, so there is no assumption of a programmatic API endpoint on the
@@ -378,7 +387,7 @@ Two classes, and conflating them is the most likely way to build a gate that is 
 |---|---|---|
 | Identity / mesh keys | Node, generated locally, never transmitted | Enrollment via short-lived code from an enrolled node |
 | Action credentials | Node broker, sealed, harness has no read path | `glab`, `gh`, `acli`, deploy creds, the consulta DB credential |
-| Model auth | Harness store | See above |
+| Model auth | Node broker, same store, kinds `api_key` / `oauth` | Injected by the model gateway; the harness holds its session token as a placeholder |
 
 If action credentials sit on the same UID as the harness, the agent has Bash and can read
 them. Separate UID, rootless container, or separate container.
@@ -551,6 +560,14 @@ replicas, libSQL embedded replicas forward writes to a primary so offline writes
 and Litestream is single-writer backup. All of them assume a sync layer that can read the
 data, which the hub cannot for work channels.
 
+*Built (Phase 4):* the `sync` crate, shared by node and hub. A write stamps
+`(site, site_seq)` and an HLC in one transaction with its `change_log` row, then travels
+as a `changes` frame on the record's channel; a receiver dedupes on `(site, site_seq)`,
+observes the HLC, and applies row-level last-writer-wins on `(hlc_ms, hlc_ctr, site)`
+with tombstones for deletes. Catch-up is per site: a sequence gap, a retention `410`, or
+a fresh channel key asks each site for its own log after what is held. The replicated
+tables are `document`, `memory`, and `promotion`; sessions keep their Phase 2 mirror.
+
 `cr-sqlite` is the one option that fits an opaque relay path: `crsql_as_crr` upgrades a table
 and `crsql_changes` produces and applies changesets that can be encrypted and shipped.
 Deferred, not rejected. Inserts into CRRs run roughly 2.5x slower, there are caveats
@@ -609,6 +626,11 @@ opaquely** (ordering and forwarding only, no indexing, no embeddings, ciphertext
 rest). Work-side recall runs FTS-only against the local replica, which is the degraded
 mode being built anyway. Per-client keys so a compromise is scoped to one channel.
 
+*Built (Phase 4):* the hub is a member of role `hub` under its own identity; a node
+shares a channel with `tracon channel share --hub`, which hands off the keyring with a
+`processing: "hub"` binding. The replica (`hub.db`, the same `sync` schema) opens what it
+holds keys for and counts what it does not. Opaque is the absence of a key, not a flag.
+
 **Vectors are not a safe form of encrypted content.** Embedding inversion can recover a
 substantial amount of source text from a vector alone. Ciphertext at rest plus a
 plaintext vector index is a channel with a readable index attached, not a protected
@@ -647,6 +669,11 @@ Two axes.
 
 Only directives and high-confidence facts load automatically. Hard token cap on
 injection: oversized context degrades the session it was meant to help.
+
+*Built (Phase 4):* `memory(channel, scope, scope_ref, kind, body, confidence, state)` with
+states `active`, `candidate`, `proposed`, `promoted`, `rejected`; `retain` refuses the
+directive kind and holds lessons and low-confidence facts as candidates; the orientation
+injects directives and facts at or above 0.7 confidence for the session's project.
 
 ### Retrieval
 
@@ -694,6 +721,12 @@ it.
 the task needs it. One retrieval index across both with a `kind` discriminator,
 documents chunked but always returned with their slug.
 
+*Built (Phase 4):* `document(channel, slug, kind, title, body, hash)` with an FTS5 index;
+`doc_search` returns slugs and snippets, `doc_read` the body, `doc_write` is asked;
+edits carry the hash last read (`If-Match`, 412 with the current state). The Documents
+screen reads, searches, and edits; `tracon doc import|export` move a notebook directory
+in and out as plain files.
+
 ### Generated orientation files
 
 The two workspace `README.md` files (personal and work) drift because there is no
@@ -708,6 +741,12 @@ equivalent. This is three layers assembled per session, not one file with condit
 
 `~/.workspace-notes.git` and `workspace-notes-sync` are what the hub replaces. Run both
 until the corpus has landed and the two machines demonstrably converge, then cut.
+
+*Built (Phase 4):* `corpus::orientation::assemble` — guides on the channel, this node's
+facts, the bundle's deny rules and their reasons, then what is known — delivered as a
+read-only file passed to the harness with `--append-system-prompt`, and recorded as an
+`orientation` event. The workspace README is imported as `guide-workspace`, and the
+shared conventions are the part of it worth keeping short.
 
 ## Work ledger
 

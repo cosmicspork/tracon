@@ -268,37 +268,79 @@ database, except through the node, and `review` and `consulta` can be archived.
 
 ## Phase 4: Memory, documents, hub
 
-- [ ] **Model credentials brokered.** A model gateway on the internal network injects
-      provider credentials from the node's sealed store; the harness holds none. Login
-      and refresh run the harness's own flow as node-owned subprocesses inside the
-      boundary, surfaced as a "connect a provider" card; the node lifts the token into
-      its vault. Provider bindings enforced at the gateway, fail closed; per-channel
-      usage counted there. Retires `agent.db` on the harness volume,
-      `harness import-credentials`, and `harness shell`. Decided 2026-08-28; see
-      ARCHITECTURE "Model auth". First, because Phase 4's provider bindings need the
-      enforcement point.
-- [ ] Hub-and-spoke sync: site ID, monotonic sequence, hub-assigned ordering, cursor
-      pull, HLC plus LWW
-- [ ] Full local replica on every node, reads always local
-- [ ] Hub decrypts personal and client channels; work channels ordered and forwarded
-      opaquely
-- [ ] Document store, notebook prefix scheme as the kind column
-- [ ] Memory store: scope and kind axes, MCP `retain` / `recall` tools
-- [ ] Bank identity from channel and project ID, never cwd or git root
-- [ ] **Retrieval starts FTS5-only.** Directives ranked above facts. Add `sqlite-vec`
-      and a reranker only once FTS demonstrably misses things in real use; the corpus is
-      plain text either way and vectors are the part that does not export.
+- [x] **Model credentials brokered.** The harness holds a placeholder key (its session
+      token) and reaches every provider through `/model/<provider>/…` on the node's
+      harness listener; the node injects the credential from its sealed store
+      (`credentials.sealed`, under a key derived from the identity seed), enforces the
+      channel's provider bindings, and counts usage per request (`GET /api/usage`).
+      Login and refresh run `omp auth-broker login` / `omp token --force-refresh` as
+      node-owned subprocesses against a per-provider store never mounted into a
+      session; the Nodes screen carries the "connect a provider" card with the
+      sign-in link and the paste-back. `agent.db`, `harness import-credentials`, and
+      `harness shell` are gone. The spike behind it and what could not be verified (a
+      live Anthropic subscription token: the operator's had expired) are in
+      [`phase-4-notes`](reference/phase-4-notes.md).
+- [x] Hub-and-spoke sync: site ID, monotonic sequence, hub-assigned ordering, cursor
+      pull, HLC plus LWW. The `sync` crate: `change_log` keyed on `(site, site_seq)`, a
+      persisted HLC, row-level last-writer-wins on `(hlc_ms, hlc_ctr, site)`, tombstones;
+      `changes` / `changes_request` / `changes_batch` payloads under contract version 2.
+      Found on the way and fixed: the Phase 2 client deadlocked on its first hub outage.
+- [x] Full local replica on every node, reads always local. Documents, memories, and
+      batches are replicated tables on every node; recall and the interface never wait
+      on the hub, and a late joiner backfills each site's log when it is handed a key.
+- [x] Hub decrypts personal and client channels; work channels ordered and forwarded
+      opaquely. The hub has an identity and a `hub.db` replica; `tracon channel share
+      --hub` admits it into a channel (role `hub`) and hands it the keyring. A channel
+      nobody shares stays ciphertext because there is no key, and the hub counts what it
+      could not open.
+- [x] Document store, notebook prefix scheme as the kind column. `tracon doc
+      import|ls|get|put|rm|export`, `GET/PUT/DELETE /api/docs/{channel}/{slug}` with the
+      notebook's `If-Match`/412 contract, `doc_read` / `doc_search` / `doc_write` for
+      agents (the write is asked), and a Documents screen with search, markdown, and a
+      conflict-aware editor. `~/src/docs` (12 documents) and the workspace README
+      imported.
+- [x] Memory store: scope and kind axes, MCP `retain` / `recall` tools. Directives are
+      the operator's (`tracon memory add`, `POST /api/memories`); `retain` writes facts,
+      lessons, and episodes, and holds a lesson (or a fact under 0.7 confidence) as a
+      candidate for the batch. Every session gets the MCP server now.
+- [x] Bank identity from channel and project ID, never cwd or git root:
+      `sha256(channel ‖ canonical remote)`, recorded as `session.project_id`.
+- [x] **Retrieval starts FTS5-only.** Directives ranked above facts (by confidence and a
+      90-day half-life), then promoted lessons, then documents with snippets; episodes
+      only when asked. `sqlite-vec` and a reranker wait for FTS to demonstrably miss.
 - [ ] Embedding model name and dimension stored per vector row, when vectors arrive
-- [ ] Processing node and provider bindings, enforced fail-closed, recorded as data
+- [x] Processing node and provider bindings, enforced fail-closed, recorded as data. A
+      channel's `bindings_json` carries `providers` (the gateway refuses anything off the
+      list) and `processing` (`hub` or a node id: who batches it). Both are handed off
+      with the keyring.
 - [ ] Local embeddings on the work node, when vectors arrive
-- [ ] Generated per-session orientation file: shared conventions, node facts, channel
-      policy
-- [ ] Memory promotion routed through the approval queue, batched nightly
-- [ ] Degraded mode verified: hub unreachable means FTS-only, work continues
-- [ ] Encrypted hub snapshots to object storage, restore exercised at least once
+- [x] Generated per-session orientation file: guides on the channel, this node's facts,
+      the bundle's deny rules with reasons, then directives and confident facts —
+      capped, mounted read-only, passed as `--append-system-prompt`, recorded as an
+      `orientation` event. Nothing in the worktree.
+- [x] Memory promotion routed through the approval queue, batched nightly. The batch is
+      a synced `promotion` record built by whoever the channel's `processing` binding
+      names (the hub at 03:00 UTC, the node at `[memory] promote_at`); verdicts are
+      per item, local writes, and converge; the third queue kind, after reviews.
+- [x] Degraded mode verified: hub unreachable means FTS-only, work continues
+      (`node/tests/sync_e2e.rs`: recall and the outbox with the hub answering 503,
+      concurrent offline edits converging on its return, a delete across a second
+      outage).
+- [x] Encrypted hub snapshots to object storage, restore exercised at least once —
+      against a directory bucket in `hub/tests/snapshot.rs`; the run against Spaces
+      waits on a bucket and a key in the cluster's secrets.
 
-Import both workspace `README.md` files and the `docs/` corpus. Run
-`workspace-notes-sync` in parallel until the machines demonstrably converge, then cut it.
+Imported: `~/src/docs` and this host's workspace `README.md` (as `guide-workspace`).
+The work-side README is imported from a host that can reach it. There was no
+`workspace-notes-sync` on this host to run in parallel; the notebook stays runnable
+against `tracon doc export` until the operator has lived in the Documents screen.
+
+Phase 4 implementation completed 2026-08-28 except the vector items, which wait on
+FTS missing something. Not done, recorded so it is not assumed: a live subscription
+token through the gateway (the operator's Anthropic refresh token had expired; the
+header shape is from the public clients and marked unverified); the snapshot run
+against Spaces; the hub's replica on the homelab cluster, which arrives with the next
+release; the work-side README import.
 
 Exit criteria: `notebook` can be archived, and the two orientation files stop drifting
 because there is only one source.
