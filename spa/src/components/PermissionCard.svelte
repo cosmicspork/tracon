@@ -14,6 +14,14 @@
   const options = $derived(permissionOptions(permission))
   const owner = $derived(nodeById(store.nodes, permission.node_id))
   const held = $derived(unreachableReason(store.nodes, store.mesh, permission.node_id))
+  const request = $derived.by(() => {
+    if (!permission.raw_input) return null
+    try {
+      return JSON.stringify(JSON.parse(permission.raw_input), null, 2)
+    } catch {
+      return permission.raw_input
+    }
+  })
   const command = $derived.by(() => {
     try {
       const input = JSON.parse(permission.raw_input ?? 'null')
@@ -74,6 +82,12 @@
       {/each}
     {/if}
   </span>
+  {#if request}
+    <details class="request">
+      <summary>Full request</summary>
+      <pre>{request}</pre>
+    </details>
+  {/if}
 </div>
 
 <style>
@@ -90,6 +104,29 @@
   .card.inline {
     grid-template-columns: 3px minmax(0, 1fr) auto;
     border-radius: 0 4px 4px 0;
+  }
+  .request {
+    grid-column: 3 / -1;
+    min-width: 0;
+    margin-top: 6px;
+    color: var(--dim);
+  }
+  .inline .request {
+    grid-column: 2 / -1;
+  }
+  .request summary {
+    cursor: pointer;
+    font: 11px var(--mono);
+  }
+  .request pre {
+    max-height: 280px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--ink);
+    background: var(--s0);
+    padding: 8px;
+    border-radius: 3px;
   }
   .bar {
     align-self: stretch;

@@ -130,7 +130,10 @@ export const api = {
   putDoc: async (channel: string, slug: string, body: string, ifMatch?: string): Promise<Document> => {
     const res = await fetch(`/api/docs/${channel}/${slug}`, {
       method: 'PUT',
-      headers: { 'content-type': 'application/json', ...(ifMatch ? { 'if-match': ifMatch } : {}) },
+      headers: {
+        'content-type': 'application/json',
+        ...(ifMatch ? { 'if-match': ifMatch } : { 'if-none-match': '*' }),
+      },
       body: JSON.stringify({ body }),
     })
     const text = await res.text()

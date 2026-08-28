@@ -397,10 +397,17 @@ pub async fn admit(
             }
         }
     }
+    // A channel grant for an existing peer must not also be a directory-key
+    // mutation. The target's authenticated request is the proof for its own
+    // name/key rotation; third-party grants preserve both fields.
+    let (x25519_pub, name) = match (&existing, is_self) {
+        (Some(e), false) => (e.x25519_pub.clone(), e.name.clone()),
+        _ => (body.x25519_pub.to_ascii_lowercase(), body.name),
+    };
     let member = Member {
         node_id: node_id.clone(),
-        x25519_pub: body.x25519_pub.to_ascii_lowercase(),
-        name: body.name,
+        x25519_pub,
+        name,
         channels,
         admitted_ms: existing
             .as_ref()
@@ -435,8 +442,11 @@ pub async fn remove_member(
 ) -> ApiResult {
     let me = member_of(&s, &owner)?;
     let node_id = node_id.to_ascii_lowercase();
-    if node_id == me.node_id {
-        return Err(err(StatusCode::BAD_REQUEST, "a node cannot remove itself"));
+    if node_id != me.node_id {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "a node may only remove its own membership",
+        ));
     }
     if s.members.remove(&node_id).map_err(io)? {
         Ok((StatusCode::NO_CONTENT, Json(Value::Null)))

@@ -646,6 +646,17 @@ pub async fn put_doc(
         .get("if-match")
         .and_then(|v| v.to_str().ok())
         .map(|v| v.trim_matches('"').to_string());
+    let create_only = headers
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim() == "*");
+    if if_match.is_some() && create_only {
+        return ApiError(
+            StatusCode::BAD_REQUEST,
+            "if-match and if-none-match cannot be combined".into(),
+        )
+        .into_response();
+    }
     match crate::mcp::docs::write_document(
         s.store(),
         s.manager.bus(),
@@ -654,6 +665,7 @@ pub async fn put_doc(
         &slug,
         &body.body,
         if_match.as_deref(),
+        create_only,
     ) {
         Ok(doc) => Json(json!(doc)).into_response(),
         Err(crate::mcp::docs::WriteError::Conflict { hash, body }) => (

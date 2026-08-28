@@ -308,6 +308,13 @@ async fn enrollment_lifecycle_and_admit() {
     let ch = v["channels"].as_array().unwrap();
     assert!(ch.contains(&json!("@mesh")) && ch.contains(&json!("personal")));
     assert_eq!(v["admitted_by"], a.node_id());
+    // A may extend B's routing channels, but cannot substitute B's sealing
+    // key or rename it as part of that third-party grant.
+    let body = json!({"node_id": b.node_id(), "x25519_pub": c.x25519_hex(), "name": "forged", "channels": ["personal"]});
+    let (st, v) = s(&h, &a, "POST", "/v0/admit", &body.to_string()).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v["x25519_pub"], b.x25519_hex());
+    assert_eq!(v["name"], "laptop");
     // B is a member now and can self-extend into a channel A never had.
     let body = json!({"node_id": b.node_id(), "x25519_pub": b.x25519_hex(), "name": "laptop", "channels": ["work"]});
     let (st, v) = s(&h, &b, "POST", "/v0/admit", &body.to_string()).await;
@@ -317,12 +324,12 @@ async fn enrollment_lifecycle_and_admit() {
         h.members.get(&b.node_id()).unwrap().unwrap().channels.len(),
         3
     );
-    // Removal: not self, then a stranger.
-    let (st, _) = s(&h, &a, "DELETE", &format!("/v0/admit/{}", a.node_id()), "").await;
-    assert_eq!(st, StatusCode::BAD_REQUEST);
+    // Removal is self-authenticated: no member can revoke another one.
     let (st, _) = s(&h, &a, "DELETE", &format!("/v0/admit/{}", c.node_id()), "").await;
-    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_eq!(st, StatusCode::FORBIDDEN);
     let (st, _) = s(&h, &a, "DELETE", &format!("/v0/admit/{}", b.node_id()), "").await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, _) = s(&h, &b, "DELETE", &format!("/v0/admit/{}", b.node_id()), "").await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     let (st, _) = s(&h, &b, "GET", "/v0/members", "").await;
     assert_eq!(st, StatusCode::FORBIDDEN);

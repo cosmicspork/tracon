@@ -8,7 +8,7 @@ use tracon_sync::ChangeOp;
 use crate::{
     corpus,
     mcp::{CallContext, SessionAccess},
-    store::{now_ms, DocumentRow},
+    store::{DocumentRow, DocumentWrite},
 };
 
 pub const DOC_READ: &str = "doc_read";
@@ -140,6 +140,7 @@ pub async fn call(
                 slug,
                 body,
                 args["if_hash"].as_str(),
+                false,
             )
             .map_err(|e| e.to_string())?;
             Ok(json!({ "slug": doc.slug, "hash": doc.hash }))
@@ -160,6 +161,7 @@ pub enum WriteError {
 
 /// Create or replace a document at a slug, on this node, as a sync write.
 /// `if_hash` is the edit's precondition: the hash the caller last read.
+/// `create_only` is the HTTP `If-None-Match: *` precondition.
 pub fn write_document(
     store: &crate::store::Store,
     bus: &crate::stream::Bus,
@@ -168,49 +170,33 @@ pub fn write_document(
     slug: &str,
     body: &str,
     if_hash: Option<&str>,
+    create_only: bool,
 ) -> Result<DocumentRow, WriteError> {
     if !valid_slug(slug) {
         return Err(WriteError::Slug(slug.to_string()));
     }
-    let existing = store.doc_get(channel, slug)?;
-    if let (Some(want), Some(cur)) = (if_hash, &existing) {
-        if want != cur.hash {
-            return Err(WriteError::Conflict {
-                hash: cur.hash.clone(),
-                body: cur.body.clone(),
-            });
-        }
-    }
-    let now = now_ms();
     let hash = corpus::hash_body(body);
-    let row = DocumentRow {
-        id: existing
-            .as_ref()
-            .map(|d| d.id.clone())
-            .unwrap_or_else(corpus::new_id),
-        channel: channel.to_string(),
-        slug: slug.to_string(),
-        kind: kind_of(slug).to_string(),
-        title: title_of(slug, body),
-        body: body.to_string(),
-        hash,
-        site: site.to_string(),
-        hlc_ms: 0,
-        deleted: 0,
-        created_ms: existing.as_ref().map(|d| d.created_ms).unwrap_or(now),
-        updated_ms: now,
-    };
-    corpus::write(
-        store,
-        bus,
+    match store.write_document_change(
         site,
         channel,
-        "document",
-        ChangeOp::Upsert,
-        &row.id,
-        row.to_change_row(),
-    )?;
-    Ok(row)
+        slug,
+        kind_of(slug),
+        &title_of(slug, body),
+        body,
+        &hash,
+        if_hash,
+        create_only,
+        &corpus::new_id(),
+    )? {
+        DocumentWrite::Written { row, change } => {
+            bus.publish(crate::stream::Frame::Changes {
+                channel: channel.to_string(),
+                changes: vec![change],
+            });
+            Ok(row)
+        }
+        DocumentWrite::Conflict { hash, body } => Err(WriteError::Conflict { hash, body }),
+    }
 }
 
 /// Remove a document at a slug (a tombstone that travels).
@@ -240,6 +226,7 @@ pub fn delete_document(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn kinds_and_titles_follow_the_notebook_scheme() {
@@ -253,5 +240,66 @@ mod tests {
         assert!(!valid_slug("Guide"));
         assert!(!valid_slug("../x"));
         assert!(!valid_slug(""));
+    }
+
+    #[test]
+    fn matching_hash_is_checked_in_the_same_transaction_as_the_write() {
+        let store = Arc::new(crate::store::Store::open_in_memory().unwrap());
+        let bus = Arc::new(crate::stream::Bus::new());
+        let original = write_document(
+            &store,
+            &bus,
+            "A",
+            "personal",
+            "guide-race",
+            "# Original",
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(matches!(
+            write_document(
+                &store,
+                &bus,
+                "A",
+                "personal",
+                "guide-race",
+                "# Blind overwrite",
+                None,
+                true,
+            ),
+            Err(WriteError::Conflict { .. })
+        ));
+        let barrier = Arc::new(Barrier::new(3));
+        let mut joins = Vec::new();
+        for body in ["# First", "# Second"] {
+            let store = store.clone();
+            let bus = bus.clone();
+            let barrier = barrier.clone();
+            let hash = original.hash.clone();
+            joins.push(std::thread::spawn(move || {
+                barrier.wait();
+                write_document(
+                    &store,
+                    &bus,
+                    "A",
+                    "personal",
+                    "guide-race",
+                    body,
+                    Some(&hash),
+                    false,
+                )
+            }));
+        }
+        barrier.wait();
+        let results: Vec<_> = joins.into_iter().map(|j| j.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r, Err(WriteError::Conflict { .. })))
+                .count(),
+            1
+        );
     }
 }

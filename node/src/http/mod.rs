@@ -8,8 +8,8 @@ use std::{net::SocketAddr, sync::Arc};
 use anyhow::{Context, Result};
 use axum::{
     extract::Request,
-    http::{header, StatusCode},
-    middleware::Next,
+    http::{header, HeaderName, HeaderValue, StatusCode},
+    middleware::{self, Next},
     response::Response,
     routing::{get, post, put},
     Router,
@@ -81,8 +81,31 @@ pub fn router(state: AppState) -> Router {
         .route("/api/queue", get(api::queue))
         .route("/api/stream", get(stream::stream))
         .fallback(spa::serve)
+        .layer(middleware::from_fn(security_headers))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn security_headers(req: Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data: https:; connect-src 'self'; object-src 'none'; \
+             base-uri 'none'; frame-ancestors 'none'",
+        ),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 /// The hostname portion of a `Host`/`Origin` value, minus any scheme, port, or
