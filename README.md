@@ -207,7 +207,16 @@ the seed loses the store), and are never given to a harness. `tracon credential 
 kinds, and bindings, never values; `tracon credential share <name> --to <node>` hands one
 to another member, direct-sealed over the hub, and enrollment hands over every credential
 whose `nodes` lists the new node. A plaintext `credentials.toml` found at startup is
-sealed once and set aside. What the harness gets is a tool it may
+sealed once and set aside.
+
+Model credentials are brokered the same way. The harness holds only a placeholder key
+(its session token) and reaches every provider through the node's gateway
+(`/model/<provider>/…` on the harness forward), which injects the real credential,
+enforces the channel's provider bindings, and counts usage (`GET /api/usage`). A
+subscription is connected from the Nodes screen: the node runs the harness's own login
+inside the boundary, shows the sign-in link, takes the paste-back, and lifts the token
+into the store; refresh runs the same way ahead of expiry. An API key is a credential
+of kind `api_key` with `provider` set, imported like any other. What the harness gets is a tool it may
 ask the node to run, over MCP through the gateway's forward, with a token minted for its
 session. A credential names the channels allowed to use it; a channel with none bound is
 offered no tools at all. It may also name the nodes allowed to use it, by node id, so a

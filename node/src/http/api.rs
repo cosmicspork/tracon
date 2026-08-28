@@ -534,6 +534,82 @@ pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Valu
     ))
 }
 
+// ---- providers ----
+
+fn providers_of(s: &AppState) -> ApiResult<Arc<crate::providers::Providers>> {
+    s.manager.providers().cloned().ok_or(ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "providers are not available on this node".into(),
+    ))
+}
+
+fn provider_err(e: crate::providers::ProviderError) -> ApiError {
+    use crate::providers::ProviderError::*;
+    let status = match &e {
+        Unknown(_) => StatusCode::NOT_FOUND,
+        NoLogin(_) | NotPending(_) => StatusCode::CONFLICT,
+        Busy(_) => StatusCode::CONFLICT,
+        Failed(_) => StatusCode::BAD_GATEWAY,
+    };
+    ApiError(status, e.to_string())
+}
+
+pub async fn list_providers(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    match s.manager.providers() {
+        Some(p) => Ok(Json(json!(p.list()))),
+        None => Ok(Json(json!(providers_json(&s)))),
+    }
+}
+
+#[derive(Deserialize, Default)]
+pub struct ConnectBody {
+    #[serde(default)]
+    pub channels: Vec<String>,
+}
+
+/// Start the harness's login for a provider; the response carries the URL to
+/// open. The card then takes the paste-back.
+pub async fn connect_provider(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    body: Option<Json<ConnectBody>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let channels = body.map(|Json(b)| b.channels).unwrap_or_default();
+    let url = providers_of(&s)?
+        .connect(&name, channels)
+        .await
+        .map_err(provider_err)?;
+    Ok(Json(json!({ "name": name, "url": url })))
+}
+
+#[derive(Deserialize)]
+pub struct CodeBody {
+    pub code: String,
+}
+
+pub async fn provider_code(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<CodeBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    providers_of(&s)?
+        .code(&name, &body.code)
+        .await
+        .map_err(provider_err)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn disconnect_provider(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    providers_of(&s)?
+        .disconnect(&name)
+        .await
+        .map_err(provider_err)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 /// Each configured provider and whether a credential for it is usable here.
 pub(crate) fn providers_json(s: &AppState) -> Vec<serde_json::Value> {
     let broker = s.tools.broker.read().unwrap();

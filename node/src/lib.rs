@@ -11,6 +11,7 @@ pub mod http;
 pub mod mcp;
 pub mod mesh;
 pub mod policy;
+pub mod providers;
 pub mod review;
 pub mod runner;
 pub mod session;

@@ -4,7 +4,45 @@
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
 
+  import { api } from '../lib/api'
+  import type { ProviderInfo } from '../lib/types'
+
   const nodes = $derived(store.nodes)
+  const providers = $derived(store.providers)
+  let codes = $state<Record<string, string>>({})
+  let busy = $state<Record<string, boolean>>({})
+  let errors = $state<Record<string, string>>({})
+
+  async function act(p: ProviderInfo, f: () => Promise<unknown>) {
+    busy = { ...busy, [p.name]: true }
+    errors = { ...errors, [p.name]: '' }
+    try {
+      await f()
+    } catch (e) {
+      errors = { ...errors, [p.name]: e instanceof Error ? e.message : String(e) }
+    } finally {
+      busy = { ...busy, [p.name]: false }
+    }
+  }
+  function connect(p: ProviderInfo) {
+    return act(p, () => api.connectProvider(p.name, ['personal']))
+  }
+  function paste(p: ProviderInfo) {
+    const code = (codes[p.name] ?? '').trim()
+    if (!code) return
+    return act(p, async () => {
+      await api.providerCode(p.name, code)
+      codes = { ...codes, [p.name]: '' }
+    })
+  }
+  function disconnect(p: ProviderInfo) {
+    return act(p, () => api.disconnectProvider(p.name))
+  }
+  function expiry(p: ProviderInfo): string {
+    if (!p.expires_ms) return ''
+    const left = p.expires_ms - clock.now
+    return left <= 0 ? 'expired' : `refreshes in ${formatAge(clock.now - left, clock.now)}`
+  }
   const reachable = $derived(nodes.filter((n) => n.is_self || n.reachable).length)
   const meshed = $derived(store.mesh !== null && store.mesh.hub.state !== 'disabled')
 
@@ -79,6 +117,58 @@
           {/if}
         </span>
       </div>
+      {#if node.is_self && providers.length}
+        <!-- Providers: the model credentials this node brokers. The harness
+             never holds one; connecting runs its own login here, and the
+             paste-back comes through this card. -->
+        <div class="providers">
+          {#each providers as p (p.name)}
+            <div class="prov" class:pending={p.state === 'pending'} class:bad={p.state === 'failed'}>
+              <span class="pbar"></span>
+              <span class="pnm">
+                {p.name}
+                <small
+                  >{#if p.state === 'connected'}{p.kind === 'oauth' ? 'subscription' : 'api key'}{#if p.identity}
+                      · {p.identity}{/if}{:else if p.state === 'pending'}waiting on you{:else if p.state === 'failed'}failed{:else}not
+                    connected{/if}</small
+                >
+              </span>
+              <span class="pst">
+                {#if p.state === 'connected'}
+                  <span class="l"><span class="chip">connected</span>{#if p.channels.length} · {p.channels.join(', ')}{/if}{#if expiry(p)} · {expiry(p)}{/if}</span>
+                  {#if !surface.phone}
+                    <span><button class="lnk d" onclick={() => disconnect(p)} disabled={busy[p.name]}>Disconnect</button></span>
+                  {/if}
+                {:else if p.state === 'pending'}
+                  <span class="l warn"><span class="chip warn">connect</span> · open the link, sign in, paste what it gives you back</span>
+                  <span><a class="lnk" href={p.url} target="_blank" rel="noopener">Open {p.name} sign-in</a></span>
+                  {#if !surface.phone}
+                    <span class="paste">
+                      <input
+                        placeholder="redirect URL or code"
+                        bind:value={codes[p.name]}
+                        onkeydown={(e) => e.key === 'Enter' && paste(p)}
+                      />
+                      <button class="btn p" onclick={() => paste(p)} disabled={busy[p.name] || !(codes[p.name] ?? '').trim()}>Paste back</button>
+                      <button class="lnk d" onclick={() => disconnect(p)} disabled={busy[p.name]}>Cancel</button>
+                    </span>
+                  {/if}
+                {:else}
+                  <span class="l off" class:bad={p.state === 'failed'}
+                    ><span class="chip" class:off={p.state !== 'failed'} class:bad={p.state === 'failed'}>{p.state === 'failed' ? 'failed' : 'disconnected'}</span>{#if p.error} · {p.error}{/if}</span
+                  >
+                  {#if p.can_login && !surface.phone}
+                    <span><button class="lnk" onclick={() => connect(p)} disabled={busy[p.name]}>{p.state === 'failed' ? 'Try again' : 'Connect'}</button></span>
+                  {:else if !p.can_login}
+                    <span>API key only: <code>tracon credential import</code> on this node.</span>
+                  {/if}
+                {/if}
+                {#if errors[p.name]}<span class="l bad">{errors[p.name]}</span>{/if}
+              </span>
+            </div>
+          {/each}
+        </div>
+      {/if}
     {/each}
   </div>
   {#if meshed && surface.phone}
@@ -168,6 +258,91 @@
   }
   .st .l.off {
     color: var(--dim);
+  }
+  /* Providers sit under the serving node, indented past its bar. */
+  .providers {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0 0 6px 17px;
+  }
+  .prov {
+    display: grid;
+    grid-template-columns: 3px 133px minmax(0, 1fr);
+    gap: 0 14px;
+    background: var(--s1);
+    border-radius: 4px;
+    padding: 9px 14px 9px 0;
+    overflow: hidden;
+  }
+  .pbar {
+    align-self: stretch;
+    border-radius: 2px 0 0 2px;
+    background: var(--ok);
+  }
+  .prov.pending .pbar {
+    background: var(--wait);
+  }
+  .prov.pending {
+    background: linear-gradient(90deg, var(--wash-wait), var(--s1) 42%);
+  }
+  .prov.bad .pbar {
+    background: var(--crit);
+  }
+  .pnm {
+    font-weight: 600;
+    min-width: 0;
+  }
+  .pnm small {
+    display: block;
+    font: 11.5px var(--mono);
+    color: var(--dim);
+    font-weight: 400;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pst {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font: 12.5px var(--mono);
+    color: var(--ink2);
+    min-width: 0;
+  }
+  .pst > span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pst .l.warn {
+    color: var(--wait);
+  }
+  .pst .l.off {
+    color: var(--dim);
+  }
+  .pst .l.bad {
+    color: var(--crit);
+  }
+  .paste {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    white-space: normal;
+  }
+  .paste input {
+    flex: 1;
+    min-width: 0;
+    font: 12.5px var(--mono);
+    background: var(--s2);
+    color: var(--ink);
+    border: 0;
+    border-radius: 3px;
+    padding: 6px 8px;
+  }
+  .pst code {
+    font: 12px var(--mono);
+    color: var(--ink);
   }
   @media (max-width: 700px) {
     .node {

@@ -89,6 +89,7 @@ async fn harness(broker_toml: &str, allow: &[&str]) -> Harness {
             credential: "stubcred".into(),
             upstream: format!("http://127.0.0.1:{port}"),
             shape: SHAPE_ANTHROPIC.into(),
+            login: None,
         },
     );
     cfg.providers.insert(
@@ -97,6 +98,7 @@ async fn harness(broker_toml: &str, allow: &[&str]) -> Harness {
             credential: "stubcred".into(),
             upstream: "https://example.com".into(),
             shape: SHAPE_ANTHROPIC.into(),
+            login: None,
         },
     );
     let cfg = Arc::new(cfg);

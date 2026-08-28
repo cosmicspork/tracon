@@ -4,7 +4,17 @@
 
 import { api, type ChannelInfo } from './api'
 import { upsertNode } from './nodes'
-import type { Event, Frame, MeshState, NodeInfo, Permission, Queue, Review, Session } from './types'
+import type {
+  Event,
+  Frame,
+  MeshState,
+  NodeInfo,
+  Permission,
+  ProviderInfo,
+  Queue,
+  Review,
+  Session,
+} from './types'
 
 const MAX_LIVE_EVENTS = 3000
 const RECONNECTED_BANNER_MS = 8000
@@ -16,6 +26,8 @@ class Store {
   mesh = $state<MeshState | null>(null)
   /** Channels this node can start sessions on, and who is bound to each. */
   channels = $state<ChannelInfo[]>([])
+  /** Model providers on the serving node and whether each is connected. */
+  providers = $state<ProviderInfo[]>([])
   /** Set briefly after the hub comes back: how many queued items went out. */
   reconnected = $state<number | null>(null)
   queue = $state<Queue>({ waiting: [], reviews: [], running: [], ended: [] })
@@ -68,6 +80,7 @@ class Store {
       'reviews',
       'node',
       'mesh',
+      'providers',
     ] as const) {
       this.source.addEventListener(name, (m) => this.onFrame(JSON.parse((m as MessageEvent).data)))
     }
@@ -75,16 +88,18 @@ class Store {
 
   async refetch() {
     try {
-      const [nodes, mesh, channels, queue, sessions] = await Promise.all([
+      const [nodes, mesh, channels, queue, sessions, providers] = await Promise.all([
         api.nodes(),
         api.mesh(),
         api.channels(),
         api.queue(),
         api.sessions(),
+        api.providers().catch(() => [] as ProviderInfo[]),
       ])
       this.nodes = nodes.reduce(upsertNode, [] as NodeInfo[])
       this.mesh = mesh
       this.channels = channels
+      this.providers = providers
       this.queue = queue
       this.sessions = new Map(sessions.map((s) => [s.id, s]))
       if (this.openSession) await this.loadEvents(this.openSession)
@@ -177,6 +192,10 @@ class Store {
         const wasDown = this.mesh?.hub.state === 'unreachable'
         this.mesh = frame
         if (wasDown && frame.hub.state === 'connected') this.showReconnected(frame.queued)
+        break
+      }
+      case 'providers': {
+        this.providers = frame.providers
         break
       }
     }

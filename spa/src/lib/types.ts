@@ -23,6 +23,21 @@ export interface ModelOption {
   name: string
 }
 
+/** One model provider on the serving node, from `/api/providers` and the `providers` stream event. */
+export interface ProviderInfo {
+  name: string
+  state: 'connected' | 'pending' | 'failed' | 'disconnected'
+  kind: 'api_key' | 'oauth' | null
+  /** Whether the harness has a login flow for it; otherwise an API key is imported by CLI. */
+  can_login: boolean
+  url: string | null
+  error: string | null
+  identity: string | null
+  expires_ms: number | null
+  channels: string[]
+  updated_ms: number | null
+}
+
 /** Hub reachability, from `/api/mesh` and the `mesh` stream event. */
 export interface MeshState {
   hub: { state: 'disabled' } | { state: 'connected' } | { state: 'unreachable'; since_ms: number }
@@ -149,6 +164,7 @@ export type Frame =
   | { type: 'reviews'; waiting: Review[] }
   | ({ type: 'node' } & NodeInfo)
   | ({ type: 'mesh' } & MeshState)
+  | { type: 'providers'; providers: ProviderInfo[] }
 
 export const TERMINAL_STATES: SessionState[] = ['closed', 'killed_budget', 'failed']
 

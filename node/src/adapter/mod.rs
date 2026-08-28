@@ -3,6 +3,8 @@
 
 pub mod omp;
 
+use std::path::Path;
+
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
@@ -107,6 +109,25 @@ pub enum AdapterError {
     Protocol(String),
 }
 
+/// A provider login the harness is running: the URL for the operator, the
+/// subprocess's stdin for the paste-back, and its exit.
+pub struct LoginFlow {
+    pub url: String,
+    pub stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+    pub done: futures_core::future::BoxFuture<'static, Result<i32, crate::runner::RunnerError>>,
+    /// Everything the login printed, for the reason when it fails.
+    pub output: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+/// What a login left in the harness's store, as the broker keeps it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LiftedToken {
+    pub access: String,
+    pub refresh: Option<String>,
+    pub expires_ms: Option<i64>,
+    pub identity: Option<String>,
+}
+
 #[async_trait]
 pub trait HarnessAdapter: Send + Sync {
     fn id(&self) -> &'static str;
@@ -123,6 +144,34 @@ pub trait HarnessAdapter: Send + Sync {
         runner: &dyn Runner,
         spec: LaunchSpec,
     ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError>;
+
+    /// Run the harness's own login for `provider` inside the runner, against
+    /// the store the runner mounts. Returns once the URL is known.
+    async fn login(
+        &self,
+        _runner: &dyn Runner,
+        _provider: &str,
+        _name: &str,
+    ) -> Result<LoginFlow, AdapterError> {
+        Err(AdapterError::Protocol(
+            "this harness has no login flow".into(),
+        ))
+    }
+
+    /// Refresh the stored token for `provider` in place.
+    async fn refresh(
+        &self,
+        _runner: &dyn Runner,
+        _provider: &str,
+        _name: &str,
+    ) -> Result<(), AdapterError> {
+        Err(AdapterError::Protocol("this harness has no refresh".into()))
+    }
+
+    /// Read the token a login or refresh left in `store_dir`.
+    async fn lift(&self, _store_dir: &Path, _provider: &str) -> Result<LiftedToken, AdapterError> {
+        Err(AdapterError::Protocol("this harness has no lift".into()))
+    }
 }
 
 #[async_trait]

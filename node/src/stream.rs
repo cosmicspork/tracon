@@ -48,6 +48,10 @@ pub enum Frame {
     Node(Value),
     /// Hub reachability and mesh counters, for the banner.
     Mesh(Value),
+    /// Every configured model provider and its state on this node.
+    Providers {
+        providers: Vec<Value>,
+    },
 }
 
 impl Frame {
@@ -62,6 +66,7 @@ impl Frame {
             Frame::Reviews { .. } => "reviews",
             Frame::Node(_) => "node",
             Frame::Mesh(_) => "mesh",
+            Frame::Providers { .. } => "providers",
         }
     }
 
