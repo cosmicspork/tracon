@@ -127,6 +127,17 @@ impl Credential {
     }
 }
 
+/// Headers the model gateway writes in place of the harness's placeholder.
+/// Built inside the broker so the secret leaves it only as a header bound for
+/// the provider, never as a value a response could carry.
+#[derive(Debug, Clone, Default)]
+pub struct Injection {
+    pub authorization: Option<String>,
+    pub x_api_key: Option<String>,
+    /// An Anthropic subscription token: the gateway merges the OAuth beta flag.
+    pub oauth_beta: bool,
+}
+
 /// Loaded at startup from a store only the node can open, and written back
 /// whenever a login, an import, or a handoff changes it.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -338,6 +349,94 @@ impl Broker {
         Ok(self.usable(name, channel, node_id)?.env.clone())
     }
 
+    /// The gateway's way out: headers for one provider request on behalf of a
+    /// session in `channel`. Same bindings as `env_for`.
+    pub fn inject_for(
+        &self,
+        name: &str,
+        channel: &str,
+        node_id: &str,
+        shape: &str,
+    ) -> Result<Injection, BrokerError> {
+        let cred = self.usable(name, channel, node_id)?;
+        Self::injection(cred, shape)
+    }
+
+    /// For the node's own model probe, which has no channel: the credential
+    /// must at least be usable by some channel on this node.
+    pub fn inject_for_probe(
+        &self,
+        name: &str,
+        node_id: &str,
+        shape: &str,
+    ) -> Result<Injection, BrokerError> {
+        let cred = self
+            .credentials
+            .get(name)
+            .ok_or_else(|| BrokerError::Unknown(name.to_string()))?;
+        if cred.channels.is_empty() {
+            return Err(BrokerError::NotBound {
+                name: name.to_string(),
+                channel: "(any)".into(),
+            });
+        }
+        if !cred.allows_node(node_id) {
+            return Err(BrokerError::NotOnThisNode {
+                name: name.to_string(),
+            });
+        }
+        Self::injection(cred, shape)
+    }
+
+    fn injection(cred: &Credential, shape: &str) -> Result<Injection, BrokerError> {
+        let missing = |k: &str| BrokerError::Parse(format!("credential has no {k}"));
+        match cred.kind.as_str() {
+            KIND_API_KEY => {
+                let key = cred.env.get("API_KEY").ok_or_else(|| missing("API_KEY"))?;
+                Ok(if shape == "anthropic" {
+                    Injection {
+                        x_api_key: Some(key.clone()),
+                        ..Default::default()
+                    }
+                } else {
+                    Injection {
+                        authorization: Some(format!("Bearer {key}")),
+                        ..Default::default()
+                    }
+                })
+            }
+            KIND_OAUTH => {
+                let tok = cred
+                    .env
+                    .get("ACCESS_TOKEN")
+                    .ok_or_else(|| missing("ACCESS_TOKEN"))?;
+                Ok(Injection {
+                    authorization: Some(format!("Bearer {tok}")),
+                    oauth_beta: shape == "anthropic",
+                    ..Default::default()
+                })
+            }
+            other => Err(BrokerError::Parse(format!(
+                "credential kind {other} cannot be injected into a model request"
+            ))),
+        }
+    }
+
+    /// The first model credential for `provider` usable on this node, for
+    /// reporting which providers are connected.
+    pub fn model_credential_for(
+        &self,
+        provider: &str,
+        node_id: &str,
+    ) -> Option<(&str, &Credential)> {
+        self.credentials
+            .iter()
+            .find(|(_, c)| {
+                c.is_model() && c.provider.as_deref() == Some(provider) && c.allows_node(node_id)
+            })
+            .map(|(n, c)| (n.as_str(), c))
+    }
+
     fn usable(&self, name: &str, channel: &str, node_id: &str) -> Result<&Credential, BrokerError> {
         let cred = self
             .credentials
@@ -455,6 +554,43 @@ mod tests {
         let b = Broker::default();
         assert!(b.is_empty());
         assert!(b.available_to("work", "node-a").is_empty());
+    }
+
+    #[test]
+    fn injection_is_shaped_by_kind_and_provider_and_never_for_env() {
+        let b = broker();
+        let i = b
+            .inject_for("anthropic", "personal", "node-a", "anthropic")
+            .unwrap();
+        assert_eq!(i.x_api_key.as_deref(), Some("sk-x"));
+        assert!(i.authorization.is_none() && !i.oauth_beta);
+        let i = b
+            .inject_for("anthropic", "personal", "node-a", "openai")
+            .unwrap();
+        assert_eq!(i.authorization.as_deref(), Some("Bearer sk-x"));
+        assert!(matches!(
+            b.inject_for("anthropic", "work", "node-a", "anthropic")
+                .unwrap_err(),
+            BrokerError::NotBound { .. }
+        ));
+        assert!(b
+            .inject_for("warehouse", "work", "node-a", "openai")
+            .is_err());
+        let mut oauth = Credential {
+            kind: KIND_OAUTH.into(),
+            provider: Some("anthropic".into()),
+            channels: vec!["work".into()],
+            ..Default::default()
+        };
+        oauth.env.insert("ACCESS_TOKEN".into(), "at".into());
+        let mut b = Broker::default();
+        b.put("max", oauth);
+        let i = b.inject_for("max", "work", "node-a", "anthropic").unwrap();
+        assert_eq!(i.authorization.as_deref(), Some("Bearer at"));
+        assert!(i.oauth_beta);
+        assert!(b.inject_for_probe("max", "node-a", "anthropic").is_ok());
+        assert!(b.model_credential_for("anthropic", "node-a").is_some());
+        assert!(b.model_credential_for("openai", "node-a").is_none());
     }
 
     #[test]

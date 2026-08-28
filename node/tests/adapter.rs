@@ -82,7 +82,7 @@ async fn version_is_parsed_from_the_runner() {
 #[tokio::test]
 async fn probe_models_lists_what_the_harness_offers() {
     let models = OmpAdapter::new("18.0.4")
-        .probe_models(&FakeRunner)
+        .probe_models(&FakeRunner, Vec::new())
         .await
         .unwrap();
     assert_eq!(
@@ -102,6 +102,7 @@ async fn unknown_model_is_refused_before_prompting() {
                 container_name: "t".into(),
                 mcp_servers: Vec::new(),
                 tools: Vec::new(),
+                env: Vec::new(),
             },
         )
         .await
@@ -121,6 +122,7 @@ async fn launch_prompt_permission_and_turn_result() {
                 container_name: "t".into(),
                 mcp_servers: Vec::new(),
                 tools: Vec::new(),
+                env: Vec::new(),
             },
         )
         .await
@@ -170,6 +172,7 @@ async fn denying_a_permission_fails_the_tool_call() {
                 container_name: "t".into(),
                 mcp_servers: Vec::new(),
                 tools: Vec::new(),
+                env: Vec::new(),
             },
         )
         .await

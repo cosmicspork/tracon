@@ -131,7 +131,7 @@ pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
         );
     };
     let mut v = node_row_json(&n);
-    v["harness_credentials"] = json!(crate::session::materialize::has_credentials());
+    v["providers"] = json!(providers_json(s));
     Ok(v)
 }
 
@@ -534,28 +534,101 @@ pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Valu
     ))
 }
 
-/// Re-probe the harness for its model list, for when the probe failed at
-/// startup or the harness gained providers since.
-pub async fn refresh_models(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    let backend = s.manager.backend();
+/// Each configured provider and whether a credential for it is usable here.
+pub(crate) fn providers_json(s: &AppState) -> Vec<serde_json::Value> {
+    let broker = s.tools.broker.read().unwrap();
+    s.cfg
+        .providers
+        .keys()
+        .map(|name| {
+            let cred = broker.model_credential_for(name, &s.node_id);
+            json!({
+                "name": name,
+                "state": if cred.is_some() { "connected" } else { "disconnected" },
+                "identity": cred.and_then(|(_, c)| c.identity.clone()),
+                "expires_ms": cred.and_then(|(_, c)| c.expires_ms),
+            })
+        })
+        .collect()
+}
+
+/// Probe the harness for its model list through the gateway and record it on
+/// this node's row. Skipped when no model credential is usable here: the
+/// harness would list its catalogue, but nothing could be run against it.
+pub async fn probe_models_into_store(
+    s: &AppState,
+    backend: &dyn crate::boundary::Backend,
+) -> Result<Vec<crate::adapter::ModelOption>, String> {
+    let Ok(Some(node)) = s.store().get_node(&s.node_id) else {
+        return Err("node row missing".into());
+    };
+    if node.state != "ready" {
+        return Err("node is refused; no probe".into());
+    }
+    if !s
+        .tools
+        .broker
+        .read()
+        .unwrap()
+        .has_model_credential(&s.node_id)
+    {
+        tracing::warn!(
+            "no model credential on this node; connect a provider on the Nodes screen. \
+             Sessions cannot start until one is connected."
+        );
+        return Err("no model credential".into());
+    }
+    let wiring = crate::gateway::model::harness_wiring(
+        &s.cfg,
+        &backend.harness_host(),
+        s.manager.probe_token(),
+    );
     let runner = backend.runner(
-        crate::session::materialize::state_mounts(&backend.harness_home()).unwrap_or_default(),
+        crate::session::materialize::probe_mounts(&backend.harness_home(), &wiring)
+            .unwrap_or_default(),
     );
     let models = s
         .adapter
-        .probe_models(runner.as_ref())
+        .probe_models(runner.as_ref(), wiring.env)
         .await
-        .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
+        .map_err(|e| e.to_string())?;
     if let Ok(Some(mut node)) = s.store().get_node(&s.node_id) {
         node.models_json = serde_json::to_string(&models).ok();
         let _ = s.store().put_node(&node);
         // Push the refreshed node to any live client, so a model list (or a
         // refused state) reaches the interface without a reload.
-        s.manager
-            .bus()
-            .publish(crate::stream::Frame::Node(node_json(&s)?));
+        if let Ok(v) = node_json(s) {
+            s.manager.bus().publish(crate::stream::Frame::Node(v));
+        }
     }
+    tracing::info!(models = models.len(), "model list probed");
+    Ok(models)
+}
+
+/// Re-probe the harness for its model list, for when the probe failed at
+/// startup or a provider was connected since.
+pub async fn refresh_models(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let backend = s.manager.backend().clone();
+    let models = probe_models_into_store(&s, backend.as_ref())
+        .await
+        .map_err(|e| ApiError(StatusCode::CONFLICT, e))?;
     Ok(Json(serde_json::json!(models)))
+}
+
+/// `GET /api/usage?channel=&since_ms=`: what the gateway counted. Defaults to
+/// the last 24 hours across every channel.
+pub async fn usage(
+    State(s): State<AppState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let since = q
+        .get("since_ms")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or_else(|| crate::store::now_ms() - 24 * 3600 * 1000);
+    let totals = s
+        .store()
+        .usage_since(q.get("channel").map(String::as_str), since)?;
+    Ok(Json(json!({ "since_ms": since, "totals": totals })))
 }
 
 pub async fn health() -> Json<serde_json::Value> {

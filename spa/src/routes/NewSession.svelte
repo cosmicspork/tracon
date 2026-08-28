@@ -84,7 +84,7 @@
       {/each}
     </select>
     {#if node && node.models.length === 0}
-      <small class="crit">The node offered no models; check the harness credentials.</small>
+      <small class="crit">The node offered no models; connect a provider on the Nodes screen.</small>
     {/if}
   </label>
   <label>

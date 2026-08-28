@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{config::Config, runner::Mount};
+use crate::{config::Config, gateway::model::Wiring, runner::Mount};
 
 pub struct Scratch {
     pub dir: PathBuf,
@@ -20,10 +20,10 @@ pub fn state_target(home: &str) -> String {
     format!("{home}/.omp")
 }
 
-/// The node-owned harness state directory, and nothing else. Model credentials
-/// live in it (`agent/agent.db`), put there once by `tracon harness
-/// import-credentials` or a login through `tracon harness shell`; the node
-/// never reaches into the operator's own `~/.omp`.
+/// The node-owned harness state directory, and nothing else: the harness's
+/// own caches, sessions, and model catalogue. It holds no credential — the
+/// model gateway injects those — and the node never reaches into the
+/// operator's own `~/.omp`.
 pub fn state_mounts(home: &str) -> std::io::Result<Vec<Mount>> {
     let state = Config::harness_state_dir();
     std::fs::create_dir_all(state.join("agent"))?;
@@ -34,52 +34,47 @@ pub fn state_mounts(home: &str) -> std::io::Result<Vec<Mount>> {
     }])
 }
 
-/// The credential database the harness reads.
-pub fn credentials_path() -> PathBuf {
-    Config::harness_state_dir().join("agent/agent.db")
-}
-
-/// Whether the volume holds a credential store at all.
-pub fn has_credentials() -> bool {
-    credentials_path().exists()
-}
-
-/// Copy a credential database into the volume through SQLite's online backup,
-/// so a live WAL is folded into one consistent file. Refuses to overwrite
-/// unless asked.
-pub fn import_credentials(from: &Path, force: bool) -> Result<PathBuf, String> {
-    let dest = credentials_path();
-    if dest.exists() && !force {
-        return Err(format!(
-            "{} already exists; pass --force to replace it",
-            dest.display()
-        ));
+/// A credential store left on the volume by Phases 1–3 would let the harness
+/// talk to a provider directly, around the gateway and its bindings. Set it
+/// aside on startup rather than mount it; nothing deletes it.
+pub fn retire_harness_credentials() -> Option<PathBuf> {
+    let db = Config::harness_state_dir().join("agent/agent.db");
+    if !db.exists() {
+        return None;
     }
-    if let Some(dir) = dest.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let src =
-        rusqlite::Connection::open_with_flags(from, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| format!("open {}: {e}", from.display()))?;
-    let tmp = dest.with_extension("db.tmp");
-    let _ = std::fs::remove_file(&tmp);
-    {
-        let mut dst = rusqlite::Connection::open(&tmp).map_err(|e| e.to_string())?;
-        let backup = rusqlite::backup::Backup::new(&src, &mut dst).map_err(|e| e.to_string())?;
-        backup
-            .run_to_completion(64, std::time::Duration::from_millis(5), None)
-            .map_err(|e| e.to_string())?;
+    let retired = db.with_extension("db.retired");
+    if std::fs::rename(&db, &retired).is_err() {
+        return None;
     }
     for stale in ["agent.db-wal", "agent.db-shm"] {
-        let _ = std::fs::remove_file(dest.with_file_name(stale));
+        let _ = std::fs::remove_file(db.with_file_name(stale));
     }
-    std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(dest)
+    Some(retired)
+}
+
+/// The provider override the harness reads, written once per wiring so a
+/// probe or a session finds the gateway where it expects a provider.
+fn models_json_mount(dir: &Path, home: &str, wiring: &Wiring) -> std::io::Result<Mount> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("models.json");
+    std::fs::write(&path, &wiring.models_json)?;
+    Ok(Mount {
+        source: path.to_string_lossy().into_owned(),
+        target: format!("{}/agent/models.json", state_target(home)),
+        read_only: true,
+    })
+}
+
+/// Mounts for the node's own model probe: the state volume plus the gateway
+/// wiring, nothing of any session.
+pub fn probe_mounts(home: &str, wiring: &Wiring) -> std::io::Result<Vec<Mount>> {
+    let mut mounts = state_mounts(home)?;
+    mounts.push(models_json_mount(
+        &Config::state_dir().join("probe"),
+        home,
+        wiring,
+    )?);
+    Ok(mounts)
 }
 
 /// Build the scratch directory for one session and the mounts that carry it
@@ -93,6 +88,7 @@ pub fn scratch_for(
     worktree: &Path,
     repo: &Path,
     home: &str,
+    wiring: &Wiring,
 ) -> std::io::Result<Scratch> {
     let dir = Config::state_dir().join("sessions").join(session_id);
     std::fs::create_dir_all(dir.join("omp"))?;
@@ -110,6 +106,7 @@ pub fn scratch_for(
     )?;
 
     let mut mounts = state_mounts(home)?;
+    mounts.push(models_json_mount(&dir.join("omp"), home, wiring)?);
     mounts.extend([
         Mount {
             source: dir.join("omp/config.yml").to_string_lossy().into_owned(),
@@ -186,11 +183,13 @@ mod tests {
             Path::new("/tmp/wt"),
             Path::new("/tmp/repo"),
             PODMAN_HARNESS_HOME,
+            &Wiring::default(),
         )
         .unwrap();
         let targets: Vec<&str> = s.mounts.iter().map(|m| m.target.as_str()).collect();
         assert!(targets.contains(&"/work"));
         assert!(targets.contains(&"/root/.omp/agent/config.yml"));
+        assert!(targets.contains(&"/root/.omp/agent/models.json"));
         assert!(targets.contains(&"/root/.gitconfig"));
         // The harness state dir is the node's own, never the operator's ~/.omp,
         // and nothing from the operator's home is mounted alongside it.
@@ -223,6 +222,7 @@ mod tests {
             Path::new("/tmp/wt"),
             &repo,
             PODMAN_HARNESS_HOME,
+            &Wiring::default(),
         )
         .unwrap();
         let git_target = repo.join(".git").to_string_lossy().into_owned();

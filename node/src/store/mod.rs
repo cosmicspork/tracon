@@ -344,6 +344,51 @@ impl Store {
         Ok(rows)
     }
 
+    // ---- model usage ----
+
+    pub fn record_usage(&self, u: &UsageRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO model_usage (channel, node_id, session_id, provider, model, at_ms, input_tokens, output_tokens, requests)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                u.channel,
+                u.node_id,
+                u.session_id,
+                u.provider,
+                u.model,
+                u.at_ms,
+                u.input_tokens,
+                u.output_tokens,
+                u.requests
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Totals per provider and model since `since_ms`, for one channel or all.
+    pub fn usage_since(&self, channel: Option<&str>, since_ms: i64) -> Result<Vec<UsageTotal>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT channel, provider, model, SUM(requests), SUM(input_tokens), SUM(output_tokens)
+             FROM model_usage WHERE at_ms >= ?1 AND (?2 IS NULL OR channel = ?2)
+             GROUP BY channel, provider, model ORDER BY channel, provider, model",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![since_ms, channel], |r| {
+                Ok(UsageTotal {
+                    channel: r.get(0)?,
+                    provider: r.get(1)?,
+                    model: r.get(2)?,
+                    requests: r.get(3)?,
+                    input_tokens: r.get(4)?,
+                    output_tokens: r.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     // ---- mesh: channels, cursors, outbox, seen ----
 
     pub fn channel_put(&self, name: &str, keyring: &[u8], bindings_json: &str) -> Result<()> {
@@ -768,6 +813,30 @@ impl Store {
 }
 
 impl Store {}
+
+/// One model request as the gateway saw it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageRow {
+    pub channel: String,
+    pub node_id: String,
+    pub session_id: Option<String>,
+    pub provider: String,
+    pub model: Option<String>,
+    pub at_ms: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub requests: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageTotal {
+    pub channel: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub requests: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
 
 mod records {
     use super::*;

@@ -151,6 +151,22 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE mesh_seen (frame_id TEXT PRIMARY KEY, at_ms INTEGER NOT NULL);
     CREATE INDEX mesh_seen_at ON mesh_seen(at_ms);
     "#,
+    // 4: what the model gateway counted, per request.
+    r#"
+    CREATE TABLE model_usage (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel       TEXT NOT NULL,
+        node_id       TEXT NOT NULL,
+        session_id    TEXT,
+        provider      TEXT NOT NULL,
+        model         TEXT,
+        at_ms         INTEGER NOT NULL,
+        input_tokens  INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        requests      INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX model_usage_channel ON model_usage(channel, at_ms);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

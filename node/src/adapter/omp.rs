@@ -25,11 +25,7 @@ impl OmpAdapter {
         }
     }
 
-    fn acp_cmd(name: &str) -> RunnerCommand {
-        Self::acp_cmd_with(name, &[])
-    }
-
-    fn acp_cmd_with(name: &str, tools: &[String]) -> RunnerCommand {
+    fn acp_cmd_with(name: &str, tools: &[String], env: Vec<(String, String)>) -> RunnerCommand {
         let mut argv = vec!["omp".to_string()];
         if !tools.is_empty() {
             argv.push(format!("--tools={}", tools.join(",")));
@@ -39,6 +35,7 @@ impl OmpAdapter {
         // and mounts the state directory under it.
         RunnerCommand {
             argv,
+            env,
             name: name.into(),
             ..Default::default()
         }
@@ -75,8 +72,14 @@ impl HarnessAdapter for OmpAdapter {
         })
     }
 
-    async fn probe_models(&self, runner: &dyn Runner) -> Result<Vec<ModelOption>, AdapterError> {
-        let child = runner.spawn(Self::acp_cmd("omp-probe")).await?;
+    async fn probe_models(
+        &self,
+        runner: &dyn Runner,
+        env: Vec<(String, String)>,
+    ) -> Result<Vec<ModelOption>, AdapterError> {
+        let child = runner
+            .spawn(Self::acp_cmd_with("omp-probe", &[], env))
+            .await?;
         let mut session = OmpSession::start(child).await?;
         let models = session.model_options();
         session.close().await.ok();
@@ -89,7 +92,11 @@ impl HarnessAdapter for OmpAdapter {
         spec: LaunchSpec,
     ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError> {
         let child = runner
-            .spawn(Self::acp_cmd_with(&spec.container_name, &spec.tools))
+            .spawn(Self::acp_cmd_with(
+                &spec.container_name,
+                &spec.tools,
+                spec.env.clone(),
+            ))
             .await?;
         let mut session =
             OmpSession::start_in(child, &spec.cwd_in_runner, spec.mcp_servers.clone()).await?;
@@ -475,13 +482,14 @@ mod tests {
     fn a_restricted_tool_list_reaches_the_harness() {
         // A tool that is absent cannot be talked into running, so the surface
         // is reduced before the gate has to decide anything.
-        let cmd = OmpAdapter::acp_cmd_with("c", &["read".to_string(), "list".to_string()]);
+        let cmd =
+            OmpAdapter::acp_cmd_with("c", &["read".to_string(), "list".to_string()], Vec::new());
         assert_eq!(cmd.argv, ["omp", "--tools=read,list", "acp"]);
     }
 
     #[test]
     fn an_empty_list_leaves_the_harness_default() {
-        let cmd = OmpAdapter::acp_cmd_with("c", &[]);
+        let cmd = OmpAdapter::acp_cmd_with("c", &[], Vec::new());
         assert_eq!(cmd.argv, ["omp", "acp"]);
     }
 }

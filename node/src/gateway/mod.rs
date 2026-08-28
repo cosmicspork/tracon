@@ -1,4 +1,4 @@
-//! What the gateway container does on a Podman host, done by the node itself
-//! where there is no gateway container: the CONNECT allowlist proxy.
+//! What the node serves to the harness on the internal network.
 
+pub mod model;
 pub mod proxy;

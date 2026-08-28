@@ -69,7 +69,11 @@ impl HarnessAdapter for FakeAdapter {
             pinned: "1.0.0".into(),
         })
     }
-    async fn probe_models(&self, _r: &dyn Runner) -> Result<Vec<ModelOption>, AdapterError> {
+    async fn probe_models(
+        &self,
+        _r: &dyn Runner,
+        _env: Vec<(String, String)>,
+    ) -> Result<Vec<ModelOption>, AdapterError> {
         Ok(vec![ModelOption {
             value: "m/a".into(),
             name: "A".into(),
