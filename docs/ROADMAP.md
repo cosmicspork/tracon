@@ -229,14 +229,39 @@ the blocked work topology.
 The current work topology is privileged and cannot enforce the gate. Phase 3 replaces
 it with a boundary the node can verify.
 
-- [ ] Replace the privileged single-container Envbuilder workspace with a node-owned,
-      unprivileged harness runner topology
-- [ ] Node outside the harness container, with a node-owned exec pipe
-- [ ] Harness runner on an internal network with the node as its only route out
-- [ ] Startup boundary check passes on the live pod
-- [ ] Broker holds `glab`, `acli`; consulta bound to the work channel and the work node
-- [ ] Work-channel policy: no merge, no transition, no production deploy, enforced at
-      the broker rather than the prompt
+- [x] Replace the privileged single-container Envbuilder workspace with a node-owned,
+      unprivileged harness runner topology. Built as a second boundary backend
+      (`[runtime] kind = "kubernetes"`): the node is an unprivileged pod that creates
+      one harness pod per session, and two NetworkPolicies make it the harness's only
+      route. Proven on the homelab cluster (`deploy/kubernetes/lab`,
+      [`phase-3-notes`](reference/phase-3-notes.md)); the Coder template that carries
+      it to the work cluster is written on a host that can reach that environment,
+      against [`deploy/coder/README.md`](../deploy/coder/README.md).
+- [x] Node outside the harness container, with a node-owned exec pipe. `pods/attach`
+      over a WebSocket the node opens; killing a session deletes the pod.
+- [x] Harness runner on an internal network with the node as its only route out. No
+      resolver, no API token; egress only to `tracon.dev/role=node` on the forward and
+      proxy ports; the node serves the CONNECT allowlist proxy itself.
+- [x] Startup boundary check passes on the live pod. The same five checks, answered
+      from a gated probe pod, the policy's shape, and a `SelfSubjectAccessReview` per
+      verb; all five pass on the lab pod. The work pod is pending the template.
+- [x] Broker holds `glab`, `acli`; consulta bound to the work channel and the work
+      node. As credentials (`glab`, `jira`) behind narrow REST tools — `mr_status`,
+      `mr_comment`, `issue`, `issue_comment` — and a `nodes` binding on every
+      credential, so "work node only" is data.
+- [x] Work-channel policy: no merge, no transition, no production deploy, enforced at
+      the broker rather than the prompt. Those verbs are not tools; the token that could
+      do them never leaves the node. Policy also decides every tool call before the
+      broker is touched, and a call the bundle does not name is asked, not run.
+
+Phase 3 implementation completed 2026-08-28. The runner topology is built and proven
+on the homelab cluster: all five checks pass inside the node pod, the deep probe shows
+a harness pod with no route but the node, and a session creates its pod, mounts the
+worktree as subpaths of the shared claim, and attaches. Not yet done: a turn with model
+credentials in the lab, the Coder template itself, and therefore the boundary check on
+the live work pod — that is the operator's next step on a host that can reach it.
+`review` and `consulta` can be archived once the work node has run real tasks through
+these tools.
 
 Exit criteria: an agent physically cannot post to GitLab or Jira, or reach the work
 database, except through the node, and `review` and `consulta` can be archived.

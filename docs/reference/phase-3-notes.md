@@ -25,15 +25,55 @@ answer the same five checks from Kubernetes objects instead.
 | probe container created, never started | probe pod with a scheduling gate: admitted, never scheduled |
 | `podman run -i` stdio | `pods/attach` |
 
-## Lab proof (homelab, Cilium)
+## Lab proof (homelab, Cilium, k8s 1.35), 2026-08-28
 
-_Pending the first release that publishes `ghcr.io/cosmicspork/tracon-node` and
-`tracon-harness`._ The steps and what each is expected to show:
+`kubectl apply -k deploy/kubernetes/lab` into `tracon-lab` (outside Flux), image
+`ghcr.io/cosmicspork/tracon-node:0.2.0`, harness `tracon-harness:0.2.0`. Two findings
+on the first run, both fixed the same day:
 
-1. `kubectl apply -k deploy/kubernetes/lab` — namespace `tracon-lab`, outside Flux.
-2. `tracon check-boundary --deep` inside the node pod — all five checks.
-3. Nested read-only `subPath` mounts over a read-write one (`.git/config`, `hooks`,
-   `info` over `.git`) — kubelet accepts them, or the recorded fallback applies.
-4. A session on a small public repository from the port-forwarded interface.
-5. From inside the harness pod: `curl https://gitlab.com` fails; `mr_status` through
-   the node succeeds.
+1. **A gated pod may not carry `nodeName`.** The API refuses it ("cannot be set until
+   all schedulingGates have been cleared"), so the probe could not be created and every
+   static check failed closed — the right failure, for the wrong reason. The probe now
+   pins by `nodeSelector: kubernetes.io/hostname`; session pods keep `nodeName`.
+2. **Attach is a `GET`.** kube-rs opens `pods/attach` as a WebSocket upgrade on GET,
+   which the API server authorises as the `get` verb; the Role granted only `create`
+   and the runtime check asserted only what the Role had, so the node could create a
+   harness it could not talk to (`403 Forbidden` on upgrade). Both the Role and the
+   `SelfSubjectAccessReview` list now carry `create` and `get`.
+
+With those, inside the node pod:
+
+```
+ok   runtime                api reachable; pods/attach/log and networkpolicies granted in tracon-lab; node general-ihxil
+ok   harness_unprivileged   non-root uid 65532, no capabilities, no escalation, seccomp RuntimeDefault
+ok   no_runtime_socket      no host namespaces, no API token, no hostPath; only the state claim
+ok   network_isolated       no resolver; tracon-harness allows egress only to the node pod on the forward and proxy ports
+ok   egress                 no direct egress; allowlisted host reachable, unlisted host refused
+```
+
+The deep probe ran as a real harness pod under the NetworkPolicy: `curl --noproxy '*'
+https://example.com` failed (no route, no resolver), `https://api.anthropic.com` through
+`tracon-gw:8888` succeeded, `https://example.com` through the proxy was refused, and
+`http://tracon-gw:7421/harness/ping` answered `pong` — the node's own proxy and forward,
+reached by pod IP, with nothing else reachable.
+
+A session (`POST /api/sessions`, repo cloned onto the volume) then:
+
+- created the worktree at `/state/work/<repo>-<slug>` on the shared claim;
+- created `tracon-h-<slug>` with the full mount layout as `subPath`s of the claim —
+  `/work` rw, `<repo>/.git` rw at its absolute path, and `.git/config`, `hooks`, `info`
+  layered read-only over it. **kubelet accepts the nested read-only subPath mounts**; the
+  fallback in the plan was not needed;
+- attached, completed the ACP `initialize` / `session/new` handshake with omp inside the
+  pod, and failed honestly at model selection ("not offered by the harness") because the
+  lab volume holds no harness credentials. That is the exec pipe proven end to end; a
+  full turn needs `tracon harness import-credentials` against a copied `agent.db`.
+
+The exit criterion's network half — an agent in the runner cannot reach GitLab, Jira, or
+a database except through the node — is the `egress` line above under a policy that
+names the node pod as the only peer. The tool half (`mr_status`, `issue_comment`, …)
+is exercised against API stubs in `node/tests/work_tools.rs`; the verbs that would merge
+or transition do not exist to call.
+
+Not done in the lab: a turn with model credentials, and the Coder template itself
+(`deploy/coder/README.md` is what it is written against).
