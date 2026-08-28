@@ -281,6 +281,25 @@ pub struct Provider {
     /// (`omp auth-broker login <id>`); none means API key only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login: Option<String>,
+    /// What a token costs through this provider, when the credential is
+    /// metered. Absent means a subscription: tokens are counted, dollars are
+    /// not derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<Price>,
+}
+
+/// Dollars per million tokens.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Price {
+    pub input_per_mtok: f64,
+    pub output_per_mtok: f64,
+}
+
+impl Price {
+    pub fn cost(&self, input_tokens: i64, output_tokens: i64) -> f64 {
+        (input_tokens as f64 * self.input_per_mtok + output_tokens as f64 * self.output_per_mtok)
+            / 1_000_000.0
+    }
 }
 
 impl Default for Provider {
@@ -290,6 +309,7 @@ impl Default for Provider {
             upstream: String::new(),
             shape: SHAPE_OPENAI.into(),
             login: None,
+            price: None,
         }
     }
 }
@@ -303,6 +323,7 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 upstream: "https://api.anthropic.com".into(),
                 shape: SHAPE_ANTHROPIC.into(),
                 login: Some("anthropic".into()),
+                price: None,
             },
         ),
         (
@@ -312,6 +333,7 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 upstream: "https://api.openai.com".into(),
                 shape: SHAPE_OPENAI.into(),
                 login: None,
+                price: None,
             },
         ),
     ]

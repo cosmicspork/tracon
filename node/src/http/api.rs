@@ -102,16 +102,149 @@ pub async fn list_channels(State(s): State<AppState>) -> ApiResult<Json<serde_js
     let rows = s.store().channel_list()?;
     if rows.is_empty() {
         for name in ["personal", "work"] {
-            out.push(json!({ "name": name, "nodes": [s.node_id] }));
+            let ceiling = crate::metrics::ceiling(s.store(), &json!({}), name);
+            out.push(
+                json!({ "name": name, "nodes": [s.node_id], "bindings": {}, "ceiling": ceiling }),
+            );
         }
     }
     for c in rows {
         if c.name.starts_with('@') {
             continue;
         }
-        out.push(json!({ "name": c.name, "nodes": s.store().nodes_in_channel(&c.name)? }));
+        let bindings: serde_json::Value =
+            serde_json::from_str(&c.bindings_json).unwrap_or(json!({}));
+        let ceiling = crate::metrics::ceiling(s.store(), &bindings, &c.name);
+        out.push(json!({
+            "name": c.name, "nodes": s.store().nodes_in_channel(&c.name)?,
+            "bindings": bindings, "ceiling": ceiling,
+        }));
     }
     Ok(Json(json!(out)))
+}
+
+/// `PUT /api/channels/{name}/bindings`: merge keys into the channel's
+/// bindings (a null value removes a key) and, on a mesh, hand the channel
+/// again to every member so they hold the same bindings.
+pub async fn put_channel_bindings(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(patch): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let row = s.store().channel_get(&name)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        format!("no channel {name} on this node"),
+    ))?;
+    let mut bindings: serde_json::Value =
+        serde_json::from_str(&row.bindings_json).unwrap_or(json!({}));
+    let Some(obj) = patch.as_object() else {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "bindings must be an object".into(),
+        ));
+    };
+    for (k, v) in obj {
+        merge_path(&mut bindings, k, v.clone());
+    }
+    s.store()
+        .channel_put(&name, &row.keyring, &bindings.to_string())?;
+    let mut handed = 0;
+    if let Some(hub) = s.cfg.mesh.hub_url.as_deref() {
+        match crate::mesh::identity::load_or_generate() {
+            Ok((identity, _)) => {
+                match crate::mesh::enroll::rehand_channel(s.store(), &identity, hub, &name).await {
+                    Ok(n) => handed = n,
+                    Err(e) => tracing::warn!(error = %e, channel = %name, "bindings not re-handed"),
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "no identity to re-hand bindings with"),
+        }
+    }
+    Ok(Json(
+        json!({ "name": name, "bindings": bindings, "handed_to": handed }),
+    ))
+}
+
+/// `a.b.c = v` into nested objects; a null removes the key.
+fn merge_path(root: &mut serde_json::Value, path: &str, value: serde_json::Value) {
+    let mut cur = root;
+    let parts: Vec<&str> = path.split('.').collect();
+    for (i, part) in parts.iter().enumerate() {
+        if !cur.is_object() {
+            *cur = json!({});
+        }
+        let map = cur.as_object_mut().unwrap();
+        if i == parts.len() - 1 {
+            if value.is_null() {
+                map.remove(*part);
+            } else {
+                map.insert(part.to_string(), value);
+            }
+            return;
+        }
+        cur = map.entry(part.to_string()).or_insert_with(|| json!({}));
+    }
+}
+
+/// `GET /api/metrics?channel=&since_ms=`: per channel, the numbers that
+/// matter. Default window: the last 30 days.
+pub async fn metrics(
+    State(s): State<AppState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let since = q
+        .get("since_ms")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or_else(|| crate::store::now_ms() - 30 * 24 * 3600 * 1000);
+    let channels: Vec<String> = match q.get("channel") {
+        Some(c) => vec![c.clone()],
+        None => {
+            let mut names: Vec<String> = s
+                .store()
+                .channel_list()?
+                .into_iter()
+                .map(|c| c.name)
+                .filter(|n| !n.starts_with('@'))
+                .collect();
+            if names.is_empty() {
+                names = vec!["personal".into(), "work".into()];
+            }
+            names
+        }
+    };
+    let mut out = Vec::new();
+    for c in channels {
+        out.push(crate::metrics::channel_metrics(
+            s.store(),
+            &s.cfg,
+            &c,
+            since,
+        )?);
+    }
+    Ok(Json(json!({
+        "since_ms": since, "node_id": s.node_id,
+        "note": "as seen from this node: usage is counted where the model call was made",
+        "channels": out,
+    })))
+}
+
+/// `GET /api/provenance/{sha}`: the trail behind a commit.
+pub async fn provenance(
+    State(s): State<AppState>,
+    Path(sha): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let sha = sha.trim().to_ascii_lowercase();
+    if sha.len() < 7 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "give at least seven hex characters of the commit".into(),
+        ));
+    }
+    let v = crate::metrics::provenance(s.store(), &sha)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        format!("no review on this node reviewed or published {sha}"),
+    ))?;
+    Ok(Json(v))
 }
 
 /// Hub reachability and mesh counters. Until the mesh client lands this

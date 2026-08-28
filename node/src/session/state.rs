@@ -102,6 +102,9 @@ pub mod event_kind {
     pub const REVIEW_REJECTED: &str = "review_rejected";
     /// A review session gave its verdict on the review it was spawned for.
     pub const REVIEW_VERDICT: &str = "review_verdict";
+    /// The channel reached its daily token ceiling; the gateway refused a
+    /// model call. Recorded once per session.
+    pub const CEILING: &str = "ceiling";
 }
 
 #[cfg(test)]

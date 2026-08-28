@@ -33,6 +33,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/node", get(api::get_node))
         .route("/api/node/refresh-models", post(api::refresh_models))
         .route("/api/usage", get(api::usage))
+        .route("/api/metrics", get(api::metrics))
+        .route("/api/provenance/{sha}", get(api::provenance))
+        .route(
+            "/api/channels/{name}/bindings",
+            put(api::put_channel_bindings),
+        )
         .route("/api/promotions/batch", post(api::batch_promotions))
         .route("/api/promotions/{id}", get(api::get_promotion))
         .route("/api/promotions/{id}/verdict", post(api::decide_promotion))

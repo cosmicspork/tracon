@@ -346,6 +346,12 @@ impl Manager {
         if budget <= 0 {
             return Err(SessionError::BadBudget);
         }
+        // Runaway spend is the failure mode that scales with how well the
+        // system works: a channel at its daily ceiling starts nothing.
+        let ceiling = crate::metrics::ceiling(&self.store, &bindings, &spec.channel);
+        if ceiling.at() {
+            return Err(SessionError::Ceiling(ceiling.reason()));
+        }
         // A meshed node seals every frame under the channel's key, so a channel
         // it has no keyring for cannot carry a session. A standalone node keeps
         // channels as plain labels.

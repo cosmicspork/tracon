@@ -63,6 +63,16 @@ enum Command {
     /// The work ledger: items, dependencies, ready work.
     #[command(subcommand)]
     Work(WorkCommand),
+    /// Approvals and tokens per accepted change, human and agent time.
+    Metrics {
+        #[arg(long)]
+        channel: Option<String>,
+        /// Window, in days (default 30).
+        #[arg(long, default_value_t = 30)]
+        days: i64,
+    },
+    /// The trail behind a commit: model, prompts, approval, policy version.
+    Provenance { sha: String },
 }
 
 #[derive(Subcommand)]
@@ -251,6 +261,14 @@ enum MeshCommand {
 
 #[derive(Subcommand)]
 enum ChannelCommand {
+    /// Set bindings on a channel: `key=value` pairs, dotted keys nest
+    /// (`phases.review.model=m`, `ceiling_tokens_per_day=2000000`,
+    /// `key=` removes). Re-handed to every member on a mesh.
+    Bind {
+        name: String,
+        #[arg(required = true)]
+        pairs: Vec<String>,
+    },
     /// Create a channel: mint its key here. Other nodes get it by enrollment.
     Create { name: String },
     /// The channels this node holds keys for.
@@ -308,6 +326,46 @@ async fn main() -> Result<()> {
         Command::Doc(cmd) => doc_command(cmd).await,
         Command::Memory(cmd) => memory_command(cmd).await,
         Command::Work(cmd) => work_command(cmd).await,
+        Command::Metrics { channel, days } => {
+            use reqwest::Method;
+            let since = tracon::store::now_ms() - days.max(1) * 86_400_000;
+            let mut q = format!("/api/metrics?since_ms={since}");
+            if let Some(c) = channel {
+                q.push_str(&format!("&channel={c}"));
+            }
+            let v = node_call(Method::GET, &q, None, None).await?;
+            println!("{}", v["note"].as_str().unwrap_or(""));
+            for c in v["channels"].as_array().cloned().unwrap_or_default() {
+                let f = |k: &str| {
+                    c[k].as_f64()
+                        .map(|x| format!("{x:.1}"))
+                        .unwrap_or_else(|| "—".into())
+                };
+                println!(
+                    "{:<12} accepted {:>3}  rejected {:>3}  approvals/accepted {:>6}  tokens/accepted {:>10}  tokens {:>10}  cost {}  human {}s  agent {}s  sessions {}",
+                    c["channel"].as_str().unwrap_or(""),
+                    c["accepted_changes"],
+                    c["rejected_changes"],
+                    f("approvals_per_accepted_change"),
+                    f("tokens_per_accepted_change"),
+                    c["tokens"],
+                    c["cost_usd"]
+                        .as_f64()
+                        .map(|x| format!("${x:.2}"))
+                        .unwrap_or_else(|| "unpriced".into()),
+                    f("human_seconds"),
+                    f("agent_seconds"),
+                    c["sessions"],
+                );
+            }
+            Ok(())
+        }
+        Command::Provenance { sha } => {
+            use reqwest::Method;
+            let v = node_call(Method::GET, &format!("/api/provenance/{sha}"), None, None).await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            Ok(())
+        }
         Command::Policy(PolicyCommand::Push) => {
             let cfg = config::Config::load();
             let hub = cfg
@@ -672,6 +730,34 @@ async fn channel_command(cmd: ChannelCommand) -> Result<()> {
                 }
             }
             println!("created channel {name}; hand its key to other nodes with tracon mesh invite");
+            Ok(())
+        }
+        ChannelCommand::Bind { name, pairs } => {
+            use reqwest::Method;
+            use serde_json::Value;
+            let mut patch = serde_json::Map::new();
+            for pair in pairs {
+                let (k, v) = pair
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("{pair}: expected key=value"))?;
+                let value = if v.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.to_string()))
+                };
+                patch.insert(k.to_string(), value);
+            }
+            let v = node_call(
+                Method::PUT,
+                &format!("/api/channels/{name}/bindings"),
+                Some(Value::Object(patch)),
+                None,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&v["bindings"])?);
+            if let Some(n) = v["handed_to"].as_u64() {
+                println!("handed to {n} member{}", if n == 1 { "" } else { "s" });
+            }
             Ok(())
         }
         ChannelCommand::List => {

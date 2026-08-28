@@ -11,6 +11,7 @@ pub mod gateway;
 pub mod http;
 pub mod mcp;
 pub mod mesh;
+pub mod metrics;
 pub mod policy;
 pub mod providers;
 pub mod review;
