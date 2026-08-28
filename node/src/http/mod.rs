@@ -395,6 +395,15 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         });
     }
 
+    // What waits on the operator, pushed to where the operator is. Bound per
+    // channel, so exactly one node in a mesh delivers each one.
+    tokio::spawn(crate::notify::run(
+        store.clone(),
+        bus.clone(),
+        cfg.clone(),
+        state.node_id.clone(),
+    ));
+
     tracing::info!(%listen, "serving");
     let manager = state.manager.clone();
     let bus = manager.bus().clone();
