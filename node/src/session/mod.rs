@@ -46,6 +46,12 @@ pub struct NewSession {
     /// the node against a review.
     #[serde(default)]
     pub phase: Phase,
+    /// Review sessions only: the review to read, and the commit to check out
+    /// (the worktree is created at it rather than at origin's default).
+    #[serde(default)]
+    pub review_id: Option<String>,
+    #[serde(default)]
+    pub base_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -131,6 +137,8 @@ pub struct Manager {
     backend: Arc<dyn crate::boundary::Backend>,
     /// Provider logins, once the node exists to run them.
     providers: Arc<std::sync::OnceLock<Arc<crate::providers::Providers>>>,
+    /// The node's harness adapter, for sessions the node spawns itself.
+    adapter: Arc<std::sync::OnceLock<Arc<dyn HarnessAdapter>>>,
 }
 
 impl Manager {
@@ -156,11 +164,33 @@ impl Manager {
             probe_token: mint_token(),
             mesh: Arc::new(std::sync::OnceLock::new()),
             providers: Arc::new(std::sync::OnceLock::new()),
+            adapter: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
     pub fn backend(&self) -> &Arc<dyn crate::boundary::Backend> {
         &self.backend
+    }
+
+    pub fn cfg(&self) -> &Arc<Config> {
+        &self.cfg
+    }
+
+    /// Create a session on this node with the node's own adapter, for
+    /// sessions the node spawns itself (review sessions).
+    pub async fn create_local(&self, spec: NewSession) -> Result<SessionRow, SessionError> {
+        let adapter = self
+            .adapter
+            .get()
+            .cloned()
+            .ok_or_else(|| SessionError::Rejected("no harness adapter yet".into()))?;
+        self.create(spec, adapter).await
+    }
+
+    /// The node's adapter, set once at startup so node-spawned sessions can
+    /// use it.
+    pub fn set_adapter(&self, adapter: Arc<dyn HarnessAdapter>) {
+        let _ = self.adapter.set(adapter);
     }
 
     pub fn set_mesh(&self, mesh: Arc<crate::mesh::client::MeshClient>) {
@@ -434,6 +464,7 @@ impl Manager {
             project_id: Some(project_id),
             phase: spec.phase.as_str().into(),
             policy_version: Some(self.policy.read().unwrap().version as i64),
+            review_id: spec.review_id.clone(),
             budget_tokens: budget,
             tokens_used: 0,
             cost_usd: None,
@@ -525,7 +556,15 @@ impl Manager {
             .insert(id.to_string(), (token.clone(), spec.channel.clone()));
 
         let repo = PathBuf::from(&spec.repo_path);
-        let wt = worktree::create(&repo, &self.cfg.session.worktree_root, &branch, &slug).await?;
+        let wt = match spec.base_sha.as_deref() {
+            Some(sha) => {
+                worktree::create_at(&repo, &self.cfg.session.worktree_root, &branch, &slug, sha)
+                    .await?
+            }
+            None => {
+                worktree::create(&repo, &self.cfg.session.worktree_root, &branch, &slug).await?
+            }
+        };
         self.store.update_session(
             id,
             SessionPatch {
@@ -574,9 +613,13 @@ impl Manager {
                 .store
                 .work_ready(&spec.channel, project.as_ref().map(|p| p.id.as_str()))
                 .unwrap_or_default();
+            let review = spec
+                .review_id
+                .as_deref()
+                .and_then(|r| self.store.get_review(r).ok().flatten());
             let tool_names: Vec<String> = self
                 .tools
-                .list(&spec.channel, &self.node_id)
+                .list_for(&spec.channel, &self.node_id, spec.phase)
                 .iter()
                 .filter_map(|t| t["name"].as_str().map(str::to_string))
                 .collect();
@@ -599,6 +642,7 @@ impl Manager {
                     item: item.as_ref(),
                     plan_body: plan_body.as_deref(),
                     ready: &ready,
+                    review: review.as_ref(),
                 },
             )
         };
@@ -639,7 +683,11 @@ impl Manager {
         // only with this session's token. Tools are offered only if the
         // channel has a credential bound to it; otherwise the harness is given
         // no MCP server at all rather than one that refuses everything.
-        let mcp_servers = if self.tools.list(&spec.channel, &self.node_id).is_empty() {
+        let mcp_servers = if self
+            .tools
+            .list_for(&spec.channel, &self.node_id, spec.phase)
+            .is_empty()
+        {
             Vec::new()
         } else {
             vec![json!({
@@ -847,6 +895,22 @@ impl Manager {
         let _ = self
             .send(id, Command::EndAfterTurn(EndReason::ItemClose))
             .await;
+    }
+
+    /// Mark a session as waiting on deterministic checks (or back to running)
+    /// and tell the interface. Called from the submit tool, inside a turn.
+    pub fn set_checking(&self, id: &str, checking: bool) {
+        let state = if checking {
+            SessionState::WaitingOnCheck
+        } else {
+            SessionState::Running
+        };
+        let _ = self
+            .store
+            .update_session(id, SessionPatch::state(state.as_str()));
+        if let Ok(Some(row)) = self.store.get_session(id) {
+            self.bus.publish(Frame::Session(Box::new(row)));
+        }
     }
 
     /// Record an event on a session from outside the supervisor.

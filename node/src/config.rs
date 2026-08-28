@@ -19,6 +19,46 @@ pub struct Config {
     /// Model providers the gateway fronts, by name.
     pub providers: std::collections::BTreeMap<String, Provider>,
     pub memory: Memory,
+    pub supervision: Supervision,
+    pub review: ReviewLimits,
+}
+
+/// Deterministic checks the node runs at submit, in a throwaway harness
+/// container with the worktree mounted and nothing else. A worktree may
+/// carry its own list in `.tracon/checks` (one command per line).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Supervision {
+    pub checks: Vec<String>,
+    pub timeout_secs: u64,
+}
+
+impl Default for Supervision {
+    fn default() -> Self {
+        Self {
+            checks: vec!["just check".into()],
+            timeout_secs: 900,
+        }
+    }
+}
+
+/// What a submission may be at most. Complexity accretes because nothing
+/// says no at submission time; this does.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewLimits {
+    /// Added plus removed lines.
+    pub max_diff_lines: i64,
+    pub max_files: usize,
+}
+
+impl Default for ReviewLimits {
+    fn default() -> Self {
+        Self {
+            max_diff_lines: 800,
+            max_files: 40,
+        }
+    }
 }
 
 /// Which boundary this node establishes. `podman` is a laptop or Linux host
@@ -300,6 +340,8 @@ impl Default for Config {
             runtime: Runtime::default(),
             providers: default_providers(),
             memory: Memory::default(),
+            supervision: Supervision::default(),
+            review: ReviewLimits::default(),
             harness: Harness {
                 id: "omp".into(),
                 version: "18.0.4".into(),

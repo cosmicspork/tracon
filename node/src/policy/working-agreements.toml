@@ -111,7 +111,7 @@ id = "brokered-reads"
 verdict = "allow"
 reason = "A read-only query, a data-dictionary lookup, or a review submission changes nothing the operator has not agreed to."
 kinds = ["tool"]
-matches = ["query", "describe", "submit_review", "review_status", "mr_status", "issue"]
+matches = ["query", "describe", "submit_review", "review_status", "review_verdict", "mr_status", "issue"]
 
 # Comments are visible, attributable, and reversible; they are what the agent
 # does instead of transitioning a ticket or merging a change.

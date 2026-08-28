@@ -185,6 +185,15 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE session ADD COLUMN phase TEXT NOT NULL DEFAULT 'execute';
     ALTER TABLE session ADD COLUMN policy_version INTEGER;
     "#,
+    // 7: supervision and review sessions. A review records the checks that
+    // passed at submit, the fresh session that read it, and that session's
+    // verdict; a review session records which review it is for.
+    r#"
+    ALTER TABLE review ADD COLUMN checks_json TEXT;
+    ALTER TABLE review ADD COLUMN review_session_id TEXT;
+    ALTER TABLE review ADD COLUMN ai_verdict_json TEXT;
+    ALTER TABLE session ADD COLUMN review_id TEXT;
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

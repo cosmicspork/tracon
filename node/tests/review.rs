@@ -23,6 +23,8 @@ use tracon::{
 
 struct Fixture {
     app: axum::Router,
+    harness: axum::Router,
+    manager: Manager,
     store: Arc<Store>,
     dir: std::path::PathBuf,
     worktree: String,
@@ -45,6 +47,10 @@ fn sh(dir: &std::path::Path, script: &str) {
 /// A worktree with a commit beyond its base, a bare origin to push to, and a
 /// stub `gh` on PATH that records how it was called.
 async fn fixture(name: &str, credentials: &str) -> Fixture {
+    fixture_with(name, credentials, |_| {}).await
+}
+
+async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> Fixture {
     // Per test: these run in parallel and each needs its own repo, its own
     // stub CLI, and its own log to assert against.
     let dir = std::env::temp_dir().join(format!("tracon-review-it-{}-{name}", std::process::id()));
@@ -112,6 +118,7 @@ async fn fixture(name: &str, credentials: &str) -> Fixture {
             project_id: None,
             phase: "execute".into(),
             policy_version: None,
+            review_id: None,
             budget_tokens: 1000,
             tokens_used: 0,
             cost_usd: None,
@@ -134,6 +141,10 @@ async fn fixture(name: &str, credentials: &str) -> Fixture {
     // process-global and races when these run in parallel.
     let mut cfg = Config::default();
     cfg.publish.gh = bin.join("gh").to_string_lossy().into_owned();
+    // Checks run through the local runner in the worktree itself; the
+    // default `just check` is not what a test fixture has.
+    cfg.supervision.checks = vec!["test -f a.txt".into()];
+    tweak(&mut cfg);
     let cfg = Arc::new(cfg);
     let tools = Arc::new(Tools {
         broker: Arc::new(toml::from_str(credentials).unwrap()),
@@ -155,17 +166,24 @@ async fn fixture(name: &str, credentials: &str) -> Fixture {
         store: store.clone(),
         manager: manager.clone(),
     });
-    let app = tracon::http::router(tracon::http::api::AppState {
-        manager,
+    let adapter: Arc<dyn tracon::adapter::HarnessAdapter> =
+        Arc::new(tracon::adapter::omp::OmpAdapter::new("18.0.4"));
+    manager.set_adapter(adapter.clone());
+    let state = tracon::http::api::AppState {
+        manager: manager.clone(),
         cfg,
-        adapter: Arc::new(tracon::adapter::omp::OmpAdapter::new("18.0.4")),
+        adapter,
         node_id: "n1".into(),
         tools,
         mesh: None,
-    });
+    };
+    let app = tracon::http::router(state.clone());
+    let harness = tracon::http::harness_router(state);
 
     Fixture {
         app,
+        harness,
+        manager,
         store,
         dir,
         worktree,
@@ -241,9 +259,54 @@ impl Fixture {
                 created_mono_ms: 0,
                 resolved_mono_ms: None,
                 updated_ms: now_ms(),
+                checks_json: None,
+                review_session_id: None,
+                ai_verdict_json: None,
             })
             .unwrap();
         id
+    }
+
+    /// A tool call as the harness makes it, for the given session.
+    async fn tool(&self, sid: &str, name: &str, args: Value) -> Value {
+        let token = self.manager.register_tool_token_for_test(sid, "work").await;
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}});
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/mcp/{sid}"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = self.harness.clone().oneshot(req).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 22)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
+        let is_err = v["result"]["isError"] == true;
+        serde_json::from_str(text)
+            .map(|parsed: Value| {
+                if is_err {
+                    json!({"error": parsed})
+                } else {
+                    parsed
+                }
+            })
+            .unwrap_or(json!({ "error": text }))
+    }
+
+    fn submit_args(&self) -> Value {
+        json!({"title": "feat: the thing", "body": "why", "provider": "github", "project": "owner/name", "base": "main"})
+    }
+
+    fn event_kinds(&self, sid: &str) -> Vec<String> {
+        self.store
+            .events_after(sid, 0, 500)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect()
     }
 
     fn gh_log(&self) -> String {
@@ -639,4 +702,204 @@ async fn a_claim_from_a_vanished_client_lapses() {
     assert_eq!(stale, std::slice::from_ref(&id));
     f.store.release_review(&id).unwrap();
     assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "new");
+}
+
+#[tokio::test]
+async fn submit_runs_the_checks_first_and_a_failure_refuses_the_submission() {
+    const FN: &str = "submit_runs_the_checks_first_and_a_failure_refuses_the_submission";
+    let f = fixture(FN, WITH_GH).await;
+    // The worktree's own list wins over the node's, and this one fails.
+    std::fs::create_dir_all(f.dir.join("wt/.tracon")).unwrap();
+    std::fs::write(
+        f.dir.join("wt/.tracon/checks"),
+        "# project checks\ntest -f a.txt\nsh -c 'echo boom >&2; exit 3'\n",
+    )
+    .unwrap();
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let err = v["error"].as_str().unwrap_or_default().to_string();
+    assert!(err.contains("check failed"), "{v}");
+    assert!(err.contains("exit 3") && err.contains("boom"), "{v}");
+    assert!(f.store.open_reviews().unwrap().is_empty());
+    let kinds = f.event_kinds("s1");
+    assert_eq!(
+        kinds.iter().filter(|k| *k == "check_result").count(),
+        2,
+        "stops at the first failure: {kinds:?}"
+    );
+    assert!(kinds.contains(&"check_started".to_string()));
+    assert!(kinds.contains(&"review_rejected".to_string()));
+    assert_eq!(
+        f.store.get_session("s1").unwrap().unwrap().state,
+        "running",
+        "back to running after the check"
+    );
+
+    // Fix the check: the submission goes through, with the checks on the row.
+    std::fs::write(f.dir.join("wt/.tracon/checks"), "test -f a.txt\n").unwrap();
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    assert_eq!(v["review_session"]["state"], "none", "{v}");
+    let r = f.store.get_review(&id).unwrap().unwrap();
+    let checks: Vec<Value> = serde_json::from_str(r.checks_json.as_deref().unwrap()).unwrap();
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0]["command"], "test -f a.txt");
+    assert_eq!(checks[0]["ok"], true);
+}
+
+#[tokio::test]
+async fn a_diff_over_the_cap_is_refused_before_any_check_runs() {
+    const FN: &str = "a_diff_over_the_cap_is_refused_before_any_check_runs";
+    let f = fixture_with(FN, WITH_GH, |c| c.review.max_diff_lines = 0).await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let err = v["error"].as_str().unwrap_or_default();
+    assert!(err.contains("the cap is 0 lines"), "{v}");
+    assert!(err.contains("Split the change"), "{v}");
+    assert!(f.store.open_reviews().unwrap().is_empty());
+    let kinds = f.event_kinds("s1");
+    assert!(kinds.contains(&"review_rejected".to_string()));
+    assert!(!kinds.contains(&"check_started".to_string()), "{kinds:?}");
+}
+
+#[tokio::test]
+async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_on_the_card() {
+    const FN: &str =
+        "a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_on_the_card";
+    let f = fixture(FN, WITH_GH).await;
+    f.store
+        .channel_put(
+            "work",
+            b"",
+            &json!({"phases": {"review": {"model": "m/reviewer", "budget_tokens": 5000}}})
+                .to_string(),
+        )
+        .unwrap();
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    assert_eq!(v["review_session"]["state"], "started", "{v}");
+    let rsid = v["review_session"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(r.review_session_id.as_deref(), Some(rsid.as_str()));
+    let rs = f.store.get_session(&rsid).unwrap().unwrap();
+    assert_eq!(rs.phase, "review");
+    assert_eq!(rs.model, "m/reviewer");
+    assert_eq!(rs.budget_tokens, 5000);
+    assert_eq!(rs.review_id.as_deref(), Some(id.as_str()));
+    assert_eq!(
+        rs.repo_path,
+        f.store.get_session("s1").unwrap().unwrap().repo_path
+    );
+    // Its worktree is at the reviewed commit, on its own branch.
+    for _ in 0..300 {
+        if f.store
+            .get_session(&rsid)
+            .unwrap()
+            .unwrap()
+            .worktree_path
+            .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let rs = f.store.get_session(&rsid).unwrap().unwrap();
+    let wt = rs.worktree_path.clone().expect("review worktree");
+    let head = std::process::Command::new("git")
+        .args(["-C", &wt, "rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), r.head_sha);
+    assert!(rs.branch.starts_with("review/"));
+
+    // A review session sees only reading tools and its verdict.
+    let v = f.tool(&rsid, "submit_review", f.submit_args()).await;
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not offered to a review session"),
+        "{v}"
+    );
+    let v = f
+        .tool(
+            &rsid,
+            "review_verdict",
+            json!({"verdict": "request_changes", "summary": "a.txt grew without a test",
+                   "findings": [{"path": "a.txt", "line": 2, "severity": "should", "note": "cover it"}]}),
+        )
+        .await;
+    assert_eq!(v["recorded"], true, "{v}");
+    let r = f.store.get_review(&id).unwrap().unwrap();
+    let verdict: Value = serde_json::from_str(r.ai_verdict_json.as_deref().unwrap()).unwrap();
+    assert_eq!(verdict["verdict"], "request_changes");
+    assert_eq!(verdict["model"], "m/reviewer");
+    assert_eq!(verdict["findings"][0]["path"], "a.txt");
+    assert!(f.event_kinds(&rsid).contains(&"review_verdict".to_string()));
+    // The human's verdict is untouched: the review is still open.
+    assert_eq!(f.store.open_reviews().unwrap().len(), 1);
+    // An execute session cannot give one.
+    let v = f
+        .tool(
+            "s1",
+            "review_verdict",
+            json!({"verdict": "approve", "summary": "x"}),
+        )
+        .await;
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("only a review session"),
+        "{v}"
+    );
+}
+
+#[tokio::test]
+async fn publishing_closes_the_item_the_session_holds() {
+    const FN: &str = "publishing_closes_the_item_the_session_holds";
+    let f = fixture(FN, WITH_GH).await;
+    let item = tracon::corpus::work::create(
+        &f.store,
+        &Bus::new(),
+        "n1",
+        tracon::corpus::work::NewWork {
+            channel: "work".into(),
+            project_id: None,
+            title: "The thing".into(),
+            body: String::new(),
+            deps: vec![],
+            priority: 0,
+            discovered_from: None,
+            discovered_by_session: None,
+        },
+    )
+    .unwrap();
+    f.store
+        .conn()
+        .execute(
+            "UPDATE session SET work_item_id = ?1 WHERE id = 's1'",
+            [&item.id],
+        )
+        .unwrap();
+    let id = f.submit().await;
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let closed = f.store.work_get(&item.id).unwrap().unwrap();
+    assert_eq!(closed.state, "closed");
+    assert_eq!(closed.closed_by_session.as_deref(), Some("s1"));
+    assert!(f.event_kinds("s1").contains(&"work_closed".to_string()));
 }

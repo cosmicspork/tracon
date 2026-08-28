@@ -395,6 +395,7 @@ fn insert_running_session(store: &Arc<Store>, budget: i64) -> String {
             project_id: None,
             phase: "execute".into(),
             policy_version: None,
+            review_id: None,
             budget_tokens: budget,
             tokens_used: 0,
             cost_usd: None,
@@ -1027,6 +1028,8 @@ async fn a_session_starts_with_its_orientation_recorded() {
                 budget_tokens: Some(1000),
                 node_id: None,
                 phase: tracon::session::Phase::Plan,
+                review_id: None,
+                base_sha: None,
             },
             adapter.clone(),
         )

@@ -93,6 +93,15 @@ pub mod event_kind {
     pub const WORK_CLOSED: &str = "work_closed";
     /// A plan session wrote its plan document; the item now carries its slug.
     pub const PLAN_ARTIFACT: &str = "plan_artifact";
+    /// Deterministic checks began at submit (`commands`).
+    pub const CHECK_STARTED: &str = "check_started";
+    /// One check finished (`command`, `ok`, `exit`, `tail`, `ms`).
+    pub const CHECK_RESULT: &str = "check_result";
+    /// A submission was refused before a review existed: over the cap, or a
+    /// check failed (`reason`).
+    pub const REVIEW_REJECTED: &str = "review_rejected";
+    /// A review session gave its verdict on the review it was spawned for.
+    pub const REVIEW_VERDICT: &str = "review_verdict";
 }
 
 #[cfg(test)]
