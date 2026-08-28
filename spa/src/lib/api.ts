@@ -4,15 +4,27 @@
 import type {
   Event,
   Invite,
+  Document,
   MeshState,
   NodeInfo,
   Promotion,
   PromotionItem,
   ProviderInfo,
   Queue,
+  RecallHit,
   Review,
   Session,
 } from './types'
+
+/** A document edit that lost to another: the current state comes back. */
+export class DocConflict extends Error {
+  constructor(
+    public hash: string,
+    public body: string,
+  ) {
+    super('the document changed since it was read')
+  }
+}
 
 export class ApiError extends Error {
   constructor(
@@ -101,6 +113,38 @@ export const api = {
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),
   answer: (permissionId: string, optionId: string) =>
     call<void>('POST', `/api/permissions/${permissionId}/answer`, { option_id: optionId }),
+  // Documents: read by slug, search by content, edit with the hash last read.
+  docs: (channel?: string, kind?: string) => {
+    const q = new URLSearchParams()
+    if (channel) q.set('channel', channel)
+    if (kind) q.set('kind', kind)
+    const s = q.toString()
+    return call<{ docs: Document[] }>('GET', `/api/docs${s ? `?${s}` : ''}`)
+  },
+  searchDocs: (text: string, channel?: string) => {
+    const q = new URLSearchParams({ q: text })
+    if (channel) q.set('channel', channel)
+    return call<{ hits: RecallHit[] }>('GET', `/api/docs?${q}`)
+  },
+  doc: (channel: string, slug: string) => call<Document>('GET', `/api/docs/${channel}/${slug}`),
+  putDoc: async (channel: string, slug: string, body: string, ifMatch?: string): Promise<Document> => {
+    const res = await fetch(`/api/docs/${channel}/${slug}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...(ifMatch ? { 'if-match': ifMatch } : {}) },
+      body: JSON.stringify({ body }),
+    })
+    const text = await res.text()
+    let json: { error?: { message?: string }; hash?: string; body?: string } | null = null
+    try {
+      json = text ? JSON.parse(text) : null
+    } catch {
+      json = null
+    }
+    if (res.status === 412) throw new DocConflict(json?.hash ?? '', json?.body ?? '')
+    if (!res.ok) throw new ApiError(res.status, json?.error?.message ?? text)
+    return json as unknown as Document
+  },
+  deleteDoc: (channel: string, slug: string) => call<void>('DELETE', `/api/docs/${channel}/${slug}`),
   // Promotion batches: read, decide per item, or build tonight's now.
   promotion: (id: string) =>
     call<{ promotion: Promotion; items: PromotionItem[]; verdicts: Record<string, string> }>(
