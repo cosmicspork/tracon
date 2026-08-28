@@ -170,3 +170,17 @@ SigV4 client for S3-compatible storage (`TRACON_HUB_SNAPSHOT_*`); scheduled ever
 reopens with the same identity, keyrings, rows, and frames (`hub/tests/snapshot.rs`).
 The run against DigitalOcean Spaces waits on a bucket and a key in the cluster's
 secrets; the code path is the same as the directory one past the trait.
+
+## Documents in the browser
+
+A fifth destination. The list is grouped by kind with content search (the node's FTS,
+so it is local with the hub down; the header says so); a document renders as markdown
+(`marked` — what is rendered was written or approved by the operator); the editor is a
+textarea that saves with the hash last read and, on 412, shows the other version and
+offers "take theirs" or "keep mine". A `changes` frame naming a document bumps a version
+the screens refetch on, and an editor mid-draft is told rather than clobbered. The
+notebook's dashboard (todo scan, priorities panel) is not carried over: `~/src/docs`
+held no `note-priorities.md`, and open items are the agent's `recall` away.
+
+Imported `~/src/docs` (12 documents) and `~/src/README.md` as `guide-workspace` on a
+scratch node; `tracon memory recall "what is the test command"` returned the guide first.

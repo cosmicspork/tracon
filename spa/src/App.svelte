@@ -1,5 +1,7 @@
 <script lang="ts">
   import Approval from './routes/Approval.svelte'
+  import Doc from './routes/Doc.svelte'
+  import Docs from './routes/Docs.svelte'
   import Promotion from './routes/Promotion.svelte'
   import NewSession from './routes/NewSession.svelte'
   import Nodes from './routes/Nodes.svelte'
@@ -38,6 +40,8 @@
   const reviewId = $derived(router.path.match(/^\/reviews\/([^/]+)/)?.[1] ?? null)
   const promotionId = $derived(router.path.match(/^\/promotions\/([^/]+)/)?.[1] ?? null)
   const enroll = $derived(router.path === '/nodes/enroll')
+  const docRef = $derived(router.path.match(/^\/docs\/([^/]+)\/([^/]+)(\/edit)?$/))
+  const docEdit = $derived(Boolean(docRef?.[3]))
   const nav = $derived(
     sessionId || router.path === '/sessions'
       ? 'sessions'
@@ -45,7 +49,9 @@
         ? 'nodes'
         : router.path === '/new'
           ? 'new'
-          : 'queue',
+          : router.path.startsWith('/docs')
+            ? 'docs'
+            : 'queue',
   )
   const hubDown = $derived(store.mesh?.hub.state === 'unreachable')
   const hubLabel = $derived.by(() => {
@@ -74,6 +80,10 @@
     <a href="/nodes" class:on={nav === 'nodes'}>
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14.5v2.5" /></svg>
       <span class="lbl">Nodes</span>
+    </a>
+    <a href="/docs" class:on={nav === 'docs'}>
+      <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
+      <span class="lbl">Documents</span>
     </a>
     <a href="/new" class:on={nav === 'new'}>
       <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
@@ -112,6 +122,10 @@
       <Enroll />
     {:else if nav === 'nodes'}
       <Nodes />
+    {:else if docRef}
+      <Doc channel={docRef[1]} slug={docRef[2]} edit={docEdit} />
+    {:else if nav === 'docs'}
+      <Docs />
     {:else if nav === 'new'}
       <NewSession />
     {:else}
@@ -120,7 +134,7 @@
   </main>
 
   <!-- The phone navigates from the bottom, where a thumb is. Capability is
-       gated by surface, not by width: this is the same four destinations. -->
+       gated by surface, not by width: this is the same five destinations. -->
   <nav class="tabs">
     <a href="/" class:on={nav === 'queue'}>
       <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
@@ -134,6 +148,10 @@
     <a href="/nodes" class:on={nav === 'nodes'}>
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14.5v2.5" /></svg>
       <span>Nodes</span>
+    </a>
+    <a href="/docs" class:on={nav === 'docs'}>
+      <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
+      <span>Docs</span>
     </a>
     <a href="/new" class:on={nav === 'new'}>
       <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
@@ -170,7 +188,7 @@
     main { padding: 14px 12px calc(72px + env(safe-area-inset-bottom)); }
     .tabs {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(5, 1fr);
       position: fixed;
       inset: auto 0 0 0;
       background: var(--s1);

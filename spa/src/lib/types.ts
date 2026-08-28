@@ -157,6 +157,34 @@ export interface Queue {
   ended: Session[]
 }
 
+/** A document as the node keeps it. `body` is empty in listings. */
+export interface Document {
+  id: string
+  channel: string
+  slug: string
+  kind: string
+  title: string
+  body: string
+  hash: string
+  site: string
+  hlc_ms: number
+  deleted: number
+  created_ms: number
+  updated_ms: number
+}
+
+/** A search hit across memories and documents. */
+export interface RecallHit {
+  kind: string
+  id: string
+  slug: string | null
+  title: string | null
+  text: string
+  scope: string | null
+  confidence: number | null
+  rank: number
+}
+
 /** A promotion batch as the node keeps it; `items_json` holds the memories. */
 export interface Promotion {
   id: string
@@ -202,6 +230,7 @@ export type Frame =
   | ({ type: 'mesh' } & MeshState)
   | { type: 'providers'; providers: ProviderInfo[] }
   | { type: 'promotions'; waiting: Promotion[] }
+  | { type: 'changes'; channel: string; changes: { table: string; id: string; op: string }[] }
 
 export const TERMINAL_STATES: SessionState[] = ['closed', 'killed_budget', 'failed']
 
