@@ -47,6 +47,9 @@ pub enum EndReason {
     Budget,
     HarnessExit,
     ItemClose,
+    /// The phase's artifact landed (a plan was written, a review verdict
+    /// given); the session has nothing more to do.
+    PhaseDone,
     Error,
 }
 
@@ -57,6 +60,7 @@ impl EndReason {
             Self::Budget => "budget",
             Self::HarnessExit => "harness_exit",
             Self::ItemClose => "item_close",
+            Self::PhaseDone => "phase_done",
             Self::Error => "error",
         }
     }
@@ -87,6 +91,8 @@ pub mod event_kind {
     /// The session's work item was closed (by the agent or the operator);
     /// the session ends at the end of the turn.
     pub const WORK_CLOSED: &str = "work_closed";
+    /// A plan session wrote its plan document; the item now carries its slug.
+    pub const PLAN_ARTIFACT: &str = "plan_artifact";
 }
 
 #[cfg(test)]

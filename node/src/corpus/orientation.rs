@@ -5,9 +5,11 @@
 //! plus the directives and confident facts recalled for the project. Capped,
 //! because oversized context degrades the session it was meant to help.
 
+use tracon_sync::work::WorkItem;
+
 use crate::{
     policy::{Policy, Verdict},
-    store::{MemoryRow, Store},
+    store::{MemoryRow, Store, WorkView},
 };
 
 /// Roughly six thousand tokens at four characters each.
@@ -26,6 +28,14 @@ pub struct Facts<'a> {
     pub project_name: Option<&'a str>,
     pub tools: &'a [String],
     pub worktree: &'a str,
+    /// `plan`, `execute`, or `review`.
+    pub phase: &'a str,
+    /// The item this session holds.
+    pub item: Option<&'a WorkItem>,
+    /// The plan document's body, for an execute session.
+    pub plan_body: Option<&'a str>,
+    /// Ready work on the project, for `work_discover` deps and context.
+    pub ready: &'a [WorkView],
 }
 
 /// The orientation text, and whether the cap trimmed it.
@@ -93,6 +103,72 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, bool)
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+    }
+
+    // 2b. The work: the item, its phase, and what the phase must produce.
+    if let Some(item) = facts.item {
+        out.push_str(&format!(
+            "## Work\n\n**{}** (`{}…`, phase: {})\n\n",
+            item.title,
+            &item.id[..8.min(item.id.len())],
+            facts.phase
+        ));
+        if !item.body.trim().is_empty() {
+            let mut body = item.body.trim().to_string();
+            if body.len() > GUIDE_CHARS {
+                body.truncate(floor_char(&body, GUIDE_CHARS));
+                body.push_str("\n\n[trimmed]");
+                trimmed = true;
+            }
+            out.push_str(&body);
+            out.push_str("\n\n");
+        }
+        if let Some(from) = &item.discovered_from {
+            out.push_str(&format!(
+                "Discovered from item `{}…`.\n\n",
+                &from[..8.min(from.len())]
+            ));
+        }
+        match facts.phase {
+            "plan" => {
+                let slug = crate::corpus::work::plan_slug(&item.id);
+                out.push_str(&format!(
+                    "This is a **plan session**: read, ask `recall`, and think; write no code. \
+                     It ends when you write the plan as document `{slug}` with `doc_write` \
+                     (that slug alone needs no approval). Say what will change, where, how it \
+                     is verified, and what you are unsure of. An execute session follows and \
+                     reads only that document and this item.\n\n"
+                ));
+            }
+            "execute" => {
+                out.push_str(
+                    "This is an **execute session**: do the work in the worktree, then `submit` \
+                     for review. Work you find but should not do now: `work_discover`. When the \
+                     item is done and submitted, `work_close` ends this session.\n\n",
+                );
+                if let Some(plan) = facts.plan_body {
+                    let mut body = plan.trim().to_string();
+                    if body.len() > GUIDE_CHARS {
+                        body.truncate(floor_char(&body, GUIDE_CHARS));
+                        body.push_str("\n\n[trimmed; call doc_read for the whole plan]");
+                        trimmed = true;
+                    }
+                    out.push_str(&format!("### Plan\n\n{body}\n\n"));
+                }
+            }
+            _ => {}
+        }
+        if !facts.ready.is_empty() {
+            out.push_str("### Ready work on this project\n\n");
+            for v in facts.ready.iter().take(10) {
+                out.push_str(&format!(
+                    "- `{}…` {}\n",
+                    &v.item.id[..8.min(v.item.id.len())],
+                    v.item.title
+                ));
+            }
+            out.push('\n');
+        }
     }
 
     // 3. Policy: what is refused, and why, so a refusal reads as expected.
@@ -187,6 +263,10 @@ mod tests {
             project_name: Some("tracon"),
             tools: &["recall".into(), "retain".into()],
             worktree: "/work",
+            phase: "execute",
+            item: None,
+            plan_body: None,
+            ready: &[],
         };
         let (text, trimmed) = assemble(&store, &Policy::shipped(), &facts);
         assert!(!trimmed);
@@ -230,6 +310,10 @@ mod tests {
             project_name: None,
             tools: &[],
             worktree: "/work",
+            phase: "execute",
+            item: None,
+            plan_body: None,
+            ready: &[],
         };
         let (text, trimmed) = assemble(&store, &Policy::default(), &facts);
         assert!(trimmed);

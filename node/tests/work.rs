@@ -137,6 +137,8 @@ fn session_row(id: &str, item: Option<&str>) -> SessionRow {
         container_name: None,
         model: "m/a".into(),
         project_id: None,
+        phase: "execute".into(),
+        policy_version: None,
         budget_tokens: 1000,
         tokens_used: 0,
         cost_usd: None,

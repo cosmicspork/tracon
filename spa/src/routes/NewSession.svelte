@@ -8,6 +8,7 @@
   let repo = $state('')
   let branch = $state('')
   let workItem = $state('')
+  let phase = $state<'plan' | 'execute'>('plan')
   // No default, deliberately: a session without an explicit model is a
   // validation failure, and the form makes that unreachable instead.
   let model = $state('')
@@ -25,7 +26,7 @@
     eligible.find((n) => n.id === nodeId) ?? eligible.find((n) => n.is_self) ?? eligible[0] ?? store.node,
   )
   const blocked = $derived(!node || node.state === 'refused' || node.harness.mismatch === true || !node.reachable)
-  const ready = $derived(!blocked && repo.trim() !== '' && model !== '' && !busy)
+  const ready = $derived(!blocked && repo.trim() !== '' && workItem.trim() !== '' && model !== '' && !busy)
 
   async function start(e: SubmitEvent) {
     e.preventDefault()
@@ -37,6 +38,7 @@
         repo_path: repo.trim(),
         branch: branch.trim() || undefined,
         work_item_id: workItem.trim() || undefined,
+        phase,
         model,
         budget_tokens: Number(budget) || undefined,
         node_id: node && !node.is_self ? node.id : undefined,
@@ -72,8 +74,16 @@
     <small>The worktree is created from origin's default branch, outside the repo.</small>
   </label>
   <label>
-    <span>Work item <em class="opt">optional in Phase 1</em></span>
-    <input bind:value={workItem} placeholder="NUDEV-25" spellcheck="false" />
+    <span>Phase</span>
+    <select bind:value={phase}>
+      <option value="plan">Plan — read and write the plan document</option>
+      <option value="execute">Execute — do the work (needs the item's plan)</option>
+    </select>
+  </label>
+  <label>
+    <span>Work item <em class="req">required · from the ready list</em></span>
+    <input bind:value={workItem} placeholder="item id" spellcheck="false" />
+    <small>Pick a ready item; <code>tracon work ready</code> lists them.</small>
   </label>
   <label>
     <span>Model <em class="req">required · no default</em></span>

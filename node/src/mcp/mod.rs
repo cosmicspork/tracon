@@ -97,7 +97,12 @@ impl Tools {
     }
 
     pub async fn call(&self, ctx: &CallContext, name: &str, args: &Value) -> Result<Value, String> {
-        self.gate(ctx, name, args).await?;
+        // A plan session's own plan document is the phase's artifact: writing
+        // that one slug is what the session exists to do, so it is not asked.
+        let plan_write = name == docs::DOC_WRITE && self.is_plan_artifact(ctx, args);
+        if !plan_write {
+            self.gate(ctx, name, args).await?;
+        }
         match name {
             consulta::QUERY | consulta::DESCRIBE => {
                 consulta::call(&self.broker, &self.cfg, ctx, name, args).await
@@ -138,6 +143,20 @@ impl Tools {
             }
             other => Err(format!("no tool named {other}")),
         }
+    }
+
+    fn is_plan_artifact(&self, ctx: &CallContext, args: &Value) -> bool {
+        let Some(access) = self.session.get() else {
+            return false;
+        };
+        let Ok(Some(session)) = access.store.get_session(&ctx.session_id) else {
+            return false;
+        };
+        session.phase == "plan"
+            && session.work_item_id.as_deref().is_some_and(|item| {
+                args["slug"].as_str().map(str::trim)
+                    == Some(crate::corpus::work::plan_slug(item).as_str())
+            })
     }
 
     /// Policy before the broker. Deny is final and explained; Ask goes to the

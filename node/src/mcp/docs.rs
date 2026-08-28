@@ -143,6 +143,24 @@ pub async fn call(
                 false,
             )
             .map_err(|e| e.to_string())?;
+            // The plan artifact: record it on the item and end the plan
+            // session once this turn is over.
+            let session = access.store.get_session(&ctx.session_id).ok().flatten();
+            if let Some(item) = session
+                .as_ref()
+                .filter(|s| s.phase == "plan")
+                .and_then(|s| s.work_item_id.clone())
+                .filter(|item| corpus::work::plan_slug(item) == slug)
+            {
+                corpus::work::set_plan(&access.store, access.manager.bus(), &node_id, &item, slug)
+                    .map_err(|e| e.to_string())?;
+                access.manager.record_event(
+                    &ctx.session_id,
+                    crate::session::state::event_kind::PLAN_ARTIFACT,
+                    json!({ "slug": slug, "hash": doc.hash, "work_item_id": item }),
+                );
+                access.manager.phase_done(&ctx.session_id).await;
+            }
             Ok(json!({ "slug": doc.slug, "hash": doc.hash }))
         }
         other => Err(format!("no tool named {other}")),

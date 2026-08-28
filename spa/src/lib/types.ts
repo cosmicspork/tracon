@@ -85,6 +85,8 @@ export interface Session {
   harness_id: string
   harness_version: string
   model: string
+  phase: 'plan' | 'execute' | 'review'
+  policy_version: number | null
   budget_tokens: number
   tokens_used: number
   cost_usd: number | null
