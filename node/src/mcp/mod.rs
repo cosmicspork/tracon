@@ -11,6 +11,7 @@ pub mod gitlab;
 pub mod jira;
 pub mod memory;
 pub mod review;
+pub mod work;
 
 use std::sync::Arc;
 
@@ -90,6 +91,7 @@ impl Tools {
             // doing. This means every session gets an MCP server.
             out.extend(memory::definitions());
             out.extend(docs::definitions());
+            out.extend(work::definitions());
         }
         out
     }
@@ -119,6 +121,13 @@ impl Tools {
                     .get()
                     .ok_or("memory is not available on this node")?;
                 memory::call(access, ctx, name, args).await
+            }
+            work::WORK_READY | work::WORK_DISCOVER | work::WORK_CLOSE => {
+                let access = self
+                    .session
+                    .get()
+                    .ok_or_else(|| "node not ready".to_string())?;
+                work::call(access, ctx, name, args).await
             }
             docs::DOC_READ | docs::DOC_SEARCH | docs::DOC_WRITE => {
                 let access = self

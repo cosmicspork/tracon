@@ -30,6 +30,8 @@ class Store {
   providers = $state<ProviderInfo[]>([])
   /** Bumped when a document changes anywhere on the mesh; screens refetch on it. */
   docsVersion = $state(0)
+  /** Bumped when a work item changes anywhere on the mesh. */
+  workVersion = $state(0)
   /** Set briefly after the hub comes back: how many queued items went out. */
   reconnected = $state<number | null>(null)
   queue = $state<Queue>({ waiting: [], reviews: [], promotions: [], running: [], ended: [] })
@@ -208,6 +210,7 @@ class Store {
       }
       case 'changes': {
         if (frame.changes.some((c) => c.table === 'document')) this.docsVersion += 1
+        if (frame.changes.some((c) => c.table === 'work_item')) this.workVersion += 1
         break
       }
     }

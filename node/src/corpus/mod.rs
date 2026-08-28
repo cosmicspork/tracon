@@ -1,4 +1,4 @@
-//! The node's corpus: documents and memories written through the sync layer
+//! The node's corpus: documents, memories, and work items written through the sync layer
 //! and published to the mesh, project identity, and the orientation a session
 //! starts with. Reads are always local; see `store::corpus`.
 
@@ -6,6 +6,7 @@ pub mod import;
 pub mod orientation;
 pub mod project;
 pub mod promote;
+pub mod work;
 
 use serde_json::Value;
 use tracon_sync::{Change, ChangeOp};

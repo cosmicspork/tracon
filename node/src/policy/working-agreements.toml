@@ -6,7 +6,7 @@
 # Anything not matched here is asked, so adding a rule can only ever reduce the
 # number of interruptions, never widen what an agent may do unattended.
 
-version = 3
+version = 4
 
 # --- 1. Worktree, not the main checkout -------------------------------------
 # Structurally true already: the harness only ever sees its own worktree at
@@ -127,8 +127,8 @@ matches = ["mr_comment", "issue_comment"]
 # rather than by asking every time. Writing a document is not named here, so
 # it is asked: a document is the operator's artifact.
 [[rule]]
-id = "corpus-reads-and-retain"
+id = "corpus-and-ledger"
 verdict = "allow"
-reason = "Recalling what is known, reading a document, or retaining a fact changes nothing the operator has not agreed to."
+reason = "Recalling what is known, reading a document, retaining a fact, or recording and closing work changes nothing the operator has not agreed to."
 kinds = ["tool"]
-matches = ["recall", "retain", "doc_read", "doc_search"]
+matches = ["recall", "retain", "doc_read", "doc_search", "work_ready", "work_discover", "work_close"]

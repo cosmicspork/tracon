@@ -39,6 +39,9 @@ pub enum Command {
         ack: oneshot::Sender<Result<(), String>>,
     },
     Kill,
+    /// End the session once the running turn finishes (now, if none is):
+    /// the work item closed, or the phase's artifact landed.
+    EndAfterTurn(EndReason),
     /// A permission request that did not come from the harness: a brokered
     /// tool call the policy wants the operator to decide. Same queue, same
     /// expiry, same answer path.
@@ -76,6 +79,8 @@ pub struct Supervisor {
     container: String,
     policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
     channel: String,
+    /// Set by `Command::EndAfterTurn` while a turn is running.
+    end_after_turn: Option<EndReason>,
 }
 
 impl Supervisor {
@@ -97,6 +102,7 @@ impl Supervisor {
         Self {
             policy,
             channel,
+            end_after_turn: None,
             self_tx,
             runner,
             container,
@@ -205,6 +211,26 @@ impl Supervisor {
                     Some(Command::TurnDone { kind, payload, tokens }) => {
                         self.on_turn_done(kind, payload, tokens).await;
                         if self.check_budget().await {
+                            break;
+                        }
+                        if let Some(reason) = self.end_after_turn.take() {
+                            killed_by_us = true;
+                            self.shutdown(reason).await;
+                            break;
+                        }
+                    }
+                    Some(Command::EndAfterTurn(reason)) => {
+                        let turning = self
+                            .store
+                            .get_session(&self.session_id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|s| s.turn_active != 0);
+                        if turning {
+                            self.end_after_turn = Some(reason);
+                        } else {
+                            killed_by_us = true;
+                            self.shutdown(reason).await;
                             break;
                         }
                     }
