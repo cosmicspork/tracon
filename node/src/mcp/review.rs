@@ -12,12 +12,13 @@ use serde_json::{json, Value};
 use crate::{
     mcp::CallContext,
     review::{self, publish::Target},
-    session::Manager,
+    session::{state::event_kind as ek, Manager},
     store::{now_ms, ReviewRow, Store},
 };
 
 pub const SUBMIT: &str = "submit_review";
 pub const STATUS: &str = "review_status";
+pub const VERDICT: &str = "review_verdict";
 
 pub fn definitions() -> Vec<Value> {
     vec![
@@ -54,6 +55,33 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["review_id"],
             },
         }),
+        json!({
+            "name": VERDICT,
+            "description": "Review sessions only: your verdict on the review this session was \
+                            spawned for. It informs the human who decides; it publishes nothing. \
+                            The session ends once it is given.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "verdict": { "type": "string", "enum": ["approve", "request_changes"] },
+                    "summary": { "type": "string", "description": "Two or three sentences: what the change does and whether it meets the requirements." },
+                    "findings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string" },
+                                "line": { "type": "integer" },
+                                "severity": { "type": "string", "enum": ["blocking", "should", "nit"] },
+                                "note": { "type": "string" },
+                            },
+                            "required": ["note"],
+                        },
+                    },
+                },
+                "required": ["verdict", "summary"],
+            },
+        }),
     ]
 }
 
@@ -67,6 +95,7 @@ pub async fn call(
     match name {
         SUBMIT => submit(store, manager, ctx, args).await,
         STATUS => status(store, ctx, args).await,
+        VERDICT => verdict(store, manager, ctx, args).await,
         other => Err(format!("no tool named {other}")),
     }
 }
@@ -111,6 +140,67 @@ async fn submit(
         .map_err(|e| e.to_string())?;
     let files = serde_json::to_string(&capture.files).unwrap_or_else(|_| "[]".into());
 
+    // The cap, before anything else: complexity accretes because nothing says
+    // no at submission time. A resubmission is capped the same way.
+    let limits = &manager.cfg().review;
+    let lines = capture.added + capture.removed;
+    if lines > limits.max_diff_lines || capture.files.len() > limits.max_files {
+        let reason = format!(
+            "the diff is {lines} lines across {} files; the cap is {} lines and {} files. \
+             Split the change into smaller submissions.",
+            capture.files.len(),
+            limits.max_diff_lines,
+            limits.max_files
+        );
+        manager.record_event(
+            &ctx.session_id,
+            ek::REVIEW_REJECTED,
+            json!({ "reason": reason, "lines": lines, "files": capture.files.len() }),
+        );
+        return Err(review::ReviewError::Rejected(reason).to_string());
+    }
+
+    // Deterministic checks, in a throwaway container, before any human or
+    // model reads the diff. A failure is the reason the submit is refused.
+    let commands = review::checks::commands_for(manager.cfg(), std::path::Path::new(&worktree));
+    let slug = ctx.session_id.rsplit('-').next().unwrap_or("s").to_string();
+    manager.set_checking(&ctx.session_id, true);
+    manager.record_event(
+        &ctx.session_id,
+        ek::CHECK_STARTED,
+        json!({ "commands": commands }),
+    );
+    let results = review::checks::run(
+        manager.backend().as_ref(),
+        manager.cfg(),
+        std::path::Path::new(&worktree),
+        &slug,
+        &commands,
+    )
+    .await;
+    for r in &results {
+        manager.record_event(&ctx.session_id, ek::CHECK_RESULT, json!(r));
+    }
+    manager.set_checking(&ctx.session_id, false);
+    if let Some(failed) = results.iter().find(|r| !r.ok) {
+        let reason = format!(
+            "check failed: `{}` (exit {}). Fix it and submit again.\n\n{}",
+            failed.command,
+            failed
+                .exit
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "none".into()),
+            failed.tail
+        );
+        manager.record_event(
+            &ctx.session_id,
+            ek::REVIEW_REJECTED,
+            json!({ "reason": format!("check failed: {}", failed.command), "command": failed.command }),
+        );
+        return Err(reason);
+    }
+    let checks_json = serde_json::to_string(&results).ok();
+
     // A resubmission keeps the same card and the same thread.
     if let Some(id) = args.get("review_id").and_then(Value::as_str) {
         let existing = store
@@ -130,12 +220,15 @@ async fn submit(
                 capture.removed,
             )
             .map_err(|e| e.to_string())?;
+        let _ = store.set_checks(id, checks_json.as_deref());
         manager.publish_queue().await;
+        let reviewer = spawn_review_session(store, manager, ctx, id, &session).await;
         return Ok(json!({
             "review_id": id,
             "state": "new",
             "message": "Resubmitted. Call review_status to wait for the verdict.",
             "uncommitted": capture.uncommitted,
+            "review_session": reviewer,
         }));
     }
 
@@ -176,9 +269,13 @@ async fn submit(
         created_mono_ms: 0,
         resolved_mono_ms: None,
         updated_ms: now_ms(),
+        checks_json,
+        review_session_id: None,
+        ai_verdict_json: None,
     };
     store.insert_review(&row).map_err(|e| e.to_string())?;
     manager.publish_queue().await;
+    let reviewer = spawn_review_session(store, manager, ctx, &id, &session).await;
 
     Ok(json!({
         "review_id": id,
@@ -187,7 +284,101 @@ async fn submit(
                     Call review_status to wait for the verdict.",
         "files": row.added + row.removed,
         "uncommitted": capture.uncommitted,
+        "review_session": reviewer,
     }))
+}
+
+/// A fresh session that reads only the requirements and the diff, when the
+/// channel binds a model for it (`phases.review.model`). Its verdict lands on
+/// the review card; the human still decides. Returns what happened, for the
+/// submitting agent's information.
+async fn spawn_review_session(
+    store: &Arc<Store>,
+    manager: &Manager,
+    ctx: &CallContext,
+    review_id: &str,
+    implementing: &crate::store::SessionRow,
+) -> Value {
+    let bindings = manager.bindings(&ctx.channel);
+    let Some(model) = bindings["phases"]["review"]["model"]
+        .as_str()
+        .filter(|m| !m.trim().is_empty())
+        .map(str::to_string)
+    else {
+        return json!({ "state": "none", "reason": "no review model bound on this channel (phases.review.model)" });
+    };
+    let Ok(Some(r)) = store.get_review(review_id) else {
+        return json!({ "state": "none", "reason": "review not found" });
+    };
+    let short = &review_id[review_id.len().saturating_sub(12)..];
+    let spec = crate::session::NewSession {
+        channel: ctx.channel.clone(),
+        repo_path: implementing.repo_path.clone(),
+        branch: Some(format!("review/{short}")),
+        work_item_id: implementing.work_item_id.clone(),
+        model,
+        budget_tokens: bindings["phases"]["review"]["budget_tokens"].as_i64(),
+        node_id: None,
+        phase: crate::session::Phase::Review,
+        review_id: Some(review_id.to_string()),
+        base_sha: Some(r.head_sha.clone()),
+    };
+    match manager.create_local(spec).await {
+        Ok(row) => {
+            let _ = store.set_review_session(review_id, &row.id);
+            manager.publish_queue().await;
+            json!({ "state": "started", "session_id": row.id })
+        }
+        Err(e) => json!({ "state": "failed", "reason": e.to_string() }),
+    }
+}
+
+/// `review_verdict`: a review session's verdict on the review it was
+/// spawned for. Recorded on the row, never a decision.
+async fn verdict(
+    store: &Arc<Store>,
+    manager: &Manager,
+    ctx: &CallContext,
+    args: &Value,
+) -> Result<Value, String> {
+    let session = store
+        .get_session(&ctx.session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("this session is gone")?;
+    if session.phase != "review" {
+        return Err(
+            "only a review session gives a verdict; submit_review is what an execute session calls"
+                .into(),
+        );
+    }
+    let review_id = session
+        .review_id
+        .clone()
+        .ok_or("this review session has no review")?;
+    let verdict = str_arg(args, "verdict")?;
+    if verdict != "approve" && verdict != "request_changes" {
+        return Err(format!("{verdict:?} is not a verdict"));
+    }
+    let summary = str_arg(args, "summary")?;
+    let findings = args.get("findings").cloned().unwrap_or_else(|| json!([]));
+    let v = json!({
+        "verdict": verdict, "summary": summary, "findings": findings,
+        "model": session.model, "session_id": ctx.session_id, "at_ms": now_ms(),
+    });
+    if !store
+        .set_ai_verdict(&review_id, &v.to_string())
+        .map_err(|e| e.to_string())?
+    {
+        return Err("the review is gone".into());
+    }
+    manager.record_event(
+        &ctx.session_id,
+        ek::REVIEW_VERDICT,
+        json!({ "review_id": review_id, "verdict": verdict, "summary": summary }),
+    );
+    manager.publish_queue().await;
+    manager.phase_done(&ctx.session_id).await;
+    Ok(json!({ "review_id": review_id, "recorded": true }))
 }
 
 async fn status(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, String> {

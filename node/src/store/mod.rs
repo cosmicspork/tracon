@@ -142,9 +142,9 @@ impl Store {
                 branch, harness_id, harness_version, harness_session_id, container_name, model,
                 budget_tokens, tokens_used, cost_usd, context_used, context_size, state, end_reason,
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
-                ended_mono_ms, updated_ms, project_id, phase, policy_version)
+                ended_mono_ms, updated_ms, project_id, phase, policy_version, review_id)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-                ?23,?24,?25,?26,?27,?28,?29,?30)",
+                ?23,?24,?25,?26,?27,?28,?29,?30,?31)",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -175,7 +175,8 @@ impl Store {
                 s.updated_ms,
                 s.project_id,
                 s.phase,
-                s.policy_version
+                s.policy_version,
+                s.review_id
             ],
         )?;
         Ok(())
@@ -588,16 +589,16 @@ impl Store {
                 branch, harness_id, harness_version, harness_session_id, container_name, model,
                 budget_tokens, tokens_used, cost_usd, context_used, context_size, state, end_reason,
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
-                ended_mono_ms, updated_ms, project_id, phase, policy_version)
+                ended_mono_ms, updated_ms, project_id, phase, policy_version, review_id)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,NULL,
-                NULL,?22,?23,?24,?25,?26,?27,?28)
+                NULL,?22,?23,?24,?25,?26,?27,?28,?29)
              ON CONFLICT(id) DO UPDATE SET node_id=?2, channel=?3, work_item_id=?4, repo_path=?5,
                 worktree_path=?6, branch=?7, harness_id=?8, harness_version=?9,
                 harness_session_id=?10, container_name=?11, model=?12, budget_tokens=?13,
                 tokens_used=?14, cost_usd=?15, context_used=?16, context_size=?17, state=?18,
                 end_reason=?19, last_error=?20, turn_active=?21, created_ms=?22,
                 started_mono_ms=?23, ended_mono_ms=?24, updated_ms=?25, project_id=?26,
-                phase=?27, policy_version=?28",
+                phase=?27, policy_version=?28, review_id=?29",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -626,7 +627,8 @@ impl Store {
                 s.updated_ms,
                 s.project_id,
                 s.phase,
-                s.policy_version
+                s.policy_version,
+                s.review_id
             ],
         )?;
         Ok(())
@@ -1008,6 +1010,9 @@ mod records {
         /// The policy bundle version the session started under.
         #[serde(default)]
         pub policy_version: Option<i64>,
+        /// For a review session: the review it was spawned to read.
+        #[serde(default)]
+        pub review_id: Option<String>,
         pub budget_tokens: i64,
         pub tokens_used: i64,
         pub cost_usd: Option<f64>,
@@ -1047,6 +1052,7 @@ mod records {
                 project_id: r.get("project_id")?,
                 phase: r.get("phase")?,
                 policy_version: r.get("policy_version")?,
+                review_id: r.get("review_id")?,
                 budget_tokens: r.get("budget_tokens")?,
                 tokens_used: r.get("tokens_used")?,
                 cost_usd: r.get("cost_usd")?,
@@ -1177,6 +1183,15 @@ mod records {
         pub created_mono_ms: i64,
         pub resolved_mono_ms: Option<i64>,
         pub updated_ms: i64,
+        /// The deterministic checks that passed at submit.
+        #[serde(default)]
+        pub checks_json: Option<String>,
+        /// The fresh session that read this review, when one was spawned.
+        #[serde(default)]
+        pub review_session_id: Option<String>,
+        /// That session's verdict: `{verdict, summary, findings}`.
+        #[serde(default)]
+        pub ai_verdict_json: Option<String>,
     }
 
     impl ReviewRow {
@@ -1216,6 +1231,9 @@ mod records {
                 created_mono_ms: r.get("created_mono_ms")?,
                 resolved_mono_ms: r.get("resolved_mono_ms")?,
                 updated_ms: r.get("updated_ms")?,
+                checks_json: r.get("checks_json")?,
+                review_session_id: r.get("review_session_id")?,
+                ai_verdict_json: r.get("ai_verdict_json")?,
             })
         }
     }
@@ -1294,9 +1312,9 @@ impl Store {
             "INSERT INTO review (id, session_id, node_id, channel, kind, title, body, edited_title,
                 edited_body, provider, target, diff, files, head_sha, base_ref, added, removed,
                 state, verdict_reason, publish_result, claimed_ms, created_ms, created_mono_ms,
-                resolved_mono_ms, updated_ms)
+                resolved_mono_ms, updated_ms, checks_json, review_session_id, ai_verdict_json)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,
-                ?22,?23,?24,?25)",
+                ?22,?23,?24,?25,?26,?27,?28)",
             rusqlite::params![
                 r.id,
                 r.session_id,
@@ -1322,10 +1340,43 @@ impl Store {
                 r.created_ms,
                 r.created_mono_ms,
                 r.resolved_mono_ms,
-                r.updated_ms
+                r.updated_ms,
+                r.checks_json,
+                r.review_session_id,
+                r.ai_verdict_json
             ],
         )?;
         Ok(())
+    }
+
+    pub fn set_checks(&self, id: &str, checks_json: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE review SET checks_json=?2, updated_ms=?3 WHERE id=?1",
+            rusqlite::params![id, checks_json, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Attach the review session the node spawned for a review.
+    pub fn set_review_session(&self, id: &str, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE review SET review_session_id=?2, updated_ms=?3 WHERE id=?1",
+            rusqlite::params![id, session_id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Record a review session's verdict. Never a decision: the human's
+    /// verdict is the only one that resolves the row.
+    pub fn set_ai_verdict(&self, id: &str, verdict_json: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE review SET ai_verdict_json=?2, updated_ms=?3 WHERE id=?1",
+            rusqlite::params![id, verdict_json, now_ms()],
+        )?;
+        Ok(n == 1)
     }
 
     pub fn get_review(&self, id: &str) -> Result<Option<ReviewRow>> {
@@ -1543,6 +1594,7 @@ mod tests {
                 project_id: None,
                 phase: "execute".into(),
                 policy_version: None,
+                review_id: None,
                 budget_tokens: 1000,
                 tokens_used: 0,
                 cost_usd: None,

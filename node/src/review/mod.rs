@@ -6,6 +6,7 @@
 //! before publish" is a property of the system rather than an instruction the
 //! agent may forget by hour two.
 
+pub mod checks;
 pub mod publish;
 
 use serde::{Deserialize, Serialize};

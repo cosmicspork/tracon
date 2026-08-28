@@ -9,7 +9,7 @@ use tracon_sync::work::WorkItem;
 
 use crate::{
     policy::{Policy, Verdict},
-    store::{MemoryRow, Store, WorkView},
+    store::{MemoryRow, ReviewRow, Store, WorkView},
 };
 
 /// Roughly six thousand tokens at four characters each.
@@ -36,7 +36,12 @@ pub struct Facts<'a> {
     pub plan_body: Option<&'a str>,
     /// Ready work on the project, for `work_discover` deps and context.
     pub ready: &'a [WorkView],
+    /// For a review session: the review to read.
+    pub review: Option<&'a ReviewRow>,
 }
+
+/// A diff longer than this is cut; the reviewer has the worktree and git.
+const DIFF_CHARS: usize = 12_000;
 
 /// The orientation text, and whether the cap trimmed it.
 pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, bool) {
@@ -140,6 +145,7 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, bool)
                      reads only that document and this item.\n\n"
                 ));
             }
+            "review" => {}
             "execute" => {
                 out.push_str(
                     "This is an **execute session**: do the work in the worktree, then `submit` \
@@ -169,6 +175,28 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, bool)
             }
             out.push('\n');
         }
+    }
+
+    // 2c. A review session: requirements and diff, nothing of how the diff
+    //     came to be. A fresh reader does not rationalise what it watched.
+    if let Some(r) = facts.review {
+        out.push_str(&format!(
+            "## Review\n\nThis is a **review session**. You did not write this change and have \
+             not seen how it was made; judge the diff against the requirements above and the \
+             plan, run the tests in your worktree if it helps, and end by calling \
+             `review_verdict` (approve, or request_changes with findings). A human decides \
+             after you; your verdict informs them.\n\n### Proposed change\n\n**{}**\n\n{}\n\n\
+             ### Diff ({} added, {} removed, base `{}`)\n\n```diff\n",
+            r.title, r.body, r.added, r.removed, r.base_ref
+        ));
+        let mut diff = r.diff.clone();
+        if diff.len() > DIFF_CHARS {
+            diff.truncate(floor_char(&diff, DIFF_CHARS));
+            diff.push_str("\n[diff cut here; run `git diff` in the worktree for the rest]");
+            trimmed = true;
+        }
+        out.push_str(&diff);
+        out.push_str("\n```\n\n");
     }
 
     // 3. Policy: what is refused, and why, so a refusal reads as expected.
@@ -267,6 +295,7 @@ mod tests {
             item: None,
             plan_body: None,
             ready: &[],
+            review: None,
         };
         let (text, trimmed) = assemble(&store, &Policy::shipped(), &facts);
         assert!(!trimmed);
@@ -314,6 +343,7 @@ mod tests {
             item: None,
             plan_body: None,
             ready: &[],
+            review: None,
         };
         let (text, trimmed) = assemble(&store, &Policy::default(), &facts);
         assert!(trimmed);

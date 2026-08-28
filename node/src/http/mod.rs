@@ -285,6 +285,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     if mesh.is_none() {
         tracing::info!("no hub configured; this node is standalone (tracon enroll to join a mesh)");
     }
+    manager.set_adapter(adapter.clone());
     let state = AppState {
         manager,
         cfg: cfg.clone(),

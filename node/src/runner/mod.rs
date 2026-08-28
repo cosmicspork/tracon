@@ -122,7 +122,21 @@ pub mod local {
                 .argv
                 .split_first()
                 .ok_or_else(|| RunnerError::Other("empty argv".into()))?;
-            Ok(Command::new(bin).args(args).envs(cmd.env).output().await?)
+            // No container: a workdir names a mount target, so run in that
+            // mount's source instead (the worktree itself, for checks).
+            let dir = cmd.workdir.as_deref().and_then(|w| {
+                cmd.mounts
+                    .iter()
+                    .find(|m| m.target == w)
+                    .map(|m| m.source.clone())
+                    .or_else(|| std::path::Path::new(w).is_dir().then(|| w.to_string()))
+            });
+            let mut c = Command::new(bin);
+            c.args(args).envs(cmd.env);
+            if let Some(d) = dir {
+                c.current_dir(d);
+            }
+            Ok(c.output().await?)
         }
 
         async fn kill(&self, _name: &str) -> Result<(), RunnerError> {

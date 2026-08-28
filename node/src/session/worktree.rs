@@ -128,6 +128,39 @@ pub async fn create(
     })
 }
 
+/// A worktree at a specific commit, for a review session: the reviewed
+/// commit is already in the repository (the implementing worktree shares
+/// its object store), so nothing is fetched.
+pub async fn create_at(
+    repo: &Path,
+    root: &Path,
+    branch: &str,
+    slug: &str,
+    sha: &str,
+) -> Result<Worktree, WorktreeError> {
+    if !repo.exists() {
+        return Err(WorktreeError::NoRepo(repo.to_path_buf()));
+    }
+    if !repo.join(".git").exists() {
+        return Err(WorktreeError::NotGit(repo.to_path_buf()));
+    }
+    std::fs::create_dir_all(root)?;
+    let path = worktree_path(root, repo, slug);
+    let path_str = path.to_string_lossy().to_string();
+    git(
+        repo,
+        "worktree add",
+        &["worktree", "add", &path_str, "-b", branch, sha],
+    )
+    .await?;
+    Ok(Worktree {
+        path,
+        branch: branch.to_string(),
+        base: sha.to_string(),
+        main_checkout_dirty: false,
+    })
+}
+
 /// Remove a worktree. Only called when a session never produced commits; a
 /// worktree with work in it outlives the session that made it.
 pub async fn remove(repo: &Path, path: &Path) -> Result<(), WorktreeError> {

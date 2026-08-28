@@ -66,6 +66,37 @@ pub struct CallContext {
 }
 
 impl Tools {
+    /// The tools a review session gets: what it needs to read, and its
+    /// verdict. Nothing that writes, publishes, or reaches a forge.
+    pub const REVIEW_TOOLS: &'static [&'static str] = &[
+        memory::RECALL,
+        docs::DOC_READ,
+        docs::DOC_SEARCH,
+        review::VERDICT,
+    ];
+
+    /// Tool definitions for a channel, narrowed by phase: a review session
+    /// sees only [`Self::REVIEW_TOOLS`].
+    pub fn list_for(
+        &self,
+        channel: &str,
+        node_id: &str,
+        phase: crate::session::Phase,
+    ) -> Vec<Value> {
+        let all = self.list(channel, node_id);
+        match phase {
+            crate::session::Phase::Review => all
+                .into_iter()
+                .filter(|t| {
+                    t["name"]
+                        .as_str()
+                        .is_some_and(|n| Self::REVIEW_TOOLS.contains(&n))
+                })
+                .collect(),
+            _ => all,
+        }
+    }
+
     /// Tool definitions for a channel. A channel with no credential bound to it
     /// is offered no tools rather than tools that will fail.
     pub fn list(&self, channel: &str, node_id: &str) -> Vec<Value> {
@@ -100,6 +131,12 @@ impl Tools {
         // A plan session's own plan document is the phase's artifact: writing
         // that one slug is what the session exists to do, so it is not asked.
         let plan_write = name == docs::DOC_WRITE && self.is_plan_artifact(ctx, args);
+        if self.is_review_session(ctx) && !Self::REVIEW_TOOLS.contains(&name) {
+            return Err(format!(
+                "{name} is not offered to a review session; give a verdict with {}",
+                review::VERDICT
+            ));
+        }
         if !plan_write {
             self.gate(ctx, name, args).await?;
         }
@@ -113,7 +150,7 @@ impl Tools {
             jira::ISSUE | jira::ISSUE_COMMENT => {
                 jira::call(&self.broker, &self.http, ctx, name, args).await
             }
-            review::SUBMIT | review::STATUS => {
+            review::SUBMIT | review::STATUS | review::VERDICT => {
                 let access = self
                     .session
                     .get()
@@ -143,6 +180,13 @@ impl Tools {
             }
             other => Err(format!("no tool named {other}")),
         }
+    }
+
+    fn is_review_session(&self, ctx: &CallContext) -> bool {
+        self.session
+            .get()
+            .and_then(|a| a.store.get_session(&ctx.session_id).ok().flatten())
+            .is_some_and(|s| s.phase == "review")
     }
 
     fn is_plan_artifact(&self, ctx: &CallContext, args: &Value) -> bool {
