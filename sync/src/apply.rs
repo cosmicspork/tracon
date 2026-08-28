@@ -784,4 +784,60 @@ mod tests {
             .unwrap();
         assert_eq!(state, "open");
     }
+
+    #[test]
+    fn work_items_replicate_and_a_later_close_wins() {
+        let mut a = db();
+        let mut b = db();
+        let row = json!({"channel": "personal", "project_id": "p", "title": "Ship it", "body": "", "state": "open", "priority": 2, "deps_json": "[\"other\"]", "created_ms": 1, "updated_ms": 1});
+        let open = write_change(
+            &mut a,
+            "A",
+            "personal",
+            "work_item",
+            ChangeOp::Upsert,
+            "w1",
+            row.clone(),
+            1000,
+        )
+        .unwrap();
+        let mut closed_row = row.clone();
+        closed_row["state"] = json!("closed");
+        closed_row["closed_by_session"] = json!("s9");
+        closed_row["updated_ms"] = json!(2);
+        let close = write_change(
+            &mut b,
+            "B",
+            "personal",
+            "work_item",
+            ChangeOp::Upsert,
+            "w1",
+            closed_row,
+            3000,
+        )
+        .unwrap();
+        // B learns the open row after it already closed the item: the older
+        // upsert loses, the close stands.
+        assert_eq!(
+            apply_changes(&mut b, "A", "personal", &[open], 4000).unwrap(),
+            vec![Applied::Lost]
+        );
+        assert_eq!(
+            apply_changes(&mut a, "B", "personal", &[close], 4000).unwrap(),
+            vec![Applied::Stored]
+        );
+        for c in [&a, &b] {
+            let (state, deps, by): (String, String, String) = c
+                .query_row(
+                    "SELECT state, deps_json, closed_by_session FROM work_item WHERE id = 'w1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (state.as_str(), deps.as_str(), by.as_str()),
+                ("closed", "[\"other\"]", "s9")
+            );
+        }
+    }
 }

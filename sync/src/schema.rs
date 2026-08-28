@@ -4,7 +4,8 @@
 use rusqlite::Connection;
 
 /// Ordered, append-only. Each step runs once per database.
-const STEPS: &[&str] = &[r#"
+const STEPS: &[&str] = &[
+    r#"
     CREATE TABLE IF NOT EXISTS hlc (
         id       INTEGER PRIMARY KEY CHECK (id = 1),
         last_ms  INTEGER NOT NULL,
@@ -110,7 +111,35 @@ const STEPS: &[&str] = &[r#"
         INSERT INTO memory_fts(memory_fts, rowid, body) VALUES ('delete', old.rowid, old.body);
         INSERT INTO memory_fts(rowid, body) VALUES (new.rowid, new.body);
     END;
-    "#];
+    "#,
+    // Step 2 (Phase 5): the work ledger. Readiness is derived from deps and
+    // state at query time, never stored, so a replica needs nothing beyond
+    // the rows to agree on the ready list.
+    r#"
+    CREATE TABLE IF NOT EXISTS work_item (
+        id                    TEXT PRIMARY KEY,
+        channel               TEXT NOT NULL,
+        project_id            TEXT,
+        title                 TEXT NOT NULL DEFAULT '',
+        body                  TEXT NOT NULL DEFAULT '',
+        state                 TEXT NOT NULL DEFAULT 'open',
+        priority              INTEGER NOT NULL DEFAULT 0,
+        deps_json             TEXT NOT NULL DEFAULT '[]',
+        discovered_from       TEXT,
+        discovered_by_session TEXT,
+        phase_plan_slug       TEXT,
+        closed_by_session     TEXT,
+        site                  TEXT NOT NULL,
+        site_seq              INTEGER NOT NULL,
+        hlc_ms                INTEGER NOT NULL,
+        hlc_ctr               INTEGER NOT NULL DEFAULT 0,
+        deleted               INTEGER NOT NULL DEFAULT 0,
+        created_ms            INTEGER NOT NULL,
+        updated_ms            INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS work_item_channel ON work_item(channel, state);
+    "#,
+];
 
 /// Install or upgrade the replicated schema. Safe to call on every open.
 pub fn install(conn: &Connection) -> rusqlite::Result<()> {
