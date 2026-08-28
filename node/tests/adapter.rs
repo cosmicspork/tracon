@@ -15,7 +15,7 @@ impl Runner for FakeRunner {
     async fn spawn(
         &self,
         mut cmd: RunnerCommand,
-    ) -> Result<tokio::process::Child, tracon::runner::RunnerError> {
+    ) -> Result<tracon::runner::Spawned, tracon::runner::RunnerError> {
         // Cargo builds this bin for integration tests and hands us its path.
         cmd.argv = vec![env!("CARGO_BIN_EXE_fake_agent").to_string()];
         LocalRunner.spawn(cmd).await

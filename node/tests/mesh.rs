@@ -412,6 +412,7 @@ async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
         id.node_id(),
         tools,
         Default::default(),
+        Arc::new(tracon::runner::local::LocalBackend),
     );
     let spec = NewSession {
         channel: "work".into(),

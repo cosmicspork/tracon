@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use crate::{
     adapter::{HarnessAdapter, LaunchSpec},
     config::Config,
-    runner::{podman::PodmanRunner, podman::RunSpec, Runner},
+    runner::Runner,
     session::{
         state::{event_kind as ek, EndReason, SessionState},
         supervisor::{Command, Supervisor},
@@ -90,6 +90,8 @@ pub struct Manager {
     /// The hub client, once one exists: commands for sessions other nodes own
     /// are forwarded through it.
     mesh: Arc<std::sync::OnceLock<Arc<crate::mesh::client::MeshClient>>>,
+    /// The boundary every harness runs behind.
+    backend: Arc<dyn crate::boundary::Backend>,
 }
 
 impl Manager {
@@ -100,10 +102,12 @@ impl Manager {
         node_id: String,
         tools: Arc<crate::mcp::Tools>,
         policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
+        backend: Arc<dyn crate::boundary::Backend>,
     ) -> Self {
         Self {
             tools,
             policy,
+            backend,
             store,
             bus,
             cfg,
@@ -112,6 +116,10 @@ impl Manager {
             tokens: Arc::new(Mutex::new(HashMap::new())),
             mesh: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    pub fn backend(&self) -> &Arc<dyn crate::boundary::Backend> {
+        &self.backend
     }
 
     pub fn set_mesh(&self, mesh: Arc<crate::mesh::client::MeshClient>) {
@@ -390,11 +398,8 @@ impl Manager {
         });
 
         let scratch = materialize::scratch_for(id, &wt.path, &repo)?;
-        let selinux = crate::boundary::selinux_enabled().await;
-        let mut run_spec = RunSpec::from_config(&self.cfg, selinux);
-        run_spec.extra_mounts = scratch.mounts;
         let container = format!("tracon-h-{slug}");
-        let runner: Arc<dyn Runner> = Arc::new(PodmanRunner::new(run_spec));
+        let runner: Arc<dyn Runner> = self.backend.runner(scratch.mounts);
 
         // Record the container name before it exists: it is deterministic, and a
         // launch that fails after the container is created would otherwise leave
@@ -420,7 +425,8 @@ impl Manager {
                 "name": "tracon",
                 "url": format!(
                     "http://{}:{}/mcp/{id}",
-                    self.cfg.boundary.gateway_container, self.cfg.gateway.forward_port
+                    self.backend.harness_host(),
+                    self.cfg.gateway.forward_port
                 ),
                 "headers": [{ "name": "Authorization", "value": format!("Bearer {token}") }],
             })]
@@ -622,7 +628,11 @@ impl Manager {
 /// credential store open and the model probe fails underneath it.
 ///
 /// Only this node's sessions: a peer's mirrored rows are its to close.
-pub async fn reconcile_after_restart(store: &Store, self_node_id: &str) -> Vec<String> {
+pub async fn reconcile_after_restart(
+    store: &Store,
+    self_node_id: &str,
+    backend: &dyn crate::boundary::Backend,
+) -> Vec<String> {
     let mut cleaned = Vec::new();
     let Ok(sessions) = store.list_sessions(None) else {
         return cleaned;
@@ -650,10 +660,7 @@ pub async fn reconcile_after_restart(store: &Store, self_node_id: &str) -> Vec<S
             }
         }
         if let Some(container) = &s.container_name {
-            let _ = tokio::process::Command::new("podman")
-                .args(["rm", "-f", "-i", container])
-                .output()
-                .await;
+            backend.reconcile(std::slice::from_ref(container)).await;
         }
         let _ = store.update_session(
             &s.id,

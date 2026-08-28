@@ -1,13 +1,23 @@
 //! Establishing and verifying the harness boundary. A node that cannot prove
 //! the boundary refuses to run harnesses; there is no advisory mode.
+//!
+//! The boundary has more than one implementation — rootless Podman on a
+//! laptop, harness pods behind a NetworkPolicy on a cluster — and every one of
+//! them answers the same five checks (`checks::CheckId`) and hands out the
+//! same `Runner`. `Backend` is that seam; `backend_for` picks one from
+//! `[runtime] kind`.
 
 pub mod checks;
-pub mod setup;
+pub mod podman;
 
-use serde::Serialize;
+use std::sync::Arc;
 
-pub use checks::{check_all, CheckResult};
-pub use setup::setup;
+use async_trait::async_trait;
+
+pub use checks::{BoundaryReport, CheckId, CheckResult};
+
+use crate::config::{Config, RuntimeKind};
+use crate::runner::{Mount, Runner};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BoundaryError {
@@ -17,49 +27,33 @@ pub enum BoundaryError {
     Io(#[from] std::io::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Other(String),
 }
 
-/// The outcome of the startup verification.
-#[derive(Debug, Clone, Serialize)]
-pub struct BoundaryReport {
-    pub checks: Vec<CheckResult>,
+/// One way of putting a harness behind a boundary the node can verify.
+#[async_trait]
+pub trait Backend: Send + Sync {
+    /// `podman` or `kubernetes`; shown in logs and `/api/nodes`.
+    fn kind(&self) -> &'static str;
+    /// `tracon setup`: make what the boundary needs exist. Idempotent.
+    async fn setup(&self, cfg: &Config, rebuild: bool) -> Result<(), BoundaryError>;
+    /// The startup verification, against the same specification a session
+    /// runs. `deep` adds the active egress probe from inside the boundary.
+    async fn check_all(&self, cfg: &Config, deep: bool) -> BoundaryReport;
+    /// A runner carrying these mounts in addition to the boundary's own.
+    fn runner(&self, extra_mounts: Vec<Mount>) -> Arc<dyn Runner>;
+    /// The name by which a harness reaches the node (the MCP endpoint and the
+    /// deep probe's ping).
+    fn harness_host(&self) -> String;
+    /// Remove harnesses left over from a previous run, by name.
+    async fn reconcile(&self, names: &[String]);
 }
 
-impl BoundaryReport {
-    pub fn passed(&self) -> bool {
-        self.checks.iter().all(|c| c.ok)
+/// The backend `[runtime] kind` selects. Detection that needs the host (the
+/// SELinux probe) happens here, once, rather than per session.
+pub async fn backend_for(cfg: &Config) -> Arc<dyn Backend> {
+    match cfg.runtime.kind {
+        RuntimeKind::Podman => Arc::new(podman::PodmanBackend::detect(cfg).await),
     }
-
-    pub fn first_failure(&self) -> Option<&CheckResult> {
-        self.checks.iter().find(|c| !c.ok)
-    }
-}
-
-/// Run `podman` with args and return stdout, or the stderr as an error.
-pub(crate) async fn podman(args: &[&str]) -> Result<String, BoundaryError> {
-    let out = tokio::process::Command::new("podman")
-        .args(args)
-        .output()
-        .await?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        Err(BoundaryError::Podman(
-            String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        ))
-    }
-}
-
-pub(crate) async fn podman_json(args: &[&str]) -> Result<serde_json::Value, BoundaryError> {
-    let text = podman(args).await?;
-    Ok(serde_json::from_str(&text)?)
-}
-
-/// Whether the container host enforces SELinux (Podman needs `label=disable`
-/// for bind mounts when it does).
-pub async fn selinux_enabled() -> bool {
-    podman(&["info", "--format", "{{.Host.Security.SELinuxEnabled}}"])
-        .await
-        .map(|s| s.trim() == "true")
-        .unwrap_or(false)
 }

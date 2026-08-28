@@ -145,8 +145,10 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         session: Default::default(),
     });
 
-    let (node_id, identity) = init_node(&store, &cfg, adapter.as_ref()).await?;
-    let cleaned = crate::session::reconcile_after_restart(&store, &node_id).await;
+    let backend = boundary::backend_for(&cfg).await;
+    tracing::info!(runtime = backend.kind(), "boundary backend");
+    let (node_id, identity) = init_node(&store, &cfg, adapter.as_ref(), backend.as_ref()).await?;
+    let cleaned = crate::session::reconcile_after_restart(&store, &node_id, backend.as_ref()).await;
     if !cleaned.is_empty() {
         tracing::info!(
             sessions = cleaned.len(),
@@ -184,6 +186,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         node_id.clone(),
         tools.clone(),
         policy.clone(),
+        backend.clone(),
     );
     let _ = tools.session.set(crate::mcp::SessionAccess {
         store: store.clone(),
@@ -313,6 +316,7 @@ async fn init_node(
     store: &Arc<Store>,
     cfg: &Arc<Config>,
     adapter: &dyn HarnessAdapter,
+    backend: &dyn boundary::Backend,
 ) -> Result<(String, proto::keys::Identity)> {
     let (identity, fresh) = crate::mesh::identity::load_or_generate().context("node identity")?;
     let id = identity.node_id();
@@ -326,7 +330,7 @@ async fn init_node(
         }
         _ => {}
     }
-    let report = boundary::check_all(cfg, false).await;
+    let report = backend.check_all(cfg, false).await;
     let failed = report.first_failure().cloned();
     let ready = failed.is_none();
     if let Some(f) = &failed {
@@ -342,19 +346,17 @@ async fn init_node(
         );
     }
     let (found, models) = if ready && has_credentials {
-        let selinux = boundary::selinux_enabled().await;
-        let mut spec = crate::runner::podman::RunSpec::from_config(cfg, selinux);
         // The probe opens a real session, so it needs the credential store the
         // harness reads; without it `session/new` fails and the model list is
         // silently empty.
-        spec.extra_mounts = crate::session::materialize::state_mounts().unwrap_or_default();
-        let runner = crate::runner::podman::PodmanRunner::new(spec);
+        let runner =
+            backend.runner(crate::session::materialize::state_mounts().unwrap_or_default());
         // A probe that cannot read the version is not a pass: record "unknown",
         // which does not equal the pin, so new sessions are blocked with the
         // version pair shown rather than run against an unverified harness.
         let found = Some(
             adapter
-                .version(&runner)
+                .version(runner.as_ref())
                 .await
                 .map(|v| v.found)
                 .unwrap_or_else(|e| {
@@ -362,7 +364,10 @@ async fn init_node(
                     "unknown".into()
                 }),
         );
-        let models = adapter.probe_models(&runner).await.unwrap_or_default();
+        let models = adapter
+            .probe_models(runner.as_ref())
+            .await
+            .unwrap_or_default();
         (found, models)
     } else {
         (None, Vec::new())

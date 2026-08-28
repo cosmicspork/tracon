@@ -73,6 +73,7 @@ impl Harness {
             "n1".into(),
             tools.clone(),
             Default::default(),
+            Arc::new(tracon::runner::local::LocalBackend),
         );
         let app = tracon::http::router(AppState {
             manager,
@@ -345,7 +346,7 @@ impl Runner for NoRunner {
     async fn spawn(
         &self,
         _cmd: tracon::runner::RunnerCommand,
-    ) -> Result<tokio::process::Child, tracon::runner::RunnerError> {
+    ) -> Result<tracon::runner::Spawned, tracon::runner::RunnerError> {
         unreachable!("the fake adapter never spawns")
     }
     async fn run_capture(
@@ -606,6 +607,7 @@ async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
         "n1".into(),
         tools.clone(),
         Default::default(),
+        Arc::new(tracon::runner::local::LocalBackend),
     );
     let app = tracon::http::harness_router(AppState {
         manager: manager.clone(),

@@ -5,9 +5,9 @@
 use std::process::Stdio;
 
 use async_trait::async_trait;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 
-use super::{Mount, Runner, RunnerCommand, RunnerError};
+use super::{Mount, Runner, RunnerCommand, RunnerError, Spawned};
 use crate::config::Config;
 
 /// Everything that puts a harness process inside the boundary.
@@ -121,7 +121,7 @@ impl PodmanRunner {
 
 #[async_trait]
 impl Runner for PodmanRunner {
-    async fn spawn(&self, cmd: RunnerCommand) -> Result<Child, RunnerError> {
+    async fn spawn(&self, cmd: RunnerCommand) -> Result<Spawned, RunnerError> {
         let name = if cmd.name.is_empty() {
             "tracon-h".to_string()
         } else {
@@ -129,14 +129,14 @@ impl Runner for PodmanRunner {
         };
         let args = self.spec.podman_args(&name, &cmd, false);
         tracing::debug!(?args, "podman run");
-        Command::new("podman")
+        let child = Command::new("podman")
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
-            .spawn()
-            .map_err(Into::into)
+            .spawn()?;
+        Spawned::from_child(child)
     }
 
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {

@@ -15,6 +15,23 @@ pub struct Config {
     pub consulta: Consulta,
     pub publish: Publish,
     pub mesh: Mesh,
+    pub runtime: Runtime,
+}
+
+/// Which boundary this node establishes. `podman` is a laptop or Linux host
+/// with rootless Podman; `kubernetes` is a node running as a pod that owns
+/// harness pods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeKind {
+    #[default]
+    Podman,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Runtime {
+    pub kind: RuntimeKind,
 }
 
 /// The hub this node dials. Written by `tracon enroll`; absent until then,
@@ -160,6 +177,7 @@ impl Default for Config {
         Self {
             node_name: hostname(),
             mesh: Mesh::default(),
+            runtime: Runtime::default(),
             harness: Harness {
                 id: "omp".into(),
                 version: "18.0.4".into(),
