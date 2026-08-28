@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.1](https://github.com/cosmicspork/tracon/compare/v0.2.0...v0.2.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* **deploy:** grant get on pods/attach — the websocket attach is a GET ([a0f0de3](https://github.com/cosmicspork/tracon/commit/a0f0de35ce713472fc57d631983da9fc6ca2ddd6))
+* **node:** pin the gated probe pod by hostname label, not nodeName ([54ca9c0](https://github.com/cosmicspork/tracon/commit/54ca9c05f17c330491b3238884ff683cd8f0d6f4))
+* **node:** pin the gated probe pod by hostname label, not nodeName ([ae5c08d](https://github.com/cosmicspork/tracon/commit/ae5c08ded32d2d9b807c0882ad18f9cbde1479a9))
+* **node:** pin the gated probe pod by hostname label, not nodeName ([8fb31db](https://github.com/cosmicspork/tracon/commit/8fb31db2dd7521c035efbb0a259aded886910f17))
+
 ## [0.2.0](https://github.com/cosmicspork/tracon/compare/v0.1.0...v0.2.0) (2026-08-28)
 
 
