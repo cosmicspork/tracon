@@ -41,6 +41,31 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # The desktop wrapper is its own workspace and needs webkit and gtk headers,
+  # so it is built here rather than by the `node` job — which must keep working
+  # on a machine that has neither.
+  wrapper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - run: rustup component add clippy rustfmt
+      # The SPA is what the window loads; tauri-build wants it present.
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile && bun run build
+        working-directory: spa
+      - run: cargo fmt --check
+        working-directory: wrapper
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: wrapper
+      - run: cargo test
+        working-directory: wrapper
+      - run: cargo build --release
+        working-directory: wrapper
+
   # A node runs on hosts whose glibc is not ours to control, so the Linux
   # artefact has to be static. Built on every change rather than at release, so
   # a dependency that cannot cross-compile is caught by the PR that adds it.
