@@ -190,6 +190,17 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Every session that ever held an item, oldest first.
+    pub fn sessions_of_work_item(&self, work_item_id: &str) -> Result<Vec<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT * FROM session WHERE work_item_id=?1 ORDER BY created_ms")?;
+        let rows = stmt
+            .query_map([work_item_id], SessionRow::from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn list_sessions(&self, state: Option<&str>) -> Result<Vec<SessionRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(match state {
@@ -227,11 +238,12 @@ impl Store {
     /// Appends an event and returns its assigned `seq` (also the SSE id).
     pub fn append_event(&self, e: &NewEvent) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
-        // The owning node is the session's; derived here so no call site has
-        // to carry it.
+        // The owning node and work item are the session's; derived here so
+        // no call site has to carry them, and per-item metrics are a group-by.
         conn.execute(
             "INSERT INTO event (session_id, work_item_id, kind, ref_id, payload, at_ms, mono_ms, node_id)
-             VALUES (?1,?2,?3,?4,?5,?6,?7, (SELECT node_id FROM session WHERE id=?1))",
+             VALUES (?1, COALESCE(?2, (SELECT work_item_id FROM session WHERE id=?1)),
+                     ?3,?4,?5,?6,?7, (SELECT node_id FROM session WHERE id=?1))",
             rusqlite::params![
                 e.session_id,
                 e.work_item_id,

@@ -36,6 +36,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/promotions/batch", post(api::batch_promotions))
         .route("/api/promotions/{id}", get(api::get_promotion))
         .route("/api/promotions/{id}/verdict", post(api::decide_promotion))
+        .route("/api/work", get(api::list_work).post(api::add_work))
+        .route("/api/work/ready", get(api::ready_work))
+        .route(
+            "/api/work/{id}",
+            get(api::get_work)
+                .put(api::put_work)
+                .delete(api::delete_work),
+        )
         .route("/api/docs", get(api::list_docs))
         .route(
             "/api/docs/{channel}/{slug}",

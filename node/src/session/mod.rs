@@ -711,6 +711,24 @@ impl Manager {
         }
     }
 
+    /// The item a session holds was closed: record it and end the session
+    /// once its turn is over. A session not live here (ended, or another
+    /// node's) is left alone; the close itself has already replicated.
+    pub async fn item_closed(&self, id: &str, summary: &str) {
+        self.record(NewEvent {
+            session_id: id.to_string(),
+            work_item_id: None,
+            kind: ek::WORK_CLOSED.into(),
+            ref_id: None,
+            payload: json!({ "summary": summary }),
+            at_ms: now_ms(),
+            mono_ms: 0,
+        });
+        let _ = self
+            .send(id, Command::EndAfterTurn(EndReason::ItemClose))
+            .await;
+    }
+
     pub async fn kill(&self, id: &str) -> Result<(), SessionError> {
         match self.send(id, Command::Kill).await {
             Err(SessionError::Remote(node, _)) => self

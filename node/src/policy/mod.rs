@@ -216,7 +216,7 @@ mod tests {
     fn the_shipped_bundle_parses_and_has_rules() {
         let p = policy();
         assert!(!p.is_empty());
-        assert_eq!(policy().version, 3);
+        assert_eq!(policy().version, 4);
     }
 
     #[test]

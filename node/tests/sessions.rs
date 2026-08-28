@@ -592,6 +592,53 @@ async fn killing_a_session_closes_it_and_expires_open_requests() {
 }
 
 #[tokio::test]
+async fn closing_the_work_item_ends_the_session_after_its_turn() {
+    // Idle: the end is immediate.
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    rig.commands
+        .send(Command::EndAfterTurn(
+            tracon::session::state::EndReason::ItemClose,
+        ))
+        .await
+        .unwrap();
+    assert!(rig.await_state("closed").await);
+    let s = rig.store.get_session(&rig.session_id).unwrap().unwrap();
+    assert_eq!(s.end_reason.as_deref(), Some("item_close"));
+
+    // Mid-turn: the turn finishes first, then the session ends.
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    let (ack, done) = oneshot::channel();
+    rig.commands
+        .send(Command::Prompt {
+            text: "close it".into(),
+            ack,
+        })
+        .await
+        .unwrap();
+    done.await.unwrap().unwrap();
+    rig.commands
+        .send(Command::EndAfterTurn(
+            tracon::session::state::EndReason::ItemClose,
+        ))
+        .await
+        .unwrap();
+    assert!(rig.await_state("closed").await);
+    let s = rig.store.get_session(&rig.session_id).unwrap().unwrap();
+    assert_eq!(s.end_reason.as_deref(), Some("item_close"));
+    assert_eq!(s.turn_active, 0);
+    let kinds: Vec<String> = rig
+        .store
+        .events_after(&rig.session_id, 0, 500)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    let turn = kinds.iter().position(|k| k == "turn_end").unwrap();
+    let closed = kinds.iter().rposition(|k| k == "state").unwrap();
+    assert!(turn < closed, "{kinds:?}");
+}
+
+#[tokio::test]
 async fn streamed_chunks_are_coalesced_into_one_logged_message() {
     let rig = Rig::start(10_000, Duration::from_secs(60)).await;
     for part in ["Read", "ing the", " file"] {

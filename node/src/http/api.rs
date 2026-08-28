@@ -695,6 +695,172 @@ pub async fn delete_doc(
     Ok(Json(json!({ "ok": true })))
 }
 
+// ---- work ledger ----
+
+#[derive(Deserialize, Default)]
+pub struct WorkQuery {
+    pub channel: Option<String>,
+    pub project_id: Option<String>,
+    /// `ready`, `blocked`, `open` (ready + blocked), or `closed`; default all.
+    pub state: Option<String>,
+}
+
+/// `GET /api/work?channel=&project_id=&state=`: the ledger with derived
+/// readiness, in the deterministic order every node agrees on.
+pub async fn list_work(
+    State(s): State<AppState>,
+    Query(q): Query<WorkQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    use tracon_sync::work::Readiness;
+    let channel = q.channel.clone().ok_or(ApiError(
+        StatusCode::BAD_REQUEST,
+        "channel is required".into(),
+    ))?;
+    let items = s.store().work_status(&channel, q.project_id.as_deref())?;
+    let items: Vec<_> = items
+        .into_iter()
+        .filter(|v| match q.state.as_deref() {
+            Some("ready") => v.readiness == Readiness::Ready && v.session_id.is_none(),
+            Some("blocked") => matches!(v.readiness, Readiness::Blocked { .. }),
+            Some("open") => v.readiness != Readiness::Closed,
+            Some("closed") => v.readiness == Readiness::Closed,
+            _ => true,
+        })
+        .collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+/// `GET /api/work/ready?channel=&project_id=`: what a session may pick.
+pub async fn ready_work(
+    State(s): State<AppState>,
+    Query(q): Query<WorkQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let channel = q.channel.clone().ok_or(ApiError(
+        StatusCode::BAD_REQUEST,
+        "channel is required".into(),
+    ))?;
+    let items = s.store().work_ready(&channel, q.project_id.as_deref())?;
+    Ok(Json(json!({ "items": items })))
+}
+
+#[derive(Deserialize)]
+pub struct NewWorkBody {
+    pub channel: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub deps: Vec<String>,
+    #[serde(default)]
+    pub priority: i64,
+    #[serde(default)]
+    pub discovered_from: Option<String>,
+}
+
+pub async fn add_work(
+    State(s): State<AppState>,
+    Json(w): Json<NewWorkBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let item = crate::corpus::work::create(
+        s.store(),
+        s.manager.bus(),
+        &s.node_id,
+        crate::corpus::work::NewWork {
+            channel: w.channel,
+            project_id: w.project_id,
+            title: w.title,
+            body: w.body,
+            deps: w.deps,
+            priority: w.priority,
+            discovered_from: w.discovered_from,
+            discovered_by_session: None,
+        },
+    )
+    .map_err(work_err)?;
+    Ok(Json(json!(item)))
+}
+
+pub async fn get_work(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let item = s.store().work_get(&id)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        format!("no work item {id}"),
+    ))?;
+    let view = s
+        .store()
+        .work_status(&item.channel, None)?
+        .into_iter()
+        .find(|v| v.item.id == id);
+    let sessions = s.store().sessions_of_work_item(&id)?;
+    let discovered: Vec<_> = s
+        .store()
+        .work_list(&item.channel, None)?
+        .into_iter()
+        .filter(|w| w.discovered_from.as_deref() == Some(id.as_str()))
+        .map(|w| json!({ "id": w.id, "title": w.title, "state": w.state }))
+        .collect();
+    Ok(Json(json!({
+        "item": view,
+        "sessions": sessions,
+        "discovered": discovered,
+    })))
+}
+
+/// `PUT /api/work/{id}` with any of title, body, deps, priority, state.
+pub async fn put_work(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(patch): Json<crate::corpus::work::Patch>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let closing = patch.state.as_deref() == Some(tracon_sync::work::CLOSED);
+    let holder = if closing {
+        s.store().session_holding(&id)?
+    } else {
+        None
+    };
+    let item = crate::corpus::work::update(
+        s.store(),
+        s.manager.bus(),
+        &s.node_id,
+        &id,
+        patch,
+        holder.as_ref().map(|h| h.id.as_str()),
+    )
+    .map_err(work_err)?;
+    if let Some(h) = holder {
+        s.manager.item_closed(&h.id, "closed by the operator").await;
+    }
+    Ok(Json(json!(item)))
+}
+
+pub async fn delete_work(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let removed = crate::corpus::work::remove(s.store(), s.manager.bus(), &s.node_id, &id)
+        .map_err(work_err)?;
+    if !removed {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no work item {id}"),
+        ));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+fn work_err(e: crate::corpus::work::WorkError) -> ApiError {
+    use crate::corpus::work::WorkError::*;
+    match e {
+        Title => ApiError(StatusCode::BAD_REQUEST, e.to_string()),
+        Missing(_) => ApiError(StatusCode::NOT_FOUND, e.to_string()),
+        Store(e) => ApiError::from(e),
+    }
+}
+
 #[derive(Deserialize, Default)]
 pub struct MemoryQuery {
     pub channel: Option<String>,

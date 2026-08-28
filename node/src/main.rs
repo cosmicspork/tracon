@@ -60,6 +60,9 @@ enum Command {
     /// Memories on the running node's corpus (talks to `tracon serve`).
     #[command(subcommand)]
     Memory(MemoryCommand),
+    /// The work ledger: items, dependencies, ready work.
+    #[command(subcommand)]
+    Work(WorkCommand),
 }
 
 #[derive(Subcommand)]
@@ -100,6 +103,54 @@ enum DocCommand {
         #[arg(long, default_value = "personal")]
         channel: String,
     },
+}
+
+#[derive(Subcommand)]
+enum WorkCommand {
+    /// Add an item.
+    Add {
+        title: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, default_value = "")]
+        body: String,
+        /// Items this one waits on, comma-separated ids (prefixes are fine).
+        #[arg(long, value_delimiter = ',')]
+        dep: Vec<String>,
+        #[arg(long, default_value_t = 0)]
+        priority: i64,
+    },
+    /// List the ledger with derived readiness, in the ready order.
+    Ls {
+        #[arg(long, default_value = "personal")]
+        channel: String,
+        #[arg(long)]
+        project: Option<String>,
+        /// ready | blocked | open | closed
+        #[arg(long)]
+        state: Option<String>,
+    },
+    /// Ready work: what a session may pick, in order.
+    Ready {
+        #[arg(long, default_value = "personal")]
+        channel: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Show one item, its sessions, and what was discovered from it.
+    Show { id: String },
+    /// Close an item; a session holding it ends at its next turn end.
+    Close { id: String },
+    /// Add a dependency: `dep <id> --on <id>`.
+    Dep {
+        id: String,
+        #[arg(long)]
+        on: String,
+    },
+    /// Delete an item.
+    Rm { id: String },
 }
 
 #[derive(Subcommand)]
@@ -256,6 +307,7 @@ async fn main() -> Result<()> {
         Command::Credential(cmd) => credential_command(cmd).await,
         Command::Doc(cmd) => doc_command(cmd).await,
         Command::Memory(cmd) => memory_command(cmd).await,
+        Command::Work(cmd) => work_command(cmd).await,
         Command::Policy(PolicyCommand::Push) => {
             let cfg = config::Config::load();
             let hub = cfg
@@ -806,6 +858,167 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
                 if n == 1 { "" } else { "s" },
                 dir.display()
             );
+            Ok(())
+        }
+    }
+}
+
+/// Resolve an id prefix against the channel's ledger.
+async fn work_resolve(channel: &str, prefix: &str) -> Result<String> {
+    use reqwest::Method;
+    if prefix.len() == 64 {
+        return Ok(prefix.to_string());
+    }
+    let v = node_call(
+        Method::GET,
+        &format!("/api/work?channel={channel}"),
+        None,
+        None,
+    )
+    .await?;
+    let hits: Vec<String> = v["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .filter(|id| id.starts_with(prefix))
+        .map(str::to_string)
+        .collect();
+    match hits.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => anyhow::bail!("no work item starts with {prefix} on {channel}"),
+        _ => anyhow::bail!("{prefix} is ambiguous on {channel}"),
+    }
+}
+
+fn work_line(i: &serde_json::Value) -> String {
+    let id = i["id"].as_str().unwrap_or("");
+    let state = match i["readiness"]["state"].as_str().unwrap_or("") {
+        "ready" if i["session_id"].is_string() => "in session".to_string(),
+        "blocked" => {
+            let by: Vec<String> = i["readiness"]["by"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|b| match b["kind"].as_str() {
+                            Some("cycle") => "cycle".to_string(),
+                            _ => b["id"].as_str().unwrap_or("?")[..8].to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            format!("blocked by {}", by.join(","))
+        }
+        other => other.to_string(),
+    };
+    format!(
+        "{}  p{:<2} {:<24} {}",
+        &id[..8.min(id.len())],
+        i["priority"].as_i64().unwrap_or(0),
+        state,
+        i["title"].as_str().unwrap_or("")
+    )
+}
+
+async fn work_command(cmd: WorkCommand) -> Result<()> {
+    use reqwest::Method;
+    use serde_json::json;
+    match cmd {
+        WorkCommand::Add {
+            title,
+            channel,
+            project,
+            body,
+            dep,
+            priority,
+        } => {
+            let mut deps = Vec::new();
+            for d in dep.iter().filter(|d| !d.trim().is_empty()) {
+                deps.push(work_resolve(&channel, d.trim()).await?);
+            }
+            let v = node_call(
+                Method::POST,
+                "/api/work",
+                Some(json!({
+                    "channel": channel, "project_id": project, "title": title, "body": body,
+                    "deps": deps, "priority": priority,
+                })),
+                None,
+            )
+            .await?;
+            println!("{}", v["id"].as_str().unwrap_or(""));
+            Ok(())
+        }
+        WorkCommand::Ls {
+            channel,
+            project,
+            state,
+        } => {
+            let mut q = format!("/api/work?channel={channel}");
+            if let Some(p) = project {
+                q.push_str(&format!("&project_id={p}"));
+            }
+            if let Some(s) = state {
+                q.push_str(&format!("&state={s}"));
+            }
+            let v = node_call(Method::GET, &q, None, None).await?;
+            for i in v["items"].as_array().cloned().unwrap_or_default() {
+                println!("{}", work_line(&i));
+            }
+            Ok(())
+        }
+        WorkCommand::Ready { channel, project } => {
+            let mut q = format!("/api/work/ready?channel={channel}");
+            if let Some(p) = project {
+                q.push_str(&format!("&project_id={p}"));
+            }
+            let v = node_call(Method::GET, &q, None, None).await?;
+            for i in v["items"].as_array().cloned().unwrap_or_default() {
+                println!("{}", work_line(&i));
+            }
+            Ok(())
+        }
+        WorkCommand::Show { id } => {
+            let v = node_call(Method::GET, &format!("/api/work/{id}"), None, None).await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            Ok(())
+        }
+        WorkCommand::Close { id } => {
+            let v = node_call(
+                Method::PUT,
+                &format!("/api/work/{id}"),
+                Some(json!({ "state": "closed" })),
+                None,
+            )
+            .await?;
+            println!("closed {}", v["id"].as_str().unwrap_or(&id));
+            Ok(())
+        }
+        WorkCommand::Dep { id, on } => {
+            let cur = node_call(Method::GET, &format!("/api/work/{id}"), None, None).await?;
+            let mut deps: Vec<String> = cur["item"]["deps"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|d| d.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            deps.push(on);
+            node_call(
+                Method::PUT,
+                &format!("/api/work/{id}"),
+                Some(json!({ "deps": deps })),
+                None,
+            )
+            .await?;
+            println!("ok");
+            Ok(())
+        }
+        WorkCommand::Rm { id } => {
+            node_call(Method::DELETE, &format!("/api/work/{id}"), None, None).await?;
+            println!("removed {id}");
             Ok(())
         }
     }

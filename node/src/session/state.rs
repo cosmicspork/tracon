@@ -84,6 +84,9 @@ pub mod event_kind {
     pub const POLICY_ALLOWED: &str = "policy_allowed";
     pub const POLICY_DENIED: &str = "policy_denied";
     pub const ERROR: &str = "error";
+    /// The session's work item was closed (by the agent or the operator);
+    /// the session ends at the end of the turn.
+    pub const WORK_CLOSED: &str = "work_closed";
 }
 
 #[cfg(test)]

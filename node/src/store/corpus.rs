@@ -6,9 +6,10 @@
 use rusqlite::{params, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tracon_sync::work::{Readiness, WorkItem};
 use tracon_sync::{Applied, Change, ChangeOp};
 
-use super::{now_ms, Result, Store, StoreError};
+use super::{now_ms, Result, SessionRow, Store, StoreError};
 
 /// Kinds a memory can be. Directives are human-authored and always injected.
 pub const KIND_DIRECTIVE: &str = "directive";
@@ -89,6 +90,47 @@ pub struct ProjectRow {
     pub name: String,
     pub remote_url: Option<String>,
     pub created_ms: i64,
+}
+
+/// A ledger item as the interface reads it: the row, its derived readiness,
+/// and the open session holding it, if any.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkView {
+    #[serde(flatten)]
+    pub item: WorkItem,
+    pub readiness: Readiness,
+    pub session_id: Option<String>,
+}
+
+pub fn work_from_row(r: &Row) -> rusqlite::Result<WorkItem> {
+    let deps: String = r.get("deps_json")?;
+    Ok(WorkItem {
+        id: r.get("id")?,
+        channel: r.get("channel")?,
+        project_id: r.get("project_id")?,
+        title: r.get("title")?,
+        body: r.get("body")?,
+        state: r.get("state")?,
+        priority: r.get("priority")?,
+        deps: serde_json::from_str(&deps).unwrap_or_default(),
+        discovered_from: r.get("discovered_from")?,
+        discovered_by_session: r.get("discovered_by_session")?,
+        phase_plan_slug: r.get("phase_plan_slug")?,
+        closed_by_session: r.get("closed_by_session")?,
+        created_ms: r.get("created_ms")?,
+        updated_ms: r.get("updated_ms")?,
+    })
+}
+
+/// The columns the sync layer replicates for a work item.
+pub fn work_change_row(w: &WorkItem) -> Value {
+    json!({
+        "channel": w.channel, "project_id": w.project_id, "title": w.title, "body": w.body,
+        "state": w.state, "priority": w.priority, "deps_json": serde_json::to_string(&w.deps).unwrap_or_else(|_| "[]".into()),
+        "discovered_from": w.discovered_from, "discovered_by_session": w.discovered_by_session,
+        "phase_plan_slug": w.phase_plan_slug, "closed_by_session": w.closed_by_session,
+        "created_ms": w.created_ms, "updated_ms": w.updated_ms,
+    })
 }
 
 /// One recall result, across both indexes.
@@ -214,6 +256,95 @@ impl Store {
             .query_map([], |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?;
         Ok(rows)
+    }
+
+    // ---- work ledger ----
+
+    pub fn work_get(&self, id: &str) -> Result<Option<WorkItem>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM work_item WHERE id = ?1 AND deleted = 0",
+            [id],
+            work_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Every live item on a channel (optionally one project), unordered.
+    pub fn work_list(&self, channel: &str, project_id: Option<&str>) -> Result<Vec<WorkItem>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM work_item WHERE channel = ?1 AND deleted = 0
+               AND (?2 IS NULL OR project_id = ?2)",
+        )?;
+        let rows = stmt
+            .query_map(params![channel, project_id], work_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The ledger as the interface shows it: readiness derived by the sync
+    /// crate's order, and the session holding each item. Readiness is
+    /// computed over the whole channel so cross-project deps count.
+    pub fn work_status(&self, channel: &str, project_id: Option<&str>) -> Result<Vec<WorkView>> {
+        let all = self.work_list(channel, None)?;
+        let holders = self.work_holders(channel)?;
+        Ok(tracon_sync::work::status(&all)
+            .into_iter()
+            .filter(|(i, _)| project_id.is_none_or(|p| i.project_id.as_deref() == Some(p)))
+            .map(|(item, readiness)| {
+                let session_id = holders.get(&item.id).cloned();
+                WorkView {
+                    item,
+                    readiness,
+                    session_id,
+                }
+            })
+            .collect())
+    }
+
+    /// Ready items only, in order, minus those a session already holds.
+    pub fn work_ready(&self, channel: &str, project_id: Option<&str>) -> Result<Vec<WorkView>> {
+        Ok(self
+            .work_status(channel, project_id)?
+            .into_iter()
+            .filter(|v| v.readiness == Readiness::Ready && v.session_id.is_none())
+            .collect())
+    }
+
+    /// Item id → the non-terminal session holding it, on any node.
+    fn work_holders(&self, channel: &str) -> Result<std::collections::HashMap<String, String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT work_item_id, id FROM session
+             WHERE channel = ?1 AND work_item_id IS NOT NULL
+               AND state NOT IN ('closed', 'killed_budget', 'failed')
+             ORDER BY created_ms",
+        )?;
+        let rows = stmt.query_map([channel], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (item, session) = row?;
+            out.entry(item).or_insert(session);
+        }
+        Ok(out)
+    }
+
+    /// The non-terminal session holding an item, if any.
+    pub fn session_holding(&self, work_item_id: &str) -> Result<Option<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM session WHERE work_item_id = ?1
+               AND state NOT IN ('closed', 'killed_budget', 'failed')
+             ORDER BY created_ms LIMIT 1",
+            [work_item_id],
+            SessionRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     // ---- sync plumbing ----
