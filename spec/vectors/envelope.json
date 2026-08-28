@@ -9,7 +9,7 @@
       "recipient_seed_hex": "3333333333333333333333333333333333333333333333333333333333333333"
     }
   ],
-  "contract_version": 1,
+  "contract_version": 2,
   "sealing": [
     {
       "aad_hex": "",

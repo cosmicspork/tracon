@@ -139,9 +139,20 @@ fn main() {
     // same code (the test recomputes them independently from the inputs).
     let s = Identity::from_seed(&seed(0xf1));
     let r = Identity::from_seed(&seed(0xf2));
-    let payload = Payload::Hello {
-        node: json!({"name": "bazzite"}),
-        contract: CONTRACT_VERSION,
+    // Contract 2 pins a record change as the payload: the shape the sync
+    // layer ships, with a hello kept in the ids as the older vectors had.
+    let payload = Payload::Changes {
+        channel: "personal".into(),
+        changes: vec![proto::frame::Change {
+            table: "document".into(),
+            op: proto::frame::ChangeOp::Upsert,
+            id: "doc-1".into(),
+            site: s.node_id(),
+            site_seq: 1,
+            hlc_ms: 1_787_000_000_000,
+            hlc_ctr: 0,
+            row: json!({"slug": "guide-workspace", "title": "Workspace", "body": "hello"}),
+        }],
     };
     let (channel_canon, channel_id, direct_canon, direct_id, prefix) =
         proto::frame::vector_support(&s, &r, "personal", 1_787_000_000_000, &payload);

@@ -12,7 +12,7 @@ vendored, not depended on, so this contract moves on its own cadence.
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `CONTRACT_VERSION` | 1 | Wire version, reported at `GET /v0/info`. Additive; moving it rotates nothing. |
+| `CONTRACT_VERSION` | 2 | Wire version, reported at `GET /v0/info`. Additive; moving it rotates nothing. Every node and the hub move together: a frame or enrollment of another version is refused. |
 | `CONTRACT_MAJOR` | 0 | Cryptographic era, embedded in every label below. Bumps only on a key-rotating break. |
 
 Labels are `tracon/v{MAJOR}/{operation}`.
@@ -81,7 +81,14 @@ a member of. A frame may be at most 4 MiB serialized.
 Payload kinds (JSON, discriminated on `kind`): `hello`, `snapshot`, `session`,
 `event`, `queue`, `reviews`, `node`, `command`, `ack`, `events_request`,
 `events_batch`, `key_handoff` (direct only), `policy_bundle` (direct only),
-`credential_handoff` (direct only; broker rows for the recipient).
+`credential_handoff` (direct only; broker rows for the recipient), `changes`,
+`changes_request` (direct only), `changes_batch` (direct only).
+
+A `changes` payload carries record-level changes from one site:
+`{ table, op: upsert|delete, id, site, site_seq, hlc_ms, hlc_ctr, row }`. `site` must
+equal the sender; `(site, site_seq)` makes a change idempotent; `(hlc_ms, hlc_ctr, site)`
+is the last-writer-wins key; `row` is the whole record for an upsert and null for a
+delete. Version 2 added these three kinds.
 Commands are discriminated on `op`: `create`, `prompt`, `answer`, `kill`, `verdict`.
 
 ## Hub requests (`auth.rs`)

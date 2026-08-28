@@ -159,6 +159,50 @@ pub enum Payload {
     CredentialHandoff {
         credentials: Vec<Value>,
     },
+    /// Record changes on a channel, from one site. Every change's `site` must
+    /// be the frame's sender; `channel` is repeated so the applier can hold it
+    /// against the envelope's.
+    Changes {
+        channel: String,
+        changes: Vec<Change>,
+    },
+    /// Direct only: ask one site for its own changes on a channel after a
+    /// sequence number (the record-level twin of `EventsRequest`).
+    ChangesRequest {
+        channel: String,
+        after_site_seq: i64,
+    },
+    /// Direct only: the answer, in pages.
+    ChangesBatch {
+        channel: String,
+        changes: Vec<Change>,
+        done: bool,
+    },
+}
+
+/// One record-level change, as the sync layer stamps it. `site` is the
+/// writer's node id and `site_seq` its own monotonic write counter, which
+/// together make a change idempotent; `(hlc_ms, hlc_ctr, site)` is the
+/// last-writer-wins key. `row` is the whole record for an upsert and null for
+/// a delete.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Change {
+    pub table: String,
+    pub op: ChangeOp,
+    pub id: String,
+    pub site: String,
+    pub site_seq: i64,
+    pub hlc_ms: i64,
+    pub hlc_ctr: u32,
+    #[serde(default)]
+    pub row: Value,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeOp {
+    Upsert,
+    Delete,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -608,6 +652,35 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v["kind"], "credential_handoff");
+        let v = serde_json::to_value(Payload::Changes {
+            channel: "personal".into(),
+            changes: vec![Change {
+                table: "document".into(),
+                op: ChangeOp::Delete,
+                id: "d1".into(),
+                site: "s".into(),
+                site_seq: 4,
+                hlc_ms: 1,
+                hlc_ctr: 0,
+                row: Value::Null,
+            }],
+        })
+        .unwrap();
+        assert_eq!(v["kind"], "changes");
+        assert_eq!(v["changes"][0]["op"], "delete");
+        let v = serde_json::to_value(Payload::ChangesRequest {
+            channel: "personal".into(),
+            after_site_seq: 0,
+        })
+        .unwrap();
+        assert_eq!(v["kind"], "changes_request");
+        let v = serde_json::to_value(Payload::ChangesBatch {
+            channel: "personal".into(),
+            changes: vec![],
+            done: true,
+        })
+        .unwrap();
+        assert_eq!(v["kind"], "changes_batch");
         let v = serde_json::to_value(Command::Prompt {
             session_id: "s".into(),
             text: "t".into(),
