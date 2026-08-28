@@ -54,7 +54,12 @@ impl From<SessionError> for ApiError {
             // A missing model is a malformed request, not a conflict.
             SessionError::ModelRequired
             | SessionError::BadBudget
-            | SessionError::UnknownChannel(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            | SessionError::UnknownChannel(_)
+            | SessionError::WorkItemRequired
+            | SessionError::NotReady(_)
+            | SessionError::InSession(_)
+            | SessionError::PlanRequired(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            SessionError::Ceiling(_) => StatusCode::TOO_MANY_REQUESTS,
             SessionError::NotFound => StatusCode::NOT_FOUND,
             SessionError::PeerUnreachable(_) => StatusCode::GATEWAY_TIMEOUT,
             SessionError::Remote(..) | SessionError::NoMesh => StatusCode::CONFLICT,

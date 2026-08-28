@@ -41,6 +41,30 @@ pub struct NewSession {
     /// to it, which validates and starts the session.
     #[serde(default)]
     pub node_id: Option<String>,
+    /// Which phase of the item this session is. Plan and execute need an
+    /// item; execute needs the item's plan. Review sessions are spawned by
+    /// the node against a review.
+    #[serde(default)]
+    pub phase: Phase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Plan,
+    #[default]
+    Execute,
+    Review,
+}
+
+impl Phase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Execute => "execute",
+            Self::Review => "review",
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +81,16 @@ pub enum SessionError {
     NotFound,
     #[error("channel {0} is not one this node holds keys for; create or enroll it first")]
     UnknownChannel(String),
+    #[error("a work item is required: pick one from the ready list")]
+    WorkItemRequired,
+    #[error("work item is not ready: {0}")]
+    NotReady(String),
+    #[error("work item is already held by session {0}")]
+    InSession(String),
+    #[error("execute needs a plan: run a plan session for this item first ({0})")]
+    PlanRequired(String),
+    #[error("channel is at its daily ceiling: {0}")]
+    Ceiling(String),
     /// The session belongs to another node: `(node_id, channel)`.
     #[error("session is owned by node {0}")]
     Remote(String, String),
@@ -273,7 +307,12 @@ impl Manager {
                 .publish_untapped(Frame::Session(Box::new(row.clone())));
             return Ok(row);
         }
-        let budget = spec.budget_tokens.unwrap_or(self.cfg.session.budget_tokens);
+        let bindings = self.bindings(&spec.channel);
+        let phase_bindings = &bindings["phases"][spec.phase.as_str()];
+        let budget = spec
+            .budget_tokens
+            .or_else(|| phase_bindings["budget_tokens"].as_i64())
+            .unwrap_or(self.cfg.session.budget_tokens);
         if budget <= 0 {
             return Err(SessionError::BadBudget);
         }
@@ -299,6 +338,64 @@ impl Manager {
             }
         }
 
+        // The ledger decides: a plan or execute session needs a ready item
+        // nobody holds, and execute needs the plan a plan session wrote.
+        if spec.phase != Phase::Review {
+            let item_id = spec
+                .work_item_id
+                .as_deref()
+                .filter(|i| !i.trim().is_empty())
+                .ok_or(SessionError::WorkItemRequired)?;
+            let view = self
+                .store
+                .work_status(&spec.channel, None)?
+                .into_iter()
+                .find(|v| v.item.id == item_id)
+                .ok_or_else(|| {
+                    SessionError::NotReady(format!("no work item {item_id} on {}", spec.channel))
+                })?;
+            match &view.readiness {
+                tracon_sync::work::Readiness::Ready => {}
+                tracon_sync::work::Readiness::Closed => {
+                    return Err(SessionError::NotReady("it is closed".into()))
+                }
+                tracon_sync::work::Readiness::Blocked { by } => {
+                    let by: Vec<String> = by
+                        .iter()
+                        .map(|b| match b {
+                            tracon_sync::work::Blocker::Open { id } => {
+                                format!("open item {}", &id[..8.min(id.len())])
+                            }
+                            tracon_sync::work::Blocker::Unknown { id } => {
+                                format!("item {} not seen here", &id[..8.min(id.len())])
+                            }
+                            tracon_sync::work::Blocker::Cycle => "a dependency cycle".into(),
+                        })
+                        .collect();
+                    return Err(SessionError::NotReady(format!(
+                        "blocked by {}",
+                        by.join(", ")
+                    )));
+                }
+            }
+            if let Some(holder) = view.session_id {
+                return Err(SessionError::InSession(holder));
+            }
+            let requires_plan = bindings["phases"]["execute"]["requires_plan"]
+                .as_bool()
+                .unwrap_or(true);
+            if spec.phase == Phase::Execute && requires_plan {
+                let planned = view
+                    .item
+                    .phase_plan_slug
+                    .as_deref()
+                    .and_then(|slug| self.store.doc_get(&spec.channel, slug).ok().flatten())
+                    .is_some();
+                if !planned {
+                    return Err(SessionError::PlanRequired(item_id.to_string()));
+                }
+            }
+        }
         // Bank identity: the channel and the repository's remote, resolved on
         // this side of the boundary and recorded on the row for memory to key
         // on; never a checkout path.
@@ -335,6 +432,8 @@ impl Manager {
             container_name: None,
             model: spec.model.clone(),
             project_id: Some(project_id),
+            phase: spec.phase.as_str().into(),
+            policy_version: Some(self.policy.read().unwrap().version as i64),
             budget_tokens: budget,
             tokens_used: 0,
             cost_usd: None,
@@ -462,6 +561,19 @@ impl Manager {
                 .and_then(|s| s.project_id.clone())
                 .and_then(|pid| self.store.project_get(&pid).ok().flatten());
             let node = self.store.get_node(&self.node_id)?;
+            let item = spec
+                .work_item_id
+                .as_deref()
+                .and_then(|i| self.store.work_get(i).ok().flatten());
+            let plan_body = item
+                .as_ref()
+                .and_then(|i| i.phase_plan_slug.as_deref())
+                .and_then(|slug| self.store.doc_get(&spec.channel, slug).ok().flatten())
+                .map(|d| d.body);
+            let ready = self
+                .store
+                .work_ready(&spec.channel, project.as_ref().map(|p| p.id.as_str()))
+                .unwrap_or_default();
             let tool_names: Vec<String> = self
                 .tools
                 .list(&spec.channel, &self.node_id)
@@ -483,6 +595,10 @@ impl Manager {
                     project_name: project.as_ref().map(|p| p.name.as_str()),
                     tools: &tool_names,
                     worktree: "/work",
+                    phase: spec.phase.as_str(),
+                    item: item.as_ref(),
+                    plan_body: plan_body.as_deref(),
+                    ready: &ready,
                 },
             )
         };
@@ -575,7 +691,11 @@ impl Manager {
             work_item_id: None,
             kind: ek::SESSION_STARTED.into(),
             ref_id: None,
-            payload: json!({ "model": spec.model, "harness": adapter.id() }),
+            payload: json!({
+                "model": spec.model, "harness": adapter.id(), "phase": spec.phase.as_str(),
+                "work_item_id": spec.work_item_id,
+                "policy_version": self.policy.read().unwrap().version,
+            }),
             at_ms: now_ms(),
             mono_ms: started.elapsed().as_millis() as i64,
         });
@@ -727,6 +847,36 @@ impl Manager {
         let _ = self
             .send(id, Command::EndAfterTurn(EndReason::ItemClose))
             .await;
+    }
+
+    /// Record an event on a session from outside the supervisor.
+    pub fn record_event(&self, session_id: &str, kind: &str, payload: serde_json::Value) {
+        self.record(NewEvent {
+            session_id: session_id.to_string(),
+            work_item_id: None,
+            kind: kind.to_string(),
+            ref_id: None,
+            payload,
+            at_ms: now_ms(),
+            mono_ms: 0,
+        });
+    }
+
+    /// The phase's artifact landed: end the session once its turn is over.
+    pub async fn phase_done(&self, id: &str) {
+        let _ = self
+            .send(id, Command::EndAfterTurn(EndReason::PhaseDone))
+            .await;
+    }
+
+    /// A channel's bindings as JSON (`{}` when unbound or standalone).
+    pub fn bindings(&self, channel: &str) -> serde_json::Value {
+        self.store
+            .channel_get(channel)
+            .ok()
+            .flatten()
+            .and_then(|c| serde_json::from_str(&c.bindings_json).ok())
+            .unwrap_or_else(|| json!({}))
     }
 
     pub async fn kill(&self, id: &str) -> Result<(), SessionError> {

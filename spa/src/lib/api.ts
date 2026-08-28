@@ -96,6 +96,7 @@ export const api = {
     model: string
     budget_tokens?: number
     node_id?: string
+    phase?: 'plan' | 'execute'
   }) => call<Session>('POST', '/api/sessions', spec),
   prompt: (id: string, text: string) => call<void>('POST', `/api/sessions/${id}/prompt`, { text }),
   kill: (id: string) => call<void>('POST', `/api/sessions/${id}/kill`),

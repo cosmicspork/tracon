@@ -243,12 +243,24 @@ async fn a_session_on_b_is_driven_from_a() {
     let (_, mesh) = call(&a.app, "GET", "/api/mesh", None).await;
     assert_eq!(mesh["hub"]["state"], "connected");
 
-    // Start a session on B from A's API.
+    // Start a session on B from A's API. B validates it against its own
+    // ledger, so the item is minted there.
+    let (st, item) = call(
+        &b.app,
+        "POST",
+        "/api/work",
+        Some(json!({"channel": "personal", "title": "Run on B"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{item}");
     let (st, row) = call(
         &a.app,
         "POST",
         "/api/sessions",
-        Some(json!({"channel": "personal", "repo_path": "/r", "model": "m/a", "node_id": bi})),
+        Some(
+            json!({"channel": "personal", "repo_path": "/r", "model": "m/a", "node_id": bi,
+                    "work_item_id": item["id"], "phase": "plan"}),
+        ),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "{row}");
@@ -293,11 +305,21 @@ async fn prompt_answer_and_kill_forward_to_the_owner() {
     let bi = b.id.node_id();
 
     // A running session on B, planted directly so the fake harness is live.
+    let (_, item) = call(
+        &b.app,
+        "POST",
+        "/api/work",
+        Some(json!({"channel": "personal", "title": "Planted"})),
+    )
+    .await;
     let (st, row) = call(
         &b.app,
         "POST",
         "/api/sessions",
-        Some(json!({"channel": "personal", "repo_path": "/nonexistent", "model": "m/a"})),
+        Some(
+            json!({"channel": "personal", "repo_path": "/nonexistent", "model": "m/a",
+                    "work_item_id": item["id"], "phase": "plan"}),
+        ),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED);

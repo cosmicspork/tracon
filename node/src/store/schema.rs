@@ -179,6 +179,12 @@ const MIGRATIONS: &[&str] = &[
     );
     ALTER TABLE session ADD COLUMN project_id TEXT;
     "#,
+    // 6: phases and provenance. A session is one phase of one item; the
+    // policy version it ran under is what provenance answers with.
+    r#"
+    ALTER TABLE session ADD COLUMN phase TEXT NOT NULL DEFAULT 'execute';
+    ALTER TABLE session ADD COLUMN policy_version INTEGER;
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

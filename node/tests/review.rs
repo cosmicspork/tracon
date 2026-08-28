@@ -110,6 +110,8 @@ async fn fixture(name: &str, credentials: &str) -> Fixture {
             container_name: None,
             model: "m".into(),
             project_id: None,
+            phase: "execute".into(),
+            policy_version: None,
             budget_tokens: 1000,
             tokens_used: 0,
             cost_usd: None,

@@ -146,6 +146,11 @@ pub fn close(
     )
 }
 
+/// The document a plan session writes for an item: `plan-<id prefix>`.
+pub fn plan_slug(item_id: &str) -> String {
+    format!("plan-{}", &item_id[..12.min(item_id.len())])
+}
+
 /// Record the plan artifact a plan session wrote for an item.
 pub fn set_plan(
     store: &Store,

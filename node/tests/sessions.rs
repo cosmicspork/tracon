@@ -125,6 +125,86 @@ async fn a_session_without_a_model_is_refused() {
 }
 
 #[tokio::test]
+async fn a_session_needs_a_ready_item_and_execute_needs_its_plan() {
+    let h = Harness::new(1000).await;
+    let bus = Bus::new();
+    let mk = |title: &str, deps: Vec<String>| {
+        tracon::corpus::work::create(
+            &h.store,
+            &bus,
+            "n1",
+            tracon::corpus::work::NewWork {
+                channel: "personal".into(),
+                project_id: None,
+                title: title.into(),
+                body: String::new(),
+                deps,
+                priority: 0,
+                discovered_from: None,
+                discovered_by_session: None,
+            },
+        )
+        .unwrap()
+    };
+    let a = mk("A", vec![]);
+    let b = mk("B", vec![a.id.clone()]);
+    let base = json!({ "channel": "personal", "repo_path": "/tmp/x", "model": "m/a" });
+    let spec = |extra: Value| {
+        let mut v = base.clone();
+        for (k, val) in extra.as_object().unwrap() {
+            v[k] = val.clone();
+        }
+        v
+    };
+    // No item at all.
+    let (st, body) = h.call("POST", "/api/sessions", Some(spec(json!({})))).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("work item is required"));
+    // Blocked.
+    let (st, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(spec(json!({"work_item_id": b.id, "phase": "plan"}))),
+        )
+        .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("blocked by open item"));
+    // Ready, but execute has no plan yet.
+    let (st, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(spec(json!({"work_item_id": a.id, "phase": "execute"}))),
+        )
+        .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("needs a plan"));
+    // Unknown item.
+    let (st, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(spec(json!({"work_item_id": "nope", "phase": "plan"}))),
+        )
+        .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("no work item"));
+}
+
+#[tokio::test]
 async fn a_refused_node_refuses_sessions_and_says_which_check_failed() {
     let h = Harness::new(1000).await;
     h.store
@@ -313,6 +393,8 @@ fn insert_running_session(store: &Arc<Store>, budget: i64) -> String {
             container_name: None,
             model: "m/a".into(),
             project_id: None,
+            phase: "execute".into(),
+            policy_version: None,
             budget_tokens: budget,
             tokens_used: 0,
             cost_usd: None,
@@ -917,21 +999,41 @@ async fn a_session_starts_with_its_orientation_recorded() {
         store: store.clone(),
         manager: manager.clone(),
     });
+    // The item this session plans, and one more so ready work is listed.
+    let item = tracon::corpus::work::create(
+        &store,
+        &Bus::new(),
+        "n1",
+        tracon::corpus::work::NewWork {
+            channel: "personal".into(),
+            project_id: None,
+            title: "Add the ledger".into(),
+            body: "Items, deps, ready-work.".into(),
+            deps: vec![],
+            priority: 0,
+            discovered_from: None,
+            discovered_by_session: None,
+        },
+    )
+    .unwrap();
     let row = manager
         .create(
             tracon::session::NewSession {
                 channel: "personal".into(),
                 repo_path: repo.to_string_lossy().into_owned(),
                 branch: None,
-                work_item_id: None,
+                work_item_id: Some(item.id.clone()),
                 model: "m/a".into(),
                 budget_tokens: Some(1000),
                 node_id: None,
+                phase: tracon::session::Phase::Plan,
             },
-            adapter,
+            adapter.clone(),
         )
         .await
         .unwrap();
+    assert_eq!(row.phase, "plan");
+    assert_eq!(row.policy_version, Some(4));
     // Bank identity from the remote, not the path.
     let canonical = tracon::corpus::project::canonical_remote(&origin_url).unwrap();
     assert_eq!(
@@ -979,10 +1081,64 @@ async fn a_session_starts_with_its_orientation_recorded() {
         "the tools offered are named: {text}"
     );
     assert_eq!(e.payload["trimmed"], false);
+    assert!(text.contains("## Work"), "{text}");
+    assert!(text.contains("**Add the ledger**"), "{text}");
+    assert!(text.contains("plan session"), "{text}");
+    let slug = tracon::corpus::work::plan_slug(&item.id);
+    assert!(text.contains(&slug), "{text}");
     // Never in the worktree: the harness gets it as a mounted system-prompt
     // file (see `materialize`), and the scratch directory is cleaned with the
     // session, so only the repository is asserted here.
     assert!(!repo.join("orientation.md").exists());
+
+    // Writing the plan document is the phase's artifact: not asked, recorded
+    // on the item, and the session ends with `phase_done`.
+    for _ in 0..300 {
+        if store.get_session(&row.id).unwrap().unwrap().state == "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let state = tracon::http::api::AppState {
+        manager: manager.clone(),
+        cfg: cfg.clone(),
+        adapter: adapter.clone(),
+        node_id: "n1".into(),
+        tools: tools.clone(),
+        mesh: None,
+    };
+    let harness_app = tracon::http::harness_router(state);
+    let token = manager
+        .register_tool_token_for_test(&row.id, "personal")
+        .await;
+    let (st, v) = mcp_call(
+        &harness_app,
+        &row.id,
+        &token,
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"doc_write","arguments":{"slug": slug, "body": "# Plan\n\n1. Do it."}}}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_ne!(v["result"]["isError"], true, "{v}");
+    let planned = store.work_get(&item.id).unwrap().unwrap();
+    assert_eq!(planned.phase_plan_slug.as_deref(), Some(slug.as_str()));
+    let mut ended = None;
+    for _ in 0..300 {
+        let s = store.get_session(&row.id).unwrap().unwrap();
+        if s.state == "closed" {
+            ended = s.end_reason;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(ended.as_deref(), Some("phase_done"));
+    let kinds: Vec<String> = store
+        .events_after(&row.id, 0, 500)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    assert!(kinds.contains(&"plan_artifact".to_string()), "{kinds:?}");
     let _ = std::fs::remove_dir_all(&dir);
     tracon::session::materialize::remove(&row.id);
 }

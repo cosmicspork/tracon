@@ -68,6 +68,8 @@ fn session(node: &str, id: &str, channel: &str) -> SessionRow {
         container_name: None,
         model: "m".into(),
         project_id: None,
+        phase: "execute".into(),
+        policy_version: None,
         budget_tokens: 10,
         tokens_used: 0,
         cost_usd: None,
@@ -426,6 +428,7 @@ async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
         model: "m".into(),
         budget_tokens: None,
         node_id: None,
+        phase: Default::default(),
     };
     let adapter: Arc<dyn tracon::adapter::HarnessAdapter> =
         Arc::new(tracon::adapter::omp::OmpAdapter::new(String::from("1")));

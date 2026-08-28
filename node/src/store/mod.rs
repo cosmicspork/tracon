@@ -142,9 +142,9 @@ impl Store {
                 branch, harness_id, harness_version, harness_session_id, container_name, model,
                 budget_tokens, tokens_used, cost_usd, context_used, context_size, state, end_reason,
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
-                ended_mono_ms, updated_ms, project_id)
+                ended_mono_ms, updated_ms, project_id, phase, policy_version)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-                ?23,?24,?25,?26,?27,?28)",
+                ?23,?24,?25,?26,?27,?28,?29,?30)",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -173,7 +173,9 @@ impl Store {
                 s.started_mono_ms,
                 s.ended_mono_ms,
                 s.updated_ms,
-                s.project_id
+                s.project_id,
+                s.phase,
+                s.policy_version
             ],
         )?;
         Ok(())
@@ -586,15 +588,16 @@ impl Store {
                 branch, harness_id, harness_version, harness_session_id, container_name, model,
                 budget_tokens, tokens_used, cost_usd, context_used, context_size, state, end_reason,
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
-                ended_mono_ms, updated_ms, project_id)
+                ended_mono_ms, updated_ms, project_id, phase, policy_version)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,NULL,
-                NULL,?22,?23,?24,?25,?26)
+                NULL,?22,?23,?24,?25,?26,?27,?28)
              ON CONFLICT(id) DO UPDATE SET node_id=?2, channel=?3, work_item_id=?4, repo_path=?5,
                 worktree_path=?6, branch=?7, harness_id=?8, harness_version=?9,
                 harness_session_id=?10, container_name=?11, model=?12, budget_tokens=?13,
                 tokens_used=?14, cost_usd=?15, context_used=?16, context_size=?17, state=?18,
                 end_reason=?19, last_error=?20, turn_active=?21, created_ms=?22,
-                started_mono_ms=?23, ended_mono_ms=?24, updated_ms=?25, project_id=?26",
+                started_mono_ms=?23, ended_mono_ms=?24, updated_ms=?25, project_id=?26,
+                phase=?27, policy_version=?28",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -621,7 +624,9 @@ impl Store {
                 s.started_mono_ms,
                 s.ended_mono_ms,
                 s.updated_ms,
-                s.project_id
+                s.project_id,
+                s.phase,
+                s.policy_version
             ],
         )?;
         Ok(())
@@ -997,6 +1002,12 @@ mod records {
         pub model: String,
         #[serde(default)]
         pub project_id: Option<String>,
+        /// `plan`, `execute`, or `review`.
+        #[serde(default = "default_phase")]
+        pub phase: String,
+        /// The policy bundle version the session started under.
+        #[serde(default)]
+        pub policy_version: Option<i64>,
         pub budget_tokens: i64,
         pub tokens_used: i64,
         pub cost_usd: Option<f64>,
@@ -1012,6 +1023,10 @@ mod records {
         pub started_mono_ms: Option<i64>,
         pub ended_mono_ms: Option<i64>,
         pub updated_ms: i64,
+    }
+
+    fn default_phase() -> String {
+        "execute".into()
     }
 
     impl SessionRow {
@@ -1030,6 +1045,8 @@ mod records {
                 container_name: r.get("container_name")?,
                 model: r.get("model")?,
                 project_id: r.get("project_id")?,
+                phase: r.get("phase")?,
+                policy_version: r.get("policy_version")?,
                 budget_tokens: r.get("budget_tokens")?,
                 tokens_used: r.get("tokens_used")?,
                 cost_usd: r.get("cost_usd")?,
@@ -1524,6 +1541,8 @@ mod tests {
                 container_name: None,
                 model: "m".into(),
                 project_id: None,
+                phase: "execute".into(),
+                policy_version: None,
                 budget_tokens: 1000,
                 tokens_used: 0,
                 cost_usd: None,
