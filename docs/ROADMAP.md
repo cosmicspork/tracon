@@ -268,6 +268,15 @@ database, except through the node, and `review` and `consulta` can be archived.
 
 ## Phase 4: Memory, documents, hub
 
+- [ ] **Model credentials brokered.** A model gateway on the internal network injects
+      provider credentials from the node's sealed store; the harness holds none. Login
+      and refresh run the harness's own flow as node-owned subprocesses inside the
+      boundary, surfaced as a "connect a provider" card; the node lifts the token into
+      its vault. Provider bindings enforced at the gateway, fail closed; per-channel
+      usage counted there. Retires `agent.db` on the harness volume,
+      `harness import-credentials`, and `harness shell`. Decided 2026-08-28; see
+      ARCHITECTURE "Model auth". First, because Phase 4's provider bindings need the
+      enforcement point.
 - [ ] Hub-and-spoke sync: site ID, monotonic sequence, hub-assigned ordering, cursor
       pull, HLC plus LWW
 - [ ] Full local replica on every node, reads always local
@@ -345,8 +354,9 @@ Not rejected, not scheduled.
 - **Stacked MR automation.** Resolve the flags-vs-stacks question first. The trunk plus
   semantic-release setup favors feature flags, which also produces smaller reviews and
   helps the complexity problem.
-- **Model-proxied credentials.** Routing model API calls through the broker with an
-  injected key is a TLS-interception project and is not where the risk is.
+- **Model-proxied credentials.** *Un-deferred 2026-08-28:* the objection was TLS
+  interception; a header-injecting gateway on the internal network is not that, and it
+  is the only enforcement point for provider bindings. Now the first Phase 4 item.
 - **Splitting the relay back out of the hub.** Channel-scoped keys make this possible if
   the hub's host ever becomes less trusted than somewhere else available. Not needed
   while everything always-on lives in the same cluster.

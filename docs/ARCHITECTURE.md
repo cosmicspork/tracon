@@ -167,13 +167,48 @@ break silently.
 
 ### Model auth
 
-Model credentials stay in the harness's own store (`~/.omp/agent/agent.db`,
-`~/.local/share/opencode/auth.json`). The node does not broker them. Session refresh is
-the harness's problem.
+**Decided 2026-08-28: model credentials become brokered, like every other credential.**
+Phases 1–3 kept them in the harness's own store (`~/.omp/agent/agent.db`,
+`~/.local/share/opencode/auth.json`) on a volume the node owns and mounts
+(`OMP_STATE_DIR`), imported once from an operator's laptop. That was the one credential
+the harness still held, and it is the one the gate cannot see: a provider binding
+("work channel, local models only") is not enforceable while the harness talks to the
+provider itself. It is replaced by the split below, scheduled as the first item of
+Phase 4.
 
-Because the harness runs in an ephemeral runner container, that state directory must be
-a volume the node owns and mounts. `OMP_STATE_DIR` establishes this pattern; copy it
-rather than inventing one.
+**The node owns the gateway, the store, and the bindings.**
+
+- A model gateway on the internal network, the CONNECT proxy grown one step: the harness
+  sends its ordinary provider request to `http://tracon-gw:<port>/<provider>/…` and the
+  node injects the credential and forwards over TLS. No interception — the harness's
+  own request is forwarded with its own shape, which is what subscription OAuth tokens
+  (issued to a specific client) require.
+- Provider credentials live in the node's sealed store with `channels` and `nodes`
+  bindings like any other, are handed off over the mesh with channel keys, and never
+  appear on a harness volume. `agent.db` on the volume, `harness import-credentials`,
+  and `harness shell` retire once this is in real use.
+- The gateway is the enforcement point for provider bindings (a channel bound to local
+  models is refused a hosted provider, fail closed) and the counting point for per-
+  channel cost ceilings: every model call passes through it, so usage is measured where
+  it happens rather than reported by the harness.
+- API-key providers (GradientAI, OpenAI keys, a local model endpoint) are a header.
+
+**The node does not implement the vendors' OAuth.** The subscription flows are the
+harnesses' own clients — undocumented, changed without notice, a grey area to drive
+from a third-party binary, and the most churn-prone surface in the system. So the node
+*runs* the harness's login and refresh as owned subprocesses inside the boundary
+(`omp auth-broker login`, `claude setup-token`, `opencode auth login`), surfaces the
+URL and code on the Nodes screen as a "connect a provider" card (a paste-back code is
+answered through the same card), and lifts the resulting token from the scratch store
+into its own vault. Refresh is the same move on a timer. The vendor logic stays in the
+vendor's binary; the node owns everything around it. The adapter trait gains
+`login(provider)` and `refresh(provider)`, and each adapter carries the one line that
+points it at the gateway (`ANTHROPIC_BASE_URL`, opencode's provider `baseURL`, omp's
+`auth-gateway` setting).
+
+This supersedes the "model-proxied credentials" entry in the roadmap's deferred list,
+which objected to TLS interception; header injection on the internal network is not
+that.
 
 Work-side model access is through the employer's provider subscription via
 omp/opencode. Subscription access and API-platform access are separate systems at
