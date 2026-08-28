@@ -251,6 +251,28 @@ DB_HOST = "…"
 DB_PASSWORD = "…"
 ```
 
+### The ledger
+
+Work is a replicated ledger per channel: items with priorities and dependencies, ids that
+two nodes mint offline without colliding, and a ready-work order every node computes
+the same way. `tracon work add|ls|ready|show|close|dep|rm` and the Work screen keep it;
+an agent gets `work_ready`, `work_discover` (what it found, linked to its item), and
+`work_close`. A session is a phase of one item: a **plan** session ends by writing
+`plan-<item>`; an **execute** session is refused until that document exists, does the
+work, and submits; at submit the node runs the project's checks (`.tracon/checks` in the
+worktree, else `[supervision] checks`) in a throwaway container and refuses a failure or
+a diff over `[review] max_diff_lines` / `max_files`; then, if the channel binds
+`phases.review.model`, a fresh **review** session reads only the requirements and the
+diff and leaves its verdict on the card. Approving publishes, closes the item, and ends
+the session. `tracon channel bind <name> key=value…` sets the bindings (`phases.*`,
+`ceiling_tokens_per_day`) and hands them to every member.
+
+Cost is enforced, not watched: a channel at its daily ceiling starts no session and the
+gateway refuses its model calls. `tracon metrics` prints approvals and tokens per
+accepted change per channel (dollars only where `[providers.<p>.price]` is set);
+`tracon provenance <sha>` answers which model, which prompts, which approval, and which
+policy version shipped a commit.
+
 ### Review before publish
 
 An agent has no forge token and never runs `gh` or `glab`. To get something published it

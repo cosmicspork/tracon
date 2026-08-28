@@ -775,6 +775,19 @@ and the upstream mitigation is to kill sessions after each item. Beads can only 
 nicely in `AGENTS.md`. The node owns the harness lifecycle, so it can require a work item
 to open a session, inject ready-work at start, and end the session at item close.
 
+*Built (Phase 5):* `work_item` is a replicated table in the `sync` crate (step 2 of its
+schema), so the ledger converges the way documents do and the hub holds it for the
+channels it reads. Ids are `sha256(channel ‖ project ‖ site ‖ created_ms ‖ title)`;
+readiness is never stored — `tracon_sync::work::status` derives it from `deps_json` and
+`state` with a Kahn pass over the open subgraph and ids as the final tiebreak, so every
+replica lists the same order. Unknown deps block (and say "not seen here"); cycles block
+every member. `Manager::create` refuses a plan or execute session whose item is missing,
+closed, blocked, or held by a live session; the orientation carries the item and the
+project's ready work; `work_discover` records what a session finds, linked to its item;
+`work_close`, a close from the interface, or a publish ends the holding session at the
+end of its turn (`EndReason::ItemClose`). Events inherit the session's item, so per-item
+metrics are a group-by.
+
 ## Sessions and phases
 
 Plan, execute, and review are **separate sessions the node spawns**, not phases inside one
@@ -806,6 +819,19 @@ a property of what the harness reports rather than a gap to paper over: the inte
 says the budget is checked at turn end, and mid-turn enforcement waits on a usage
 snapshot the adapter does not have. Per-channel daily ceilings are Phase 5.
 
+*Built (Phase 5):* a session spec names its `phase` (`plan`, `execute`, `review`). The
+operator starts plan and execute sessions; the plan session's purpose is one document,
+`plan-<item>`, which its `doc_write` may write unasked and which ends the session
+(`phase_done`); execute is refused until that document exists (a channel may bind
+`phases.execute.requires_plan=false`). Review sessions are spawned by the node at submit
+(below) with the model the channel binds under `phases.review.model` — the spec is
+constructed on the node, so there is nothing a harness could inherit. Budgets default from
+`phases.<phase>.budget_tokens` on the channel. The daily ceiling is
+`ceiling_tokens_per_day` in the channel's bindings, counted from the gateway's
+`model_usage` since local midnight: `POST /api/sessions` refuses at 429 with the figures,
+and the gateway refuses every model call at 429 so a running session stops spending —
+the harness sees the error, a `ceiling` event is recorded once, and the operator decides.
+
 ### Supervision
 
 Anything checkable deterministically is checked deterministically. The node runs
@@ -813,6 +839,15 @@ Anything checkable deterministically is checked deterministically. The node runs
 failures back. Model supervision is reserved for judgment with no test. A cheap model
 watching an expensive model work mostly pays twice to learn what the test suite would
 have reported.
+
+*Built (Phase 5):* at `submit_review`, after the diff is captured and before a human or a
+model reads it, the node runs the worktree's `.tracon/checks` (one command per line; else
+`[supervision] checks`, default `just check`) in a throwaway container from the harness
+image with the worktree mounted at `/work` and nothing else — no credentials, no gateway
+token, no MCP — under `[supervision] timeout_secs`. The session shows `waiting_on_check`;
+each result is a `check_result` event with the exit code and a 4 KiB tail; the first
+failure refuses the submission with that tail and no review exists; the passing list is
+recorded on the review (`checks_json`) and shown on its card.
 
 ### Review sessions
 
@@ -825,6 +860,16 @@ Cap diff size at submit. Complexity accretes because nothing says no at submissi
 
 Gate the execute phase on a plan artifact, which converts "requirements first, plan
 second" from a request into a mechanism.
+
+*Built (Phase 5):* when the channel binds `phases.review.model`, a review-phase session is
+spawned for every submission (and resubmission): same item, a fresh worktree at the
+reviewed commit (`worktree::create_at`), an orientation of the item, its plan, and the
+diff, and only `recall`, `doc_read`, `doc_search`, and `review_verdict` offered — a call
+to anything else is refused by name. Its verdict (approve or request changes, a summary,
+findings with severity and path) lands on the review row and the approval screen above
+the human's controls, which are unchanged. The cap: `[review] max_diff_lines` (800,
+added + removed) and `max_files` (40), refused before the checks with "split the
+change" and a `review_rejected` event.
 
 ## Metrics
 
@@ -849,6 +894,19 @@ The data is captured for metrics anyway.
 
 **Cost ceilings** per day per channel, enforced by the node, not a dashboard checked
 afterward. Runaway spend is the failure mode that scales with how well the system works.
+
+*Built (Phase 5):* `GET /api/metrics` (`tracon metrics`, the Metrics screen) computes per
+channel, from the node's own tables: accepted and rejected changes, approvals (permission
+answers plus review verdicts) per accepted change, gateway tokens per accepted change
+(the implementing and review sessions behind each accepted review), total tokens, cost
+only where `[providers.<p>.price]` gives dollars per million tokens, human seconds
+(permission request→answer, monotonic on the observing node; review claim→decision), and
+agent seconds. Stated as "as seen from this node": usage is counted where the model call
+was made, sessions and events mirror. Hub-side rollups are not built. Provenance:
+`GET /api/provenance/{sha}` (`tracon provenance`) joins the review found by the reviewed
+sha or the published URL to its item and plan, the implementing and review sessions
+(model, phase, policy version, budget), the prompts, the approvals, the checks, and the
+review session's verdict.
 
 ## Clients
 

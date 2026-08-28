@@ -88,7 +88,10 @@ A `changes` payload carries record-level changes from one site:
 `{ table, op: upsert|delete, id, site, site_seq, hlc_ms, hlc_ctr, row }`. `site` must
 equal the sender; `(site, site_seq)` makes a change idempotent; `(hlc_ms, hlc_ctr, site)`
 is the last-writer-wins key; `row` is the whole record for an upsert and null for a
-delete. Version 2 added these three kinds.
+delete. Version 2 added these three kinds. The replicated tables are `document`,
+`memory`, `promotion`, and (sync schema step 2, no contract change) `work_item`, whose
+id is `hex(sha256("tracon/work-item" ‖ 0x1f ‖ channel ‖ 0x1f ‖ project ‖ 0x1f ‖ site ‖
+0x1f ‖ created_ms ‖ 0x1f ‖ title))` — pinned in `sync/src/work.rs`.
 Commands are discriminated on `op`: `create`, `prompt`, `answer`, `kill`, `verdict`.
 
 ## Hub requests (`auth.rs`)
