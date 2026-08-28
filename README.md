@@ -273,6 +273,45 @@ accepted change per channel (dollars only where `[providers.<p>.price]` is set);
 `tracon provenance <sha>` answers which model, which prompts, which approval, and which
 policy version shipped a commit.
 
+### Clients
+
+Every node serves the same interface, so a client is a matter of shell. It installs as a
+PWA — manifest, icons, and a service worker that caches the shell and never caches the
+API, because a stale queue is worse than an honest "cannot reach the node". A desktop
+wrapper (`wrapper/`, its own cargo workspace) adds what is actually wanted from native:
+a tray showing what is waiting, a global hotkey, command-tab presence, and system
+notifications. It supervises nothing and holds no session state.
+
+The node is run by the platform, not by hand or by the wrapper:
+
+```bash
+tracon service install     # a systemd user unit, or a LaunchAgent on macOS
+tracon service status
+```
+
+Off its own machine, the node wants a credential. Loopback is unchanged — the CLI and
+`just dev` need nothing — but anything else needs a token:
+
+```bash
+tracon auth issue          # printed once; exchanged for a cookie at the login screen
+tracon auth sessions       # what is logged in
+tracon auth revoke         # loopback only again
+```
+
+Issuing a token again rotates it and logs every client out. Set `TRACON_TOKEN` to reach
+a remote node from the CLI.
+
+What is waiting can be pushed to where you are. The sink is a channel binding, so one
+node in the mesh delivers per channel:
+
+```bash
+tracon channel bind personal notify.sink=pager notify.node=<node id>
+tracon channel bind work notify.sink=tray
+```
+
+`pager` posts to a local pager bridge, which holds the device keys and does the sealing;
+`tray` means the desktop wrapper shows it instead.
+
 ### Review before publish
 
 An agent has no forge token and never runs `gh` or `glab`. To get something published it
@@ -284,6 +323,11 @@ want to — and the node publishes *those* bytes with the brokered credential.
 Each file's git blob hash is recorded at submit. If the branch moves afterwards, approval
 is refused and the changed files are named: publishing something nobody read is the
 failure this prevents.
+
+On a desktop the diff can be edited rather than described: each reviewed file opens as a
+unified merge view, and what leaves is a patch. It goes back with the notes, the agent
+applies it and resubmits — so an edit is a request for changes, and the agent is still
+the only thing that writes to the worktree.
 
 ```toml
 [credentials.glab]

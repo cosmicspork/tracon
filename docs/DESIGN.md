@@ -150,7 +150,7 @@ has a one-line answer to "what does the operator see."
 | State | What the operator sees |
 |---|---|
 | Read-only | Unified diff, file list, per-file blob hash check. On the phone the file list *is* the diff: each file folds open to its hunks, because the list decides most reviews and 390px will not hold both. |
-| Editable (browser only) | *Not built in Phase 1.* "Request changes" sends notes instead: the review stays open as one thread, the agent edits and resubmits against the same id. Editing a diff in place needs `@codemirror/merge` and arrives with the desktop wrapper in Phase 6. Asking rather than editing is also what keeps the agent the only writer to the worktree, which the architecture requires. |
+| Editable (browser only) | *Built in Phase 6.* Each reviewed file opens as a unified merge view: the agent's change inline, the result editable. The button becomes "Send edits and request changes", because an edit **is** a request for changes — the patch travels with the notes and the agent applies it, which is what keeps the agent the only writer to the worktree. Files that changed since submit are left read-only rather than edited against text that has moved. Unsent edits sit in browser storage keyed by review id *and* head sha, so a resubmission cannot resurrect edits against a diff that no longer exists. |
 | Conflicts with worktree | Files that changed are marked; editing disabled for those files. |
 
 ### Work item (Phase 5)
@@ -390,6 +390,25 @@ checked with headless screenshots at 1280 and 390 wide.
   says so. On the phone too: the one Phase 5 job on every surface.
 - **Metrics.** `/metrics` from the meters' header: the two numbers first, then the rest,
   7/30/90-day windows, "as seen from this node".
+
+## What Phase 6 built
+
+- **Login.** A full-screen gate, not a route: every screen needs auth, so none should
+  spend a URL on it. It appears only when the node asks for one — the store tells "log
+  in" from "node is down" by probing a request that can answer, because `EventSource`
+  reports no status and the two want different screens. The token is exchanged for a
+  cookie and never stored; the screen says so.
+- **Installable.** Manifest, icons drawn from the rail's own mark, and a service
+  worker that caches the shell and refuses to touch `/api`. Nothing about the interface
+  changes when it is installed; it simply opens without a browser around it.
+- **Editing a diff.** "Edit the diff" sits under the read-only diff on desktop, and
+  becomes per-file merge views. The verdict button changes to "Send edits and request
+  changes" once anything is edited, which is the whole semantic: an edit is a request,
+  not an approval. The phone gets the sentence saying where to do it instead of a
+  disabled control with no explanation.
+- **The tray.** What is waiting, in one list across all three kinds, each opening the
+  window at its route. Killing is a submenu — destructive, and easy to mis-click beside
+  the thing it would end. The tooltip is the count. It does not stream output.
 
 ## Decisions from the flows
 

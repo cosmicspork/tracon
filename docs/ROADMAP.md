@@ -413,19 +413,52 @@ a channel binding, so there is nothing for a subagent to inherit; and
 
 ## Phase 6: Clients
 
-- [ ] PWA: manifest, service worker, no local replica, no keys at rest
-- [ ] Notification sinks bound per channel (pager for personal and client)
-- [ ] Tauri desktop wrapper: tray, command-tab, global hotkey, system notifications
-- [ ] Node supervised by the platform (systemd user unit on Bazzite, launchd on macOS,
-      container lifecycle in Coder); the wrapper is a tray client of it, not its
-      supervisor. Switchboard's units move, its role is not reimplemented.
-- [ ] Work approvals surface in the wrapper tray
-- [ ] `@codemirror/merge` editable diffs feeding `/revise`
+- [x] PWA: manifest, service worker, no local replica, no keys at rest. The worker
+      caches the shell and the hashed assets and refuses to touch `/api` — a cached
+      queue you cannot act on is worse than one that says the node is unreachable,
+      and passing an endless SSE response through a fetch handler breaks it. Tested
+      by loading the worker against stubs rather than through a browser, so the
+      no-`/api` rule is checked on every PR.
+- [x] Notification sinks bound per channel (pager for personal and client). The task
+      reads the bus rather than the manager, which is what makes a *peer's* approval
+      reach the phone: mirrored state is published untapped, and `publish_untapped`
+      never reaches `Manager::publish_queue`. Hooking the manager would have missed
+      exactly the case this phase exists for.
+- [x] Tauri desktop wrapper: tray, command-tab, global hotkey, system notifications.
+      Its own cargo workspace, so the node and hub stay buildable on a machine with
+      no webkit or gtk headers.
+- [x] Node supervised by the platform: `tracon service install` writes a systemd user
+      unit or a LaunchAgent and starts it. Host-side CLI only, never a tool, so a
+      session that breaks the build cannot restart the node that gates it. Coder
+      needed nothing — there the container lifecycle already is the supervisor.
+      Switchboard installed nothing on Linux; its units are a macOS-only migration.
+- [x] Work approvals surface in the wrapper tray, with a kill switch one level down
+      because killing is destructive and easy to mis-click. The tray does not stream
+      output; anything worth reading opens the window at that route.
+- [x] `@codemirror/merge` editable diffs feeding `/revise`. An edit is a request for
+      changes carrying a patch, never an approval of something the operator altered:
+      the agent applies it and resubmits, so the agent stays the only writer to the
+      worktree. Lazy-loaded, so the phone never pays for the editor.
 - [ ] Retire Switchboard, after supervision has moved and notebook and review are gone
-- [ ] Rehome or deliberately kill the display-linked theme switcher
+- [x] Rehome or deliberately kill the display-linked theme switcher — **killed**, see
+      `reference/phase-6-notes.md`. It is a macOS-only behaviour that nothing in
+      tracon depends on, and rehoming it means a System Events code path in the
+      wrapper forever.
+
+Reaching a node from off its own machine needed an answer this phase did not have.
+The corpus said the phone "reads over the hub" and also that "the hub never talks to
+a browser", and the operator API had no authentication at all — only a loopback Host
+check. So the node grew one: an operator token exchanged for an HttpOnly cookie, with
+loopback unchanged, and the lab node reached through an ingress. The hub-mediated path
+stays unbuilt and unneeded; documented under Clients.
+
+Not built: the wrapper is not bundled or signed, and macOS is not in CI — the plist
+and the launchctl path are written but built only on a Mac. Hub-side rollups and the
+phone's read-over-the-hub path remain later phases.
 
 Exit criteria: a task can be directed from the phone with both laptops closed, and
-`switchboard` can be archived.
+`switchboard` can be archived. The first half is built and waits on the release and
+the cluster deploy; the second is the operator's, after the mac migration.
 
 ## Deferred
 

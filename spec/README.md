@@ -93,6 +93,10 @@ delete. Version 2 added these three kinds. The replicated tables are `document`,
 id is `hex(sha256("tracon/work-item" ‖ 0x1f ‖ channel ‖ 0x1f ‖ project ‖ 0x1f ‖ site ‖
 0x1f ‖ created_ms ‖ 0x1f ‖ title))` — pinned in `sync/src/work.rs`.
 Commands are discriminated on `op`: `create`, `prompt`, `answer`, `kill`, `verdict`.
+A `verdict` command may carry an optional `patch`: a unified diff the operator edited
+by hand, applied by the agent on the owning node. Additive and defaulted, so a node on
+an older build reads the rest of the verdict unchanged and the contract version is
+unmoved.
 
 ## Hub requests (`auth.rs`)
 
