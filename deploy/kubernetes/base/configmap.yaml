@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tracon-node
+data:
+  node.toml: |
+    node_name = "work"
+
+    [runtime]
+    kind = "kubernetes"
+
+    [gateway]
+    # The harness reaches the node by pod IP; loopback would not be reachable.
+    harness_listen = "0.0.0.0:7421"
+
+    [session]
+    worktree_root = "/state/work"
+
+    [consulta]
+    command = "uv"
+    args = ["run", "--project", "/opt/consulta", "consulta"]

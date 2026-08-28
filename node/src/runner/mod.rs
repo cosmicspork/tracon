@@ -3,6 +3,7 @@
 //! (tests only) runs the argv on the host so the adapter can be exercised
 //! without containers.
 
+pub mod kube;
 pub mod podman;
 
 use async_trait::async_trait;
@@ -151,6 +152,9 @@ pub mod local {
         }
         fn harness_host(&self) -> String {
             "localhost".into()
+        }
+        fn harness_home(&self) -> String {
+            crate::session::materialize::PODMAN_HARNESS_HOME.into()
         }
         async fn reconcile(&self, _names: &[String]) {}
     }

@@ -26,12 +26,55 @@ pub struct Config {
 pub enum RuntimeKind {
     #[default]
     Podman,
+    Kubernetes,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Runtime {
     pub kind: RuntimeKind,
+    pub kubernetes: Kubernetes,
+}
+
+/// The pod-hosted boundary: one harness Pod per session, created by the node
+/// through the API, isolated by the NetworkPolicies the deployment carries
+/// (`deploy/kubernetes/base`), sharing one RWO volume with the node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Kubernetes {
+    /// Namespace for harness pods. Empty: the pod's own.
+    pub namespace: String,
+    pub harness_image: String,
+    /// The PersistentVolumeClaim both the node and every harness mount.
+    pub state_claim: String,
+    /// Where that claim is mounted, in the node and in every harness pod —
+    /// identical, because linked-worktree `.git` pointers are absolute paths.
+    pub state_mount: PathBuf,
+    /// The harness user's home inside its pod; the state directory and
+    /// gitconfig are mounted under it.
+    pub harness_home: String,
+    /// The uid the harness runs as. Non-root, and the same as the node so the
+    /// files each writes on the shared volume are readable by the other.
+    pub uid: i64,
+    /// The name the harness pod resolves to the node's pod IP.
+    pub gateway_host: String,
+}
+
+impl Default for Kubernetes {
+    fn default() -> Self {
+        Self {
+            namespace: String::new(),
+            harness_image: format!(
+                "ghcr.io/cosmicspork/tracon-harness:{}",
+                env!("CARGO_PKG_VERSION")
+            ),
+            state_claim: "tracon-state".into(),
+            state_mount: PathBuf::from("/state"),
+            harness_home: "/home/harness".into(),
+            uid: 65532,
+            gateway_host: "tracon-gw".into(),
+        }
+    }
 }
 
 /// The hub this node dials. Written by `tracon enroll`; absent until then,

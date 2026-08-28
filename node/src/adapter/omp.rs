@@ -35,15 +35,11 @@ impl OmpAdapter {
             argv.push(format!("--tools={}", tools.join(",")));
         }
         argv.push("acp".into());
+        // `OMP_STATE_DIR` is set by the runner, which knows the harness's home
+        // and mounts the state directory under it.
         RunnerCommand {
             argv,
             name: name.into(),
-            // Explicit even though the image sets it: the mount target and the
-            // harness's idea of its state directory must agree.
-            env: vec![(
-                "OMP_STATE_DIR".into(),
-                crate::session::materialize::HARNESS_STATE_TARGET.into(),
-            )],
             ..Default::default()
         }
     }

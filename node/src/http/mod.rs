@@ -225,6 +225,13 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
 
     // The harness listener is separate from the operator's: it carries only the
     // MCP surface, and the gateway forwards to it from the internal network.
+    // Where no gateway container carries the allowlist proxy, the node does.
+    if let Some(port) = backend.proxy_port() {
+        let allow = crate::gateway::proxy::Allowlist::new(&cfg.gateway.allow_hosts)
+            .map_err(|e| anyhow::anyhow!("allowlist: {e}"))?;
+        tokio::spawn(crate::gateway::proxy::serve(port, allow));
+        tracing::info!(port, "connect proxy listening");
+    }
     let harness_app = harness_router(state.clone());
     tracing::info!(listen = %cfg.gateway.harness_listen, "harness listener");
     match &cfg.gateway.harness_listen {
@@ -349,8 +356,9 @@ async fn init_node(
         // The probe opens a real session, so it needs the credential store the
         // harness reads; without it `session/new` fails and the model list is
         // silently empty.
-        let runner =
-            backend.runner(crate::session::materialize::state_mounts().unwrap_or_default());
+        let runner = backend.runner(
+            crate::session::materialize::state_mounts(&backend.harness_home()).unwrap_or_default(),
+        );
         // A probe that cannot read the version is not a pass: record "unknown",
         // which does not equal the pin, so new sessions are blocked with the
         // version pair shown rather than run against an unverified harness.

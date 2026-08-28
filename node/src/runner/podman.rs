@@ -21,6 +21,8 @@ pub struct RunSpec {
     pub selinux_label_disable: bool,
     pub extra_mounts: Vec<Mount>,
     pub workdir: String,
+    /// The harness runs as root in its container; its state is under `/root`.
+    pub home: String,
 }
 
 impl RunSpec {
@@ -34,6 +36,7 @@ impl RunSpec {
             selinux_label_disable: cfg.boundary.selinux_label_disable.unwrap_or(selinux),
             extra_mounts: Vec::new(),
             workdir: "/work".into(),
+            home: crate::session::materialize::PODMAN_HARNESS_HOME.into(),
         }
     }
 
@@ -64,10 +67,14 @@ impl RunSpec {
             a.push("--security-opt".into());
             a.push("label=disable".into());
         }
+        // The state dir is explicit even though the image sets it: the mount
+        // target and the harness's idea of its state directory must agree.
+        let state = crate::session::materialize::state_target(&self.home);
         for (k, v) in [
             ("HTTPS_PROXY", proxy.as_str()),
             ("HTTP_PROXY", proxy.as_str()),
             ("NO_PROXY", self.gateway_host.as_str()),
+            ("OMP_STATE_DIR", state.as_str()),
         ] {
             a.push("-e".into());
             a.push(format!("{k}={v}"));
@@ -189,6 +196,7 @@ mod tests {
         assert!(joined.contains("--security-opt=no-new-privileges"));
         assert!(joined.contains("--network tracon-int"));
         assert!(joined.contains("HTTPS_PROXY=http://tracon-gw:8888"));
+        assert!(joined.contains("OMP_STATE_DIR=/root/.omp"));
         assert!(joined.ends_with("localhost/tracon-harness omp acp"));
         // No SELinux flag unless the host needs it.
         assert!(!joined.contains("label=disable"));
