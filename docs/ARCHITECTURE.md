@@ -279,6 +279,43 @@ Three things collapse the boundary and must be verified per environment:
 3. **Direct egress.** The harness runner must be on an internal network with the node
    gateway as its only reachable route. Image build may use network; execution may not.
 
+#### A pod-hosted node
+
+The work topology is the same boundary with Kubernetes doing what rootless Podman did.
+Selected by `[runtime] kind = "kubernetes"`; the Podman code is untouched behind the
+same `boundary::Backend` seam, and both answer the same five checks.
+
+- The node is an unprivileged pod (uid 65532, `drop ALL`, no escalation, seccomp) with
+  a ServiceAccount that may create, attach to, read the logs of, and delete pods in its
+  own namespace, and read one NetworkPolicy. Those verbs, and no others, are what the
+  `runtime` check asserts with a `SelfSubjectAccessReview` per verb.
+- **One harness pod per session**, rendered in exactly one place (`runner/kube.rs`) and
+  created through the API. Non-root, `drop ALL`, no API token, no service links, no
+  resolver (`dnsPolicy: None`), `restartPolicy: Never`. The node holds its stdio over
+  `pods/attach`, so the exec pipe is node-owned in the same sense as a child's stdin;
+  killing a session deletes the pod.
+- **The node is the harness's only route.** A NetworkPolicy selecting
+  `tracon.dev/role=harness` admits no ingress and permits egress only to pods labelled
+  `tracon.dev/role=node`, on the forward port and the proxy port. The harness resolves
+  `tracon-gw` to the node's own pod IP through `hostAliases`, and the node serves the
+  CONNECT allowlist proxy itself (`gateway/proxy.rs`: only CONNECT, only 443, the same
+  anchored allowlist the gateway file holds). The `network_isolated` check reads the
+  policy back and refuses if it is missing, one-sided, or wider.
+- **One RWO volume, shared.** The node keeps its state under it; every mount a session
+  needs becomes a `subPath` of that claim, so nothing of the node's is reachable except
+  what it placed there for that session — a mount source outside the volume cannot be
+  rendered at all. Linked-worktree `.git` pointers are absolute, so the claim is mounted
+  at the same path in both pods, and harness pods are pinned to the node's Kubernetes
+  node because the claim is ReadWriteOnce.
+- **The probe is admitted, never scheduled.** The checks create the session pod with a
+  scheduling gate and inspect what admission returned, so a mutating webhook that adds
+  privilege or a hostPath fails the check rather than passing the rendering.
+
+The manifests a node expects around it are in `deploy/kubernetes/base` and printed by
+`tracon setup` on this runtime; the node verifies them and does not create them. The
+Coder template that carries this to the work cluster is not in this repository (see
+`deploy/coder/README.md`); the topology was built and proven on the homelab cluster.
+
 ### Boundary check
 
 At startup, before accepting any session, the node verifies its own boundary: the
@@ -348,6 +385,24 @@ subprocess, pinned version, replaceable.
 Why the first: one credential, read-only by construction, smallest blast radius of
 anything the broker will hold, and it exercises the whole tool → node → broker →
 external call → result path before `gh` and `glab` depend on it.
+
+**GitLab and Jira followed, as verbs rather than CLIs.** `mr_status` and `mr_comment`;
+`issue` and `issue_comment`. Opening a merge request stays the review path. Merging,
+marking ready, transitioning a ticket, triggering a pipeline, and deploying are not
+tools, so the work-channel agreements are the absence of a verb rather than a rule
+about one — an agent cannot call what does not exist, and the token that could do it
+never leaves the node. Both speak REST from the node; no `glab` or `acli` binary is
+needed where the node runs.
+
+**Policy decides every tool call before the broker is touched**, under the kind
+`tool`. An allow rule names the tool exactly; a deny returns its reason to the agent;
+a tool the bundle does not mention is put to the operator on the session's queue, with
+the same expiry and answer path as a harness permission. Adding a tool never widens
+what runs unattended.
+
+**A credential is bound to nodes as well as channels.** `nodes = [...]` on a
+credential pins it by node id, so a store copied to another machine brokers nothing
+there. "consulta on the work node only" is that field.
 
 Note for the port: consulta's MSSQL "read-only" statement is
 `SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED`, which is an isolation level and
@@ -425,7 +480,7 @@ named processing node and a named provider.
 |---|---|---|---|---|
 | Personal | hub | DigitalOcean GradientAI | pager | `gh` |
 | Client | hub | DigitalOcean GradientAI (permitted by contract) | pager | `gh` |
-| Work | work laptop node | Local models only | desktop wrapper | `glab`, `acli`, consulta (work Coder node only) |
+| Work | work laptop node | Local models only | desktop wrapper | `mr_status` / `mr_comment` (GitLab), `issue` / `issue_comment` (Jira), consulta (work node only, by node binding) |
 
 Work-channel embeddings run locally on the laptop. Embedding models are small enough
 that no external provider is required, which removes the contract question entirely.

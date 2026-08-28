@@ -133,6 +133,18 @@ tracon check-boundary --deep
 tracon serve
 ```
 
+As a pod (the work topology), the node is an image rather than a binary, and the
+boundary is Kubernetes: one harness pod per session, a NetworkPolicy that makes the node
+the harness's only route, and the node serving the allowlist proxy itself. The manifests
+are in `deploy/kubernetes/base`; `deploy/kubernetes/lab` is the homelab overlay the
+topology was proven on.
+
+```sh
+kubectl apply -k deploy/kubernetes/lab
+kubectl -n tracon-lab exec deploy/tracon-node -- tracon check-boundary --deep
+kubectl -n tracon-lab port-forward deploy/tracon-node 7420:7420
+```
+
 `tracon check-boundary` prints each check and exits non-zero naming the first failure.
 A node that fails refuses to run harnesses; it still serves the interface and says which
 check failed. That refusal is the design working, not a bug to route around.
@@ -235,6 +247,21 @@ GITLAB_TOKEN = "…"
 refuses anything that is not a single `SELECT`/`WITH` before spawning anything, and
 consulta's own guard refuses again inside the sidecar. Two checks, on opposite sides of
 the privilege boundary.
+
+GitLab and Jira are the next two, as the verbs an agent needs and nothing else:
+`mr_status`, `mr_comment`, `issue`, `issue_comment`. Merge, transition, and deploy are
+not tools. Both talk REST from the node, so no `glab` or `acli` binary is needed where
+it runs.
+
+```toml
+[credentials.jira]
+channels = ["work"]
+nodes = ["<work node id>"]
+[credentials.jira.env]
+JIRA_URL = "https://example.atlassian.net"
+JIRA_EMAIL = "…"
+JIRA_TOKEN = "…"
+```
 
 ### Policy
 
