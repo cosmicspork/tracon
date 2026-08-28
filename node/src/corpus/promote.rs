@@ -177,13 +177,24 @@ pub mod chrono_free {
         pub second: u32,
     }
 
+    pub fn offset_minutes() -> i64 {
+        std::env::var("TRACON_TZ_OFFSET_MINUTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// The wall-clock millisecond the local day began: the ceiling's "today".
+    pub fn day_start_ms() -> i64 {
+        let offset_ms = offset_minutes() * 60_000;
+        let local = crate::store::now_ms() + offset_ms;
+        local - local.rem_euclid(86_400_000) - offset_ms
+    }
+
     /// UTC, offset by `TZ_OFFSET_MINUTES` if set; a node in a pod has no
     /// zoneinfo worth trusting and a laptop's operator can set it.
     pub fn now() -> LocalTime {
-        let offset: i64 = std::env::var("TRACON_TZ_OFFSET_MINUTES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+        let offset: i64 = offset_minutes();
         let secs = crate::store::now_ms() / 1000 + offset * 60;
         let day = secs.rem_euclid(86_400) as u32;
         LocalTime {

@@ -22,6 +22,8 @@ use axum::{
 use futures_core::Stream;
 use serde_json::{json, Value};
 
+use crate::session::state::event_kind as ek;
+
 use crate::{
     broker::Injection,
     config::{Config, Provider, SHAPE_ANTHROPIC, SHAPE_OPENAI},
@@ -147,6 +149,30 @@ pub async fn handle(
         Caller::Session { id, channel } => (Some(id.clone()), Some(channel.clone())),
         Caller::Probe => (None, None),
     };
+    // The ceiling, enforced where the spending happens. The harness sees the
+    // error and the turn fails; the session stays for the operator to decide.
+    if let (Some(sid), Some(ch)) = (&session_id, &channel) {
+        let bindings = s.manager.bindings(ch);
+        let ceiling = crate::metrics::ceiling(s.manager.store(), &bindings, ch);
+        if ceiling.at() {
+            if !s
+                .manager
+                .store()
+                .has_event(sid, ek::CEILING)
+                .unwrap_or(true)
+            {
+                s.manager.record_event(
+                    sid,
+                    ek::CEILING,
+                    json!({ "channel": ch, "usage_today": ceiling.usage_today, "ceiling": ceiling.ceiling }),
+                );
+            }
+            return refuse(
+                StatusCode::TOO_MANY_REQUESTS,
+                &format!("channel {ch} is at its daily ceiling: {}", ceiling.reason()),
+            );
+        }
+    }
     let injection = match decide(&s, &provider, &p, channel.as_deref()) {
         Ok(i) => i,
         Err(reason) => {

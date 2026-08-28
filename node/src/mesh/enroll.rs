@@ -410,6 +410,42 @@ pub async fn share_with_hub(
     Ok(chans)
 }
 
+/// Hand a channel again to every member the hub records in it (and the hub
+/// itself when it holds the channel), so a bindings change lands everywhere.
+/// Members merge the keyring by union and take the bindings as sent.
+pub async fn rehand_channel(
+    store: &Store,
+    identity: &Identity,
+    hub_url: &str,
+    channel: &str,
+) -> Result<usize, EnrollError> {
+    let (st, text) = send(identity, hub_url, "GET", "/v0/members", None).await?;
+    let members: Vec<Value> = serde_json::from_value(ok(st, text)?).map_err(local)?;
+    let me = identity.node_id();
+    let mut n = 0;
+    for m in members {
+        let (Some(id), Some(x)) = (m["node_id"].as_str(), m["x25519_pub"].as_str()) else {
+            continue;
+        };
+        if id == me || x.is_empty() {
+            continue;
+        }
+        let in_channel = m["channels"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|c| c.as_str() == Some(channel)));
+        if !in_channel {
+            continue;
+        }
+        let Some(pk) = key32(x).map(x25519_dalek::PublicKey::from) else {
+            continue;
+        };
+        let payload = handoff_payload(store, identity, &pk, &[channel.to_string()])?;
+        post_direct(identity, hub_url, id, &pk, &payload).await?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// Hand this node's policy bundle to every member of the hub.
 pub async fn push_policy(identity: &Identity, hub_url: &str) -> Result<usize, EnrollError> {
     let (toml, sig, key) = crate::policy::bundle::export()

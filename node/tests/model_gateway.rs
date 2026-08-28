@@ -90,6 +90,7 @@ async fn harness(broker_toml: &str, allow: &[&str]) -> Harness {
             upstream: format!("http://127.0.0.1:{port}"),
             shape: SHAPE_ANTHROPIC.into(),
             login: None,
+            price: None,
         },
     );
     cfg.providers.insert(
@@ -99,6 +100,7 @@ async fn harness(broker_toml: &str, allow: &[&str]) -> Harness {
             upstream: "https://example.com".into(),
             shape: SHAPE_ANTHROPIC.into(),
             login: None,
+            price: None,
         },
     );
     let cfg = Arc::new(cfg);
@@ -337,4 +339,135 @@ async fn an_oauth_credential_becomes_a_bearer_with_the_beta_flag_merged() {
         !format!("{up:?}").contains("rt-1"),
         "refresh token never leaves the node"
     );
+}
+
+#[tokio::test]
+async fn a_channel_at_its_daily_ceiling_is_refused_and_told_once_per_session() {
+    let h = harness(STORE, LOOPBACK).await;
+    h.store
+        .channel_put("work", b"ring", r#"{"ceiling_tokens_per_day": 100}"#)
+        .unwrap();
+    h.store.ensure_peer_node("n1").unwrap();
+    // A running session on the channel, so the ceiling event has a row to land on.
+    let sid = "s-ceiling";
+    h.store
+        .conn()
+        .execute(
+            "INSERT INTO session (id, node_id, channel, repo_path, branch, harness_id, harness_version, model,
+                budget_tokens, tokens_used, state, turn_active, created_ms, updated_ms)
+             VALUES (?1, 'n1', 'work', '/r', 'b', 'fake', '1', 'm', 1000, 0, 'running', 0, 1, 1)",
+            [sid],
+        )
+        .unwrap();
+    let token = h.manager.register_tool_token_for_test(sid, "work").await;
+    // Under the ceiling: the call goes through and its usage is counted.
+    let (status, _, _) = call(
+        &h.app,
+        "POST",
+        "/model/stub/v1/messages",
+        &token,
+        json!({"model": "claude-x", "messages": []}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // Spend the rest of today's tokens.
+    h.store
+        .record_usage(&tracon::store::UsageRow {
+            channel: "work".into(),
+            node_id: "n1".into(),
+            session_id: Some(sid.into()),
+            provider: "stub".into(),
+            model: None,
+            at_ms: tracon::store::now_ms(),
+            input_tokens: 90,
+            output_tokens: 10,
+            requests: 1,
+        })
+        .unwrap();
+    for _ in 0..2 {
+        let (status, _, body) = call(
+            &h.app,
+            "POST",
+            "/model/stub/v1/messages",
+            &token,
+            json!({"model": "claude-x", "messages": []}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert!(
+            body.contains("daily ceiling") && body.contains("of 100 tokens"),
+            "{body}"
+        );
+    }
+    assert_eq!(
+        h.seen.requests.lock().unwrap().len(),
+        1,
+        "nothing forwarded at the ceiling"
+    );
+    let kinds: Vec<String> = h
+        .store
+        .events_after(sid, 0, 50)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    assert_eq!(
+        kinds.iter().filter(|k| *k == "ceiling").count(),
+        1,
+        "{kinds:?}"
+    );
+    // The channel reports it, and a new session on it is refused with the figures.
+    let (st, chans) = {
+        let app = tracon::http::router(tracon::http::api::AppState {
+            manager: h.manager.clone(),
+            cfg: Arc::new(Config::default()),
+            adapter: Arc::new(FakeAdapter {
+                tx: Arc::new(tokio::sync::Mutex::new(None)),
+                tokens: Arc::new(tokio::sync::Mutex::new(0)),
+            }),
+            node_id: "n1".into(),
+            tools: Arc::new(Tools {
+                broker: Broker::default().shared(),
+                cfg: Arc::new(Config::default()),
+                policy: tracon::policy::Policy::shipped_shared(),
+                http: reqwest::Client::new(),
+                session: Default::default(),
+            }),
+            mesh: None,
+        });
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/channels")
+            .header("host", "127.0.0.1:7420")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        let st = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/sessions")
+            .header("host", "127.0.0.1:7420")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"channel": "work", "repo_path": "/r", "model": "m", "work_item_id": "x", "phase": "plan"}).to_string(),
+            ))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        (st, v)
+    };
+    assert_eq!(st, StatusCode::OK);
+    let work = chans
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "work")
+        .unwrap();
+    assert_eq!(work["ceiling"]["state"], "at");
+    assert_eq!(work["ceiling"]["ceiling"], 100);
+    assert!(work["ceiling"]["usage_today"].as_i64().unwrap() >= 100);
 }

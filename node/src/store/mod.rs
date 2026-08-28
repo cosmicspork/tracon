@@ -386,6 +386,107 @@ impl Store {
         Ok(())
     }
 
+    /// Tokens (input + output) a channel spent since `since_ms`, as the
+    /// gateway counted them on this node.
+    pub fn usage_tokens_since(&self, channel: &str, since_ms: i64) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM model_usage
+             WHERE channel = ?1 AND at_ms >= ?2",
+            rusqlite::params![channel, since_ms],
+            |r| r.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Per-session usage since `since_ms` on a channel: (session_id, provider,
+    /// input, output, requests).
+    pub fn usage_by_session(&self, channel: &str, since_ms: i64) -> Result<Vec<SessionUsage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(session_id, ''), provider, SUM(input_tokens), SUM(output_tokens), SUM(requests)
+             FROM model_usage WHERE channel = ?1 AND at_ms >= ?2
+             GROUP BY session_id, provider",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![channel, since_ms], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Reviews on a channel decided since `since_ms`, any final state.
+    pub fn reviews_decided_since(&self, channel: &str, since_ms: i64) -> Result<Vec<ReviewRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM review WHERE channel = ?1 AND state IN ('approved', 'rejected')
+               AND updated_ms >= ?2 ORDER BY updated_ms",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![channel, since_ms], ReviewRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Permission requests on a channel's sessions answered since `since_ms`:
+    /// (count, seconds of human latency, request→answer, monotonic on the node
+    /// that observed both).
+    pub fn permissions_answered_since(&self, channel: &str, since_ms: i64) -> Result<(i64, f64)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(MAX(p.resolved_mono_ms - p.created_mono_ms, 0)), 0) / 1000.0
+             FROM permission_request p JOIN session s ON s.id = p.session_id
+             WHERE s.channel = ?1 AND p.answer_option_id IS NOT NULL AND p.created_ms >= ?2",
+            rusqlite::params![channel, since_ms],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Sessions on a channel created since `since_ms`.
+    pub fn sessions_on_channel_since(
+        &self,
+        channel: &str,
+        since_ms: i64,
+    ) -> Result<Vec<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM session WHERE channel = ?1 AND created_ms >= ?2 ORDER BY created_ms",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![channel, since_ms], SessionRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// The review a commit came from: by the reviewed sha (a prefix will do)
+    /// or by where it was published.
+    pub fn review_by_sha(&self, sha: &str) -> Result<Option<ReviewRow>> {
+        let conn = self.conn.lock().unwrap();
+        let like = format!("{sha}%");
+        let anywhere = format!("%{sha}%");
+        conn.query_row(
+            "SELECT * FROM review WHERE head_sha LIKE ?1 OR publish_result LIKE ?2
+             ORDER BY updated_ms DESC LIMIT 1",
+            rusqlite::params![like, anywhere],
+            ReviewRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn has_event(&self, session_id: &str, kind: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM event WHERE session_id = ?1 AND kind = ?2",
+            rusqlite::params![session_id, kind],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     /// Totals per provider and model since `since_ms`, for one channel or all.
     pub fn usage_since(&self, channel: Option<&str>, since_ms: i64) -> Result<Vec<UsageTotal>> {
         let conn = self.conn.lock().unwrap();
@@ -852,6 +953,9 @@ pub struct UsageRow {
     pub output_tokens: i64,
     pub requests: i64,
 }
+
+/// `(session_id, provider, input_tokens, output_tokens, requests)`.
+pub type SessionUsage = (String, String, i64, i64, i64);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageTotal {
