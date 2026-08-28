@@ -155,6 +155,9 @@ impl Mirror {
             Payload::KeyHandoff { .. } => Applied::Unhandled("key_handoff"),
             Payload::PolicyBundle { .. } => Applied::Unhandled("policy_bundle"),
             Payload::CredentialHandoff { .. } => Applied::Unhandled("credential_handoff"),
+            Payload::Changes { .. } => Applied::Unhandled("changes"),
+            Payload::ChangesRequest { .. } => Applied::Unhandled("changes_request"),
+            Payload::ChangesBatch { .. } => Applied::Unhandled("changes_batch"),
         }
     }
 
