@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.2](https://github.com/cosmicspork/tracon/compare/v0.2.1...v0.2.2) (2026-08-28)
+
+
+### Bug Fixes
+
+* **mesh:** tell the hub which channels this node holds before granting them ([f2cd842](https://github.com/cosmicspork/tracon/commit/f2cd842bc8f7b779b84acdd709bfbed8d874377a))
+* **mesh:** tell the hub which channels this node holds before granting them ([acd22ad](https://github.com/cosmicspork/tracon/commit/acd22ad3fef594cd842b5e0f3dbd32d22a8e024e))
+
 ## [0.2.1](https://github.com/cosmicspork/tracon/compare/v0.2.0...v0.2.1) (2026-08-28)
 
 
