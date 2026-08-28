@@ -12,6 +12,7 @@ pub mod http;
 pub mod mcp;
 pub mod mesh;
 pub mod metrics;
+pub mod notify;
 pub mod policy;
 pub mod providers;
 pub mod review;
