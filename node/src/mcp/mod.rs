@@ -6,6 +6,8 @@
 //! node to do, never as something it holds.
 
 pub mod consulta;
+pub mod gitlab;
+pub mod jira;
 pub mod review;
 
 use std::sync::Arc;
@@ -36,6 +38,9 @@ pub struct Tools {
     /// what the node will do on its behalf. A denied call returns the rule's
     /// reason; one the policy does not cover is put to the operator.
     pub policy: Arc<std::sync::RwLock<Policy>>,
+    /// One client for the forge and tracker tools. Not proxied: the node
+    /// reaches those hosts directly; the harness reaches only the node.
+    pub http: reqwest::Client,
     /// Set once the manager exists. Review tools need both, and the manager
     /// needs the tools to decide what a session is offered, so the cycle is
     /// broken here rather than by merging the two.
@@ -69,6 +74,13 @@ impl Tools {
         {
             out.extend(consulta::definitions());
         }
+        let available = self.broker.available_to(channel, node_id);
+        if available.contains(&gitlab::CREDENTIAL) {
+            out.extend(gitlab::definitions());
+        }
+        if available.contains(&jira::CREDENTIAL) {
+            out.extend(jira::definitions());
+        }
         // Review tools need no credential of their own: submitting is always
         // allowed, and publishing is what needs one. An agent that cannot
         // publish can still ask for review and be told why it stopped there.
@@ -83,6 +95,12 @@ impl Tools {
         match name {
             consulta::QUERY | consulta::DESCRIBE => {
                 consulta::call(&self.broker, &self.cfg, ctx, name, args).await
+            }
+            gitlab::MR_STATUS | gitlab::MR_COMMENT => {
+                gitlab::call(&self.broker, &self.http, ctx, name, args).await
+            }
+            jira::ISSUE | jira::ISSUE_COMMENT => {
+                jira::call(&self.broker, &self.http, ctx, name, args).await
             }
             review::SUBMIT | review::STATUS => {
                 let access = self
@@ -225,6 +243,7 @@ mod tests {
             broker: Arc::new(toml::from_str(store).unwrap()),
             cfg: Arc::new(Config::default()),
             policy: Policy::shipped_shared(),
+            http: reqwest::Client::new(),
             session: Default::default(),
         }
     }

@@ -136,6 +136,7 @@ async fn fixture(name: &str, credentials: &str) -> Fixture {
         broker: Arc::new(toml::from_str(credentials).unwrap()),
         cfg: cfg.clone(),
         policy: tracon::policy::Policy::shipped_shared(),
+        http: reqwest::Client::new(),
         session: Default::default(),
     });
     let manager = Manager::new(

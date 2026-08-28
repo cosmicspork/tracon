@@ -65,6 +65,7 @@ impl Harness {
             broker: Arc::new(Default::default()),
             cfg: cfg.clone(),
             policy: tracon::policy::Policy::shipped_shared(),
+            http: reqwest::Client::new(),
             session: Default::default(),
         });
         let manager = Manager::new(
@@ -641,6 +642,7 @@ async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
         broker: Arc::new(broker),
         cfg: cfg.clone(),
         policy: tracon::policy::Policy::shipped_shared(),
+        http: reqwest::Client::new(),
         session: Default::default(),
     });
     let manager = Manager::new(
