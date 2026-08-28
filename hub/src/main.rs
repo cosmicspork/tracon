@@ -24,8 +24,129 @@ fn env_u64(name: &str, default: u64) -> u64 {
     }
 }
 
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "tracon-hub", version, about = "tracon hub: relay and replica")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the hub (the default).
+    Serve,
+    /// Generate the snapshot restore key: prints the seed once, keeps the
+    /// public half under the data directory.
+    SnapshotKey,
+    /// Take a snapshot now, to S3 (`TRACON_HUB_SNAPSHOT_*`) or a directory.
+    Snapshot {
+        /// A directory instead of S3.
+        #[arg(long)]
+        to: Option<std::path::PathBuf>,
+    },
+    /// Restore a snapshot into an empty directory.
+    Restore {
+        /// The object key, or `latest`.
+        #[arg(long, default_value = "latest")]
+        key: String,
+        /// A directory instead of S3.
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
+        #[arg(long)]
+        into: std::path::PathBuf,
+        /// The seed `snapshot-key` printed.
+        #[arg(long, env = "TRACON_HUB_RESTORE_SEED")]
+        seed_hex: String,
+    },
+}
+
+fn data_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("TRACON_HUB_DATA_DIR").unwrap_or_else(|_| "/data".into()),
+    )
+}
+
+fn objects(dir: Option<std::path::PathBuf>) -> Box<dyn hub::snapshot::ObjectStore> {
+    match dir {
+        Some(d) => Box::new(hub::snapshot::FsObjects::new(&d).expect("snapshot directory")),
+        None => {
+            let cfg = hub::snapshot::s3::S3Config::from_env()
+                .expect("TRACON_HUB_SNAPSHOT_ENDPOINT/BUCKET/ACCESS_KEY/SECRET_KEY, or --to/--from a directory");
+            Box::new(hub::snapshot::s3::S3::new(cfg))
+        }
+    }
+}
+
+fn snapshot_prefix() -> String {
+    std::env::var("TRACON_HUB_SNAPSHOT_PREFIX").unwrap_or_else(|_| "tracon-hub".into())
+}
+
 #[tokio::main]
 async fn main() {
+    let cli = Cli::parse();
+    match cli.command.unwrap_or(Command::Serve) {
+        Command::Serve => serve().await,
+        Command::SnapshotKey => {
+            let (seed, path) =
+                hub::snapshot::create_restore_key(&data_dir()).expect("write restore key");
+            println!("restore seed (keep it somewhere the cluster is not; shown once):\n{seed}");
+            println!("public half written to {}", path.display());
+        }
+        Command::Snapshot { to } => {
+            let dir = data_dir();
+            let recipient = hub::snapshot::recipient(&dir)
+                .expect("no restore key: run `tracon-hub snapshot-key` first");
+            let store = objects(to);
+            let key = hub::snapshot::take(
+                &dir,
+                &recipient,
+                store.as_ref(),
+                &snapshot_prefix(),
+                hub::auth::now_ms(),
+            )
+            .expect("snapshot");
+            println!("{key}");
+        }
+        Command::Restore {
+            key,
+            from,
+            into,
+            seed_hex,
+        } => {
+            let store = objects(from);
+            let key = if key == "latest" {
+                hub::snapshot::latest(store.as_ref(), &snapshot_prefix())
+                    .expect("list")
+                    .expect("no snapshots")
+            } else {
+                key
+            };
+            if into.exists()
+                && std::fs::read_dir(&into)
+                    .map(|mut d| d.next().is_some())
+                    .unwrap_or(false)
+            {
+                eprintln!(
+                    "{} is not empty; refusing to restore over it",
+                    into.display()
+                );
+                std::process::exit(2);
+            }
+            let written =
+                hub::snapshot::restore(store.as_ref(), &key, &seed_hex, &into).expect("restore");
+            println!(
+                "{} restored: {} files into {}",
+                key,
+                written.len(),
+                into.display()
+            );
+        }
+    }
+}
+
+async fn serve() {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -133,6 +254,38 @@ async fn main() {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
             }
         });
+    }
+
+    // Scheduled snapshots, when object storage and a restore key are set.
+    if let (Some(dir), Some(s3)) = (&data_dir, hub::snapshot::s3::S3Config::from_env()) {
+        let dir = std::path::PathBuf::from(dir);
+        match hub::snapshot::recipient(&dir) {
+            Some(recipient) => {
+                let every = env_u64("TRACON_HUB_SNAPSHOT_EVERY_HOURS", 24);
+                let keep = env_u64("TRACON_HUB_SNAPSHOT_KEEP", 14) as usize;
+                let prefix = snapshot_prefix();
+                tokio::task::spawn_blocking(move || {
+                    let store = hub::snapshot::s3::S3::new(s3);
+                    loop {
+                        match hub::snapshot::take(&dir, &recipient, &store, &prefix, hub::auth::now_ms()) {
+                            Ok(k) => {
+                                tracing::info!(key = %k, "snapshot written");
+                                if let Ok(removed) = hub::snapshot::prune(&store, &prefix, keep) {
+                                    if !removed.is_empty() {
+                                        tracing::info!(removed = removed.len(), "old snapshots pruned");
+                                    }
+                                }
+                            }
+                            Err(e) => tracing::warn!(error = %e, "snapshot failed"),
+                        }
+                        std::thread::sleep(Duration::from_secs(every * 3600));
+                    }
+                });
+            }
+            None => tracing::warn!(
+                "TRACON_HUB_SNAPSHOT_* set but no restore key; run `tracon-hub snapshot-key` (snapshots disabled)"
+            ),
+        }
     }
 
     let router = app_with_state(state_for(frames, members, cfg, pokes, replica));

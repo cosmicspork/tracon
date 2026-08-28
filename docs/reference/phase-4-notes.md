@@ -156,3 +156,17 @@ decides — `promotion.state` and each memory's `promoted`/`rejected` converge b
 the author of a batch being unreachable is irrelevant. The batch is the third queue
 kind, after reviews: it neither expires nor holds an agent. `tracon memory batch --now`
 builds tonight's batches now.
+## Snapshots
+
+`tracon-hub snapshot-key` prints a restore seed once and keeps only its public half
+beside the data; the hub can seal and never unseal. A snapshot is the data directory —
+`hub.db` through SQLite's online backup, the identity seed (the replica's keyrings are
+wrapped to it, so a restore without it would be ciphertext), `members/`, `frames/` — as a
+three-field archive, in 1 MiB chunks each sealed under a fresh data key wrapped to the
+restore key, with the chunk index in the AAD and a terminator so truncation is caught.
+Object storage is a trait with a directory implementation for tests and a hand-rolled
+SigV4 client for S3-compatible storage (`TRACON_HUB_SNAPSHOT_*`); scheduled every
+`EVERY_HOURS`, keeping `KEEP`. `tracon-hub restore --into <empty dir> --seed-hex …`
+reopens with the same identity, keyrings, rows, and frames (`hub/tests/snapshot.rs`).
+The run against DigitalOcean Spaces waits on a bucket and a key in the cluster's
+secrets; the code path is the same as the directory one past the trait.
