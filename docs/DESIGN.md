@@ -317,6 +317,13 @@ Signed off 2026-08-28 against static mockups rendered in the interface's own tok
   URL, QR, this node's fingerprint, expiry), received (the other node's name and
   fingerprint; "Fingerprints match, admit" or "They differ — cancel"), enrolled.
 
+## What Phase 3 built
+
+Nothing visible. The pod-hosted node serves the same interface and reports the same
+five checks; a refused work node shows its failed check exactly as a laptop would. The
+one new thing an operator meets is a queue card of kind `tool`: a brokered call the
+policy did not name, waiting for the same allow-or-reject as a harness permission.
+
 ## Decisions from the flows
 
 Taken 2026-08-24. The first is also recorded in `ARCHITECTURE.md` under the client
