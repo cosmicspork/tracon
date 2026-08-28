@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.0](https://github.com/cosmicspork/tracon/compare/v0.3.0...v0.4.0) (2026-08-28)
+
+
+### Features
+
+* **metrics:** per-channel daily ceiling, metrics rollups, provenance per commit, and channel bindings ([#59](https://github.com/cosmicspork/tracon/issues/59)) ([30a4b73](https://github.com/cosmicspork/tracon/commit/30a4b735c66917d1b7998e38bc0da94bd71fa23a))
+* **review:** deterministic checks at submit, a diff cap, and a fresh review session whose verdict lands on the card ([#58](https://github.com/cosmicspork/tracon/issues/58)) ([954678d](https://github.com/cosmicspork/tracon/commit/954678dc7bdb4cf3dd553cb5188dd0d805c70e55))
+* **session:** phases with a required ready item, plan artifact gate, and policy version on the row ([#57](https://github.com/cosmicspork/tracon/issues/57)) ([5a6f3d6](https://github.com/cosmicspork/tracon/commit/5a6f3d6d19eb6ef0805e629bb5649e65787225df))
+* **spa:** Work screen and item view, the ready-work picker, checks and phases on sessions, review verdicts, channel meters, metrics ([#60](https://github.com/cosmicspork/tracon/issues/60)) ([0cec701](https://github.com/cosmicspork/tracon/commit/0cec701acc7ab567e0be9ec4728875bba8c41760))
+* **sync:** work_item table, hash ids, and the deterministic ready-work order ([#55](https://github.com/cosmicspork/tracon/issues/55)) ([09a149c](https://github.com/cosmicspork/tracon/commit/09a149c76b60448c85ec67368900593557662f77))
+* **work:** the ledger on the node: store, API, CLI, agent tools, and item close ends the session ([#56](https://github.com/cosmicspork/tracon/issues/56)) ([d7fcc15](https://github.com/cosmicspork/tracon/commit/d7fcc1597d64fd67104efd587225512aeb86ad67))
+
+
+### Bug Fixes
+
+* harden document and mesh trust boundaries ([#52](https://github.com/cosmicspork/tracon/issues/52)) ([19eb2ad](https://github.com/cosmicspork/tracon/commit/19eb2ad242b2ebe6e49c3c30a3a86e66eaaaa047))
+
 ## [0.3.0](https://github.com/cosmicspork/tracon/compare/v0.2.2...v0.3.0) (2026-08-28)
 
 
