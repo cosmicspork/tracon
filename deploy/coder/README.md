@@ -55,9 +55,10 @@ The node **verifies** these; it does not create them. In particular:
 
 `credentials.sealed` under `/state/tracon/` (sealed under the pod's identity seed; seed it with `tracon credential import <toml>` inside the pod). `consulta` and
 `jira` bound to the work channel and pinned to this node's id (`nodes = [...]`);
-`glab` bound to the work channel. Model credentials are the harness's own, imported
-once into `/state/tracon/harness-state/agent/agent.db` with
-`tracon harness import-credentials` run inside the node pod against a copied store.
+`glab` bound to the work channel. Model credentials are brokered too: connect the
+employer's subscription from the Nodes screen (the login runs inside the boundary and
+the token is lifted into the sealed store), or import an API-key credential with
+`tracon credential import`.
 
 ## The autostop
 
