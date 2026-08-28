@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["proto", "node", "hub"]
+members = ["proto", "sync", "node", "hub"]
 
 [workspace.package]
 version = "0.2.2"
@@ -10,6 +10,7 @@ repository = "https://github.com/cosmicspork/tracon"
 
 [workspace.dependencies]
 tracon-proto = { path = "proto" }
+tracon-sync = { path = "sync" }
 base64 = "0.22"
 hex = "0.4"
 sha2 = "0.10"
