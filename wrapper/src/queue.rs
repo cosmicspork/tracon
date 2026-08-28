@@ -242,7 +242,9 @@ mod tests {
     use super::*;
 
     fn body(json: serde_json::Value) -> Queue {
-        serde_json::from_value::<QueueBody>(json).unwrap().into_queue()
+        serde_json::from_value::<QueueBody>(json)
+            .unwrap()
+            .into_queue()
     }
 
     #[test]
