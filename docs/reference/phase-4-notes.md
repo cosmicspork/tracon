@@ -75,3 +75,30 @@ store's `agent.db` and puts it in the broker as an `oauth` credential pinned to 
 node; `omp token <provider> --force-refresh` on a timer (half an hour ahead of
 `expires`) refreshes it in the same store and the node lifts again. A provider without
 a login flow (`openai` by default) is API-key only: `tracon credential import`.
+
+## Record sync
+
+Every replicated write (`document`, `memory`, `promotion`) goes through
+`tracon_sync::write_change`: an HLC tick, the site's next `site_seq`, the row, and the
+`change_log` entry in one transaction, then a `changes` frame on the record's channel.
+Receivers apply row-level last-writer-wins on `(hlc_ms, hlc_ctr, site)`, dedupe on
+`(site, site_seq)`, and tombstone deletes; a sequence gap, a retention `410`, or a
+freshly received channel key asks each site for its own log after what is held
+(`changes_request` / `changes_batch`, direct). Verified in `node/tests/sync_e2e.rs`: a
+document written on one node reads on the other; with the hub answering 503, a fact
+retained on A is recalled on A at once and waits in its outbox; concurrent offline edits
+resolve to the later HLC on both sides once the hub returns; a delete across a second
+outage tombstones on the other side; a node handed a channel key after the writes
+backfills both sites' records.
+
+Found on the way: **a hub outage deadlocked the Phase 2 mesh client.** `set_state_down`
+called `presence_tick` from inside the watch channel's `send_if_modified` closure, and
+`presence_tick` borrows the same watch — a self-deadlock on the first transition from
+connected to unreachable, which no Phase 2 test exercised. Fixed by moving every side
+effect of a state transition outside the closure. The test hub is taken down by a 503
+gate rather than by aborting its accept loop: the nodes' keep-alive connections outlive
+the loop, so an aborted hub still answers.
+
+Bank identity is `sha256(channel ‖ canonical remote)` (`corpus::project`), resolved on
+the node's side from `remote.origin.url` and recorded as `session.project_id`; a
+repository without a remote falls back to its directory name and says so.

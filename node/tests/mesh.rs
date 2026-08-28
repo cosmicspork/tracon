@@ -67,6 +67,7 @@ fn session(node: &str, id: &str, channel: &str) -> SessionRow {
         harness_session_id: None,
         container_name: None,
         model: "m".into(),
+        project_id: None,
         budget_tokens: 10,
         tokens_used: 0,
         cost_usd: None,

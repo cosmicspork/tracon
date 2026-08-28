@@ -334,6 +334,9 @@ impl MeshClient {
                         oldest,
                         "cursor behind hub retention; resyncing"
                     );
+                    // Sessions come back with the owners' snapshots; records
+                    // come back from each site's own change log.
+                    self.request_changes_backfill_all(channel);
                     let _ = self.store.cursor_set(channel, oldest.saturating_sub(1));
                     continue;
                 }
@@ -417,6 +420,11 @@ impl MeshClient {
             Payload::KeyHandoff { channels } if env.is_direct() => {
                 let n = enroll::apply_key_handoff(&self.store, &self.node_id(), channels);
                 tracing::info!(from = %sender, channels = n, "channel keys received");
+                // A channel this node can now read: ask every site on it for
+                // the records written before this node could listen.
+                for c in channels {
+                    self.request_changes_backfill_all(&c.name);
+                }
                 self.pull_wake.notify_one();
                 return n > 0;
             }
@@ -481,6 +489,32 @@ impl MeshClient {
             } if env.is_direct() => {
                 let n = self.apply_events_batch(&sender, session_id, events);
                 return n > 0;
+            }
+            Payload::ChangesRequest {
+                channel,
+                after_site_seq,
+            } if env.is_direct() => {
+                self.answer_changes_request(&sender, channel, *after_site_seq);
+                return true;
+            }
+            Payload::ChangesBatch {
+                channel, changes, ..
+            } if env.is_direct() => {
+                let n = self.apply_changes_batch(&sender, channel, changes);
+                return n > 0;
+            }
+            Payload::Changes { changes, .. } if !env.is_direct() => {
+                // A sequence gap means frames were missed (retention, or a
+                // pull that raced): ask the site for what lies between.
+                if let Some(first) = changes.first() {
+                    let known = self
+                        .store
+                        .change_log_max(&sender, &env.channel)
+                        .unwrap_or(0);
+                    if first.site_seq > known + 1 {
+                        self.request_changes_backfill(&sender, &env.channel);
+                    }
+                }
             }
             _ => {}
         }
@@ -815,51 +849,47 @@ impl MeshClient {
 
     // --------------------------------------------------------------- state
 
+    // The watch's modify closure holds its write lock, so nothing that reads
+    // the state (`snapshot`, `presence_tick`) may run inside it: the side
+    // effects of a transition happen after the closure returns.
+
     fn set_state_ok(&self) {
         let now = now_ms();
-        self.state.send_if_modified(|s| {
+        let was_down = self.state.send_if_modified(|s| {
             let was_down = !matches!(s.hub, HubState::Connected);
             s.hub = HubState::Connected;
             s.last_ok_ms = Some(now);
             s.last_error = None;
-            if was_down {
-                self.delivered.store(0, Ordering::Relaxed);
-                self.bus
-                    .publish_untapped(Frame::Mesh(serde_json::json!(self.snapshot_of(s))));
-                self.pull_wake.notify_one();
-                self.drain_wake.notify_one();
-            }
             was_down
         });
+        if was_down {
+            self.delivered.store(0, Ordering::Relaxed);
+            self.bus
+                .publish_untapped(Frame::Mesh(serde_json::json!(self.snapshot())));
+            self.pull_wake.notify_one();
+            self.drain_wake.notify_one();
+        }
     }
 
     fn set_state_down(&self, error: String) {
         let now = now_ms();
-        self.state.send_if_modified(|s| {
+        let was_up = self.state.send_if_modified(|s| {
             let was_up = matches!(s.hub, HubState::Connected);
             if was_up {
                 s.hub = HubState::Unreachable { since_ms: now };
             }
             s.last_error = Some(error);
-            if was_up {
-                self.bus
-                    .publish_untapped(Frame::Mesh(serde_json::json!(self.snapshot_of(s))));
-                self.presence_tick(now);
-            }
             was_up
         });
+        if was_up {
+            self.bus
+                .publish_untapped(Frame::Mesh(serde_json::json!(self.snapshot())));
+            self.presence_tick(now);
+        }
     }
 
     fn note_refusal(&self, what: String) {
         self.state.send_modify(|s| s.last_refusal = Some(what));
-    }
-
-    fn snapshot_of(&self, s: &MeshState) -> MeshState {
-        let mut out = s.clone();
-        out.queued = self.store.outbox_len().unwrap_or(0);
-        out.delivered_since_reconnect = self.delivered.load(Ordering::Relaxed);
-        out.undecryptable = self.undecryptable.load(Ordering::Relaxed);
-        out
     }
 }
 

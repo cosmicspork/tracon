@@ -312,6 +312,7 @@ fn insert_running_session(store: &Arc<Store>, budget: i64) -> String {
             harness_session_id: None,
             container_name: None,
             model: "m/a".into(),
+            project_id: None,
             budget_tokens: budget,
             tokens_used: 0,
             cost_usd: None,

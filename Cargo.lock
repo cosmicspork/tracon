@@ -2801,6 +2801,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlparser",
  "thiserror",
  "tokio",
@@ -2813,6 +2814,7 @@ dependencies = [
  "tracing-subscriber",
  "tracon-hub",
  "tracon-proto",
+ "tracon-sync",
  "uuid",
  "x25519-dalek",
 ]

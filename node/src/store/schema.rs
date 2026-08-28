@@ -167,6 +167,18 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX model_usage_channel ON model_usage(channel, at_ms);
     "#,
+    // 5: bank identity. The replicated corpus itself is installed by the
+    // `sync` crate after these run (see `migrate`).
+    r#"
+    CREATE TABLE project (
+        id         TEXT PRIMARY KEY,
+        channel    TEXT NOT NULL,
+        name       TEXT NOT NULL,
+        remote_url TEXT,
+        created_ms INTEGER NOT NULL
+    );
+    ALTER TABLE session ADD COLUMN project_id TEXT;
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build
@@ -193,5 +205,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             conn.pragma_update(None, "user_version", target)?;
         }
     }
+    // The replicated tables are one schema shared with the hub's replica.
+    tracon_sync::schema::install(conn)?;
     Ok(())
 }
