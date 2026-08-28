@@ -452,8 +452,58 @@ impl Manager {
         // key, so the only secret in the container names the session.
         let wiring =
             crate::gateway::model::harness_wiring(&self.cfg, &self.backend.harness_host(), &token);
-        let scratch =
-            materialize::scratch_for(id, &wt.path, &repo, &self.backend.harness_home(), &wiring)?;
+        // What the session is told first: conventions from the corpus, this
+        // node's facts, the channel's policy, and what is known. Recorded as
+        // an event so the transcript shows what the agent was told.
+        let (orientation, trimmed) = {
+            let session_row = self.store.get_session(id)?;
+            let project = session_row
+                .as_ref()
+                .and_then(|s| s.project_id.clone())
+                .and_then(|pid| self.store.project_get(&pid).ok().flatten());
+            let node = self.store.get_node(&self.node_id)?;
+            let tool_names: Vec<String> = self
+                .tools
+                .list(&spec.channel, &self.node_id)
+                .iter()
+                .filter_map(|t| t["name"].as_str().map(str::to_string))
+                .collect();
+            let policy = self.policy.read().unwrap();
+            crate::corpus::orientation::assemble(
+                &self.store,
+                &policy,
+                &crate::corpus::orientation::Facts {
+                    node_name: node.as_ref().map(|n| n.name.as_str()).unwrap_or(""),
+                    node_id: &self.node_id,
+                    backend: self.backend.kind(),
+                    harness: adapter.id(),
+                    harness_version: adapter.pinned_version(),
+                    channel: &spec.channel,
+                    project_id: project.as_ref().map(|p| p.id.as_str()),
+                    project_name: project.as_ref().map(|p| p.name.as_str()),
+                    tools: &tool_names,
+                    worktree: "/work",
+                },
+            )
+        };
+        self.record(NewEvent {
+            session_id: id.to_string(),
+            work_item_id: None,
+            kind: ek::ORIENTATION.into(),
+            ref_id: None,
+            payload: json!({ "text": orientation, "trimmed": trimmed, "chars": orientation.len() }),
+            at_ms: now_ms(),
+            mono_ms: started.elapsed().as_millis() as i64,
+        });
+
+        let scratch = materialize::scratch_for(
+            id,
+            &wt.path,
+            &repo,
+            &self.backend.harness_home(),
+            &wiring,
+            &orientation,
+        )?;
         let container = format!("tracon-h-{slug}");
         let runner: Arc<dyn Runner> = self.backend.runner(scratch.mounts);
 
@@ -498,6 +548,7 @@ impl Manager {
                     mcp_servers,
                     tools: self.cfg.harness.tools.clone(),
                     env: wiring.env.clone(),
+                    system_prompt_file: Some(scratch.orientation_path.clone()),
                 },
             )
             .await;

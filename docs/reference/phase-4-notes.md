@@ -115,3 +115,16 @@ confidence, enters as `candidate` and waits for the nightly batch. `retain` refu
 `tracon memory add`. The CLI (`tracon doc …`, `tracon memory …`) is a client of the
 running node's API on purpose — a write straight into the store would never reach the
 mesh outbox. Documents keep the notebook's `If-Match`/412 edit contract.
+
+## Orientation
+
+Assembled per session by `corpus::orientation::assemble` in three layers — guides on
+the channel (shortest first, each trimmed to its share), this node's facts (runtime,
+harness and version, channel, project, worktree, tools offered), and the bundle's deny
+rules with their reasons — followed by what is known: the channel's directives and the
+project's confident facts. Capped at ~24k characters. Delivered as a file mounted
+read-only under the harness's state directory and passed as
+`--append-system-prompt=<file>` (the spike found omp honours it under `acp`), and
+recorded as an `orientation` event so the transcript shows what the agent was told.
+Nothing is written into the worktree; the `materialize` test that forbids an
+`AGENTS.md` still holds.

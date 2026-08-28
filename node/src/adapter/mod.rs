@@ -91,6 +91,9 @@ pub struct LaunchSpec {
     pub tools: Vec<String>,
     /// Environment for the harness process: the gateway wiring.
     pub env: Vec<(String, String)>,
+    /// A file inside the runner appended to the harness's system prompt: the
+    /// session's orientation.
+    pub system_prompt_file: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

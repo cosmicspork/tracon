@@ -66,6 +66,8 @@ impl EndReason {
 pub mod event_kind {
     pub const SESSION_STARTED: &str = "session_started";
     pub const WORKTREE: &str = "worktree";
+    /// What the session was told at start, so the transcript shows it.
+    pub const ORIENTATION: &str = "orientation";
     pub const STATE: &str = "state";
     pub const USER_PROMPT: &str = "user_prompt";
     pub const MESSAGE: &str = "message";

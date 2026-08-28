@@ -777,3 +777,165 @@ async fn a_session_on_an_unbound_channel_is_offered_no_tools() {
     .await;
     assert!(body["result"]["tools"].as_array().unwrap().is_empty());
 }
+
+// ---- orientation --------------------------------------------------------
+
+/// A session is told where it is before its first prompt: the orientation
+/// is assembled on the node, recorded as an event, and handed to the harness
+/// as a system-prompt file rather than anything in the worktree.
+#[tokio::test]
+async fn a_session_starts_with_its_orientation_recorded() {
+    let dir = std::env::temp_dir().join(format!("tracon-orientation-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let repo = dir.join("repo");
+    let origin = dir.join("origin.git");
+    std::fs::create_dir_all(&repo).unwrap();
+    let origin_url = format!("file://{}", origin.display());
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "t@t"],
+        vec!["config", "user.name", "t"],
+        vec!["config", "commit.gpgsign", "false"],
+        vec!["commit", "-q", "--allow-empty", "-m", "init"],
+        vec!["clone", "-q", "--bare", ".", origin.to_str().unwrap()],
+        vec!["remote", "add", "origin", &origin_url],
+        vec!["fetch", "-q", "origin"],
+    ] {
+        let st = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(&args)
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    }
+
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    store
+        .put_node(&NodeRow {
+            id: "n1".into(),
+            name: "orient".into(),
+            state: "ready".into(),
+            failed_check: None,
+            failed_detail: None,
+            harness_id: "fake".into(),
+            harness_pinned: "1.0.0".into(),
+            harness_found: Some("1.0.0".into()),
+            models_json: Some(r#"[{"value":"m/a","name":"A"}]"#.into()),
+            checked_at_ms: Some(now_ms()),
+            is_self: 1,
+            x25519_pub: None,
+            last_seen_ms: None,
+            reachable: 1,
+        })
+        .unwrap();
+    // Something to be told: a directive on the channel.
+    tracon::corpus::write(
+        &store,
+        &Bus::new(),
+        "n1",
+        "personal",
+        "memory",
+        tracon_sync::ChangeOp::Upsert,
+        "m1",
+        json!({"channel": "personal", "scope": "global", "scope_ref": null, "kind": "directive",
+               "body": "run just test before every commit", "source_session": null, "source_node": null,
+               "confidence": 1.0, "state": "active", "created_ms": now_ms(), "updated_ms": now_ms()}),
+    )
+    .unwrap();
+    let adapter = Arc::new(FakeAdapter {
+        tx: Arc::new(Mutex::new(None)),
+        tokens: Arc::new(Mutex::new(100)),
+    });
+    let mut cfg = Config::default();
+    cfg.session.worktree_root = dir.join("worktrees");
+    let cfg = Arc::new(cfg);
+    let tools = Arc::new(tracon::mcp::Tools {
+        broker: Arc::new(Default::default()),
+        cfg: cfg.clone(),
+        policy: tracon::policy::Policy::shipped_shared(),
+        http: reqwest::Client::new(),
+        session: Default::default(),
+    });
+    let manager = Manager::new(
+        store.clone(),
+        Bus::new(),
+        cfg.clone(),
+        "n1".into(),
+        tools.clone(),
+        tracon::policy::Policy::shipped_shared(),
+        Arc::new(tracon::runner::local::LocalBackend),
+    );
+    let _ = tools.session.set(tracon::mcp::SessionAccess {
+        store: store.clone(),
+        manager: manager.clone(),
+    });
+    let row = manager
+        .create(
+            tracon::session::NewSession {
+                channel: "personal".into(),
+                repo_path: repo.to_string_lossy().into_owned(),
+                branch: None,
+                work_item_id: None,
+                model: "m/a".into(),
+                budget_tokens: Some(1000),
+                node_id: None,
+            },
+            adapter,
+        )
+        .await
+        .unwrap();
+    // Bank identity from the remote, not the path.
+    let canonical = tracon::corpus::project::canonical_remote(&origin_url).unwrap();
+    assert_eq!(
+        row.project_id.as_deref(),
+        Some(tracon::corpus::project::project_id("personal", &canonical).as_str())
+    );
+
+    let mut orientation = None;
+    for _ in 0..300 {
+        if let Some(e) = store
+            .events_after(&row.id, 0, 500)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == "orientation")
+        {
+            orientation = Some(e);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let e = orientation.unwrap_or_else(|| {
+        let s = store.get_session(&row.id).unwrap().unwrap();
+        let kinds: Vec<String> = store
+            .events_after(&row.id, 0, 500)
+            .unwrap()
+            .into_iter()
+            .map(|e| format!("{}:{}", e.kind, e.payload))
+            .collect();
+        panic!(
+            "no orientation event; state={} error={:?} events={kinds:#?}",
+            s.state, s.last_error
+        )
+    });
+    let text = e.payload["text"].as_str().unwrap();
+    assert!(text.contains("## This node"), "{text}");
+    assert!(text.contains("Node `orient`"));
+    assert!(text.contains("Project `repo`"), "{text}");
+    assert!(
+        text.contains("no-merge"),
+        "the working agreements are named"
+    );
+    assert!(text.contains("(directive) run just test before every commit"));
+    assert!(
+        text.contains("`recall`"),
+        "the tools offered are named: {text}"
+    );
+    assert_eq!(e.payload["trimmed"], false);
+    // Never in the worktree: the harness gets it as a mounted system-prompt
+    // file (see `materialize`), and the scratch directory is cleaned with the
+    // session, so only the repository is asserted here.
+    assert!(!repo.join("orientation.md").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+    tracon::session::materialize::remove(&row.id);
+}

@@ -28,9 +28,23 @@ impl OmpAdapter {
     }
 
     fn acp_cmd_with(name: &str, tools: &[String], env: Vec<(String, String)>) -> RunnerCommand {
+        Self::acp_cmd_full(name, tools, env, None)
+    }
+
+    fn acp_cmd_full(
+        name: &str,
+        tools: &[String],
+        env: Vec<(String, String)>,
+        system_prompt_file: Option<&str>,
+    ) -> RunnerCommand {
         let mut argv = vec!["omp".to_string()];
         if !tools.is_empty() {
             argv.push(format!("--tools={}", tools.join(",")));
+        }
+        // omp reads the file and appends it to its system prompt; this is how
+        // the orientation reaches the model without a file in the worktree.
+        if let Some(f) = system_prompt_file {
+            argv.push(format!("--append-system-prompt={f}"));
         }
         argv.push("acp".into());
         // `OMP_STATE_DIR` is set by the runner, which knows the harness's home
@@ -94,10 +108,11 @@ impl HarnessAdapter for OmpAdapter {
         spec: LaunchSpec,
     ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError> {
         let child = runner
-            .spawn(Self::acp_cmd_with(
+            .spawn(Self::acp_cmd_full(
                 &spec.container_name,
                 &spec.tools,
                 spec.env.clone(),
+                spec.system_prompt_file.as_deref(),
             ))
             .await?;
         let mut session =
@@ -638,6 +653,16 @@ mod tests {
     #[test]
     fn an_empty_list_leaves_the_harness_default() {
         let cmd = OmpAdapter::acp_cmd_with("c", &[], Vec::new());
+        let with =
+            OmpAdapter::acp_cmd_full("c", &[], Vec::new(), Some("/root/.omp/orientation.md"));
+        assert_eq!(
+            with.argv,
+            vec![
+                "omp",
+                "--append-system-prompt=/root/.omp/orientation.md",
+                "acp"
+            ]
+        );
         assert_eq!(cmd.argv, ["omp", "acp"]);
     }
 }

@@ -8,6 +8,8 @@ use crate::{config::Config, gateway::model::Wiring, runner::Mount};
 pub struct Scratch {
     pub dir: PathBuf,
     pub mounts: Vec<Mount>,
+    /// Where the harness finds the orientation text, inside the runner.
+    pub orientation_path: String,
 }
 
 /// Where the harness keeps its state inside the runner. The node-owned volume
@@ -89,9 +91,15 @@ pub fn scratch_for(
     repo: &Path,
     home: &str,
     wiring: &Wiring,
+    orientation: &str,
 ) -> std::io::Result<Scratch> {
     let dir = Config::state_dir().join("sessions").join(session_id);
     std::fs::create_dir_all(dir.join("omp"))?;
+
+    // The orientation is a system-prompt file, mounted read-only under the
+    // harness's state directory — never into the worktree.
+    std::fs::write(dir.join("orientation.md"), orientation)?;
+    let orientation_path = format!("{}/orientation.md", state_target(home));
 
     // Memory is a Phase 4 concern and the node owns it; the harness's own
     // memory backend would write into state we do not model.
@@ -107,6 +115,11 @@ pub fn scratch_for(
 
     let mut mounts = state_mounts(home)?;
     mounts.push(models_json_mount(&dir.join("omp"), home, wiring)?);
+    mounts.push(Mount {
+        source: dir.join("orientation.md").to_string_lossy().into_owned(),
+        target: orientation_path.clone(),
+        read_only: true,
+    });
     mounts.extend([
         Mount {
             source: dir.join("omp/config.yml").to_string_lossy().into_owned(),
@@ -164,7 +177,11 @@ pub fn scratch_for(
         }
     }
 
-    Ok(Scratch { dir, mounts })
+    Ok(Scratch {
+        dir,
+        mounts,
+        orientation_path,
+    })
 }
 
 pub fn remove(session_id: &str) {
@@ -184,10 +201,13 @@ mod tests {
             Path::new("/tmp/repo"),
             PODMAN_HARNESS_HOME,
             &Wiring::default(),
+            "# Orientation",
         )
         .unwrap();
         let targets: Vec<&str> = s.mounts.iter().map(|m| m.target.as_str()).collect();
         assert!(targets.contains(&"/work"));
+        assert!(targets.contains(&"/root/.omp/orientation.md"));
+        assert_eq!(s.orientation_path, "/root/.omp/orientation.md");
         assert!(targets.contains(&"/root/.omp/agent/config.yml"));
         assert!(targets.contains(&"/root/.omp/agent/models.json"));
         assert!(targets.contains(&"/root/.gitconfig"));
@@ -223,6 +243,7 @@ mod tests {
             &repo,
             PODMAN_HARNESS_HOME,
             &Wiring::default(),
+            "",
         )
         .unwrap();
         let git_target = repo.join(".git").to_string_lossy().into_owned();
