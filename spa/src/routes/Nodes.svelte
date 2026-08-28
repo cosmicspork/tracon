@@ -4,6 +4,7 @@
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
 
+  import ChannelMeters from '../components/ChannelMeters.svelte'
   import { api } from '../lib/api'
   import type { ProviderInfo } from '../lib/types'
 
@@ -174,6 +175,7 @@
   {#if meshed && surface.phone}
     <div class="empty">Enrolling a node needs a desktop browser.</div>
   {/if}
+  <ChannelMeters />
 {/if}
 
 <style>

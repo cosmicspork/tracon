@@ -79,7 +79,29 @@
             : ''}
         </div>
       {:else if e.kind === 'session_started'}
-        <div class="sys">harness started · {e.payload.model}</div>
+        <div class="sys">harness started · {e.payload.model}{e.payload.phase ? ` · ${e.payload.phase}` : ''}{e.payload.policy_version != null ? ` · policy v${e.payload.policy_version}` : ''}</div>
+      {:else if e.kind === 'check_started'}
+        <div class="mark">checks started · {((e.payload.commands as string[]) ?? []).join(' · ')}</div>
+      {:else if e.kind === 'check_result'}
+        <details class="fold" open={e.payload.ok !== true}>
+          <summary class={e.payload.ok ? '' : 'crit'}>{e.payload.ok ? '✓' : '✗'} {e.payload.command} · exit {e.payload.exit ?? 'none'} · {Math.round(((e.payload.ms as number) ?? 0) / 1000)}s</summary>
+          <div>{e.payload.tail || '(no output)'}</div>
+        </details>
+      {:else if e.kind === 'review_rejected'}
+        <div class="mark crit">submission refused · {e.payload.reason}</div>
+      {:else if e.kind === 'plan_artifact'}
+        <div class="mark ok">plan written · <a href="/docs/{e.payload.channel ?? ''}/{e.payload.slug}">{e.payload.slug}</a> · ends the phase</div>
+      {:else if e.kind === 'work_closed'}
+        <div class="mark">work closed{e.payload.summary ? ` · ${e.payload.summary}` : ''}</div>
+      {:else if e.kind === 'review_verdict'}
+        <div class="mark ok">verdict · {e.payload.verdict} · {e.payload.summary}</div>
+      {:else if e.kind === 'ceiling'}
+        <div class="mark crit">channel at its daily ceiling · {e.payload.usage_today} of {e.payload.ceiling} tokens · model calls refused</div>
+      {:else if e.kind === 'orientation'}
+        <details class="fold">
+          <summary>orientation · {e.payload.chars} chars{e.payload.trimmed ? ' · trimmed' : ''}</summary>
+          <div>{e.payload.text}</div>
+        </details>
       {:else if e.kind === 'state'}
         <div class="sys">→ {e.payload.state}</div>
       {:else if e.kind === 'error'}
@@ -146,8 +168,12 @@
     color: var(--wait);
   }
   .mark.crit,
-  .tool.crit {
+  .tool.crit,
+  .fold summary.crit {
     color: var(--crit);
+  }
+  .mark.ok {
+    color: var(--ok);
   }
   .fold summary {
     color: var(--dim);

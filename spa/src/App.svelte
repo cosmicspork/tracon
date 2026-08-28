@@ -2,6 +2,9 @@
   import Approval from './routes/Approval.svelte'
   import Doc from './routes/Doc.svelte'
   import Docs from './routes/Docs.svelte'
+  import Metrics from './routes/Metrics.svelte'
+  import Work from './routes/Work.svelte'
+  import WorkItem from './routes/WorkItem.svelte'
   import Promotion from './routes/Promotion.svelte'
   import NewSession from './routes/NewSession.svelte'
   import Nodes from './routes/Nodes.svelte'
@@ -42,6 +45,7 @@
   const enroll = $derived(router.path === '/nodes/enroll')
   const docRef = $derived(router.path.match(/^\/docs\/([^/]+)\/([^/]+)(\/edit)?$/))
   const docEdit = $derived(Boolean(docRef?.[3]))
+  const workId = $derived(router.path.match(/^\/work\/([^/]+)/)?.[1] ?? null)
   const nav = $derived(
     sessionId || router.path === '/sessions'
       ? 'sessions'
@@ -51,7 +55,11 @@
           ? 'new'
           : router.path.startsWith('/docs')
             ? 'docs'
-            : 'queue',
+            : router.path.startsWith('/work')
+              ? 'work'
+              : router.path === '/metrics'
+                ? 'nodes'
+                : 'queue',
   )
   const hubDown = $derived(store.mesh?.hub.state === 'unreachable')
   const hubLabel = $derived.by(() => {
@@ -80,6 +88,10 @@
     <a href="/nodes" class:on={nav === 'nodes'}>
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14.5v2.5" /></svg>
       <span class="lbl">Nodes</span>
+    </a>
+    <a href="/work" class:on={nav === 'work'}>
+      <svg viewBox="0 0 24 24"><path d="M5 7h3M5 12h3M5 17h3" /><path d="M11 7h8M11 12h8M11 17h5" /></svg>
+      <span class="lbl">Work</span>
     </a>
     <a href="/docs" class:on={nav === 'docs'}>
       <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
@@ -120,8 +132,14 @@
       <Queue only="sessions" />
     {:else if enroll}
       <Enroll />
+    {:else if router.path === '/metrics'}
+      <Metrics />
     {:else if nav === 'nodes'}
       <Nodes />
+    {:else if workId}
+      <WorkItem id={workId} />
+    {:else if nav === 'work'}
+      <Work />
     {:else if docRef}
       <Doc channel={docRef[1]} slug={docRef[2]} edit={docEdit} />
     {:else if nav === 'docs'}
@@ -134,7 +152,7 @@
   </main>
 
   <!-- The phone navigates from the bottom, where a thumb is. Capability is
-       gated by surface, not by width: this is the same five destinations. -->
+       gated by surface, not by width: this is the same six destinations. -->
   <nav class="tabs">
     <a href="/" class:on={nav === 'queue'}>
       <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
@@ -148,6 +166,10 @@
     <a href="/nodes" class:on={nav === 'nodes'}>
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14.5v2.5" /></svg>
       <span>Nodes</span>
+    </a>
+    <a href="/work" class:on={nav === 'work'}>
+      <svg viewBox="0 0 24 24"><path d="M5 7h3M5 12h3M5 17h3" /><path d="M11 7h8M11 12h8M11 17h5" /></svg>
+      <span>Work</span>
     </a>
     <a href="/docs" class:on={nav === 'docs'}>
       <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
@@ -188,7 +210,7 @@
     main { padding: 14px 12px calc(72px + env(safe-area-inset-bottom)); }
     .tabs {
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
+      grid-template-columns: repeat(6, 1fr);
       position: fixed;
       inset: auto 0 0 0;
       background: var(--s1);

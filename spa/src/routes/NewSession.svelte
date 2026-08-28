@@ -3,12 +3,17 @@
   import { eligibleNodes } from '../lib/nodes'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
+  import type { WorkView } from '../lib/types'
+  import { formatTokens } from '../lib/format'
+  import { short } from '../lib/work'
 
   let channel = $state('personal')
   let repo = $state('')
   let branch = $state('')
-  let workItem = $state('')
-  let phase = $state<'plan' | 'execute'>('plan')
+  const params = new URLSearchParams(location.search)
+  let workItem = $state(params.get('item') ?? '')
+  let phase = $state<'plan' | 'execute'>(params.get('phase') === 'execute' ? 'execute' : 'plan')
+  let ready_items = $state<WorkView[]>([])
   // No default, deliberately: a session without an explicit model is a
   // validation failure, and the form makes that unreachable instead.
   let model = $state('')
@@ -25,8 +30,29 @@
   const node = $derived(
     eligible.find((n) => n.id === nodeId) ?? eligible.find((n) => n.is_self) ?? eligible[0] ?? store.node,
   )
+  const channelInfo = $derived(store.channels.find((c) => c.name === channel))
+  const atCeiling = $derived(channelInfo?.ceiling.state === 'at')
   const blocked = $derived(!node || node.state === 'refused' || node.harness.mismatch === true || !node.reachable)
-  const ready = $derived(!blocked && repo.trim() !== '' && workItem.trim() !== '' && model !== '' && !busy)
+  const picked = $derived(ready_items.find((i) => i.id === workItem))
+  const needsPlan = $derived(phase === 'execute' && picked !== undefined && !picked.phase_plan_slug)
+  const ready = $derived(
+    !blocked && !atCeiling && !needsPlan && repo.trim() !== '' && workItem.trim() !== '' && model !== '' && !busy,
+  )
+
+  $effect(() => {
+    void store.workVersion
+    if (!channel) return
+    api
+      .workReady(channel)
+      .then((d) => (ready_items = d.items))
+      .catch(() => (ready_items = []))
+  })
+  // The budget default is the channel's binding for the phase, then the node's.
+  $effect(() => {
+    const phases = channelInfo?.bindings?.phases as Record<string, { budget_tokens?: number }> | undefined
+    const b = phases?.[phase]?.budget_tokens
+    if (b) budget = String(b)
+  })
 
   async function start(e: SubmitEvent) {
     e.preventDefault()
@@ -63,6 +89,13 @@
         <option value={c}>{c}</option>
       {/each}
     </select>
+    {#if channelInfo?.ceiling.ceiling}
+      <small class:crit={atCeiling} class:warn={channelInfo.ceiling.state === 'near'}
+        >{channel} · {formatTokens(channelInfo.ceiling.usage_today)} of {formatTokens(channelInfo.ceiling.ceiling)} tokens today{atCeiling
+          ? ' · at its ceiling: new sessions are refused'
+          : ''}</small
+      >
+    {/if}
   </label>
   <label>
     <span>Repository <em class="req">required</em></span>
@@ -73,18 +106,32 @@
     <input bind:value={branch} placeholder="feat/…  (a name is generated if empty)" spellcheck="false" />
     <small>The worktree is created from origin's default branch, outside the repo.</small>
   </label>
-  <label>
+  <div class="field">
     <span>Phase</span>
-    <select bind:value={phase}>
-      <option value="plan">Plan — read and write the plan document</option>
-      <option value="execute">Execute — do the work (needs the item's plan)</option>
-    </select>
-  </label>
-  <label>
+    <div class="seg" role="radiogroup">
+      <button type="button" class:on={phase === 'plan'} onclick={() => (phase = 'plan')}>Plan</button>
+      <button type="button" class:on={phase === 'execute'} onclick={() => (phase = 'execute')}>Execute</button>
+    </div>
+    <small>{phase === 'plan' ? 'Reads, thinks, and ends by writing the plan document.' : "Does the work from the item's plan, then submits for review."}</small>
+  </div>
+  <div class="field">
     <span>Work item <em class="req">required · from the ready list</em></span>
-    <input bind:value={workItem} placeholder="item id" spellcheck="false" />
-    <small>Pick a ready item; <code>tracon work ready</code> lists them.</small>
-  </label>
+    {#if ready_items.length === 0}
+      <small>Nothing is ready on {channel}. <a href="/work">Add or unblock an item.</a></small>
+    {:else}
+      <div class="picker" role="radiogroup">
+        {#each ready_items as it (it.id)}
+          <button type="button" class:on={workItem === it.id} onclick={() => (workItem = it.id)}>
+            <i></i>
+            <span>{it.title} <small>{short(it.id)} · p{it.priority}</small></span>
+            <span class="chip" class:ok={!!it.phase_plan_slug} class:off={!it.phase_plan_slug}>{it.phase_plan_slug ? 'planned' : 'needs a plan'}</span>
+          </button>
+        {/each}
+      </div>
+      <small>Blocked and in-session items are not offered. Execute needs the item's plan; Plan takes any ready item.</small>
+      {#if needsPlan}<small class="crit">This item has no plan yet: run a plan session first.</small>{/if}
+    {/if}
+  </div>
   <label>
     <span>Model <em class="req">required · no default</em></span>
     <select bind:value={model}>
@@ -152,7 +199,9 @@
     <div class="banner crit">could not start <b>· {error}</b></div>
   {/if}
   <div>
-    <button class="btn p" type="submit" disabled={!ready}>Start session</button>
+    <button class="btn p" type="submit" disabled={!ready}
+      >{atCeiling ? `${channel} is at its ceiling` : `Start ${phase} session`}</button
+    >
   </div>
 </form>
 
@@ -162,11 +211,90 @@
     gap: 14px;
     max-width: 520px;
   }
-  label {
+  label,
+  .field {
     display: grid;
     gap: 5px;
   }
+  .seg {
+    display: flex;
+    background: var(--s1);
+    border-radius: 4px;
+    padding: 3px;
+    gap: 3px;
+    width: max-content;
+  }
+  .seg button {
+    padding: 5px 12px;
+    border-radius: 3px;
+    font: 500 13px var(--sans);
+    color: var(--ink2);
+    background: none;
+    border: 0;
+    cursor: pointer;
+  }
+  .seg button.on {
+    background: var(--s3);
+    color: var(--ink);
+  }
+  .picker {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    background: var(--s1);
+    border-radius: 4px;
+    padding: 4px;
+    max-height: 220px;
+    overflow: auto;
+  }
+  .picker button {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+    padding: 6px 8px;
+    border-radius: 3px;
+    font: 13px var(--sans);
+    color: var(--ink);
+    background: none;
+    border: 0;
+    text-align: left;
+    cursor: pointer;
+  }
+  .picker button.on {
+    background: var(--s3);
+  }
+  .picker button > span:first-of-type {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .picker i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 1.5px solid var(--dim);
+    display: inline-block;
+  }
+  .picker button.on i {
+    border-color: var(--acc);
+    background: var(--acc);
+    box-shadow: inset 0 0 0 2px var(--s3);
+  }
+  .picker small {
+    font: 11px var(--mono);
+    color: var(--dim);
+  }
+  .chip.ok {
+    background: var(--wash-ok);
+    color: var(--ok);
+  }
+  small.warn {
+    color: var(--wait);
+  }
   label > span,
+  .field > span,
   .runs > span {
     font: 500 11px var(--mono);
     letter-spacing: 0.08em;

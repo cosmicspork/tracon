@@ -2,6 +2,8 @@
 // interface can say what the node said, not "request failed".
 
 import type {
+  ChannelInfo,
+  ChannelMetrics,
   Event,
   Invite,
   Document,
@@ -14,6 +16,8 @@ import type {
   RecallHit,
   Review,
   Session,
+  WorkItem,
+  WorkView,
 } from './types'
 
 /** A document edit that lost to another: the current state comes back. */
@@ -54,11 +58,6 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
     throw new ApiError(res.status, message)
   }
   return json as T
-}
-
-export interface ChannelInfo {
-  name: string
-  nodes: string[]
 }
 
 export const api = {
@@ -165,6 +164,33 @@ export const api = {
   providerCode: (name: string, code: string) =>
     call<void>('POST', `/api/providers/${name}/code`, { code }),
   disconnectProvider: (name: string) => call<void>('POST', `/api/providers/${name}/disconnect`),
+  // The work ledger.
+  work: (channel: string, opts: { project_id?: string; state?: string } = {}) => {
+    const q = new URLSearchParams({ channel })
+    if (opts.project_id) q.set('project_id', opts.project_id)
+    if (opts.state) q.set('state', opts.state)
+    return call<{ items: WorkView[] }>('GET', `/api/work?${q}`)
+  },
+  workReady: (channel: string, project_id?: string) => {
+    const q = new URLSearchParams({ channel })
+    if (project_id) q.set('project_id', project_id)
+    return call<{ items: WorkView[] }>('GET', `/api/work/ready?${q}`)
+  },
+  workItem: (id: string) =>
+    call<{ item: WorkView | null; sessions: Session[]; discovered: { id: string; title: string; state: string }[] }>(
+      'GET',
+      `/api/work/${id}`,
+    ),
+  addWork: (w: { channel: string; title: string; body?: string; deps?: string[]; priority?: number; project_id?: string; discovered_from?: string }) =>
+    call<WorkItem>('POST', '/api/work', w),
+  putWork: (id: string, patch: { title?: string; body?: string; deps?: string[]; priority?: number; state?: 'open' | 'closed' }) =>
+    call<WorkItem>('PUT', `/api/work/${id}`, patch),
+  deleteWork: (id: string) => call<void>('DELETE', `/api/work/${id}`),
+  metrics: (sinceMs?: number) =>
+    call<{ since_ms: number; node_id: string; note: string; channels: ChannelMetrics[] }>(
+      'GET',
+      `/api/metrics${sinceMs ? `?since_ms=${sinceMs}` : ''}`,
+    ),
   // Enrollment: browser only.
   openInvite: (channels: string[]) => call<Invite>('POST', '/api/mesh/invite', { channels }),
   pollInvite: (code: string) => call<Invite>('GET', `/api/mesh/invite/${code}`),
