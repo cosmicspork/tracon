@@ -331,6 +331,66 @@ pub async fn post_direct(
     ok(st, text).map(|_| ())
 }
 
+/// Share channels with the hub's replica: admit the hub's own id as a member
+/// of them (role `hub`) and hand it the keyrings with a `processing: "hub"`
+/// binding, so the hub — and only the hub — batches them.
+pub async fn share_with_hub(
+    store: &Store,
+    identity: &Identity,
+    hub_url: &str,
+    channels: &[String],
+) -> Result<Vec<String>, EnrollError> {
+    let (st, text) = send(identity, hub_url, "GET", "/v0/info", None).await?;
+    let info = ok(st, text)?;
+    let hub_id = info["hub_node_id"]
+        .as_str()
+        .ok_or_else(|| EnrollError::Local("this hub runs no replica".into()))?
+        .to_string();
+    let grantee = info["hub_x25519_pub"]
+        .as_str()
+        .and_then(key32)
+        .map(x25519_dalek::PublicKey::from)
+        .ok_or_else(|| EnrollError::Local("the hub's sealing key is malformed".into()))?;
+    let own_name = crate::config::Config::load().node_name;
+    sync_own_channels(store, identity, hub_url, &own_name).await?;
+    let chans: Vec<String> = channels
+        .iter()
+        .filter(|c| c.as_str() != MESH_CHANNEL)
+        .cloned()
+        .collect();
+    if chans.is_empty() {
+        return Err(EnrollError::Local("name at least one channel".into()));
+    }
+    let Payload::KeyHandoff { mut channels } = handoff_payload(store, identity, &grantee, &chans)?
+    else {
+        unreachable!("handoff_payload builds a key handoff");
+    };
+    for h in &mut channels {
+        let mut b: Value = serde_json::from_str(&h.bindings_json).unwrap_or(json!({}));
+        b["processing"] = json!("hub");
+        h.bindings_json = b.to_string();
+        // Recorded locally too, so this node knows not to batch it.
+        if let Ok(Some(row)) = store.channel_get(&h.name) {
+            let _ = store.channel_put(&h.name, &row.keyring, &h.bindings_json);
+        }
+    }
+    let body = serde_json::to_vec(&json!({
+        "node_id": hub_id, "x25519_pub": info["hub_x25519_pub"], "name": "hub", "channels": chans, "role": "hub",
+    }))
+    .map_err(local)?;
+    let (st, text) = send(identity, hub_url, "POST", "/v0/admit", Some(body)).await?;
+    ok(st, text)?;
+    post_direct(
+        identity,
+        hub_url,
+        &hub_id,
+        &grantee,
+        &Payload::KeyHandoff { channels },
+    )
+    .await?;
+    Ok(chans)
+}
+
 /// Hand this node's policy bundle to every member of the hub.
 pub async fn push_policy(identity: &Identity, hub_url: &str) -> Result<usize, EnrollError> {
     let (toml, sig, key) = crate::policy::bundle::export()

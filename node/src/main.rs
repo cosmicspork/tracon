@@ -193,6 +193,15 @@ enum ChannelCommand {
     Create { name: String },
     /// The channels this node holds keys for.
     List,
+    /// Share channels with the hub's replica: it can then open and index
+    /// them, and run the nightly batch for them. Never do this for a work
+    /// channel; the hub is rented infrastructure.
+    Share {
+        #[arg(value_delimiter = ',')]
+        channels: Vec<String>,
+        #[arg(long)]
+        hub: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -555,6 +564,21 @@ async fn invite_command(channels: Vec<String>, ttl: u64, yes: bool) -> Result<()
 async fn channel_command(cmd: ChannelCommand) -> Result<()> {
     let store = tracon::store::Store::open(&config::Config::db_path())?;
     match cmd {
+        ChannelCommand::Share { channels, hub } => {
+            if !hub {
+                anyhow::bail!("only --hub is supported; a node gets channels by enrollment");
+            }
+            let cfg = config::Config::load();
+            let hub_url = cfg
+                .mesh
+                .hub_url
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("no hub configured"))?;
+            let (id, _) = tracon::mesh::identity::load_or_generate()?;
+            let n = tracon::mesh::enroll::share_with_hub(&store, &id, &hub_url, &channels).await?;
+            println!("shared {} with the hub's replica", n.join(", "));
+            Ok(())
+        }
         ChannelCommand::Create { name } => {
             if !proto::frame::valid_channel(&name) {
                 anyhow::bail!("channel names are lowercase [a-z0-9@._-], at most 64 characters");

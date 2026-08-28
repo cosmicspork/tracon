@@ -38,6 +38,7 @@ fn hub_with(admitted: &[(&Identity, &[&str])]) -> Hub {
                 channels: channels.iter().map(|s| s.to_string()).collect(),
                 admitted_ms: 0,
                 admitted_by: "test".into(),
+                role: Default::default(),
             })
             .unwrap();
     }
@@ -222,6 +223,7 @@ async fn cursor_behind_retention_is_gone() {
             channels: vec!["personal".into()],
             admitted_ms: 0,
             admitted_by: "t".into(),
+            role: Default::default(),
         })
         .unwrap();
     let app = app(frames.clone(), members, HubConfig::default());

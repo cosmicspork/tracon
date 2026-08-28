@@ -97,6 +97,7 @@ async fn start_hub(admitted: &[(&Identity, &[&str])]) -> String {
                 channels: channels.iter().map(|s| s.to_string()).collect(),
                 admitted_ms: 0,
                 admitted_by: "test".into(),
+                role: Default::default(),
             })
             .unwrap();
     }

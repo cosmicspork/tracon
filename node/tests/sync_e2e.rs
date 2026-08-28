@@ -56,6 +56,7 @@ impl Hub {
                     channels: vec![MESH_CHANNEL.into(), "personal".into()],
                     admitted_ms: 0,
                     admitted_by: "t".into(),
+                    role: Default::default(),
                 })
                 .unwrap();
         }
@@ -407,6 +408,7 @@ async fn a_late_joiner_backfills_records_from_each_site() {
             channels: vec![MESH_CHANNEL.into(), "personal".into()],
             admitted_ms: 0,
             admitted_by: "t".into(),
+            role: Default::default(),
         })
         .unwrap();
     let mesh_ring =

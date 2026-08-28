@@ -3,6 +3,8 @@
 # the other homelab images and any future outbound call).
 
 FROM rust:1-slim-bookworm AS builder
+# The replica's SQLite is bundled and compiled in.
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY . .
 RUN cargo build -p tracon-hub --release

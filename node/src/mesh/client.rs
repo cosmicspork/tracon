@@ -602,17 +602,23 @@ impl MeshClient {
                         .collect()
                 })
                 .unwrap_or_default();
-            let _ = self.store.node_channels_set(id, &channels);
             if id == me {
+                let _ = self.store.node_channels_set(id, &channels);
                 continue;
             }
-            n += 1;
             if let Some(x) = m["x25519_pub"].as_str().filter(|x| !x.is_empty()) {
                 self.peers
                     .lock()
                     .unwrap()
                     .insert(id.to_string(), x.to_string());
             }
+            // The hub as a replica is a member with a sealing key, never a
+            // peer node: it says no hello and runs no session.
+            if m["role"].as_str() == Some("hub") {
+                continue;
+            }
+            let _ = self.store.node_channels_set(id, &channels);
+            n += 1;
             if self.store.get_node(id).ok().flatten().is_none() {
                 let _ = self.store.put_node(&NodeRow {
                     id: id.to_string(),
