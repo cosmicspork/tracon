@@ -924,6 +924,13 @@ pod does not.
 - **Scope is directing work, not writing code.** Read a diff, approve or reject, send a
   prompt, read output, kill a stuck session.
 
+**Built (Phase 6).** A manifest, icons, and a hand-written service worker. The worker
+is deliberately not an offline mode: it caches the shell and the content-hashed assets
+and never touches `/api`, because a cached queue you cannot act on is worse than one
+that says the node is unreachable — and wrapping an endless SSE response in a fetch
+handler breaks the stream outright. Nothing is stored beyond that; the only credential
+is an HttpOnly cookie the browser holds.
+
 ### Desktop wrapper
 
 Tauri, not Swift plus Qt. What is actually wanted from native is tray presence,
@@ -942,6 +949,19 @@ would be a lot of platform surface for what is wanted from native.
 - **Editing is diff editing, not an editor.** `@codemirror/merge` for editable unified
   diffs, reusing the CodeMirror already present in review and notebook. Edits become
   `/revise` submissions.
+
+**Built (Phase 6).** The wrapper is a tray client and nothing more: it supervises
+nothing, holds no session state, and loads the same interface the node serves. Its own
+cargo workspace, so the node and hub stay buildable where webkit and gtk headers are
+absent. The tray is the queue plus a kill switch — the kill one level down, since it is
+destructive and easy to mis-click — and anything worth reading opens the window at that
+route.
+
+The diff editor edits the file the review submitted, shown as a unified merge view
+against the text it changed from, and emits a patch. The patch travels with the notes:
+`review_status` hands it to the agent, which applies it and resubmits. So editing is
+still a *request*, and the agent is still the only writer to the worktree. Desktop only,
+and the editor is lazy-loaded so the phone never fetches it.
 
 ### Reach across nodes
 
@@ -975,6 +995,62 @@ Bound per channel like processing nodes.
 
 Work approvals do not require the phone, which removes the need to tunnel anything out
 of the work machine and eliminates the asymmetry that would otherwise need explaining.
+
+**Built (Phase 6).** `notify.sink` and `notify.node` are channel bindings like any
+other, so exactly one node in a mesh delivers for a channel and a queue mirrored onto
+three nodes still buzzes once. The delivering node reads the *bus*, not the session
+manager: a peer's approval arrives mirrored and is published untapped, which reaches
+subscribers but never `Manager::publish_queue`. Hooking the manager would have silently
+missed the case the phase exists for — the other laptop raised it and this node is the
+one awake.
+
+Delivery is a POST to a pager bridge, which holds the device keys and seals per device;
+the node holds no notification secret. Because a bridge on a laptop cannot page while
+the laptop sleeps, a second bridge runs beside the always-on services, and pager's relay
+now authorizes a set of bridge keys rather than one. Pushes are hints: the queue is the
+truth, so a failed send is logged and dropped rather than retried forever, and a slow
+sink can never block a session.
+
+What it does not do is as deliberate: it does not announce the standing queue at
+startup (a redeploy is not news), and it does not page again when a review returns to
+`new` because the operator opened it and walked away — only when the agent resubmits.
+
+## Reaching a node
+
+Three surfaces, three different answers, and the differences are the point.
+
+**The harness** reaches its own tools over a separate listener with a per-session
+bearer token. It never carries the operator API, so a harness that finds the forward
+cannot drive sessions.
+
+**The operator, on the node's own machine**, is the operator by definition: a shell
+there already has the state. Loopback callers are answered with no credential, guarded
+only against DNS rebinding — a page on `evil.example` that resolves to `127.0.0.1`
+still sends `Host: evil.example`, which is refused.
+
+**The operator, from anywhere else**, needs a token. `tracon auth issue` mints one and
+prints it once; `POST /api/login` exchanges it for an HttpOnly, Secure, SameSite=Lax
+cookie. A cookie rather than a header because `EventSource` cannot set headers and the
+phone lives on `/api/stream`; Lax rather than Strict because opening a review from a
+push notification is a top-level cross-site navigation, and Strict drops the cookie on
+exactly that. Non-browser clients present the token as a bearer instead.
+
+Only hashes are stored — of the token, and of each cookie — so reading the database
+mints neither. Rotating the token drops every logged-in client in the same transaction
+that writes the new hash, which makes `tracon auth issue` the revoke-everything button.
+A credential alone is not enough: Origin and Host must agree, so a cross-site page
+carrying the cookie is refused.
+
+Until a token exists the node answers loopback only and says so, naming the command
+that would open the door. The SPA shell stays public once one does — it is open-source
+code holding nothing, and serving it is what lets the login screen render and a
+notification's deep link open.
+
+**The phone**, therefore, reaches a node directly over an HTTPS ingress rather than
+through the hub. The earlier sketch had it "read over the hub", but the hub has no
+browser-facing surface and no auth model for one, and inventing both to reach a node
+that is already reachable would have been the larger change. The hub still never talks
+to a browser.
 
 ## Constraints
 
@@ -1035,7 +1111,7 @@ claim/release (see [Metrics](#metrics)); the mesh frame format (see
 |---|---|
 | `review` | Contract absorbed. Broker makes it enforcing. Repo retired. |
 | `notebook` | Document corpus absorbed. Prefix scheme kept. Repo retired. |
-| `switchboard` | Superseded by the desktop wrapper. Retired last, after it stops supervising the things being replaced. The display-linked theme switcher is unrelated and needs its own home or a deliberate kill. |
+| `switchboard` | Superseded by the desktop wrapper. Retired last, after it stops supervising the things being replaced. On Linux it installs nothing, so what moves is macOS-only. Its display-linked theme switcher was **deliberately killed** in Phase 6 rather than rehomed. |
 | `pager` | Kept. Becomes the notification sink for personal and client channels. |
 | `svastha` | Relay and trust-binding patterns reused. |
 | `consulta` | Absorbed as node MCP tools (`query`, `describe`) with a node-owned Python sidecar. Guard contract kept. Repo retired after the tool has been in real use. |
