@@ -162,6 +162,7 @@ pub enum WriteError {
 /// Create or replace a document at a slug, on this node, as a sync write.
 /// `if_hash` is the edit's precondition: the hash the caller last read.
 /// `create_only` is the HTTP `If-None-Match: *` precondition.
+#[allow(clippy::too_many_arguments)]
 pub fn write_document(
     store: &crate::store::Store,
     bus: &crate::stream::Bus,
@@ -189,6 +190,7 @@ pub fn write_document(
         &corpus::new_id(),
     )? {
         DocumentWrite::Written { row, change } => {
+            let row = *row;
             bus.publish(crate::stream::Frame::Changes {
                 channel: channel.to_string(),
                 changes: vec![change],

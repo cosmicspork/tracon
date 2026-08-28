@@ -39,8 +39,14 @@ pub struct DocumentRow {
 
 #[derive(Debug)]
 pub enum DocumentWrite {
-    Written { row: DocumentRow, change: Change },
-    Conflict { hash: String, body: String },
+    Written {
+        row: Box<DocumentRow>,
+        change: Change,
+    },
+    Conflict {
+        hash: String,
+        body: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -254,13 +260,10 @@ impl Store {
                 DocumentRow::from_row,
             )
             .optional()?;
-        let hash_mismatch = if_hash.is_some_and(|want| {
-            existing.as_ref().map(|cur| cur.hash.as_str()) != Some(want)
-        });
+        let hash_mismatch = if_hash
+            .is_some_and(|want| existing.as_ref().map(|cur| cur.hash.as_str()) != Some(want));
         if (create_only && existing.is_some()) || hash_mismatch {
-            let (hash, body) = existing
-                .map(|cur| (cur.hash, cur.body))
-                .unwrap_or_default();
+            let (hash, body) = existing.map(|cur| (cur.hash, cur.body)).unwrap_or_default();
             return Ok(DocumentWrite::Conflict { hash, body });
         }
 
@@ -295,7 +298,10 @@ impl Store {
         .map_err(sync_err)?;
         row.hlc_ms = change.hlc_ms;
         tx.commit()?;
-        Ok(DocumentWrite::Written { row, change })
+        Ok(DocumentWrite::Written {
+            row: Box::new(row),
+            change,
+        })
     }
 
     pub fn apply_changes(

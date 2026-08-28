@@ -208,12 +208,15 @@ fn log_change(
 /// mutable row JSON. Existing ids may not be moved between channels either.
 fn validate_channel(conn: &Connection, channel: &str, c: &Change) -> Result<()> {
     let Some(_) = columns_of(&c.table) else {
-        return Err(SyncError::Malformed(format!("no replicated table {}", c.table)));
+        return Err(SyncError::Malformed(format!(
+            "no replicated table {}",
+            c.table
+        )));
     };
-    if c.op == ChangeOp::Upsert
-        && c.row.get("channel").and_then(Value::as_str) != Some(channel)
-    {
-        return Err(SyncError::Malformed("row channel does not match envelope".into()));
+    if c.op == ChangeOp::Upsert && c.row.get("channel").and_then(Value::as_str) != Some(channel) {
+        return Err(SyncError::Malformed(
+            "row channel does not match envelope".into(),
+        ));
     }
     let existing: Option<String> = conn
         .query_row(
@@ -659,7 +662,9 @@ mod tests {
             vec![Applied::Malformed]
         );
         let stored_channel: String = b
-            .query_row("SELECT channel FROM document WHERE id='d1'", [], |r| r.get(0))
+            .query_row("SELECT channel FROM document WHERE id='d1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(stored_channel, "personal");
     }

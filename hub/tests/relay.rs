@@ -324,15 +324,20 @@ async fn enrollment_lifecycle_and_admit() {
         h.members.get(&b.node_id()).unwrap().unwrap().channels.len(),
         3
     );
-    // Removal is self-authenticated: no member can revoke another one.
+    // Removal: self, or the sponsor recorded at admission. A stranger is
+    // simply absent; B did not admit A and cannot evict it.
     let (st, _) = s(&h, &a, "DELETE", &format!("/v0/admit/{}", c.node_id()), "").await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _) = s(&h, &b, "DELETE", &format!("/v0/admit/{}", a.node_id()), "").await;
     assert_eq!(st, StatusCode::FORBIDDEN);
+    // A admitted B, so A may revoke it (a lost laptop); B is out afterwards.
     let (st, _) = s(&h, &a, "DELETE", &format!("/v0/admit/{}", b.node_id()), "").await;
-    assert_eq!(st, StatusCode::FORBIDDEN);
-    let (st, _) = s(&h, &b, "DELETE", &format!("/v0/admit/{}", b.node_id()), "").await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     let (st, _) = s(&h, &b, "GET", "/v0/members", "").await;
     assert_eq!(st, StatusCode::FORBIDDEN);
+    // Self-removal needs no sponsor.
+    let (st, _) = s(&h, &a, "DELETE", &format!("/v0/admit/{}", a.node_id()), "").await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]

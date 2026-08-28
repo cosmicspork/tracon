@@ -442,10 +442,16 @@ pub async fn remove_member(
 ) -> ApiResult {
     let me = member_of(&s, &owner)?;
     let node_id = node_id.to_ascii_lowercase();
-    if node_id != me.node_id {
+    // Removal is self, the sponsor recorded at admission, or the hub. A peer
+    // that is neither cannot evict the rest of the mesh.
+    let target = s.members.get(&node_id).map_err(io)?;
+    let allowed = node_id == me.node_id
+        || me.role == crate::store::MemberRole::Hub
+        || target.as_ref().is_some_and(|t| t.admitted_by == me.node_id);
+    if target.is_some() && !allowed {
         return Err(err(
             StatusCode::FORBIDDEN,
-            "a node may only remove its own membership",
+            "only the member itself or the node that admitted it may remove it",
         ));
     }
     if s.members.remove(&node_id).map_err(io)? {
