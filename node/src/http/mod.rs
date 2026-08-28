@@ -33,6 +33,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/node", get(api::get_node))
         .route("/api/node/refresh-models", post(api::refresh_models))
         .route("/api/usage", get(api::usage))
+        .route("/api/providers", get(api::list_providers))
+        .route("/api/providers/{name}/connect", post(api::connect_provider))
+        .route("/api/providers/{name}/code", post(api::provider_code))
+        .route(
+            "/api/providers/{name}/disconnect",
+            post(api::disconnect_provider),
+        )
         .route("/api/nodes", get(api::list_nodes))
         .route("/api/mesh", get(api::get_mesh))
         .route("/api/channels", get(api::list_channels))
@@ -241,6 +248,30 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     };
     if let Some(m) = &state.mesh {
         m.set_executor(Arc::new(state.clone()));
+    }
+    // Provider logins run through the same backend as sessions, against a
+    // store the node keeps; a connected provider re-runs the model probe.
+    {
+        let providers = crate::providers::Providers::new(
+            cfg.clone(),
+            broker.clone(),
+            store_key,
+            state.adapter.clone(),
+            backend.clone(),
+            state.node_id.clone(),
+            bus.clone(),
+        );
+        let probe_state = state.clone();
+        let probe_backend = backend.clone();
+        providers.set_on_connected(Box::new(move || {
+            let s = probe_state.clone();
+            let b = probe_backend.clone();
+            tokio::spawn(async move {
+                let _ = api::probe_models_into_store(&s, b.as_ref()).await;
+            });
+        }));
+        state.manager.set_providers(providers.clone());
+        tokio::spawn(providers.refresh_loop());
     }
 
     // The harness listener is separate from the operator's: it carries only the

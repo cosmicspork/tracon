@@ -95,6 +95,8 @@ pub struct Manager {
     mesh: Arc<std::sync::OnceLock<Arc<crate::mesh::client::MeshClient>>>,
     /// The boundary every harness runs behind.
     backend: Arc<dyn crate::boundary::Backend>,
+    /// Provider logins, once the node exists to run them.
+    providers: Arc<std::sync::OnceLock<Arc<crate::providers::Providers>>>,
 }
 
 impl Manager {
@@ -119,6 +121,7 @@ impl Manager {
             tokens: Arc::new(Mutex::new(HashMap::new())),
             probe_token: mint_token(),
             mesh: Arc::new(std::sync::OnceLock::new()),
+            providers: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -132,6 +135,14 @@ impl Manager {
 
     pub fn mesh(&self) -> Option<&Arc<crate::mesh::client::MeshClient>> {
         self.mesh.get()
+    }
+
+    pub fn set_providers(&self, p: Arc<crate::providers::Providers>) {
+        let _ = self.providers.set(p);
+    }
+
+    pub fn providers(&self) -> Option<&Arc<crate::providers::Providers>> {
+        self.providers.get()
     }
 
     /// Run a command on the node that owns a session. A prompt to an owner

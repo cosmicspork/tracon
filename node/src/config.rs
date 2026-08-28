@@ -220,6 +220,10 @@ pub struct Provider {
     pub upstream: String,
     /// `anthropic` or `openai`: which headers the credential becomes.
     pub shape: String,
+    /// The harness's own provider id for a subscription login
+    /// (`omp auth-broker login <id>`); none means API key only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
 }
 
 impl Default for Provider {
@@ -228,6 +232,7 @@ impl Default for Provider {
             credential: String::new(),
             upstream: String::new(),
             shape: SHAPE_OPENAI.into(),
+            login: None,
         }
     }
 }
@@ -240,6 +245,7 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 credential: "anthropic".into(),
                 upstream: "https://api.anthropic.com".into(),
                 shape: SHAPE_ANTHROPIC.into(),
+                login: Some("anthropic".into()),
             },
         ),
         (
@@ -248,6 +254,7 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 credential: "openai".into(),
                 upstream: "https://api.openai.com".into(),
                 shape: SHAPE_OPENAI.into(),
+                login: None,
             },
         ),
     ]

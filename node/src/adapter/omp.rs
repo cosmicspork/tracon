@@ -1,12 +1,14 @@
 //! The omp ACP adapter. Drives `omp acp` over the runner's stdio.
 
+use std::path::Path;
+
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
     AdapterError, HarnessAdapter, HarnessEvent, HarnessHandle, HarnessVersion, LaunchSpec,
-    ModelOption, PermissionReply, PermissionRequest, TurnResult,
+    LiftedToken, LoginFlow, ModelOption, PermissionReply, PermissionRequest, TurnResult,
 };
 use crate::acp::{
     rpc::{Incoming, Peer},
@@ -128,6 +130,152 @@ impl HarnessAdapter for OmpAdapter {
         tokio::spawn(session.pump(event_tx));
         Ok((Box::new(handle), event_rx))
     }
+
+    /// `omp auth-broker login <provider>`: prints the URL, then waits on stdin
+    /// for the pasted redirect URL or code. The runner mounts the login store
+    /// as the harness's state directory, so the token lands there and nowhere
+    /// a session can see.
+    async fn login(
+        &self,
+        runner: &dyn Runner,
+        provider: &str,
+        name: &str,
+    ) -> Result<LoginFlow, AdapterError> {
+        use tokio::io::AsyncBufReadExt;
+        let spawned = runner
+            .spawn(RunnerCommand {
+                argv: vec![
+                    "omp".into(),
+                    "auth-broker".into(),
+                    "login".into(),
+                    provider.into(),
+                ],
+                name: name.into(),
+                ..Default::default()
+            })
+            .await?;
+        let output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let mut lines = tokio::io::BufReader::new(spawned.stdout).lines();
+        let url = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            while let Ok(Some(line)) = lines.next_line().await {
+                output.lock().unwrap().push_str(&line);
+                output.lock().unwrap().push('\n');
+                // The URL may share its line with a label; the local
+                // shortcut is for a browser on the same machine, which the
+                // boundary is not.
+                if let Some(u) = line.split_whitespace().find(|t| {
+                    (t.starts_with("https://") || t.starts_with("http://"))
+                        && !t.starts_with("http://localhost")
+                        && !t.starts_with("http://127.0.0.1")
+                }) {
+                    return Some(u.trim_end_matches(['.', ',']).to_string());
+                }
+            }
+            None
+        })
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
+            AdapterError::Protocol(format!(
+                "login printed no URL: {}",
+                output.lock().unwrap().lines().last().unwrap_or("")
+            ))
+        })?;
+        // Keep draining so the login never blocks on a full pipe, and keep
+        // what it says for the failure reason.
+        let drain = output.clone();
+        tokio::spawn(async move {
+            while let Ok(Some(line)) = lines.next_line().await {
+                let mut o = drain.lock().unwrap();
+                o.push_str(&line);
+                o.push('\n');
+                if o.len() > 64 * 1024 {
+                    let cut = o.len() - 32 * 1024;
+                    o.drain(..cut);
+                }
+            }
+        });
+        Ok(LoginFlow {
+            url,
+            stdin: spawned.stdin,
+            done: spawned.done,
+            output,
+        })
+    }
+
+    /// `omp token <provider> --force-refresh`: omp refreshes in its own store;
+    /// the token it prints is discarded, the store is read by `lift`.
+    async fn refresh(
+        &self,
+        runner: &dyn Runner,
+        provider: &str,
+        name: &str,
+    ) -> Result<(), AdapterError> {
+        let out = runner
+            .run_capture(RunnerCommand {
+                argv: vec![
+                    "omp".into(),
+                    "token".into(),
+                    provider.into(),
+                    "--force-refresh".into(),
+                ],
+                name: name.into(),
+                ..Default::default()
+            })
+            .await?;
+        if !out.status.success() {
+            return Err(AdapterError::Protocol(format!(
+                "refresh exited with {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .last()
+                    .unwrap_or("")
+            )));
+        }
+        Ok(())
+    }
+
+    /// omp's store is SQLite: `auth_credentials.data` is JSON
+    /// `{access, refresh, expires, accountId, email}` for an OAuth row.
+    async fn lift(&self, store_dir: &Path, provider: &str) -> Result<LiftedToken, AdapterError> {
+        let db = store_dir.join("agent/agent.db");
+        let provider = provider.to_string();
+        tokio::task::spawn_blocking(move || lift_from_agent_db(&db, &provider))
+            .await
+            .map_err(|e| AdapterError::Protocol(e.to_string()))?
+    }
+}
+
+fn lift_from_agent_db(db: &Path, provider: &str) -> Result<LiftedToken, AdapterError> {
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| AdapterError::Protocol(format!("open {}: {e}", db.display())))?;
+    let data: String = conn
+        .query_row(
+            "SELECT data FROM auth_credentials WHERE provider = ?1 AND credential_type = 'oauth' \
+             AND disabled_cause IS NULL ORDER BY updated_at DESC LIMIT 1",
+            [provider],
+            |r| r.get(0),
+        )
+        .map_err(|_| {
+            AdapterError::Protocol(format!(
+                "no usable oauth credential for {provider} in the login store"
+            ))
+        })?;
+    let v: serde_json::Value = serde_json::from_str(&data)
+        .map_err(|e| AdapterError::Protocol(format!("credential row is not JSON: {e}")))?;
+    let access = v["access"]
+        .as_str()
+        .ok_or_else(|| AdapterError::Protocol("credential row has no access token".into()))?
+        .to_string();
+    Ok(LiftedToken {
+        access,
+        refresh: v["refresh"].as_str().map(str::to_string),
+        expires_ms: v["expires"].as_i64(),
+        identity: v["email"].as_str().map(str::to_string),
+    })
 }
 
 /// Owns the peer and the inbound stream between launch and pump.

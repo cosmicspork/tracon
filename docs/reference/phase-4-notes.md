@@ -59,3 +59,19 @@ the listeners are up, presents a read-only probe token, and is skipped when no m
 credential is usable on the node. `agent.db` on the harness volume is set aside at
 startup (`agent.db.retired`), and `tracon harness import-credentials` / `harness shell`
 are gone.
+
+## Connecting a provider
+
+`omp auth-broker login <provider>` prints the sign-in URL, starts a callback listener
+on its own localhost, and then waits on stdin for the pasted redirect URL or code
+(closing stdin crashes its readline, which is how the fallback was found). The node
+runs it inside the boundary against a per-provider store at
+`<state>/providers/<provider>/` mounted as the harness's `$HOME/.omp` — never a
+session's volume — reads the URL off stdout, shows it on the Nodes screen, and writes
+the paste-back to stdin. The callback port is unreachable from the operator's browser
+by construction, so the paste-back is the path. When the login exits `0`, the node reads
+`auth_credentials.data` (`{access, refresh, expires, accountId, email}`) from that
+store's `agent.db` and puts it in the broker as an `oauth` credential pinned to the
+node; `omp token <provider> --force-refresh` on a timer (half an hour ahead of
+`expires`) refreshes it in the same store and the node lifts again. A provider without
+a login flow (`openai` by default) is API-key only: `tracon credential import`.
