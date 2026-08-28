@@ -25,6 +25,15 @@ use crate::pokes::PokeHub;
 use crate::store::{FrameStore, MemberStore};
 
 pub const DB_FILE: &str = "hub.db";
+
+/// A random 128-bit id for hub-authored records: the hub has no uuid crate
+/// and needs no ordering guarantee.
+fn rand_id() -> u128 {
+    use rand_core::RngCore;
+    let mut b = [0u8; 16];
+    rand_core::OsRng.fill_bytes(&mut b);
+    u128::from_be_bytes(b)
+}
 const PAGE: usize = 200;
 
 pub struct Replica {
@@ -417,6 +426,79 @@ impl Replica {
     pub fn with_db<T>(&self, f: impl FnOnce(&Connection) -> T) -> T {
         let conn = self.db.lock().unwrap();
         f(&conn)
+    }
+
+    /// Build tonight's batch for every channel whose binding says the hub
+    /// processes it. Returns promotion ids created.
+    pub fn batch_now(&self, min_age_ms: i64) -> Vec<String> {
+        let mut out = Vec::new();
+        for channel in self.readable_channels() {
+            if self.bindings_of(&channel)["processing"].as_str() != Some("hub") {
+                continue;
+            }
+            let id = format!("{:032x}", rand_id());
+            let plan = {
+                let conn = self.db.lock().unwrap();
+                tracon_sync::batch::plan_promotion(&conn, &channel, &id, now_ms(), min_age_ms)
+            };
+            let Ok(Some(plan)) = plan else {
+                continue;
+            };
+            if self
+                .write_change(
+                    &channel,
+                    "promotion",
+                    ChangeOp::Upsert,
+                    &id,
+                    plan.promotion_row(now_ms()),
+                )
+                .is_err()
+            {
+                continue;
+            }
+            for item in &plan.items {
+                let row = {
+                    let conn = self.db.lock().unwrap();
+                    tracon_sync::batch::memory_row_with_state(
+                        &conn,
+                        &item.memory_id,
+                        "proposed",
+                        now_ms(),
+                    )
+                };
+                if let Ok(Some(row)) = row {
+                    let _ = self.write_change(
+                        &channel,
+                        "memory",
+                        ChangeOp::Upsert,
+                        &item.memory_id,
+                        row,
+                    );
+                }
+            }
+            out.push(id);
+        }
+        out
+    }
+
+    /// The nightly loop: at `HH:MM` UTC, build the batches.
+    pub async fn nightly(self: Arc<Self>, at: String) {
+        loop {
+            let (h, m) = at
+                .split_once(':')
+                .and_then(|(h, m)| Some((h.parse::<i64>().ok()?, m.parse::<i64>().ok()?)))
+                .unwrap_or((3, 0));
+            let day = (now_ms() / 1000).rem_euclid(86_400);
+            let mut wait = h * 3600 + m * 60 - day;
+            if wait <= 0 {
+                wait += 86_400;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(wait as u64)).await;
+            let made = self.batch_now(6 * 3600 * 1000);
+            if !made.is_empty() {
+                tracing::info!(batches = made.len(), "nightly promotion batches built");
+            }
+        }
     }
 
     /// Wake on every append, look anyway every thirty seconds.

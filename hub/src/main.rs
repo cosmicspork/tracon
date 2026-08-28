@@ -85,6 +85,8 @@ async fn main() {
             admit_self(members.as_ref(), r.as_ref(), hub::auth::now_ms()).expect("admit the hub");
             tracing::info!(hub_node_id = %r.node_id(), fresh_identity = fresh, "replica enabled");
             tokio::spawn(r.clone().run());
+            let at = std::env::var("TRACON_HUB_PROMOTE_AT").unwrap_or_else(|_| "03:00".into());
+            tokio::spawn(r.clone().nightly(at));
             Some(r)
         }
         _ => {

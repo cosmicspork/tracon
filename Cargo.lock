@@ -2825,6 +2825,7 @@ version = "0.2.2"
 dependencies = [
  "axum",
  "hex",
+ "rand_core 0.6.4",
  "rusqlite",
  "serde",
  "serde_json",

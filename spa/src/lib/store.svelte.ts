@@ -30,7 +30,7 @@ class Store {
   providers = $state<ProviderInfo[]>([])
   /** Set briefly after the hub comes back: how many queued items went out. */
   reconnected = $state<number | null>(null)
-  queue = $state<Queue>({ waiting: [], reviews: [], running: [], ended: [] })
+  queue = $state<Queue>({ waiting: [], reviews: [], promotions: [], running: [], ended: [] })
   sessions = $state<Map<string, Session>>(new Map())
   /** Persisted events for the session that is open on screen. */
   events = $state<Event[]>([])
@@ -81,6 +81,7 @@ class Store {
       'node',
       'mesh',
       'providers',
+      'promotions',
     ] as const) {
       this.source.addEventListener(name, (m) => this.onFrame(JSON.parse((m as MessageEvent).data)))
     }
@@ -198,6 +199,10 @@ class Store {
         this.providers = frame.providers
         break
       }
+      case 'promotions': {
+        this.queue = { ...this.queue, promotions: frame.waiting }
+        break
+      }
     }
   }
 
@@ -213,6 +218,7 @@ class Store {
     this.queue = {
       waiting: this.queue.waiting,
       reviews: this.queue.reviews,
+      promotions: this.queue.promotions,
       running: terminal ? strip(this.queue.running) : upsert(this.queue.running, s),
       ended: terminal ? upsert(this.queue.ended, s) : strip(this.queue.ended),
     }

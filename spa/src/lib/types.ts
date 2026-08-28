@@ -151,8 +151,44 @@ export interface Review {
 export interface Queue {
   waiting: Permission[]
   reviews: Review[]
+  /** Nightly memory-promotion batches, decided per item. */
+  promotions: Promotion[]
   running: Session[]
   ended: Session[]
+}
+
+/** A promotion batch as the node keeps it; `items_json` holds the memories. */
+export interface Promotion {
+  id: string
+  channel: string
+  items_json: string
+  state: 'open' | 'decided'
+  verdicts_json: string | null
+  decided_by: string | null
+  decided_ms: number | null
+  site: string
+  hlc_ms: number
+  created_ms: number
+}
+
+export interface PromotionItem {
+  memory_id: string
+  kind: 'fact' | 'lesson' | 'episode'
+  scope: string
+  scope_ref: string | null
+  body: string
+  confidence: number
+  source_session: string | null
+  source_node: string | null
+  created_ms: number
+}
+
+export function promotionItems(p: Promotion): PromotionItem[] {
+  try {
+    return JSON.parse(p.items_json) as PromotionItem[]
+  } catch {
+    return []
+  }
 }
 
 export type Frame =
@@ -165,6 +201,7 @@ export type Frame =
   | ({ type: 'node' } & NodeInfo)
   | ({ type: 'mesh' } & MeshState)
   | { type: 'providers'; providers: ProviderInfo[] }
+  | { type: 'promotions'; waiting: Promotion[] }
 
 export const TERMINAL_STATES: SessionState[] = ['closed', 'killed_budget', 'failed']
 

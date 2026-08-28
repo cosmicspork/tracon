@@ -131,6 +131,11 @@ enum MemoryCommand {
         #[arg(long, default_value = "personal")]
         channel: String,
     },
+    /// Build the promotion batches now instead of tonight.
+    Batch {
+        #[arg(long)]
+        now: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -840,6 +845,15 @@ async fn memory_command(cmd: MemoryCommand) -> Result<()> {
         MemoryCommand::Rm { id } => {
             node_call(Method::DELETE, &format!("/api/memories/{id}"), None, None).await?;
             println!("removed {id}");
+            Ok(())
+        }
+        MemoryCommand::Batch { now } => {
+            if !now {
+                anyhow::bail!("pass --now; the nightly batch runs on its own");
+            }
+            let v = node_call(Method::POST, "/api/promotions/batch", None, None).await?;
+            let n = v["created"].as_array().map(|a| a.len()).unwrap_or(0);
+            println!("{n} batch{} created", if n == 1 { "" } else { "es" });
             Ok(())
         }
         MemoryCommand::Recall { query, channel } => {

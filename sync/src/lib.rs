@@ -9,6 +9,7 @@
 //! clock) so the deferred cr-sqlite path remains open.
 
 pub mod apply;
+pub mod batch;
 pub mod hlc;
 pub mod schema;
 
