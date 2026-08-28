@@ -2,6 +2,11 @@
 
 default: check
 
+# The node image for pod-hosted nodes, and the harness image those pods pull.
+node-image tag="dev":
+    podman build -f Dockerfile.node -t ghcr.io/cosmicspork/tracon-node:{{tag}} .
+    podman build -f containers/harness/Containerfile -t ghcr.io/cosmicspork/tracon-harness:{{tag}} containers/harness
+
 # Build the SPA into spa/dist (embedded by the node at compile time).
 spa:
     cd spa && bun install --frozen-lockfile && bun run build

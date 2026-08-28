@@ -1,0 +1,48 @@
+# The node image, for a node that runs as a pod (the Kubernetes runtime). It
+# carries the node binary with the SPA embedded, git for worktrees, and the
+# consulta sidecar's interpreter (uv, so the Phase 0 "Python 3.9, no uv"
+# finding about the work environment no longer applies: the runner topology
+# provisions the sidecar's dependencies itself). Laptops do not use this
+# image; they fetch the static binary.
+
+FROM docker.io/oven/bun:1 AS spa
+WORKDIR /build/spa
+COPY spa/package.json spa/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY spa .
+RUN bun run build
+
+FROM docker.io/library/rust:1-slim-bookworm AS builder
+WORKDIR /build
+COPY . .
+COPY --from=spa /build/spa/dist spa/dist
+RUN cargo build -p tracon --release --bin tracon
+
+# consulta, at a pinned ref, with its environment resolved at build time so the
+# first query does not wait on a download inside the boundary.
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS consulta
+ARG CONSULTA_REF=main
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch "${CONSULTA_REF}" https://github.com/cosmicspork/consulta.git /opt/consulta
+WORKDIR /opt/consulta
+ENV UV_LINK_MODE=copy
+RUN uv sync --frozen --no-dev
+
+# The runtime is the same image consulta's environment was resolved on, so
+# its venv's interpreter link holds; uv runs it offline from here.
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /build/target/release/tracon /usr/local/bin/tracon
+COPY --from=consulta /opt/consulta /opt/consulta
+ENV UV_NO_SYNC=1 UV_OFFLINE=1 UV_CACHE_DIR=/tmp/uv-cache
+# State and config are volumes; the deployment sets XDG_STATE_HOME=/state and
+# XDG_CONFIG_HOME=/config. Runs as uid 65532, the same uid the harness pods
+# use, so what each writes on the shared claim the other can read.
+RUN mkdir -p /state /config \
+    && chown -R 65532:65532 /state /config /opt/consulta
+USER 65532:65532
+ENTRYPOINT ["tracon"]
+CMD ["serve"]
