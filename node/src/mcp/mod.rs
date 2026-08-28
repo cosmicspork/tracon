@@ -6,8 +6,10 @@
 //! node to do, never as something it holds.
 
 pub mod consulta;
+pub mod docs;
 pub mod gitlab;
 pub mod jira;
+pub mod memory;
 pub mod review;
 
 use std::sync::Arc;
@@ -83,6 +85,11 @@ impl Tools {
         // publish can still ask for review and be told why it stopped there.
         if self.session.get().is_some() {
             out.extend(review::definitions());
+            // Memory and documents need no credential either: the corpus is
+            // the node's own, and reading it is what every session starts by
+            // doing. This means every session gets an MCP server.
+            out.extend(memory::definitions());
+            out.extend(docs::definitions());
         }
         out
     }
@@ -105,6 +112,20 @@ impl Tools {
                     .get()
                     .ok_or("review tools are not available on this node")?;
                 review::call(&access.store, &access.manager, ctx, name, args).await
+            }
+            memory::RECALL | memory::RETAIN => {
+                let access = self
+                    .session
+                    .get()
+                    .ok_or("memory is not available on this node")?;
+                memory::call(access, ctx, name, args).await
+            }
+            docs::DOC_READ | docs::DOC_SEARCH | docs::DOC_WRITE => {
+                let access = self
+                    .session
+                    .get()
+                    .ok_or("documents are not available on this node")?;
+                docs::call(access, ctx, name, args).await
             }
             other => Err(format!("no tool named {other}")),
         }

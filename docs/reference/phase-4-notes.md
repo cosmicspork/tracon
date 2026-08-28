@@ -102,3 +102,16 @@ the loop, so an aborted hub still answers.
 Bank identity is `sha256(channel ‖ canonical remote)` (`corpus::project`), resolved on
 the node's side from `remote.origin.url` and recorded as `session.project_id`; a
 repository without a remote falls back to its directory name and says so.
+
+## Memory and documents as tools
+
+Every session now gets the MCP server: `recall`, `retain`, `doc_search`, `doc_read`
+need no credential, so the "no credential, no server" rule that held since Phase 1
+gave way — the corpus is the node's own. Bundle v3 allows the four reads and `retain`;
+`doc_write` is unnamed and therefore asked. What `retain` may make into context is
+bounded by kind rather than by a question each time: a lesson, or a fact under 0.7
+confidence, enters as `candidate` and waits for the nightly batch. `retain` refuses the
+`directive` kind: those are the operator's, written through `POST /api/memories` or
+`tracon memory add`. The CLI (`tracon doc …`, `tracon memory …`) is a client of the
+running node's API on purpose — a write straight into the store would never reach the
+mesh outbox. Documents keep the notebook's `If-Match`/412 edit contract.
