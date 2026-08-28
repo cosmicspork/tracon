@@ -128,3 +128,18 @@ read-only under the harness's state directory and passed as
 recorded as an `orientation` event so the transcript shows what the agent was told.
 Nothing is written into the worktree; the `materialize` test that forbids an
 `AGENTS.md` still holds.
+## The hub as a replica
+
+With a data directory the hub now has an identity (`hub-identity.seed`) and a `hub.db`
+holding the same replicated tables a node does, installed from the `sync` crate. It
+admits itself into `@mesh` as a member of role `hub`; nodes keep its sealing key but
+never list it as a peer. `tracon channel share --hub <channels>` admits the hub into
+those channels and hands it their keyrings direct-sealed with a `processing: "hub"`
+binding. The replica loop reads its own frame store from a per-channel cursor, opens
+what it holds keys for, applies changes with the same LWW code, answers
+`changes_request` for its own rows, and counts what it could not open. A channel
+nobody shares stays ciphertext by construction — there is no key — which is the
+trust-asymmetry decision in code. The hub Dockerfile gains `gcc` for the bundled SQLite.
+
+Found on the way: the key-handoff path re-locked the replica's own connection while
+holding it (rewinding cursors) — a self-deadlock the replica test caught on its first run.

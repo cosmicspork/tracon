@@ -7,8 +7,10 @@
 //! filesystem stores under the data directory.
 
 pub mod auth;
+pub mod identity;
 pub mod nonce;
 pub mod pokes;
+pub mod replica;
 pub mod routes;
 pub mod store;
 
@@ -57,6 +59,8 @@ pub struct AppState {
     pub pokes: Arc<PokeHub>,
     pub enroll: Arc<EnrollSlots>,
     pub limiter: Arc<RateLimit>,
+    /// The replica half, when the hub has an identity and a data directory.
+    pub replica: Option<Arc<replica::Replica>>,
 }
 
 /// Admit the bootstrap keys (`TRACON_HUB_ADMIT`) into `@mesh` if absent.
@@ -80,6 +84,7 @@ pub fn admit_bootstrap(
                 channels: vec![proto::frame::MESH_CHANNEL.to_string()],
                 admitted_ms: now_ms,
                 admitted_by: "env".into(),
+                role: store::MemberRole::Node,
             })?;
             added += 1;
         }
@@ -87,18 +92,62 @@ pub fn admit_bootstrap(
     Ok(added)
 }
 
-/// Build the hub router over the given stores.
+/// Build the hub router over the given stores, relay only.
 pub fn app(frames: Arc<dyn FrameStore>, members: Arc<dyn MemberStore>, cfg: HubConfig) -> Router {
-    let state = AppState {
+    app_with_state(state_for(
+        frames,
+        members,
+        cfg,
+        Arc::new(PokeHub::new()),
+        None,
+    ))
+}
+
+pub fn state_for(
+    frames: Arc<dyn FrameStore>,
+    members: Arc<dyn MemberStore>,
+    cfg: HubConfig,
+    pokes: Arc<PokeHub>,
+    replica: Option<Arc<replica::Replica>>,
+) -> AppState {
+    AppState {
         frames,
         members,
         cfg: Arc::new(cfg),
         nonces: Arc::new(NonceStore::new()),
-        pokes: Arc::new(PokeHub::new()),
+        pokes,
         enroll: Arc::new(EnrollSlots::new()),
         limiter: Arc::new(RateLimit::new()),
-    };
-    app_with_state(state)
+        replica,
+    }
+}
+
+/// The hub as a member of `@mesh` under its own identity, so nodes can seal
+/// handoffs to it and it can read the channels it is handed.
+pub fn admit_self(
+    members: &dyn MemberStore,
+    replica: &replica::Replica,
+    now_ms: i64,
+) -> std::io::Result<()> {
+    let id = replica.node_id();
+    let existing = members.get(&id)?;
+    let mut channels = vec![proto::frame::MESH_CHANNEL.to_string()];
+    if let Some(e) = &existing {
+        for c in &e.channels {
+            if !channels.contains(c) {
+                channels.push(c.clone());
+            }
+        }
+    }
+    members.put(&Member {
+        node_id: id,
+        x25519_pub: replica.x25519_hex(),
+        name: "hub".into(),
+        channels,
+        admitted_ms: existing.map(|e| e.admitted_ms).unwrap_or(now_ms),
+        admitted_by: "self".into(),
+        role: store::MemberRole::Hub,
+    })
 }
 
 pub fn app_with_state(state: AppState) -> Router {

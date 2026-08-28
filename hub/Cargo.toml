@@ -16,6 +16,9 @@ path = "src/main.rs"
 
 [dependencies]
 tracon-proto.workspace = true
+tracon-sync.workspace = true
+rusqlite.workspace = true
+x25519-dalek = "2"
 axum.workspace = true
 hex.workspace = true
 serde.workspace = true

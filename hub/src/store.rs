@@ -257,6 +257,16 @@ impl FrameStore for FsFrames {
 
 // ---------------------------------------------------------------- members
 
+/// What kind of member: a node, or the hub itself as a replica. Nodes skip a
+/// hub member when listing peers — it never says hello and runs no sessions.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberRole {
+    #[default]
+    Node,
+    Hub,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Member {
     pub node_id: String,
@@ -265,6 +275,8 @@ pub struct Member {
     pub channels: Vec<String>,
     pub admitted_ms: i64,
     pub admitted_by: String,
+    #[serde(default)]
+    pub role: MemberRole,
 }
 
 pub trait MemberStore: Send + Sync {
@@ -538,6 +550,7 @@ mod tests {
             channels: vec!["@mesh".into(), "personal".into()],
             admitted_ms: 1,
             admitted_by: "env".into(),
+            role: Default::default(),
         };
         for s in [
             Box::new(MemoryMembers::new()) as Box<dyn MemberStore>,

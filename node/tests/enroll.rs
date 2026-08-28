@@ -29,6 +29,7 @@ async fn start_hub(admitted: &[&Identity]) -> String {
                 channels: vec![MESH_CHANNEL.into(), "personal".into()],
                 admitted_ms: 0,
                 admitted_by: "env".into(),
+                role: Default::default(),
             })
             .unwrap();
     }

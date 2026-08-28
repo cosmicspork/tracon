@@ -2825,6 +2825,7 @@ version = "0.2.2"
 dependencies = [
  "axum",
  "hex",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
@@ -2835,6 +2836,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracon-proto",
+ "tracon-sync",
+ "x25519-dalek",
 ]
 
 [[package]]

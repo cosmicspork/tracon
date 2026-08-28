@@ -60,6 +60,11 @@ pub async fn info(State(s): State<AppState>) -> Json<Value> {
         "max_channel_bytes": s.cfg.max_channel_bytes,
         "max_frame": MAX_FRAME_BYTES,
         "enroll_ttl_secs": s.cfg.enroll_ttl_secs,
+        "replica": s.replica.is_some(),
+        "hub_node_id": s.replica.as_ref().map(|r| r.node_id()),
+        "hub_x25519_pub": s.replica.as_ref().map(|r| r.x25519_hex()),
+        "replica_channels": s.replica.as_ref().map(|r| r.readable_channels()),
+        "replica_undecryptable": s.replica.as_ref().map(|r| r.undecryptable()),
     }))
 }
 
@@ -103,6 +108,9 @@ pub async fn post_frame(
         if let Some(k) = key32(&m.node_id) {
             s.pokes.poke(&k);
         }
+    }
+    if let Some(r) = &s.replica {
+        r.wake.notify_one();
     }
     Ok((StatusCode::CREATED, Json(json!({"seq": seq}))))
 }
@@ -320,6 +328,10 @@ pub struct AdmitBody {
     pub name: String,
     #[serde(default)]
     pub channels: Vec<String>,
+    /// `hub` when a node shares channels with the replica. Only the hub's own
+    /// id may be admitted as a hub.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 /// Admit or extend a member. The admitter must itself be in every channel it
@@ -343,6 +355,25 @@ pub async fn admit(
         return Err(err(StatusCode::BAD_REQUEST, "name at most 64 chars"));
     }
     let is_self = node_id == me.node_id;
+    let role = match body.role.as_deref() {
+        Some("hub") => {
+            let hub_id = s.replica.as_ref().map(|r| r.node_id());
+            if hub_id.as_deref() != Some(node_id.as_str()) {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "only this hub's own id may be admitted as a hub",
+                ));
+            }
+            crate::store::MemberRole::Hub
+        }
+        Some(other) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!("unknown role {other}"),
+            ))
+        }
+        None => crate::store::MemberRole::Node,
+    };
     let mut channels: Vec<String> = vec![MESH_CHANNEL.to_string()];
     for c in &body.channels {
         if !valid_channel(c) {
@@ -379,8 +410,18 @@ pub async fn admit(
             .as_ref()
             .map(|e| e.admitted_by.clone())
             .unwrap_or_else(|| me.node_id.clone()),
+        role: existing
+            .as_ref()
+            .map(|e| e.role)
+            .filter(|r| *r == crate::store::MemberRole::Hub)
+            .unwrap_or(role),
     };
     s.members.put(&member).map_err(io)?;
+    if member.role == crate::store::MemberRole::Hub {
+        if let Some(r) = &s.replica {
+            r.wake.notify_one();
+        }
+    }
     if let Some(k) = key32(&node_id) {
         s.pokes.poke(&k);
     }

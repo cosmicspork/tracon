@@ -10,8 +10,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use hub::pokes::PokeHub;
 use hub::store::{FrameStore, FsFrames, FsMembers, MemberStore, MemoryFrames, MemoryMembers};
-use hub::{admit_bootstrap, app, sweep, HubConfig};
+use hub::{admit_bootstrap, admit_self, app_with_state, state_for, sweep, HubConfig};
 use tracing_subscriber::EnvFilter;
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -45,25 +46,52 @@ async fn main() {
         ) as u32,
     };
 
-    let (frames, members): (Arc<dyn FrameStore>, Arc<dyn MemberStore>) =
-        match std::env::var("TRACON_HUB_DATA_DIR") {
-            Ok(dir) => {
-                let d = std::path::Path::new(&dir);
-                let f = FsFrames::new(d).expect("create data directory");
-                let m = FsMembers::new(d).expect("create data directory");
-                tracing::info!(data_dir = %dir, "durable filesystem stores");
-                (Arc::new(f), Arc::new(m))
-            }
-            Err(_) => {
-                tracing::warn!(
+    let data_dir = std::env::var("TRACON_HUB_DATA_DIR").ok();
+    let (frames, members): (Arc<dyn FrameStore>, Arc<dyn MemberStore>) = match &data_dir {
+        Some(dir) => {
+            let d = std::path::Path::new(dir);
+            let f = FsFrames::new(d).expect("create data directory");
+            let m = FsMembers::new(d).expect("create data directory");
+            tracing::info!(data_dir = %dir, "durable filesystem stores");
+            (Arc::new(f), Arc::new(m))
+        }
+        None => {
+            tracing::warn!(
                 "TRACON_HUB_DATA_DIR unset; frames and members are in memory and lost on restart"
             );
-                (
-                    Arc::new(MemoryFrames::new()),
-                    Arc::new(MemoryMembers::new()),
-                )
-            }
-        };
+            (
+                Arc::new(MemoryFrames::new()),
+                Arc::new(MemoryMembers::new()),
+            )
+        }
+    };
+    let pokes = Arc::new(PokeHub::new());
+    // The replica: on by default when there is somewhere durable to keep it.
+    let replica_on = std::env::var("TRACON_HUB_REPLICA")
+        .map(|v| !matches!(v.as_str(), "0" | "false" | "off"))
+        .unwrap_or(data_dir.is_some());
+    let replica = match (&data_dir, replica_on) {
+        (Some(dir), true) => {
+            let d = std::path::Path::new(dir);
+            let (identity, fresh) = hub::identity::load_or_generate(d).expect("hub identity");
+            let r = hub::replica::Replica::open(
+                d,
+                identity,
+                frames.clone(),
+                members.clone(),
+                pokes.clone(),
+            )
+            .expect("open hub.db");
+            admit_self(members.as_ref(), r.as_ref(), hub::auth::now_ms()).expect("admit the hub");
+            tracing::info!(hub_node_id = %r.node_id(), fresh_identity = fresh, "replica enabled");
+            tokio::spawn(r.clone().run());
+            Some(r)
+        }
+        _ => {
+            tracing::info!("replica disabled; relay only");
+            None
+        }
+    };
 
     let admits: Vec<String> = std::env::var("TRACON_HUB_ADMIT")
         .ok()
@@ -105,7 +133,7 @@ async fn main() {
         });
     }
 
-    let router = app(frames, members, cfg);
+    let router = app_with_state(state_for(frames, members, cfg, pokes, replica));
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("bind listen address");
