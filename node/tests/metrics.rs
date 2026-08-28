@@ -147,6 +147,7 @@ async fn app(store: Arc<Store>) -> axum::Router {
         node_id: "n1".into(),
         tools,
         mesh: None,
+        auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
     })
 }
 

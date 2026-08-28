@@ -11,6 +11,7 @@
   import Queue from './routes/Queue.svelte'
   import Session from './routes/Session.svelte'
   import Enroll from './routes/Enroll.svelte'
+  import Login from './routes/Login.svelte'
   import { clock } from './lib/clock.svelte'
   import { formatAge } from './lib/format'
   import { router } from './lib/router.svelte'
@@ -70,6 +71,9 @@
   })
 </script>
 
+{#if store.authRequired}
+  <Login />
+{:else}
 <div class="shell" class:narrow={collapsed}>
   <nav class="rail">
     <div class="brand">
@@ -181,6 +185,7 @@
     </a>
   </nav>
 </div>
+{/if}
 
 <style>
   .shell { display: grid; grid-template-columns: 172px minmax(0, 1fr); min-height: 100vh; }

@@ -194,6 +194,24 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE review ADD COLUMN ai_verdict_json TEXT;
     ALTER TABLE session ADD COLUMN review_id TEXT;
     "#,
+    // 8: operator authentication. `kv` holds the hash of the operator token
+    // (never the token); `auth_session` holds one row per logged-in client,
+    // keyed by the hash of its cookie, so rotating the token or logging out
+    // invalidates immediately rather than waiting for a signature to expire.
+    r#"
+    CREATE TABLE kv (
+        k          TEXT PRIMARY KEY,
+        v          TEXT NOT NULL,
+        updated_ms INTEGER NOT NULL
+    );
+    CREATE TABLE auth_session (
+        token_hash   TEXT PRIMARY KEY,
+        created_ms   INTEGER NOT NULL,
+        last_seen_ms INTEGER NOT NULL,
+        expires_ms   INTEGER NOT NULL,
+        user_agent   TEXT
+    );
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

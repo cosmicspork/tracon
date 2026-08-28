@@ -967,8 +967,35 @@ pub struct UsageTotal {
     pub output_tokens: i64,
 }
 
+/// The kv key holding the SHA-256 of the operator token. The token itself is
+/// shown once by `tracon auth issue` and never stored anywhere.
+pub const OPERATOR_TOKEN_KEY: &str = "operator_token_hash";
+
 mod records {
     use super::*;
+
+    /// One logged-in client. Keyed by the hash of its cookie, so a database
+    /// read cannot mint a session.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AuthSessionRow {
+        pub token_hash: String,
+        pub created_ms: i64,
+        pub last_seen_ms: i64,
+        pub expires_ms: i64,
+        pub user_agent: Option<String>,
+    }
+
+    impl AuthSessionRow {
+        pub(super) fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Self> {
+            Ok(Self {
+                token_hash: r.get("token_hash")?,
+                created_ms: r.get("created_ms")?,
+                last_seen_ms: r.get("last_seen_ms")?,
+                expires_ms: r.get("expires_ms")?,
+                user_agent: r.get("user_agent")?,
+            })
+        }
+    }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ChannelRow {
@@ -1408,6 +1435,111 @@ mod records {
 }
 
 impl Store {
+    // ---- operator auth ----
+
+    pub fn kv_get(&self, k: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT v FROM kv WHERE k=?1", [k], |r| r.get(0))
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn kv_put(&self, k: &str, v: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kv (k, v, updated_ms) VALUES (?1,?2,?3)
+             ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_ms=excluded.updated_ms",
+            rusqlite::params![k, v, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn kv_delete(&self, k: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM kv WHERE k=?1", [k])?;
+        Ok(())
+    }
+
+    /// Set the operator token hash and drop every logged-in client in one
+    /// transaction: rotating the token must not leave an old cookie working.
+    pub fn set_operator_token(&self, hash: Option<&str>) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        match hash {
+            Some(h) => {
+                tx.execute(
+                    "INSERT INTO kv (k, v, updated_ms) VALUES (?1,?2,?3)
+                     ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_ms=excluded.updated_ms",
+                    rusqlite::params![OPERATOR_TOKEN_KEY, h, now_ms()],
+                )?;
+            }
+            None => {
+                tx.execute("DELETE FROM kv WHERE k=?1", [OPERATOR_TOKEN_KEY])?;
+            }
+        }
+        tx.execute("DELETE FROM auth_session", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn auth_session_insert(&self, r: &AuthSessionRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auth_session (token_hash, created_ms, last_seen_ms, expires_ms, user_agent)
+             VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![
+                r.token_hash,
+                r.created_ms,
+                r.last_seen_ms,
+                r.expires_ms,
+                r.user_agent
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The row for a presented cookie, if it exists and has not expired.
+    pub fn auth_session_live(&self, token_hash: &str, now: i64) -> Result<Option<AuthSessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM auth_session WHERE token_hash=?1 AND expires_ms > ?2",
+            rusqlite::params![token_hash, now],
+            AuthSessionRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn auth_session_touch(&self, token_hash: &str, now: i64, expires_ms: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE auth_session SET last_seen_ms=?2, expires_ms=?3 WHERE token_hash=?1",
+            rusqlite::params![token_hash, now, expires_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn auth_session_delete(&self, token_hash: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM auth_session WHERE token_hash=?1", [token_hash])?;
+        Ok(())
+    }
+
+    pub fn auth_sessions(&self) -> Result<Vec<AuthSessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT * FROM auth_session ORDER BY created_ms DESC")?;
+        let rows = stmt
+            .query_map([], AuthSessionRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn auth_sessions_purge(&self, now: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM auth_session WHERE expires_ms <= ?1", [now])?;
+        Ok(())
+    }
+
     // ---- review ----
 
     pub fn insert_review(&self, r: &ReviewRow) -> Result<()> {
