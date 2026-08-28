@@ -529,9 +529,63 @@ pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Valu
         .take(20)
         .cloned()
         .collect();
+    let promotions = s.store().open_promotions()?;
+    Ok(Json(json!({
+        "waiting": waiting, "reviews": reviews, "promotions": promotions, "running": running, "ended": ended
+    })))
+}
+
+// ---- promotions ----
+
+pub async fn get_promotion(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let p = s
+        .store()
+        .promotion_get(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such batch".into()))?;
+    let items: serde_json::Value = serde_json::from_str(&p.items_json).unwrap_or(json!([]));
+    let verdicts: serde_json::Value = p
+        .verdicts_json
+        .as_deref()
+        .and_then(|v| serde_json::from_str(v).ok())
+        .unwrap_or(json!({}));
     Ok(Json(
-        json!({ "waiting": waiting, "reviews": reviews, "running": running, "ended": ended }),
+        json!({ "promotion": p, "items": items, "verdicts": verdicts }),
     ))
+}
+
+#[derive(Deserialize)]
+pub struct PromotionVerdicts {
+    /// `memory_id → "promote" | "reject"`.
+    pub verdicts: serde_json::Map<String, serde_json::Value>,
+}
+
+pub async fn decide_promotion(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<PromotionVerdicts>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let done =
+        crate::corpus::promote::decide(s.store(), s.manager.bus(), &s.node_id, &id, &body.verdicts)
+            .map_err(|e| ApiError(StatusCode::CONFLICT, e))?;
+    if !done {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "no open batch by that id".into(),
+        ));
+    }
+    let p = s.store().promotion_get(&id)?;
+    Ok(Json(
+        json!({ "state": p.map(|p| p.state).unwrap_or_default() }),
+    ))
+}
+
+/// `POST /api/promotions/batch`: build the batches now rather than tonight.
+pub async fn batch_promotions(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let ids = crate::corpus::promote::batch_now(s.store(), s.manager.bus(), &s.node_id, 0);
+    Ok(Json(json!({ "created": ids })))
 }
 
 // ---- corpus: documents, memories, recall ----
@@ -667,6 +721,17 @@ pub struct NewMemory {
     #[serde(default)]
     pub scope_ref: Option<String>,
     pub body: String,
+    /// `active` unless the operator wants it to wait for a batch (`candidate`).
+    #[serde(default = "active")]
+    pub state: String,
+    #[serde(default = "one")]
+    pub confidence: f64,
+}
+fn active() -> String {
+    "active".into()
+}
+fn one() -> f64 {
+    1.0
 }
 fn directive() -> String {
     "directive".into()
@@ -695,7 +760,7 @@ pub async fn add_memory(
         &id,
         json!({
             "channel": m.channel, "scope": m.scope, "scope_ref": m.scope_ref, "kind": m.kind, "body": m.body.trim(),
-            "source_session": null, "source_node": s.node_id, "confidence": 1.0, "state": "active",
+            "source_session": null, "source_node": s.node_id, "confidence": m.confidence, "state": m.state,
             "created_ms": now, "updated_ms": now,
         }),
     )?;

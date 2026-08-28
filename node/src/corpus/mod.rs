@@ -5,6 +5,7 @@
 pub mod import;
 pub mod orientation;
 pub mod project;
+pub mod promote;
 
 use serde_json::Value;
 use tracon_sync::{Change, ChangeOp};

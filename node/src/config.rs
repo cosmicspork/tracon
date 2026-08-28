@@ -18,6 +18,7 @@ pub struct Config {
     pub runtime: Runtime,
     /// Model providers the gateway fronts, by name.
     pub providers: std::collections::BTreeMap<String, Provider>,
+    pub memory: Memory,
 }
 
 /// Which boundary this node establishes. `podman` is a laptop or Linux host
@@ -205,6 +206,22 @@ pub struct Gateway {
     pub harness_listen: HarnessListen,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Memory {
+    /// When the nightly promotion batch is built, `HH:MM` (UTC, or offset by
+    /// `TRACON_TZ_OFFSET_MINUTES`), for channels this node processes.
+    pub promote_at: String,
+}
+
+impl Default for Memory {
+    fn default() -> Self {
+        Self {
+            promote_at: "02:00".into(),
+        }
+    }
+}
+
 /// Request shapes the model gateway knows how to inject a credential into.
 pub const SHAPE_ANTHROPIC: &str = "anthropic";
 pub const SHAPE_OPENAI: &str = "openai";
@@ -282,6 +299,7 @@ impl Default for Config {
             mesh: Mesh::default(),
             runtime: Runtime::default(),
             providers: default_providers(),
+            memory: Memory::default(),
             harness: Harness {
                 id: "omp".into(),
                 version: "18.0.4".into(),

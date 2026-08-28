@@ -1,7 +1,18 @@
 // Typed wrappers over the node's API. Errors surface the node's message so the
 // interface can say what the node said, not "request failed".
 
-import type { Event, Invite, MeshState, NodeInfo, ProviderInfo, Queue, Review, Session } from './types'
+import type {
+  Event,
+  Invite,
+  MeshState,
+  NodeInfo,
+  Promotion,
+  PromotionItem,
+  ProviderInfo,
+  Queue,
+  Review,
+  Session,
+} from './types'
 
 export class ApiError extends Error {
   constructor(
@@ -90,6 +101,15 @@ export const api = {
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),
   answer: (permissionId: string, optionId: string) =>
     call<void>('POST', `/api/permissions/${permissionId}/answer`, { option_id: optionId }),
+  // Promotion batches: read, decide per item, or build tonight's now.
+  promotion: (id: string) =>
+    call<{ promotion: Promotion; items: PromotionItem[]; verdicts: Record<string, string> }>(
+      'GET',
+      `/api/promotions/${id}`,
+    ),
+  decidePromotion: (id: string, verdicts: Record<string, 'promote' | 'reject'>) =>
+    call<{ state: string }>('POST', `/api/promotions/${id}/verdict`, { verdicts }),
+  batchPromotions: () => call<{ created: string[] }>('POST', '/api/promotions/batch'),
   // Providers: connect through the harness's own login, paste the code back.
   providers: () => call<ProviderInfo[]>('GET', '/api/providers'),
   connectProvider: (name: string, channels: string[]) =>

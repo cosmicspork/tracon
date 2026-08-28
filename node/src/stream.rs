@@ -58,6 +58,10 @@ pub enum Frame {
         channel: String,
         changes: Vec<proto::frame::Change>,
     },
+    /// Open promotion batches: the third thing that can wait on the operator.
+    Promotions {
+        waiting: Vec<crate::store::PromotionRow>,
+    },
 }
 
 impl Frame {
@@ -74,6 +78,7 @@ impl Frame {
             Frame::Mesh(_) => "mesh",
             Frame::Providers { .. } => "providers",
             Frame::Changes { .. } => "changes",
+            Frame::Promotions { .. } => "promotions",
         }
     }
 

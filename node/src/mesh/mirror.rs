@@ -181,10 +181,16 @@ impl Mirror {
                 if won.is_empty() {
                     return Applied::Duplicate;
                 }
+                let touched_batches = won
+                    .iter()
+                    .any(|c| c.table == "promotion" || c.table == "memory");
                 self.bus.publish_untapped(Frame::Changes {
                     channel: channel.to_string(),
                     changes: won,
                 });
+                if touched_batches {
+                    crate::corpus::promote::publish(&self.store, &self.bus);
+                }
                 Applied::Stored
             }
             Payload::ChangesRequest { .. } => Applied::Unhandled("changes_request"),

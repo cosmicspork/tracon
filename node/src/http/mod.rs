@@ -33,6 +33,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/node", get(api::get_node))
         .route("/api/node/refresh-models", post(api::refresh_models))
         .route("/api/usage", get(api::usage))
+        .route("/api/promotions/batch", post(api::batch_promotions))
+        .route("/api/promotions/{id}", get(api::get_promotion))
+        .route("/api/promotions/{id}/verdict", post(api::decide_promotion))
         .route("/api/docs", get(api::list_docs))
         .route(
             "/api/docs/{channel}/{slug}",
@@ -262,6 +265,13 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     if let Some(m) = &state.mesh {
         m.set_executor(Arc::new(state.clone()));
     }
+    // The nightly batch, for channels this node processes.
+    tokio::spawn(crate::corpus::promote::nightly(
+        store.clone(),
+        bus.clone(),
+        state.node_id.clone(),
+        cfg.clone(),
+    ));
     // Provider logins run through the same backend as sessions, against a
     // store the node keeps; a connected provider re-runs the model probe.
     {

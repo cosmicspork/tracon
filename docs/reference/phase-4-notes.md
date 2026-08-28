@@ -143,3 +143,16 @@ trust-asymmetry decision in code. The hub Dockerfile gains `gcc` for the bundled
 
 Found on the way: the key-handoff path re-locked the replica's own connection while
 holding it (rewinding cursors) — a self-deadlock the replica test caught on its first run.
+
+## Promotion
+
+A candidate (a lesson, or a fact under 0.7 confidence) waits at least six hours, then
+the nightly batch collects a channel's candidates into one `promotion` record and flips
+them to `proposed` — every row a sync write, so the batch reads the same on every node.
+Who batches is the channel's `processing` binding: the hub for the channels shared with
+it (`TRACON_HUB_PROMOTE_AT`, 03:00 UTC), the node for the rest (`[memory] promote_at`,
+02:00, offset by `TRACON_TZ_OFFSET_MINUTES`). Verdicts are per item and local to whoever
+decides — `promotion.state` and each memory's `promoted`/`rejected` converge by LWW, so
+the author of a batch being unreachable is irrelevant. The batch is the third queue
+kind, after reviews: it neither expires nor holds an agent. `tracon memory batch --now`
+builds tonight's batches now.

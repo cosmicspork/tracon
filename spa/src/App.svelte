@@ -1,5 +1,6 @@
 <script lang="ts">
   import Approval from './routes/Approval.svelte'
+  import Promotion from './routes/Promotion.svelte'
   import NewSession from './routes/NewSession.svelte'
   import Nodes from './routes/Nodes.svelte'
   import Queue from './routes/Queue.svelte'
@@ -30,9 +31,12 @@
     }
   }
 
-  const waiting = $derived(store.queue.waiting.length + store.queue.reviews.length)
+  const waiting = $derived(
+    store.queue.waiting.length + store.queue.reviews.length + (store.queue.promotions?.length ?? 0),
+  )
   const sessionId = $derived(router.path.match(/^\/sessions\/([^/]+)/)?.[1] ?? null)
   const reviewId = $derived(router.path.match(/^\/reviews\/([^/]+)/)?.[1] ?? null)
+  const promotionId = $derived(router.path.match(/^\/promotions\/([^/]+)/)?.[1] ?? null)
   const enroll = $derived(router.path === '/nodes/enroll')
   const nav = $derived(
     sessionId || router.path === '/sessions'
@@ -98,6 +102,8 @@
     {/if}
     {#if reviewId}
       <Approval id={reviewId} />
+    {:else if promotionId}
+      <Promotion id={promotionId} />
     {:else if sessionId}
       <Session id={sessionId} />
     {:else if nav === 'sessions'}

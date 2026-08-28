@@ -189,6 +189,21 @@ pub fn fts_query(text: &str) -> String {
 }
 
 impl Store {
+    /// The connection, for the sync crate's planners. Held briefly.
+    pub fn conn(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
+        self.conn.lock().unwrap()
+    }
+
+    /// Channels that hold memories at all, for a node without channel keys.
+    pub fn memory_channels(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT DISTINCT channel FROM memory WHERE deleted = 0")?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     // ---- sync plumbing ----
 
     /// Stamp, apply, and log a local write. The caller publishes the change.
