@@ -8,7 +8,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 RUN set -eu; case "${TARGETARCH}" in amd64) a=x64 ;; arm64) a=arm64 ;; *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; esac; \
     curl -fsSL -o /usr/local/bin/omp "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/omp-linux-${a}"; \
     chmod +x /usr/local/bin/omp; /usr/local/bin/omp --version
-# The node mounts its own state volume here and sets the same path in the
-# environment, so a harness that honours OMP_STATE_DIR agrees with the mount.
+# The node mounts its own state volume under the harness's home and sets
+# OMP_STATE_DIR to the same path. Under Podman the harness is root and its
+# home is /root; as a pod it runs as uid 65532 with HOME=/home/harness, which
+# exists here so that user has somewhere to write. No USER directive: the
+# runtime chooses, and verifies what it chose.
 ENV OMP_STATE_DIR=/root/.omp
+RUN mkdir -p /home/harness /work && chown 65532:65532 /home/harness /work
 WORKDIR /work
