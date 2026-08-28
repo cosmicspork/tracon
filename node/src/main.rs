@@ -66,6 +66,10 @@ enum Command {
     /// Who may reach this node's API from off this machine.
     #[command(subcommand)]
     Auth(AuthCommand),
+    /// Run the node under the platform's supervisor, so it survives a logout,
+    /// a crash, and a reboot.
+    #[command(subcommand)]
+    Service(ServiceCommand),
     /// Approvals and tokens per accepted change, human and agent time.
     Metrics {
         #[arg(long)]
@@ -116,6 +120,16 @@ enum DocCommand {
         #[arg(long, default_value = "personal")]
         channel: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Write the unit and start the node. Safe to run again after an upgrade.
+    Install,
+    /// Stop the node and remove the unit. State and credentials are untouched.
+    Uninstall,
+    /// What the supervisor says about it.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -342,6 +356,11 @@ async fn main() -> Result<()> {
         Command::Memory(cmd) => memory_command(cmd).await,
         Command::Work(cmd) => work_command(cmd).await,
         Command::Auth(cmd) => auth_command(cmd).await,
+        Command::Service(cmd) => match cmd {
+            ServiceCommand::Install => tracon::service::install(),
+            ServiceCommand::Uninstall => tracon::service::uninstall(),
+            ServiceCommand::Status => tracon::service::status(),
+        },
         Command::Metrics { channel, days } => {
             use reqwest::Method;
             let since = tracon::store::now_ms() - days.max(1) * 86_400_000;

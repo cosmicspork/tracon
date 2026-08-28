@@ -71,5 +71,6 @@ next, on this machine:
   tracon setup                          create the harness network and gateway (needs rootless podman)
   tracon credential import <file>       seal a credential (or connect a provider on the Nodes screen)
   tracon check-boundary --deep          prove the boundary
-  tracon serve                          run the node
+  tracon service install                run the node under systemd or launchd
+  tracon auth issue                     to reach this node from a phone or another machine
 EOF

@@ -17,6 +17,7 @@ pub mod policy;
 pub mod providers;
 pub mod review;
 pub mod runner;
+pub mod service;
 pub mod session;
 pub mod store;
 pub mod stream;
