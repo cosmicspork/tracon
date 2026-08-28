@@ -69,7 +69,7 @@ cat <<EOF
 next, on this machine:
   tracon enroll <invitation url>        join the mesh (run \`tracon mesh invite\` on an enrolled node)
   tracon setup                          create the harness network and gateway (needs rootless podman)
-  tracon harness import-credentials     copy a model-credential store into the node-owned volume
+  tracon credential import <file>       seal a credential (or connect a provider on the Nodes screen)
   tracon check-boundary --deep          prove the boundary
   tracon serve                          run the node
 EOF
