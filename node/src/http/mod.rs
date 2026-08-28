@@ -128,16 +128,25 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     let store = Arc::new(Store::open(&Config::db_path()).context("open store")?);
     let bus = Bus::new();
     let adapter: Arc<dyn HarnessAdapter> = Arc::new(OmpAdapter::new(cfg.harness.version.clone()));
-    let broker = Arc::new(crate::broker::Broker::load().unwrap_or_else(|e| {
-        // A broken store must not silently broker nothing: say so loudly and
-        // carry on without credentials.
-        tracing::error!(error = %e, "credential store could not be read; brokering nothing");
-        Default::default()
-    }));
-    if broker.is_empty() {
-        tracing::info!(path = %crate::broker::Broker::path().display(), "no credentials; no tools offered");
-    } else {
-        tracing::info!(credentials = ?broker.names(), "credential broker loaded");
+    // The identity comes first: the credential store is sealed under a key
+    // derived from it. `init_node` loads the same seed again below.
+    let (store_key_identity, _) = crate::mesh::identity::load_or_generate()?;
+    let store_key = store_key_identity.credential_store_key();
+    let broker = crate::broker::Broker::load(&store_key)
+        .unwrap_or_else(|e| {
+            // A broken store must not silently broker nothing: say so loudly and
+            // carry on without credentials.
+            tracing::error!(error = %e, "credential store could not be read; brokering nothing");
+            Default::default()
+        })
+        .shared();
+    {
+        let b = broker.read().unwrap();
+        if b.is_empty() {
+            tracing::info!(path = %crate::broker::Broker::path().display(), "no credentials; no tools offered");
+        } else {
+            tracing::info!(credentials = ?b.names(), "credential broker loaded");
+        }
     }
     // A bundle that cannot be verified yields no rules, and no rules means every
     // request is asked. The failure mode of broken policy is more questions.
@@ -164,7 +173,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     ));
 
     let tools = Arc::new(crate::mcp::Tools {
-        broker,
+        broker: broker.clone(),
         cfg: cfg.clone(),
         policy: policy.clone(),
         http: reqwest::Client::builder()
@@ -208,6 +217,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             cfg.clone(),
             policy.clone(),
         );
+        client.set_broker(broker.clone(), crate::broker::Broker::path());
         bus.with_tap(client.spawn());
         manager.set_mesh(client.clone());
         tracing::info!(hub = %url, "mesh client started");

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::{broker::Broker, config::Config};
+use crate::{broker::SharedBroker, config::Config};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -91,7 +91,7 @@ pub enum PublishError {
 /// the TOCTOU the approve-time staleness check alone would leave open.
 #[allow(clippy::too_many_arguments)]
 pub async fn publish(
-    broker: &Broker,
+    broker: &SharedBroker,
     cfg: &Config,
     channel: &str,
     node_id: &str,
@@ -105,6 +105,8 @@ pub async fn publish(
         provider: target.provider.clone(),
     })?;
     let env = broker
+        .read()
+        .unwrap()
         .env_for(provider.credential(), channel, node_id)
         .map_err(|e| PublishError::Broker(e.to_string()))?;
 
@@ -264,7 +266,7 @@ mod tests {
 
     #[tokio::test]
     async fn publishing_without_a_bound_credential_is_refused_before_anything_runs() {
-        let broker = Broker::default();
+        let broker = crate::broker::Broker::default().shared();
         let target = Target {
             provider: "gitlab".into(),
             project: "custom-development/integrations".into(),
@@ -296,7 +298,7 @@ mod tests {
             branch: "feat/x".into(),
         };
         let err = publish(
-            &Broker::default(),
+            &crate::broker::Broker::default().shared(),
             &Config::default(),
             "work",
             "n1",

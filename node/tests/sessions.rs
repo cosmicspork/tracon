@@ -639,7 +639,7 @@ async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
     let cfg = Arc::new(Config::default());
     let broker: Broker = toml::from_str(store_toml).unwrap();
     let tools = Arc::new(Tools {
-        broker: Arc::new(broker),
+        broker: broker.shared(),
         cfg: cfg.clone(),
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),

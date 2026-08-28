@@ -200,8 +200,14 @@ received at enrollment.
 
 ### Brokered tools
 
-Credentials live in `credentials.toml` under the node's state directory, readable only by
-the node's user, and are never given to a harness. What the harness gets is a tool it may
+Credentials live in `credentials.sealed` under the node's state directory, sealed under a
+key derived from the node's identity seed (a copied file is ciphertext elsewhere; losing
+the seed loses the store), and are never given to a harness. `tracon credential import
+<file>` seals a plaintext TOML like the one below; `tracon credential ls` shows names,
+kinds, and bindings, never values; `tracon credential share <name> --to <node>` hands one
+to another member, direct-sealed over the hub, and enrollment hands over every credential
+whose `nodes` lists the new node. A plaintext `credentials.toml` found at startup is
+sealed once and set aside. What the harness gets is a tool it may
 ask the node to run, over MCP through the gateway's forward, with a token minted for its
 session. A credential names the channels allowed to use it; a channel with none bound is
 offered no tools at all. It may also name the nodes allowed to use it, by node id, so a
@@ -213,7 +219,7 @@ tool the bundle does not mention is put to the operator on the session's queue. 
 tool never widens what runs unattended.
 
 ```toml
-# ~/.config or ~/Library/Application Support → tracon/credentials.toml, chmod 600
+# a plaintext file for `tracon credential import`, chmod 600
 [credentials.consulta]
 channels = ["work"]
 nodes = ["2b310f36c18605ac9ab367ec3abe4fe9aaa6aee04e64db98b0ea364e5e6b3013"]

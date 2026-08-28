@@ -154,6 +154,7 @@ impl Mirror {
             Payload::EventsBatch { .. } => Applied::Unhandled("events_batch"),
             Payload::KeyHandoff { .. } => Applied::Unhandled("key_handoff"),
             Payload::PolicyBundle { .. } => Applied::Unhandled("policy_bundle"),
+            Payload::CredentialHandoff { .. } => Applied::Unhandled("credential_handoff"),
         }
     }
 

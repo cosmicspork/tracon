@@ -152,6 +152,13 @@ pub enum Payload {
         sig_hex: String,
         pubkey_hex: String,
     },
+    /// Direct only: credentials for the recipient's broker, each
+    /// `{ "name": …, "credential": … }` in the broker's own row shape. The
+    /// receiver keeps its own bindings check; a credential not bound to it is
+    /// dropped there.
+    CredentialHandoff {
+        credentials: Vec<Value>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -596,6 +603,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v["kind"], "events_request");
+        let v = serde_json::to_value(Payload::CredentialHandoff {
+            credentials: vec![],
+        })
+        .unwrap();
+        assert_eq!(v["kind"], "credential_handoff");
         let v = serde_json::to_value(Command::Prompt {
             session_id: "s".into(),
             text: "t".into(),

@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use crate::{
     acp::types::{PermissionOption, OPTION_ALLOW_ONCE, OPTION_REJECT_ONCE},
     adapter::{PermissionReply, PermissionRequest},
-    broker::Broker,
+    broker::SharedBroker,
     config::Config,
     policy::{Policy, Request, Verdict},
 };
@@ -31,7 +31,7 @@ pub const TOOL_KIND: &str = "tool";
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
 pub struct Tools {
-    pub broker: Arc<Broker>,
+    pub broker: SharedBroker,
     pub cfg: Arc<Config>,
     /// Every call is decided here before the broker is touched: the same
     /// bundle that answers the harness's own permission requests answers
@@ -67,14 +67,11 @@ impl Tools {
     /// is offered no tools rather than tools that will fail.
     pub fn list(&self, channel: &str, node_id: &str) -> Vec<Value> {
         let mut out = Vec::new();
-        if self
-            .broker
-            .available_to(channel, node_id)
-            .contains(&consulta::CREDENTIAL)
-        {
+        let broker = self.broker.read().unwrap();
+        let available = broker.available_to(channel, node_id);
+        if available.contains(&consulta::CREDENTIAL) {
             out.extend(consulta::definitions());
         }
-        let available = self.broker.available_to(channel, node_id);
         if available.contains(&gitlab::CREDENTIAL) {
             out.extend(gitlab::definitions());
         }
@@ -240,7 +237,9 @@ mod tests {
 
     fn tools(store: &str) -> Tools {
         Tools {
-            broker: Arc::new(toml::from_str(store).unwrap()),
+            broker: toml::from_str::<crate::broker::Broker>(store)
+                .unwrap()
+                .shared(),
             cfg: Arc::new(Config::default()),
             policy: Policy::shipped_shared(),
             http: reqwest::Client::new(),

@@ -439,3 +439,55 @@ async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
         mono_ms: 0,
     };
 }
+
+#[tokio::test]
+async fn a_credential_handoff_lands_in_the_receivers_sealed_store() {
+    let (a, b) = pair().await;
+    let dir = std::env::temp_dir().join(format!("tracon-mesh-cred-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("credentials.sealed");
+    let broker = tracon::broker::Broker::default().shared();
+    b.client.set_broker(broker.clone(), path.clone());
+
+    let pinned = tracon::broker::Credential {
+        channels: vec!["work".into()],
+        nodes: vec![b.id.node_id()],
+        env: [("TOKEN".to_string(), "t".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let loose = tracon::broker::Credential {
+        channels: vec!["work".into()],
+        ..Default::default()
+    };
+    let payload = Payload::CredentialHandoff {
+        credentials: tracon::broker::Broker::handoff_rows(&[
+            ("glab".into(), pinned),
+            ("mine".into(), loose),
+        ]),
+    };
+    tracon::mesh::enroll::post_direct(
+        &a.id,
+        a.client.hub_url(),
+        &b.id.node_id(),
+        &b.id.x25519_public(),
+        &payload,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(b.client.pull_once().await.unwrap(), 1);
+    let stored = broker.read().unwrap();
+    assert!(stored.get("glab").is_some(), "pinned credential stored");
+    assert!(stored.get("mine").is_none(), "unpinned credential dropped");
+    // And it is on disk, sealed under B's key, readable back.
+    let back = tracon::broker::Broker::load_at(
+        &path,
+        &dir.join("credentials.toml"),
+        &b.id.credential_store_key(),
+    )
+    .unwrap();
+    assert!(back.get("glab").is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}

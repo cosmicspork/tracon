@@ -25,6 +25,7 @@ A node is one 32-byte random seed (`<state>/node-identity.seed`, hex, `0600`).
 hk      = HKDF-SHA256(ikm = seed, salt = none)
 x25519  = hk.expand("tracon/v0/x25519", 32)      sealing
 ed25519 = hk.expand("tracon/v0/ed25519", 32)     signing
+credstore = hk.expand("tracon/v0/credstore", 32) seals the node's credential store at rest
 node_id = hex(ed25519 public key)
 ```
 
@@ -79,7 +80,8 @@ a member of. A frame may be at most 4 MiB serialized.
 
 Payload kinds (JSON, discriminated on `kind`): `hello`, `snapshot`, `session`,
 `event`, `queue`, `reviews`, `node`, `command`, `ack`, `events_request`,
-`events_batch`, `key_handoff` (direct only), `policy_bundle` (direct only).
+`events_batch`, `key_handoff` (direct only), `policy_bundle` (direct only),
+`credential_handoff` (direct only; broker rows for the recipient).
 Commands are discriminated on `op`: `create`, `prompt`, `answer`, `kill`, `verdict`.
 
 ## Hub requests (`auth.rs`)
@@ -119,7 +121,7 @@ See `hub/` and `docs/ARCHITECTURE.md` (Mesh frames). Summary:
 
 | File | Pins |
 |---|---|
-| `key-derivation.json` | seed → both public keys, node id |
+| `key-derivation.json` | seed → both public keys, node id, credential-store key |
 | `envelope.json` | seal, wrap, box bytes for fixed nonces and ephemerals |
 | `auth.json` | descriptor bytes and signatures |
 | `keyring.json` | container bytes for genesis + one rotation, and a handoff |

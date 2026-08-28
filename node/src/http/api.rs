@@ -675,6 +675,7 @@ pub async fn admit_invite(
         StatusCode::CONFLICT,
         "the other node has not answered yet".into(),
     ))?;
+    let handoff = s.tools.broker.read().unwrap().bound_to(&req.node_id);
     crate::mesh::enroll::admit(
         s.store(),
         mesh.identity(),
@@ -683,6 +684,7 @@ pub async fn admit_invite(
         &req.x25519_pub,
         &req.name,
         &inv.channels,
+        &handoff,
     )
     .await
     .map_err(enroll_err)?;

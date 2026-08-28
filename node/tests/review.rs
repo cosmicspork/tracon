@@ -565,7 +565,9 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
     let f = fixture(FN, WITH_GH).await;
     let mut cfg = Config::default();
     cfg.publish.gh = f.dir.join("bin/gh").to_string_lossy().into_owned();
-    let broker: tracon::broker::Broker = toml::from_str(WITH_GH).unwrap();
+    let broker = toml::from_str::<tracon::broker::Broker>(WITH_GH)
+        .unwrap()
+        .shared();
     let target = tracon::review::publish::Target {
         provider: "github".into(),
         project: "owner/name".into(),

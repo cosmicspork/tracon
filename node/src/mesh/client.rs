@@ -64,6 +64,9 @@ pub struct MeshClient {
     /// Who runs commands addressed to this node. Set once the session manager
     /// exists; until then commands are answered with an error.
     pub(super) executor: std::sync::OnceLock<Arc<dyn super::forward::CommandExecutor>>,
+    /// The credential store a handoff writes into. Set once the broker
+    /// exists; a handoff arriving before then is dropped and logged.
+    broker: std::sync::OnceLock<(crate::broker::SharedBroker, std::path::PathBuf)>,
 }
 
 impl MeshClient {
@@ -110,7 +113,13 @@ impl MeshClient {
             invites: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             executor: std::sync::OnceLock::new(),
+            broker: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Give handoffs somewhere to land.
+    pub fn set_broker(&self, broker: crate::broker::SharedBroker, path: std::path::PathBuf) {
+        let _ = self.broker.set((broker, path));
     }
 
     pub fn set_executor(&self, executor: Arc<dyn super::forward::CommandExecutor>) {
@@ -409,6 +418,24 @@ impl MeshClient {
                 let n = enroll::apply_key_handoff(&self.store, &self.node_id(), channels);
                 tracing::info!(from = %sender, channels = n, "channel keys received");
                 self.pull_wake.notify_one();
+                return n > 0;
+            }
+            Payload::CredentialHandoff { credentials } if env.is_direct() => {
+                let Some((broker, path)) = self.broker.get() else {
+                    tracing::warn!(from = %sender, "credential handoff before the broker exists; dropped");
+                    return false;
+                };
+                let n = {
+                    let mut b = broker.write().unwrap();
+                    let n = b.apply_handoff(&self.node_id(), credentials);
+                    if n > 0 {
+                        if let Err(e) = b.save_at(path, &self.identity.credential_store_key()) {
+                            tracing::error!(error = %e, "credential store could not be written");
+                        }
+                    }
+                    n
+                };
+                tracing::info!(from = %sender, credentials = n, "credential handoff received");
                 return n > 0;
             }
             Payload::PolicyBundle {

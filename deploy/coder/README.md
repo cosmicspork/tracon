@@ -53,7 +53,7 @@ The node **verifies** these; it does not create them. In particular:
 
 ## The credentials
 
-`credentials.toml` under `/state/tracon/` (mode 600, uid 65532). `consulta` and
+`credentials.sealed` under `/state/tracon/` (sealed under the pod's identity seed; seed it with `tracon credential import <toml>` inside the pod). `consulta` and
 `jira` bound to the work channel and pinned to this node's id (`nodes = [...]`);
 `glab` bound to the work channel. Model credentials are the harness's own, imported
 once into `/state/tracon/harness-state/agent/agent.db` with

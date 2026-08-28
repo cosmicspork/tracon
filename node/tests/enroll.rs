@@ -109,6 +109,7 @@ async fn a_fresh_node_is_invited_admitted_and_handed_keys() {
         &req.x25519_pub,
         &req.name,
         &inv.channels,
+        &[],
     )
     .await
     .unwrap();
@@ -158,6 +159,7 @@ async fn admit_refuses_channels_this_node_cannot_hand_off() {
         &b.x25519_hex(),
         "b",
         &["work".into()],
+        &[],
     )
     .await
     .unwrap_err();
