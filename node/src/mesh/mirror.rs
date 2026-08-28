@@ -155,7 +155,38 @@ impl Mirror {
             Payload::KeyHandoff { .. } => Applied::Unhandled("key_handoff"),
             Payload::PolicyBundle { .. } => Applied::Unhandled("policy_bundle"),
             Payload::CredentialHandoff { .. } => Applied::Unhandled("credential_handoff"),
-            Payload::Changes { .. } => Applied::Unhandled("changes"),
+            Payload::Changes {
+                channel: c,
+                changes,
+            } => {
+                if c != channel {
+                    return Applied::Malformed;
+                }
+                let results = match self.store.apply_changes(sender, channel, &changes) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "changes not applied");
+                        return Applied::Malformed;
+                    }
+                };
+                if results.contains(&tracon_sync::Applied::Impersonation) {
+                    return Applied::Impersonation;
+                }
+                let won: Vec<_> = changes
+                    .into_iter()
+                    .zip(results.iter())
+                    .filter(|(_, r)| **r == tracon_sync::Applied::Stored)
+                    .map(|(c, _)| c)
+                    .collect();
+                if won.is_empty() {
+                    return Applied::Duplicate;
+                }
+                self.bus.publish_untapped(Frame::Changes {
+                    channel: channel.to_string(),
+                    changes: won,
+                });
+                Applied::Stored
+            }
             Payload::ChangesRequest { .. } => Applied::Unhandled("changes_request"),
             Payload::ChangesBatch { .. } => Applied::Unhandled("changes_batch"),
         }

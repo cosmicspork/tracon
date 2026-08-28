@@ -8,6 +8,9 @@ use serde_json::{json, Value};
 use crate::store::{PermissionRow, ReviewRow, Store};
 use crate::stream::Frame;
 
+/// Changes per frame, well under the 4 MiB frame cap for ordinary rows.
+pub const CHANGES_PER_FRAME: usize = 200;
+
 /// The `(channel, payload)` pairs a locally published frame becomes. Frames
 /// about other nodes' sessions (mirrored state) yield nothing; the bus only
 /// taps what this node publishes, but the filter is repeated here so a bug
@@ -63,6 +66,21 @@ pub fn to_payloads(frame: &Frame, store: &Store, self_id: &str) -> Vec<(String, 
             out
         }
         Frame::Node(v) => vec![(MESH_CHANNEL.to_string(), Payload::Node(v.clone()))],
+        // Only this site's own changes leave here: a mirrored change that won
+        // locally is republished untapped, and even if it were not, a change
+        // stamped by another site must not be relayed as ours.
+        Frame::Changes { channel, changes } if changes.iter().all(|c| c.site == self_id) => changes
+            .chunks(CHANGES_PER_FRAME)
+            .map(|chunk| {
+                (
+                    channel.clone(),
+                    Payload::Changes {
+                        channel: channel.clone(),
+                        changes: chunk.to_vec(),
+                    },
+                )
+            })
+            .collect(),
         // Live chunks and tool progress are not forwarded in this phase: the
         // remote view is message-granular. Mesh state is local by definition.
         Frame::Chunk { .. } | Frame::ToolUpdate { .. } | Frame::Mesh(_) => Vec::new(),

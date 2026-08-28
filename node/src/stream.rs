@@ -52,6 +52,12 @@ pub enum Frame {
     Providers {
         providers: Vec<Value>,
     },
+    /// Record changes: local ones on their way to the mesh, or mirrored ones
+    /// that won here, for the interface.
+    Changes {
+        channel: String,
+        changes: Vec<proto::frame::Change>,
+    },
 }
 
 impl Frame {
@@ -67,6 +73,7 @@ impl Frame {
             Frame::Node(_) => "node",
             Frame::Mesh(_) => "mesh",
             Frame::Providers { .. } => "providers",
+            Frame::Changes { .. } => "changes",
         }
     }
 

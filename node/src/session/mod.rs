@@ -299,6 +299,22 @@ impl Manager {
             }
         }
 
+        // Bank identity: the channel and the repository's remote, resolved on
+        // this side of the boundary and recorded on the row for memory to key
+        // on; never a checkout path.
+        let (project_id, project_name, remote) = crate::corpus::project::identify(
+            &spec.channel,
+            std::path::Path::new(&spec.repo_path),
+            &self.cfg.publish.git,
+        )
+        .await;
+        let _ = self.store.project_put(&crate::store::ProjectRow {
+            id: project_id.clone(),
+            channel: spec.channel.clone(),
+            name: project_name,
+            remote_url: remote,
+            created_ms: now_ms(),
+        });
         let id = uuid::Uuid::now_v7().to_string();
         let slug = id.split('-').next_back().unwrap_or("session").to_string();
         let branch = spec
@@ -318,6 +334,7 @@ impl Manager {
             harness_session_id: None,
             container_name: None,
             model: spec.model.clone(),
+            project_id: Some(project_id),
             budget_tokens: budget,
             tokens_used: 0,
             cost_usd: None,

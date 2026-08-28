@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use proto::frame::{Command, Payload, MESH_CHANNEL};
+use proto::frame::{Change, Command, Payload, MESH_CHANNEL};
 use serde_json::Value;
 
 use super::client::MeshClient;
@@ -120,6 +120,105 @@ impl MeshClient {
             },
         ) {
             tracing::debug!(error = %e, "backfill not requested");
+        }
+    }
+
+    /// Ask a site for the record changes this node has not seen from it on a
+    /// channel. Used on a sequence gap, after a retention resync, and when a
+    /// channel key first arrives.
+    pub fn request_changes_backfill(&self, site: &str, channel: &str) {
+        if site == self.node_id() {
+            return;
+        }
+        let after = self.store.change_log_max(site, channel).unwrap_or(0);
+        if let Err(e) = self.enqueue_direct(
+            MESH_CHANNEL,
+            site,
+            &Payload::ChangesRequest {
+                channel: channel.to_string(),
+                after_site_seq: after,
+            },
+        ) {
+            tracing::debug!(error = %e, site, channel, "changes backfill not requested");
+        }
+    }
+
+    /// Every site known on a channel, asked for what this node lacks.
+    pub fn request_changes_backfill_all(&self, channel: &str) {
+        let mut sites = self.store.nodes_in_channel(channel).unwrap_or_default();
+        for s in self.store.sites_on_channel(channel).unwrap_or_default() {
+            if !sites.contains(&s) {
+                sites.push(s);
+            }
+        }
+        for site in sites {
+            self.request_changes_backfill(&site, channel);
+        }
+    }
+
+    /// Only this site's own changes; a peer asking for another site's gets
+    /// nothing, exactly as with events.
+    pub(super) fn answer_changes_request(&self, sender: &str, channel: &str, after: i64) {
+        let me = self.node_id();
+        let mut after = after;
+        loop {
+            let changes = self
+                .store
+                .changes_of_site_after(&me, channel, after, 500)
+                .unwrap_or_default();
+            let done = changes.len() < 500;
+            if changes.is_empty() && after > 0 {
+                break;
+            }
+            after = changes.last().map(|c| c.site_seq).unwrap_or(after);
+            let empty = changes.is_empty();
+            let _ = self.enqueue_direct(
+                MESH_CHANNEL,
+                sender,
+                &Payload::ChangesBatch {
+                    channel: channel.to_string(),
+                    changes,
+                    done,
+                },
+            );
+            if done || empty {
+                break;
+            }
+        }
+    }
+
+    pub(super) fn apply_changes_batch(
+        &self,
+        sender: &str,
+        channel: &str,
+        changes: &[Change],
+    ) -> usize {
+        // A batch is a peer's own history on a channel this node reads; the
+        // apply enforces that every change is the sender's.
+        if self.store.channel_get(channel).ok().flatten().is_none() {
+            return 0;
+        }
+        match self.store.apply_changes(sender, channel, changes) {
+            Ok(results) => {
+                let won: Vec<Change> = changes
+                    .iter()
+                    .zip(results.iter())
+                    .filter(|(_, r)| **r == tracon_sync::Applied::Stored)
+                    .map(|(c, _)| c.clone())
+                    .collect();
+                let n = won.len();
+                if n > 0 {
+                    self.bus.publish_untapped(Frame::Changes {
+                        channel: channel.to_string(),
+                        changes: won,
+                    });
+                }
+                n
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "changes batch not applied");
+                0
+            }
         }
     }
 

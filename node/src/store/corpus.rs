@@ -1,0 +1,837 @@
+//! The replicated corpus as this node reads it: documents, memories, and
+//! promotion batches, written through the sync layer's change log and read
+//! locally always. Ranking for recall lives here too, as SQL over the FTS5
+//! indexes the `sync` crate maintains.
+
+use rusqlite::{params, OptionalExtension, Row};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tracon_sync::{Applied, Change, ChangeOp};
+
+use super::{now_ms, Result, Store, StoreError};
+
+/// Kinds a memory can be. Directives are human-authored and always injected.
+pub const KIND_DIRECTIVE: &str = "directive";
+pub const KIND_FACT: &str = "fact";
+pub const KIND_LESSON: &str = "lesson";
+pub const KIND_EPISODE: &str = "episode";
+
+/// Facts fade: a fact half as old as this counts half as much.
+const FACT_HALF_LIFE_MS: f64 = 90.0 * 24.0 * 3600.0 * 1000.0;
+/// Below this a fact is proposed rather than active.
+pub const CONFIDENT: f64 = 0.7;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DocumentRow {
+    pub id: String,
+    pub channel: String,
+    pub slug: String,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    pub hash: String,
+    pub site: String,
+    pub hlc_ms: i64,
+    pub deleted: i64,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryRow {
+    pub id: String,
+    pub channel: String,
+    pub scope: String,
+    pub scope_ref: Option<String>,
+    pub kind: String,
+    pub body: String,
+    pub source_session: Option<String>,
+    pub source_node: Option<String>,
+    pub confidence: f64,
+    pub state: String,
+    pub site: String,
+    pub hlc_ms: i64,
+    pub deleted: i64,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PromotionRow {
+    pub id: String,
+    pub channel: String,
+    pub items_json: String,
+    pub state: String,
+    pub verdicts_json: Option<String>,
+    pub decided_by: Option<String>,
+    pub decided_ms: Option<i64>,
+    pub site: String,
+    pub hlc_ms: i64,
+    pub created_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectRow {
+    pub id: String,
+    pub channel: String,
+    pub name: String,
+    pub remote_url: Option<String>,
+    pub created_ms: i64,
+}
+
+/// One recall result, across both indexes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecallHit {
+    /// `directive`, `fact`, `lesson`, `episode`, or `document`.
+    pub kind: String,
+    pub id: String,
+    /// Documents only: fetch the whole thing by this.
+    pub slug: Option<String>,
+    pub title: Option<String>,
+    /// The memory body, or a snippet of the document.
+    pub text: String,
+    pub scope: Option<String>,
+    pub confidence: Option<f64>,
+    /// Lower sorts first: the tier, then relevance within it.
+    pub rank: f64,
+}
+
+impl DocumentRow {
+    fn from_row(r: &Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: r.get("id")?,
+            channel: r.get("channel")?,
+            slug: r.get("slug")?,
+            kind: r.get("kind")?,
+            title: r.get("title")?,
+            body: r.get("body")?,
+            hash: r.get("hash")?,
+            site: r.get("site")?,
+            hlc_ms: r.get("hlc_ms")?,
+            deleted: r.get("deleted")?,
+            created_ms: r.get("created_ms")?,
+            updated_ms: r.get("updated_ms")?,
+        })
+    }
+
+    /// The columns the sync layer replicates, as the row JSON it takes.
+    pub fn to_change_row(&self) -> Value {
+        json!({
+            "channel": self.channel, "slug": self.slug, "kind": self.kind, "title": self.title,
+            "body": self.body, "hash": self.hash, "created_ms": self.created_ms, "updated_ms": self.updated_ms,
+        })
+    }
+}
+
+impl MemoryRow {
+    fn from_row(r: &Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: r.get("id")?,
+            channel: r.get("channel")?,
+            scope: r.get("scope")?,
+            scope_ref: r.get("scope_ref")?,
+            kind: r.get("kind")?,
+            body: r.get("body")?,
+            source_session: r.get("source_session")?,
+            source_node: r.get("source_node")?,
+            confidence: r.get("confidence")?,
+            state: r.get("state")?,
+            site: r.get("site")?,
+            hlc_ms: r.get("hlc_ms")?,
+            deleted: r.get("deleted")?,
+            created_ms: r.get("created_ms")?,
+            updated_ms: r.get("updated_ms")?,
+        })
+    }
+
+    pub fn to_change_row(&self) -> Value {
+        json!({
+            "channel": self.channel, "scope": self.scope, "scope_ref": self.scope_ref, "kind": self.kind,
+            "body": self.body, "source_session": self.source_session, "source_node": self.source_node,
+            "confidence": self.confidence, "state": self.state, "created_ms": self.created_ms, "updated_ms": self.updated_ms,
+        })
+    }
+}
+
+impl PromotionRow {
+    fn from_row(r: &Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: r.get("id")?,
+            channel: r.get("channel")?,
+            items_json: r.get("items_json")?,
+            state: r.get("state")?,
+            verdicts_json: r.get("verdicts_json")?,
+            decided_by: r.get("decided_by")?,
+            decided_ms: r.get("decided_ms")?,
+            site: r.get("site")?,
+            hlc_ms: r.get("hlc_ms")?,
+            created_ms: r.get("created_ms")?,
+        })
+    }
+
+    pub fn to_change_row(&self) -> Value {
+        json!({
+            "channel": self.channel, "items_json": self.items_json, "state": self.state,
+            "verdicts_json": self.verdicts_json, "decided_by": self.decided_by, "decided_ms": self.decided_ms,
+            "created_ms": self.created_ms,
+        })
+    }
+}
+
+/// Turn free text into an FTS5 query: each word quoted, any word may match,
+/// so punctuation in a question cannot break the syntax.
+pub fn fts_query(text: &str) -> String {
+    text.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .filter(|w| !w.is_empty())
+        .map(|w| format!("\"{}\"", w.replace('"', "")))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+impl Store {
+    // ---- sync plumbing ----
+
+    /// Stamp, apply, and log a local write. The caller publishes the change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_change(
+        &self,
+        site: &str,
+        channel: &str,
+        table: &str,
+        op: ChangeOp,
+        id: &str,
+        row: Value,
+    ) -> Result<Change> {
+        let mut conn = self.conn.lock().unwrap();
+        tracon_sync::write_change(&mut conn, site, channel, table, op, id, row, now_ms())
+            .map_err(sync_err)
+    }
+
+    pub fn apply_changes(
+        &self,
+        sender: &str,
+        channel: &str,
+        changes: &[Change],
+    ) -> Result<Vec<Applied>> {
+        let mut conn = self.conn.lock().unwrap();
+        tracon_sync::apply_changes(&mut conn, sender, channel, changes, now_ms()).map_err(sync_err)
+    }
+
+    pub fn changes_of_site_after(
+        &self,
+        site: &str,
+        channel: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<Change>> {
+        let conn = self.conn.lock().unwrap();
+        tracon_sync::apply::changes_of_site_after(&conn, site, channel, after, limit)
+            .map_err(sync_err)
+    }
+
+    pub fn change_log_max(&self, site: &str, channel: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        tracon_sync::apply::change_log_max(&conn, site, channel).map_err(sync_err)
+    }
+
+    pub fn sites_on_channel(&self, channel: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        tracon_sync::apply::sites_on_channel(&conn, channel).map_err(sync_err)
+    }
+
+    pub fn prune_tombstones(&self, older_than_ms: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        tracon_sync::apply::prune_tombstones(&conn, older_than_ms).map_err(sync_err)
+    }
+
+    // ---- documents ----
+
+    /// The live document at a slug. Two sites creating the same slug offline
+    /// converge to two rows; the later write is the one that reads.
+    pub fn doc_get(&self, channel: &str, slug: &str) -> Result<Option<DocumentRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM document WHERE channel = ?1 AND slug = ?2 AND deleted = 0
+             ORDER BY hlc_ms DESC, hlc_ctr DESC LIMIT 1",
+            params![channel, slug],
+            DocumentRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn doc_by_id(&self, id: &str) -> Result<Option<DocumentRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM document WHERE id = ?1",
+            [id],
+            DocumentRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Every live document, optionally on one channel, without bodies.
+    pub fn doc_list(&self, channel: Option<&str>) -> Result<Vec<DocumentRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, channel, slug, kind, title, '' AS body, hash, site, hlc_ms, deleted, created_ms, updated_ms
+             FROM document WHERE deleted = 0 AND (?1 IS NULL OR channel = ?1)
+             ORDER BY channel, kind, slug",
+        )?;
+        let rows = stmt
+            .query_map([channel], DocumentRow::from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(dedupe_slugs(rows))
+    }
+
+    /// Documents matching free text, with a snippet, best first.
+    pub fn doc_search(
+        &self,
+        channel: Option<&str>,
+        kind: Option<&str>,
+        text: &str,
+        limit: usize,
+    ) -> Result<Vec<RecallHit>> {
+        let q = fts_query(text);
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT d.id, d.slug, d.title, snippet(document_fts, 1, '', '', '…', 14) AS snip, bm25(document_fts) AS score
+             FROM document_fts JOIN document d ON d.rowid = document_fts.rowid
+             WHERE document_fts MATCH ?1 AND d.deleted = 0
+               AND (?2 IS NULL OR d.channel = ?2) AND (?3 IS NULL OR d.kind = ?3)
+             ORDER BY score LIMIT ?4",
+        )?;
+        let rows = stmt
+            .query_map(params![q, channel, kind, limit as i64], |r| {
+                Ok(RecallHit {
+                    kind: "document".into(),
+                    id: r.get(0)?,
+                    slug: Some(r.get(1)?),
+                    title: Some(r.get(2)?),
+                    text: r.get(3)?,
+                    scope: None,
+                    confidence: None,
+                    rank: 3.0 + r.get::<_, f64>(4)?,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    // ---- memory ----
+
+    pub fn memory_get(&self, id: &str) -> Result<Option<MemoryRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM memory WHERE id = ?1",
+            [id],
+            MemoryRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Memories on a channel, newest first, optionally of one state.
+    pub fn memory_list(
+        &self,
+        channel: &str,
+        state: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MemoryRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM memory WHERE channel = ?1 AND deleted = 0 AND (?2 IS NULL OR state = ?2)
+             ORDER BY hlc_ms DESC LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(params![channel, state, limit as i64], MemoryRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// What a session is always told: the channel's directives, global and for
+    /// its project, plus its high-confidence facts. Empty query, no FTS.
+    pub fn directives_for(
+        &self,
+        channel: &str,
+        project_id: Option<&str>,
+    ) -> Result<Vec<MemoryRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM memory WHERE channel = ?1 AND deleted = 0
+               AND state IN ('active', 'promoted')
+               AND (scope = 'global' OR scope = 'client' OR (scope = 'project' AND scope_ref = ?2))
+               AND (kind = 'directive' OR (kind = 'fact' AND confidence >= ?3))
+             ORDER BY CASE kind WHEN 'directive' THEN 0 ELSE 1 END, confidence DESC, created_ms DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![channel, project_id, CONFIDENT], MemoryRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Ranked recall across memories and documents: directives first, then
+    /// facts by confidence and age, then promoted lessons, then documents by
+    /// relevance; episodes only when asked for. Scope narrows to what the
+    /// session can see: its own, its project's, the client's, the global.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recall(
+        &self,
+        channel: &str,
+        text: &str,
+        project_id: Option<&str>,
+        session_id: Option<&str>,
+        kinds: Option<&[String]>,
+        limit: usize,
+    ) -> Result<Vec<RecallHit>> {
+        let q = fts_query(text);
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let want = |k: &str| {
+            kinds
+                .map(|ks| ks.iter().any(|x| x == k))
+                .unwrap_or(k != KIND_EPISODE)
+        };
+        let now = now_ms() as f64;
+        let mut hits: Vec<RecallHit> = Vec::new();
+        {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT m.id, m.kind, m.body, m.scope, m.confidence, m.state, m.created_ms, bm25(memory_fts) AS score
+                 FROM memory_fts JOIN memory m ON m.rowid = memory_fts.rowid
+                 WHERE memory_fts MATCH ?1 AND m.channel = ?2 AND m.deleted = 0
+                   AND m.state IN ('active', 'promoted')
+                   AND (m.scope = 'global' OR m.scope = 'client'
+                        OR (m.scope = 'project' AND m.scope_ref = ?3)
+                        OR (m.scope = 'session' AND m.scope_ref = ?4))
+                 ORDER BY score LIMIT ?5",
+            )?;
+            let rows = stmt.query_map(
+                params![q, channel, project_id, session_id, (limit * 4) as i64],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, f64>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, i64>(6)?,
+                        r.get::<_, f64>(7)?,
+                    ))
+                },
+            )?;
+            for row in rows {
+                let (id, kind, body, scope, confidence, state, created_ms, score) = row?;
+                if !want(&kind) {
+                    continue;
+                }
+                let rank = match kind.as_str() {
+                    KIND_DIRECTIVE => score,
+                    KIND_FACT => {
+                        let age = (now - created_ms as f64).max(0.0);
+                        let decay = 0.5f64.powf(age / FACT_HALF_LIFE_MS);
+                        1.0 + score - confidence * decay
+                    }
+                    KIND_LESSON if state == "promoted" => 2.0 + score,
+                    KIND_LESSON => continue,
+                    _ => 4.0 + score,
+                };
+                hits.push(RecallHit {
+                    kind,
+                    id,
+                    slug: None,
+                    title: None,
+                    text: body,
+                    scope: Some(scope),
+                    confidence: Some(confidence),
+                    rank,
+                });
+            }
+        }
+        if want("document") {
+            hits.extend(self.doc_search(Some(channel), None, text, limit)?);
+        }
+        hits.sort_by(|a, b| {
+            a.rank
+                .partial_cmp(&b.rank)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
+    // ---- promotions ----
+
+    pub fn promotion_get(&self, id: &str) -> Result<Option<PromotionRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM promotion WHERE id = ?1",
+            [id],
+            PromotionRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn open_promotions(&self) -> Result<Vec<PromotionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM promotion WHERE state = 'open' AND deleted = 0 ORDER BY created_ms ASC",
+        )?;
+        let rows = stmt
+            .query_map([], PromotionRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    // ---- projects ----
+
+    pub fn project_put(&self, p: &ProjectRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO project (id, channel, name, remote_url, created_ms) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, remote_url = excluded.remote_url",
+            params![p.id, p.channel, p.name, p.remote_url, p.created_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn project_get(&self, id: &str) -> Result<Option<ProjectRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT * FROM project WHERE id = ?1", [id], |r| {
+            Ok(ProjectRow {
+                id: r.get("id")?,
+                channel: r.get("channel")?,
+                name: r.get("name")?,
+                remote_url: r.get("remote_url")?,
+                created_ms: r.get("created_ms")?,
+            })
+        })
+        .optional()
+        .map_err(Into::into)
+    }
+}
+
+/// Of rows sharing a slug (two sites created it offline), keep the newest.
+fn dedupe_slugs(rows: Vec<DocumentRow>) -> Vec<DocumentRow> {
+    let mut out: Vec<DocumentRow> = Vec::with_capacity(rows.len());
+    for r in rows {
+        if let Some(existing) = out
+            .iter_mut()
+            .find(|d| d.channel == r.channel && d.slug == r.slug)
+        {
+            if r.hlc_ms > existing.hlc_ms {
+                *existing = r;
+            }
+        } else {
+            out.push(r);
+        }
+    }
+    out
+}
+
+fn sync_err(e: tracon_sync::SyncError) -> StoreError {
+    match e {
+        tracon_sync::SyncError::Sqlite(e) => e.into(),
+        tracon_sync::SyncError::Malformed(m) => StoreError::Invalid(m),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc(channel: &str, slug: &str, kind: &str, title: &str, body: &str) -> Value {
+        json!({"channel": channel, "slug": slug, "kind": kind, "title": title, "body": body, "hash": "h", "created_ms": 1, "updated_ms": 1})
+    }
+    fn mem(
+        kind: &str,
+        scope: &str,
+        scope_ref: Option<&str>,
+        body: &str,
+        confidence: f64,
+        state: &str,
+        created_ms: i64,
+    ) -> Value {
+        json!({"channel": "personal", "scope": scope, "scope_ref": scope_ref, "kind": kind, "body": body,
+               "source_session": null, "source_node": null, "confidence": confidence, "state": state,
+               "created_ms": created_ms, "updated_ms": created_ms})
+    }
+
+    #[test]
+    fn documents_are_read_by_slug_searched_and_deduplicated() {
+        let s = Store::open_in_memory().unwrap();
+        s.write_change(
+            "A",
+            "personal",
+            "document",
+            ChangeOp::Upsert,
+            "d1",
+            doc(
+                "personal",
+                "guide-workspace",
+                "guide",
+                "Workspace",
+                "run just test to test",
+            ),
+        )
+        .unwrap();
+        s.write_change(
+            "A",
+            "personal",
+            "document",
+            ChangeOp::Upsert,
+            "d2",
+            doc(
+                "personal",
+                "ref-deploy",
+                "ref",
+                "Deploy",
+                "flux reconciles main",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            s.doc_get("personal", "guide-workspace")
+                .unwrap()
+                .unwrap()
+                .body,
+            "run just test to test"
+        );
+        assert!(s.doc_get("work", "guide-workspace").unwrap().is_none());
+        let hits = s
+            .doc_search(Some("personal"), None, "how do I test?", 5)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].slug.as_deref(), Some("guide-workspace"));
+        assert!(hits[0].text.contains("test"));
+        assert_eq!(s.doc_search(None, Some("ref"), "flux", 5).unwrap().len(), 1);
+        assert_eq!(s.doc_list(Some("personal")).unwrap().len(), 2);
+        // A second site created the same slug later: the list shows one, the newer.
+        s.write_change(
+            "B",
+            "personal",
+            "document",
+            ChangeOp::Upsert,
+            "d3",
+            doc("personal", "ref-deploy", "ref", "Deploy (B)", "newer"),
+        )
+        .unwrap();
+        let list = s.doc_list(Some("personal")).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(
+            s.doc_get("personal", "ref-deploy").unwrap().unwrap().id,
+            "d3"
+        );
+        // Deleting hides it from every read.
+        s.write_change(
+            "B",
+            "personal",
+            "document",
+            ChangeOp::Delete,
+            "d3",
+            Value::Null,
+        )
+        .unwrap();
+        assert_eq!(
+            s.doc_get("personal", "ref-deploy").unwrap().unwrap().id,
+            "d2"
+        );
+    }
+
+    #[test]
+    fn recall_ranks_directives_then_facts_by_confidence_and_age_then_lessons_then_documents() {
+        let s = Store::open_in_memory().unwrap();
+        let now = now_ms();
+        s.write_change(
+            "A",
+            "personal",
+            "memory",
+            ChangeOp::Upsert,
+            "m-dir",
+            mem(
+                KIND_DIRECTIVE,
+                "global",
+                None,
+                "the test command is just test",
+                1.0,
+                "active",
+                now,
+            ),
+        )
+        .unwrap();
+        s.write_change(
+            "A",
+            "personal",
+            "memory",
+            ChangeOp::Upsert,
+            "m-fact-new",
+            mem(
+                KIND_FACT,
+                "project",
+                Some("p1"),
+                "tests live under node/tests",
+                0.9,
+                "active",
+                now,
+            ),
+        )
+        .unwrap();
+        s.write_change(
+            "A",
+            "personal",
+            "memory",
+            ChangeOp::Upsert,
+            "m-fact-old",
+            mem(
+                KIND_FACT,
+                "project",
+                Some("p1"),
+                "tests used to be slow",
+                0.9,
+                "active",
+                now - 400 * 24 * 3600 * 1000,
+            ),
+        )
+        .unwrap();
+        s.write_change(
+            "A",
+            "personal",
+            "memory",
+            ChangeOp::Upsert,
+            "m-lesson",
+            mem(
+                KIND_LESSON,
+                "global",
+                None,
+                "flaky tests hide behind retries",
+                0.8,
+                "promoted",
+                now,
+            ),
+        )
+        .unwrap();
+        s.write_change(
+            "A",
+            "personal",
+            "memory",
+            ChangeOp::Upsert,
+            "m-proposed",
+            mem(
+                KIND_LESSON,
+                "global",
+                None,
+                "a proposed lesson about tests",
+                0.8,
+                "proposed",
+                now,
+            ),
+        )
+        .unwrap();
+        s.write_change(
+            "A",
+            "personal",
+            "memory",
+            ChangeOp::Upsert,
+            "m-other-project",
+            mem(
+                KIND_FACT,
+                "project",
+                Some("p2"),
+                "another project's test fact",
+                0.9,
+                "active",
+                now,
+            ),
+        )
+        .unwrap();
+        s.write_change(
+            "A",
+            "personal",
+            "memory",
+            ChangeOp::Upsert,
+            "m-episode",
+            mem(
+                KIND_EPISODE,
+                "session",
+                Some("s1"),
+                "ran the tests once",
+                1.0,
+                "active",
+                now,
+            ),
+        )
+        .unwrap();
+        s.write_change(
+            "A",
+            "personal",
+            "document",
+            ChangeOp::Upsert,
+            "d1",
+            doc(
+                "personal",
+                "guide-testing",
+                "guide",
+                "Testing",
+                "how the tests are run",
+            ),
+        )
+        .unwrap();
+
+        let hits = s
+            .recall("personal", "test", Some("p1"), Some("s1"), None, 10)
+            .unwrap();
+        let kinds: Vec<&str> = hits.iter().map(|h| h.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["directive", "fact", "fact", "lesson", "document"],
+            "{hits:#?}"
+        );
+        assert_eq!(
+            hits[1].id, "m-fact-new",
+            "the fresh fact outranks the decayed one"
+        );
+        assert!(hits
+            .iter()
+            .all(|h| h.id != "m-proposed" && h.id != "m-other-project"));
+        assert!(
+            hits.iter().all(|h| h.kind != "episode"),
+            "episodes only when asked"
+        );
+        let eps = s
+            .recall(
+                "personal",
+                "tests",
+                None,
+                Some("s1"),
+                Some(&["episode".to_string()]),
+                10,
+            )
+            .unwrap();
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].kind, "episode");
+
+        let always = s.directives_for("personal", Some("p1")).unwrap();
+        let ids: Vec<&str> = always.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["m-dir", "m-fact-new", "m-fact-old"]);
+        assert!(s
+            .recall("personal", "???", None, None, None, 5)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn fts_queries_survive_punctuation() {
+        assert_eq!(
+            fts_query("what's the \"test\" command?"),
+            "\"what\" OR \"s\" OR \"the\" OR \"test\" OR \"command\""
+        );
+        assert_eq!(fts_query("  "), "");
+    }
+}

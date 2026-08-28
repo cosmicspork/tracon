@@ -18,6 +18,8 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod corpus;
+pub use corpus::*;
 pub use records::*;
 
 pub struct Store {
@@ -30,6 +32,8 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Invalid(String),
 }
 
 type Result<T> = std::result::Result<T, StoreError>;
@@ -138,9 +142,9 @@ impl Store {
                 branch, harness_id, harness_version, harness_session_id, container_name, model,
                 budget_tokens, tokens_used, cost_usd, context_used, context_size, state, end_reason,
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
-                ended_mono_ms, updated_ms)
+                ended_mono_ms, updated_ms, project_id)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-                ?23,?24,?25,?26,?27)",
+                ?23,?24,?25,?26,?27,?28)",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -168,7 +172,8 @@ impl Store {
                 s.created_ms,
                 s.started_mono_ms,
                 s.ended_mono_ms,
-                s.updated_ms
+                s.updated_ms,
+                s.project_id
             ],
         )?;
         Ok(())
@@ -569,15 +574,15 @@ impl Store {
                 branch, harness_id, harness_version, harness_session_id, container_name, model,
                 budget_tokens, tokens_used, cost_usd, context_used, context_size, state, end_reason,
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
-                ended_mono_ms, updated_ms)
+                ended_mono_ms, updated_ms, project_id)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,NULL,
-                NULL,?22,?23,?24,?25)
+                NULL,?22,?23,?24,?25,?26)
              ON CONFLICT(id) DO UPDATE SET node_id=?2, channel=?3, work_item_id=?4, repo_path=?5,
                 worktree_path=?6, branch=?7, harness_id=?8, harness_version=?9,
                 harness_session_id=?10, container_name=?11, model=?12, budget_tokens=?13,
                 tokens_used=?14, cost_usd=?15, context_used=?16, context_size=?17, state=?18,
                 end_reason=?19, last_error=?20, turn_active=?21, created_ms=?22,
-                started_mono_ms=?23, ended_mono_ms=?24, updated_ms=?25",
+                started_mono_ms=?23, ended_mono_ms=?24, updated_ms=?25, project_id=?26",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -603,7 +608,8 @@ impl Store {
                 s.created_ms,
                 s.started_mono_ms,
                 s.ended_mono_ms,
-                s.updated_ms
+                s.updated_ms,
+                s.project_id
             ],
         )?;
         Ok(())
@@ -977,6 +983,8 @@ mod records {
         pub harness_session_id: Option<String>,
         pub container_name: Option<String>,
         pub model: String,
+        #[serde(default)]
+        pub project_id: Option<String>,
         pub budget_tokens: i64,
         pub tokens_used: i64,
         pub cost_usd: Option<f64>,
@@ -1009,6 +1017,7 @@ mod records {
                 harness_session_id: r.get("harness_session_id")?,
                 container_name: r.get("container_name")?,
                 model: r.get("model")?,
+                project_id: r.get("project_id")?,
                 budget_tokens: r.get("budget_tokens")?,
                 tokens_used: r.get("tokens_used")?,
                 cost_usd: r.get("cost_usd")?,
@@ -1502,6 +1511,7 @@ mod tests {
                 harness_session_id: None,
                 container_name: None,
                 model: "m".into(),
+                project_id: None,
                 budget_tokens: 1000,
                 tokens_used: 0,
                 cost_usd: None,
