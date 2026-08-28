@@ -87,6 +87,8 @@ export interface Session {
   model: string
   phase: 'plan' | 'execute' | 'review'
   policy_version: number | null
+  /** Review sessions: the review this session was spawned to read. */
+  review_id: string | null
   budget_tokens: number
   tokens_used: number
   cost_usd: number | null
@@ -148,6 +150,97 @@ export interface Review {
   publish_result: string | null
   claimed_ms: number | null
   created_ms: number
+  /** The deterministic checks that passed at submit, as JSON. */
+  checks_json: string | null
+  /** The fresh session the node spawned to read this review, if any. */
+  review_session_id: string | null
+  /** That session's verdict, as JSON: `{verdict, summary, findings, model}`. */
+  ai_verdict_json: string | null
+}
+
+export interface CheckResult {
+  command: string
+  ok: boolean
+  exit: number | null
+  tail: string
+  ms: number
+}
+
+export interface AiVerdict {
+  verdict: 'approve' | 'request_changes'
+  summary: string
+  findings: { path?: string; line?: number; severity?: 'blocking' | 'should' | 'nit'; note: string }[]
+  model: string
+  session_id: string
+  at_ms: number
+}
+
+export function reviewChecks(r: Review): CheckResult[] {
+  try {
+    return r.checks_json ? (JSON.parse(r.checks_json) as CheckResult[]) : []
+  } catch {
+    return []
+  }
+}
+
+export function reviewVerdict(r: Review): AiVerdict | null {
+  try {
+    return r.ai_verdict_json ? (JSON.parse(r.ai_verdict_json) as AiVerdict) : null
+  } catch {
+    return null
+  }
+}
+
+/** A work item as the node keeps it; `deps` are the ids it waits on. */
+export interface WorkItem {
+  id: string
+  channel: string
+  project_id: string | null
+  title: string
+  body: string
+  state: 'open' | 'closed'
+  priority: number
+  deps: string[]
+  discovered_from: string | null
+  discovered_by_session: string | null
+  phase_plan_slug: string | null
+  closed_by_session: string | null
+  created_ms: number
+  updated_ms: number
+}
+
+export type Blocker = { kind: 'open'; id: string } | { kind: 'unknown'; id: string } | { kind: 'cycle' }
+export type Readiness = { state: 'ready' } | { state: 'blocked'; by: Blocker[] } | { state: 'closed' }
+
+/** The ledger view: the item, its derived readiness, and the session holding it. */
+export type WorkView = WorkItem & { readiness: Readiness; session_id: string | null }
+
+export interface CeilingInfo {
+  usage_today: number
+  ceiling: number | null
+  state: 'under' | 'near' | 'at' | 'none'
+}
+
+export interface ChannelInfo {
+  name: string
+  nodes: string[]
+  bindings: Record<string, unknown>
+  ceiling: CeilingInfo
+}
+
+export interface ChannelMetrics {
+  channel: string
+  since_ms: number
+  accepted_changes: number
+  rejected_changes: number
+  approvals: number
+  approvals_per_accepted_change: number | null
+  tokens_per_accepted_change: number | null
+  tokens: number
+  cost_usd: number | null
+  human_seconds: number
+  agent_seconds: number
+  sessions: number
 }
 
 export interface Queue {

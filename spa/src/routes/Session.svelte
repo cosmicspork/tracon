@@ -67,6 +67,19 @@
 
   let confirmingKill = $state(false)
 
+  // The check that is running: the last check_started without a later
+  // check_result for its last command, shown with elapsed time.
+  const checkStarted = $derived.by(() => {
+    const started = [...store.events].reverse().find((e) => e.kind === 'check_started')
+    return started ?? null
+  })
+  const checkCommand = $derived.by(() => {
+    const cmds = (checkStarted?.payload.commands as string[] | undefined) ?? []
+    const done = store.events.filter((e) => e.kind === 'check_result' && checkStarted && e.seq > checkStarted.seq).length
+    return cmds[done] ?? cmds.at(-1) ?? null
+  })
+  const checkElapsed = $derived(checkStarted ? formatAge(checkStarted.at_ms, clock.now) : '')
+
   async function kill() {
     // Immediate in the browser; confirmed on the phone, where a stray thumb is
     // likely and the session is someone's work in progress.
@@ -87,6 +100,7 @@
     if (!session) return 'loading'
     if (isTerminal(session.state)) return `session ${session.state.replace('_', ' ')}`
     if (session.state === 'starting') return 'starting'
+    if (session.state === 'waiting_on_check') return `running ${checkCommand ?? 'the checks'}`
     if (busy) return 'a turn is running'
     if (session.tokens_used >= session.budget_tokens) return 'over budget'
     return null
@@ -108,6 +122,7 @@
   <header class="sess">
     <a class="lnk" href="/">‹ Queue</a>
     <span class="model">{session.model}</span>
+    <span class="chip">{session.phase}</span>
     <span class="chip" class:self={owner?.is_self} class:off={unreachable !== null}
       >{nodeLabel(store.nodes, session.node_id)}{unreachable !== null && owner?.last_seen_ms
         ? ` · last seen ${formatAge(owner.last_seen_ms, clock.now)}`
@@ -124,6 +139,12 @@
     {/if}
     {#if session.cost_usd != null}
       <span class="mono">${session.cost_usd.toFixed(2)}</span>
+    {/if}
+    {#if session.policy_version != null}
+      <span class="mono">policy v{session.policy_version}</span>
+    {/if}
+    {#if session.work_item_id}
+      <a class="mono" href="/work/{session.work_item_id}">item {session.work_item_id.slice(0, 8)}</a>
     {/if}
     {#if !isTerminal(session.state)}
       <button class="lnk d" onclick={kill} disabled={unreachable !== null}>{confirmingKill ? 'Kill — tap again' : 'Kill'}</button>
@@ -142,6 +163,12 @@
     </div>
   {:else if session.state === 'failed'}
     <div class="banner crit">failed <b>· {session.last_error ?? 'harness error'}</b></div>
+  {:else if session.state === 'waiting_on_check'}
+    <div class="banner dim">running <code>{checkCommand ?? 'checks'}</code> <b>· {checkElapsed} · input disabled until it finishes</b></div>
+  {:else if session.end_reason === 'item_close'}
+    <div class="banner ok">ended at item close <b>· the work item is closed{session.work_item_id ? ` · ${session.work_item_id.slice(0, 8)}` : ''}</b></div>
+  {:else if session.end_reason === 'phase_done'}
+    <div class="banner ok">{session.phase === 'plan' ? 'plan written' : 'verdict given'} <b>· this {session.phase} session is done</b></div>
   {/if}
   {#if remote && unreachable !== null}
     <div class="banner dim">{unreachable} <b>· the log resumes when {owner?.name ?? 'it'} returns</b></div>

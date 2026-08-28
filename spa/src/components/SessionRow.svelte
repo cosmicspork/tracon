@@ -22,7 +22,16 @@
       running: session.turn_active ? 'Working' : 'Running',
       waiting_on_you: 'Waiting on you',
       waiting_on_check: 'Waiting on a check',
-      closed: session.end_reason === 'killed_user' ? 'Killed' : 'Closed',
+      closed:
+        session.end_reason === 'killed_user'
+          ? 'Killed'
+          : session.end_reason === 'item_close'
+            ? 'Ended · item closed'
+            : session.end_reason === 'phase_done'
+              ? session.phase === 'plan'
+                ? 'Planned'
+                : 'Reviewed'
+              : 'Closed',
       killed_budget: 'Killed · budget',
       failed: 'Failed',
     }[session.state],
@@ -40,7 +49,7 @@
     <em>{kind}</em>
     {session.branch}
     <small
-      >{stale && owner?.last_seen_ms ? `last seen ${formatAge(owner.last_seen_ms, clock.now)} · ` : ''}{repo} · {session.model.split('/').at(-1)} · {session.channel}{session.last_error
+      >{stale && owner?.last_seen_ms ? `last seen ${formatAge(owner.last_seen_ms, clock.now)} · ` : ''}{repo} · {session.phase} · {session.model.split('/').at(-1)} · {session.channel}{session.last_error
         ? ` · ${session.last_error}`
         : ''}</small
     >

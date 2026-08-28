@@ -2,9 +2,10 @@
 // On reconnect everything is refetched and ephemeral state dropped, so a client
 // crash costs nothing (the client crash invariant).
 
-import { api, type ChannelInfo } from './api'
+import { api } from './api'
 import { upsertNode } from './nodes'
 import type {
+  ChannelInfo,
   Event,
   Frame,
   MeshState,

@@ -6,7 +6,7 @@
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
-  import type { Review } from '../lib/types'
+  import { reviewChecks, reviewVerdict, type Review } from '../lib/types'
 
   let { id }: { id: string } = $props()
 
@@ -59,6 +59,10 @@
       return []
     }
   })
+  const verdict = $derived(review ? reviewVerdict(review) : null)
+  const checks = $derived(review ? reviewChecks(review) : [])
+  const session = $derived(review ? store.sessions.get(review.session_id) : undefined)
+  const reviewer = $derived(review?.review_session_id ? store.sessions.get(review.review_session_id) : undefined)
   const edited = $derived(
     review !== null && (title !== review.title || body !== review.body),
   )
@@ -116,6 +120,39 @@
     <dt>Session</dt>
     <dd class="m"><a href="/sessions/{review.session_id}">{review.session_id.slice(0, 8)}</a></dd>
   </dl>
+
+  {#if checks.length}
+    <div class="checks">
+      {#each checks as c (c.command)}<span class="chip ok">✓ {c.command} · {Math.round(c.ms / 1000)}s</span>{/each}
+    </div>
+  {/if}
+
+  <dl class="prov">
+    <div><dt>Model</dt><dd>{session ? `${session.model} · ${session.phase}` : '—'}</dd></div>
+    <div><dt>Item</dt><dd>{#if session?.work_item_id}<a href="/work/{session.work_item_id}">{session.work_item_id.slice(0, 8)}</a>{:else}none{/if}</dd></div>
+    <div><dt>Policy</dt><dd>{session?.policy_version != null ? `working-agreements v${session.policy_version}` : '—'}</dd></div>
+    <div><dt>Reviewed by</dt><dd>{reviewer ? `${reviewer.model} · fresh session` : review.review_session_id ? 'fresh session' : 'no review model bound'}</dd></div>
+    <div><dt>Commit</dt><dd>{review.head_sha.slice(0, 8)}</dd></div>
+  </dl>
+
+  {#if verdict}
+    <div class="verdict" class:rc={verdict.verdict === 'request_changes'}>
+      <span class="vbar"></span>
+      <div class="in">
+        <div class="who"><b>{verdict.verdict === 'approve' ? 'Approves' : 'Request changes'}</b> · {verdict.model} · read only the requirements and the diff{reviewer ? ` · ${Math.round(reviewer.tokens_used / 1000)}k tokens` : ''}</div>
+        <div class="sum">{verdict.summary}</div>
+        {#if verdict.findings?.length}
+          <ul class="findings">
+            {#each verdict.findings as f, i (i)}
+              <li><span class="sev {f.severity ?? 'should'}">{f.severity ?? 'should'}</span><span class="path">{f.path ?? ''}{f.line ? `:${f.line}` : ''}</span><span>{f.note}</span></li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    </div>
+  {:else if review.review_session_id}
+    <div class="banner dim">a fresh session is reading this review <b>· its verdict lands here; yours decides</b></div>
+  {/if}
 
   {#if review.state === 'revising'}
     <div class="banner ok">
@@ -238,6 +275,120 @@
   .kv dd.m {
     font: 12.5px var(--mono);
     color: var(--ink2);
+  }
+  .checks {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .chip.ok {
+    background: var(--wash-ok);
+    color: var(--ok);
+  }
+  .prov {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px 16px;
+    background: var(--s1);
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin: 0;
+  }
+  .prov div {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .prov dt {
+    font: 11px var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  .prov dd {
+    margin: 0;
+    font: 12.5px var(--mono);
+    color: var(--ink2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .verdict {
+    display: grid;
+    grid-template-columns: 3px minmax(0, 1fr);
+    gap: 0 14px;
+    background: var(--s1);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .vbar {
+    background: var(--acc);
+  }
+  .verdict.rc .vbar {
+    background: var(--wait);
+  }
+  .verdict .in {
+    padding: 10px 14px 12px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .who {
+    font: 12px var(--mono);
+    color: var(--dim);
+  }
+  .who b {
+    font-weight: 500;
+    color: var(--acc);
+  }
+  .verdict.rc .who b {
+    color: var(--wait);
+  }
+  .sum {
+    font-size: 13.5px;
+    max-width: 70ch;
+  }
+  .findings {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 2px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .findings li {
+    display: grid;
+    grid-template-columns: 64px 170px minmax(0, 1fr);
+    gap: 10px;
+    font-size: 12.5px;
+  }
+  .sev {
+    font: 11px var(--mono);
+    color: var(--wait);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .sev.nit {
+    color: var(--dim);
+  }
+  .sev.blocking {
+    color: var(--crit);
+  }
+  .path {
+    font: 12px var(--mono);
+    color: var(--ink2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  @media (max-width: 700px) {
+    .findings li {
+      grid-template-columns: 64px 1fr;
+    }
+    .path {
+      grid-column: 2;
+    }
   }
   .edit {
     background: var(--s1);
