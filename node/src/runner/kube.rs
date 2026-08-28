@@ -564,7 +564,10 @@ mod tests {
         // The API refuses nodeName on a gated pod; the probe pins by label.
         assert!(s.node_name.is_none());
         assert_eq!(
-            s.node_selector.unwrap().get("kubernetes.io/hostname").map(String::as_str),
+            s.node_selector
+                .unwrap()
+                .get("kubernetes.io/hostname")
+                .map(String::as_str),
             Some("general-1")
         );
     }
