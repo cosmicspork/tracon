@@ -2854,6 +2854,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracon-sync"
+version = "0.2.2"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracon-proto",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
