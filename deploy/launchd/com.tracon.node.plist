@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The macOS counterpart of deploy/systemd/tracon.service. A LaunchAgent, not
+     a daemon: the node's state and credentials belong to the logged-in
+     operator. `tracon service install` writes this file with HOME expanded. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tracon.node</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__BIN__</string>
+    <string>serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RUST_LOG</key>
+    <string>tracon=info</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <!-- The node logs to stdout and does not daemonize; launchd keeps the log. -->
+  <key>StandardOutPath</key>
+  <string>__LOGS__/tracon.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOGS__/tracon.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

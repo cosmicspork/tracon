@@ -1,0 +1,21 @@
+# The node runs as a user service, not a system one: its state, config, and
+# harness socket all live under the operator's XDG directories, and rootless
+# podman needs the user session. `tracon service install` writes this file.
+[Unit]
+Description=tracon node
+Documentation=https://github.com/cosmicspork/tracon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/tracon serve
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=tracon=info
+# The node ends its sessions and tears down harness containers on SIGTERM;
+# killing it sooner orphans them.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target
