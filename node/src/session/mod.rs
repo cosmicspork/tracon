@@ -87,6 +87,9 @@ pub struct Manager {
     /// starts and dropped when it ends, so it authorises exactly one session
     /// for exactly as long as that session runs.
     tokens: Arc<Mutex<HashMap<String, (String, String)>>>,
+    /// The node's own model probe presents this to the gateway; it may only
+    /// read, and it names no channel.
+    probe_token: String,
     /// The hub client, once one exists: commands for sessions other nodes own
     /// are forwarded through it.
     mesh: Arc<std::sync::OnceLock<Arc<crate::mesh::client::MeshClient>>>,
@@ -114,6 +117,7 @@ impl Manager {
             node_id,
             live: Arc::new(Mutex::new(HashMap::new())),
             tokens: Arc::new(Mutex::new(HashMap::new())),
+            probe_token: mint_token(),
             mesh: Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -179,6 +183,24 @@ impl Manager {
         } else {
             None
         }
+    }
+
+    /// The session a gateway request belongs to, from the placeholder key it
+    /// carries: `(session_id, channel)`.
+    pub async fn session_for_token(&self, presented: &str) -> Option<(String, String)> {
+        let tokens = self.tokens.lock().await;
+        tokens
+            .iter()
+            .find(|(_, (expected, _))| constant_time_eq(expected.as_bytes(), presented.as_bytes()))
+            .map(|(id, (_, channel))| (id.clone(), channel.clone()))
+    }
+
+    pub fn probe_token(&self) -> &str {
+        &self.probe_token
+    }
+
+    pub fn is_probe_token(&self, presented: &str) -> bool {
+        constant_time_eq(self.probe_token.as_bytes(), presented.as_bytes())
     }
 
     pub fn store(&self) -> &Arc<Store> {
@@ -397,7 +419,13 @@ impl Manager {
             mono_ms: started.elapsed().as_millis() as i64,
         });
 
-        let scratch = materialize::scratch_for(id, &wt.path, &repo, &self.backend.harness_home())?;
+        // The harness reaches its models through the node: every provider is
+        // wired to the gateway with this session's token as the placeholder
+        // key, so the only secret in the container names the session.
+        let wiring =
+            crate::gateway::model::harness_wiring(&self.cfg, &self.backend.harness_host(), &token);
+        let scratch =
+            materialize::scratch_for(id, &wt.path, &repo, &self.backend.harness_home(), &wiring)?;
         let container = format!("tracon-h-{slug}");
         let runner: Arc<dyn Runner> = self.backend.runner(scratch.mounts);
 
@@ -441,6 +469,7 @@ impl Manager {
                     container_name: container.clone(),
                     mcp_servers,
                     tools: self.cfg.harness.tools.clone(),
+                    env: wiring.env.clone(),
                 },
             )
             .await;

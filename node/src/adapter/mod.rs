@@ -21,7 +21,7 @@ impl HarnessVersion {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelOption {
     pub value: String,
     pub name: String,
@@ -87,6 +87,8 @@ pub struct LaunchSpec {
     pub mcp_servers: Vec<Value>,
     /// Built-in tools the harness may use. Empty leaves its default set.
     pub tools: Vec<String>,
+    /// Environment for the harness process: the gateway wiring.
+    pub env: Vec<(String, String)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,7 +112,12 @@ pub trait HarnessAdapter: Send + Sync {
     fn id(&self) -> &'static str;
     fn pinned_version(&self) -> &str;
     async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError>;
-    async fn probe_models(&self, runner: &dyn Runner) -> Result<Vec<ModelOption>, AdapterError>;
+    /// List the models the harness offers, wired to the gateway by `env`.
+    async fn probe_models(
+        &self,
+        runner: &dyn Runner,
+        env: Vec<(String, String)>,
+    ) -> Result<Vec<ModelOption>, AdapterError>;
     async fn launch(
         &self,
         runner: &dyn Runner,

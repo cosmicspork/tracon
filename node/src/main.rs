@@ -51,9 +51,6 @@ enum Command {
     /// Channels: the unit of tenancy, separated by key.
     #[command(subcommand)]
     Channel(ChannelCommand),
-    /// The harness's node-owned state volume and its model credentials.
-    #[command(subcommand)]
-    Harness(HarnessCommand),
     /// The credential store: what the node brokers, sealed under its identity.
     #[command(subcommand)]
     Credential(CredentialCommand),
@@ -75,23 +72,6 @@ enum CredentialCommand {
         #[arg(long)]
         to: String,
     },
-}
-
-#[derive(Subcommand)]
-enum HarnessCommand {
-    /// Copy a model-credential database into the node-owned volume, once.
-    /// Defaults to the operator's own `~/.omp/agent/agent.db`.
-    ImportCredentials {
-        #[arg(long)]
-        from: Option<std::path::PathBuf>,
-        /// Replace a store already in the volume.
-        #[arg(long)]
-        force: bool,
-    },
-    /// Run the harness image interactively on the default network with only
-    /// the node-owned volume mounted, to log in where no operator install
-    /// exists. Nothing else of this host is visible to it.
-    Shell,
 }
 
 #[derive(Subcommand)]
@@ -176,7 +156,6 @@ async fn main() -> Result<()> {
             println!("{} boundary is in place", backend.kind());
             Ok(())
         }
-        Command::Harness(cmd) => harness_command(cmd).await,
         Command::Credential(cmd) => credential_command(cmd).await,
         Command::Policy(PolicyCommand::Push) => {
             let cfg = config::Config::load();
@@ -647,52 +626,6 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
             };
             tracon::mesh::enroll::post_direct(&id, &hub, &to, &grantee, &payload).await?;
             println!("handed {name} to {}", &to[..16.min(to.len())]);
-            Ok(())
-        }
-    }
-}
-
-async fn harness_command(cmd: HarnessCommand) -> Result<()> {
-    use tracon::session::materialize;
-    match cmd {
-        HarnessCommand::ImportCredentials { from, force } => {
-            let from = from.unwrap_or_else(|| {
-                dirs::home_dir()
-                    .unwrap_or_default()
-                    .join(".omp/agent/agent.db")
-            });
-            if !from.exists() {
-                anyhow::bail!("{} does not exist; pass --from <agent.db>", from.display());
-            }
-            let dest =
-                materialize::import_credentials(&from, force).map_err(|e| anyhow::anyhow!(e))?;
-            println!("credentials imported to {}", dest.display());
-            Ok(())
-        }
-        HarnessCommand::Shell => {
-            let cfg = config::Config::load();
-            if cfg.runtime.kind != config::RuntimeKind::Podman {
-                anyhow::bail!("`harness shell` needs the podman runtime; log in on a laptop and import the store");
-            }
-            let mounts = materialize::state_mounts(materialize::PODMAN_HARNESS_HOME)?;
-            let mut c = std::process::Command::new("podman");
-            c.args(["run", "--rm", "-it", "--network", "podman"]);
-            c.args([
-                "-e",
-                &format!(
-                    "OMP_STATE_DIR={}",
-                    materialize::state_target(materialize::PODMAN_HARNESS_HOME)
-                ),
-            ]);
-            for m in mounts {
-                c.args(["-v", &format!("{}:{}", m.source, m.target)]);
-            }
-            c.args([cfg.boundary.harness_image.as_str(), "sh"]);
-            eprintln!("harness shell: run `omp` to log in; only the node-owned volume is mounted");
-            let status = c.status()?;
-            if !status.success() {
-                anyhow::bail!("shell exited with {status}");
-            }
             Ok(())
         }
     }

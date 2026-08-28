@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(api::health))
         .route("/api/node", get(api::get_node))
         .route("/api/node/refresh-models", post(api::refresh_models))
+        .route("/api/usage", get(api::usage))
         .route("/api/nodes", get(api::list_nodes))
         .route("/api/mesh", get(api::get_mesh))
         .route("/api/channels", get(api::list_channels))
@@ -118,6 +119,10 @@ pub fn harness_router(state: AppState) -> Router {
     Router::new()
         .route("/harness/ping", get(|| async { "pong" }))
         .route("/mcp/{session_id}", post(mcp::handle))
+        .route(
+            "/model/{provider}/{*rest}",
+            axum::routing::any(crate::gateway::model::handle),
+        )
         .with_state(state)
 }
 
@@ -272,6 +277,18 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         }
     }
 
+    // Now that the harness can reach the gateway, ask it what models it offers.
+    // The probe presents the node's own read-only token; without a model
+    // credential there is nothing to inject, so the list stays empty and the
+    // interface says to connect a provider.
+    {
+        let probe_state = state.clone();
+        let probe_backend = backend.clone();
+        tokio::spawn(async move {
+            let _ = api::probe_models_into_store(&probe_state, probe_backend.as_ref()).await;
+        });
+    }
+
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("bind {listen}"))?;
@@ -359,25 +376,20 @@ async fn init_node(
         tracing::warn!(check = f.id.as_str(), detail = %f.detail, "refusing to run harnesses");
     }
 
-    let has_credentials = crate::session::materialize::has_credentials();
-    if ready && !has_credentials {
+    if let Some(p) = crate::session::materialize::retire_harness_credentials() {
         tracing::warn!(
-            path = %Config::harness_state_dir().join("agent/agent.db").display(),
-            "no harness credentials in the node-owned volume; run `tracon harness import-credentials` \
-             or `tracon harness shell` to log in. Sessions will start but the model list is empty."
+            path = %p.display(),
+            "a credential store was on the harness volume; set aside — models are brokered through the gateway now"
         );
     }
-    let (found, models) = if ready && has_credentials {
-        // The probe opens a real session, so it needs the credential store the
-        // harness reads; without it `session/new` fails and the model list is
-        // silently empty.
+    let found = if ready {
         let runner = backend.runner(
             crate::session::materialize::state_mounts(&backend.harness_home()).unwrap_or_default(),
         );
         // A probe that cannot read the version is not a pass: record "unknown",
         // which does not equal the pin, so new sessions are blocked with the
         // version pair shown rather than run against an unverified harness.
-        let found = Some(
+        Some(
             adapter
                 .version(runner.as_ref())
                 .await
@@ -386,15 +398,19 @@ async fn init_node(
                     tracing::warn!(error = %e, "harness version probe failed; treating as unknown");
                     "unknown".into()
                 }),
-        );
-        let models = adapter
-            .probe_models(runner.as_ref())
-            .await
-            .unwrap_or_default();
-        (found, models)
+        )
     } else {
-        (None, Vec::new())
+        None
     };
+    // The model list is probed once the gateway is listening (see `serve`);
+    // until then the previous run's list stands.
+    let models: Vec<crate::adapter::ModelOption> = store
+        .get_node(&id)
+        .ok()
+        .flatten()
+        .and_then(|n| n.models_json)
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default();
 
     store.put_node(&NodeRow {
         id: id.clone(),

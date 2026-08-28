@@ -39,3 +39,23 @@ sealed once and renamed `.imported`. Credentials carry a `kind` (`env`, `api_key
 pinned to it in `nodes`, as a direct-sealed `credential_handoff` frame — on enrollment,
 or by `tracon credential share`. The receiver drops a row not pinned to it: the sender's
 bindings are a claim, the receiver's are the rule.
+
+## The model gateway
+
+`/model/{provider}/{*path}` on the harness listener (the same forward the MCP surface
+rides). The harness's placeholder key is its session token: `x-api-key` or
+`Authorization: Bearer` names the session, the session names the channel, and the
+channel's `bindings_json.providers` (when present) and the credential's own
+`channels`/`nodes` decide before anything is forwarded. The upstream host must also pass
+the egress allowlist. An `api_key` credential becomes `x-api-key` (Anthropic shape) or a
+bearer (OpenAI shape); an `oauth` credential becomes a bearer with `oauth-2025-04-20`
+merged into `anthropic-beta`. The response streams through untouched while a scanner
+reads `usage` off it; every request is a `model_usage` row (`GET /api/usage`).
+
+The harness is wired per session by `gateway::model::harness_wiring`: `ANTHROPIC_BASE_URL`
+and the placeholder in the environment, and a read-only `agent/models.json` for the
+providers omp only reaches through an override. The node's own model probe runs after
+the listeners are up, presents a read-only probe token, and is skipped when no model
+credential is usable on the node. `agent.db` on the harness volume is set aside at
+startup (`agent.db.retired`), and `tracon harness import-credentials` / `harness shell`
+are gone.

@@ -16,6 +16,8 @@ pub struct Config {
     pub publish: Publish,
     pub mesh: Mesh,
     pub runtime: Runtime,
+    /// Model providers the gateway fronts, by name.
+    pub providers: std::collections::BTreeMap<String, Provider>,
 }
 
 /// Which boundary this node establishes. `podman` is a laptop or Linux host
@@ -203,6 +205,57 @@ pub struct Gateway {
     pub harness_listen: HarnessListen,
 }
 
+/// Request shapes the model gateway knows how to inject a credential into.
+pub const SHAPE_ANTHROPIC: &str = "anthropic";
+pub const SHAPE_OPENAI: &str = "openai";
+
+/// One model provider the gateway fronts. The harness reaches it at
+/// `/model/<name>/…`; the node injects `credential` and forwards to
+/// `upstream`, which must also pass the egress allowlist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Provider {
+    /// The broker credential injected for it (kind `api_key` or `oauth`).
+    pub credential: String,
+    pub upstream: String,
+    /// `anthropic` or `openai`: which headers the credential becomes.
+    pub shape: String,
+}
+
+impl Default for Provider {
+    fn default() -> Self {
+        Self {
+            credential: String::new(),
+            upstream: String::new(),
+            shape: SHAPE_OPENAI.into(),
+        }
+    }
+}
+
+pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
+    [
+        (
+            "anthropic",
+            Provider {
+                credential: "anthropic".into(),
+                upstream: "https://api.anthropic.com".into(),
+                shape: SHAPE_ANTHROPIC.into(),
+            },
+        ),
+        (
+            "openai",
+            Provider {
+                credential: "openai".into(),
+                upstream: "https://api.openai.com".into(),
+                shape: SHAPE_OPENAI.into(),
+            },
+        ),
+    ]
+    .into_iter()
+    .map(|(n, p)| (n.to_string(), p))
+    .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionDefaults {
@@ -221,6 +274,7 @@ impl Default for Config {
             node_name: hostname(),
             mesh: Mesh::default(),
             runtime: Runtime::default(),
+            providers: default_providers(),
             harness: Harness {
                 id: "omp".into(),
                 version: "18.0.4".into(),

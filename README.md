@@ -128,7 +128,7 @@ On a host that only needs to run a node, skip the toolchain:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | sh
 tracon setup                        # the container definitions ship inside the binary
-tracon harness import-credentials   # or `tracon harness shell` to log in inside the volume
+tracon credential import creds.toml # a model credential, or connect a provider from the Nodes screen
 tracon check-boundary --deep
 tracon serve
 ```
