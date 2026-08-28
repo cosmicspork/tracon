@@ -9,9 +9,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create", "get", "list", "watch", "delete"]
+  # Attach is a GET that upgrades to a WebSocket, which the API server
+  # authorises as `get`; `create` covers the POST form. Both, or the node can
+  # create a harness it cannot talk to.
   - apiGroups: [""]
     resources: ["pods/attach"]
-    verbs: ["create"]
+    verbs: ["create", "get"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]

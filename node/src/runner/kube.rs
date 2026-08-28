@@ -183,8 +183,17 @@ impl KubeSpec {
                     hostnames: Some(vec![self.gateway_host.clone()]),
                 }]),
                 // The state claim is ReadWriteOnce, so the harness must land
-                // on the node's own Kubernetes node.
-                node_name: Some(self.env.node_name.clone()),
+                // on the node's own Kubernetes node. A gated pod may not carry
+                // `nodeName` (the API refuses it until the gates clear), so the
+                // probe pins by hostname label instead; what the checks read
+                // from it — privilege, mounts, network — is unaffected.
+                node_name: (!gated).then(|| self.env.node_name.clone()),
+                node_selector: gated.then(|| {
+                    std::collections::BTreeMap::from([(
+                        "kubernetes.io/hostname".to_string(),
+                        self.env.node_name.clone(),
+                    )])
+                }),
                 scheduling_gates: gated.then(|| {
                     vec![PodSchedulingGate {
                         name: PROBE_GATE.into(),
@@ -550,7 +559,16 @@ mod tests {
     #[test]
     fn a_probe_is_gated_so_it_is_admitted_but_never_scheduled() {
         let pod = spec().pod("probe", &cmd(), true).unwrap();
-        let gates = pod.spec.unwrap().scheduling_gates.unwrap();
-        assert_eq!(gates[0].name, PROBE_GATE);
+        let s = pod.spec.unwrap();
+        assert_eq!(s.scheduling_gates.unwrap()[0].name, PROBE_GATE);
+        // The API refuses nodeName on a gated pod; the probe pins by label.
+        assert!(s.node_name.is_none());
+        assert_eq!(
+            s.node_selector
+                .unwrap()
+                .get("kubernetes.io/hostname")
+                .map(String::as_str),
+            Some("general-1")
+        );
     }
 }
