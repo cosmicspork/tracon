@@ -209,6 +209,18 @@ to another member, direct-sealed over the hub, and enrollment hands over every c
 whose `nodes` lists the new node. A plaintext `credentials.toml` found at startup is
 sealed once and set aside.
 
+### The corpus
+
+Every node keeps documents and memories, replicated through the hub and read locally
+always. `tracon doc import <dir>` brings a notebook directory in (`<kind>-<slug>.md`);
+`tracon doc ls|get|put|rm|export` and the Documents screen read and edit them, with the
+hash last read as the edit's precondition. Agents get `recall`, `retain`, `doc_search`,
+`doc_read`, and `doc_write` (asked); the operator's directives (`tracon memory add`)
+rank first in recall and are injected into every session's orientation. What an agent
+retains as a lesson waits for the nightly batch, which arrives on the queue for a
+per-item verdict. `tracon channel share --hub <channel>` lets the hub's replica index a
+channel and run its batch; a channel never shared stays ciphertext to it.
+
 Model credentials are brokered the same way. The harness holds only a placeholder key
 (its session token) and reaches every provider through the node's gateway
 (`/model/<provider>/…` on the harness forward), which injects the real credential,

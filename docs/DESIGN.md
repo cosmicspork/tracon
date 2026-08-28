@@ -179,6 +179,15 @@ has a one-line answer to "what does the operator see."
 | Proposed | In the nightly batch with kind, scope, source session. |
 | Promoted / rejected | Out of the batch. |
 
+### Document (Phase 4)
+
+| State | What the operator sees |
+|---|---|
+| Listed | Under its kind, with slug and age; search by content across the channel. |
+| Read | Rendered markdown, the hash in the header. |
+| Editing | A textarea; Save is disabled until the text differs. |
+| Changed elsewhere | While editing: a quiet banner. On save: the other version, "take theirs" or "keep mine". |
+
 ### Three states designed as first-class, not as badges
 
 - **Waiting on you.** The whole point. One visual treatment, used on the queue card, the
@@ -323,6 +332,29 @@ Nothing visible. The pod-hosted node serves the same interface and reports the s
 five checks; a refused work node shows its failed check exactly as a laptop would. The
 one new thing an operator meets is a queue card of kind `tool`: a brokered call the
 policy did not name, waiting for the same allow-or-reject as a harness permission.
+
+## What Phase 4 built
+
+Checked against screenshots of the built screens rather than static mockups: each
+screen was small enough to build and look at in one sitting, and the tokens are the
+record.
+
+- **Connect a provider.** Cards under the serving node on the Nodes screen. Pending is
+  the amber treatment with the sign-in link and a paste-back field; connected shows
+  the identity and when the token refreshes; failed shows the reason and "Try again".
+  A provider without a login flow says "API key only" and names the CLI. The phone
+  shows the link and nothing to paste into.
+- **Memory batch.** The third queue kind, after reviews, in the waiting treatment. Its
+  screen lists each proposed memory with kind, scope, confidence, age, and source, a
+  Reject/Promote pair per item, promote-all / reject-all, and one Send. Decided items
+  keep their chip. The phone stacks the actions under each item and can decide.
+- **Documents.** A fifth destination on the rail and the tab bar. The list is grouped
+  by kind with a channel picker and content search; a document renders as markdown
+  with its hash in the header; the editor is a textarea, browser only, that saves with
+  the hash last read and shows the other version on a conflict. The header says when
+  search is local because the hub is down.
+- **Orientation.** Not a screen: an `orientation` event at the top of every session's
+  log, so the transcript shows what the agent was told.
 
 ## Decisions from the flows
 
