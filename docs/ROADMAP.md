@@ -347,24 +347,69 @@ because there is only one source.
 
 ## Phase 5: Ledger, phases, metrics
 
-- [ ] Work item store: hash IDs, dependency edges, `discovered-from`
-- [ ] Ready-work query, deterministic topological sort
-- [ ] Session requires a work item; ready-work injected at start; session ends at item
-      close
-- [ ] Plan / execute / review as separate spawned sessions
-- [ ] Model required in every session spec, validated at spawn
-- [ ] Per-session budget enforced by killing the session
-- [ ] Deterministic supervision between phases (`just check`, `just analyse`,
-      `just test`)
-- [ ] Review sessions run with fresh context: requirements and diff only
-- [ ] Diff size cap at submit
-- [ ] Execute phase gated on a plan artifact
-- [ ] Metrics rollups: approvals per accepted change, cost per accepted change
-- [ ] Per-channel daily cost ceiling enforced by the node
-- [ ] Provenance queryable per commit: model, prompt, approval, policy version
+- [x] Work item store: hash IDs, dependency edges, `discovered-from`. The `work_item`
+      table replicates through the `sync` crate like documents; ids are
+      `sha256(channel, project, site, created_ms, title)` so two nodes mint offline
+      without collision; `deps_json` holds the edges, `discovered_from` and
+      `discovered_by_session` the origin. `tracon work add|ls|ready|show|close|dep|rm`,
+      `/api/work`, and the Work screen.
+- [x] Ready-work query, deterministic topological sort. `tracon_sync::work::status`:
+      Kahn over the open subgraph with ids as the tiebreak, then
+      `(priority desc, created_ms asc, id asc)`; unknown deps block and say so; cycles
+      block every member. Every replica lists the same order.
+- [x] Session requires a work item; ready-work injected at start; session ends at item
+      close. Plan and execute sessions are refused without a ready, unheld item (422 with
+      the blocker named); the orientation carries the item and the project's ready work;
+      `work_close` (or a close from the interface, or a publish) ends the holding session
+      once its turn is over, reason `item_close`.
+- [x] Plan / execute / review as separate spawned sessions. The operator starts plan and
+      execute; the plan session ends by writing `plan-<item>` (`doc_write` to that one
+      slug is not asked); the node spawns the review session at submit.
+- [x] Model required in every session spec, validated at spawn. Since Phase 1; the spec
+      now also names the phase, and a review session's model comes from the channel's
+      `phases.review.model` binding — nothing is inherited.
+- [x] Per-session budget enforced by killing the session. Since Phase 1; the default now
+      comes from the channel's per-phase binding before the node's.
+- [x] Deterministic supervision between phases. At `submit_review`, after the diff is
+      captured and before anyone reads it, the node runs the worktree's `.tracon/checks`
+      (else `[supervision] checks`, default `just check`) in a throwaway harness
+      container with the worktree mounted and nothing else. A failure refuses the
+      submission with the exit code and tail; the passing list is recorded on the review.
+      `just analyse` / `just test` are whatever the project's file names.
+- [x] Review sessions run with fresh context: requirements and diff only. A
+      `review`-phase session on a fresh worktree at the reviewed commit, offered only
+      `recall`, `doc_read`, `doc_search`, `review_verdict`; its verdict lands on the card
+      for the human, who still decides.
+- [x] Diff size cap at submit. `[review] max_diff_lines` (800) and `max_files` (40);
+      over either is refused before the checks with "split the change".
+- [x] Execute phase gated on a plan artifact. Refused with 422 until the item carries a
+      plan document; `phases.execute.requires_plan=false` on a channel is the recorded
+      bypass.
+- [x] Metrics rollups: approvals per accepted change, cost per accepted change.
+      `GET /api/metrics`, `tracon metrics`, the Metrics screen: approvals (permission
+      answers + review verdicts) and gateway tokens per accepted change, priced only where
+      `[providers.<p>.price]` is set. As seen from the node asked.
+- [x] Per-channel daily cost ceiling enforced by the node. Binding
+      `ceiling_tokens_per_day`, gateway tokens since local midnight: new sessions refused
+      with 429 and the figures, and the gateway refuses every call at the ceiling so a
+      running session stops spending. Meters on the Nodes screen.
+- [x] Provenance queryable per commit: model, prompt, approval, policy version.
+      `GET /api/provenance/{sha}`, `tracon provenance <sha>`: the review, the item and
+      its plan, the implementing and review sessions with their models and the policy
+      version they started under, the prompts, the approvals, the checks that passed.
 
-Exit criteria: subagent model inheritance is structurally impossible, and cost per
-accepted change is a number you can read.
+Phase 5 implementation completed 2026-08-28, in eight PRs after a reviewer's security
+patch (#52). Everything is tested in-process against the fake harness and a real
+worktree; the two-node run of the ledger and a real plan → execute → review chain
+through the gateway wait on the next release and a connected provider. Not built,
+recorded so it is not assumed: hub-side rollups (metrics are computed on the node from
+its own usage table and the mirrored sessions); mid-turn ceiling enforcement (the gateway
+refuses the next call, the harness surfaces the error, the operator decides); a cost in
+dollars for subscriptions (tokens are the unit; a price is per provider, optional).
+
+Exit criteria met: a session's model is on its own spec and a review session's model is
+a channel binding, so there is nothing for a subagent to inherit; and
+`tracon metrics` prints tokens per accepted change.
 
 ## Phase 6: Clients
 

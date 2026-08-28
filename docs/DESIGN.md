@@ -163,6 +163,11 @@ has a one-line answer to "what does the operator see."
 | Closed | Out of the list; reachable from its session. |
 | Discovered-from | Shows the parent item and the session that found it. |
 
+*Built:* the Work screen (`/work`) groups ready, blocked, in-session, and closed; the
+item view (`/work/:id`) shows the plan, dependencies, the discovered-from chain, the
+sessions by phase and outcome, and Plan / Execute buttons that prefill the new-session
+form; Execute is disabled with "needs a plan" until a plan session has written one.
+
 ### Channel
 
 | State | What the operator sees |
@@ -355,6 +360,36 @@ record.
   search is local because the hub is down.
 - **Orientation.** Not a screen: an `orientation` event at the top of every session's
   log, so the transcript shows what the agent was told.
+
+## What Phase 5 built
+
+Mockup-first: one page of static screens in the interface's tokens, then the Svelte,
+checked with headless screenshots at 1280 and 390 wide.
+
+- **Work.** A sixth destination on the rail and the tab bar. Ready items in the node's
+  order with priority and age in the mono column; blocked items name their blockers by
+  id and title, or say the item has not reached this node; in-session items link to
+  the session; closed items fold. New item is desktop-only; the phone reads.
+- **New session.** A phase control and a picker over the ready list in place of the
+  free-text field: blocked and in-session items are not offered, each shows "planned"
+  or "needs a plan", and execute refuses an unplanned item before the click. The
+  channel line shows today's tokens against the ceiling; at the ceiling the start
+  button says so and is disabled — the 429 the node would return, shown first.
+- **Session.** Phase chip, policy version, and item link in the header. "Waiting on a
+  check" uses the accent, not amber: it waits on the node, not on you; the banner names
+  the command and counts up. Check results fold with their tail (failures open); the
+  refusal is in the log. Phase ends get their own labels — Planned, Reviewed, Ended ·
+  item closed — so the Ended list says what each session produced.
+- **Review.** The card carries "checks ✓" and the fresh session's chip (approves /
+  changes suggested / reviewing). The approval screen adds the checks that passed, a
+  provenance strip (model · phase, item, policy version, reviewed by, commit), and the
+  verdict block — accent for approve, amber for request changes; findings by severity,
+  path, note — above the human's controls, which did not move.
+- **Channel cost.** Meters per channel under the nodes: plain, warn above 80%, crit at
+  the ceiling where sessions are refused; a channel with no ceiling shows its count and
+  says so. On the phone too: the one Phase 5 job on every surface.
+- **Metrics.** `/metrics` from the meters' header: the two numbers first, then the rest,
+  7/30/90-day windows, "as seen from this node".
 
 ## Decisions from the flows
 
