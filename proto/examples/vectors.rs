@@ -41,6 +41,7 @@ fn main() {
             "x25519_public_hex": id.x25519_hex(),
             "ed25519_public_hex": hx(&id.verifying_key().to_bytes()),
             "node_id": id.node_id(),
+            "credential_store_key_hex": hx(&id.credential_store_key().to_bytes()),
         }));
     }
     write(

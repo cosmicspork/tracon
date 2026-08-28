@@ -54,6 +54,27 @@ enum Command {
     /// The harness's node-owned state volume and its model credentials.
     #[command(subcommand)]
     Harness(HarnessCommand),
+    /// The credential store: what the node brokers, sealed under its identity.
+    #[command(subcommand)]
+    Credential(CredentialCommand),
+}
+
+#[derive(Subcommand)]
+enum CredentialCommand {
+    /// Names, kinds, and bindings. Never values.
+    Ls,
+    /// Add the credentials from a plaintext TOML file (owner-only), sealing
+    /// them into the store. Existing names are replaced.
+    Import { file: std::path::PathBuf },
+    /// Remove one credential.
+    Rm { name: String },
+    /// Hand a credential to another member node, direct-sealed over the hub.
+    /// The credential must list that node in `nodes`, or it is refused there.
+    Share {
+        name: String,
+        #[arg(long)]
+        to: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -156,6 +177,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Harness(cmd) => harness_command(cmd).await,
+        Command::Credential(cmd) => credential_command(cmd).await,
         Command::Policy(PolicyCommand::Push) => {
             let cfg = config::Config::load();
             let hub = cfg
@@ -346,6 +368,7 @@ async fn mesh_command(cmd: MeshCommand) -> Result<()> {
                 m["x25519_pub"].as_str().unwrap_or(""),
                 m["name"].as_str().unwrap_or(""),
                 &channels,
+                &tracon::broker::Broker::load(&id.credential_store_key())?.bound_to(&node_id),
             )
             .await?;
             println!(
@@ -464,6 +487,7 @@ async fn invite_command(channels: Vec<String>, ttl: u64, yes: bool) -> Result<()
         &req.x25519_pub,
         &req.name,
         &inv.channels,
+        &tracon::broker::Broker::load(&id.credential_store_key())?.bound_to(&req.node_id),
     )
     .await?;
     println!("admitted {} with {}", req.name, inv.channels.join(", "));
@@ -529,6 +553,103 @@ fn create_channel(
     }
     store.node_channel_add(&id.node_id(), name)?;
     Ok(())
+}
+
+async fn credential_command(cmd: CredentialCommand) -> Result<()> {
+    use tracon::broker::Broker;
+    let (id, _) = tracon::mesh::identity::load_or_generate()?;
+    let key = id.credential_store_key();
+    let mut broker = Broker::load(&key)?;
+    match cmd {
+        CredentialCommand::Ls => {
+            if broker.is_empty() {
+                println!("no credentials ({})", Broker::path().display());
+            }
+            for (name, c) in broker.iter() {
+                let mut line = format!("{name:<20} {:<8}", c.kind);
+                if let Some(p) = &c.provider {
+                    line.push_str(&format!(" provider={p}"));
+                }
+                line.push_str(&format!(" channels={}", c.channels.join(",")));
+                if !c.nodes.is_empty() {
+                    line.push_str(&format!(
+                        " nodes={}",
+                        c.nodes
+                            .iter()
+                            .map(|n| &n[..8.min(n.len())])
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ));
+                }
+                if let Some(i) = &c.identity {
+                    line.push_str(&format!(" identity={i}"));
+                }
+                if let Some(e) = c.expires_ms {
+                    line.push_str(&format!(" expires_ms={e}"));
+                }
+                println!("{line}");
+            }
+            Ok(())
+        }
+        CredentialCommand::Import { file } => {
+            let text = std::fs::read_to_string(&file)?;
+            let incoming = Broker::parse_plain(&file, &text)?;
+            let mut n = 0;
+            for (name, c) in incoming.iter() {
+                broker.put(name, c.clone());
+                n += 1;
+            }
+            broker.save(&key)?;
+            println!(
+                "{n} credential{} sealed into {}",
+                if n == 1 { "" } else { "s" },
+                Broker::path().display()
+            );
+            Ok(())
+        }
+        CredentialCommand::Rm { name } => {
+            if !broker.remove(&name) {
+                anyhow::bail!("no credential named {name}");
+            }
+            broker.save(&key)?;
+            println!("removed {name}");
+            Ok(())
+        }
+        CredentialCommand::Share { name, to } => {
+            let cred = broker
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no credential named {name}"))?;
+            if !cred.nodes.iter().any(|n| n == &to) {
+                anyhow::bail!("{name} does not list {to} in `nodes`; it would be refused there");
+            }
+            let cfg = config::Config::load();
+            let hub = cfg
+                .mesh
+                .hub_url
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("no hub configured"))?;
+            let members =
+                tracon::mesh::client::MeshClient::get_once(&id, &hub, "/v0/members").await?;
+            let m = members
+                .as_array()
+                .and_then(|a| {
+                    a.iter()
+                        .find(|m| m["node_id"].as_str() == Some(to.as_str()))
+                })
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("{to} is not a member of the hub"))?;
+            let grantee = proto::keys::key32(m["x25519_pub"].as_str().unwrap_or(""))
+                .map(x25519_dalek::PublicKey::from)
+                .ok_or_else(|| anyhow::anyhow!("the node's sealing key is malformed"))?;
+            let payload = proto::frame::Payload::CredentialHandoff {
+                credentials: Broker::handoff_rows(&[(name.clone(), cred)]),
+            };
+            tracon::mesh::enroll::post_direct(&id, &hub, &to, &grantee, &payload).await?;
+            println!("handed {name} to {}", &to[..16.min(to.len())]);
+            Ok(())
+        }
+    }
 }
 
 async fn harness_command(cmd: HarnessCommand) -> Result<()> {

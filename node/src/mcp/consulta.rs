@@ -14,7 +14,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::{
-    broker::{guard, Broker},
+    broker::{guard, SharedBroker},
     config::Config,
     mcp::CallContext,
 };
@@ -53,7 +53,7 @@ pub fn definitions() -> Vec<Value> {
 }
 
 pub async fn call(
-    broker: &Arc<Broker>,
+    broker: &SharedBroker,
     cfg: &Arc<Config>,
     ctx: &CallContext,
     name: &str,
@@ -61,6 +61,8 @@ pub async fn call(
 ) -> Result<Value, String> {
     // Channel binding first: which channel may use which connection.
     let env = broker
+        .read()
+        .unwrap()
         .env_for(CREDENTIAL, &ctx.channel, &ctx.node_id)
         .map_err(|e| e.to_string())?;
 

@@ -3,11 +3,9 @@
 //! actually working on, so the verb does not exist here. The API token
 //! never leaves the node.
 
-use std::sync::Arc;
-
 use serde_json::{json, Value};
 
-use crate::{broker::Broker, mcp::CallContext};
+use crate::{broker::SharedBroker, mcp::CallContext};
 
 pub const CREDENTIAL: &str = "jira";
 pub const ISSUE: &str = "issue";
@@ -42,13 +40,15 @@ pub fn definitions() -> Vec<Value> {
 }
 
 pub async fn call(
-    broker: &Arc<Broker>,
+    broker: &SharedBroker,
     http: &reqwest::Client,
     ctx: &CallContext,
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
     let env = broker
+        .read()
+        .unwrap()
         .env_for(CREDENTIAL, &ctx.channel, &ctx.node_id)
         .map_err(|e| e.to_string())?;
     let url = env

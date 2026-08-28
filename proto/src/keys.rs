@@ -18,6 +18,9 @@ pub const SEED_LEN: usize = 32;
 pub struct Identity {
     encryption: StaticSecret,
     signing: SigningKey,
+    /// Seals the node's credential store at rest. Derived, never stored: the
+    /// seed is the one secret a node keeps.
+    credstore: DataKey,
 }
 
 impl Identity {
@@ -27,6 +30,7 @@ impl Identity {
         Self {
             encryption: StaticSecret::from(expand(&hk, "x25519")),
             signing: SigningKey::from_bytes(&expand(&hk, "ed25519")),
+            credstore: DataKey::from_bytes(expand(&hk, "credstore")),
         }
     }
 
@@ -56,6 +60,13 @@ impl Identity {
     /// member records.
     pub fn x25519_hex(&self) -> String {
         hex::encode(self.x25519_public().as_bytes())
+    }
+
+    /// The key the node's credential store is sealed under. A fresh
+    /// [`DataKey`] each call (the type is not `Clone` by design); the bytes
+    /// are the same for the life of the seed.
+    pub fn credential_store_key(&self) -> DataKey {
+        DataKey::from_bytes(self.credstore.to_bytes())
     }
 
     pub fn sign(&self, message: &[u8]) -> Signature {
@@ -111,6 +122,7 @@ mod tests {
         x25519_public_hex: String,
         ed25519_public_hex: String,
         node_id: String,
+        credential_store_key_hex: String,
     }
 
     const VECTORS: &str = include_str!("../../spec/vectors/key-derivation.json");
@@ -127,6 +139,10 @@ mod tests {
                 v.ed25519_public_hex
             );
             assert_eq!(id.node_id(), v.node_id);
+            assert_eq!(
+                hex::encode(id.credential_store_key().to_bytes()),
+                v.credential_store_key_hex
+            );
         }
     }
 

@@ -3,11 +3,9 @@
 //! ready, and triggering pipelines are not tools at all — "no merge" is the
 //! absence of a verb, not a rule about one. The token never leaves the node.
 
-use std::sync::Arc;
-
 use serde_json::{json, Value};
 
-use crate::{broker::Broker, mcp::CallContext};
+use crate::{broker::SharedBroker, mcp::CallContext};
 
 pub const CREDENTIAL: &str = "glab";
 pub const MR_STATUS: &str = "mr_status";
@@ -45,13 +43,15 @@ pub fn definitions() -> Vec<Value> {
 }
 
 pub async fn call(
-    broker: &Arc<Broker>,
+    broker: &SharedBroker,
     http: &reqwest::Client,
     ctx: &CallContext,
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
     let env = broker
+        .read()
+        .unwrap()
         .env_for(CREDENTIAL, &ctx.channel, &ctx.node_id)
         .map_err(|e| e.to_string())?;
     let token = env

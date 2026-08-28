@@ -247,6 +247,7 @@ pub async fn sync_own_channels(
     Ok(chans)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn admit(
     store: &Store,
     identity: &Identity,
@@ -255,6 +256,7 @@ pub async fn admit(
     x25519_pub: &str,
     name: &str,
     channels: &[String],
+    credentials: &[(String, crate::broker::Credential)],
 ) -> Result<(), EnrollError> {
     // The hub must know this node holds what it is about to grant.
     let own_name = crate::config::Config::load().node_name;
@@ -293,6 +295,14 @@ pub async fn admit(
         };
         post_direct(identity, hub_url, node_id, &grantee, &p).await?;
     }
+    // Credentials pinned to the new node travel with its keys, sealed the
+    // same way; the hub relays ciphertext it cannot open.
+    if !credentials.is_empty() {
+        let p = Payload::CredentialHandoff {
+            credentials: crate::broker::Broker::handoff_rows(credentials),
+        };
+        post_direct(identity, hub_url, node_id, &grantee, &p).await?;
+    }
     // Record the new member locally too, so the interface lists it before
     // its first hello arrives.
     let _ = store.ensure_peer_node(node_id);
@@ -300,7 +310,7 @@ pub async fn admit(
     Ok(())
 }
 
-async fn post_direct(
+pub async fn post_direct(
     identity: &Identity,
     hub_url: &str,
     recipient: &str,
@@ -473,6 +483,28 @@ pub async fn accept(
                                     .collect::<Vec<_>>()
                                     .join(", ")
                             ));
+                        }
+                        Ok(Payload::CredentialHandoff { credentials }) => {
+                            let key = identity.credential_store_key();
+                            match crate::broker::Broker::load(&key) {
+                                Ok(mut b) => {
+                                    let n = b.apply_handoff(&identity.node_id(), &credentials);
+                                    if n > 0 {
+                                        if let Err(e) = b.save(&key) {
+                                            progress
+                                                .say(&format!("credential store not written: {e}"));
+                                        } else {
+                                            progress.say(&format!(
+                                                "{n} credential{} received",
+                                                if n == 1 { "" } else { "s" }
+                                            ));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    progress.say(&format!("credential store not opened: {e}"))
+                                }
+                            }
                         }
                         Ok(Payload::PolicyBundle {
                             toml,
