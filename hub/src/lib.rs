@@ -12,6 +12,7 @@ pub mod nonce;
 pub mod pokes;
 pub mod replica;
 pub mod routes;
+pub mod snapshot;
 pub mod store;
 
 use std::sync::Arc;
