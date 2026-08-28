@@ -139,22 +139,6 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     } else {
         tracing::info!(credentials = ?broker.names(), "credential broker loaded");
     }
-    let tools = Arc::new(crate::mcp::Tools {
-        broker,
-        cfg: cfg.clone(),
-        session: Default::default(),
-    });
-
-    let backend = boundary::backend_for(&cfg).await;
-    tracing::info!(runtime = backend.kind(), "boundary backend");
-    let (node_id, identity) = init_node(&store, &cfg, adapter.as_ref(), backend.as_ref()).await?;
-    let cleaned = crate::session::reconcile_after_restart(&store, &node_id, backend.as_ref()).await;
-    if !cleaned.is_empty() {
-        tracing::info!(
-            sessions = cleaned.len(),
-            "closed sessions left over from a previous run"
-        );
-    }
     // A bundle that cannot be verified yields no rules, and no rules means every
     // request is asked. The failure mode of broken policy is more questions.
     let policy = Arc::new(std::sync::RwLock::new(
@@ -179,6 +163,23 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         },
     ));
 
+    let tools = Arc::new(crate::mcp::Tools {
+        broker,
+        cfg: cfg.clone(),
+        policy: policy.clone(),
+        session: Default::default(),
+    });
+
+    let backend = boundary::backend_for(&cfg).await;
+    tracing::info!(runtime = backend.kind(), "boundary backend");
+    let (node_id, identity) = init_node(&store, &cfg, adapter.as_ref(), backend.as_ref()).await?;
+    let cleaned = crate::session::reconcile_after_restart(&store, &node_id, backend.as_ref()).await;
+    if !cleaned.is_empty() {
+        tracing::info!(
+            sessions = cleaned.len(),
+            "closed sessions left over from a previous run"
+        );
+    }
     let manager = Manager::new(
         store.clone(),
         bus.clone(),

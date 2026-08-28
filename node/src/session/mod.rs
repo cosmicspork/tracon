@@ -417,7 +417,7 @@ impl Manager {
         // only with this session's token. Tools are offered only if the
         // channel has a credential bound to it; otherwise the harness is given
         // no MCP server at all rather than one that refuses everything.
-        let mcp_servers = if self.tools.list(&spec.channel).is_empty() {
+        let mcp_servers = if self.tools.list(&spec.channel, &self.node_id).is_empty() {
             Vec::new()
         } else {
             vec![json!({
@@ -520,6 +520,20 @@ impl Manager {
                 )),
             },
         }
+    }
+
+    /// Put a request to the operator on a live session's queue and wait for
+    /// the answer. Used by brokered tool calls the policy does not decide.
+    pub async fn ask_permission(
+        &self,
+        id: &str,
+        request: crate::adapter::PermissionRequest,
+    ) -> Result<crate::adapter::PermissionReply, SessionError> {
+        let (reply, wait) = oneshot::channel();
+        self.send(id, Command::Permission { request, reply })
+            .await?;
+        wait.await
+            .map_err(|_| SessionError::Rejected("session ended before answering".into()))
     }
 
     pub async fn prompt(&self, id: &str, text: String) -> Result<(), SessionError> {

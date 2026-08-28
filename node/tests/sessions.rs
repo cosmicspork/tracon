@@ -64,6 +64,7 @@ impl Harness {
         let tools = Arc::new(tracon::mcp::Tools {
             broker: Arc::new(Default::default()),
             cfg: cfg.clone(),
+            policy: tracon::policy::Policy::shipped_shared(),
             session: Default::default(),
         });
         let manager = Manager::new(
@@ -491,6 +492,47 @@ async fn a_permission_request_moves_the_session_to_waiting_and_back() {
 }
 
 #[tokio::test]
+async fn a_brokered_tool_call_the_policy_does_not_cover_waits_on_the_operator() {
+    // The node's own tools are gated by the same queue as the harness's: a
+    // call the bundle does not name lands on the session as a request of kind
+    // `tool`, and the operator's answer reaches the caller verbatim.
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    let (reply, wait) = oneshot::channel();
+    rig.commands
+        .send(Command::Permission {
+            request: tracon::adapter::PermissionRequest {
+                tool_call_id: None,
+                title: "issue_comment {\"key\":\"WRK-1\"}".into(),
+                kind: Some(tracon::mcp::TOOL_KIND.into()),
+                raw_input: Some(json!({ "tool": "issue_comment" })),
+                options: vec![],
+            },
+            reply,
+        })
+        .await
+        .unwrap();
+    assert!(rig.await_state("waiting_on_you").await);
+    let open = rig.store.open_permissions().unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].kind.as_deref(), Some("tool"));
+    let (ack, done) = oneshot::channel();
+    rig.commands
+        .send(Command::Answer {
+            permission_id: open[0].id.clone(),
+            option_id: "reject_once".into(),
+            ack,
+        })
+        .await
+        .unwrap();
+    done.await.unwrap().unwrap();
+    match wait.await.unwrap() {
+        PermissionReply::Selected(o) => assert_eq!(o, "reject_once"),
+        other => panic!("expected a selection, got {other:?}"),
+    }
+    assert!(rig.await_state("running").await);
+}
+
+#[tokio::test]
 async fn an_unanswered_request_is_denied_by_default() {
     // Deny-on-expiry is the whole point of the gate: silence is a refusal.
     let rig = Rig::start(10_000, Duration::from_millis(50)).await;
@@ -598,6 +640,7 @@ async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
     let tools = Arc::new(Tools {
         broker: Arc::new(broker),
         cfg: cfg.clone(),
+        policy: tracon::policy::Policy::shipped_shared(),
         session: Default::default(),
     });
     let manager = Manager::new(

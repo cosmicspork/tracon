@@ -80,6 +80,16 @@ impl Rule {
     /// shell chaining, redirection, or substitution, whose leading token is one
     /// of the patterns.
     fn allows(&self, req: &Request) -> bool {
+        // A brokered tool call is allowed by its name, exactly: its arguments
+        // are not a shell line and carry no chaining to guard against. The
+        // guard that matters for a tool is the tool's own (the SQL guard, the
+        // review capture), which runs after policy says yes.
+        if req.kind == Some(crate::mcp::TOOL_KIND) {
+            return self
+                .matches
+                .iter()
+                .any(|pat| pat.trim().eq_ignore_ascii_case(req.title.trim()));
+        }
         let cmd = req.command.unwrap_or(req.title).trim().to_ascii_lowercase();
         // A shell metacharacter means the line does more than its leading token
         // says; such a command is asked, not auto-allowed.
@@ -174,6 +184,17 @@ impl Policy {
 /// prose somewhere an agent may or may not read.
 pub const WORKING_AGREEMENTS: &str = include_str!("working-agreements.toml");
 
+impl Policy {
+    /// The bundle this binary ships, parsed. What `tracon policy init` signs.
+    pub fn shipped() -> Self {
+        toml::from_str(WORKING_AGREEMENTS).expect("the shipped bundle parses")
+    }
+
+    pub fn shipped_shared() -> std::sync::Arc<std::sync::RwLock<Self>> {
+        std::sync::Arc::new(std::sync::RwLock::new(Self::shipped()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,7 +216,7 @@ mod tests {
     fn the_shipped_bundle_parses_and_has_rules() {
         let p = policy();
         assert!(!p.is_empty());
-        assert_eq!(p.version, 1);
+        assert_eq!(policy().version, 2);
     }
 
     #[test]

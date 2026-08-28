@@ -61,7 +61,7 @@ pub async fn call(
 ) -> Result<Value, String> {
     // Channel binding first: which channel may use which connection.
     let env = broker
-        .env_for(CREDENTIAL, &ctx.channel)
+        .env_for(CREDENTIAL, &ctx.channel, &ctx.node_id)
         .map_err(|e| e.to_string())?;
 
     let mut argv: Vec<String> = Vec::new();

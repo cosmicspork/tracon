@@ -12,7 +12,18 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::{broker::Broker, config::Config};
+use crate::{
+    acp::types::{PermissionOption, OPTION_ALLOW_ONCE, OPTION_REJECT_ONCE},
+    adapter::{PermissionReply, PermissionRequest},
+    broker::Broker,
+    config::Config,
+    policy::{Policy, Request, Verdict},
+};
+
+/// The policy kind a brokered tool call is evaluated under. Rules with
+/// `kinds = ["tool"]` match the tool's name exactly for allow, and any
+/// substring of name-plus-arguments for deny.
+pub const TOOL_KIND: &str = "tool";
 
 /// The MCP protocol version the node speaks.
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -20,6 +31,11 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 pub struct Tools {
     pub broker: Arc<Broker>,
     pub cfg: Arc<Config>,
+    /// Every call is decided here before the broker is touched: the same
+    /// bundle that answers the harness's own permission requests answers
+    /// what the node will do on its behalf. A denied call returns the rule's
+    /// reason; one the policy does not cover is put to the operator.
+    pub policy: Arc<std::sync::RwLock<Policy>>,
     /// Set once the manager exists. Review tools need both, and the manager
     /// needs the tools to decide what a session is offered, so the cycle is
     /// broken here rather than by merging the two.
@@ -38,16 +54,17 @@ pub struct SessionAccess {
 pub struct CallContext {
     pub session_id: String,
     pub channel: String,
+    pub node_id: String,
 }
 
 impl Tools {
     /// Tool definitions for a channel. A channel with no credential bound to it
     /// is offered no tools rather than tools that will fail.
-    pub fn list(&self, channel: &str) -> Vec<Value> {
+    pub fn list(&self, channel: &str, node_id: &str) -> Vec<Value> {
         let mut out = Vec::new();
         if self
             .broker
-            .available_to(channel)
+            .available_to(channel, node_id)
             .contains(&consulta::CREDENTIAL)
         {
             out.extend(consulta::definitions());
@@ -62,6 +79,7 @@ impl Tools {
     }
 
     pub async fn call(&self, ctx: &CallContext, name: &str, args: &Value) -> Result<Value, String> {
+        self.gate(ctx, name, args).await?;
         match name {
             consulta::QUERY | consulta::DESCRIBE => {
                 consulta::call(&self.broker, &self.cfg, ctx, name, args).await
@@ -74,6 +92,65 @@ impl Tools {
                 review::call(&access.store, &access.manager, ctx, name, args).await
             }
             other => Err(format!("no tool named {other}")),
+        }
+    }
+
+    /// Policy before the broker. Deny is final and explained; Ask goes to the
+    /// queue as a permission request on the calling session and waits for the
+    /// operator (or the same expiry every unanswered request gets); Allow
+    /// proceeds. A tool the policy does not mention is therefore asked, not
+    /// run — adding a tool never widens what runs unattended.
+    async fn gate(&self, ctx: &CallContext, name: &str, args: &Value) -> Result<(), String> {
+        let summary = summarize(name, args);
+        let decision = self.policy.read().unwrap().decide(&Request {
+            channel: &ctx.channel,
+            kind: Some(TOOL_KIND),
+            title: name,
+            command: Some(&summary),
+        });
+        match decision.verdict {
+            Verdict::Allow => Ok(()),
+            Verdict::Deny => Err(format!(
+                "refused by policy{}: {}",
+                decision
+                    .rule_id
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default(),
+                decision.reason.unwrap_or_default()
+            )),
+            Verdict::Ask => {
+                let access = self
+                    .session
+                    .get()
+                    .ok_or("this call needs the operator's approval and no session can ask")?;
+                let request = PermissionRequest {
+                    tool_call_id: None,
+                    title: summary,
+                    kind: Some(TOOL_KIND.into()),
+                    raw_input: Some(json!({ "tool": name, "arguments": args })),
+                    options: vec![
+                        PermissionOption {
+                            option_id: OPTION_ALLOW_ONCE.into(),
+                            name: "Allow once".into(),
+                            kind: "allow_once".into(),
+                        },
+                        PermissionOption {
+                            option_id: OPTION_REJECT_ONCE.into(),
+                            name: "Reject".into(),
+                            kind: "reject_once".into(),
+                        },
+                    ],
+                };
+                match access
+                    .manager
+                    .ask_permission(&ctx.session_id, request)
+                    .await
+                    .map_err(|e| e.to_string())?
+                {
+                    PermissionReply::Selected(o) if o == OPTION_ALLOW_ONCE => Ok(()),
+                    _ => Err("the operator did not allow this call".into()),
+                }
+            }
         }
     }
 
@@ -91,7 +168,7 @@ impl Tools {
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "tracon", "version": env!("CARGO_PKG_VERSION") },
             })),
-            "tools/list" => Ok(json!({ "tools": self.list(&ctx.channel) })),
+            "tools/list" => Ok(json!({ "tools": self.list(&ctx.channel, &ctx.node_id) })),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -115,6 +192,22 @@ impl Tools {
     }
 }
 
+/// `name` plus its arguments on one line, bounded, for the policy haystack
+/// and the queue card. Secrets never appear here: arguments are the
+/// harness's own words.
+pub fn summarize(name: &str, args: &Value) -> String {
+    let mut s = format!("{name} {}", args);
+    if s.len() > 400 {
+        let mut cut = 400;
+        while !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        s.truncate(cut);
+        s.push('…');
+    }
+    s
+}
+
 fn tool_result(value: &Value, is_error: bool) -> Value {
     let text = match value {
         Value::String(s) => s.clone(),
@@ -131,6 +224,7 @@ mod tests {
         Tools {
             broker: Arc::new(toml::from_str(store).unwrap()),
             cfg: Arc::new(Config::default()),
+            policy: Policy::shipped_shared(),
             session: Default::default(),
         }
     }
@@ -139,6 +233,7 @@ mod tests {
         CallContext {
             session_id: "s".into(),
             channel: channel.into(),
+            node_id: "n1".into(),
         }
     }
 
@@ -152,8 +247,8 @@ mod tests {
     #[tokio::test]
     async fn tools_are_offered_only_to_a_bound_channel() {
         let t = tools(STORE);
-        assert_eq!(t.list("work").len(), 2);
-        assert!(t.list("personal").is_empty());
+        assert_eq!(t.list("work", "n1").len(), 2);
+        assert!(t.list("personal", "n1").is_empty());
     }
 
     #[tokio::test]
@@ -210,6 +305,58 @@ mod tests {
         assert_eq!(res["result"]["isError"], true);
         let text = res["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("not bound"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_tool_the_policy_denies_is_refused_with_the_reason() {
+        let mut t = tools(STORE);
+        t.policy = Arc::new(std::sync::RwLock::new(
+            toml::from_str(
+                r#"
+                version = 9
+                [[rule]]
+                id = "no-warehouse"
+                verdict = "deny"
+                reason = "The warehouse is closed today."
+                kinds = ["tool"]
+                matches = ["query"]
+                "#,
+            )
+            .unwrap(),
+        ));
+        let res = t
+            .handle(
+                &ctx("work"),
+                &json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
+                        "params":{"name":"query","arguments":{"sql":"SELECT 1"}}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["result"]["isError"], true);
+        let text = res["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("no-warehouse") && text.contains("closed today"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tool_the_policy_does_not_cover_is_not_run_unattended() {
+        // Empty policy: everything is asked, and with no session to ask
+        // through the call fails rather than proceeds.
+        let mut t = tools(STORE);
+        t.policy = Default::default();
+        let res = t
+            .handle(
+                &ctx("work"),
+                &json!({"jsonrpc":"2.0","id":6,"method":"tools/call",
+                        "params":{"name":"query","arguments":{"sql":"SELECT 1"}}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["result"]["isError"], true);
+        let text = res["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("approval"), "{text}");
     }
 
     #[tokio::test]

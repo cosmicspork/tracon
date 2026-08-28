@@ -100,6 +100,7 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
     let tools = Arc::new(tracon::mcp::Tools {
         broker: Default::default(),
         cfg: cfg.clone(),
+        policy: tracon::policy::Policy::shipped_shared(),
         session: Default::default(),
     });
     let manager = Manager::new(

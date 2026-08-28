@@ -478,6 +478,7 @@ pub(crate) async fn decide_local(
                 &s.tools.broker,
                 &s.cfg,
                 &r.channel,
+                &s.node_id,
                 &worktree,
                 &target,
                 &r.head_sha,
