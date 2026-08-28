@@ -414,6 +414,11 @@ pub struct VerdictBody {
     pub title: Option<String>,
     #[serde(default)]
     pub body: Option<String>,
+    /// A unified diff the operator edited by hand, sent with "revise". The
+    /// agent applies it and resubmits, so an edit is a request for changes
+    /// rather than an approval of something the operator changed.
+    #[serde(default)]
+    pub patch: Option<String>,
 }
 
 pub async fn get_review(
@@ -444,6 +449,47 @@ async fn staleness_of(s: &AppState, r: &crate::store::ReviewRow) -> Vec<String> 
     let files: Vec<crate::review::FileAtSubmit> =
         serde_json::from_str(&r.files).unwrap_or_default();
     crate::review::staleness(&worktree, &r.head_sha, &files).await
+}
+
+#[derive(Deserialize)]
+pub struct FileQuery {
+    pub path: String,
+}
+
+/// One reviewed file as it was submitted, for the diff editor. Read by the
+/// blob hash recorded at submit, so it is the text the diff was taken against
+/// even if the worktree has moved since.
+pub async fn review_file(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<FileQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s.store().get_review(&id)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        "no review with that id".into(),
+    ))?;
+    // The worktree lives on the owning node, so a peer's review cannot be
+    // edited here. Saying so beats an empty editor.
+    if r.node_id != s.node_id {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this review belongs to another node; editing happens where the worktree is".into(),
+        ));
+    }
+    let session = s
+        .store()
+        .get_session(&r.session_id)?
+        .ok_or(ApiError(StatusCode::CONFLICT, "the session is gone".into()))?;
+    let worktree = session.worktree_path.ok_or(ApiError(
+        StatusCode::CONFLICT,
+        "the worktree is gone".into(),
+    ))?;
+    let files: Vec<crate::review::FileAtSubmit> =
+        serde_json::from_str(&r.files).unwrap_or_default();
+    let text = crate::review::file_at_submit(&worktree, &files, &q.path)
+        .await
+        .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
+    Ok(Json(json!({ "path": q.path, "text": text })))
 }
 
 /// Called when the operator leaves the review screen. Explicit release is the
@@ -489,6 +535,7 @@ pub async fn decide_review(
                     reason: b.reason.clone(),
                     title: b.title.clone(),
                     body: b.body.clone(),
+                    patch: b.patch.clone(),
                 },
                 timeout,
             )
@@ -538,7 +585,10 @@ pub(crate) async fn decide_local(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "asking for changes needs a note saying what to change".into(),
                 ))?;
-            if !s.store().request_changes(&id, notes)? {
+            // Not trimmed: a patch's trailing newline is part of it, and
+            // `git apply` calls a patch without one corrupt.
+            let patch = b.patch.as_deref().filter(|p| !p.trim().is_empty());
+            if !s.store().request_changes(&id, notes, patch)? {
                 let now = s.store().get_review(&id)?.map(|r| r.state);
                 return Err(ApiError(
                     StatusCode::CONFLICT,
@@ -1501,6 +1551,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 reason,
                 title,
                 body,
+                patch,
             } => {
                 decide_local(
                     self,
@@ -1510,6 +1561,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                         reason,
                         title,
                         body,
+                        patch,
                     },
                 )
                 .await

@@ -97,6 +97,7 @@ fn review(id: &str, session: &str, sha: &str, state: &str, reviewer: Option<&str
         review_session_id: reviewer.map(str::to_string),
         ai_verdict_json: reviewer
             .map(|_| r#"{"verdict":"approve","summary":"fine","findings":[]}"#.into()),
+        revision_patch: None,
     }
 }
 

@@ -91,6 +91,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/draft", put(api::put_draft))
         .route("/api/permissions/{id}/answer", post(api::answer_permission))
         .route("/api/reviews/{id}", get(api::get_review))
+        .route("/api/reviews/{id}/file", get(api::review_file))
         .route("/api/reviews/{id}/verdict", post(api::decide_review))
         .route("/api/reviews/{id}/release", post(api::release_review))
         .route("/api/queue", get(api::queue))

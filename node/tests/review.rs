@@ -224,6 +224,24 @@ impl Fixture {
         )
     }
 
+    /// What the agent sees when it asks about its review.
+    async fn status_tool(&self, review_id: &str) -> Value {
+        let ctx = tracon::mcp::CallContext {
+            session_id: "s1".into(),
+            channel: "work".into(),
+            node_id: "n1".into(),
+        };
+        tracon::mcp::review::call(
+            &self.store,
+            &self.manager,
+            &ctx,
+            "review_status",
+            &json!({ "review_id": review_id, "wait_secs": 0 }),
+        )
+        .await
+        .unwrap()
+    }
+
     async fn submit(&self) -> String {
         let capture = tracon::review::capture(&self.worktree, "main", "feat/x")
             .await
@@ -263,6 +281,7 @@ impl Fixture {
                 checks_json: None,
                 review_session_id: None,
                 ai_verdict_json: None,
+                revision_patch: None,
             })
             .unwrap();
         id
@@ -903,4 +922,103 @@ async fn publishing_closes_the_item_the_session_holds() {
     assert_eq!(closed.state, "closed");
     assert_eq!(closed.closed_by_session.as_deref(), Some("s1"));
     assert!(f.event_kinds("s1").contains(&"work_closed".to_string()));
+}
+
+/// An edited diff is a request for changes carrying a patch. What matters is
+/// that the bytes survive the round trip intact — a patch is whitespace, and
+/// `git apply` calls one with a missing final newline corrupt.
+#[tokio::test]
+async fn an_edited_diff_reaches_the_agent_and_still_applies() {
+    const FN: &str = "an_edited_diff_reaches_the_agent_and_still_applies";
+    let f = fixture(FN, WITH_GH).await;
+    let id = f.submit().await;
+
+    // What the interface builds: the file as submitted, with one line changed.
+    let patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n";
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({
+                "verdict": "revise",
+                "reason": "call it what it is",
+                "patch": patch,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "revising");
+
+    let row = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(
+        row.revision_patch.as_deref(),
+        Some(patch),
+        "the patch must arrive byte for byte, trailing newline included"
+    );
+
+    // And the agent is told to apply it, not merely that changes were asked for.
+    let status = f.status_tool(&id).await;
+    assert_eq!(status["state"], "changes_requested");
+    assert_eq!(status["patch"], patch);
+    assert_eq!(status["notes"], "call it what it is");
+    assert!(
+        status["message"].as_str().unwrap().contains("git apply"),
+        "the agent should be told how to apply it: {status}"
+    );
+}
+
+/// Asking for changes without editing anything is unchanged: notes, no patch.
+#[tokio::test]
+async fn asking_for_changes_without_an_edit_carries_no_patch() {
+    const FN: &str = "asking_for_changes_without_an_edit_carries_no_patch";
+    let f = fixture(FN, WITH_GH).await;
+    let id = f.submit().await;
+    let (status, _) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "revise", "reason": "rename the thing" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let row = f.store.get_review(&id).unwrap().unwrap();
+    assert!(row.revision_patch.is_none());
+    let s = f.status_tool(&id).await;
+    assert!(s["patch"].is_null());
+    assert!(!s["message"].as_str().unwrap().contains("git apply"));
+}
+
+/// A resubmission replaces the diff the patch described, so the patch goes
+/// with it rather than lingering against text that no longer exists.
+#[tokio::test]
+async fn resubmitting_clears_the_patch() {
+    const FN: &str = "resubmitting_clears_the_patch";
+    let f = fixture(FN, WITH_GH).await;
+    let id = f.submit().await;
+    f.call(
+        "POST",
+        &format!("/api/reviews/{id}/verdict"),
+        Some(json!({ "verdict": "revise", "reason": "x", "patch": "--- a/a\n+++ b/a\n" })),
+    )
+    .await;
+    assert!(f
+        .store
+        .get_review(&id)
+        .unwrap()
+        .unwrap()
+        .revision_patch
+        .is_some());
+
+    f.store
+        .revise_review(&id, "new diff", "[]", "deadbeef", 1, 1)
+        .unwrap();
+    assert!(
+        f.store
+            .get_review(&id)
+            .unwrap()
+            .unwrap()
+            .revision_patch
+            .is_none(),
+        "a patch must not outlive the diff it described"
+    );
 }

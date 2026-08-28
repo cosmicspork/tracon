@@ -212,6 +212,12 @@ const MIGRATIONS: &[&str] = &[
         user_agent   TEXT
     );
     "#,
+    // 9: an edited diff. When the operator edits rather than describes, the
+    // patch rides along with the notes; the agent applies it and resubmits,
+    // so the agent is still the only writer to the worktree.
+    r#"
+    ALTER TABLE review ADD COLUMN revision_patch TEXT;
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

@@ -1323,6 +1323,11 @@ mod records {
         /// That session's verdict: `{verdict, summary, findings}`.
         #[serde(default)]
         pub ai_verdict_json: Option<String>,
+        /// A unified diff the operator edited by hand, carried back to the
+        /// agent with the notes. The agent applies it and resubmits; nothing
+        /// but the agent writes to the worktree.
+        #[serde(default)]
+        pub revision_patch: Option<String>,
     }
 
     impl ReviewRow {
@@ -1365,6 +1370,7 @@ mod records {
                 checks_json: r.get("checks_json")?,
                 review_session_id: r.get("review_session_id")?,
                 ai_verdict_json: r.get("ai_verdict_json")?,
+                revision_patch: r.get("revision_patch")?,
             })
         }
     }
@@ -1548,9 +1554,9 @@ impl Store {
             "INSERT INTO review (id, session_id, node_id, channel, kind, title, body, edited_title,
                 edited_body, provider, target, diff, files, head_sha, base_ref, added, removed,
                 state, verdict_reason, publish_result, claimed_ms, created_ms, created_mono_ms,
-                resolved_mono_ms, updated_ms, checks_json, review_session_id, ai_verdict_json)
+                resolved_mono_ms, updated_ms, checks_json, review_session_id, ai_verdict_json, revision_patch)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,
-                ?22,?23,?24,?25,?26,?27,?28)",
+                ?22,?23,?24,?25,?26,?27,?28,?29)",
             rusqlite::params![
                 r.id,
                 r.session_id,
@@ -1579,7 +1585,8 @@ impl Store {
                 r.updated_ms,
                 r.checks_json,
                 r.review_session_id,
-                r.ai_verdict_json
+                r.ai_verdict_json,
+                r.revision_patch
             ],
         )?;
         Ok(())
@@ -1755,12 +1762,12 @@ impl Store {
     /// Changes requested: the review stays in the queue, marked so the operator
     /// can see it is waiting on the agent rather than on them. Returns false if
     /// the review was no longer awaiting a verdict.
-    pub fn request_changes(&self, id: &str, notes: &str) -> Result<bool> {
+    pub fn request_changes(&self, id: &str, notes: &str, patch: Option<&str>) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
-            "UPDATE review SET state='revising', verdict_reason=?2, updated_ms=?3
+            "UPDATE review SET state='revising', verdict_reason=?2, revision_patch=?4, updated_ms=?3
              WHERE id=?1 AND state IN ('new','claimed')",
-            rusqlite::params![id, notes, now_ms()],
+            rusqlite::params![id, notes, now_ms(), patch],
         )?;
         Ok(n == 1)
     }
@@ -1778,8 +1785,11 @@ impl Store {
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
+            // The patch is cleared with the notes: it described the diff that
+            // has just been replaced.
             "UPDATE review SET diff=?2, files=?3, head_sha=?4, added=?5, removed=?6, state='new',
-                verdict_reason=NULL, claimed_ms=NULL, resolved_mono_ms=NULL, updated_ms=?7
+                verdict_reason=NULL, revision_patch=NULL, claimed_ms=NULL, resolved_mono_ms=NULL,
+                updated_ms=?7
              WHERE id=?1",
             rusqlite::params![id, diff, files, head_sha, added, removed, now_ms()],
         )?;

@@ -272,6 +272,7 @@ async fn submit(
         checks_json,
         review_session_id: None,
         ai_verdict_json: None,
+        revision_patch: None,
     };
     store.insert_review(&row).map_err(|e| e.to_string())?;
     manager.publish_queue().await;
@@ -400,12 +401,25 @@ async fn status(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<V
         }
         match r.state.as_str() {
             "revising" => {
+                // A patch means the operator edited the diff rather than
+                // describing the change. Applying it verbatim is the point:
+                // it is what they want, and the agent is still the hand that
+                // writes it to the worktree.
+                let message = if r.revision_patch.is_some() {
+                    "Changes were requested, with an edited diff. Apply `patch` to the \
+                     worktree exactly as given (`git apply`), make any further changes the \
+                     notes ask for, commit, then call submit_review again with this \
+                     review_id."
+                } else {
+                    "Changes were requested. Make them, commit, then call submit_review \
+                     again with this review_id."
+                };
                 return Ok(json!({
                     "review_id": r.id,
                     "state": "changes_requested",
                     "notes": r.verdict_reason,
-                    "message": "Changes were requested. Make them, commit, then call \
-                                submit_review again with this review_id.",
+                    "patch": r.revision_patch,
+                    "message": message,
                 }));
             }
             "approved" | "rejected" => {

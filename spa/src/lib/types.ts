@@ -156,6 +156,8 @@ export interface Review {
   review_session_id: string | null
   /** That session's verdict, as JSON: `{verdict, summary, findings, model}`. */
   ai_verdict_json: string | null
+  /** A diff the operator edited by hand, carried back with the notes. */
+  revision_patch?: string | null
 }
 
 export interface CheckResult {

@@ -130,6 +130,7 @@ fn review(id: &str, state: &str) -> ReviewRow {
         checks_json: None,
         review_session_id: None,
         ai_verdict_json: None,
+        revision_patch: None,
     }
 }
 
