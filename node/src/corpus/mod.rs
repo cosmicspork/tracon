@@ -3,6 +3,7 @@
 //! starts with. Reads are always local; see `store::corpus`.
 
 pub mod import;
+pub mod orientation;
 pub mod project;
 
 use serde_json::Value;

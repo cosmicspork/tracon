@@ -103,6 +103,7 @@ async fn unknown_model_is_refused_before_prompting() {
                 mcp_servers: Vec::new(),
                 tools: Vec::new(),
                 env: Vec::new(),
+                system_prompt_file: None,
             },
         )
         .await
@@ -123,6 +124,7 @@ async fn launch_prompt_permission_and_turn_result() {
                 mcp_servers: Vec::new(),
                 tools: Vec::new(),
                 env: Vec::new(),
+                system_prompt_file: None,
             },
         )
         .await
@@ -173,6 +175,7 @@ async fn denying_a_permission_fails_the_tool_call() {
                 mcp_servers: Vec::new(),
                 tools: Vec::new(),
                 env: Vec::new(),
+                system_prompt_file: None,
             },
         )
         .await
