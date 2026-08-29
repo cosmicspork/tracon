@@ -3,6 +3,7 @@
 //! keeps its state, and what it must find in that state directory all live
 //! behind it rather than being spelled `omp` throughout the node.
 
+pub mod claude;
 pub mod omp;
 
 use std::path::Path;
@@ -29,15 +30,15 @@ pub struct Layout {
 }
 
 /// The harness ids this node has an adapter for.
-pub const KNOWN: &[&str] = &["omp"];
+pub const KNOWN: &[&str] = &["omp", "claude"];
 
 /// The layout for a harness id, for the few callers that have the config but
 /// not the adapter (the boundary preflight). An unknown id gets omp's, which
 /// only that preflight can reach: `adapter_for` refuses the id first, so no
 /// session ever runs against a layout that is not its harness's.
 pub fn layout(harness_id: &str) -> Layout {
-    if harness_id == omp::OmpAdapter::ID {
-        return OMP_LAYOUT;
+    if harness_id == claude::ClaudeAdapter::ID {
+        return claude::ClaudeAdapter::layout();
     }
     OMP_LAYOUT
 }
@@ -53,7 +54,10 @@ const OMP_LAYOUT: Layout = Layout {
 /// node that will not start.
 pub fn adapter_for(cfg: &Config) -> Result<Arc<dyn HarnessAdapter>, AdapterError> {
     match cfg.harness.id.as_str() {
-        "omp" => Ok(Arc::new(omp::OmpAdapter::new(cfg.harness.version.clone()))),
+        omp::OmpAdapter::ID => Ok(Arc::new(omp::OmpAdapter::new(cfg.harness.version.clone()))),
+        claude::ClaudeAdapter::ID => Ok(Arc::new(claude::ClaudeAdapter::new(
+            cfg.harness.version.clone(),
+        ))),
         other => Err(AdapterError::Protocol(format!(
             "no adapter for harness `{other}`; this node knows {}",
             KNOWN.join(", ")

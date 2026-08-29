@@ -1,0 +1,25 @@
+# Harness runner: Claude Code at a pinned version, git, CA certificates. No
+# network at run time; everything the harness reaches goes through the tracon
+# gateway, and `ANTHROPIC_BASE_URL` points at it rather than at Anthropic.
+#
+# A second image rather than one image with both harnesses: a node runs one
+# harness, the version is pinned per node, and putting two in a layer means
+# every node carries the one it does not use.
+FROM docker.io/library/debian:bookworm-slim
+ARG CLAUDE_VERSION=2.1.247
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+# The native installer places a single binary; no Node runtime is involved.
+RUN set -eu; curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}"; \
+    install -m 0755 "$(command -v claude || echo /root/.local/bin/claude)" /usr/local/bin/claude; \
+    /usr/local/bin/claude --version
+# The node mounts its own state volume under the harness's home and sets
+# CLAUDE_CONFIG_DIR to the same path, so the mount target and the harness's
+# idea of where its state lives cannot disagree. Under Podman the harness is
+# root and its home is /root; as a pod it runs as uid 65532 with
+# HOME=/home/harness. No USER directive: the runtime chooses, and verifies.
+ENV CLAUDE_CONFIG_DIR=/root/.claude \
+    DISABLE_AUTOUPDATER=1 \
+    DISABLE_TELEMETRY=1
+RUN mkdir -p /home/harness /work && chown 65532:65532 /home/harness /work
+WORKDIR /work
