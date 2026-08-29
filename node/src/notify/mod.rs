@@ -161,7 +161,7 @@ struct Gate {
 ///
 /// On by default: a subscribed device is the opt-in now, and a standalone
 /// node whose channel rows were never bound must not stay silent. An explicit
-/// `notify.enabled` wins. The Phase 6 shape — `notify.sink` naming a pager
+/// `notify.enabled` wins. The Phase 6 shape — `notify.sink` naming an external
 /// bridge or the desktop tray — still reads: the bridge meant "push", the tray
 /// meant "not the phone", and the `node` it named no longer matters because
 /// every node delivers for its own devices.
@@ -171,8 +171,10 @@ pub fn enabled(bindings: &serde_json::Value) -> bool {
         return b;
     }
     match notify["sink"].as_str() {
-        None | Some("pager") => true,
-        Some(_) => false,
+        // The tray was the one sink that meant "not the phone"; any other
+        // named sink was a bridge that pushed.
+        None => true,
+        Some(sink) => sink != "tray",
     }
 }
 
@@ -635,10 +637,10 @@ mod tests {
         assert!(enabled(&json!({})));
         assert!(enabled(&json!({"notify": {"enabled": true}})));
         assert!(!enabled(&json!({"notify": {"enabled": false}})));
-        // The Phase 6 shapes: a pager sink meant push, a tray sink meant not
+        // The Phase 6 shapes: a bridge sink meant push, a tray sink meant not
         // the phone, and an explicit flag beats either.
         assert!(enabled(
-            &json!({"notify": {"sink": "pager", "node": "other"}})
+            &json!({"notify": {"sink": "bridge", "node": "other"}})
         ));
         assert!(!enabled(&json!({"notify": {"sink": "tray", "node": "n1"}})));
         assert!(enabled(

@@ -1,7 +1,7 @@
 # Phase 2 notes
 
 What implementing the mesh changed, recorded so it is not re-decided. Evidence
-gathered on the Bazzite host (rootless Podman 5, netavark + pasta, SELinux
+gathered on the Linux host (immutable Fedora, rootless Podman 5, netavark + pasta, SELinux
 enforcing) on 2026-08-28, with the macOS Podman-machine node as the first peer.
 
 ## The Linux gateway forward is a Unix socket
@@ -29,7 +29,7 @@ guarded only by the per-session bearer token.
 
 Under SELinux two more things were needed, found by running it:
 
-- The gateway's bind mounts need relabelling. The first run on Bazzite died
+- The gateway's bind mounts need relabelling. The first run under SELinux died
   with `allow.txt missing`: the file was mounted but unreadable from the
   container's context. The allowlist file and the socket directory are mounted
   with `:z` when `podman info` reports SELinux; they are the node's own state.
@@ -48,7 +48,7 @@ Under SELinux two more things were needed, found by running it:
 `/harness/ping` through the forward, so a broken forward fails the check rather
 than passing on egress alone.
 
-Verified on the Bazzite host on 2026-08-28: `tracon setup` built both images
+Verified on the Linux host on 2026-08-28: `tracon setup` built both images
 from the embedded definitions and started the gateway; `tracon check-boundary
 --deep` passed all five checks; a probe container on the internal network got
 `pong` from `http://tracon-gw:7421/harness/ping` and a 404 from

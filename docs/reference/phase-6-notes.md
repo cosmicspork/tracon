@@ -3,7 +3,7 @@
 Written 2026-08-29, while building it. What the roadmap does not have room for:
 the decisions, the runbooks, and the things that only showed up when it ran.
 
-> **Superseded in part.** The pager bridge, the `notify.sink`/`notify.node` bindings
+> **Superseded in part.** The external push bridge, the `notify.sink`/`notify.node` bindings
 > and the cluster runbook below were replaced in Phase 8 by Web Push from every node
 > to its own devices; see ARCHITECTURE "Notification sinks". Kept as the record of
 > what was built and why.
@@ -95,7 +95,7 @@ being opened against a guess.
 
 ## Building the wrapper on an immutable host
 
-Bazzite has the webkit2gtk and gtk *runtime* libraries but no development headers and
+The immutable host has the webkit2gtk and gtk *runtime* libraries but no development headers and
 no pkgconfig, and layering them with `rpm-ostree` re-applies on every image update. A
 container is the lower-friction path, and the produced binary runs on the host because
 the versions match:
@@ -119,15 +119,15 @@ ignored. The wrapper is a separate cargo workspace (`exclude = ["wrapper"]`) so
 Not built: bundling and signing (`bundle.active: false`), and macOS is not in CI. The
 plist and the `launchctl` path are written and reviewed but only exercised on a Mac.
 
-## Switchboard
+## The menu-bar supervisor
 
-It installs **nothing** on Linux. `systemctl --user list-unit-files` on this host shows
-`tracon.service` and `pager-bridge.service` and no switchboard anything; it is a macOS
-menu-bar app that toggles launchd agents. So "Switchboard's units move" is a macOS-only
-migration, and on Linux there was nothing to move — `tracon service install` simply
-adopted the hand-written unit that was already there.
+It installs **nothing** on Linux. `systemctl --user list-unit-files` on this host showed
+`tracon.service` and the old push bridge's unit and nothing of its own; it is a macOS
+menu-bar app that toggles launchd agents. So "its units move" is a macOS-only migration,
+and on Linux there was nothing to move — `tracon service install` simply adopted the
+hand-written unit that was already there.
 
-Its three roles: supervising the notebook server (dies with notebook), toggling launchd
+Its three roles: supervising the old notes server (dies with it), toggling launchd
 agents from a menu bar (superseded by the tray, on macOS only), and the display-linked
 theme switcher.
 
@@ -135,36 +135,23 @@ theme switcher.
 external display is connected. Nothing in tracon depends on it; it is macOS-only
 (System Events, with the automation permission that implies); and rehoming it into the
 wrapper would mean a mac-only code path maintained forever for a behaviour unrelated to
-directing agent work. If it is missed, it belongs in dotfiles as a small launchd agent,
+directing agent work. If it is missed, it belongs in the operator's own launchd agents,
 not in tracon.
 
-Retiring the repo is the operator's, and last: after the mac's pager-bridge LaunchAgent
-has moved off it and the wrapper has been used there. Nothing is retired until its
-replacement has been in real use.
+Retiring the repo is the operator's, and last, after the wrapper has been used on the
+mac. Nothing is retired until its replacement has been in real use.
 
 ## Cluster runbook
 
-Merging the homelab PR deploys, so it lands only after `tracon 0.5.0` and `pager 0.6.0`
-exist — the ingress must not stand in front of a node image with no auth guard.
+Merging the cluster's manifests deploys, so the node image must carry the auth guard
+(`tracon 0.5.0` or later) before an ingress stands in front of it.
 
 Then, in order:
 
-1. The cluster bridge mints its identity on first start, so its key cannot be in the
-   manifests ahead of time. Read it off the pod and append it to the relay's
-   `PAGER_BRIDGE_PUBKEY` (comma-separated; the laptop's stays):
-   `kubectl exec deploy/pager-bridge -n pager -- pager-bridge id`
-   Until then the cluster bridge gets a 401 and only its own pushes are lost.
-2. Pair the phone to the cluster bridge from `kubectl logs` — the same QR flow as the
-   laptop's. Keep both pairings; each bridge seals to its own devices.
-3. On the lab node: `tracon auth issue`, then log in at `https://tracon-node.0x69.xyz`
+1. On the cluster node: `tracon auth issue`, then log in at the node's public address
    and install the PWA from there.
-4. `tracon channel bind personal notify.sink=pager notify.node=<lab node id>` (and
-   `client`); `tracon channel bind work notify.sink=tray`.
-5. Then the exit criterion, for real: close both laptops, wait for a push, tap it, and
+2. On the phone, on the Nodes screen, switch on **Push to this device** and send a
+   test. (This replaced the external bridge pairing that stood here in Phase 6; see
+   ARCHITECTURE "Notification sinks".)
+3. Then the exit criterion, for real: close both laptops, wait for a push, tap it, and
    approve a review from the phone.
-
-## Still open
-
-Carried from Phase 4: the snapshot run against Spaces, and the hub memory limit
-(128Mi → 256Mi). From Phase 5: one real plan → execute → review chain through the
-gateway, with the check-container timing recorded here.

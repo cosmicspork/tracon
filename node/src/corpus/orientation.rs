@@ -281,7 +281,7 @@ mod tests {
                 "state": "active", "created_ms": 1, "updated_ms": 1}))
             .unwrap();
         let facts = Facts {
-            node_name: "bazzite",
+            node_name: "laptop",
             node_id: "0123456789abcdef",
             backend: "podman",
             harness: "omp",

@@ -171,7 +171,7 @@ pub async fn publish(
             title.to_string(),
             "--description".into(),
             body.to_string(),
-            // Merging is Josh's, never the agent's.
+            // Merging is the operator's, never the agent's.
             "--no-squash-before-merge".into(),
             "--yes".into(),
         ],

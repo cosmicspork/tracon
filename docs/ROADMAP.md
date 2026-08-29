@@ -14,7 +14,7 @@ else provides is enforcement, then cross-machine reach; those come first.
 
 ## Phase 0: Validate the assumptions
 
-Validation work completed on 2026-08-24. The ACP, restricted-harness, and Bazzite
+Validation work completed on 2026-08-24. The ACP, restricted-harness, and Linux
 boundary assumptions passed. The assumed work Coder boundary failed: the current
 single-container template cannot enforce the gate. Evidence remains in the
 [`ACP capture`](reference/acp-omp-18.0.4-session.jsonl),
@@ -39,7 +39,8 @@ single-container template cannot enforce the gate. Evidence remains in the
       topology assumption: the template sets `privileged = true`; `coder` has
       passwordless `sudo`; root has `CapEff: 000001ffffffffff`. There is no separate
       inner runner, so this topology cannot run a gated harness.
-- [x] **Stand up one host boundary by hand.** Rootless Podman on Bazzite, harness in a
+- [x] **Stand up one host boundary by hand.** Rootless Podman on an immutable Fedora
+      host, harness in a
       container on an internal network, node-side process holding the exec pipe.
       Confirm the harness can still reach the model provider through the node and
       nothing else.
@@ -47,7 +48,8 @@ single-container template cannot enforce the gate. Evidence remains in the
       separate outer pod: Coder runs in the Envbuilder devcontainer. It has Python
       3.9.2; `uv` is absent but its installer is reachable. The replacement topology
       must provision sidecar dependencies independently.
-- [x] **Check DigitalOcean embeddings, reranking, and batch inference.** Embeddings use
+- [x] **Check the hosted inference API's embeddings, reranking, and batch inference.**
+      Embeddings use
       synchronous endpoints and are not supported by batch inference. Reranking is a
       knowledge-base feature, not a standalone endpoint. Candidate embedding models are
       deferred to Phase 4, after FTS demonstrates a need.
@@ -56,7 +58,7 @@ single-container template cannot enforce the gate. Evidence remains in the
       metric. Decided here because it changes the event schema and is expensive to
       retrofit.
 
-Outcome: the adapter, restricted-harness, and Bazzite boundary checks passed. The
+Outcome: the adapter, restricted-harness, and Linux boundary checks passed. The
 original work-boundary criterion failed and produced the Phase 3 replacement-topology
 requirement. It did not create an advisory mode or establish the current Coder workspace
 as a valid node.
@@ -65,7 +67,7 @@ as a valid node.
 
 The smallest thing that changes behavior. Phase 1 runs on any one machine that can host
 the persistent node and isolated runner, retain state, expose the SPA to the operator,
-and pass the startup boundary check. Bazzite proved one implementation; it is not the
+and pass the startup boundary check. One Linux host proved one implementation; it is not the
 required platform. macOS, another Linux host, or a managed environment qualifies by
 capability, not product name.
 
@@ -82,7 +84,7 @@ Node:
       not musl.
 - [x] Host boundary as code: internal network, gateway container with the allowlist
       proxy and node-socket forward, harness container. Exactly what Phase 0 established
-      by hand on Bazzite, generalized behind capability checks.
+      by hand on Linux, generalized behind capability checks.
 - [x] Startup boundary check; refusal to run harnesses surfaced with the failed check
 - [x] ACP adapter for omp, with a harness adapter trait from day one. One harness until
       a concrete task needs a second; adapters are the part that rots.
@@ -160,14 +162,14 @@ From here on, tracon is built through tracon.
 
 ## Phase 2: Mesh
 
-- [x] Hub deployed to the homelab cluster **as the relay**: opaque frame routing, keyed
-      per channel, modeled on pager and svastha. Sync and processing come in Phase 4;
+- [x] Hub deployed to the cluster **as the relay**: opaque frame routing, keyed
+      per channel, modeled on an earlier encrypted relay. Sync and processing come in Phase 4;
       here it only routes. Built as the `hub/` crate (`tracon-hub`): signed requests
       with the signature as the replay nonce, per-channel sequence, cursor pull with a
       `410` resync when behind retention, payload-free SSE pokes, members as routing
       metadata, enrollment slots. It holds no channel keys and opens no frame. The
-      homelab manifests are `kubernetes/apps/{base,production}/tracon-hub`; the pod
-      goes live with the first release that publishes the image.
+      cluster's manifests live with the cluster; the pod goes live with the first
+      release that publishes the image.
 - [x] Node keypair on first run, enrollment via short-lived code from an enrolled node.
       `<state>/node-identity.seed`; the node id is the Ed25519 public key (a Phase 1
       database is rekeyed once). `tracon mesh invite` / `tracon enroll`, or the Enroll
@@ -185,9 +187,10 @@ From here on, tracon is built through tracon.
       `tracon policy push` hands a new bundle to every member; it takes effect without
       a restart.
 - [x] Second boundary-capable node on another host, bootstrapped by one-line binary
-      fetch, not dotfiles. `install.sh` fetches the static musl binary and verifies
+      fetch, not the operator's shell setup. `install.sh` fetches the static musl
+      binary and verifies
       the release checksum; the container definitions ship inside the binary so
-      `tracon setup` builds the images. Stood up on the Bazzite host: the Linux
+      `tracon setup` builds the images. Stood up on the Linux host: the Linux
       gateway forward is a Unix socket, and two SELinux constraints were found by
       running it ([`phase-2-notes`](reference/phase-2-notes.md)).
 - [x] Harness state directory as a node-owned volume (the `OMP_STATE_DIR` pattern).
@@ -208,10 +211,10 @@ Phase 2 implementation completed 2026-08-28. The exit criterion is demonstrated
 end to end in-process (`node/tests/mesh_e2e.rs`: two managers with the fake harness, two
 live mesh clients, one real hub router; a session created on B from A's API, its outcome
 and events mirrored back, a forwarded kill refused as the owner phrases it, a queued
-prompt to an unreachable owner). The two-machine run — hub on the homelab cluster, the
-macOS node and the Bazzite node enrolled, a session on one driven from the other's
+prompt to an unreachable owner). The two-machine run — hub on the cluster, the
+macOS node and the Linux node enrolled, a session on one driven from the other's
 browser — waits on the first release (which publishes the hub image and the node
-binaries) and the homelab merge; the Bazzite node already passes its boundary check with
+binaries) and the cluster deploy; the Linux node already passes its boundary check with
 the socket forward.
 
 Not built in this phase, recorded so it is not assumed: live chunks and tool progress are
@@ -233,8 +236,7 @@ it with a boundary the node can verify.
       unprivileged harness runner topology. Built as a second boundary backend
       (`[runtime] kind = "kubernetes"`): the node is an unprivileged pod that creates
       one harness pod per session, and two NetworkPolicies make it the harness's only
-      route. Proven on the homelab cluster (`deploy/kubernetes/lab`,
-      [`phase-3-notes`](reference/phase-3-notes.md)); the Coder template that carries
+      route. Proven on the cluster ([`phase-3-notes`](reference/phase-3-notes.md)); the Coder template that carries
       it to the work cluster is written on a host that can reach that environment,
       against [`deploy/coder/README.md`](../deploy/coder/README.md).
 - [x] Node outside the harness container, with a node-owned exec pipe. `pods/attach`
@@ -255,7 +257,7 @@ it with a boundary the node can verify.
       broker is touched, and a call the bundle does not name is asked, not run.
 
 Phase 3 implementation completed 2026-08-28. The runner topology is built and proven
-on the homelab cluster: all five checks pass inside the node pod, the deep probe shows
+on the cluster: all five checks pass inside the node pod, the deep probe shows
 a harness pod with no route but the node, and a session creates its pod, mounts the
 worktree as subpaths of the shared claim, and attaches. Not yet done: a turn with model
 credentials in the lab, the Coder template itself, and therefore the boundary check on
@@ -293,12 +295,12 @@ database, except through the node, and `review` and `consulta` can be archived.
       --hub` admits it into a channel (role `hub`) and hands it the keyring. A channel
       nobody shares stays ciphertext because there is no key, and the hub counts what it
       could not open.
-- [x] Document store, notebook prefix scheme as the kind column. `tracon doc
+- [x] Document store, the filename prefix scheme as the kind column. `tracon doc
       import|ls|get|put|rm|export`, `GET/PUT/DELETE /api/docs/{channel}/{slug}` with the
-      notebook's `If-Match`/412 contract, `doc_read` / `doc_search` / `doc_write` for
+      `If-Match`/412 edit contract, `doc_read` / `doc_search` / `doc_write` for
       agents (the write is asked), and a Documents screen with search, markdown, and a
-      conflict-aware editor. `~/src/docs` (12 documents) and the workspace README
-      imported.
+      conflict-aware editor. The operator's notes (12 documents) and the workspace
+      README imported.
 - [x] Memory store: scope and kind axes, MCP `retain` / `recall` tools. Directives are
       the operator's (`tracon memory add`, `POST /api/memories`); `retain` writes facts,
       lessons, and episodes, and holds a lesson (or a fact under 0.7 confidence) as a
@@ -334,19 +336,19 @@ database, except through the node, and `review` and `consulta` can be archived.
       against a directory bucket in `hub/tests/snapshot.rs`; the run against Spaces
       waits on a bucket and a key in the cluster's secrets.
 
-Imported: `~/src/docs` and this host's workspace `README.md` (as `guide-workspace`).
-The work-side README is imported from a host that can reach it. There was no
-`workspace-notes-sync` on this host to run in parallel; the notebook stays runnable
-against `tracon doc export` until the operator has lived in the Documents screen.
+Imported: the operator's notes directory and this host's workspace `README.md` (as
+`guide-workspace`). The work-side README is imported from a host that can reach it.
+The old notes app stays runnable against `tracon doc export` until the operator has
+lived in the Documents screen.
 
 Phase 4 implementation completed 2026-08-28 except the vector items, which waited on
 FTS missing something and were built in Phase 7. Not done, recorded so it is not assumed: a live subscription
 token through the gateway (the operator's Anthropic refresh token had expired; the
 header shape is from the public clients and marked unverified); the snapshot run
-against Spaces; the hub's replica on the homelab cluster, which arrives with the next
+against object storage; the hub's replica on the cluster, which arrives with the next
 release; the work-side README import.
 
-Exit criteria: `notebook` can be archived, and the two orientation files stop drifting
+Exit criteria: the old notes app can be archived, and the two orientation files stop drifting
 because there is only one source.
 
 ## Phase 5: Ledger, phases, metrics
@@ -423,7 +425,7 @@ a channel binding, so there is nothing for a subagent to inherit; and
       and passing an endless SSE response through a fetch handler breaks it. Tested
       by loading the worker against stubs rather than through a browser, so the
       no-`/api` rule is checked on every PR.
-- [x] Notification sinks bound per channel (a pager bridge, then; every node pushes
+- [x] Notification sinks bound per channel (an external push bridge, then; every node pushes
       Web Push to its own devices since Phase 8). The task
       reads the bus rather than the manager, which is what makes a *peer's* approval
       reach the phone: mirrored state is published untapped, and `publish_untapped`
@@ -436,7 +438,8 @@ a channel binding, so there is nothing for a subagent to inherit; and
       unit or a LaunchAgent and starts it. Host-side CLI only, never a tool, so a
       session that breaks the build cannot restart the node that gates it. Coder
       needed nothing — there the container lifecycle already is the supervisor.
-      Switchboard installed nothing on Linux; its units are a macOS-only migration.
+      The old menu-bar supervisor installed nothing on Linux; its units are a
+      macOS-only migration.
 - [x] Work approvals surface in the wrapper tray, with a kill switch one level down
       because killing is destructive and easy to mis-click. The tray does not stream
       output; anything worth reading opens the window at that route.
@@ -444,7 +447,8 @@ a channel binding, so there is nothing for a subagent to inherit; and
       changes carrying a patch, never an approval of something the operator altered:
       the agent applies it and resubmits, so the agent stays the only writer to the
       worktree. Lazy-loaded, so the phone never pays for the editor.
-- [ ] Retire Switchboard, after supervision has moved and notebook and review are gone
+- [ ] Retire the menu-bar supervisor, after supervision has moved and the notes and
+      review tools are gone
 - [x] Rehome or deliberately kill the display-linked theme switcher — **killed**, see
       `reference/phase-6-notes.md`. It is a macOS-only behaviour that nothing in
       tracon depends on, and rehoming it means a System Events code path in the
@@ -462,7 +466,7 @@ and the launchctl path are written but built only on a Mac. Hub-side rollups and
 phone's read-over-the-hub path remain later phases.
 
 Exit criteria: a task can be directed from the phone with both laptops closed, and
-`switchboard` can be archived. The first half is built and waits on the release and
+the menu-bar supervisor can be archived. The first half is built and waits on the release and
 the cluster deploy; the second is the operator's, after the mac migration.
 
 ## Phase 7: A second harness, and retrieval by meaning
@@ -545,8 +549,8 @@ Not rejected, not scheduled.
 Recorded so they are not rediscovered as good ideas.
 
 - **Multi-user.** No tenancy in the auth model. Single operator by design.
-- **Business domain in tracon.** Clients, invoicing, and time billing stay in
-  Kritee.
+- **Business domain in tracon.** Clients, invoicing, and time billing stay
+  elsewhere.
 - **An agent loop in the node.** Harnesses are replaceable; a harness written here is
   not. Considered and rejected: owning the harness is a large undertaking whose main
   return is self-controlled churn.
@@ -567,4 +571,4 @@ Recorded so they are not rediscovered as good ideas.
 | A node cannot establish its boundary | Every host must pass the startup check; the current Coder topology is deferred until Phase 3 rather than degraded |
 | Corpus lock-in | Boring schemas, plain-text export for every kind; vectors are derived, node-local, and rebuildable from the corpus |
 | Cost runaway | Per-session budget and per-channel daily ceiling, enforced not monitored |
-| Retiring Switchboard too early | It retires last, after supervision has moved |
+| Retiring the menu-bar supervisor too early | It retires last, after supervision has moved |

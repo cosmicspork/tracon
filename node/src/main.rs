@@ -87,7 +87,7 @@ enum Command {
 
 #[derive(Subcommand)]
 enum DocCommand {
-    /// Import a notebook directory: flat `<kind>-<slug>.md` files.
+    /// Import a docs directory: flat `<kind>-<slug>.md` files.
     Import {
         dir: std::path::PathBuf,
         #[arg(long, default_value = "personal")]
@@ -267,7 +267,7 @@ enum MeshCommand {
     /// The first node: create the `@mesh` channel key here and point this node
     /// at a hub that admits it (`TRACON_HUB_ADMIT=<node id>` on the hub).
     Init {
-        /// The hub's URL, e.g. https://tracon-hub.0x69.xyz
+        /// The hub's URL, e.g. https://hub.example.com
         #[arg(long)]
         hub: String,
     },

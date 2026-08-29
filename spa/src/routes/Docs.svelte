@@ -119,7 +119,7 @@
     </div>
   {/if}
 {:else if docs.length === 0}
-  <div class="empty">No documents on {channel} yet. <code>tracon doc import &lt;dir&gt;</code> brings a notebook in.</div>
+  <div class="empty">No documents on {channel} yet. <code>tracon doc import &lt;dir&gt;</code> brings a directory of markdown in.</div>
 {:else}
   {#each grouped as [kind, list] (kind)}
     <div class="h5">{kind} <b>{list.length}</b></div>

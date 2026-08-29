@@ -1,5 +1,5 @@
 //! Where snapshots go: three verbs behind a trait, a directory for tests and
-//! laptops, S3-compatible storage (DigitalOcean Spaces) for the cluster.
+//! laptops, S3-compatible object storage for the cluster.
 
 use std::path::{Path, PathBuf};
 

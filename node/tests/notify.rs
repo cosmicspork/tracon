@@ -390,7 +390,7 @@ async fn every_member_delivers_unless_the_channel_is_quiet() {
     for (bindings, delivers) in [
         (r#"{}"#, true),
         (r#"{"notify":{"enabled":true}}"#, true),
-        (r#"{"notify":{"sink":"pager","node":"n2"}}"#, true),
+        (r#"{"notify":{"sink":"bridge","node":"n2"}}"#, true),
         (r#"{"notify":{"enabled":false}}"#, false),
         (r#"{"notify":{"sink":"tray","node":"n1"}}"#, false),
     ] {

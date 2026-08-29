@@ -555,7 +555,7 @@ mod tests {
     fn a_source_outside_the_volume_cannot_be_mounted() {
         let mut c = cmd();
         c.mounts.push(Mount {
-            source: "/home/jd/.omp".into(),
+            source: "/home/someone/.omp".into(),
             target: "/x".into(),
             read_only: true,
         });

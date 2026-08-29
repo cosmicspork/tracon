@@ -5,7 +5,8 @@ The bytes that cross a machine boundary, defined once in `proto/` and pinned by
 regenerate with `cargo run -p tracon-proto --example vectors` and commit the result
 alongside the change that made it necessary.
 
-Shapes are borrowed from svastha's trust contract and re-labelled. The crate is
+Shapes are borrowed from an earlier end-to-end-encrypted project's trust contract and
+re-labelled. The crate is
 vendored, not depended on, so this contract moves on its own cadence.
 
 ## Versions

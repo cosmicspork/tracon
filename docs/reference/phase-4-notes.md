@@ -114,7 +114,7 @@ confidence, enters as `candidate` and waits for the nightly batch. `retain` refu
 `directive` kind: those are the operator's, written through `POST /api/memories` or
 `tracon memory add`. The CLI (`tracon doc …`, `tracon memory …`) is a client of the
 running node's API on purpose — a write straight into the store would never reach the
-mesh outbox. Documents keep the notebook's `If-Match`/412 edit contract.
+mesh outbox. Documents keep the `If-Match`/412 edit contract the old notes app had.
 
 ## Orientation
 
@@ -168,7 +168,7 @@ Object storage is a trait with a directory implementation for tests and a hand-r
 SigV4 client for S3-compatible storage (`TRACON_HUB_SNAPSHOT_*`); scheduled every
 `EVERY_HOURS`, keeping `KEEP`. `tracon-hub restore --into <empty dir> --seed-hex …`
 reopens with the same identity, keyrings, rows, and frames (`hub/tests/snapshot.rs`).
-The run against DigitalOcean Spaces waits on a bucket and a key in the cluster's
+The run against real object storage waits on a bucket and a key in the cluster's
 secrets; the code path is the same as the directory one past the trait.
 
 ## Documents in the browser
@@ -179,8 +179,8 @@ so it is local with the hub down; the header says so); a document renders as mar
 textarea that saves with the hash last read and, on 412, shows the other version and
 offers "take theirs" or "keep mine". A `changes` frame naming a document bumps a version
 the screens refetch on, and an editor mid-draft is told rather than clobbered. The
-notebook's dashboard (todo scan, priorities panel) is not carried over: `~/src/docs`
+old notes app's dashboard (todo scan, priorities panel) is not carried over: the notes
 held no `note-priorities.md`, and open items are the agent's `recall` away.
 
-Imported `~/src/docs` (12 documents) and `~/src/README.md` as `guide-workspace` on a
+Imported the notes directory (12 documents) and the workspace README as `guide-workspace` on a
 scratch node; `tracon memory recall "what is the test command"` returned the guide first.

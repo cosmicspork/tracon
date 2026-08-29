@@ -38,6 +38,7 @@ jobs:
       # Every test binary must carry the guard that keeps it out of a real
       # state directory; see node/tests/support/state.rs.
       - run: ./scripts/check-tests.sh
+      - run: ./scripts/scrub-check.sh
       # No SPA build here on purpose: build.rs writes a placeholder so the Rust
       # job never depends on the JS toolchain.
       - run: cargo fmt --all --check

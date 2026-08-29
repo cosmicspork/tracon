@@ -123,7 +123,7 @@ async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
     // (see docs/reference/phase-2-notes.md).
     let selinux = super::selinux_enabled().await;
     // Under SELinux a plain bind mount is unreadable from the container (the
-    // gateway died on "allow.txt missing" on Bazzite); `:z` relabels the node's
+    // gateway died on "allow.txt missing" on an SELinux host); `:z` relabels the node's
     // own files, which is fine for state tracon owns.
     let mount = format!(
         "{}:/etc/tinyproxy/allow.txt:ro{}",
