@@ -111,6 +111,31 @@ fn main() {
                 eprintln!("tracon: could not register the global shortcut: {e}");
             }
 
+            // A window closed to the tray means the app keeps running, so the
+            // only ways out are the tray's Quit and a signal — logout sends
+            // one, and so does anything that kills the app. Routing a signal
+            // through `exit` rather than letting the process die is what stops
+            // a node being orphaned by a logout: the same shutdown runs either
+            // way, and an orphan would outlive the app that owns it.
+            #[cfg(unix)]
+            {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    use tokio::signal::unix::{signal, SignalKind};
+                    let (Ok(mut term), Ok(mut int)) = (
+                        signal(SignalKind::terminate()),
+                        signal(SignalKind::interrupt()),
+                    ) else {
+                        return;
+                    };
+                    tokio::select! {
+                        _ = term.recv() => {}
+                        _ = int.recv() => {}
+                    }
+                    handle.exit(0);
+                });
+            }
+
             let watcher = handle.clone();
             let st = state.clone();
             tauri::async_runtime::spawn(async move {
