@@ -75,6 +75,19 @@ impl Embedder {
         }
     }
 
+    /// The bearer token for a direct endpoint, read fresh so rotating the file
+    /// takes effect without a restart. A configured file that cannot be read is
+    /// an error rather than an unauthenticated call, which would fail later and
+    /// less clearly.
+    fn api_key(&self) -> Result<Option<String>, EmbedError> {
+        let Some(path) = &self.cfg.embed.api_key_file else {
+            return Ok(None);
+        };
+        let key = std::fs::read_to_string(path)
+            .map_err(|e| EmbedError::Http(format!("reading {}: {e}", path.display())))?;
+        Ok(Some(key.trim().to_string()))
+    }
+
     /// Embed a batch of texts, in order. The order matters: the caller pairs
     /// the results back to its chunks by position, so a response that reorders
     /// or drops one is an error rather than a silent mispairing.
@@ -88,9 +101,12 @@ impl Embedder {
             .post(self.endpoint())
             .timeout(Duration::from_secs(e.timeout_secs))
             .json(&json!({ "model": e.model, "input": texts }));
-        if e.provider.is_some() {
-            req = req.bearer_auth(token);
-        }
+        req = match (&e.provider, self.api_key()?) {
+            // Through the gateway: the session-shaped token identifies the node.
+            (Some(_), _) => req.bearer_auth(token),
+            (None, Some(key)) => req.bearer_auth(key),
+            (None, None) => req,
+        };
         let res = req
             .send()
             .await

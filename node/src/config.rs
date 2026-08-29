@@ -49,6 +49,18 @@ pub struct Embed {
     pub model: String,
     /// Its dimension. A change rebuilds the index from empty.
     pub dim: usize,
+    /// A file holding the bearer token for `base_url`, when the endpoint wants
+    /// one. A path rather than the token itself: `node.toml` is a plain file
+    /// and a read-only ConfigMap in a pod, so the secret stays somewhere that
+    /// can be a Secret, and rotating it does not mean editing config.
+    ///
+    /// Not the broker. The broker holds what a *harness* may be given; this is
+    /// the node talking to a service on its own machine, and putting it behind
+    /// the gateway would mean adding loopback to the egress allowlist — which
+    /// the harness's CONNECT proxy shares, so it would hand every session the
+    /// run of this host's local ports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_file: Option<PathBuf>,
     /// A `[providers]` name instead of `base_url`, when the endpoint needs a
     /// brokered credential. The call then goes through the model gateway, so
     /// the channel's provider binding and its daily ceiling still apply.
@@ -68,6 +80,7 @@ impl Default for Embed {
             base_url: "http://127.0.0.1:8080".into(),
             model: "bge-m3".into(),
             dim: 1024,
+            api_key_file: None,
             provider: None,
             batch: 16,
             timeout_secs: 60,

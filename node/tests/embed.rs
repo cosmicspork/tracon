@@ -29,6 +29,8 @@ const TOPICS: [&[&str]; DIM] = [
 #[derive(Clone, Default)]
 struct Stub {
     seen: Arc<Mutex<Vec<Value>>>,
+    /// What the node presented, so an endpoint that wants a key can check it.
+    auth: Arc<Mutex<Vec<Option<String>>>>,
     fail: Arc<Mutex<bool>>,
     /// Return the wrong number of dimensions, to prove that is caught.
     wrong_dim: Arc<Mutex<bool>>,
@@ -36,8 +38,15 @@ struct Stub {
 
 async fn embeddings(
     State(s): State<Stub>,
+    headers: axum::http::HeaderMap,
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, axum::http::StatusCode> {
+    s.auth.lock().unwrap().push(
+        headers
+            .get("authorization")
+            .and_then(|h| h.to_str().ok())
+            .map(str::to_string),
+    );
     if *s.fail.lock().unwrap() {
         return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -566,4 +575,53 @@ async fn a_title_the_body_already_carries_is_not_repeated() {
         "the title is in the snippet twice: {:?}",
         hits[0].text
     );
+}
+
+/// A local model server with an API key is the ordinary case, not an exotic
+/// one, and the node reads it from a file so rotating the key is not a config
+/// edit and the secret can be a Secret in a pod.
+#[tokio::test]
+async fn a_key_file_is_presented_to_the_endpoint() {
+    let (s, base) = stub().await;
+    let dir = std::env::temp_dir().join(format!("tracon-embed-key-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let key_path = dir.join("llama.key");
+    std::fs::write(&key_path, "sk-local-abc\n").unwrap();
+
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    store.vec_ensure(DIM).unwrap();
+    let mut cfg = Config::default();
+    cfg.embed.enabled = true;
+    cfg.embed.base_url = base.clone();
+    cfg.embed.model = "stub-embed".into();
+    cfg.embed.dim = DIM;
+    cfg.embed.api_key_file = Some(key_path.clone());
+    let e = Embedder::new(Arc::new(cfg), store.clone(), reqwest::Client::new());
+
+    e.embed_query("anything", "unused-gateway-token")
+        .await
+        .unwrap();
+    let seen = s.auth.lock().unwrap().clone();
+    // The trailing newline a key file always has must not reach the header.
+    assert_eq!(seen.last().unwrap().as_deref(), Some("Bearer sk-local-abc"));
+
+    // A key file that is configured but unreadable is an error, not a silent
+    // unauthenticated call that fails later and less clearly.
+    std::fs::remove_file(&key_path).unwrap();
+    let err = e
+        .embed_query("anything", "t")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("llama.key"), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// With no key file, nothing is sent — the common loopback case.
+#[tokio::test]
+async fn no_key_file_sends_no_authorization() {
+    let (s, base) = stub().await;
+    let (_store, e) = setup(&base);
+    e.embed_query("anything", "t").await.unwrap();
+    assert_eq!(s.auth.lock().unwrap().last().unwrap().as_deref(), None);
 }
