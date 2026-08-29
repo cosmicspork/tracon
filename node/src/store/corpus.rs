@@ -263,14 +263,24 @@ fn nearest_by_source<'a>(
     out
 }
 
+/// What a document is embedded as. The title carries real meaning and is
+/// worth indexing — but the corpus's own documents start with the title as an
+/// H1, and prepending it again puts it in the snippet twice.
+pub fn embed_text(title: &str, body: &str) -> String {
+    if title.is_empty() {
+        return body.to_string();
+    }
+    let head = body.trim_start().trim_start_matches('#').trim_start();
+    if head.starts_with(title) {
+        return body.to_string();
+    }
+    format!("{title}\n\n{body}")
+}
+
 /// The text a vector hit actually matched, read back out of the record. The
 /// embedder indexes a document as title then body, so offsets index that.
 fn span_of(title: &str, body: &str, offset: i64, len: i64) -> String {
-    let text = if title.is_empty() {
-        body.to_string()
-    } else {
-        format!("{title}\n\n{body}")
-    };
+    let text = embed_text(title, body);
     let start = (offset.max(0) as usize).min(text.len());
     let end = ((offset + len).max(0) as usize).min(text.len());
     // Offsets came from this text, but a record edited since indexing may be
@@ -577,18 +587,11 @@ impl Store {
         let rows = stmt.query_map([], |r| {
             let title: String = r.get(2)?;
             let body: String = r.get(3)?;
-            // The title is part of what a document is about, so it is embedded
-            // with it rather than being searchable only through FTS.
-            let text = if title.is_empty() {
-                body
-            } else {
-                format!("{title}\n\n{body}")
-            };
             Ok((
                 "document".to_string(),
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                text,
+                embed_text(&title, &body),
             ))
         })?;
         for row in rows {

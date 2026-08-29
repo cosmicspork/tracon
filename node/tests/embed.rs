@@ -202,8 +202,8 @@ async fn a_hit_points_at_the_text_it_matched() {
     let q = e.embed_query("approve the diff", "t").await.unwrap();
     let hits = store.vec_search(Some("personal"), &q, 1).unwrap();
     let row = store.doc_by_id(&d1).unwrap().unwrap();
-    // The document is embedded as title + body, so offsets index that text.
-    let text = format!("{}\n\n{}", row.title, row.body);
+    // Offsets index the text the embedder built, title included.
+    let text = tracon::store::corpus::embed_text(&row.title, &row.body);
     let span = &text[hits[0].offset as usize..(hits[0].offset + hits[0].len) as usize];
     assert!(span.contains("verdict"), "matched span was {span:?}");
 }
@@ -536,4 +536,34 @@ async fn no_vectors_is_the_text_only_ranking_unchanged() {
         .unwrap();
     assert_eq!(plain, hybrid);
     assert!(!plain.is_empty());
+}
+
+/// The corpus's own documents open with their title as an H1. Prepending the
+/// title again is how a snippet ends up saying it twice.
+#[tokio::test]
+async fn a_title_the_body_already_carries_is_not_repeated() {
+    let (_stub, base) = stub().await;
+    let (store, e) = setup(&base);
+    let d1 = doc(
+        &store,
+        "d1",
+        "personal",
+        "guide-testing",
+        "Running the suite",
+        "# Running the suite\n\nRun pest before pushing anything at all, every single time.\n",
+    );
+    indexed(&e, &store).await;
+
+    let q = e.embed_query("how do I verify my work", "t").await.unwrap();
+    let near = store.vec_search(Some("personal"), &q, 5).unwrap();
+    let hits = store
+        .doc_search_hybrid(Some("personal"), None, "how do I verify my work", 5, &near)
+        .unwrap();
+    assert_eq!(hits[0].id, d1);
+    assert_eq!(
+        hits[0].text.matches("Running the suite").count(),
+        1,
+        "the title is in the snippet twice: {:?}",
+        hits[0].text
+    );
 }
