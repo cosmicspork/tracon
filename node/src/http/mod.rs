@@ -18,7 +18,7 @@ use axum::{
 use tower_http::trace::TraceLayer;
 
 use crate::{
-    adapter::{omp::OmpAdapter, HarnessAdapter},
+    adapter::HarnessAdapter,
     boundary,
     config::Config,
     session::Manager,
@@ -179,7 +179,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     let cfg = Arc::new(Config::try_load().map_err(|e| anyhow::anyhow!(e))?);
     let store = Arc::new(Store::open(&Config::db_path()).context("open store")?);
     let bus = Bus::new();
-    let adapter: Arc<dyn HarnessAdapter> = Arc::new(OmpAdapter::new(cfg.harness.version.clone()));
+    let adapter: Arc<dyn HarnessAdapter> = crate::adapter::adapter_for(&cfg)?;
     // The identity comes first: the credential store is sealed under a key
     // derived from it. `init_node` loads the same seed again below.
     let (store_key_identity, _) = crate::mesh::identity::load_or_generate()?;
@@ -470,7 +470,8 @@ async fn init_node(
     }
     let found = if ready {
         let runner = backend.runner(
-            crate::session::materialize::state_mounts(&backend.harness_home()).unwrap_or_default(),
+            crate::session::materialize::state_mounts(&backend.harness_home(), adapter.layout())
+                .unwrap_or_default(),
         );
         // A probe that cannot read the version is not a pass: record "unknown",
         // which does not equal the pin, so new sessions are blocked with the

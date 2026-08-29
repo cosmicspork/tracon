@@ -667,6 +667,7 @@ impl Manager {
             &wt.path,
             &repo,
             &self.backend.harness_home(),
+            adapter.as_ref(),
             &wiring,
             &orientation,
         )?;

@@ -1,15 +1,65 @@
-//! The harness-agnostic seam. One implementation (`omp`) exists; the trait is
-//! here from the first commit because adapters are the part that rots.
+//! The harness-agnostic seam. The trait has been here from the first commit
+//! because adapters are the part that rots; what a harness is called, where it
+//! keeps its state, and what it must find in that state directory all live
+//! behind it rather than being spelled `omp` throughout the node.
 
 pub mod omp;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::config::Config;
+use crate::gateway::model::Wiring;
 use crate::runner::Runner;
+
+/// Where a harness keeps its state inside the runner, and what it calls that
+/// place. The node mounts a directory it owns at `dir` under the harness's
+/// home and sets `env` to the same path, so the mount and the harness's own
+/// idea of its state directory cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Layout {
+    /// Directory under the harness's home, including the leading dot.
+    pub dir: &'static str,
+    /// The environment variable that names it.
+    pub env: &'static str,
+}
+
+/// The harness ids this node has an adapter for.
+pub const KNOWN: &[&str] = &["omp"];
+
+/// The layout for a harness id, for the few callers that have the config but
+/// not the adapter (the boundary preflight). An unknown id gets omp's, which
+/// only that preflight can reach: `adapter_for` refuses the id first, so no
+/// session ever runs against a layout that is not its harness's.
+pub fn layout(harness_id: &str) -> Layout {
+    if harness_id == omp::OmpAdapter::ID {
+        return OMP_LAYOUT;
+    }
+    OMP_LAYOUT
+}
+
+const OMP_LAYOUT: Layout = Layout {
+    dir: ".omp",
+    env: "OMP_STATE_DIR",
+};
+
+/// The adapter for the configured harness. An unknown id fails here, at
+/// startup, rather than silently running whichever harness happens to be the
+/// default — a node that thinks it is running something else is worse than a
+/// node that will not start.
+pub fn adapter_for(cfg: &Config) -> Result<Arc<dyn HarnessAdapter>, AdapterError> {
+    match cfg.harness.id.as_str() {
+        "omp" => Ok(Arc::new(omp::OmpAdapter::new(cfg.harness.version.clone()))),
+        other => Err(AdapterError::Protocol(format!(
+            "no adapter for harness `{other}`; this node knows {}",
+            KNOWN.join(", ")
+        ))),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct HarnessVersion {
@@ -135,6 +185,20 @@ pub struct LiftedToken {
 pub trait HarnessAdapter: Send + Sync {
     fn id(&self) -> &'static str;
     fn pinned_version(&self) -> &str;
+
+    /// Where this harness keeps its state, and what it calls that place.
+    fn layout(&self) -> Layout {
+        layout(self.id())
+    }
+
+    /// Files the harness must find in its state directory, as paths relative
+    /// to that directory and their contents. This is where a harness's own
+    /// configuration lives: the node materializes it per session rather than
+    /// writing into the operator's real one.
+    fn scratch_files(&self, _wiring: &Wiring) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError>;
     /// List the models the harness offers, wired to the gateway by `env`.
     async fn probe_models(
@@ -183,4 +247,36 @@ pub trait HarnessHandle: Send + Sync {
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError>;
     async fn cancel(&self) -> Result<(), AdapterError>;
     async fn close(&self) -> Result<(), AdapterError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_configured_harness_picks_the_adapter() {
+        let mut cfg = Config::default();
+        cfg.harness.id = "omp".into();
+        let Ok(a) = adapter_for(&cfg) else {
+            panic!("omp has an adapter")
+        };
+        assert_eq!(a.id(), "omp");
+        assert_eq!(a.layout().dir, ".omp");
+        assert_eq!(a.layout().env, "OMP_STATE_DIR");
+    }
+
+    /// Falling back to omp would run a harness the operator did not ask for,
+    /// under a version pin that does not describe it. Refusing at startup is
+    /// the only safe answer.
+    #[test]
+    fn an_unknown_harness_is_refused_rather_than_guessed_at() {
+        let mut cfg = Config::default();
+        cfg.harness.id = "opencode".into();
+        let err = match adapter_for(&cfg) {
+            Ok(_) => panic!("an unknown harness must not resolve"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("opencode"), "{err}");
+        assert!(err.contains("omp"), "{err}");
+    }
 }
