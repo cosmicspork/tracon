@@ -17,6 +17,9 @@ use tracon::mesh::HubState;
 use tracon::store::{now_ms, NewEvent, NodeRow, SessionRow, Store};
 use tracon::stream::{Bus, Frame};
 
+#[path = "support/state.rs"]
+mod state;
+
 struct Node {
     id: Identity,
     store: Arc<Store>,
@@ -183,6 +186,7 @@ async fn pair() -> (Node, Node) {
 
 #[tokio::test]
 async fn hello_makes_a_peer_visible_and_presence_ages_it_out() {
+    state::isolate();
     let (a, b) = pair().await;
     let mut b_sub = b.bus.subscribe();
     a.client.hello().await.unwrap();
@@ -209,6 +213,7 @@ async fn hello_makes_a_peer_visible_and_presence_ages_it_out() {
 
 #[tokio::test]
 async fn sessions_and_events_mirror_once_and_reach_the_bus() {
+    state::isolate();
     let (a, b) = pair().await;
     let mut b_sub = b.bus.subscribe();
     let row = session(&a.id.node_id(), "s1", "personal");
@@ -261,6 +266,7 @@ async fn sessions_and_events_mirror_once_and_reach_the_bus() {
 
 #[tokio::test]
 async fn a_peer_cannot_speak_for_another_node_and_unknown_keys_are_counted() {
+    state::isolate();
     let (a, b) = pair().await;
     // A claims a session belongs to B.
     let row = session(&b.id.node_id(), "forged", "personal");
@@ -289,6 +295,7 @@ async fn a_peer_cannot_speak_for_another_node_and_unknown_keys_are_counted() {
 
 #[tokio::test]
 async fn queue_frames_expire_answered_requests_and_snapshots_close_lost_sessions() {
+    state::isolate();
     let (a, b) = pair().await;
     let row = session(&a.id.node_id(), "s1", "personal");
     a.store.insert_session(&row).unwrap();
@@ -347,6 +354,7 @@ async fn queue_frames_expire_answered_requests_and_snapshots_close_lost_sessions
 
 #[tokio::test]
 async fn outbox_survives_a_hub_outage_and_members_are_learned() {
+    state::isolate();
     let a_id = Identity::from_seed(&[1u8; 32]);
     let b_id = Identity::from_seed(&[2u8; 32]);
     // A points at a hub that is not listening yet.
@@ -399,6 +407,7 @@ async fn outbox_survives_a_hub_outage_and_members_are_learned() {
 
 #[tokio::test]
 async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
+    state::isolate();
     use tracon::session::{Manager, NewSession, SessionError};
     let id = Identity::from_seed(&[5u8; 32]);
     let store = Arc::new(Store::open_in_memory().unwrap());
@@ -450,6 +459,7 @@ async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
 
 #[tokio::test]
 async fn a_credential_handoff_lands_in_the_receivers_sealed_store() {
+    state::isolate();
     let (a, b) = pair().await;
     let dir = std::env::temp_dir().join(format!("tracon-mesh-cred-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

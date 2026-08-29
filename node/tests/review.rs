@@ -13,6 +13,9 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+#[path = "support/state.rs"]
+mod state;
+
 use tracon::{
     config::Config,
     mcp::Tools,
@@ -336,6 +339,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn a_review_waits_in_the_queue_until_it_is_decided() {
+    state::isolate();
     const FN: &str = "a_review_waits_in_the_queue_until_it_is_decided";
     let f = fixture(FN, WITH_GH).await;
     let id = f.submit().await;
@@ -360,6 +364,7 @@ async fn a_review_waits_in_the_queue_until_it_is_decided() {
 
 #[tokio::test]
 async fn approving_publishes_the_approved_bytes_with_the_brokered_credential() {
+    state::isolate();
     const FN: &str = "approving_publishes_the_approved_bytes_with_the_brokered_credential";
     let f = fixture(FN, WITH_GH).await;
     let id = f.submit().await;
@@ -409,6 +414,7 @@ async fn approving_publishes_the_approved_bytes_with_the_brokered_credential() {
 
 #[tokio::test]
 async fn a_second_verdict_cannot_overwrite_the_first() {
+    state::isolate();
     const FN: &str = "a_second_verdict_cannot_overwrite_the_first";
     let f = fixture(FN, WITH_GH).await;
     let id = f.submit().await;
@@ -439,6 +445,7 @@ async fn a_second_verdict_cannot_overwrite_the_first() {
 
 #[tokio::test]
 async fn a_rejection_needs_a_reason() {
+    state::isolate();
     const FN: &str = "a_rejection_needs_a_reason";
     let f = fixture(FN, WITH_GH).await;
     let id = f.submit().await;
@@ -455,6 +462,7 @@ async fn a_rejection_needs_a_reason() {
 
 #[tokio::test]
 async fn a_branch_that_moved_after_submit_cannot_be_approved() {
+    state::isolate();
     const FN: &str = "a_branch_that_moved_after_submit_cannot_be_approved";
     let f = fixture(FN, WITH_GH).await;
     let id = f.submit().await;
@@ -488,6 +496,7 @@ async fn a_branch_that_moved_after_submit_cannot_be_approved() {
 
 #[tokio::test]
 async fn without_a_brokered_credential_approval_publishes_nothing() {
+    state::isolate();
     const FN: &str = "without_a_brokered_credential_approval_publishes_nothing";
     let f = fixture(FN, WITHOUT_GH).await;
     let id = f.submit().await;
@@ -510,6 +519,7 @@ async fn without_a_brokered_credential_approval_publishes_nothing() {
 
 #[tokio::test]
 async fn requesting_changes_keeps_one_evolving_thread() {
+    state::isolate();
     const FN: &str = "requesting_changes_keeps_one_evolving_thread";
     let f = fixture(FN, WITH_GH).await;
     let id = f.submit().await;
@@ -578,6 +588,7 @@ async fn requesting_changes_keeps_one_evolving_thread() {
 
 #[tokio::test]
 async fn two_concurrent_approvals_publish_the_change_once() {
+    state::isolate();
     const FN: &str = "two_concurrent_approvals_publish_the_change_once";
     let f = fixture(FN, WITH_GH).await;
     let id = f.submit().await;
@@ -606,6 +617,7 @@ async fn two_concurrent_approvals_publish_the_change_once() {
 
 #[tokio::test]
 async fn a_revising_review_can_be_rejected_and_the_result_is_honest() {
+    state::isolate();
     const FN: &str = "a_revising_review_can_be_rejected_and_the_result_is_honest";
     let f = fixture(FN, WITH_GH).await;
     let id = f.submit().await;
@@ -647,6 +659,7 @@ async fn a_revising_review_can_be_rejected_and_the_result_is_honest() {
 
 #[tokio::test]
 async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
+    state::isolate();
     const FN: &str = "publish_pins_the_reviewed_commit_and_refuses_a_moved_branch";
     let f = fixture(FN, WITH_GH).await;
     let mut cfg = Config::default();
@@ -688,6 +701,7 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
 
 #[tokio::test]
 async fn a_claim_releases_when_the_operator_leaves() {
+    state::isolate();
     const FN: &str = "a_claim_releases_when_the_operator_leaves";
     let f = fixture(FN, WITH_GH).await;
     let id = f.submit().await;
@@ -710,6 +724,7 @@ async fn a_claim_releases_when_the_operator_leaves() {
 
 #[tokio::test]
 async fn a_claim_from_a_vanished_client_lapses() {
+    state::isolate();
     const FN: &str = "a_claim_from_a_vanished_client_lapses";
     let f = fixture(FN, WITH_GH).await;
     let id = f.submit().await;
@@ -726,6 +741,7 @@ async fn a_claim_from_a_vanished_client_lapses() {
 
 #[tokio::test]
 async fn submit_runs_the_checks_first_and_a_failure_refuses_the_submission() {
+    state::isolate();
     const FN: &str = "submit_runs_the_checks_first_and_a_failure_refuses_the_submission";
     let f = fixture(FN, WITH_GH).await;
     // The worktree's own list wins over the node's, and this one fails.
@@ -771,6 +787,7 @@ async fn submit_runs_the_checks_first_and_a_failure_refuses_the_submission() {
 
 #[tokio::test]
 async fn a_diff_over_the_cap_is_refused_before_any_check_runs() {
+    state::isolate();
     const FN: &str = "a_diff_over_the_cap_is_refused_before_any_check_runs";
     let f = fixture_with(FN, WITH_GH, |c| c.review.max_diff_lines = 0).await;
     let v = f.tool("s1", "submit_review", f.submit_args()).await;
@@ -785,6 +802,7 @@ async fn a_diff_over_the_cap_is_refused_before_any_check_runs() {
 
 #[tokio::test]
 async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_on_the_card() {
+    state::isolate();
     const FN: &str =
         "a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_on_the_card";
     let f = fixture(FN, WITH_GH).await;
@@ -884,6 +902,7 @@ async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_
 
 #[tokio::test]
 async fn publishing_closes_the_item_the_session_holds() {
+    state::isolate();
     const FN: &str = "publishing_closes_the_item_the_session_holds";
     let f = fixture(FN, WITH_GH).await;
     let item = tracon::corpus::work::create(
@@ -929,6 +948,7 @@ async fn publishing_closes_the_item_the_session_holds() {
 /// `git apply` calls one with a missing final newline corrupt.
 #[tokio::test]
 async fn an_edited_diff_reaches_the_agent_and_still_applies() {
+    state::isolate();
     const FN: &str = "an_edited_diff_reaches_the_agent_and_still_applies";
     let f = fixture(FN, WITH_GH).await;
     let id = f.submit().await;
@@ -970,6 +990,7 @@ async fn an_edited_diff_reaches_the_agent_and_still_applies() {
 /// Asking for changes without editing anything is unchanged: notes, no patch.
 #[tokio::test]
 async fn asking_for_changes_without_an_edit_carries_no_patch() {
+    state::isolate();
     const FN: &str = "asking_for_changes_without_an_edit_carries_no_patch";
     let f = fixture(FN, WITH_GH).await;
     let id = f.submit().await;
@@ -992,6 +1013,7 @@ async fn asking_for_changes_without_an_edit_carries_no_patch() {
 /// with it rather than lingering against text that no longer exists.
 #[tokio::test]
 async fn resubmitting_clears_the_patch() {
+    state::isolate();
     const FN: &str = "resubmitting_clears_the_patch";
     let f = fixture(FN, WITH_GH).await;
     let id = f.submit().await;

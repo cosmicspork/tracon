@@ -23,6 +23,8 @@ use tracon::{
 
 #[path = "support/fake.rs"]
 mod fake;
+#[path = "support/state.rs"]
+mod state;
 use fake::{FakeAdapter, FakeHandle};
 
 struct Harness {
@@ -110,6 +112,7 @@ impl Harness {
 
 #[tokio::test]
 async fn a_session_without_a_model_is_refused() {
+    state::isolate();
     let h = Harness::new(1000).await;
     let (status, body) = h
         .call(
@@ -127,6 +130,7 @@ async fn a_session_without_a_model_is_refused() {
 
 #[tokio::test]
 async fn a_session_needs_a_ready_item_and_execute_needs_its_plan() {
+    state::isolate();
     let h = Harness::new(1000).await;
     let bus = Bus::new();
     let mk = |title: &str, deps: Vec<String>| {
@@ -207,6 +211,7 @@ async fn a_session_needs_a_ready_item_and_execute_needs_its_plan() {
 
 #[tokio::test]
 async fn a_refused_node_refuses_sessions_and_says_which_check_failed() {
+    state::isolate();
     let h = Harness::new(1000).await;
     h.store
         .put_node(&NodeRow {
@@ -246,6 +251,7 @@ async fn a_refused_node_refuses_sessions_and_says_which_check_failed() {
 
 #[tokio::test]
 async fn a_version_mismatch_blocks_new_sessions() {
+    state::isolate();
     let h = Harness::new(1000).await;
     h.store
         .put_node(&NodeRow {
@@ -282,6 +288,7 @@ async fn a_version_mismatch_blocks_new_sessions() {
 
 #[tokio::test]
 async fn drafts_survive_a_lost_client() {
+    state::isolate();
     let h = Harness::new(1000).await;
     let id = insert_running_session(&h.store, 1000);
     let (status, _) = h
@@ -298,6 +305,7 @@ async fn drafts_survive_a_lost_client() {
 
 #[tokio::test]
 async fn the_queue_orders_waiting_before_running() {
+    state::isolate();
     let h = Harness::new(1000).await;
     let id = insert_running_session(&h.store, 1000);
     h.store
@@ -328,6 +336,7 @@ async fn the_queue_orders_waiting_before_running() {
 
 #[tokio::test]
 async fn prompting_a_session_that_is_not_running_is_refused() {
+    state::isolate();
     let h = Harness::new(1000).await;
     let id = insert_running_session(&h.store, 1000);
     // Not registered with the manager, so it is not live on this node.
@@ -347,6 +356,7 @@ async fn prompting_a_session_that_is_not_running_is_refused() {
 
 #[tokio::test]
 async fn events_are_readable_after_a_given_seq() {
+    state::isolate();
     let h = Harness::new(1000).await;
     let id = insert_running_session(&h.store, 1000);
     for i in 0..3 {
@@ -550,6 +560,7 @@ impl Rig {
 
 #[tokio::test]
 async fn a_permission_request_moves_the_session_to_waiting_and_back() {
+    state::isolate();
     let rig = Rig::start(10_000, Duration::from_secs(60)).await;
     let answer = rig.request_permission().await;
     assert!(rig.await_state("waiting_on_you").await);
@@ -579,6 +590,7 @@ async fn a_permission_request_moves_the_session_to_waiting_and_back() {
 
 #[tokio::test]
 async fn a_brokered_tool_call_the_policy_does_not_cover_waits_on_the_operator() {
+    state::isolate();
     // The node's own tools are gated by the same queue as the harness's: a
     // call the bundle does not name lands on the session as a request of kind
     // `tool`, and the operator's answer reaches the caller verbatim.
@@ -620,6 +632,7 @@ async fn a_brokered_tool_call_the_policy_does_not_cover_waits_on_the_operator() 
 
 #[tokio::test]
 async fn an_unanswered_request_is_denied_by_default() {
+    state::isolate();
     // Deny-on-expiry is the whole point of the gate: silence is a refusal.
     let rig = Rig::start(10_000, Duration::from_millis(50)).await;
     let answer = rig.request_permission().await;
@@ -640,6 +653,7 @@ async fn an_unanswered_request_is_denied_by_default() {
 
 #[tokio::test]
 async fn a_session_over_budget_is_killed_at_turn_end() {
+    state::isolate();
     // The fake handle reports 1500 tokens for the turn, over the 1000 budget.
     let rig = Rig::start(1000, Duration::from_secs(60)).await;
     let (ack, done) = oneshot::channel();
@@ -661,6 +675,7 @@ async fn a_session_over_budget_is_killed_at_turn_end() {
 
 #[tokio::test]
 async fn killing_a_session_closes_it_and_expires_open_requests() {
+    state::isolate();
     let rig = Rig::start(10_000, Duration::from_secs(60)).await;
     let answer = rig.request_permission().await;
     assert!(rig.await_state("waiting_on_you").await);
@@ -677,6 +692,7 @@ async fn killing_a_session_closes_it_and_expires_open_requests() {
 
 #[tokio::test]
 async fn closing_the_work_item_ends_the_session_after_its_turn() {
+    state::isolate();
     // Idle: the end is immediate.
     let rig = Rig::start(10_000, Duration::from_secs(60)).await;
     rig.commands
@@ -724,6 +740,7 @@ async fn closing_the_work_item_ends_the_session_after_its_turn() {
 
 #[tokio::test]
 async fn streamed_chunks_are_coalesced_into_one_logged_message() {
+    state::isolate();
     let rig = Rig::start(10_000, Duration::from_secs(60)).await;
     for part in ["Read", "ing the", " file"] {
         rig.events
@@ -829,6 +846,7 @@ async fn mcp_call(app: &axum::Router, sid: &str, token: &str, body: Value) -> (S
 
 #[tokio::test]
 async fn a_tool_call_without_a_live_session_is_unauthorized() {
+    state::isolate();
     let (app, _store, _m) = mcp_harness(BROKER_STORE).await;
     let (status, _) = mcp_call(
         &app,
@@ -842,6 +860,7 @@ async fn a_tool_call_without_a_live_session_is_unauthorized() {
 
 #[tokio::test]
 async fn a_registered_session_can_list_tools_and_a_wrong_token_cannot() {
+    state::isolate();
     let (app, _store, manager) = mcp_harness(BROKER_STORE).await;
     let sid = "sess-1";
     let token = manager.register_tool_token_for_test(sid, "work").await;
@@ -878,6 +897,7 @@ async fn a_registered_session_can_list_tools_and_a_wrong_token_cannot() {
 
 #[tokio::test]
 async fn a_write_is_refused_before_the_credential_is_touched() {
+    state::isolate();
     let (app, _store, manager) = mcp_harness(BROKER_STORE).await;
     let sid = "sess-2";
     let token = manager.register_tool_token_for_test(sid, "work").await;
@@ -897,6 +917,7 @@ async fn a_write_is_refused_before_the_credential_is_touched() {
 
 #[tokio::test]
 async fn a_session_on_an_unbound_channel_is_offered_no_tools() {
+    state::isolate();
     let (app, _store, manager) = mcp_harness(BROKER_STORE).await;
     let sid = "sess-3";
     let token = manager.register_tool_token_for_test(sid, "personal").await;
@@ -917,6 +938,7 @@ async fn a_session_on_an_unbound_channel_is_offered_no_tools() {
 /// as a system-prompt file rather than anything in the worktree.
 #[tokio::test]
 async fn a_session_starts_with_its_orientation_recorded() {
+    state::isolate();
     let dir = std::env::temp_dir().join(format!("tracon-orientation-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let repo = dir.join("repo");

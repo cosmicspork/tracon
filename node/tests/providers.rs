@@ -9,6 +9,9 @@ use async_trait::async_trait;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
+#[path = "support/state.rs"]
+mod state;
+
 use tracon::{
     adapter::{
         AdapterError, HarnessAdapter, HarnessEvent, HarnessHandle, HarnessVersion, LaunchSpec,
@@ -131,6 +134,7 @@ fn providers(fake: Arc<LoginFake>) -> (Arc<Providers>, tracon::broker::SharedBro
 
 #[tokio::test]
 async fn connect_paste_back_lifts_the_token_into_the_broker() {
+    state::isolate();
     let fake = Arc::new(LoginFake::default());
     let (p, broker, bus) = providers(fake.clone());
     let mut frames = bus.subscribe();
@@ -217,6 +221,7 @@ async fn connect_paste_back_lifts_the_token_into_the_broker() {
 
 #[tokio::test]
 async fn a_provider_without_a_login_flow_says_so_and_a_failed_login_is_reported() {
+    state::isolate();
     let fake = Arc::new(LoginFake::default());
     let (p, broker, _bus) = providers(fake);
     assert!(matches!(

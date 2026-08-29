@@ -25,6 +25,8 @@ use tracon::{
 
 #[path = "support/fake.rs"]
 mod fake;
+#[path = "support/state.rs"]
+mod state;
 use fake::FakeAdapter;
 
 struct Node {
@@ -143,6 +145,7 @@ fn cookie_of(cookies: &[String]) -> String {
 /// Everything the CLI and `just dev` do keeps working, token or no token.
 #[tokio::test]
 async fn loopback_is_the_operator_before_and_after_a_token_exists() {
+    state::isolate();
     let n = node();
     let (s, _, _) = call(&n, "GET", "/api/node", LOCAL, "127.0.0.1:7420", &[], None).await;
     assert_eq!(s, StatusCode::OK);
@@ -167,6 +170,7 @@ async fn loopback_is_the_operator_before_and_after_a_token_exists() {
 /// rather than pretending a credential would help.
 #[tokio::test]
 async fn a_stranger_is_refused_outright_until_a_token_is_issued() {
+    state::isolate();
     let n = node();
     let (s, _, v) = call(&n, "GET", "/api/node", REMOTE, "tracon.example", &[], None).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
@@ -181,6 +185,7 @@ async fn a_stranger_is_refused_outright_until_a_token_is_issued() {
 
 #[tokio::test]
 async fn the_token_buys_a_cookie_and_the_cookie_is_what_travels() {
+    state::isolate();
     let n = node();
     set_token(&n, "trc1.secret").await;
 
@@ -278,6 +283,7 @@ async fn the_token_buys_a_cookie_and_the_cookie_is_what_travels() {
 /// A non-browser client (the CLI over the ingress) presents the token itself.
 #[tokio::test]
 async fn the_token_also_works_as_a_bearer_for_clients_that_hold_no_cookies() {
+    state::isolate();
     let n = node();
     set_token(&n, "trc1.secret").await;
     let (s, _, _) = call(
@@ -308,6 +314,7 @@ async fn the_token_also_works_as_a_bearer_for_clients_that_hold_no_cookies() {
 /// The cookie travels with a cross-site request; the Origin does not lie.
 #[tokio::test]
 async fn a_cross_origin_page_cannot_drive_the_api_with_a_stolen_ride() {
+    state::isolate();
     let n = node();
     set_token(&n, "trc1.secret").await;
     let (_, cookies, _) = call(
@@ -350,6 +357,7 @@ async fn a_cross_origin_page_cannot_drive_the_api_with_a_stolen_ride() {
 
 #[tokio::test]
 async fn logging_out_ends_this_client_and_rotating_ends_all_of_them() {
+    state::isolate();
     let n = node();
     set_token(&n, "trc1.secret").await;
     let login = |n: &Node| {
@@ -445,6 +453,7 @@ async fn logging_out_ends_this_client_and_rotating_ends_all_of_them() {
 /// Revoking closes the door entirely rather than leaving it ajar.
 #[tokio::test]
 async fn revoking_returns_the_node_to_loopback_only() {
+    state::isolate();
     let n = node();
     set_token(&n, "trc1.secret").await;
     let (s, _, _) = call(
@@ -473,6 +482,7 @@ async fn revoking_returns_the_node_to_loopback_only() {
 
 #[tokio::test]
 async fn guessing_is_rate_limited() {
+    state::isolate();
     let n = node();
     set_token(&n, "trc1.secret").await;
     let mut refused = false;
@@ -499,6 +509,7 @@ async fn guessing_is_rate_limited() {
 /// from a notification has to open. The shell is public; the data is not.
 #[tokio::test]
 async fn the_shell_is_served_without_a_credential_but_the_api_is_not() {
+    state::isolate();
     let n = node();
     set_token(&n, "trc1.secret").await;
     let (s, _, _) = call(
@@ -522,6 +533,7 @@ async fn the_shell_is_served_without_a_credential_but_the_api_is_not() {
 /// is not on it, and neither are the operator's routes.
 #[tokio::test]
 async fn the_harness_router_carries_no_operator_api() {
+    state::isolate();
     let n = node();
     let state = AppState {
         manager: Manager::new(

@@ -16,6 +16,8 @@ use tracon::{
 
 #[path = "support/fake.rs"]
 mod fake;
+#[path = "support/state.rs"]
+mod state;
 use fake::FakeAdapter;
 
 async fn operator() -> (axum::Router, Arc<Store>) {
@@ -84,6 +86,7 @@ async fn call(
 
 #[tokio::test]
 async fn candidates_are_batched_decided_and_only_promoted_ones_become_context() {
+    state::isolate();
     let (app, store) = operator().await;
     for (body, state) in [
         ("flaky tests hide behind retries", "candidate"),
