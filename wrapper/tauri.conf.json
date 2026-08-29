@@ -28,7 +28,23 @@
     }
   },
   "bundle": {
-    "active": false,
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.png"]
+    "active": true,
+    "targets": [
+      "appimage",
+      "deb",
+      "dmg"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.png"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Tray client and supervisor for a tracon node",
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
   }
 }

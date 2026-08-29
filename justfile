@@ -58,13 +58,22 @@ setup: images
 boundary:
     cargo run --bin tracon -- check-boundary --deep
 
-# Static Linux binaries. musl because the glibc on a host we do not control is
-# not ours to depend on; zig supplies the cross linker without a toolchain per
-# target. Requires: brew install zig && cargo install cargo-zigbuild.
-cross target="x86_64-unknown-linux-musl": spa
-    rustup target add {{target}}
-    cargo zigbuild --release --target {{target}}
-    @file target/{{target}}/release/tracon
+# Static Linux binaries, as the release ships them. musl because the glibc on
+# a host we do not control is not ours to depend on. Needs the musl C toolchain
+# (`musl-tools` on Debian, `musl-cross` from Homebrew).
+musl: spa
+    rustup target add x86_64-unknown-linux-musl
+    cargo build --release --target x86_64-unknown-linux-musl --bin tracon --bin tracon-hub
+    @file target/x86_64-unknown-linux-musl/release/tracon
+
+# The desktop bundle (AppImage and .deb here, .dmg on a Mac) with the node
+# carried inside it as a sidecar, built in the same container as `wrapper`
+# (plus `nodejs npm librsvg2-devel fuse` there). Builds the node first.
+gui: spa
+    cargo build --release --bin tracon
+    mkdir -p wrapper/binaries
+    cp target/release/tracon wrapper/binaries/tracon-$(rustc -vV | sed -n 's/^host: //p')
+    distrobox enter tracon-build -- bash -c 'cd {{justfile_directory()}}/wrapper && APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=true npx --yes @tauri-apps/cli@2 build --bundles appimage,deb --config "{\"bundle\":{\"externalBin\":[\"binaries/tracon\"]}}"'
 
 # The desktop wrapper: its own workspace, and it needs webkit and gtk headers.
 # On an immutable host, build it in a container that has them:

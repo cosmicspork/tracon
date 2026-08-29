@@ -3,8 +3,8 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | sh
 #
-# Linux only (static musl builds for x86_64 and aarch64). macOS builds natively:
-#   cargo install --git https://github.com/cosmicspork/tracon tracon
+# Linux x86_64 (static) and macOS on Apple Silicon. Anything else builds from
+# source; see the README.
 #
 # Environment:
 #   TRACON_VERSION   a tag like v0.2.0 (default: latest release)
@@ -14,18 +14,12 @@ set -eu
 repo="cosmicspork/tracon"
 bin_dir="${TRACON_BIN_DIR:-$HOME/.local/bin}"
 
-os="$(uname -s)"
-if [ "$os" != "Linux" ]; then
-  echo "tracon: prebuilt binaries are Linux only; on $os build natively:" >&2
-  echo "  cargo install --git https://github.com/$repo tracon" >&2
-  exit 1
-fi
-
-case "$(uname -m)" in
-  x86_64 | amd64) target="x86_64-unknown-linux-musl" ;;
-  aarch64 | arm64) target="aarch64-unknown-linux-musl" ;;
+case "$(uname -s)/$(uname -m)" in
+  Linux/x86_64 | Linux/amd64) target="x86_64-unknown-linux-musl" ;;
+  Darwin/arm64 | Darwin/aarch64) target="aarch64-apple-darwin" ;;
   *)
-    echo "tracon: no prebuilt binary for $(uname -m)" >&2
+    echo "tracon: no prebuilt binary for $(uname -s) $(uname -m); build from source:" >&2
+    echo "  git clone https://github.com/$repo && cd tracon && just build" >&2
     exit 1
     ;;
 esac
@@ -49,7 +43,11 @@ if [ -z "$expected" ]; then
   echo "tracon: no checksum for tracon-$target in the release" >&2
   exit 1
 fi
-actual="$(sha256sum "$tmp/tracon" | cut -d' ' -f1)"
+if command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "$tmp/tracon" | cut -d' ' -f1)"
+else
+  actual="$(shasum -a 256 "$tmp/tracon" | cut -d' ' -f1)"
+fi
 if [ "$expected" != "$actual" ]; then
   echo "tracon: checksum mismatch (expected $expected, got $actual)" >&2
   exit 1
@@ -65,6 +63,10 @@ case ":$PATH:" in
 esac
 
 cat <<EOF
+
+the desktop app (tray, notifications, and it runs the node for you) is a
+separate download from the same release: the .AppImage or .deb on Linux, the
+.dmg on macOS. It carries its own copy of this binary.
 
 next, on this machine:
   tracon enroll <invitation url>        join the mesh (run \`tracon mesh invite\` on an enrolled node)

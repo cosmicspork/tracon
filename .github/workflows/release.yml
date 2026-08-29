@@ -3,6 +3,13 @@ name: release
 on:
   push:
     branches: [main]
+  # Re-run the artefact jobs for a release that already exists, when an
+  # upload failed part way. Nothing here re-tags.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "An existing release tag, e.g. v0.6.0"
+        required: true
 
 permissions:
   contents: write
@@ -10,23 +17,38 @@ permissions:
 
 jobs:
   # Opens/updates a release PR from the conventional-commit history; merging it
-  # tags the release and sets release_created=true.
+  # tags the release and sets release_created=true. On a manual re-run the
+  # named tag is treated as the release to attach artefacts to.
   release-please:
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.rp.outputs.release_created }}
-      version: ${{ steps.rp.outputs.version }}
-      tag: ${{ steps.rp.outputs.tag_name }}
+      release_created: ${{ steps.out.outputs.release_created }}
+      version: ${{ steps.out.outputs.version }}
+      tag: ${{ steps.out.outputs.tag }}
     steps:
       - uses: googleapis/release-please-action@v4
+        if: github.event_name == 'push'
         id: rp
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      - id: out
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+            echo "release_created=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_created=${{ steps.rp.outputs.release_created }}" >> "$GITHUB_OUTPUT"
+            echo "tag=${{ steps.rp.outputs.tag_name }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ steps.rp.outputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
 
-      # release-please bumps the workspace version but cannot touch Cargo.lock,
-      # so the release PR would fail CI on the stale lockfile. Refresh it here;
-      # pushes with GITHUB_TOKEN do not retrigger workflows, so this cannot loop.
+      # release-please bumps the versions but cannot touch a Cargo.lock, so
+      # the release PR would fail CI on the stale lockfiles. Refresh both
+      # workspaces here; pushes with GITHUB_TOKEN do not retrigger workflows,
+      # so this cannot loop.
       - name: Check out the release PR branch
         if: steps.rp.outputs.prs_created == 'true'
         uses: actions/checkout@v4
@@ -35,23 +57,25 @@ jobs:
       - name: Install Rust
         if: steps.rp.outputs.prs_created == 'true'
         run: rustup toolchain install stable --profile minimal
-      - name: Refresh Cargo.lock
-        if: steps.rp.outputs.prs_created == 'true'
-        run: cargo update --workspace
-      - name: Commit and push the refreshed lockfile
+      - name: Refresh the lockfiles
         if: steps.rp.outputs.prs_created == 'true'
         run: |
-          if [ -n "$(git status --porcelain Cargo.lock)" ]; then
+          cargo update --workspace
+          cargo update --workspace --manifest-path wrapper/Cargo.toml
+      - name: Commit and push the refreshed lockfiles
+        if: steps.rp.outputs.prs_created == 'true'
+        run: |
+          if [ -n "$(git status --porcelain Cargo.lock wrapper/Cargo.lock)" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add Cargo.lock
-            git commit -m "chore: refresh Cargo.lock for release"
+            git add Cargo.lock wrapper/Cargo.lock
+            git commit -m "chore: refresh lockfiles for release"
             git push origin HEAD:${{ fromJson(steps.rp.outputs.pr).headBranchName }}
           fi
 
-  # The images: the hub (homelab watches GHCR for the new tag), the node for
-  # pod-hosted nodes, and the harness that those nodes' pods pull. Laptops
-  # build the harness locally from the embedded Containerfile instead.
+  # The images: the hub, the node for pod-hosted nodes, and the harnesses that
+  # those nodes' pods pull. Laptops build the harness locally from the embedded
+  # Containerfile instead.
   image:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
@@ -72,6 +96,8 @@ jobs:
             file: containers/harness-claude/Containerfile
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -90,19 +116,93 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
-  # Static node binaries with the SPA embedded, attached to the release. This
-  # is what install.sh fetches.
+  # The binaries with the SPA embedded, attached to the release. This is what
+  # install.sh fetches: a static Linux x86_64 node and hub, and a native
+  # Apple Silicon node.
   binaries:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            bins: --bin tracon --bin tracon-hub
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            bins: --bin tracon
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+      - uses: oven-sh/setup-bun@v2
+      - name: Build the SPA
+        working-directory: spa
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.bins }}
+      - name: Assert Linux binaries are static
+        if: runner.os == 'Linux'
+        run: |
+          for b in tracon tracon-hub; do
+            file target/${{ matrix.target }}/release/$b | grep -q "statically linked"
+          done
+      - name: Assert the macOS binary links only system libraries
+        if: runner.os == 'macOS'
+        run: |
+          otool -L target/${{ matrix.target }}/release/tracon
+          ! otool -L target/${{ matrix.target }}/release/tracon | grep -vE '^(target/|[[:space:]]+/usr/lib/|[[:space:]]+/System/)'
+      - name: Name and checksum
+        run: |
+          for b in $(echo "${{ matrix.bins }}" | sed 's/--bin //g'); do
+            cp target/${{ matrix.target }}/release/$b $b-${{ matrix.target }}
+            shasum -a 256 $b-${{ matrix.target }} > $b-${{ matrix.target }}.sha256
+          done
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.release-please.outputs.tag }}" *-${{ matrix.target }} *-${{ matrix.target }}.sha256 --clobber
+
+  # The desktop app, with the node carried inside it as a sidecar so a single
+  # download is a working install. Unsigned: macOS needs a right-click Open the
+  # first time.
+  gui:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bundles: dmg
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf
       - uses: oven-sh/setup-bun@v2
       - name: Build the SPA
         working-directory: spa
@@ -110,27 +210,30 @@ jobs:
           bun install --frozen-lockfile
           bun run build
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: mlugg/setup-zig@v2
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
-      - run: cargo install cargo-zigbuild --locked
-      - name: Build
+          workspaces: |
+            .
+            wrapper
+      # The sidecar is the same node the standalone binary is; Tauri names it
+      # by the wrapper's own target triple.
+      - name: Build the node for the sidecar
         run: |
-          cargo zigbuild --release --bin tracon --target ${{ matrix.target }}
-          file target/${{ matrix.target }}/release/tracon | grep -q "statically linked"
-          cp target/${{ matrix.target }}/release/tracon tracon-${{ matrix.target }}
-          sha256sum tracon-${{ matrix.target }} > tracon-${{ matrix.target }}.sha256
+          cargo build --release --bin tracon
+          mkdir -p wrapper/binaries
+          cp target/release/tracon wrapper/binaries/tracon-${{ matrix.target }}
+      - name: Bundle
+        working-directory: wrapper
+        run: bunx @tauri-apps/cli@2 build --bundles ${{ matrix.bundles }} --config '{"bundle":{"externalBin":["binaries/tracon"]}}'
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          ls -R wrapper/target/release/bundle
           gh release upload "${{ needs.release-please.outputs.tag }}" \
-            tracon-${{ matrix.target }} tracon-${{ matrix.target }}.sha256 --clobber
+            $(find wrapper/target/release/bundle -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.dmg' \)) --clobber
 
-  # One checksums.txt for install.sh, after both binaries are attached.
+  # One checksums.txt for install.sh, after every binary is attached.
   checksums:
     needs: [release-please, binaries]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
@@ -144,6 +247,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           tag="${{ needs.release-please.outputs.tag }}"
-          gh release download "$tag" --pattern 'tracon-*.sha256'
-          cat tracon-*.sha256 > checksums.txt
+          gh release download "$tag" --pattern '*.sha256'
+          cat *.sha256 > checksums.txt
           gh release upload "$tag" checksums.txt --clobber

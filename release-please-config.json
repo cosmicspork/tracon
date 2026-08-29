@@ -12,6 +12,16 @@
           "type": "toml",
           "path": "Cargo.toml",
           "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "wrapper/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "json",
+          "path": "wrapper/tauri.conf.json",
+          "jsonpath": "$.version"
         }
       ]
     }
