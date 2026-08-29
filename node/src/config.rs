@@ -22,6 +22,57 @@ pub struct Config {
     pub supervision: Supervision,
     pub review: ReviewLimits,
     pub notify: Notify,
+    pub embed: Embed,
+}
+
+/// The embedding endpoint this node uses to build its own vector index.
+///
+/// It is an OpenAI-shaped `/v1/embeddings` service named here rather than a
+/// model linked into the binary, because that is what lets a work channel be
+/// embedded by something on this machine while a personal one may go to a
+/// provider: `ARCHITECTURE.md` requires work-channel embeddings to stay local,
+/// and inversion means a vector is about as sensitive as the text it came
+/// from. Point `base_url` at a local `llama-server --embedding` and nothing
+/// leaves the host.
+///
+/// Off by default. Retrieval is FTS5-only until a node is told otherwise, and
+/// that remains a complete, working configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Embed {
+    pub enabled: bool,
+    /// Base URL of an OpenAI-shaped embeddings service; `/v1/embeddings` is
+    /// appended. Ignored when `provider` is set.
+    pub base_url: String,
+    /// The embedding model's name, recorded on every vector so a change to it
+    /// is detectable rather than a silent mixing of incomparable vectors.
+    pub model: String,
+    /// Its dimension. A change rebuilds the index from empty.
+    pub dim: usize,
+    /// A `[providers]` name instead of `base_url`, when the endpoint needs a
+    /// brokered credential. The call then goes through the model gateway, so
+    /// the channel's provider binding and its daily ceiling still apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// How many chunks to embed in one request.
+    pub batch: usize,
+    pub timeout_secs: u64,
+}
+
+impl Default for Embed {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            // llama.cpp's server default. Nothing is contacted unless
+            // `enabled` is set.
+            base_url: "http://127.0.0.1:8080".into(),
+            model: "bge-m3".into(),
+            dim: 1024,
+            provider: None,
+            batch: 16,
+            timeout_secs: 60,
+        }
+    }
 }
 
 /// Where this node sends a push when something starts waiting on the operator,
@@ -390,6 +441,7 @@ impl Default for Config {
             supervision: Supervision::default(),
             review: ReviewLimits::default(),
             notify: Notify::default(),
+            embed: Embed::default(),
             harness: Harness {
                 id: "omp".into(),
                 version: "18.0.4".into(),

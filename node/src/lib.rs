@@ -7,6 +7,7 @@ pub mod boundary;
 pub mod broker;
 pub mod config;
 pub mod corpus;
+pub mod embed;
 pub mod gateway;
 pub mod http;
 pub mod mcp;

@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod corpus;
+pub mod vectors;
 pub use corpus::*;
 pub use records::*;
 
@@ -45,11 +46,35 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Register `sqlite-vec` with SQLite itself, once per process, before any
+/// connection is opened. It is compiled in rather than loaded at run time, so
+/// there is no `.so` to ship beside the binary and nothing to go missing on a
+/// host — which is what keeps the single static binary a single static binary.
+///
+/// The signature is spelled with `c_char` rather than `i8` deliberately: it is
+/// signed on x86_64 and unsigned on aarch64, and both are release targets.
+fn register_vec() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut std::os::raw::c_char,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> i32,
+        >(
+            sqlite_vec::sqlite3_vec_init as *const ()
+        )));
+    });
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
+        register_vec();
         let conn = Connection::open(path)?;
         schema::migrate(&conn)?;
         Ok(Self {
@@ -58,6 +83,7 @@ impl Store {
     }
 
     pub fn open_in_memory() -> Result<Self> {
+        register_vec();
         let conn = Connection::open_in_memory()?;
         schema::migrate(&conn)?;
         Ok(Self {

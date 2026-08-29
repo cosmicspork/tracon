@@ -513,6 +513,53 @@ impl Store {
         Ok(dedupe_slugs(rows))
     }
 
+    /// Every live document and memory body on this node, as
+    /// `(table, id, channel, body)`, for the embedder to reconcile its index
+    /// against. Tombstones are excluded: a deleted record must leave no vector
+    /// behind, and `index_record` forgets one whose body has gone.
+    pub fn rows_to_embed(&self) -> Result<Vec<(String, String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut out = Vec::new();
+        let mut stmt =
+            conn.prepare("SELECT id, channel, title, body FROM document WHERE deleted = 0")?;
+        let rows = stmt.query_map([], |r| {
+            let title: String = r.get(2)?;
+            let body: String = r.get(3)?;
+            // The title is part of what a document is about, so it is embedded
+            // with it rather than being searchable only through FTS.
+            let text = if title.is_empty() {
+                body
+            } else {
+                format!("{title}\n\n{body}")
+            };
+            Ok((
+                "document".to_string(),
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                text,
+            ))
+        })?;
+        for row in rows {
+            out.push(row?);
+        }
+        let mut stmt = conn.prepare(
+            "SELECT id, channel, body FROM memory
+             WHERE deleted = 0 AND state IN ('active', 'promoted')",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                "memory".to_string(),
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Documents matching free text, with a snippet, best first.
     pub fn doc_search(
         &self,

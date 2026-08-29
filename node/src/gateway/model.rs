@@ -84,11 +84,20 @@ fn refuse(status: StatusCode, reason: &str) -> Response {
         .into_response()
 }
 
-/// Who is calling: a session (with its channel) or the node's own model
-/// probe, which may only read.
+/// Who is calling: a session (with its channel) or the node itself, probing
+/// the model catalogue or embedding its own corpus.
 enum Caller {
     Session { id: String, channel: String },
     Probe,
+}
+
+/// Whether a proxied path is an embeddings call. Matched on the whole final
+/// segment rather than a prefix, so `/v1/embeddings-and-more` is not one.
+fn is_embeddings(rest: &str) -> bool {
+    rest.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .is_some_and(|last| last == "embeddings")
 }
 
 /// `ANY /model/{provider}/{*rest}`.
@@ -119,8 +128,16 @@ pub async fn handle(
     } else {
         return refuse(StatusCode::UNAUTHORIZED, "unauthorized");
     };
-    if matches!(caller, Caller::Probe) && method != Method::GET {
-        return refuse(StatusCode::FORBIDDEN, "the model probe may only read");
+    // The node's own token reads the model catalogue and writes exactly one
+    // thing: an embedding. Widening it to POST at all is narrow on purpose —
+    // an embeddings path and nothing else — because this token is not scoped
+    // to a channel, so anything it can reach is outside the per-channel
+    // provider bindings that every session call is held to.
+    if matches!(caller, Caller::Probe) && method != Method::GET && !is_embeddings(&rest) {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "the node's own token may only read, or embed",
+        );
     }
 
     let Some(p) = s.cfg.providers.get(&provider).cloned() else {
