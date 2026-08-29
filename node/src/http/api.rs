@@ -1310,8 +1310,12 @@ pub async fn probe_models_into_store(
         s.manager.probe_token(),
     );
     let runner = backend.runner(
-        crate::session::materialize::probe_mounts(&backend.harness_home(), &wiring)
-            .unwrap_or_default(),
+        crate::session::materialize::probe_mounts(
+            &backend.harness_home(),
+            s.adapter.as_ref(),
+            &wiring,
+        )
+        .unwrap_or_default(),
     );
     let models = s
         .adapter

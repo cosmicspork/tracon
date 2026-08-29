@@ -79,11 +79,15 @@ pub struct KubeSpec {
     pub env: PodEnv,
     pub extra_mounts: Vec<Mount>,
     pub workdir: String,
+    /// See `RunSpec::state_env`: the harness names its own state directory.
+    pub state_env: &'static str,
+    pub state_dir: &'static str,
 }
 
 impl KubeSpec {
     pub fn from_config(cfg: &Config, env: PodEnv) -> Self {
         let k = &cfg.runtime.kubernetes;
+        let layout = crate::adapter::layout(&cfg.harness.id);
         Self {
             image: k.harness_image.clone(),
             state_claim: k.state_claim.clone(),
@@ -95,6 +99,8 @@ impl KubeSpec {
             env,
             extra_mounts: Vec::new(),
             workdir: "/work".into(),
+            state_env: layout.env,
+            state_dir: layout.dir,
         }
     }
 
@@ -135,13 +141,13 @@ impl KubeSpec {
     /// scheduled: the boundary checks read the result and delete it.
     pub fn pod(&self, name: &str, cmd: &RunnerCommand, gated: bool) -> Result<Pod, RunnerError> {
         let proxy = format!("http://{}:{}", self.gateway_host, self.proxy_port);
-        let state = crate::session::materialize::state_target(&self.home);
+        let state = format!("{}/{}", self.home, self.state_dir);
         let mut env = vec![
             ("HOME", self.home.clone()),
             ("HTTPS_PROXY", proxy.clone()),
             ("HTTP_PROXY", proxy),
             ("NO_PROXY", self.gateway_host.clone()),
-            ("OMP_STATE_DIR", state),
+            (self.state_env, state),
         ]
         .into_iter()
         .map(|(k, v)| EnvVar {

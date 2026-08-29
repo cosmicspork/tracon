@@ -52,7 +52,11 @@ pub async fn check_all(b: &KubeBackend, cfg: &Config, deep: bool) -> BoundaryRep
     }
     let runner = match b
         .runner_for(
-            crate::session::materialize::state_mounts(&b.harness_home_str()).unwrap_or_default(),
+            crate::session::materialize::state_mounts(
+                &b.harness_home_str(),
+                crate::adapter::layout(&b.cfg.harness.id),
+            )
+            .unwrap_or_default(),
         )
         .await
     {

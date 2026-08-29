@@ -188,7 +188,7 @@ impl Providers {
         }
         Ok(self.backend.runner(vec![Mount {
             source: dir.to_string_lossy().into_owned(),
-            target: state_target(&self.backend.harness_home()),
+            target: state_target(&self.backend.harness_home(), self.adapter.layout()),
             read_only: false,
         }]))
     }

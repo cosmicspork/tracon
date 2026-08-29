@@ -21,6 +21,8 @@ pub struct OmpAdapter {
 }
 
 impl OmpAdapter {
+    pub const ID: &'static str = "omp";
+
     pub fn new(pinned: impl Into<String>) -> Self {
         Self {
             pinned: pinned.into(),
@@ -66,11 +68,25 @@ fn parse_version(s: &str) -> String {
 #[async_trait]
 impl HarnessAdapter for OmpAdapter {
     fn id(&self) -> &'static str {
-        "omp"
+        Self::ID
     }
 
     fn pinned_version(&self) -> &str {
         &self.pinned
+    }
+
+    /// omp reads two files from its state directory: the provider override
+    /// that points it at the gateway, and a config that turns its own memory
+    /// backend off — memory is the node's, and a harness backend would write
+    /// into state the node does not model.
+    fn scratch_files(&self, wiring: &crate::gateway::model::Wiring) -> Vec<(String, String)> {
+        vec![
+            ("agent/models.json".into(), wiring.models_json.clone()),
+            (
+                "agent/config.yml".into(),
+                "memory:\n  backend: off\n".into(),
+            ),
+        ]
     }
 
     async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError> {

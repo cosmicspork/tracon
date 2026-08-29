@@ -3,7 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{config::Config, gateway::model::Wiring, runner::Mount};
+use crate::{
+    adapter::{HarnessAdapter, Layout},
+    config::Config,
+    gateway::model::Wiring,
+    runner::Mount,
+};
 
 pub struct Scratch {
     pub dir: PathBuf,
@@ -13,25 +18,27 @@ pub struct Scratch {
 }
 
 /// Where the harness keeps its state inside the runner. The node-owned volume
-/// is mounted here; `OMP_STATE_DIR` is set to the same path so a harness that
-/// honours it agrees with the mount.
+/// is mounted here; the harness's own state-dir variable is set to the same
+/// path so a harness that honours it agrees with the mount.
 pub const PODMAN_HARNESS_HOME: &str = "/root";
 
-/// Where the harness's state directory is mounted, under its home.
-pub fn state_target(home: &str) -> String {
-    format!("{home}/.omp")
+/// Where the harness's state directory is mounted, under its home. The name
+/// is the harness's, not ours: omp looks for `.omp`, and a second adapter
+/// looks for its own.
+pub fn state_target(home: &str, layout: Layout) -> String {
+    format!("{home}/{}", layout.dir)
 }
 
 /// The node-owned harness state directory, and nothing else: the harness's
 /// own caches, sessions, and model catalogue. It holds no credential — the
 /// model gateway injects those — and the node never reaches into the
 /// operator's own `~/.omp`.
-pub fn state_mounts(home: &str) -> std::io::Result<Vec<Mount>> {
+pub fn state_mounts(home: &str, layout: Layout) -> std::io::Result<Vec<Mount>> {
     let state = Config::harness_state_dir();
     std::fs::create_dir_all(state.join("agent"))?;
     Ok(vec![Mount {
         source: state.to_string_lossy().into_owned(),
-        target: state_target(home),
+        target: state_target(home, layout),
         read_only: false,
     }])
 }
@@ -54,26 +61,46 @@ pub fn retire_harness_credentials() -> Option<PathBuf> {
     Some(retired)
 }
 
-/// The provider override the harness reads, written once per wiring so a
-/// probe or a session finds the gateway where it expects a provider.
-fn models_json_mount(dir: &Path, home: &str, wiring: &Wiring) -> std::io::Result<Mount> {
-    std::fs::create_dir_all(dir)?;
-    let path = dir.join("models.json");
-    std::fs::write(&path, &wiring.models_json)?;
-    Ok(Mount {
-        source: path.to_string_lossy().into_owned(),
-        target: format!("{}/agent/models.json", state_target(home)),
-        read_only: true,
-    })
+/// The harness's own configuration — whatever it needs to find in its state
+/// directory, which for omp is the provider override that points it at the
+/// gateway and a config turning its memory backend off. Written under `dir`
+/// mirroring the layout inside the runner, and mounted read-only: the harness
+/// reads its configuration, it does not get to rewrite it.
+fn config_mounts(
+    dir: &Path,
+    home: &str,
+    adapter: &dyn HarnessAdapter,
+    wiring: &Wiring,
+) -> std::io::Result<Vec<Mount>> {
+    let root = state_target(home, adapter.layout());
+    let mut mounts = Vec::new();
+    for (rel, contents) in adapter.scratch_files(wiring) {
+        let host = dir.join(&rel);
+        if let Some(parent) = host.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&host, contents)?;
+        mounts.push(Mount {
+            source: host.to_string_lossy().into_owned(),
+            target: format!("{root}/{rel}"),
+            read_only: true,
+        });
+    }
+    Ok(mounts)
 }
 
 /// Mounts for the node's own model probe: the state volume plus the gateway
 /// wiring, nothing of any session.
-pub fn probe_mounts(home: &str, wiring: &Wiring) -> std::io::Result<Vec<Mount>> {
-    let mut mounts = state_mounts(home)?;
-    mounts.push(models_json_mount(
+pub fn probe_mounts(
+    home: &str,
+    adapter: &dyn HarnessAdapter,
+    wiring: &Wiring,
+) -> std::io::Result<Vec<Mount>> {
+    let mut mounts = state_mounts(home, adapter.layout())?;
+    mounts.extend(config_mounts(
         &Config::state_dir().join("probe"),
         home,
+        adapter,
         wiring,
     )?);
     Ok(mounts)
@@ -90,20 +117,17 @@ pub fn scratch_for(
     worktree: &Path,
     repo: &Path,
     home: &str,
+    adapter: &dyn HarnessAdapter,
     wiring: &Wiring,
     orientation: &str,
 ) -> std::io::Result<Scratch> {
     let dir = Config::state_dir().join("sessions").join(session_id);
-    std::fs::create_dir_all(dir.join("omp"))?;
+    std::fs::create_dir_all(&dir)?;
 
     // The orientation is a system-prompt file, mounted read-only under the
     // harness's state directory — never into the worktree.
     std::fs::write(dir.join("orientation.md"), orientation)?;
-    let orientation_path = format!("{}/orientation.md", state_target(home));
-
-    // Memory is a Phase 4 concern and the node owns it; the harness's own
-    // memory backend would write into state we do not model.
-    std::fs::write(dir.join("omp/config.yml"), "memory:\n  backend: off\n")?;
+    let orientation_path = format!("{}/orientation.md", state_target(home, adapter.layout()));
 
     // `safe.directory` because the worktree is owned by the host user but git
     // runs as root inside the runner.
@@ -113,19 +137,14 @@ pub fn scratch_for(
          [safe]\n\tdirectory = /work\n[advice]\n\tdetachedHead = false\n",
     )?;
 
-    let mut mounts = state_mounts(home)?;
-    mounts.push(models_json_mount(&dir.join("omp"), home, wiring)?);
+    let mut mounts = state_mounts(home, adapter.layout())?;
+    mounts.extend(config_mounts(&dir.join("harness"), home, adapter, wiring)?);
     mounts.push(Mount {
         source: dir.join("orientation.md").to_string_lossy().into_owned(),
         target: orientation_path.clone(),
         read_only: true,
     });
     mounts.extend([
-        Mount {
-            source: dir.join("omp/config.yml").to_string_lossy().into_owned(),
-            target: format!("{}/agent/config.yml", state_target(home)),
-            read_only: true,
-        },
         Mount {
             source: dir.join("gitconfig").to_string_lossy().into_owned(),
             target: format!("{home}/.gitconfig"),
@@ -200,6 +219,7 @@ mod tests {
             Path::new("/tmp/wt"),
             Path::new("/tmp/repo"),
             PODMAN_HARNESS_HOME,
+            &crate::adapter::omp::OmpAdapter::new("18.0.4"),
             &Wiring::default(),
             "# Orientation",
         )
@@ -223,9 +243,11 @@ mod tests {
             .all(|m| !m.source.starts_with(&home.to_string_lossy().into_owned())));
         // And nothing mounts an AGENTS.md into the session.
         assert!(!targets.iter().any(|t| t.contains("AGENTS.md")));
-        assert!(std::fs::read_to_string(s.dir.join("omp/config.yml"))
-            .unwrap()
-            .contains("backend: off"));
+        assert!(
+            std::fs::read_to_string(s.dir.join("harness/agent/config.yml"))
+                .unwrap()
+                .contains("backend: off")
+        );
         remove("test-materialize");
     }
 
@@ -242,6 +264,7 @@ mod tests {
             Path::new("/tmp/wt"),
             &repo,
             PODMAN_HARNESS_HOME,
+            &crate::adapter::omp::OmpAdapter::new("18.0.4"),
             &Wiring::default(),
             "",
         )

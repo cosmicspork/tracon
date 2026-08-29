@@ -23,10 +23,16 @@ pub struct RunSpec {
     pub workdir: String,
     /// The harness runs as root in its container; its state is under `/root`.
     pub home: String,
+    /// What this harness calls its state directory. The mount target and the
+    /// harness's own idea of where its state lives have to agree, and the name
+    /// of the variable that says so is the harness's, not ours.
+    pub state_env: &'static str,
+    pub state_dir: &'static str,
 }
 
 impl RunSpec {
     pub fn from_config(cfg: &Config, selinux: bool) -> Self {
+        let layout = crate::adapter::layout(&cfg.harness.id);
         Self {
             image: cfg.boundary.harness_image.clone(),
             network: cfg.boundary.network.clone(),
@@ -37,6 +43,8 @@ impl RunSpec {
             extra_mounts: Vec::new(),
             workdir: "/work".into(),
             home: crate::session::materialize::PODMAN_HARNESS_HOME.into(),
+            state_env: layout.env,
+            state_dir: layout.dir,
         }
     }
 
@@ -69,12 +77,12 @@ impl RunSpec {
         }
         // The state dir is explicit even though the image sets it: the mount
         // target and the harness's idea of its state directory must agree.
-        let state = crate::session::materialize::state_target(&self.home);
+        let state = format!("{}/{}", self.home, self.state_dir);
         for (k, v) in [
             ("HTTPS_PROXY", proxy.as_str()),
             ("HTTP_PROXY", proxy.as_str()),
             ("NO_PROXY", self.gateway_host.as_str()),
-            ("OMP_STATE_DIR", state.as_str()),
+            (self.state_env, state.as_str()),
         ] {
             a.push("-e".into());
             a.push(format!("{k}={v}"));
