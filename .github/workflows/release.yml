@@ -158,7 +158,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           for b in tracon tracon-hub; do
-            file target/${{ matrix.target }}/release/$b | grep -q "statically linked"
+            file target/${{ matrix.target }}/release/$b | grep -qE "statically linked|static-pie linked"
           done
       - name: Assert the macOS binary links only system libraries
         if: runner.os == 'macOS'
