@@ -6,6 +6,7 @@ default: check
 node-image tag="dev":
     podman build -f Dockerfile.node -t ghcr.io/cosmicspork/tracon-node:{{tag}} .
     podman build -f containers/harness/Containerfile -t ghcr.io/cosmicspork/tracon-harness:{{tag}} containers/harness
+    podman build -f containers/harness-claude/Containerfile -t ghcr.io/cosmicspork/tracon-harness-claude:{{tag}} containers/harness-claude
 
 # Build the SPA into spa/dist (embedded by the node at compile time).
 spa:
@@ -46,6 +47,7 @@ hub-image:
 images:
     podman build -t localhost/tracon-gateway containers/gateway
     podman build -t localhost/tracon-harness containers/harness
+    podman build -t localhost/tracon-harness-claude containers/harness-claude
 
 # Create the harness network and gateway the node owns.
 setup: images
