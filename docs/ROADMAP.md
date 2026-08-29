@@ -308,12 +308,16 @@ database, except through the node, and `review` and `consulta` can be archived.
 - [x] **Retrieval starts FTS5-only.** Directives ranked above facts (by confidence and a
       90-day half-life), then promoted lessons, then documents with snippets; episodes
       only when asked. `sqlite-vec` and a reranker wait for FTS to demonstrably miss.
-- [ ] Embedding model name and dimension stored per vector row, when vectors arrive
+- [x] Embedding model name and dimension stored per vector row. Built in Phase 7: on
+      every row, not per database, so a stale vector is detectable and a model change is
+      a rebuild rather than a silent mixing of incomparable vectors.
 - [x] Processing node and provider bindings, enforced fail-closed, recorded as data. A
       channel's `bindings_json` carries `providers` (the gateway refuses anything off the
       list) and `processing` (`hub` or a node id: who batches it). Both are handed off
       with the keyring.
-- [ ] Local embeddings on the work node, when vectors arrive
+- [x] Local embeddings on the work node. Built in Phase 7, as configuration rather than
+      as a linked-in model: `[embed] base_url` points at an OpenAI-shaped endpoint, so a
+      work channel is served by something on the same machine and nothing leaves it.
 - [x] Generated per-session orientation file: guides on the channel, this node's facts,
       the bundle's deny rules with reasons, then directives and confident facts —
       capped, mounted read-only, passed as `--append-system-prompt`, recorded as an
@@ -335,8 +339,8 @@ The work-side README is imported from a host that can reach it. There was no
 `workspace-notes-sync` on this host to run in parallel; the notebook stays runnable
 against `tracon doc export` until the operator has lived in the Documents screen.
 
-Phase 4 implementation completed 2026-08-28 except the vector items, which wait on
-FTS missing something. Not done, recorded so it is not assumed: a live subscription
+Phase 4 implementation completed 2026-08-28 except the vector items, which waited on
+FTS missing something and were built in Phase 7. Not done, recorded so it is not assumed: a live subscription
 token through the gateway (the operator's Anthropic refresh token had expired; the
 header shape is from the public clients and marked unverified); the snapshot run
 against Spaces; the hub's replica on the homelab cluster, which arrives with the next
@@ -460,13 +464,67 @@ Exit criteria: a task can be directed from the phone with both laptops closed, a
 `switchboard` can be archived. The first half is built and waits on the release and
 the cluster deploy; the second is the operator's, after the mac migration.
 
+## Phase 7: A second harness, and retrieval by meaning
+
+Both items were on the Deferred list, waiting for a task that needed them.
+
+- [x] Claude Code adapter, over its `control_request` / `can_use_tool` protocol rather
+      than ACP. The frames are in neither the CLI's help nor the published docs — they
+      were read out of the shipped binary and confirmed against a live run, and are
+      recorded in `reference/phase-7-notes.md`. `--permission-mode default` and
+      `--strict-mcp-config` are load-bearing and have a test saying so: `dontAsk` or
+      `bypassPermissions` would let the harness answer its own tool calls and the
+      operator's queue would simply stay empty.
+- [x] The harness seam made real. `[harness] id` was declared and read nowhere, so it
+      selected nothing; the state directory, both runners' state variable, and the
+      harness's own config files were all spelled `omp` outside the trait. An unknown
+      harness id now refuses to start rather than silently running omp under a version
+      pin that does not describe it.
+- [x] `sqlite-vec` compiled into the binary, so the release is still one static file.
+      Two portability bugs stood in the way and would have broken the musl release
+      outright; both are recorded in the notes.
+- [x] Embeddings from an endpoint named in config, not a model linked into the node.
+      That is what makes "work-channel embeddings stay on the work machine" something
+      the configuration expresses rather than something the code hopes for.
+- [x] Documents chunked on their headings, each chunk carrying its span so a hit shows
+      the text it matched, and its hash so an edit re-embeds only what changed.
+- [x] Hybrid ranking. The vector contribution is bounded below one tier step: directives
+      above facts is a decision about whose instructions win, not a relevance heuristic
+      for a better signal to overrule.
+- [x] An honest signal when this node embeds but cannot reach its endpoint. A search
+      that quietly got worse is what nobody notices.
+
+The vector index is node-local and absent from `tracon_sync::TABLES`, which is the
+enforcement rather than the intention — `apply_changes` refuses a table it does not know.
+A vector is not a safe form of encrypted content: inversion recovers much of the source
+text from the vector alone, so replicating one would hand the hub a readable index of a
+channel it cannot open. Every node embeds its own replica instead, which also means a hub
+outage no longer costs semantic search — the degraded-mode contract in ARCHITECTURE and
+DESIGN was corrected to match.
+
+Not built, recorded so it is not assumed: no reranker; the Claude Code adapter has no
+`login` / `refresh` / `lift`, because the gateway injects the credential and there is no
+harness-side login to run; a node set to `[harness] id = "claude"` must also point
+`harness_image` at the second image, and getting that wrong surfaces as the version
+mismatch it is; and nothing has been run against a real embedding model yet — the live
+verification used a stub, so the model choice (BGE-M3 or Qwen3 Embedding 0.6B) is still
+the operator's.
+
+Exit criteria: a session can run under either harness with the same queue, policy and
+budget; and a question that shares no words with the document that answers it finds it.
+Both are covered by tests, the second being the standard Phase 4 set for building this
+at all.
+
 ## Deferred
 
 Not rejected, not scheduled.
 
-- **Second and third harness adapters** (opencode, Claude Code). The trait exists from
-  Phase 1; the adapters land when a task needs them.
-- **Vector retrieval.** FTS5 first; see Phase 4.
+- **A third harness adapter** (opencode). The trait exists from Phase 1; Claude Code's
+  adapter landed in Phase 7, and opencode's lands when a task needs it. Its ACP mode
+  starts an HTTP server and advertises over mDNS, so it needs the cautions above read
+  carefully rather than a copy of either existing adapter.
+- **A reranker over retrieval.** FTS and vectors together were enough for a corpus this
+  size; a reranker waits for the same kind of evidence vectors did.
 - **Terminal in the client.** Add only when something concrete cannot be done without
   it. `xterm.js` over the existing session channel, deliberately minimal.
 - **`cr-sqlite`.** Only if real multi-writer convergence becomes necessary. The sync
@@ -506,6 +564,6 @@ Recorded so they are not rediscovered as good ideas.
 | Hub compromise | Work channel opaque to it, policy signing key never on it, per-client keys |
 | Bootstrap lockout | Documented path to running a harness outside the system, maintained |
 | A node cannot establish its boundary | Every host must pass the startup check; the current Coder topology is deferred until Phase 3 rather than degraded |
-| Corpus lock-in | Boring schemas, plain-text export for every kind; vectors deferred |
+| Corpus lock-in | Boring schemas, plain-text export for every kind; vectors are derived, node-local, and rebuildable from the corpus |
 | Cost runaway | Per-session budget and per-channel daily ceiling, enforced not monitored |
 | Retiring Switchboard too early | It retires last, after supervision has moved |

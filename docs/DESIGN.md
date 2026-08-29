@@ -4,9 +4,10 @@ Interface design record for tracon. Companion to `ARCHITECTURE.md` (what the sys
 does) and `ROADMAP.md` (when). This file covers what the operator sees and how the
 interface decides things. Steps 1 through 4 of the design ladder are here.
 
-Phase 1 is built. The visual direction was settled on 2026-08-24 and the screens are the
-record rather than a separate wireframe file: `spa/src/app.css` holds the tokens and
-`spa/src/routes/` the five screens. **Ledger × Tonal**: Instrument Sans with Fragment
+Phase 1 is built, and Phases 2 through 6 on top of it. The visual direction was settled
+on 2026-08-24 and the screens are the record rather than a separate wireframe file:
+`spa/src/app.css` holds the tokens and `spa/src/routes/` the screens — five at Phase 1,
+thirteen now. **Ledger × Tonal**: Instrument Sans with Fragment
 Mono for every value, tonal surfaces with no outlines, state carried by a 3px bar and a
 wash on a fixed-column grid, text-link actions, dark first with light derived. What each
 decision below cost or changed in the building is recorded with it.
@@ -110,7 +111,7 @@ has a one-line answer to "what does the operator see."
 | State | What the operator sees |
 |---|---|
 | Reachable | Nothing. |
-| Unreachable | One persistent banner: "Hub unreachable. Local sessions continue; approvals will be delivered when it returns; search is text-only." Not dismissable, not modal. |
+| Unreachable | One persistent banner: "Hub unreachable. Local sessions continue; approvals will be delivered when it returns; search is local." Not dismissable, not modal. Search stays as good as this node's own replica — semantic search is local too, so a hub outage does not cost it. |
 | Restored | Banner flips to "Hub reconnected, N items delivered" briefly, then goes. |
 
 ### Session
@@ -242,8 +243,8 @@ Decisions taken in drawing this:
   teaches it nothing. One line, required.
 - **Stale and over-cap block approve.** Not a warning. The agent resubmits.
   *Built:* each file's git blob hash is recorded at submit; approving a branch that moved
-  is refused and the changed files are named. Over-cap is not built — no diff size cap
-  exists yet.
+  is refused and the changed files are named. The cap arrived in Phase 5 —
+  `[review] max_diff_lines` and `max_files`, refused before the checks run.
 - **Edit is browser-only and replaces the verdict.** An edited diff is a `/revise`
   submission, not an approval of something the operator changed.
 
@@ -289,22 +290,28 @@ hub returns
 
 Decisions taken:
 
-- **The phone is blind during a hub outage.** The phone reads over the hub and has no
-  replica; this is already decided. The interface says so on the phone rather than
-  showing an empty queue as if nothing is waiting.
-- **The agent is not told about degradation.** FTS-only recall is silent. The operator
-  sees it in the banner; the harness does not need to.
+- **The phone is blind during a hub outage.** *Reversed in Phase 6.* The phone reaches a
+  node directly over an HTTPS ingress with a session cookie, so a hub outage costs it
+  the other nodes' state and not its own. What was decided here — that the interface says
+  so rather than showing an empty queue as if nothing is waiting — still holds, and is
+  what the hub-unreachable banner does.
+- **The agent is not told about degradation.** Text-only recall is silent to the harness.
+  The operator sees it: the hub banner for a hub outage, and `· text only · no semantic
+  search` on the Documents screen when this node embeds but cannot reach its endpoint.
 
 ## What Phase 1 did not build
 
-Recorded so the gaps are visible rather than assumed closed.
+Recorded so the gaps were visible rather than assumed closed. All four have since been
+built; each line says where, so this stays a record of the order things arrived in
+rather than a list of things that are missing.
 
-- **Editable diffs.** "Request changes" carries notes; editing the diff itself is Phase 6.
-- **Diff size cap at submit.** Named in the roadmap for Phase 5; the stale check exists,
-  the cap does not.
-- **`waiting_on_check`.** Defined in the schema and in the states below, and unreachable
-  until deterministic supervision arrives in Phase 5.
-- **The tray.** Phase 6, with the desktop wrapper.
+- **Editable diffs.** "Request changes" carried notes only; editing the diff itself
+  arrived in Phase 6 (`spa/src/components/DiffEditor.svelte`).
+- **Diff size cap at submit.** Arrived in Phase 5 (`[review] max_diff_lines`,
+  `max_files`).
+- **`waiting_on_check`.** Defined in the schema and unreachable until deterministic
+  supervision arrived in Phase 5 (`node/src/review/checks.rs`).
+- **The tray.** Arrived in Phase 6 with the desktop wrapper (`wrapper/src/tray.rs`).
 
 ## What Phase 2 built
 

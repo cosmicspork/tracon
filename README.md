@@ -6,16 +6,24 @@ and existing coding agents, driven from a browser instead of a terminal.
 Named for TRACON, terminal radar approach control: the facility sequences traffic and
 issues clearances, and it never flies anything.
 
-**Status: Phase 1 complete.** A task can be driven from the browser against one macOS
-host with a Podman machine: the node establishes and verifies its boundary, spawns `omp`
-inside it, routes permission requests to a queue you answer, enforces a token budget, and
-streams the session to an embedded interface, on the desktop and at phone width. Credentials live in a broker the harness
-cannot read and are reached as tools rather than held as secrets; `consulta` is the first.
-Policy decides what is answered without asking and what is refused with a reason; the five
-working agreements ship as its starting bundle. What is not built yet is the mesh, the
-memory and document corpus, the work ledger, and the clients — Phases 2 through 6. Phase 0 validation is
-complete; the work Coder template cannot enforce the gate as configured, so Phase 3
-requires a new, unprivileged runner topology.
+**Status: Phases 1 through 6 built.** A task can be driven from a browser, or from a
+phone, against a node that establishes and verifies its own boundary, spawns a harness
+inside it, routes permission requests to a queue you answer, enforces a token budget,
+and streams the session to an embedded interface. Nodes replicate through a hub that
+cannot read a work channel. The corpus keeps memories and documents and is searched by
+text, and by meaning where a node is given an embedding endpoint. The ledger carries
+work from plan to review, and a review is approved, refused, or edited and sent back as
+a patch. Clients are the installable interface, notifications bound per channel, and a
+tray wrapper. Credentials live in a broker the harness cannot read and are reached as
+tools rather than held as secrets. Policy decides what is answered without asking and
+what is refused with a reason.
+
+Two harnesses have adapters: `omp` over ACP, and Claude Code over its stream-json
+control protocol. A node runs one, chosen with `[harness] id` and pinned by
+`[harness] version`; the pin is checked twice and an unknown id refuses to start. What is not built is listed honestly at the end of each phase in
+[docs/ROADMAP.md](docs/ROADMAP.md); the ones worth knowing here are that the desktop
+wrapper is neither bundled nor signed, hub-side rollups do not exist, and Switchboard
+has not been retired yet.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for phasing,
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design record,
@@ -123,14 +131,19 @@ just boundary   # verify the boundary, including an egress probe and the forward
 ./target/release/tracon serve
 ```
 
-On a host that only needs to run a node, skip the toolchain:
+On a host that only needs to run a node, skip the toolchain. The published binaries are
+**Linux only** (`x86_64` and `aarch64`, static musl); on macOS the installer stops and
+says so, and the node is built natively instead:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | sh
+# on macOS, or any other platform:
+cargo install --git https://github.com/cosmicspork/tracon tracon
+
 tracon setup                        # the container definitions ship inside the binary
 tracon credential import creds.toml # a model credential, or connect a provider from the Nodes screen
 tracon check-boundary --deep
-tracon serve
+tracon service install              # run it under systemd or launchd
 ```
 
 As a pod (the work topology), the node is an image rather than a binary, and the
@@ -220,6 +233,23 @@ rank first in recall and are injected into every session's orientation. What an 
 retains as a lesson waits for the nightly batch, which arrives on the queue for a
 per-item verdict. `tracon channel share --hub <channel>` lets the hub's replica index a
 channel and run its batch; a channel never shared stays ciphertext to it.
+
+Search is full-text by default, and by meaning as well on a node given an embedding
+endpoint:
+
+```toml
+[embed]
+enabled = true
+base_url = "http://127.0.0.1:8080"   # llama-server --embedding, or any /v1/embeddings
+model = "bge-m3"
+dim = 1024
+```
+
+The endpoint is named rather than linked in, which is what keeps a work channel's corpus
+on the work machine. The index is this node's own and never replicates: a vector is not a
+safe form of encrypted content, so the hub is never handed a readable index of a channel
+it cannot open. It is derived state — delete it and it rebuilds. Where a node embeds but
+cannot reach its endpoint, a search says `text only` rather than quietly returning less.
 
 Model credentials are brokered the same way. The harness holds only a placeholder key
 (its session token) and reaches every provider through the node's gateway
@@ -398,8 +428,8 @@ host-side recipe rather than something a session performs.
 3. [docs/DESIGN.md](docs/DESIGN.md) for the interface: principles, jobs, states, flows
 
 Phase 0 established the ACP message shapes, restricted-harness behavior, and one working
-boundary on Bazzite. The current work Coder template's single Envbuilder container is
-privileged and grants passwordless `sudo`; it cannot host a gated harness. Phase 3 must
-replace that topology before work-side enforcement is possible. Phase 1 is the gate on
-any one machine that passes the boundary check; browser-over-TUI is already settled from
-using opencode web and Claude Code web, so no phase re-proves it.
+boundary on Bazzite. The work Coder template's single Envbuilder container was privileged
+and granted passwordless `sudo`, so it could not host a gated harness; Phase 3 replaced
+that topology with one harness pod per session under a NetworkPolicy, which is what made
+work-side enforcement possible. Browser-over-TUI was settled before Phase 1 from using
+opencode web and Claude Code web, so no phase re-proves it.
