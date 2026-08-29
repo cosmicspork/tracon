@@ -66,6 +66,9 @@ enum Command {
     /// Who may reach this node's API from off this machine.
     #[command(subcommand)]
     Auth(AuthCommand),
+    /// The phones this node pushes to.
+    #[command(subcommand)]
+    Push(PushCommand),
     /// Run the node under the platform's supervisor, so it survives a logout,
     /// a crash, and a reboot.
     #[command(subcommand)]
@@ -130,6 +133,16 @@ enum ServiceCommand {
     Uninstall,
     /// What the supervisor says about it.
     Status,
+}
+
+#[derive(Subcommand)]
+enum PushCommand {
+    /// Every device subscribed at this node, and whether it still answers.
+    Ls,
+    /// Forget a device; the phone stops hearing from this node.
+    Rm { id: String },
+    /// Push "notifications are on" to every device, and say what came back.
+    Test,
 }
 
 #[derive(Subcommand)]
@@ -356,6 +369,7 @@ async fn main() -> Result<()> {
         Command::Memory(cmd) => memory_command(cmd).await,
         Command::Work(cmd) => work_command(cmd).await,
         Command::Auth(cmd) => auth_command(cmd).await,
+        Command::Push(cmd) => push_command(cmd).await,
         Command::Service(cmd) => match cmd {
             ServiceCommand::Install => tracon::service::install(),
             ServiceCommand::Uninstall => tracon::service::uninstall(),
@@ -921,6 +935,68 @@ async fn auth_command(cmd: AuthCommand) -> Result<()> {
                     c["id"].as_str().unwrap_or(""),
                     c["last_seen_ms"].as_i64().unwrap_or(0),
                     c["user_agent"].as_str().unwrap_or("-"),
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn push_command(cmd: PushCommand) -> Result<()> {
+    match cmd {
+        PushCommand::Ls => {
+            let v = node_call(reqwest::Method::GET, "/api/push/subscriptions", None, None).await?;
+            let devices = v["devices"].as_array().cloned().unwrap_or_default();
+            if devices.is_empty() {
+                println!("no devices; enable notifications on the Nodes screen from the phone");
+            }
+            for d in devices {
+                println!(
+                    "{}  {}  last ok {}  failures {}  {}",
+                    d["id"].as_str().unwrap_or(""),
+                    if d["local"].as_bool() == Some(true) {
+                        "this machine"
+                    } else {
+                        "logged-in client"
+                    },
+                    d["last_ok_ms"]
+                        .as_i64()
+                        .map(|t| t.to_string())
+                        .unwrap_or_else(|| "never".into()),
+                    d["fail_count"].as_i64().unwrap_or(0),
+                    d["user_agent"].as_str().unwrap_or("-"),
+                );
+            }
+            Ok(())
+        }
+        PushCommand::Rm { id } => {
+            node_call(
+                reqwest::Method::DELETE,
+                &format!("/api/push/subscriptions/{id}"),
+                None,
+                None,
+            )
+            .await?;
+            println!("forgotten");
+            Ok(())
+        }
+        PushCommand::Test => {
+            let v = node_call(
+                reqwest::Method::POST,
+                "/api/push/test",
+                Some(serde_json::json!({"all": true})),
+                None,
+            )
+            .await?;
+            let sent = v["sent"].as_array().cloned().unwrap_or_default();
+            if sent.is_empty() {
+                println!("no devices to push to");
+            }
+            for r in sent {
+                println!(
+                    "{}  {}",
+                    r["id"].as_str().unwrap_or(""),
+                    r["outcome"].as_str().unwrap_or("")
                 );
             }
             Ok(())

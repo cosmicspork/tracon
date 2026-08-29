@@ -53,17 +53,102 @@ function load() {
     return new Response(`network:${url}`, { status: 200 })
   }
 
+  const shown: { title: string; options: Record<string, unknown> }[] = []
+  const opened: string[] = []
+  const posted: unknown[] = []
+  const windows: { url: string; focused: boolean; postMessage: (m: unknown) => void; focus: () => void }[] = []
+  const subscribed: unknown[] = []
+
   const self = {
     addEventListener: (name: string, fn: Handler) => {
       handlers[name] = fn
     },
     location: { origin: 'http://n' },
     skipWaiting: () => {},
-    clients: { claim: async () => {} },
+    clients: {
+      claim: async () => {},
+      matchAll: async () => windows,
+      openWindow: async (u: string) => {
+        opened.push(u)
+      },
+    },
+    registration: {
+      showNotification: async (title: string, options: Record<string, unknown>) => {
+        shown.push({ title, options })
+      },
+      pushManager: {
+        subscribe: async (opts: unknown) => {
+          subscribed.push(opts)
+          return { toJSON: () => ({ endpoint: 'https://push.example/new', keys: { p256dh: 'k', auth: 'a' } }) }
+        },
+      },
+    },
   }
 
   new Function('self', 'caches', 'fetch', 'Response', code)(self, caches, fetchStub, Response)
-  return { handlers, caches, store, fetched: () => fetched }
+  return {
+    handlers,
+    caches,
+    store,
+    fetched: () => fetched,
+    shown,
+    opened,
+    posted,
+    windows,
+    subscribed,
+    openWindow: (url: string) => {
+      const w = {
+        url,
+        focused: false,
+        postMessage: (m: unknown) => posted.push(m),
+        focus: () => {
+          w.focused = true
+        },
+      }
+      windows.push(w)
+      return w
+    },
+  }
+}
+
+/** Fire a push with this payload (or none) and wait for the banner. */
+async function push(sw: ReturnType<typeof load>, payload: unknown | null) {
+  let done: unknown
+  const event = {
+    data:
+      payload === null
+        ? null
+        : {
+            json: () => {
+              if (typeof payload === 'string') throw new Error('not json')
+              return payload
+            },
+          },
+    waitUntil: (p: unknown) => {
+      done = p
+    },
+  }
+  ;(sw.handlers.push as unknown as (e: unknown) => void)(event)
+  await done
+}
+
+async function click(sw: ReturnType<typeof load>, path: string | undefined) {
+  let done: unknown
+  let closed = false
+  const event = {
+    notification: {
+      data: path === undefined ? undefined : { path },
+      close: () => {
+        closed = true
+      },
+    },
+    waitUntil: (p: unknown) => {
+      done = p
+    },
+  }
+  ;(sw.handlers.notificationclick as unknown as (e: unknown) => void)(event)
+  await done
+  return closed
 }
 
 /** Run the fetch handler and report whether it answered, and with what. */
@@ -177,4 +262,93 @@ test('an old version s caches are dropped on activate', async () => {
   })
   await waited
   expect(await sw.caches.keys()).not.toContain('tracon-shell-v0')
+})
+
+describe('a push always shows something', () => {
+  test('the payload becomes the banner, tagged so a duplicate replaces it', async () => {
+    const sw = load()
+    await push(sw, { title: 'Approval — feat/x', body: 'run just test', tag: 'tracon-perm-1', path: '/sessions/s1' })
+    expect(sw.shown).toHaveLength(1)
+    expect(sw.shown[0].title).toBe('Approval — feat/x')
+    expect(sw.shown[0].options.body).toBe('run just test')
+    expect(sw.shown[0].options.tag).toBe('tracon-perm-1')
+    expect(sw.shown[0].options.renotify).toBe(false)
+    expect(sw.shown[0].options.data).toEqual({ path: '/sessions/s1' })
+  })
+
+  test('no payload, or one that will not parse, still shows a banner', async () => {
+    // iOS revokes a subscription whose pushes show nothing.
+    const sw = load()
+    await push(sw, null)
+    await push(sw, 'not json')
+    expect(sw.shown).toHaveLength(2)
+    for (const s of sw.shown) {
+      expect(s.title).toBe('tracon')
+      expect(s.options.tag).toBe('tracon-generic')
+      expect(s.options.data).toEqual({ path: '/' })
+    }
+  })
+})
+
+describe('tapping a banner lands on the item', () => {
+  test('an open window is reused and told where to go', async () => {
+    const sw = load()
+    const w = sw.openWindow('http://n/queue')
+    const closed = await click(sw, '/reviews/r1')
+    expect(closed).toBe(true)
+    expect(w.focused).toBe(true)
+    expect(sw.posted).toEqual([{ type: 'navigate', path: '/reviews/r1' }])
+    expect(sw.opened).toEqual([])
+  })
+
+  test('a window on another origin is not ours; a new one opens on this origin', async () => {
+    const sw = load()
+    sw.openWindow('https://elsewhere.example/')
+    await click(sw, '/sessions/s1')
+    expect(sw.opened).toEqual(['http://n/sessions/s1'])
+    expect(sw.posted).toEqual([])
+  })
+
+  test('a banner without a path opens the front page', async () => {
+    const sw = load()
+    await click(sw, undefined)
+    expect(sw.opened).toEqual(['http://n/'])
+  })
+})
+
+test('a rotated subscription is re-registered with the node', async () => {
+  const sw = load()
+  const calls: { url: string; body: string }[] = []
+  const fetchStub = async (url: string, init: { body: string }) => {
+    calls.push({ url, body: init.body })
+    return new Response('{}')
+  }
+  // The handler reaches fetch through the global the worker was loaded with;
+  // re-load with a recording one.
+  const code = readFileSync(new URL('../../public/sw.js', import.meta.url), 'utf8')
+  const handlers: Record<string, (e: unknown) => void> = {}
+  const self = {
+    addEventListener: (n: string, f: (e: unknown) => void) => {
+      handlers[n] = f
+    },
+    location: { origin: 'http://n' },
+    registration: {
+      pushManager: {
+        subscribe: async () => ({ toJSON: () => ({ endpoint: 'https://push.example/new', keys: { p256dh: 'k', auth: 'a' } }) }),
+      },
+    },
+  }
+  new Function('self', 'caches', 'fetch', 'Response', code)(self, {}, fetchStub, Response)
+  let done: unknown
+  handlers.pushsubscriptionchange({
+    oldSubscription: { options: { applicationServerKey: 'key' } },
+    waitUntil: (p: unknown) => {
+      done = p
+    },
+  })
+  await done
+  expect(calls).toHaveLength(1)
+  expect(calls[0].url).toBe('/api/push/subscriptions')
+  expect(JSON.parse(calls[0].body).endpoint).toBe('https://push.example/new')
+  void sw
 })

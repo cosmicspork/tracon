@@ -8,9 +8,12 @@
 //! makes a peer's approval reach the phone too: mirrored state is published
 //! untapped, and untapped still means subscribers see it.
 //!
-//! Delivery goes through the pager bridge, which holds the device keys and
-//! seals to each paired device. The node hands it cleartext over a loopback or
-//! pod-network hop and holds no notification secret of its own.
+//! Delivery is Web Push, straight from this node to the push service of each
+//! phone that subscribed here. Every node in a mesh delivers for its own
+//! devices, so a phone subscribes at whichever node it reaches; a channel that
+//! should stay quiet says so in its bindings.
+
+pub mod webpush;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -31,8 +34,31 @@ use crate::{
 const DEBOUNCE_MS: u64 = 2_000;
 /// Above this many of one kind in a window, send a count instead of each item.
 const SUMMARY_ABOVE: usize = 3;
-/// At most this many pushes in flight, so a slow bridge cannot pile up.
-const MAX_IN_FLIGHT: usize = 8;
+/// At most this many pushes in flight, so a slow push service cannot pile up.
+/// Per device now, so a burst to three phones is nine sends, not three.
+const MAX_IN_FLIGHT: usize = 32;
+/// A device that has failed this many times in a row without ever saying
+/// "gone" is treated as gone anyway.
+const MAX_FAILURES: i64 = 20;
+/// How long a push service holds an undelivered push for a phone that is off.
+const TTL_ITEM_SECS: u32 = 60 * 60;
+const TTL_REVIEW_SECS: u32 = 24 * 60 * 60;
+
+/// Knobs a test turns down; production takes the defaults.
+#[derive(Debug, Clone)]
+pub struct Options {
+    pub debounce_ms: u64,
+    pub retry_after_ms: u64,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            debounce_ms: DEBOUNCE_MS,
+            retry_after_ms: 30_000,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -64,32 +90,51 @@ impl Kind {
     }
 }
 
-/// One push, before it is handed to the bridge.
+/// One push, before it is sealed for each device.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Notification {
     pub kind: Kind,
     pub title: String,
     pub body: String,
-    /// Where tapping it should land, when the node knows its own address.
+    /// Where tapping it should land. A path, not a URL: the service worker
+    /// runs on the node's own origin and resolves it there.
     pub path: String,
     /// The replacement key. Distinct per item, so two waiting approvals do not
-    /// collapse into one banner.
+    /// collapse into one banner; the same on every node, so a phone reached
+    /// by two of them sees one.
     pub tag: String,
 }
 
 impl Notification {
-    fn payload(&self, link_origin: Option<&str>, now: i64) -> serde_json::Value {
-        let mut v = json!({
+    /// What the service worker is handed once it decrypts the push.
+    pub fn payload(&self, now: i64) -> serde_json::Value {
+        json!({
             "title": self.title,
             "body": self.body,
-            "source": "tracon",
+            "path": self.path,
             "tag": self.tag,
+            "kind": self.kind.tag(),
             "ts": now,
-        });
-        if let Some(origin) = link_origin {
-            v["url"] = json!(format!("{}{}", origin.trim_end_matches('/'), self.path));
+        })
+    }
+
+    /// An approval is worth nothing after it expires; a review keeps.
+    fn ttl_secs(&self) -> u32 {
+        match self.kind {
+            Kind::Permission => TTL_ITEM_SECS,
+            Kind::Review | Kind::Promotion => TTL_REVIEW_SECS,
         }
-        v
+    }
+
+    /// The push behind "Send a test".
+    pub fn test() -> Self {
+        Self {
+            kind: Kind::Permission,
+            title: "tracon".into(),
+            body: "Notifications are on for this device.".into(),
+            path: "/".into(),
+            tag: "tracon-test".into(),
+        }
     }
 }
 
@@ -107,53 +152,95 @@ struct Seen {
     promotions: HashSet<String>,
 }
 
-/// Which channels this node pushes for. Resolved per item, because the sink is
-/// bound to the channel and exactly one node in the mesh delivers it.
+/// Which channels push at all. Resolved per item from the channel's bindings.
 struct Gate {
     store: Arc<Store>,
-    node_id: String,
+}
+
+/// Whether a channel with these bindings notifies.
+///
+/// On by default: a subscribed device is the opt-in now, and a standalone
+/// node whose channel rows were never bound must not stay silent. An explicit
+/// `notify.enabled` wins. The Phase 6 shape — `notify.sink` naming a pager
+/// bridge or the desktop tray — still reads: the bridge meant "push", the tray
+/// meant "not the phone", and the `node` it named no longer matters because
+/// every node delivers for its own devices.
+pub fn enabled(bindings: &serde_json::Value) -> bool {
+    let notify = &bindings["notify"];
+    if let Some(b) = notify["enabled"].as_bool() {
+        return b;
+    }
+    match notify["sink"].as_str() {
+        None | Some("pager") => true,
+        Some(_) => false,
+    }
+}
+
+/// Bindings still in the Phase 6 shape, worth one line in the log.
+pub fn legacy(bindings: &serde_json::Value) -> bool {
+    let notify = &bindings["notify"];
+    notify["sink"].is_string() || notify["node"].is_string()
 }
 
 impl Gate {
     fn pushes(&self, channel: &str) -> bool {
         let Ok(Some(row)) = self.store.channel_get(channel) else {
-            return false;
+            // No row at all: a standalone node's fabricated channel. Notify.
+            return true;
         };
         let Ok(bindings) = serde_json::from_str::<serde_json::Value>(&row.bindings_json) else {
-            return false;
+            return true;
         };
-        let notify = &bindings["notify"];
-        notify["sink"].as_str() == Some("pager")
-            && notify["node"].as_str() == Some(self.node_id.as_str())
+        enabled(&bindings)
     }
 }
 
 pub struct Notifier {
     store: Arc<Store>,
     cfg: Arc<Config>,
+    opts: Options,
     gate: Gate,
     seen: Seen,
     pending: Vec<Notification>,
-    http: reqwest::Client,
     permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl Notifier {
-    pub fn new(store: Arc<Store>, cfg: Arc<Config>, node_id: String) -> Self {
+    pub fn new(store: Arc<Store>, cfg: Arc<Config>, opts: Options) -> Self {
         Self {
             gate: Gate {
                 store: store.clone(),
-                node_id,
             },
             store,
             cfg,
+            opts,
             seen: Seen::default(),
             pending: Vec::new(),
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .unwrap_or_default(),
             permits: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT)),
+        }
+    }
+
+    /// Say once, at startup, which channels still carry the Phase 6 binding
+    /// shape and how to clear it. Silence would leave dead keys replicating
+    /// forever; refusing to run would be out of proportion for a hint.
+    fn warn_legacy(&self) {
+        let Ok(rows) = self.store.channel_list() else {
+            return;
+        };
+        for row in rows {
+            let Ok(b) = serde_json::from_str::<serde_json::Value>(&row.bindings_json) else {
+                continue;
+            };
+            if legacy(&b) {
+                tracing::warn!(
+                    channel = %row.name,
+                    enabled = enabled(&b),
+                    "legacy notify.sink/notify.node binding; clear it with: \
+                     tracon channel bind {} notify.enabled={} notify.sink= notify.node=",
+                    row.name,
+                    enabled(&b)
+                );
+            }
         }
     }
 
@@ -288,61 +375,153 @@ impl Notifier {
         out
     }
 
-    /// Hand everything gathered to the bridge, without waiting on it.
+    /// Seal everything gathered for every live device and send, without
+    /// waiting on any of it.
     fn flush(&mut self) {
         let pending = std::mem::take(&mut self.pending);
         if pending.is_empty() {
             return;
         }
         let now = now_ms();
+        let devices = match self.store.push_subscriptions_live(now) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not list push subscriptions");
+                return;
+            }
+        };
+        if devices.is_empty() {
+            return;
+        }
         for n in Self::collapse(pending) {
-            let body = n.payload(self.cfg.notify.link_origin.as_deref(), now);
-            let url = self.cfg.notify.pager_url.clone();
-            let http = self.http.clone();
-            let permits = self.permits.clone();
-            tokio::spawn(async move {
-                // Dropped rather than queued when the bridge is slow: the queue
-                // screen is the truth, and a stale buzz helps nobody.
-                let Ok(_permit) = permits.try_acquire_owned() else {
-                    tracing::warn!(tag = %body["tag"], "notification dropped; sink is backed up");
-                    return;
-                };
-                if send(&http, &url, &body).await {
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                if !send(&http, &url, &body).await {
-                    tracing::warn!(tag = %body["tag"], "notification not delivered");
-                }
-            });
+            for device in &devices {
+                let store = self.store.clone();
+                let cfg = self.cfg.clone();
+                let device = device.clone();
+                let n = n.clone();
+                let permits = self.permits.clone();
+                let retry_after = self.opts.retry_after_ms;
+                tokio::spawn(async move {
+                    // Dropped rather than queued when the service is slow: the
+                    // queue screen is the truth, and a stale buzz helps nobody.
+                    let Ok(_permit) = permits.try_acquire_owned() else {
+                        tracing::warn!(tag = %n.tag, "notification dropped; push is backed up");
+                        return;
+                    };
+                    if deliver(&store, &cfg, &device, &n, now).await
+                        != webpush::Outcome::Unreachable
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(retry_after)).await;
+                    if deliver(&store, &cfg, &device, &n, now).await
+                        == webpush::Outcome::Unreachable
+                    {
+                        tracing::warn!(tag = %n.tag, device = %device.id, "notification not delivered");
+                    }
+                });
+            }
         }
     }
 }
 
-/// One attempt at the bridge. Anything other than a 2xx is a failure, and a
-/// failure is only ever logged.
-async fn send(http: &reqwest::Client, url: &str, body: &serde_json::Value) -> bool {
-    match http.post(url).json(body).send().await {
-        Ok(res) if res.status().is_success() => true,
-        Ok(res) => {
-            tracing::warn!(status = %res.status(), "notification sink refused");
-            false
-        }
+/// One push to one device, with the bookkeeping the outcome earns: a "gone"
+/// forgets the device, a run of failures eventually does too, and a success
+/// resets the run.
+pub async fn deliver(
+    store: &Arc<Store>,
+    cfg: &Config,
+    device: &crate::store::PushSubscriptionRow,
+    n: &Notification,
+    now: i64,
+) -> webpush::Outcome {
+    let (p256dh, auth) = match webpush::decode_keys(&device.p256dh, &device.auth) {
+        Ok(k) => k,
         Err(e) => {
-            tracing::warn!(error = %e, "notification sink unreachable");
-            false
+            tracing::warn!(device = %device.id, error = %e, "push subscription unusable; forgetting it");
+            let _ = store.push_subscription_delete(&device.id);
+            return webpush::Outcome::Refused(0);
+        }
+    };
+    let sub = webpush::Subscriber {
+        endpoint: &device.endpoint,
+        p256dh: &p256dh,
+        auth: &auth,
+    };
+    let body = match webpush::encrypt(&sub, n.payload(now).to_string().as_bytes()) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(device = %device.id, error = %e, "push could not be sealed");
+            return webpush::Outcome::Refused(0);
+        }
+    };
+    let vapid = webpush::Vapid::load_or_generate(store);
+    let http = http_client();
+    let outcome = webpush::send(
+        &http,
+        &vapid,
+        cfg.notify.subject(),
+        &sub,
+        body,
+        n.ttl_secs(),
+        &n.tag,
+    )
+    .await;
+    match outcome {
+        webpush::Outcome::Sent => {
+            let _ = store.push_subscription_ok(&device.id, now_ms());
+        }
+        webpush::Outcome::Gone => {
+            tracing::info!(device = %device.id, "push service says the device is gone; forgetting it");
+            let _ = store.push_subscription_delete(&device.id);
+        }
+        webpush::Outcome::Refused(status) => {
+            tracing::warn!(device = %device.id, status, "push service refused the push");
+        }
+        webpush::Outcome::Unreachable => {
+            if let Ok(n) = store.push_subscription_failed(&device.id) {
+                if n >= MAX_FAILURES {
+                    tracing::warn!(device = %device.id, failures = n, "device never answers; forgetting it");
+                    let _ = store.push_subscription_delete(&device.id);
+                }
+            }
         }
     }
+    outcome
+}
+
+fn http_client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_default()
+        })
+        .clone()
 }
 
 /// Watch the queue and push what starts waiting. Runs until shutdown.
 pub async fn run(store: Arc<Store>, bus: Bus, cfg: Arc<Config>, node_id: String) {
-    let mut n = Notifier::new(store, cfg, node_id);
+    run_with(store, bus, cfg, node_id, Options::default()).await
+}
+
+pub async fn run_with(
+    store: Arc<Store>,
+    bus: Bus,
+    cfg: Arc<Config>,
+    _node_id: String,
+    opts: Options,
+) {
+    let debounce_ms = opts.debounce_ms;
+    let mut n = Notifier::new(store, cfg, opts);
     let mut rx = bus.subscribe();
     let shutdown = bus.shutdown_token();
     n.prime();
+    n.warn_legacy();
 
-    let debounce = tokio::time::sleep(std::time::Duration::from_millis(DEBOUNCE_MS));
+    let debounce = tokio::time::sleep(std::time::Duration::from_millis(debounce_ms));
     tokio::pin!(debounce);
     let mut armed = false;
 
@@ -371,7 +550,7 @@ pub async fn run(store: Arc<Store>, bus: Bus, cfg: Arc<Config>, node_id: String)
             armed = true;
             debounce
                 .as_mut()
-                .reset(tokio::time::Instant::now() + std::time::Duration::from_millis(DEBOUNCE_MS));
+                .reset(tokio::time::Instant::now() + std::time::Duration::from_millis(debounce_ms));
         }
     }
 }
@@ -435,36 +614,37 @@ mod tests {
     }
 
     #[test]
-    fn a_link_is_carried_only_when_the_node_knows_its_address() {
-        let n = note(Kind::Review, "tracon-review-x");
-        let with = n.payload(Some("https://tracon.example/"), 5);
-        assert_eq!(with["url"], "https://tracon.example/");
-        assert_eq!(with["source"], "tracon");
-        assert_eq!(with["ts"], 5);
-
-        let without = n.payload(None, 5);
-        assert!(
-            without.get("url").is_none(),
-            "no origin, no link: {without}"
-        );
-    }
-
-    #[test]
-    fn the_link_joins_origin_and_path_exactly_once() {
+    fn the_payload_carries_a_path_for_the_worker_to_resolve() {
         let n = Notification {
             kind: Kind::Review,
             title: "t".into(),
             body: "b".into(),
             path: "/reviews/abc".into(),
-            tag: "x".into(),
+            tag: "tracon-review-abc".into(),
         };
-        assert_eq!(
-            n.payload(Some("https://t.example/"), 0)["url"],
-            "https://t.example/reviews/abc"
-        );
-        assert_eq!(
-            n.payload(Some("https://t.example"), 0)["url"],
-            "https://t.example/reviews/abc"
-        );
+        let v = n.payload(5);
+        assert_eq!(v["path"], "/reviews/abc");
+        assert_eq!(v["tag"], "tracon-review-abc");
+        assert_eq!(v["kind"], "review");
+        assert_eq!(v["ts"], 5);
+        assert!(v.get("url").is_none(), "no origin is baked in: {v}");
+    }
+
+    #[test]
+    fn a_channel_notifies_unless_told_otherwise() {
+        assert!(enabled(&json!({})));
+        assert!(enabled(&json!({"notify": {"enabled": true}})));
+        assert!(!enabled(&json!({"notify": {"enabled": false}})));
+        // The Phase 6 shapes: a pager sink meant push, a tray sink meant not
+        // the phone, and an explicit flag beats either.
+        assert!(enabled(
+            &json!({"notify": {"sink": "pager", "node": "other"}})
+        ));
+        assert!(!enabled(&json!({"notify": {"sink": "tray", "node": "n1"}})));
+        assert!(enabled(
+            &json!({"notify": {"sink": "tray", "enabled": true}})
+        ));
+        assert!(legacy(&json!({"notify": {"sink": "tray"}})));
+        assert!(!legacy(&json!({"notify": {"enabled": true}})));
     }
 }

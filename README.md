@@ -115,7 +115,7 @@ These constrain everything else and are unlikely to change.
 | `notebook` | Document corpus absorbed; the `<type>-<slug>` prefix scheme is kept |
 | `switchboard` | Superseded by the desktop wrapper; retired last |
 
-`pager` is kept and becomes the notification sink for personal and client channels.
+`pager` is retired: phone push is built into the node and the PWA.
 `svastha` contributes the relay and trust-binding patterns. `homelab` hosts the hub.
 `kritee` is unaffected.
 
@@ -339,16 +339,22 @@ tracon auth revoke         # loopback only again
 Issuing a token again rotates it and logs every client out. Set `TRACON_TOKEN` to reach
 a remote node from the CLI.
 
-What is waiting can be pushed to where you are. The sink is a channel binding, so one
-node in the mesh delivers per channel:
+What is waiting can be pushed to where you are. On the phone, open the Nodes screen and
+switch on **Push to this device**; the node pushes straight to the phone's push service
+(Web Push, VAPID, sealed to the phone's own key — nothing sits in between). Every node
+pushes to the phones subscribed at it, so a phone subscribes wherever it logs in; a
+phone reached by two nodes sees each approval once, because the banner's tag is the
+same from both. Whether a channel notifies at all is a binding:
 
 ```bash
-tracon channel bind personal notify.sink=pager notify.node=<node id>
-tracon channel bind work notify.sink=tray
+tracon channel bind work notify.enabled=false   # the desktop tray is enough for work
+tracon push ls                                  # the devices this node pushes to
+tracon push test                                # "notifications are on" to each of them
 ```
 
-`pager` posts to a local pager bridge, which holds the device keys and does the sealing;
-`tray` means the desktop wrapper shows it instead.
+The desktop app shows the same items in its tray regardless. `[notify] contact` in
+`node.toml` is the address a push service may write to about this sender (a `mailto:`;
+Apple checks its shape).
 
 ### Review before publish
 

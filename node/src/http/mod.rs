@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 mod mcp;
+pub mod push;
 mod spa;
 mod stream;
 
@@ -102,6 +103,18 @@ pub fn router(state: AppState) -> Router {
             post(auth::put_token).delete(auth::delete_token),
         )
         .route("/api/auth/sessions", get(auth::list_sessions))
+        .route("/api/push/key", get(push::key))
+        .route(
+            "/api/push/subscriptions",
+            get(push::list)
+                .post(push::subscribe)
+                .delete(push::forget_endpoint),
+        )
+        .route(
+            "/api/push/subscriptions/{id}",
+            axum::routing::delete(push::forget),
+        )
+        .route("/api/push/test", post(push::test))
         .route("/api/stream", get(stream::stream))
         .fallback(spa::serve)
         .layer(middleware::from_fn(security_headers))
@@ -396,8 +409,8 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         });
     }
 
-    // What waits on the operator, pushed to where the operator is. Bound per
-    // channel, so exactly one node in a mesh delivers each one.
+    // What waits on the operator, pushed to the phones subscribed here. Every
+    // node delivers for its own devices; a channel opts out by binding.
     tokio::spawn(crate::notify::run(
         store.clone(),
         bus.clone(),

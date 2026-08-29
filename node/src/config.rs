@@ -88,27 +88,20 @@ impl Default for Embed {
     }
 }
 
-/// Where this node sends a push when something starts waiting on the operator,
-/// and what a notification links back to. Which channels are pushed at all is a
-/// channel binding, not config: the sink follows the work, not the machine.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Pushing what waits on the operator to the phones subscribed at this node.
+/// Which channels notify at all is a channel binding (`notify.enabled`), not
+/// config: it follows the work, not the machine.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Notify {
-    /// The pager bridge's capture endpoint. The bridge holds every key and
-    /// seals to the paired devices; the node hands it cleartext over loopback
-    /// (or the pod network) and holds no notification secret of its own.
-    pub pager_url: String,
-    /// The origin a notification's link should point at — the address the
-    /// operator reaches this node on. Without one, pushes carry no link.
-    pub link_origin: Option<String>,
+    /// Who a push service may contact about this sender: a `mailto:` or
+    /// `https:` URL, sent as the VAPID subject. Apple checks its shape.
+    pub contact: Option<String>,
 }
 
-impl Default for Notify {
-    fn default() -> Self {
-        Self {
-            pager_url: "http://127.0.0.1:4500/capture".into(),
-            link_origin: None,
-        }
+impl Notify {
+    pub fn subject(&self) -> &str {
+        self.contact.as_deref().unwrap_or("mailto:tracon@localhost")
     }
 }
 

@@ -223,6 +223,19 @@ export interface CeilingInfo {
   state: 'under' | 'near' | 'at' | 'none'
 }
 
+/** A browser this node pushes to, from `/api/push/subscriptions`. */
+export interface PushDevice {
+  id: string
+  user_agent: string | null
+  created_ms: number
+  last_ok_ms: number | null
+  fail_count: number
+  /** A browser on the node's own machine, which never logs in. */
+  local: boolean
+  /** Registered by this browser's session. */
+  mine: boolean
+}
+
 export interface ChannelInfo {
   name: string
   nodes: string[]

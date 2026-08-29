@@ -117,12 +117,18 @@ impl AuthState {
 }
 
 /// The value of one cookie in a `Cookie:` header.
-fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+pub(crate) fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     let raw = headers.get(header::COOKIE)?.to_str().ok()?;
     raw.split(';').find_map(|part| {
         let (k, v) = part.split_once('=')?;
         (k.trim() == name).then(|| v.trim())
     })
+}
+
+/// The hash of the session cookie a request carries, if any — what a push
+/// subscription is tied to. The guard has already checked it is live.
+pub(crate) fn session_hash(headers: &HeaderMap) -> Option<String> {
+    cookie_value(headers, COOKIE).map(hash)
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -327,6 +333,9 @@ pub async fn login(
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(secret) = cookie_value(&headers, COOKIE) {
         let _ = state.store().auth_session_delete(&hash(secret));
+        // Its devices go with it; the JOIN would have silenced them anyway,
+        // but a listed device that can never be reached is a lie.
+        let _ = state.store().auth_sessions_purge(now_ms());
     }
     let mut response = Json(json!({ "ok": true })).into_response();
     set_cookie(&mut response, "", 0);

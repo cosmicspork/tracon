@@ -2,6 +2,8 @@
 // On reconnect everything is refetched and ephemeral state dropped, so a client
 // crash costs nothing (the client crash invariant).
 
+import * as push from './push'
+import { router } from './router.svelte'
 import { api, ApiError } from './api'
 import { upsertNode } from './nodes'
 import type {
@@ -61,6 +63,13 @@ class Store {
   connect() {
     if (this.source) return
     void this.refetch()
+    // A tapped notification reuses this window and says where to go.
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', (m) => {
+        const d = (m as MessageEvent).data
+        if (d && d.type === 'navigate' && typeof d.path === 'string') router.go(d.path)
+      })
+    }
     // EventSource resends Last-Event-ID on its own reconnects; the node replays
     // persisted events after it.
     this.source = new EventSource('/api/stream')
@@ -116,6 +125,8 @@ class Store {
       this.sessions = new Map(sessions.map((s) => [s.id, s]))
       if (this.openSession) await this.loadEvents(this.openSession)
       this.authRequired = false
+      // The cookie may be new; the device follows it.
+      void push.resync()
     } catch (e) {
       // A node asking for a login is not a node that is down, and the two want
       // different screens.
@@ -151,6 +162,9 @@ class Store {
   }
 
   async signOut() {
+    // The node forgets this session's devices anyway; unsubscribing too
+    // keeps the browser from holding a subscription nothing will use.
+    await push.disable().catch(() => {})
     await api.logout()
     this.source?.close()
     this.source = null
