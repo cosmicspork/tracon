@@ -52,8 +52,11 @@ pub fn refresh(app: &AppHandle, state: &Arc<State>) {
     let queue = state.queue.lock().unwrap().clone();
     let connected = *state.connected.lock().unwrap();
 
+    let failed = state.node_error.lock().unwrap().clone();
     let waiting = queue.waiting.len();
-    let _ = tray.set_tooltip(Some(&if !connected {
+    let _ = tray.set_tooltip(Some(&if let Some(why) = &failed {
+        format!("tracon · {why}")
+    } else if !connected {
         "tracon · not connected".to_string()
     } else if waiting == 0 {
         "tracon · nothing waiting".to_string()
@@ -61,7 +64,7 @@ pub fn refresh(app: &AppHandle, state: &Arc<State>) {
         format!("tracon · {waiting} waiting on you")
     }));
 
-    let Ok(menu) = build_menu(app, &queue, connected) else {
+    let Ok(menu) = build_menu(app, &queue, connected, failed.as_deref()) else {
         return;
     };
     let _ = tray.set_menu(Some(menu));
@@ -71,10 +74,22 @@ fn build_menu(
     app: &AppHandle,
     q: &queue::Queue,
     connected: bool,
+    failed: Option<&str>,
 ) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
 
-    if !connected {
+    // A node this app started and could not keep running is a different
+    // situation from one it cannot reach, and saying which saves a hunt
+    // through logs for a node that is simply not there.
+    if let Some(why) = failed {
+        menu.append(&MenuItem::with_id(
+            app,
+            "noop",
+            truncate(why),
+            false,
+            None::<&str>,
+        )?)?;
+    } else if !connected {
         menu.append(&MenuItem::with_id(
             app,
             "noop",

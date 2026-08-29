@@ -1,17 +1,23 @@
-//! A tray client for a node that is already running.
+//! A tray client for a node, and — on a machine where you want one — the thing
+//! that runs it.
 //!
 //! What is actually wanted from native is tray presence, command-tab, a global
-//! hotkey, and system notifications. This provides those four and nothing
-//! else. It does not supervise the node — the platform does that
-//! (`tracon service install`) — and it holds no session state: the window is
-//! the same interface the node serves over HTTP, so a crash here is a
-//! reconnect, never lost work.
+//! hotkey, and system notifications. This provides those four, and will start
+//! and stop the node itself so a laptop does not need a unit file for
+//! something that is only wanted while you are logged in. It adopts a node
+//! that is already running rather than starting a second one, so
+//! `tracon service install` remains the right answer for a machine that has to
+//! stay reachable.
+//!
+//! It holds no session state: the window is the same interface the node serves
+//! over HTTP, so a crash here is a reconnect, never lost work.
 //!
 //! The tray is the queue plus a kill switch. It does not stream output; that
 //! is what the window is for.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod node;
 mod queue;
 mod tray;
 
@@ -35,10 +41,14 @@ pub struct State {
     /// the same approvals.
     pub announced: Mutex<std::collections::HashSet<String>>,
     pub connected: Mutex<bool>,
+    /// Why the node is not running, when this app was the one running it.
+    pub node_error: Mutex<Option<String>>,
 }
 
 fn main() {
     let state = Arc::new(State::default());
+    let supervisor = Arc::new(node::Node::default());
+    let stopper = supervisor.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -54,9 +64,43 @@ fn main() {
                 .build(),
         )
         .manage(state.clone())
+        .manage(supervisor.clone())
         .setup(move |app| {
             let handle = app.handle().clone();
             tray::install(&handle)?;
+
+            // Start the node before anything tries to read from it, then point
+            // the window at the node's own origin. The bundled assets exist
+            // only to satisfy the build: served from `tauri://` their relative
+            // `/api` calls would go nowhere, so the interface has to come from
+            // the node the way a browser gets it.
+            {
+                let handle = handle.clone();
+                let st = state.clone();
+                let node = supervisor.clone();
+                tauri::async_runtime::spawn(async move {
+                    let http = reqwest::Client::new();
+                    let url = node_url();
+                    match node.ensure(&http, &url).await {
+                        Ok(()) => {
+                            if let Some(window) = handle.get_webview_window("main") {
+                                if let Ok(parsed) = url.parse() {
+                                    let _ = window.navigate(parsed);
+                                }
+                            }
+                            if let Some(why) = node.supervise(http, url).await {
+                                *st.node_error.lock().unwrap() = Some(why);
+                                tray::refresh(&handle, &st);
+                            }
+                        }
+                        Err(why) => {
+                            eprintln!("tracon: {why}");
+                            *st.node_error.lock().unwrap() = Some(why);
+                            tray::refresh(&handle, &st);
+                        }
+                    }
+                });
+            }
 
             // Ctrl+Alt+T: reachable from whatever has focus, and not something
             // an editor or a browser already claims.
@@ -83,8 +127,17 @@ fn main() {
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("running the wrapper");
+        .build(tauri::generate_context!())
+        .expect("building the wrapper")
+        .run(move |_app, event| {
+            // Quitting takes the node with it, but only if this app started
+            // it. Exit is the last event, and stopping is synchronous on
+            // purpose: the process must not go away while the node is still
+            // tearing down its containers.
+            if let tauri::RunEvent::Exit = event {
+                stopper.stop();
+            }
+        });
 }
 
 /// Show and focus the window, or hide it if it already has focus.
