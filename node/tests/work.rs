@@ -22,6 +22,8 @@ use tracon::{
 
 #[path = "support/fake.rs"]
 mod fake;
+#[path = "support/state.rs"]
+mod state;
 use fake::FakeAdapter;
 
 struct H {
@@ -170,6 +172,7 @@ fn ids(v: &Value) -> Vec<String> {
 
 #[tokio::test]
 async fn readiness_is_derived_from_deps_and_sessions_and_the_order_is_stable() {
+    state::isolate();
     let h = harness().await;
     let (st, a) = call(
         &h.operator,
@@ -274,6 +277,7 @@ async fn readiness_is_derived_from_deps_and_sessions_and_the_order_is_stable() {
 
 #[tokio::test]
 async fn an_agent_sees_ready_work_and_discovered_work_links_to_its_item() {
+    state::isolate();
     let h = harness().await;
     let (_, parent) = call(
         &h.operator,

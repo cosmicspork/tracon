@@ -22,6 +22,8 @@ use tracon::{
 
 #[path = "support/fake.rs"]
 mod fake;
+#[path = "support/state.rs"]
+mod state;
 use fake::FakeAdapter;
 
 /// `(method, uri, headers, body)` as the stub saw it.
@@ -190,6 +192,7 @@ fn header<'a>(h: &'a [(String, String)], name: &str) -> Option<&'a str> {
 
 #[tokio::test]
 async fn the_placeholder_never_reaches_the_provider_and_the_credential_does() {
+    state::isolate();
     let h = harness(STORE, LOOPBACK).await;
     let token = h.manager.register_tool_token_for_test("s1", "work").await;
     let (status, headers, body) = call(
@@ -241,6 +244,7 @@ async fn the_placeholder_never_reaches_the_provider_and_the_credential_does() {
 
 #[tokio::test]
 async fn an_unknown_key_is_unauthorized_and_nothing_is_forwarded() {
+    state::isolate();
     let h = harness(STORE, LOOPBACK).await;
     let (status, _, _) = call(&h.app, "POST", "/model/stub/v1/messages", "nope", json!({})).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -249,6 +253,7 @@ async fn an_unknown_key_is_unauthorized_and_nothing_is_forwarded() {
 
 #[tokio::test]
 async fn a_channel_without_the_credential_is_refused_before_forwarding() {
+    state::isolate();
     let h = harness(STORE, LOOPBACK).await;
     let token = h
         .manager
@@ -263,6 +268,7 @@ async fn a_channel_without_the_credential_is_refused_before_forwarding() {
 
 #[tokio::test]
 async fn a_channel_bound_to_other_providers_is_refused() {
+    state::isolate();
     let h = harness(STORE, LOOPBACK).await;
     h.store
         .channel_put("work", b"ring", r#"{"providers":["local-only"]}"#)
@@ -277,6 +283,7 @@ async fn a_channel_bound_to_other_providers_is_refused() {
 
 #[tokio::test]
 async fn an_upstream_off_the_egress_allowlist_is_refused() {
+    state::isolate();
     let h = harness(STORE, LOOPBACK).await;
     let token = h.manager.register_tool_token_for_test("s4", "work").await;
     let (status, _, body) = call(
@@ -302,6 +309,7 @@ async fn an_upstream_off_the_egress_allowlist_is_refused() {
 
 #[tokio::test]
 async fn the_probe_may_only_read() {
+    state::isolate();
     let h = harness(STORE, LOOPBACK).await;
     let probe = h.manager.probe_token().to_string();
     let (status, _, _) = call(&h.app, "GET", "/model/stub/v1/models", &probe, json!({})).await;
@@ -315,6 +323,7 @@ async fn the_probe_may_only_read() {
 
 #[tokio::test]
 async fn an_oauth_credential_becomes_a_bearer_with_the_beta_flag_merged() {
+    state::isolate();
     const OAUTH: &str = r#"
         [credentials.stubcred]
         kind = "oauth"
@@ -344,6 +353,7 @@ async fn an_oauth_credential_becomes_a_bearer_with_the_beta_flag_merged() {
 
 #[tokio::test]
 async fn a_channel_at_its_daily_ceiling_is_refused_and_told_once_per_session() {
+    state::isolate();
     let h = harness(STORE, LOOPBACK).await;
     h.store
         .channel_put("work", b"ring", r#"{"ceiling_tokens_per_day": 100}"#)

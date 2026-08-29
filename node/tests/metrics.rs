@@ -21,6 +21,8 @@ use tracon::{
 
 #[path = "support/fake.rs"]
 mod fake;
+#[path = "support/state.rs"]
+mod state;
 use fake::FakeAdapter;
 
 fn session(id: &str, channel: &str, phase: &str, item: Option<&str>) -> SessionRow {
@@ -184,6 +186,7 @@ async fn call(
 
 #[tokio::test]
 async fn approvals_and_tokens_per_accepted_change_are_numbers_you_can_read() {
+    state::isolate();
     let store = Arc::new(Store::open_in_memory().unwrap());
     store.ensure_peer_node("n1").unwrap();
     let item = tracon::corpus::work::create(
@@ -334,6 +337,7 @@ async fn approvals_and_tokens_per_accepted_change_are_numbers_you_can_read() {
 
 #[tokio::test]
 async fn bindings_merge_by_dotted_key_and_the_channel_reports_its_ceiling() {
+    state::isolate();
     let store = Arc::new(Store::open_in_memory().unwrap());
     store
         .channel_put("work", b"ring", r#"{"providers":["anthropic"]}"#)

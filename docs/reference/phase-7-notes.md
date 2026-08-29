@@ -280,3 +280,46 @@ pgrep -cf 'tracon serve'          # 1
 kill -TERM $(pgrep -x tracon-wrapper); sleep 5
 pgrep -cf 'tracon serve'          # still 1
 ```
+
+## `cargo test` used to overwrite the operator's credential store
+
+Found on this host, diagnosed from a node that started saying
+
+```
+ERROR credential store could not be read; brokering nothing
+  error=credential store could not be opened with this node's key
+```
+
+`Config::state_dir()` is derived from the environment, and the credential
+store, the provider login stores, the policy bundle and per-session scratch all
+hang off it. So a test that exercised any of that code wrote the **real** files:
+
+- `node/tests/providers.rs` builds `Providers` with
+  `DataKey::from_bytes([9u8; 32])`, and the connect/lift path calls
+  `Broker::save`, which resolves `Broker::path()` — the operator's
+  `credentials.sealed`, replaced with an empty table sealed under a test key.
+- The same tests `remove_dir_all(Providers::store_dir("anthropic"))` — the
+  operator's real provider login store, holding the OAuth token.
+- Policy bundle tests overwrite `policy.toml`, its signature and public key.
+
+Confirmed rather than inferred: the file on disk opens with `[9u8; 32]` and
+contains exactly `"[credentials]\n"`.
+
+The fix is in `Config::state_dir()`: under `cfg(test)` it is always a throwaway
+directory, and `TRACON_STATE_DIR` overrides it outright. Integration tests need
+the override because they link the library *without* `cfg(test)` — that is what
+`node/tests/support/state.rs` is for, and every test in a file that reaches
+state calls `state::isolate()` first.
+
+The regression test is worth keeping honest about: it asserts the resolved
+directory is not the operator's and that every dangerous path derives from it.
+It is one test rather than two because the override is a process-global
+environment variable, and a second test asserting the default would race it.
+
+To check by hand after touching any of this:
+
+```sh
+sha256sum ~/.local/state/tracon/credentials.sealed ~/.local/state/tracon/policy.toml
+cargo test --workspace
+sha256sum ~/.local/state/tracon/credentials.sealed ~/.local/state/tracon/policy.toml
+```

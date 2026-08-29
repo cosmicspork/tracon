@@ -5,6 +5,8 @@
 
 #[path = "support/fake.rs"]
 mod fake;
+#[path = "support/state.rs"]
+mod state;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -231,6 +233,7 @@ async fn pair() -> (Node, Node) {
 
 #[tokio::test]
 async fn a_session_on_b_is_driven_from_a() {
+    state::isolate();
     let (a, b) = pair().await;
     let (ai, bi) = (a.id.node_id(), b.id.node_id());
 
@@ -302,6 +305,7 @@ async fn a_session_on_b_is_driven_from_a() {
 
 #[tokio::test]
 async fn prompt_answer_and_kill_forward_to_the_owner() {
+    state::isolate();
     let (a, b) = pair().await;
     let bi = b.id.node_id();
 

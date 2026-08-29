@@ -15,6 +15,8 @@ use tracon::{
 
 #[path = "support/fake.rs"]
 mod fake;
+#[path = "support/state.rs"]
+mod state;
 use fake::FakeAdapter;
 
 struct H {
@@ -129,6 +131,7 @@ fn text(v: &Value) -> String {
 
 #[tokio::test]
 async fn every_session_is_offered_memory_and_document_tools() {
+    state::isolate();
     let h = harness().await;
     let token = h
         .manager
@@ -155,6 +158,7 @@ async fn every_session_is_offered_memory_and_document_tools() {
 
 #[tokio::test]
 async fn retain_then_recall_round_trips_and_a_lesson_waits_for_the_batch() {
+    state::isolate();
     let h = harness().await;
     let token = h
         .manager
@@ -267,6 +271,7 @@ async fn retain_then_recall_round_trips_and_a_lesson_waits_for_the_batch() {
 
 #[tokio::test]
 async fn documents_are_written_by_the_operator_read_by_the_agent_and_edits_conflict_honestly() {
+    state::isolate();
     let h = harness().await;
     let token = h
         .manager

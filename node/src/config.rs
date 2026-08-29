@@ -569,6 +569,22 @@ fn uid() -> u32 {
     0
 }
 
+/// One throwaway directory per test process, so the unit tests share a state
+/// directory with each other and with nothing else.
+#[cfg(test)]
+fn test_state_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("tracon-test-state-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Never called: `state_dir` only reaches for it under `cfg(test)`, and this
+/// exists so the non-test build still compiles the branch away cleanly.
+#[cfg(not(test))]
+fn test_state_dir() -> PathBuf {
+    unreachable!()
+}
+
 fn hostname() -> String {
     std::process::Command::new("hostname")
         .output()
@@ -586,8 +602,28 @@ impl Config {
             .join("tracon/node.toml")
     }
 
-    /// State the node owns: database, gateway allowlist, per-session scratch.
+    /// State the node owns: database, gateway allowlist, per-session scratch,
+    /// and — the reason this is guarded — the sealed credential store.
+    ///
+    /// Under `cargo test` this is a throwaway directory, always. It is not a
+    /// convenience: the credential store, the provider login stores and the
+    /// policy bundle all live here at a path derived from the environment, so
+    /// a test that exercises the code that writes them wrote them *for real*.
+    /// Running the suite on a machine that also runs a node replaced that
+    /// node's credential store with one sealed under a test key, and deleted
+    /// its provider logins. Nothing in a test can reach the operator's state
+    /// now, whatever it calls.
+    ///
+    /// `TRACON_STATE_DIR` overrides it outright, which integration tests use
+    /// (they link the library without `cfg(test)`) and which also makes a
+    /// scratch node a one-liner.
     pub fn state_dir() -> PathBuf {
+        if let Some(dir) = std::env::var_os("TRACON_STATE_DIR") {
+            return PathBuf::from(dir);
+        }
+        if cfg!(test) {
+            return test_state_dir();
+        }
         dirs::state_dir()
             .or_else(dirs::data_local_dir)
             .unwrap_or_else(|| PathBuf::from("."))
@@ -662,6 +698,55 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+
+    /// The guard that stands between `cargo test` and the operator's sealed
+    /// credential store, and the override integration tests use because they
+    /// link the library without `cfg(test)`.
+    ///
+    /// One test, not two: the override is a process-global environment
+    /// variable, so a second test asserting the default would race with it.
+    #[test]
+    fn tests_never_resolve_the_operators_state_directory() {
+        let real = dirs::state_dir()
+            .or_else(dirs::data_local_dir)
+            .unwrap_or_default()
+            .join("tracon");
+
+        let before = std::env::var_os("TRACON_STATE_DIR");
+        std::env::remove_var("TRACON_STATE_DIR");
+        let dir = Config::state_dir();
+        assert_ne!(dir, real, "a test would write the operator's state");
+        assert!(
+            dir.to_string_lossy().contains("tracon-test-state"),
+            "unexpected test state dir: {}",
+            dir.display()
+        );
+        // Everything dangerous is derived from it, so nothing reaches out.
+        for p in [
+            crate::broker::Broker::path(),
+            crate::broker::Broker::plain_path(),
+            crate::policy::bundle::Paths::bundle(),
+            crate::policy::bundle::Paths::signing_key(),
+            Config::db_path(),
+        ] {
+            assert!(
+                p.starts_with(&dir),
+                "{} escapes the test state dir",
+                p.display()
+            );
+        }
+
+        std::env::set_var("TRACON_STATE_DIR", "/tmp/tracon-override-probe");
+        let overridden = Config::state_dir();
+        match before {
+            Some(v) => std::env::set_var("TRACON_STATE_DIR", v),
+            None => std::env::remove_var("TRACON_STATE_DIR"),
+        }
+        assert_eq!(
+            overridden,
+            std::path::PathBuf::from("/tmp/tracon-override-probe")
+        );
+    }
     use super::*;
 
     #[test]
