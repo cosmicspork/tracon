@@ -102,6 +102,7 @@ pub fn definitions() -> Vec<Value> {
 }
 
 pub async fn call(
+    tools: &super::Tools,
     access: &SessionAccess,
     ctx: &CallContext,
     name: &str,
@@ -111,9 +112,25 @@ pub async fn call(
         DOC_SEARCH => {
             let query = args["query"].as_str().unwrap_or("").trim();
             let limit = args["limit"].as_u64().unwrap_or(8).clamp(1, 50) as usize;
+            let near = crate::embed::neighbours(
+                &tools.cfg,
+                &access.store,
+                &tools.http,
+                access.manager.probe_token(),
+                Some(&ctx.channel),
+                query,
+                limit,
+            )
+            .await;
             let hits = access
                 .store
-                .doc_search(Some(&ctx.channel), args["kind"].as_str(), query, limit)
+                .doc_search_hybrid(
+                    Some(&ctx.channel),
+                    args["kind"].as_str(),
+                    query,
+                    limit,
+                    &near.hits,
+                )
                 .map_err(|e| e.to_string())?;
             Ok(json!({ "hits": hits }))
         }

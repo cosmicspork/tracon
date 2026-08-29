@@ -192,6 +192,52 @@ impl Embedder {
     }
 }
 
+/// The nearest indexed chunks to a query, or nothing at all when this node
+/// does not embed, the endpoint is down, or the query embeds to nothing.
+///
+/// Nothing here returns an error. Semantic search is an addition to FTS, and a
+/// node whose embedding endpoint is unreachable must answer the query with the
+/// text results it already has rather than fail the search.
+pub async fn neighbours(
+    cfg: &Arc<Config>,
+    store: &Arc<Store>,
+    http: &reqwest::Client,
+    token: &str,
+    channel: Option<&str>,
+    text: &str,
+    limit: usize,
+) -> Neighbours {
+    if !cfg.embed.enabled || text.trim().is_empty() {
+        return Neighbours::default();
+    }
+    let e = Embedder::new(cfg.clone(), store.clone(), http.clone());
+    match e.embed_query(text, token).await {
+        Ok(v) if !v.is_empty() => Neighbours {
+            hits: store.vec_search(channel, &v, limit).unwrap_or_default(),
+            degraded: false,
+        },
+        Ok(_) => Neighbours::default(),
+        Err(err) => {
+            // Configured but unreachable is worth saying out loud: the results
+            // are narrower than this node normally gives, and a search that
+            // quietly got worse is the kind of thing nobody notices.
+            tracing::debug!(error = %err, "semantic search is unavailable; text only");
+            Neighbours {
+                hits: Vec::new(),
+                degraded: true,
+            }
+        }
+    }
+}
+
+/// What the vector leg found, and whether it was able to look at all.
+#[derive(Debug, Default)]
+pub struct Neighbours {
+    pub hits: Vec<crate::store::vectors::Neighbour>,
+    /// This node embeds, but the endpoint could not be reached for this query.
+    pub degraded: bool,
+}
+
 /// Walk the corpus and embed whatever is missing or stale. Runs at startup and
 /// again whenever replication brings something in.
 async fn sweep(e: &Embedder, token: &str) {

@@ -32,18 +32,26 @@
       .catch((e) => (error = e instanceof Error ? e.message : String(e)))
   })
 
+  // This node embeds, but could not reach its endpoint for this query: the
+  // results are narrower than usual, and a search that quietly got worse is
+  // exactly what nobody notices.
+  let textOnly = $state(false)
   let searchTimer: ReturnType<typeof setTimeout> | undefined
   $effect(() => {
     const q = query.trim()
     clearTimeout(searchTimer)
     if (!q) {
       hits = null
+      textOnly = false
       return
     }
     searchTimer = setTimeout(() => {
       api
         .searchDocs(q, channel || undefined)
-        .then((d) => (hits = d.hits))
+        .then((d) => {
+          hits = d.hits
+          textOnly = d.text_only ?? false
+        })
         .catch(() => (hits = []))
     }, 150)
   })
@@ -63,7 +71,11 @@
 
 <div class="h4">
   Documents
-  <b>{docs.length} on {channel || '…'}{store.mesh?.hub.state === 'unreachable' ? ' · hub down · search is local' : ''}</b>
+  <b
+    >{docs.length} on {channel || '…'}{store.mesh?.hub.state === 'unreachable'
+      ? ' · hub down · search is local'
+      : ''}{textOnly ? ' · text only · no semantic search' : ''}</b
+  >
   {#if !surface.phone}
     <button class="lnk r" onclick={() => (creating = !creating)}>{creating ? 'Cancel' : 'New document'}</button>
   {/if}

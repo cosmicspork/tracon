@@ -133,7 +133,7 @@ export const api = {
   searchDocs: (text: string, channel?: string) => {
     const q = new URLSearchParams({ q: text })
     if (channel) q.set('channel', channel)
-    return call<{ hits: RecallHit[] }>('GET', `/api/docs?${q}`)
+    return call<{ hits: RecallHit[]; text_only?: boolean }>('GET', `/api/docs?${q}`)
   },
   doc: (channel: string, slug: string) => call<Document>('GET', `/api/docs/${channel}/${slug}`),
   putDoc: async (channel: string, slug: string, body: string, ifMatch?: string): Promise<Document> => {

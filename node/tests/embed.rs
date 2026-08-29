@@ -112,6 +112,16 @@ fn doc(store: &Store, _id: &str, channel: &str, slug: &str, title: &str, body: &
 }
 
 fn memory(store: &Store, channel: &str, id: &str, body: &str) {
+    memory_kind(store, channel, id, "fact", body)
+}
+
+fn memory_kind(store: &Store, channel: &str, id: &str, kind: &str, body: &str) {
+    memory_aged(store, channel, id, kind, body, now_ms())
+}
+
+/// `created_ms` matters: a fact's rank decays on a 90-day half-life, so a
+/// fresh confident fact sits level with a directive and an old one does not.
+fn memory_aged(store: &Store, channel: &str, id: &str, kind: &str, body: &str, created_ms: i64) {
     store
         .write_change(
             "n1",
@@ -123,14 +133,14 @@ fn memory(store: &Store, channel: &str, id: &str, body: &str) {
                 "channel": channel,
                 "scope": "global",
                 "scope_ref": Value::Null,
-                "kind": "fact",
+                "kind": kind,
                 "body": body,
                 "source_session": Value::Null,
                 "source_node": Value::Null,
                 "confidence": 1.0,
                 "state": "active",
-                "created_ms": now_ms(),
-                "updated_ms": now_ms(),
+                "created_ms": created_ms,
+                "updated_ms": created_ms,
             }),
         )
         .unwrap();
@@ -381,4 +391,149 @@ async fn a_memory_is_indexed_as_one_chunk_on_its_own_channel() {
         .unwrap()
         .is_empty());
     assert!(!store.vec_search(Some("work"), &q, 5).unwrap().is_empty());
+}
+
+/// The claim the ROADMAP set as the bar for doing this at all: a question FTS
+/// cannot answer, because it shares no words with the document that answers it.
+#[tokio::test]
+async fn a_query_fts_cannot_answer_is_answered_by_the_vector_leg() {
+    let (_stub, base) = stub().await;
+    let (store, e) = setup(&base);
+    doc(&store, "d1", "personal", "guide-testing", "Running the suite",
+        "# Running the suite\n\nRun pest before pushing. It is the whole workspace, and nothing else runs it.\n");
+    doc(&store, "d2", "personal", "guide-noise", "Unrelated",
+        "# Unrelated\n\nA document about deploying and releasing, which shares no ideas with the other one.\n");
+    indexed(&e, &store).await;
+
+    // No word here appears in either document.
+    let question = "how do I check my work";
+    assert!(
+        store
+            .doc_search(Some("personal"), None, question, 5)
+            .unwrap()
+            .is_empty(),
+        "FTS answered it after all; the test no longer proves anything"
+    );
+
+    let near = e
+        .embed_query(question, "t")
+        .await
+        .map(|v| store.vec_search(Some("personal"), &v, 8).unwrap())
+        .unwrap();
+    let hits = store
+        .doc_search_hybrid(Some("personal"), None, question, 5, &near)
+        .unwrap();
+    assert_eq!(
+        hits.first().map(|h| h.slug.clone().unwrap()),
+        Some("guide-testing".into()),
+        "{hits:#?}"
+    );
+    // And the hit carries the paragraph it matched, not the top of the file.
+    assert!(hits[0].text.contains("pest"), "{:?}", hits[0].text);
+}
+
+/// Directives are the operator's standing instructions, and outrank a fact
+/// however good the fact's vector is. Vectors reorder within that decision,
+/// they do not overturn it.
+#[tokio::test]
+async fn a_semantic_match_does_not_outrank_the_operators_own_directive() {
+    let (_stub, base) = stub().await;
+    let (store, e) = setup(&base);
+    memory_kind(
+        &store,
+        "personal",
+        "m-directive",
+        "directive",
+        "always run the test suite before pushing",
+    );
+    // A year old, so its tier is genuinely below the directive's: a *fresh*
+    // confident fact sits level with one by design, and would not test this.
+    memory_aged(
+        &store,
+        "personal",
+        "m-fact",
+        "fact",
+        "the check suite is run with pest and testing takes a while",
+        now_ms() - 365 * 24 * 3600 * 1000,
+    );
+    indexed(&e, &store).await;
+
+    let near = e
+        .embed_query("running the test suite", "t")
+        .await
+        .map(|v| store.vec_search(Some("personal"), &v, 8).unwrap())
+        .unwrap();
+    assert!(!near.is_empty(), "nothing was indexed to fuse");
+    let hits = store
+        .recall_hybrid("personal", "test suite", None, None, None, 8, &near)
+        .unwrap();
+    assert_eq!(hits[0].id, "m-directive", "{hits:#?}");
+}
+
+/// A semantic match must not become a way to read another project's memory:
+/// the vector leg goes through the same scope predicate as the text one.
+#[tokio::test]
+async fn the_vector_leg_respects_memory_scope() {
+    let (_stub, base) = stub().await;
+    let (store, e) = setup(&base);
+    store
+        .write_change(
+            "n1",
+            "personal",
+            "memory",
+            tracon_sync::ChangeOp::Upsert,
+            "m-other",
+            serde_json::json!({
+                "channel": "personal", "scope": "project", "scope_ref": "someone-elses-project",
+                "kind": "fact", "body": "the check command here is pest",
+                "source_session": Value::Null, "source_node": Value::Null,
+                "confidence": 1.0, "state": "active",
+                "created_ms": now_ms(), "updated_ms": now_ms(),
+            }),
+        )
+        .unwrap();
+    indexed(&e, &store).await;
+
+    let near = e
+        .embed_query("how do I run the checks", "t")
+        .await
+        .map(|v| store.vec_search(Some("personal"), &v, 8).unwrap())
+        .unwrap();
+    assert!(!near.is_empty(), "the memory was not indexed at all");
+    let hits = store
+        .recall_hybrid(
+            "personal",
+            "checks",
+            Some("my-project"),
+            None,
+            None,
+            8,
+            &near,
+        )
+        .unwrap();
+    assert!(
+        hits.iter().all(|h| h.id != "m-other"),
+        "a scoped memory leaked through the vector leg: {hits:#?}"
+    );
+}
+
+/// With no vectors the hybrid path must be the text path, exactly.
+#[tokio::test]
+async fn no_vectors_is_the_text_only_ranking_unchanged() {
+    let (_stub, base) = stub().await;
+    let (store, _e) = setup(&base);
+    doc(
+        &store,
+        "d1",
+        "personal",
+        "guide-a",
+        "A",
+        "# A\n\nRun pest to test the suite, at enough length to be its own section.\n",
+    );
+    let plain = store.doc_search(Some("personal"), None, "pest", 5).unwrap();
+    let hybrid = store
+        .doc_search_hybrid(Some("personal"), None, "pest", 5, &[])
+        .unwrap();
+    assert_eq!(plain, hybrid);
+    assert!(!plain.is_empty());
 }

@@ -162,7 +162,7 @@ impl Tools {
                     .session
                     .get()
                     .ok_or("memory is not available on this node")?;
-                memory::call(access, ctx, name, args).await
+                memory::call(self, access, ctx, name, args).await
             }
             work::WORK_READY | work::WORK_DISCOVER | work::WORK_CLOSE => {
                 let access = self
@@ -176,7 +176,7 @@ impl Tools {
                     .session
                     .get()
                     .ok_or("documents are not available on this node")?;
-                docs::call(access, ctx, name, args).await
+                docs::call(self, access, ctx, name, args).await
             }
             other => Err(format!("no tool named {other}")),
         }
