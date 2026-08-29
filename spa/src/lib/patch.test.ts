@@ -10,11 +10,19 @@ import { spawnSync } from 'node:child_process'
 
 import { unifiedDiff, buildPatch, fileSection, baseFromDiff } from './patch'
 
-/** Write `before`, apply the generated patch with git, return the result. */
-function applied(files: Array<{ path: string; before: string; after: string }>) {
-  const dir = mkdtempSync(join(tmpdir(), 'tracon-patch-'))
+/**
+ * Write `before`, apply the generated patch with git, return the result.
+ *
+ * `into` reuses an existing repository. The fuzz round below passes one,
+ * because a temp directory and a `git init` per round is several hundred extra
+ * subprocesses, and a single transient spawn failure among them reads exactly
+ * like a rejected patch — which is how this test failed in CI once, with an
+ * empty stderr and a patch that git accepts perfectly well by hand.
+ */
+function applied(files: Array<{ path: string; before: string; after: string }>, into?: string) {
+  const dir = into ?? mkdtempSync(join(tmpdir(), 'tracon-patch-'))
   try {
-    spawnSync('git', ['init', '-q'], { cwd: dir })
+    if (!into) spawnSync('git', ['init', '-q'], { cwd: dir })
     for (const f of files) {
       mkdirSync(join(dir, dirname(f.path)), { recursive: true })
       writeFileSync(join(dir, f.path), f.before)
@@ -33,12 +41,18 @@ function applied(files: Array<{ path: string; before: string; after: string }>) 
     }
     return {
       ok: res.status === 0,
-      stderr: res.stderr,
+      // Say why, including the cases where git never ran: an empty stderr with
+      // a valid patch is not a rejection and should not read like one.
+      stderr:
+        res.stderr ||
+        (res.error ? `spawn failed: ${res.error.message}` : '') ||
+        (res.signal ? `killed by ${res.signal}` : '') ||
+        (res.status === 0 ? '' : `git exited ${res.status} with no message`),
       patch,
       read: (p: string) => contents.get(p) ?? '<<missing>>',
     }
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    if (!into) rmSync(dir, { recursive: true, force: true })
   }
 }
 
@@ -192,6 +206,9 @@ describe('what it declines to produce', () => {
 /// random edits, checked by git rather than by eye.
 test('git accepts randomly generated edits', () => {
   // A fixed sequence, so a failure is reproducible rather than a rumour.
+  // One repository for every round; each round overwrites `f.txt` anyway.
+  const dir = mkdtempSync(join(tmpdir(), 'tracon-fuzz-'))
+  spawnSync('git', ['init', '-q'], { cwd: dir })
   let seed = 20260829
   const rand = () => {
     seed = (seed * 1103515245 + 12345) & 0x7fffffff
@@ -219,13 +236,14 @@ test('git accepts randomly generated edits', () => {
     const before = source.length ? source.join('\n') + nl() : ''
     const after = edited.length ? edited.join('\n') + nl() : ''
     if (before === after) continue
-    const r = applied([{ path: 'f.txt', before, after }])
+    const r = applied([{ path: 'f.txt', before, after }], dir)
     expect(
       r.ok,
       `round ${round}: git rejected\n${r.stderr}\nbefore=${JSON.stringify(before)}\nafter=${JSON.stringify(after)}\n${r.patch}`,
     ).toBe(true)
     expect(r.read('f.txt'), `round ${round}: wrong result for ${JSON.stringify(before)}`).toBe(after)
   }
+  rmSync(dir, { recursive: true, force: true })
 })
 
 test('the header names the file on both sides', () => {
