@@ -1,3 +1,4 @@
 target/
 # Written by tauri-build on every build.
 gen/schemas/
+/binaries/

@@ -1,12 +1,11 @@
 # sqlite-vec's C source unconditionally does `typedef u_int8_t uint8_t;` on any
 # platform that is not Windows, Emscripten, Cosmopolitan or wasi. `u_int8_t` is
-# a BSD/glibc spelling that musl does not define, so the release build — two
-# static musl targets through zig cc — fails to compile the extension at all.
+# a BSD/glibc spelling that musl does not define, so the static Linux release
+# build fails to compile the extension at all.
 #
 # Defining the three names as their standard equivalents makes those typedefs
 # self-referential, which C11 permits. It lives here rather than in CI so that
-# a local `cargo zigbuild` and the release workflow cannot disagree about it.
+# a local `just musl` and the release workflow cannot disagree about it.
 # Remove once sqlite-vec guards the block on __GLIBC__.
 [env]
 CFLAGS_x86_64_unknown_linux_musl = "-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"
-CFLAGS_aarch64_unknown_linux_musl = "-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"

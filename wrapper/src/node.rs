@@ -43,20 +43,29 @@ pub struct Node {
 
 /// Where the node's binary is. `TRACON_BIN` wins; otherwise the install
 /// location `install.sh` and `cargo install` both use, then the PATH.
+/// The node binary, in order: an explicit override, the sidecar the bundle
+/// ships beside this executable (an AppImage's `usr/bin`, a `.app`'s
+/// `Contents/MacOS`), the install location, then whatever is on PATH.
 fn binary() -> String {
     binary_from(
         std::env::var("TRACON_BIN").ok(),
+        std::env::current_exe().ok(),
         std::env::var_os("HOME").map(std::path::PathBuf::from),
     )
 }
 
-fn binary_from(override_bin: Option<String>, home: Option<std::path::PathBuf>) -> String {
+fn binary_from(
+    override_bin: Option<String>,
+    exe: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> String {
     if let Some(p) = override_bin {
         return p;
     }
-    if let Some(home) = home {
-        let p = home.join(".local/bin/tracon");
-        if p.exists() {
+    let sidecar = exe.and_then(|e| e.parent().map(|d| d.join("tracon")));
+    let installed = home.map(|h| h.join(".local/bin/tracon"));
+    for p in [sidecar, installed].into_iter().flatten() {
+        if p.is_file() {
             return p.to_string_lossy().into_owned();
         }
     }
@@ -201,11 +210,42 @@ mod tests {
 
     #[test]
     fn the_binary_is_overridable_and_falls_back_to_the_path() {
-        assert_eq!(binary_from(Some("/opt/tracon".into()), None), "/opt/tracon");
+        assert_eq!(
+            binary_from(Some("/opt/tracon".into()), None, None),
+            "/opt/tracon"
+        );
         // Without an override and no install, it is the PATH name — never
         // empty, which would spawn the shell's own argv[0].
-        assert_eq!(binary_from(None, Some("/nonexistent".into())), "tracon");
-        assert_eq!(binary_from(None, None), "tracon");
+        assert_eq!(
+            binary_from(
+                None,
+                Some("/nonexistent/app".into()),
+                Some("/nonexistent".into())
+            ),
+            "tracon"
+        );
+        assert_eq!(binary_from(None, None, None), "tracon");
+    }
+
+    /// A bundle carries its own node, and that one wins over an install the
+    /// operator may have left behind at an older version.
+    #[test]
+    fn the_sidecar_beside_the_executable_beats_the_install_location() {
+        let dir =
+            std::env::temp_dir().join(format!("tracon-wrapper-sidecar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bundle")).unwrap();
+        std::fs::create_dir_all(dir.join("home/.local/bin")).unwrap();
+        std::fs::write(dir.join("bundle/tracon"), "").unwrap();
+        std::fs::write(dir.join("home/.local/bin/tracon"), "").unwrap();
+        let exe = Some(dir.join("bundle/tracon-wrapper"));
+        let home = Some(dir.join("home"));
+        let got = binary_from(None, exe.clone(), home.clone());
+        assert_eq!(got, dir.join("bundle/tracon").to_string_lossy());
+        std::fs::remove_file(dir.join("bundle/tracon")).unwrap();
+        let got = binary_from(None, exe, home);
+        assert_eq!(got, dir.join("home/.local/bin/tracon").to_string_lossy());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Stopping a node this process did not start would kill something the
