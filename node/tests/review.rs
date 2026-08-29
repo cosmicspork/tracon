@@ -6,6 +6,10 @@
 //! keyring would prove the opposite of what is being claimed: the assertion is
 //! that the node passes the *brokered* credential and the *approved* bytes.
 
+#[path = "support/mod.rs"]
+mod support;
+use support::state;
+
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -13,14 +17,11 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-#[path = "support/state.rs"]
-mod state;
-
 use tracon::{
     config::Config,
     mcp::Tools,
     session::Manager,
-    store::{now_ms, NodeRow, ReviewRow, SessionRow, Store},
+    store::{now_ms, ReviewRow, Store},
     stream::Bus,
 };
 
@@ -53,12 +54,26 @@ async fn fixture(name: &str, credentials: &str) -> Fixture {
     fixture_with(name, credentials, |_| {}).await
 }
 
+/// The enclosing test's name, so two tests can never share a fixture
+/// directory by a copy-pasted constant.
+macro_rules! test_name {
+    () => {{
+        fn here() {}
+        // Inside an async test the path is `…::name::{{closure}}::here`; the
+        // closure segments are dropped, then the last one is the test.
+        let full = std::any::type_name_of_val(&here);
+        full.strip_suffix("::here")
+            .unwrap_or(full)
+            .rsplit("::")
+            .find(|s| !s.starts_with('{'))
+            .unwrap()
+    }};
+}
+
 async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> Fixture {
     // Per test: these run in parallel and each needs its own repo, its own
     // stub CLI, and its own log to assert against.
-    let dir = std::env::temp_dir().join(format!("tracon-review-it-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = state::scratch(&format!("review-{name}"));
     // `-b main` and an explicit checkout: git's default branch name is a local
     // setting, and CI does not share this machine's.
     sh(&dir, "git init -q --bare -b main origin.git");
@@ -87,56 +102,25 @@ async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> 
     let worktree = dir.join("wt").to_string_lossy().into_owned();
     let store = Arc::new(Store::open_in_memory().unwrap());
     store
-        .put_node(&NodeRow {
-            id: "n1".into(),
-            name: "t".into(),
-            state: "ready".into(),
-            failed_check: None,
-            failed_detail: None,
-            harness_id: "omp".into(),
-            harness_pinned: "18.0.4".into(),
-            harness_found: Some("18.0.4".into()),
-            models_json: None,
-            checked_at_ms: Some(now_ms()),
-            is_self: 1,
-            x25519_pub: None,
-            last_seen_ms: None,
-            reachable: 1,
+        .put_node(&{
+            let mut r = support::rows::node_row("n1", "t");
+            r.harness_id = "omp".into();
+            r.harness_pinned = "18.0.4".into();
+            r.harness_found = Some("18.0.4".into());
+            r.models_json = None;
+            r
         })
         .unwrap();
     store
-        .insert_session(&SessionRow {
-            id: "s1".into(),
-            node_id: "n1".into(),
-            channel: "work".into(),
-            work_item_id: None,
-            repo_path: dir.join("wt").to_string_lossy().into_owned(),
-            worktree_path: Some(worktree.clone()),
-            branch: "feat/x".into(),
-            harness_id: "omp".into(),
-            harness_version: "18.0.4".into(),
-            harness_session_id: None,
-            container_name: None,
-            model: "m".into(),
-            project_id: None,
-            phase: "execute".into(),
-            policy_version: None,
-            review_id: None,
-            budget_tokens: 1000,
-            tokens_used: 0,
-            cost_usd: None,
-            context_used: None,
-            context_size: None,
-            state: "running".into(),
-            end_reason: None,
-            last_error: None,
-            turn_active: 0,
-            draft: None,
-            draft_updated_ms: None,
-            created_ms: now_ms(),
-            started_mono_ms: Some(0),
-            ended_mono_ms: None,
-            updated_ms: now_ms(),
+        .insert_session(&{
+            let mut r = support::rows::session_row("s1", "n1", "work");
+            r.repo_path = dir.join("wt").to_string_lossy().into_owned();
+            r.worktree_path = Some(worktree.clone());
+            r.branch = "feat/x".into();
+            r.harness_id = "omp".into();
+            r.harness_version = "18.0.4".into();
+            r.started_mono_ms = Some(0);
+            r
         })
         .unwrap();
 
@@ -340,8 +324,7 @@ impl Fixture {
 #[tokio::test]
 async fn a_review_waits_in_the_queue_until_it_is_decided() {
     state::isolate();
-    const FN: &str = "a_review_waits_in_the_queue_until_it_is_decided";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let id = f.submit().await;
 
     let (_, queue) = f.call("GET", "/api/queue", None).await;
@@ -365,8 +348,7 @@ async fn a_review_waits_in_the_queue_until_it_is_decided() {
 #[tokio::test]
 async fn approving_publishes_the_approved_bytes_with_the_brokered_credential() {
     state::isolate();
-    const FN: &str = "approving_publishes_the_approved_bytes_with_the_brokered_credential";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let id = f.submit().await;
 
     let (status, body) = f
@@ -415,8 +397,7 @@ async fn approving_publishes_the_approved_bytes_with_the_brokered_credential() {
 #[tokio::test]
 async fn a_second_verdict_cannot_overwrite_the_first() {
     state::isolate();
-    const FN: &str = "a_second_verdict_cannot_overwrite_the_first";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let id = f.submit().await;
     let (status, _) = f
         .call(
@@ -446,8 +427,7 @@ async fn a_second_verdict_cannot_overwrite_the_first() {
 #[tokio::test]
 async fn a_rejection_needs_a_reason() {
     state::isolate();
-    const FN: &str = "a_rejection_needs_a_reason";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let id = f.submit().await;
     let (status, _) = f
         .call(
@@ -463,8 +443,7 @@ async fn a_rejection_needs_a_reason() {
 #[tokio::test]
 async fn a_branch_that_moved_after_submit_cannot_be_approved() {
     state::isolate();
-    const FN: &str = "a_branch_that_moved_after_submit_cannot_be_approved";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let id = f.submit().await;
     // The agent kept working after submitting.
     sh(
@@ -497,8 +476,7 @@ async fn a_branch_that_moved_after_submit_cannot_be_approved() {
 #[tokio::test]
 async fn without_a_brokered_credential_approval_publishes_nothing() {
     state::isolate();
-    const FN: &str = "without_a_brokered_credential_approval_publishes_nothing";
-    let f = fixture(FN, WITHOUT_GH).await;
+    let f = fixture(test_name!(), WITHOUT_GH).await;
     let id = f.submit().await;
     let (status, body) = f
         .call(
@@ -520,8 +498,7 @@ async fn without_a_brokered_credential_approval_publishes_nothing() {
 #[tokio::test]
 async fn requesting_changes_keeps_one_evolving_thread() {
     state::isolate();
-    const FN: &str = "requesting_changes_keeps_one_evolving_thread";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let id = f.submit().await;
 
     // Asking for changes without saying what to change teaches nothing.
@@ -589,8 +566,7 @@ async fn requesting_changes_keeps_one_evolving_thread() {
 #[tokio::test]
 async fn two_concurrent_approvals_publish_the_change_once() {
     state::isolate();
-    const FN: &str = "two_concurrent_approvals_publish_the_change_once";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let id = f.submit().await;
 
     // Two operators (or two taps) approve at once. The publish claim is atomic,
@@ -618,8 +594,7 @@ async fn two_concurrent_approvals_publish_the_change_once() {
 #[tokio::test]
 async fn a_revising_review_can_be_rejected_and_the_result_is_honest() {
     state::isolate();
-    const FN: &str = "a_revising_review_can_be_rejected_and_the_result_is_honest";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let id = f.submit().await;
 
     // Changes requested: the review is now waiting on the agent.
@@ -660,8 +635,7 @@ async fn a_revising_review_can_be_rejected_and_the_result_is_honest() {
 #[tokio::test]
 async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
     state::isolate();
-    const FN: &str = "publish_pins_the_reviewed_commit_and_refuses_a_moved_branch";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let mut cfg = Config::default();
     cfg.publish.gh = f.dir.join("bin/gh").to_string_lossy().into_owned();
     let broker = toml::from_str::<tracon::broker::Broker>(WITH_GH)
@@ -702,8 +676,7 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
 #[tokio::test]
 async fn a_claim_releases_when_the_operator_leaves() {
     state::isolate();
-    const FN: &str = "a_claim_releases_when_the_operator_leaves";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let id = f.submit().await;
 
     f.call("GET", &format!("/api/reviews/{id}"), None).await;
@@ -725,8 +698,7 @@ async fn a_claim_releases_when_the_operator_leaves() {
 #[tokio::test]
 async fn a_claim_from_a_vanished_client_lapses() {
     state::isolate();
-    const FN: &str = "a_claim_from_a_vanished_client_lapses";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let id = f.submit().await;
     f.call("GET", &format!("/api/reviews/{id}"), None).await;
 
@@ -742,8 +714,7 @@ async fn a_claim_from_a_vanished_client_lapses() {
 #[tokio::test]
 async fn submit_runs_the_checks_first_and_a_failure_refuses_the_submission() {
     state::isolate();
-    const FN: &str = "submit_runs_the_checks_first_and_a_failure_refuses_the_submission";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     // The worktree's own list wins over the node's, and this one fails.
     std::fs::create_dir_all(f.dir.join("wt/.tracon")).unwrap();
     std::fs::write(
@@ -788,8 +759,7 @@ async fn submit_runs_the_checks_first_and_a_failure_refuses_the_submission() {
 #[tokio::test]
 async fn a_diff_over_the_cap_is_refused_before_any_check_runs() {
     state::isolate();
-    const FN: &str = "a_diff_over_the_cap_is_refused_before_any_check_runs";
-    let f = fixture_with(FN, WITH_GH, |c| c.review.max_diff_lines = 0).await;
+    let f = fixture_with(test_name!(), WITH_GH, |c| c.review.max_diff_lines = 0).await;
     let v = f.tool("s1", "submit_review", f.submit_args()).await;
     let err = v["error"].as_str().unwrap_or_default();
     assert!(err.contains("the cap is 0 lines"), "{v}");
@@ -803,9 +773,7 @@ async fn a_diff_over_the_cap_is_refused_before_any_check_runs() {
 #[tokio::test]
 async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_on_the_card() {
     state::isolate();
-    const FN: &str =
-        "a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_on_the_card";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     f.store
         .channel_put(
             "work",
@@ -903,8 +871,7 @@ async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_
 #[tokio::test]
 async fn publishing_closes_the_item_the_session_holds() {
     state::isolate();
-    const FN: &str = "publishing_closes_the_item_the_session_holds";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let item = tracon::corpus::work::create(
         &f.store,
         &Bus::new(),
@@ -949,8 +916,7 @@ async fn publishing_closes_the_item_the_session_holds() {
 #[tokio::test]
 async fn an_edited_diff_reaches_the_agent_and_still_applies() {
     state::isolate();
-    const FN: &str = "an_edited_diff_reaches_the_agent_and_still_applies";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let id = f.submit().await;
 
     // What the interface builds: the file as submitted, with one line changed.
@@ -991,8 +957,7 @@ async fn an_edited_diff_reaches_the_agent_and_still_applies() {
 #[tokio::test]
 async fn asking_for_changes_without_an_edit_carries_no_patch() {
     state::isolate();
-    const FN: &str = "asking_for_changes_without_an_edit_carries_no_patch";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let id = f.submit().await;
     let (status, _) = f
         .call(
@@ -1014,8 +979,7 @@ async fn asking_for_changes_without_an_edit_carries_no_patch() {
 #[tokio::test]
 async fn resubmitting_clears_the_patch() {
     state::isolate();
-    const FN: &str = "resubmitting_clears_the_patch";
-    let f = fixture(FN, WITH_GH).await;
+    let f = fixture(test_name!(), WITH_GH).await;
     let id = f.submit().await;
     f.call(
         "POST",

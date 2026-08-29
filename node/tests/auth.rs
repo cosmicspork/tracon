@@ -1,6 +1,10 @@
 //! Who the operator API answers to. Loopback keeps working without a
 //! credential; everything else needs the token, or a cookie earned with it.
 
+#[path = "support/mod.rs"]
+mod support;
+use support::state;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -23,11 +27,7 @@ use tracon::{
     stream::Bus,
 };
 
-#[path = "support/fake.rs"]
-mod fake;
-#[path = "support/state.rs"]
-mod state;
-use fake::FakeAdapter;
+use support::fake::FakeAdapter;
 
 struct Node {
     app: axum::Router,

@@ -2,6 +2,10 @@
 //! containerised omp. Covers what the operator actually does: start a session,
 //! prompt it, answer a permission request, and kill it.
 
+#[path = "support/mod.rs"]
+mod support;
+use support::state;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -21,11 +25,7 @@ use tracon::{
     stream::Bus,
 };
 
-#[path = "support/fake.rs"]
-mod fake;
-#[path = "support/state.rs"]
-mod state;
-use fake::{FakeAdapter, FakeHandle};
+use support::fake::{FakeAdapter, FakeHandle};
 
 struct Harness {
     app: axum::Router,
@@ -118,7 +118,7 @@ async fn a_session_without_a_model_is_refused() {
         .call(
             "POST",
             "/api/sessions",
-            Some(json!({ "channel": "personal", "repo_path": "/tmp/x", "model": "" })),
+            Some(json!({ "channel": "personal", "repo_path": "/nonexistent/repo", "model": "" })),
         )
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -153,7 +153,7 @@ async fn a_session_needs_a_ready_item_and_execute_needs_its_plan() {
     };
     let a = mk("A", vec![]);
     let b = mk("B", vec![a.id.clone()]);
-    let base = json!({ "channel": "personal", "repo_path": "/tmp/x", "model": "m/a" });
+    let base = json!({ "channel": "personal", "repo_path": "/nonexistent/repo", "model": "m/a" });
     let spec = |extra: Value| {
         let mut v = base.clone();
         for (k, val) in extra.as_object().unwrap() {
@@ -235,7 +235,9 @@ async fn a_refused_node_refuses_sessions_and_says_which_check_failed() {
         .call(
             "POST",
             "/api/sessions",
-            Some(json!({ "channel": "personal", "repo_path": "/tmp/x", "model": "m/a" })),
+            Some(
+                json!({ "channel": "personal", "repo_path": "/nonexistent/repo", "model": "m/a" }),
+            ),
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -275,7 +277,9 @@ async fn a_version_mismatch_blocks_new_sessions() {
         .call(
             "POST",
             "/api/sessions",
-            Some(json!({ "channel": "personal", "repo_path": "/tmp/x", "model": "m/a" })),
+            Some(
+                json!({ "channel": "personal", "repo_path": "/nonexistent/repo", "model": "m/a" }),
+            ),
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -395,7 +399,7 @@ fn insert_running_session(store: &Arc<Store>, budget: i64) -> String {
             node_id: "n1".into(),
             channel: "personal".into(),
             work_item_id: None,
-            repo_path: "/tmp/repo".into(),
+            repo_path: "/nonexistent/repo".into(),
             worktree_path: None,
             branch: "feat/x".into(),
             harness_id: "fake".into(),
@@ -514,7 +518,11 @@ impl Rig {
             events: ev_tx,
             commands: cmd_tx,
         };
-        rig.await_state("running").await;
+        assert!(
+            rig.await_state("running").await,
+            "the session never started: {:?}",
+            rig.store.get_session(&rig.session_id).unwrap()
+        );
         rig
     }
 
@@ -933,14 +941,24 @@ async fn a_session_on_an_unbound_channel_is_offered_no_tools() {
 
 // ---- orientation --------------------------------------------------------
 
-/// A session is told where it is before its first prompt: the orientation
-/// is assembled on the node, recorded as an event, and handed to the harness
-/// as a system-prompt file rather than anything in the worktree.
-#[tokio::test]
-async fn a_session_starts_with_its_orientation_recorded() {
+/// Everything a planning session needs to be oriented: a repository with a
+/// remote, a directive on the channel, a work item to plan, and the session
+/// itself, created but not yet asserted on.
+struct Orientation {
+    repo: std::path::PathBuf,
+    origin_url: String,
+    store: Arc<Store>,
+    manager: Manager,
+    cfg: Arc<Config>,
+    adapter: Arc<FakeAdapter>,
+    tools: Arc<tracon::mcp::Tools>,
+    item: tracon_sync::work::WorkItem,
+    row: tracon::store::SessionRow,
+}
+
+async fn orientation(tag: &str) -> Orientation {
     state::isolate();
-    let dir = std::env::temp_dir().join(format!("tracon-orientation-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = state::scratch(&format!("orientation-{tag}"));
     let repo = dir.join("repo");
     let origin = dir.join("origin.git");
     std::fs::create_dir_all(&repo).unwrap();
@@ -1059,6 +1077,33 @@ async fn a_session_starts_with_its_orientation_recorded() {
         )
         .await
         .unwrap();
+    Orientation {
+        repo,
+        origin_url,
+        store,
+        manager,
+        cfg,
+        adapter,
+        tools,
+        item,
+        row,
+    }
+}
+
+/// A session is told where it is before its first prompt: the orientation
+/// is assembled on the node, recorded as an event, and handed to the harness
+/// as a system-prompt file rather than anything in the worktree.
+#[tokio::test]
+async fn a_session_starts_with_its_orientation_recorded() {
+    state::isolate();
+    let Orientation {
+        repo,
+        origin_url,
+        store,
+        item,
+        row,
+        ..
+    } = orientation("recorded").await;
     assert_eq!(row.phase, "plan");
     assert_eq!(row.policy_version, Some(4));
     // Bank identity from the remote, not the path.
@@ -1118,8 +1163,25 @@ async fn a_session_starts_with_its_orientation_recorded() {
     // session, so only the repository is asserted here.
     assert!(!repo.join("orientation.md").exists());
 
-    // Writing the plan document is the phase's artifact: not asked, recorded
-    // on the item, and the session ends with `phase_done`.
+    tracon::session::materialize::remove(&row.id);
+}
+
+/// Writing the plan document is the phase's artifact: not asked for, recorded
+/// on the item, and the session ends with `phase_done`.
+#[tokio::test]
+async fn writing_the_plan_document_ends_the_plan_phase() {
+    state::isolate();
+    let Orientation {
+        store,
+        manager,
+        cfg,
+        adapter,
+        tools,
+        item,
+        row,
+        ..
+    } = orientation("plan").await;
+    let slug = tracon::corpus::work::plan_slug(&item.id);
     for _ in 0..300 {
         if store.get_session(&row.id).unwrap().unwrap().state == "running" {
             break;
@@ -1167,6 +1229,5 @@ async fn a_session_starts_with_its_orientation_recorded() {
         .map(|e| e.kind)
         .collect();
     assert!(kinds.contains(&"plan_artifact".to_string()), "{kinds:?}");
-    let _ = std::fs::remove_dir_all(&dir);
     tracon::session::materialize::remove(&row.id);
 }

@@ -69,3 +69,4 @@ uuid.workspace = true
 [dev-dependencies]
 tracon-hub = { path = "../hub" }
 tower = { version = "0.5.3", features = ["util"] }
+tempfile = "3"

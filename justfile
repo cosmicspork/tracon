@@ -26,6 +26,7 @@ dev:
 
 # Everything CI runs.
 check:
+    ./scripts/check-tests.sh
     cargo fmt --all --check
     cargo clippy --all-targets -- -D warnings
     cargo test

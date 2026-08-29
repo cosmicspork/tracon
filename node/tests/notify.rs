@@ -1,6 +1,10 @@
 //! What reaches the phone, and what deliberately does not. A stub stands in
 //! for the pager bridge and records exactly what the node handed it.
 
+#[path = "support/mod.rs"]
+mod support;
+use support::state;
+
 use std::sync::{Arc, Mutex};
 
 use axum::{extract::State, routing::post, Json, Router};
@@ -160,6 +164,7 @@ const BOUND: &str = r#"{"notify":{"sink":"pager","node":"n1"}}"#;
 
 #[tokio::test]
 async fn an_approval_reaches_the_phone_once_and_carries_a_way_back() {
+    state::isolate();
     let (cap, url) = bridge().await;
     let store = store_with_channel(BOUND);
     session(&store, "s1");
@@ -194,6 +199,7 @@ async fn an_approval_reaches_the_phone_once_and_carries_a_way_back() {
 /// that genuinely is a new thing to answer.
 #[tokio::test]
 async fn a_re_ask_pages_again() {
+    state::isolate();
     let (cap, url) = bridge().await;
     let store = store_with_channel(BOUND);
     session(&store, "s1");
@@ -221,6 +227,7 @@ async fn a_re_ask_pages_again() {
 /// review, and paging for it would train the operator to ignore pages.
 #[tokio::test]
 async fn a_review_pages_when_it_arrives_and_when_it_comes_back_but_not_on_a_release() {
+    state::isolate();
     let (cap, url) = bridge().await;
     let store = store_with_channel(BOUND);
     session(&store, "s1");
@@ -262,6 +269,7 @@ async fn a_review_pages_when_it_arrives_and_when_it_comes_back_but_not_on_a_rele
 /// the same push from every node that mirrors the queue.
 #[tokio::test]
 async fn only_the_bound_node_delivers() {
+    state::isolate();
     for bindings in [
         r#"{"notify":{"sink":"pager","node":"n2"}}"#,
         r#"{"notify":{"sink":"tray","node":"n1"}}"#,
@@ -285,6 +293,7 @@ async fn only_the_bound_node_delivers() {
 /// A restart is not news. What was already waiting stays waiting silently.
 #[tokio::test]
 async fn the_standing_queue_is_not_announced_on_startup() {
+    state::isolate();
     let (cap, url) = bridge().await;
     let store = store_with_channel(BOUND);
     session(&store, "s1");
@@ -315,6 +324,7 @@ async fn the_standing_queue_is_not_announced_on_startup() {
 /// Five approvals at once is one buzz, not five.
 #[tokio::test]
 async fn a_burst_arrives_as_a_count() {
+    state::isolate();
     let (cap, url) = bridge().await;
     let store = store_with_channel(BOUND);
     session(&store, "s1");
@@ -338,6 +348,7 @@ async fn a_burst_arrives_as_a_count() {
 /// The bridge being down is not the node's problem to escalate.
 #[tokio::test]
 async fn a_dead_sink_is_survived_quietly() {
+    state::isolate();
     let store = store_with_channel(BOUND);
     session(&store, "s1");
     // Nothing is listening on this port.
@@ -367,6 +378,7 @@ async fn a_dead_sink_is_survived_quietly() {
 /// A queue that moves faster than this task reads it must not lose an item.
 #[tokio::test]
 async fn falling_behind_is_recovered_from_the_store() {
+    state::isolate();
     let (cap, url) = bridge().await;
     let store = store_with_channel(BOUND);
     session(&store, "s1");
@@ -401,6 +413,7 @@ async fn falling_behind_is_recovered_from_the_store() {
 /// say where to go.
 #[tokio::test]
 async fn a_node_that_does_not_know_its_address_sends_no_link() {
+    state::isolate();
     let (cap, url) = bridge().await;
     let store = store_with_channel(BOUND);
     session(&store, "s1");
@@ -436,6 +449,7 @@ async fn a_node_that_does_not_know_its_address_sends_no_link() {
 /// route by. It must wait, not vanish.
 #[tokio::test]
 async fn an_item_whose_session_has_not_landed_is_not_lost() {
+    state::isolate();
     let (cap, url) = bridge().await;
     let store = store_with_channel(BOUND);
     let bus = notifier(store.clone(), &url).await;
@@ -463,6 +477,7 @@ async fn an_item_whose_session_has_not_landed_is_not_lost() {
 /// Both queues, one buzz each, and both kinds reach the phone.
 #[tokio::test]
 async fn reviews_and_promotions_are_pushed_too() {
+    state::isolate();
     let (cap, url) = bridge().await;
     let store = store_with_channel(BOUND);
     session(&store, "s1");

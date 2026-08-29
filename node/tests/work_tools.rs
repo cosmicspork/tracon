@@ -2,6 +2,10 @@
 //! only the stub and only on the endpoints the tools use; the verbs that
 //! would merge or transition are never called because they do not exist.
 
+#[path = "support/mod.rs"]
+mod support;
+use support::state;
+
 use std::sync::{Arc, Mutex};
 
 use axum::{extract::State, http::HeaderMap, routing::any, Json, Router};
@@ -118,6 +122,7 @@ async fn call(t: &Tools, c: &CallContext, name: &str, args: Value) -> (bool, Val
 
 #[tokio::test]
 async fn the_forge_and_tracker_tools_are_offered_to_the_bound_channel_and_node() {
+    state::isolate();
     let (t, _, _) = rig().await;
     let names = |c: &str, n: &str| -> Vec<String> {
         t.list(c, n)
@@ -138,6 +143,7 @@ async fn the_forge_and_tracker_tools_are_offered_to_the_bound_channel_and_node()
 
 #[tokio::test]
 async fn the_token_reaches_only_the_stub_and_only_on_the_read_and_comment_endpoints() {
+    state::isolate();
     let (t, seen, _) = rig().await;
     let c = ctx("work", "n1");
     let (err, v) = call(&t, &c, "mr_status", json!({"project": "g/p", "iid": 7})).await;
@@ -191,6 +197,7 @@ async fn the_token_reaches_only_the_stub_and_only_on_the_read_and_comment_endpoi
 
 #[tokio::test]
 async fn an_unbound_channel_or_node_is_refused_before_any_request() {
+    state::isolate();
     let (t, seen, _) = rig().await;
     let (err, v) = call(
         &t,

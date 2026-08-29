@@ -1,7 +1,10 @@
 //! Adapter behaviour against the fake ACP agent: launch, model selection,
 //! streaming, permission round-trip, and the turn result the budget uses.
 
-use tokio::sync::mpsc;
+#[path = "support/mod.rs"]
+mod support;
+use support::events::{drain_until, next_permission};
+use support::state;
 
 use tracon::adapter::{
     omp::OmpAdapter, AdapterError, HarnessAdapter, HarnessEvent, LaunchSpec, PermissionReply,
@@ -39,33 +42,9 @@ impl Runner for FakeRunner {
     }
 }
 
-/// Collect labels until a permission request arrives, the harness exits, or the
-/// stream goes quiet. The fake agent stays alive after a turn, so this is bounded.
-async fn drain(
-    rx: &mut mpsc::Receiver<HarnessEvent>,
-    out: &mut Vec<String>,
-) -> Option<HarnessEvent> {
-    let quiet = std::time::Duration::from_millis(500);
-    while let Ok(Some(ev)) = tokio::time::timeout(quiet, rx.recv()).await {
-        match ev {
-            HarnessEvent::MessageChunk { ref text, .. } => out.push(format!("chunk:{text}")),
-            HarnessEvent::ToolCall(ref t) => out.push(format!("tool_call:{}", t.title)),
-            HarnessEvent::ToolCallUpdate(ref t) => out.push(format!(
-                "tool_update:{}",
-                t.status.clone().unwrap_or_default()
-            )),
-            HarnessEvent::Usage { .. } => out.push("usage".into()),
-            HarnessEvent::Models(ref m) => out.push(format!("models:{}", m.len())),
-            HarnessEvent::Permission { .. } => return Some(ev),
-            HarnessEvent::Exited { .. } => return None,
-            _ => {}
-        }
-    }
-    None
-}
-
 #[tokio::test]
 async fn version_is_parsed_from_the_runner() {
+    state::isolate();
     let v = OmpAdapter::new("18.0.4")
         .version(&FakeRunner)
         .await
@@ -81,6 +60,7 @@ async fn version_is_parsed_from_the_runner() {
 
 #[tokio::test]
 async fn probe_models_lists_what_the_harness_offers() {
+    state::isolate();
     let models = OmpAdapter::new("18.0.4")
         .probe_models(&FakeRunner, Vec::new())
         .await
@@ -93,6 +73,7 @@ async fn probe_models_lists_what_the_harness_offers() {
 
 #[tokio::test]
 async fn unknown_model_is_refused_before_prompting() {
+    state::isolate();
     let err = OmpAdapter::new("18.0.4")
         .launch(
             &FakeRunner,
@@ -114,6 +95,7 @@ async fn unknown_model_is_refused_before_prompting() {
 
 #[tokio::test]
 async fn launch_prompt_permission_and_turn_result() {
+    state::isolate();
     let (handle, mut rx) = OmpAdapter::new("18.0.4")
         .launch(
             &FakeRunner,
@@ -139,7 +121,7 @@ async fn launch_prompt_permission_and_turn_result() {
         async move { handle.prompt(text).await }
     });
 
-    let perm = drain(&mut rx, &mut seen).await.expect("permission request");
+    let perm = next_permission(&mut rx, &mut seen).await;
     let HarnessEvent::Permission { request, reply } = perm else {
         panic!("expected a permission request")
     };
@@ -155,7 +137,7 @@ async fn launch_prompt_permission_and_turn_result() {
     // The budget counts cumulative totalTokens, not visible input.
     assert_eq!(turn.usage.total_tokens, 15024);
 
-    drain(&mut rx, &mut seen).await;
+    drain_until(&mut rx, &mut seen, "tool_update:completed").await;
     assert!(seen.contains(&"models:2".to_string()));
     assert!(seen.contains(&"chunk:working".to_string()));
     assert!(seen.contains(&"tool_call:run just test".to_string()));
@@ -165,6 +147,7 @@ async fn launch_prompt_permission_and_turn_result() {
 
 #[tokio::test]
 async fn denying_a_permission_fails_the_tool_call() {
+    state::isolate();
     let (handle, mut rx) = OmpAdapter::new("18.0.4")
         .launch(
             &FakeRunner,
@@ -182,13 +165,13 @@ async fn denying_a_permission_fails_the_tool_call() {
         .unwrap();
     let prompt = tokio::spawn(async move { handle.prompt("x".into()).await });
     let mut seen = Vec::new();
-    let HarnessEvent::Permission { reply, .. } = drain(&mut rx, &mut seen).await.unwrap() else {
+    let HarnessEvent::Permission { reply, .. } = next_permission(&mut rx, &mut seen).await else {
         panic!("expected permission")
     };
     reply
         .send(PermissionReply::Selected("reject_once".into()))
         .unwrap();
     prompt.await.unwrap().unwrap();
-    drain(&mut rx, &mut seen).await;
+    drain_until(&mut rx, &mut seen, "tool_update:failed").await;
     assert!(seen.contains(&"tool_update:failed".to_string()));
 }

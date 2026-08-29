@@ -44,11 +44,18 @@ pub struct Node {
 /// Where the node's binary is. `TRACON_BIN` wins; otherwise the install
 /// location `install.sh` and `cargo install` both use, then the PATH.
 fn binary() -> String {
-    if let Ok(p) = std::env::var("TRACON_BIN") {
+    binary_from(
+        std::env::var("TRACON_BIN").ok(),
+        std::env::var_os("HOME").map(std::path::PathBuf::from),
+    )
+}
+
+fn binary_from(override_bin: Option<String>, home: Option<std::path::PathBuf>) -> String {
+    if let Some(p) = override_bin {
         return p;
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let p = std::path::Path::new(&home).join(".local/bin/tracon");
+    if let Some(home) = home {
+        let p = home.join(".local/bin/tracon");
         if p.exists() {
             return p.to_string_lossy().into_owned();
         }
@@ -194,12 +201,11 @@ mod tests {
 
     #[test]
     fn the_binary_is_overridable_and_falls_back_to_the_path() {
-        std::env::set_var("TRACON_BIN", "/opt/tracon");
-        assert_eq!(binary(), "/opt/tracon");
-        std::env::remove_var("TRACON_BIN");
-        // Without an override it is either the install location or the PATH
-        // name — never empty, which would spawn the shell's own argv[0].
-        assert!(!binary().is_empty());
+        assert_eq!(binary_from(Some("/opt/tracon".into()), None), "/opt/tracon");
+        // Without an override and no install, it is the PATH name — never
+        // empty, which would spawn the shell's own argv[0].
+        assert_eq!(binary_from(None, Some("/nonexistent".into())), "tracon");
+        assert_eq!(binary_from(None, None), "tracon");
     }
 
     /// Stopping a node this process did not start would kill something the

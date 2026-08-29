@@ -6,7 +6,10 @@
 //! that a permission round-trip, a turn result and a version mismatch behave
 //! identically whichever harness produced them.
 
-use tokio::sync::mpsc;
+#[path = "support/mod.rs"]
+mod support;
+use support::events::{drain_until, next_permission};
+use support::state;
 
 use tracon::adapter::{
     claude::ClaudeAdapter, AdapterError, HarnessAdapter, HarnessEvent, LaunchSpec, PermissionReply,
@@ -67,32 +70,9 @@ fn spec_env(env: Vec<(String, String)>) -> LaunchSpec {
     }
 }
 
-/// Collect labels until a permission request arrives or the harness goes away.
-async fn drain(
-    rx: &mut mpsc::Receiver<HarnessEvent>,
-    out: &mut Vec<String>,
-) -> Option<HarnessEvent> {
-    let quiet = std::time::Duration::from_millis(500);
-    while let Ok(Some(ev)) = tokio::time::timeout(quiet, rx.recv()).await {
-        match ev {
-            HarnessEvent::MessageChunk { ref text, .. } => out.push(format!("chunk:{text}")),
-            HarnessEvent::ThoughtChunk { ref text, .. } => out.push(format!("thought:{text}")),
-            HarnessEvent::ToolCall(ref t) => out.push(format!("tool_call:{}", t.title)),
-            HarnessEvent::ToolCallUpdate(ref t) => out.push(format!(
-                "tool_update:{}",
-                t.status.clone().unwrap_or_default()
-            )),
-            HarnessEvent::Usage { .. } => out.push("usage".into()),
-            HarnessEvent::Permission { .. } => return Some(ev),
-            HarnessEvent::Exited { .. } => return None,
-            _ => {}
-        }
-    }
-    None
-}
-
 #[tokio::test]
 async fn version_is_parsed_from_the_runner() {
+    state::isolate();
     let a = ClaudeAdapter::new("2.1.247");
     let v = a.version(&FakeRunner).await.unwrap();
     assert_eq!(v.found, "2.1.247");
@@ -101,6 +81,7 @@ async fn version_is_parsed_from_the_runner() {
 
 #[tokio::test]
 async fn launch_prompt_permission_and_turn_result() {
+    state::isolate();
     let a = ClaudeAdapter::new("2.1.247");
     let (handle, mut rx) = a.launch(&FakeRunner, spec()).await.unwrap();
     assert!(!handle.harness_session_id().is_empty());
@@ -108,7 +89,7 @@ async fn launch_prompt_permission_and_turn_result() {
     let turn = tokio::spawn(async move { handle.prompt("do the thing".into()).await });
 
     let mut seen = Vec::new();
-    let ev = drain(&mut rx, &mut seen).await.expect("a permission ask");
+    let ev = next_permission(&mut rx, &mut seen).await;
     assert!(
         seen.contains(&"chunk:working on it".to_string()),
         "{seen:?}"
@@ -147,7 +128,7 @@ async fn launch_prompt_permission_and_turn_result() {
     assert_eq!(result.usage.charged(), 15024);
 
     let mut after = Vec::new();
-    drain(&mut rx, &mut after).await;
+    drain_until(&mut rx, &mut after, "tool_update:completed").await;
     assert!(
         after.contains(&"tool_update:completed".to_string()),
         "{after:?}"
@@ -156,12 +137,13 @@ async fn launch_prompt_permission_and_turn_result() {
 
 #[tokio::test]
 async fn denying_a_permission_fails_the_tool_call() {
+    state::isolate();
     let a = ClaudeAdapter::new("2.1.247");
     let (handle, mut rx) = a.launch(&FakeRunner, spec()).await.unwrap();
     let turn = tokio::spawn(async move { handle.prompt("do it".into()).await });
 
     let mut seen = Vec::new();
-    let ev = drain(&mut rx, &mut seen).await.expect("a permission ask");
+    let ev = next_permission(&mut rx, &mut seen).await;
     let HarnessEvent::Permission { reply, .. } = ev else {
         unreachable!()
     };
@@ -171,7 +153,7 @@ async fn denying_a_permission_fails_the_tool_call() {
 
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), turn).await;
     let mut after = Vec::new();
-    drain(&mut rx, &mut after).await;
+    drain_until(&mut rx, &mut after, "tool_update:failed").await;
     assert!(
         after.contains(&"tool_update:failed".to_string()),
         "{after:?}"
@@ -182,12 +164,13 @@ async fn denying_a_permission_fails_the_tool_call() {
 /// drops the reply channel, and the harness must still be told.
 #[tokio::test]
 async fn an_expired_permission_denies_rather_than_hanging() {
+    state::isolate();
     let a = ClaudeAdapter::new("2.1.247");
     let (handle, mut rx) = a.launch(&FakeRunner, spec()).await.unwrap();
     let turn = tokio::spawn(async move { handle.prompt("do it".into()).await });
 
     let mut seen = Vec::new();
-    let ev = drain(&mut rx, &mut seen).await.expect("a permission ask");
+    let ev = next_permission(&mut rx, &mut seen).await;
     let HarnessEvent::Permission { reply, .. } = ev else {
         unreachable!()
     };
@@ -195,7 +178,7 @@ async fn an_expired_permission_denies_rather_than_hanging() {
 
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), turn).await;
     let mut after = Vec::new();
-    drain(&mut rx, &mut after).await;
+    drain_until(&mut rx, &mut after, "tool_update:failed").await;
     assert!(
         after.contains(&"tool_update:failed".to_string()),
         "{after:?}"
@@ -207,6 +190,7 @@ async fn an_expired_permission_denies_rather_than_hanging() {
 /// `--version` call that may have run against a different image.
 #[tokio::test]
 async fn a_version_the_node_did_not_pin_refuses_to_launch() {
+    state::isolate();
     let a = ClaudeAdapter::new("2.1.247");
     let spec = spec_env(vec![("FAKE_CLAUDE_VERSION".into(), "2.0.1".into())]);
     let err = match a.launch(&FakeRunner, spec).await {
@@ -226,6 +210,7 @@ async fn a_version_the_node_did_not_pin_refuses_to_launch() {
 /// a way that looks like the model being unhelpful rather than a broken node.
 #[tokio::test]
 async fn an_unreachable_mcp_server_refuses_to_launch() {
+    state::isolate();
     let a = ClaudeAdapter::new("2.1.247");
     let spec = spec_env(vec![("FAKE_CLAUDE_MCP_STATUS".into(), "failed".into())]);
     let err = match a.launch(&FakeRunner, spec).await {
@@ -239,6 +224,7 @@ async fn an_unreachable_mcp_server_refuses_to_launch() {
 /// to be the same string, or a resumed session cannot be found again.
 #[tokio::test]
 async fn the_node_chooses_the_session_id() {
+    state::isolate();
     let a = ClaudeAdapter::new("2.1.247");
     let (handle, _rx) = a.launch(&FakeRunner, spec()).await.unwrap();
     let id = handle.harness_session_id();
@@ -247,6 +233,7 @@ async fn the_node_chooses_the_session_id() {
 
 #[tokio::test]
 async fn a_session_takes_more_than_one_turn() {
+    state::isolate();
     let a = ClaudeAdapter::new("2.1.247");
     let (handle, mut rx) = a.launch(&FakeRunner, spec()).await.unwrap();
     let handle = std::sync::Arc::new(handle);
@@ -255,9 +242,7 @@ async fn a_session_takes_more_than_one_turn() {
         let h = handle.clone();
         let turn = tokio::spawn(async move { h.prompt(format!("round {round}")).await });
         let mut seen = Vec::new();
-        let ev = drain(&mut rx, &mut seen)
-            .await
-            .unwrap_or_else(|| panic!("round {round}: the harness went away"));
+        let ev = next_permission(&mut rx, &mut seen).await;
         let HarnessEvent::Permission { reply, .. } = ev else {
             unreachable!()
         };

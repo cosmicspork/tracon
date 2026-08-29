@@ -618,7 +618,14 @@ impl Config {
     /// (they link the library without `cfg(test)`) and which also makes a
     /// scratch node a one-liner.
     pub fn state_dir() -> PathBuf {
-        if let Some(dir) = std::env::var_os("TRACON_STATE_DIR") {
+        Self::state_dir_from(std::env::var_os("TRACON_STATE_DIR"))
+    }
+
+    /// `state_dir` with the override handed in, so a test can assert both
+    /// branches without touching the process-global environment that every
+    /// other test in the binary is reading.
+    fn state_dir_from(override_dir: Option<std::ffi::OsString>) -> PathBuf {
+        if let Some(dir) = override_dir {
             return PathBuf::from(dir);
         }
         if cfg!(test) {
@@ -703,8 +710,6 @@ mod tests {
     /// credential store, and the override integration tests use because they
     /// link the library without `cfg(test)`.
     ///
-    /// One test, not two: the override is a process-global environment
-    /// variable, so a second test asserting the default would race with it.
     #[test]
     fn tests_never_resolve_the_operators_state_directory() {
         let real = dirs::state_dir()
@@ -712,9 +717,9 @@ mod tests {
             .unwrap_or_default()
             .join("tracon");
 
-        let before = std::env::var_os("TRACON_STATE_DIR");
-        std::env::remove_var("TRACON_STATE_DIR");
-        let dir = Config::state_dir();
+        // Never `remove_var`/`set_var` here: the other tests in this binary
+        // resolve the state dir concurrently and would read the probe value.
+        let dir = Config::state_dir_from(None);
         assert_ne!(dir, real, "a test would write the operator's state");
         assert!(
             dir.to_string_lossy().contains("tracon-test-state"),
@@ -736,15 +741,10 @@ mod tests {
             );
         }
 
-        std::env::set_var("TRACON_STATE_DIR", "/tmp/tracon-override-probe");
-        let overridden = Config::state_dir();
-        match before {
-            Some(v) => std::env::set_var("TRACON_STATE_DIR", v),
-            None => std::env::remove_var("TRACON_STATE_DIR"),
-        }
+        let overridden = Config::state_dir_from(Some("/elsewhere/tracon-override-probe".into()));
         assert_eq!(
             overridden,
-            std::path::PathBuf::from("/tmp/tracon-override-probe")
+            std::path::PathBuf::from("/elsewhere/tracon-override-probe")
         );
     }
     use super::*;
