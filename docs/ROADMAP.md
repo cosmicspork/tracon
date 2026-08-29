@@ -520,6 +520,50 @@ budget; and a question that shares no words with the document that answers it fi
 Both are covered by tests, the second being the standard Phase 4 set for building this
 at all.
 
+## Phase 8: Standing on its own
+
+Not a capability phase. The repository stopped depending on things outside it — an
+external push bridge, a cross-compiler that existed for one target, a test suite that
+wrote into the operator's real state — and started shipping everything it has.
+
+- [x] Phone push from the node itself: RFC 8291 payload encryption and RFC 8292 VAPID
+      over pure-Rust crates, so a static binary still does it. Every node pushes to
+      the devices subscribed at it; the bound-node binding is gone, and removing it was
+      the whole fan-out, because peers' queues already arrived mirrored. A subscription
+      follows the browser session that made it, so a revoked login silences its devices.
+      `notify.enabled` per channel, on by default; the Phase 6 sink values still read.
+- [x] Every release attaches the binaries and the desktop app: `tracon` and
+      `tracon-hub` static for Linux x86_64, `tracon` for Apple Silicon, and the wrapper
+      as AppImage, `.deb` and `.dmg` with the node inside it as a sidecar. The wrapper's
+      version follows the workspace. Zig and the aarch64 Linux target are gone; the one
+      remaining musl leg builds with the native toolchain on every PR, since that is
+      what caught `sqlite-vec` the first time.
+- [x] The node compiles and runs its unit tests on macOS on every PR. It had never been
+      built there in CI despite carrying a launchd path.
+- [x] The test suite cannot reach the operator's state directory: one support module
+      per binary, the guard first in every test, a script that refuses a file without
+      it, and each provider-login test owning its store. The wall-clock guesses
+      (`try_recv().expect`, a quiet-window drain, an unbounded poll, eighteen fixed
+      2.6-second sleeps) became condition waits with deadlines.
+- [x] The repository names nothing but itself and `consulta`: no other project of the
+      operator's, no personal cluster, domain, host or path. `scripts/scrub-check.sh`
+      keeps it that way.
+- [x] A README that installs and sets the thing up: every config key with its default,
+      every command, the hub's environment, and the two rules that generate support
+      questions (loopback needs nothing; the cookie needs TLS).
+
+Not built, recorded so it is not assumed: a real phone has not yet received a push from
+this code — the wire is proven against a fake push service that decrypts with the
+device key and checks the VAPID header, and the node's endpoints are proven live, but
+the first Web Push to a handset is the operator's step after deploy. Windows is not a
+target. The desktop app is unsigned. The AppImage is large (it carries webkit), which
+is Tauri's doing rather than ours.
+
+Exit criteria: a fresh machine goes from the README's one-liner to a running node with
+a phone subscribed, using only what the release attaches; and `cargo test` on a machine
+that also runs a node leaves that node's state byte-for-byte unchanged. The second is
+checked; the first is checked up to the phone.
+
 ## Deferred
 
 Not rejected, not scheduled.

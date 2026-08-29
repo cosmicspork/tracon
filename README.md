@@ -113,44 +113,56 @@ notes app whose `<type>-<slug>` prefix scheme the corpus kept, and an end-to-end
 relay whose trust binding the hub reuses. Phone push was once an external bridge and is
 now built in.
 
-## Running the node
+## Install
 
-Requires a container runtime the node can own (rootless Podman; a Podman machine on
-macOS), `just`, a Rust toolchain, and Bun for the interface.
+Prebuilt binaries ship for Linux x86_64 (static, runs on any distribution) and macOS on
+Apple Silicon. One line fetches the right one, verifies it against the release's
+checksums, and puts it in `~/.local/bin`:
 
 ```sh
-just build      # build the SPA, then the release binary
+curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | sh
+```
+
+`TRACON_VERSION=v0.6.0` pins a release; `TRACON_BIN_DIR` moves the binary. The script
+prints the first-run commands below when it is done.
+
+**The desktop app** is a separate download from the same release — `tracon_<version>_amd64.AppImage`
+or `.deb` on Linux, `tracon_<version>_aarch64.dmg` on macOS. It is a tray client that
+also runs the node for you, and it carries its own copy of the `tracon` binary, so on a
+laptop it is the whole install. It is not signed: macOS wants a right-click → Open the
+first time.
+
+**From source**, for anything else or to hack on it: Rust, Bun, and rootless Podman.
+
+```sh
+just build      # build the SPA, then the release binary (target/release/tracon)
 just setup      # build the gateway and harness images, the internal network, allowlist, and gateway
 just boundary   # verify the boundary, including an egress probe and the forward from inside it
 ./target/release/tracon serve
 ```
 
-On a host that only needs to run a node, skip the toolchain. The published binaries are
-**Linux only** (`x86_64` and `aarch64`, static musl); on macOS the installer stops and
-says so, and the node is built natively instead:
+The desktop app needs webkit2gtk and gtk headers, which an immutable host does not
+have; `just gui` builds it in a container (the recipe says which one) and produces the
+same bundles the release does. `just musl` builds the static Linux binary.
+
+## First run
+
+Everything below is on the machine that runs the node. The binary is `tracon`; the
+node is `tracon serve`, which does not daemonize, so the last step gives it something to
+run under.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | sh
-# on macOS, or any other platform:
-cargo install --git https://github.com/cosmicspork/tracon tracon
-
-tracon setup                        # the container definitions ship inside the binary
-tracon credential import creds.toml # a model credential, or connect a provider from the Nodes screen
-tracon check-boundary --deep
-tracon service install              # run it under systemd or launchd
+tracon setup                        # the harness network and gateway; the container definitions ship inside the binary
+tracon check-boundary --deep        # prove the boundary: every check, plus an egress probe from inside it
+tracon service install              # run it under systemd or launchd …
+tracon-wrapper                      # … or let the desktop app run it (tracon service uninstall to switch)
 ```
 
-As a pod (the work topology), the node is an image rather than a binary, and the
-boundary is Kubernetes: one harness pod per session, a NetworkPolicy that makes the node
-the harness's only route, and the node serving the allowlist proxy itself. The manifests
-are in `deploy/kubernetes/base`, ready for a kustomize overlay that sets the
-namespace, the image tag and the storage class.
-
-```sh
-kubectl apply -k deploy/kubernetes/base
-kubectl -n tracon-lab exec deploy/tracon-node -- tracon check-boundary --deep
-kubectl -n tracon-lab port-forward deploy/tracon-node 7420:7420
-```
+Then a model credential, without which sessions cannot start: open the interface
+(`http://127.0.0.1:7420`), go to **Nodes**, and connect a provider — the harness's own
+login runs on the node and the code is pasted back there. An API key instead is
+`tracon credential import creds.toml`. To join an existing mesh rather than start one,
+`tracon enroll <invitation url>` first; see [The mesh](#the-mesh).
 
 `tracon check-boundary` prints each check and exits non-zero naming the first failure.
 A node that fails refuses to run harnesses; it still serves the interface and says which
@@ -158,8 +170,45 @@ check failed. That refusal is the design working, not a bug to route around.
 
 The harness reaches exactly two things: allowlisted provider hosts through the gateway's
 proxy, and the node through the gateway's forward. The allowlist is generated from
-`[gateway] allow_hosts` in `~/.config/tracon/node.toml`; a provider that is not listed is
-denied, which shows up as a model call that cannot connect.
+`[gateway] allow_hosts`; a provider that is not listed is denied, which shows up as a
+model call that cannot connect.
+
+### Reaching it from another device
+
+On its own machine the node answers loopback with no ceremony: the CLI, `just dev` and
+`kubectl port-forward` all arrive that way. Anything else is refused until a token
+exists:
+
+```sh
+tracon auth issue          # printed once; exchanged for a cookie at the login screen
+tracon auth sessions       # what is logged in
+tracon auth revoke         # loopback only again
+```
+
+The cookie is `Secure`, so the node has to be behind TLS (an ingress, a reverse proxy)
+for a browser to keep it — a plain-HTTP node on the LAN is not a supported way to use
+it; `localhost` counts as secure. Issuing a token again rotates it and logs every client
+out. `TRACON_TOKEN` lets the CLI reach a remote node (`TRACON_URL` says which).
+
+From a phone: log in, add the interface to the Home Screen (iOS only pushes to an
+installed web app), open **Nodes**, and switch on **Push to this device**. See
+[Clients](#clients) for what that does.
+
+### As a pod
+
+The node is an image rather than a binary, and the boundary is Kubernetes: one harness
+pod per session, a NetworkPolicy that makes the node the harness's only route, and the
+node serving the allowlist proxy itself. The manifests are in `deploy/kubernetes/base`,
+ready for a kustomize overlay that sets the namespace, the image tag and the storage
+class.
+
+```sh
+kubectl apply -k deploy/kubernetes/base
+kubectl -n <namespace> exec deploy/tracon-node -- tracon check-boundary --deep
+kubectl -n <namespace> port-forward deploy/tracon-node 7420:7420
+```
+
+### Where things live
 
 Configuration and state live where the platform puts them, which on macOS is the same
 directory for both:
@@ -170,8 +219,141 @@ directory for both:
 | database, credentials, identity, harness volume, scratch | `~/Library/Application Support/tracon/` | `~/.local/state/tracon/` |
 | harness socket | (TCP `127.0.0.1:7421` through the VM) | `$XDG_RUNTIME_DIR/tracon/harness.sock` |
 
-The gateway forwards to the node over TCP on a Podman machine and over that Unix socket
-on a Linux host; `[gateway] harness_listen` takes either form.
+`TRACON_STATE_DIR` overrides the state directory outright, which is how a scratch node
+is run beside a real one (`XDG_RUNTIME_DIR` must be short — a long path hits the Unix
+socket limit and fails as `bind …/harness.sock`). `TRACON_LISTEN` or `serve --listen`
+moves the API off `127.0.0.1:7420`.
+
+### Configuration
+
+`node.toml` is optional; every key has a default. The full set, with defaults:
+
+```toml
+node_name = "<hostname>"            # how this node is named in the mesh
+
+[harness]
+id = "omp"                          # "omp" or "claude"; an unknown id refuses to start
+version = "18.0.4"                  # pinned; checked against the image and the host
+tools = []                          # extra tool names to offer; empty is everything the harness has
+
+[boundary]                          # the rootless-Podman boundary a laptop establishes
+network = "tracon-int"
+subnet = "10.89.0.0/24"
+gateway_ip = "10.89.0.2"
+gateway_container = "tracon-gw"
+gateway_image = "localhost/tracon-gateway"
+harness_image = "localhost/tracon-harness"
+# selinux_label_disable = true      # only if the boundary check says the labels fight you
+
+[gateway]
+allow_hosts = ['^api\.anthropic\.com$', '^api\.openai\.com$', '^chatgpt\.com$', '^auth\.openai\.com$']
+proxy_port = 8888
+forward_port = 7421
+# harness_listen = "127.0.0.1:7421" # or a socket path; the platform default is right
+
+[session]
+budget_tokens = 2000000             # per session
+permission_timeout_secs = 900       # an unanswered ask is a deny
+claim_grace_secs = 60               # a review claim lapses this long after the client vanishes
+# worktree_root = "/tmp"            # /private/tmp on macOS
+
+[runtime]
+kind = "podman"                     # or "kubernetes", for a pod-hosted node
+# [runtime.kubernetes]              # namespace, harness_image, state_claim, state_mount, harness_home, uid, gateway_host
+
+[providers.anthropic]               # anthropic and openai are built in; add others the same way
+credential = "anthropic"
+upstream = "https://api.anthropic.com"
+shape = "anthropic"                 # or "openai"
+# login = "…"                       # the harness's login flow, if it has one
+# [providers.anthropic.price]
+# input_per_mtok = 3.0
+# output_per_mtok = 15.0
+
+[consulta]                          # the database MCP tools, run as a sidecar
+command = "uv"
+args = ["run", "--project", "~/src/consulta", "consulta"]
+timeout_secs = 60
+
+[publish]                           # the binaries the node runs to publish an approved review
+gh = "gh"
+glab = "glab"
+git = "git"
+
+[mesh]
+# hub_url = "https://hub.example.com"   # set by tracon mesh init / enroll
+heartbeat_secs = 60
+poll_secs = 30
+command_timeout_secs = 15
+
+[memory]
+promote_at = "02:00"                # the nightly promotion batch
+
+[supervision]
+checks = ["just check"]             # run in the worktree before a review is accepted
+timeout_secs = 900
+
+[review]
+max_diff_lines = 800                # a bigger submission is refused before any check runs
+max_files = 40
+
+[notify]
+# contact = "mailto:you@example.com"    # what a push service may write to about this sender
+
+[embed]                             # semantic search; off unless enabled
+enabled = false
+base_url = "http://127.0.0.1:8080"  # an OpenAI-shaped /v1/embeddings
+model = "bge-m3"
+dim = 1024                          # must match the model; changing it rebuilds the index
+# api_key_file = "~/.config/llama-server.key"
+# provider = "anthropic"            # instead of base_url: through the gateway, so the channel ceiling applies
+batch = 16
+timeout_secs = 60
+```
+
+For `[embed]`, a local `llama-server --embedding -m <model>.gguf --host 127.0.0.1 --port 8080`
+is enough; BGE-M3 and Qwen3-Embedding-0.6B (which wants `pooling = last`) are the models
+it was built against. Without an endpoint, search is text-only and the Documents screen
+says so.
+
+### Commands
+
+| | |
+|---|---|
+| `tracon serve [--listen]` | run the node |
+| `tracon setup [--rebuild]`, `check-boundary [--deep]` | the boundary |
+| `tracon service install\|uninstall\|status` | the platform supervisor |
+| `tracon auth issue\|revoke\|sessions` | off-machine access |
+| `tracon push ls\|rm <id>\|test` | the phones this node pushes to |
+| `tracon mesh id\|init\|invite\|members\|remove\|admit`, `enroll` | the mesh |
+| `tracon channel create\|list\|bind\|share` | channels and their bindings |
+| `tracon credential import\|ls\|rm\|share` | what the broker holds |
+| `tracon doc import\|ls\|get\|put\|rm\|export` | documents |
+| `tracon memory ls\|add\|rm\|recall\|batch` | memories, and the promotion batch on demand |
+| `tracon work add\|ls\|ready\|show\|close\|dep\|rm` | the ledger |
+| `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |
+| `tracon metrics [--channel] [--days]`, `provenance <sha>` | what happened |
+
+Every command talks to the running node over its API; `--help` on any of them says more.
+
+### The hub
+
+The hub is a separate binary, `tracon-hub`, shipped as a static Linux binary and as the
+`ghcr.io/cosmicspork/tracon-hub` image. It is configured by environment:
+
+| Variable | Default | |
+|---|---|---|
+| `TRACON_HUB_ADDR` | `127.0.0.1:8080` | listen address (the image sets `0.0.0.0:8080`) |
+| `TRACON_HUB_DATA_DIR` | in memory, with a warning | durable frames, members and the replica |
+| `TRACON_HUB_ADMIT` | — | the first node's id, so something can connect |
+| `TRACON_HUB_RETAIN_DAYS` | 14 | how long frames are kept |
+| `TRACON_HUB_MAX_SKEW_SECS`, `TRACON_HUB_MAX_CHANNEL_BYTES`, `TRACON_HUB_ENROLL_TTL_SECS`, `TRACON_HUB_ENROLL_RATE_PER_MIN` | 300, 256 MiB, 600, — | limits |
+| `TRACON_HUB_REPLICA` | on when there is a data dir | the hub's own replica of what it can open |
+| `TRACON_HUB_PROMOTE_AT` | `03:00` | the hub-side promotion batch |
+| `TRACON_HUB_SNAPSHOT_ENDPOINT`, `_BUCKET`, `_ACCESS_KEY`, `_SECRET_KEY`, `_PREFIX`, `_EVERY_HOURS`, `_KEEP`, `_PUBKEY` | — | encrypted snapshots to S3-compatible storage; `tracon-hub snapshot-key` makes the key |
+| `TRACON_HUB_RESTORE_SEED` | — | for `tracon-hub restore` |
+
+## Using it
 
 ### The mesh
 
@@ -307,31 +489,13 @@ a tray showing what is waiting, a global hotkey, command-tab presence, and syste
 notifications. It holds no session state — the window is the interface the node serves,
 so a crash there is a reconnect and never lost work.
 
-Something has to run the node, which does not daemonize. Either the platform:
-
-```bash
-tracon service install     # a systemd user unit, or a LaunchAgent on macOS
-tracon service status
-```
-
-or the wrapper itself, which is the better answer on a laptop where the node is only
-wanted while you are logged in. It starts one on launch and stops it on quit, and it
-**adopts** a node that is already answering rather than starting a second — two nodes
-over one state directory would fight over the same database and harness socket. So a
-machine that must stay reachable through logout keeps the unit, and running both is not
-a mistake you can make.
-
-Off its own machine, the node wants a credential. Loopback is unchanged — the CLI and
-`just dev` need nothing — but anything else needs a token:
-
-```bash
-tracon auth issue          # printed once; exchanged for a cookie at the login screen
-tracon auth sessions       # what is logged in
-tracon auth revoke         # loopback only again
-```
-
-Issuing a token again rotates it and logs every client out. Set `TRACON_TOKEN` to reach
-a remote node from the CLI.
+Something has to run the node, which does not daemonize: the platform's supervisor
+(`tracon service install`) or the desktop app, which starts one on launch and stops it
+on quit, and **adopts** a node that is already answering rather than starting a second —
+two nodes over one state directory would fight over the same database and harness
+socket. A machine that must stay reachable through logout keeps the unit; running both
+is not a mistake you can make. Off its own machine the node wants a token; see
+[Reaching it from another device](#reaching-it-from-another-device).
 
 What is waiting can be pushed to where you are. On the phone, open the Nodes screen and
 switch on **Push to this device**; the node pushes straight to the phone's push service

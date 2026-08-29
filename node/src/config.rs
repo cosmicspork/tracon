@@ -742,6 +742,41 @@ mod tests {
     }
     use super::*;
 
+    /// The README's `node.toml` reference is checked, not trusted: every key it
+    /// names must exist, and the values it shows as defaults must be them.
+    #[test]
+    fn the_readme_configuration_block_is_a_valid_node_toml() {
+        let readme = include_str!("../../README.md");
+        let block = readme
+            .split("```toml\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("README has a toml block");
+        let parsed: Config =
+            toml::from_str(block).unwrap_or_else(|e| panic!("README node.toml: {e}"));
+        let d = Config::default();
+        assert_eq!(parsed.harness.id, d.harness.id);
+        assert_eq!(parsed.harness.version, d.harness.version);
+        assert_eq!(parsed.gateway.allow_hosts, d.gateway.allow_hosts);
+        assert_eq!(parsed.gateway.proxy_port, d.gateway.proxy_port);
+        assert_eq!(parsed.session.budget_tokens, d.session.budget_tokens);
+        assert_eq!(
+            parsed.session.permission_timeout_secs,
+            d.session.permission_timeout_secs
+        );
+        assert_eq!(parsed.mesh.heartbeat_secs, d.mesh.heartbeat_secs);
+        assert_eq!(parsed.memory.promote_at, d.memory.promote_at);
+        assert_eq!(parsed.supervision.checks, d.supervision.checks);
+        assert_eq!(parsed.review.max_diff_lines, d.review.max_diff_lines);
+        assert_eq!(parsed.embed.dim, d.embed.dim);
+        assert_eq!(parsed.embed.batch, d.embed.batch);
+        assert_eq!(parsed.boundary.subnet, d.boundary.subnet);
+        assert_eq!(
+            parsed.providers["anthropic"].upstream,
+            d.providers["anthropic"].upstream
+        );
+    }
+
     #[test]
     fn strict_load_rejects_a_typo_and_round_trips() {
         let dir = std::env::temp_dir().join(format!("tracon-cfg-{}", std::process::id()));
