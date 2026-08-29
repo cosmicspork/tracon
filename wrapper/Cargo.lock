@@ -4368,7 +4368,7 @@ dependencies = [
 
 [[package]]
 name = "tracon-wrapper"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "futures-util",
  "reqwest 0.12.28",

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.6.0](https://github.com/cosmicspork/tracon/compare/v0.5.0...v0.6.0) (2026-08-29)
+
+
+### Features
+
+* **adapter:** drive Claude Code over its stream-json control protocol ([#74](https://github.com/cosmicspork/tracon/issues/74)) ([fbeb4d8](https://github.com/cosmicspork/tracon/commit/fbeb4d896f15f76c705e177399eec36f6d8ab59b))
+* **corpus:** fuse the vector index into recall ([#75](https://github.com/cosmicspork/tracon/issues/75)) ([4fa9c67](https://github.com/cosmicspork/tracon/commit/4fa9c6792c6f979f8e003bd5d59892428a6683b5))
+* embeddings and a vector index beside FTS5 ([#71](https://github.com/cosmicspork/tracon/issues/71)) ([f11ce87](https://github.com/cosmicspork/tracon/commit/f11ce872e3697f309cae84b2f43115c03cf6b9f8))
+* **embed:** let the embedding endpoint want an API key ([#77](https://github.com/cosmicspork/tracon/issues/77)) ([816339e](https://github.com/cosmicspork/tracon/commit/816339e85580f127023778c603fce3db76851b29))
+* **notify:** push to the phone from the node itself, no bridge in between ([#82](https://github.com/cosmicspork/tracon/issues/82)) ([f774511](https://github.com/cosmicspork/tracon/commit/f7745117ace87f8550b84e1e71ee29a088a74f04))
+* **wrapper:** let the app run the node it talks to ([#78](https://github.com/cosmicspork/tracon/issues/78)) ([58cbda8](https://github.com/cosmicspork/tracon/commit/58cbda827607910705ce0122f29bd542e7a25828))
+
+
+### Bug Fixes
+
+* **config:** stop the test suite writing the operator's state directory ([#79](https://github.com/cosmicspork/tracon/issues/79)) ([9fd19b1](https://github.com/cosmicspork/tracon/commit/9fd19b1ab5a76e4208e823ed0cbb2a0e58fde9f5))
+* **spa:** stop the patch fuzz test spawning a repo per round ([#72](https://github.com/cosmicspork/tracon/issues/72)) ([48d55ef](https://github.com/cosmicspork/tracon/commit/48d55ef21394a7574d92a33c95f731b3f3bf3c2a))
+
 ## [0.5.0](https://github.com/cosmicspork/tracon/compare/v0.4.0...v0.5.0) (2026-08-28)
 
 
