@@ -5,6 +5,7 @@
   import { surface } from '../lib/surface.svelte'
 
   import ChannelMeters from '../components/ChannelMeters.svelte'
+  import Notifications from '../components/Notifications.svelte'
   import { api } from '../lib/api'
   import type { ProviderInfo } from '../lib/types'
 
@@ -169,6 +170,9 @@
             </div>
           {/each}
         </div>
+      {/if}
+      {#if node.is_self}
+        <Notifications />
       {/if}
     {/each}
   </div>

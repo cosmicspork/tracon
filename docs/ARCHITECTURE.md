@@ -538,8 +538,8 @@ named processing node and a named provider.
 
 | Channel | Processing node | Provider | Sink | Brokered tools |
 |---|---|---|---|---|
-| Personal | hub | DigitalOcean GradientAI | pager | consulta |
-| Client | hub | DigitalOcean GradientAI (permitted by contract) | pager | consulta |
+| Personal | hub | DigitalOcean GradientAI | phone push | consulta |
+| Client | hub | DigitalOcean GradientAI (permitted by contract) | phone push | consulta |
 | Work | work laptop node | Local models only | desktop wrapper | `mr_status` / `mr_comment` (GitLab), `issue` / `issue_comment` (Jira), consulta (work node only, by node binding) |
 
 Work-channel embeddings run locally on the laptop. Embedding models are small enough
@@ -964,7 +964,8 @@ pod does not.
   rule. *Revised in Phase 6:* it reads a node directly over an HTTPS ingress with a
   session cookie rather than over the hub — the hub still never talks to a browser.
   See "Reaching a node".
-- A backgrounded PWA cannot hold a socket. Notifications go through pager.
+- A backgrounded PWA cannot hold a socket. Notifications arrive as Web Push,
+  sent by the node the phone subscribed at.
 - **Scope is directing work, not writing code.** Read a diff, approve or reject, send a
   prompt, read output, kill a stuck session.
 
@@ -1039,30 +1040,32 @@ client-held state, and it is confined to the surface least likely to lose it.
 
 ## Notification sinks
 
-Bound per channel like processing nodes.
-
-| Channel | Sink |
+| Surface | How |
 |---|---|
-| Personal, client | pager (E2E-encrypted phone push, already built) |
-| Work | Desktop wrapper tray |
+| Phone (any channel) | Web Push from the node the phone subscribed at, sealed to the phone's key |
+| Desktop | The wrapper's tray, from the queue it already reads |
 
-Work approvals do not require the phone, which removes the need to tunnel anything out
-of the work machine and eliminates the asymmetry that would otherwise need explaining.
+**Built (Phase 6, reworked in Phase 8).** Every node pushes to the devices subscribed
+at *it*; there is no bound delivering node. A phone subscribes wherever it logs in,
+and a queue mirrored onto three nodes reaches a phone subscribed at one of them once.
+A phone logged into two nodes hears from both, and the banner's `tag` — the same on
+every node for the same item — makes the second replace the first rather than stack.
+Whether a channel notifies at all is the `notify.enabled` binding, on by default: the
+subscribed device is the opt-in now.
 
-**Built (Phase 6).** `notify.sink` and `notify.node` are channel bindings like any
-other, so exactly one node in a mesh delivers for a channel and a queue mirrored onto
-three nodes still buzzes once. The delivering node reads the *bus*, not the session
-manager: a peer's approval arrives mirrored and is published untapped, which reaches
-subscribers but never `Manager::publish_queue`. Hooking the manager would have silently
-missed the case the phase exists for — the other laptop raised it and this node is the
-one awake.
+The delivering task reads the *bus*, not the session manager: a peer's approval
+arrives mirrored and is published untapped, which reaches subscribers but never
+`Manager::publish_queue`. Hooking the manager would have silently missed the case the
+phone exists for — the other laptop raised it and this node is the one awake.
 
-Delivery is a POST to a pager bridge, which holds the device keys and seals per device;
-the node holds no notification secret. Because a bridge on a laptop cannot page while
-the laptop sleeps, a second bridge runs beside the always-on services, and pager's relay
-now authorizes a set of bridge keys rather than one. Pushes are hints: the queue is the
-truth, so a failed send is logged and dropped rather than retried forever, and a slow
-sink can never block a session.
+Delivery is RFC 8291 payload encryption and RFC 8292 VAPID, done in the node over
+pure-Rust crates so the static build stays static. The node holds one VAPID key per
+node (in `kv`, never replicated) and, per device, only the subscription's public half;
+a push service sees ciphertext and a signature naming the node, and the phone's service
+worker sees a title, a body and a path on the node's own origin. A subscription is tied
+to the browser session that registered it, so revoking a login silences its devices.
+Pushes are hints: the queue is the truth, so a failed send is retried once and dropped,
+a `410` forgets the device, and a slow push service can never block a session.
 
 What it does not do is as deliberate: it does not announce the standing queue at
 startup (a redeploy is not news), and it does not page again when a review returns to
@@ -1165,7 +1168,7 @@ claim/release (see [Metrics](#metrics)); the mesh frame format (see
 | `review` | Contract absorbed. Broker makes it enforcing. Repo retired. |
 | `notebook` | Document corpus absorbed. Prefix scheme kept. Repo retired. |
 | `switchboard` | Superseded by the desktop wrapper. Retired last, after it stops supervising the things being replaced. On Linux it installs nothing, so what moves is macOS-only. Its display-linked theme switcher was **deliberately killed** in Phase 6 rather than rehomed. |
-| `pager` | Kept. Becomes the notification sink for personal and client channels. |
+| `pager` | Retired. Its phone-push role moved into the node and the PWA (Phase 8). |
 | `svastha` | Relay and trust-binding patterns reused. |
 | `consulta` | Absorbed as node MCP tools (`query`, `describe`) with a node-owned Python sidecar. Guard contract kept. Repo retired after the tool has been in real use. |
 | `kritee` | Out of scope. Unchanged. |

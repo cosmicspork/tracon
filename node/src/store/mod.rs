@@ -1011,6 +1011,39 @@ mod records {
         pub user_agent: Option<String>,
     }
 
+    /// A phone (or any browser) this node pushes to. Keys are kept as the
+    /// browser gave them, base64url.
+    #[derive(Debug, Clone)]
+    pub struct PushSubscriptionRow {
+        pub id: String,
+        /// The `auth_session` that registered it; `None` for a browser on
+        /// this machine, which never logs in.
+        pub session_hash: Option<String>,
+        pub endpoint: String,
+        pub p256dh: String,
+        pub auth: String,
+        pub user_agent: Option<String>,
+        pub created_ms: i64,
+        pub last_ok_ms: Option<i64>,
+        pub fail_count: i64,
+    }
+
+    impl PushSubscriptionRow {
+        pub fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+            Ok(Self {
+                id: r.get("id")?,
+                session_hash: r.get("session_hash")?,
+                endpoint: r.get("endpoint")?,
+                p256dh: r.get("p256dh")?,
+                auth: r.get("auth")?,
+                user_agent: r.get("user_agent")?,
+                created_ms: r.get("created_ms")?,
+                last_ok_ms: r.get("last_ok_ms")?,
+                fail_count: r.get("fail_count")?,
+            })
+        }
+    }
+
     impl AuthSessionRow {
         pub(super) fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Self> {
             Ok(Self {
@@ -1510,6 +1543,12 @@ impl Store {
             }
         }
         tx.execute("DELETE FROM auth_session", [])?;
+        // The devices those clients registered go with them; a browser on
+        // this machine has no session and stays.
+        tx.execute(
+            "DELETE FROM push_subscription WHERE session_hash IS NOT NULL",
+            [],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -1569,7 +1608,105 @@ impl Store {
     pub fn auth_sessions_purge(&self, now: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM auth_session WHERE expires_ms <= ?1", [now])?;
+        conn.execute(
+            "DELETE FROM push_subscription WHERE session_hash IS NOT NULL
+             AND session_hash NOT IN (SELECT token_hash FROM auth_session)",
+            [],
+        )?;
         Ok(())
+    }
+
+    // ---- push subscriptions ----
+
+    /// Register or refresh a device by its endpoint: a browser that
+    /// resubscribes after a re-login re-binds the same endpoint to the new
+    /// session rather than leaving an orphan.
+    pub fn push_subscription_upsert(&self, r: &PushSubscriptionRow) -> Result<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO push_subscription
+                (id, session_hash, endpoint, p256dh, auth, user_agent, created_ms, last_ok_ms, fail_count)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,NULL,0)
+             ON CONFLICT(endpoint) DO UPDATE SET
+                session_hash=excluded.session_hash, p256dh=excluded.p256dh,
+                auth=excluded.auth, user_agent=excluded.user_agent, fail_count=0",
+            rusqlite::params![
+                r.id,
+                r.session_hash,
+                r.endpoint,
+                r.p256dh,
+                r.auth,
+                r.user_agent,
+                r.created_ms
+            ],
+        )?;
+        conn.query_row(
+            "SELECT id FROM push_subscription WHERE endpoint=?1",
+            [&r.endpoint],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Every device whose session is still logged in, or that belongs to a
+    /// browser on this machine.
+    pub fn push_subscriptions_live(&self, now: i64) -> Result<Vec<PushSubscriptionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT p.* FROM push_subscription p
+             LEFT JOIN auth_session a ON a.token_hash = p.session_hash
+             WHERE p.session_hash IS NULL OR a.expires_ms > ?1
+             ORDER BY p.created_ms",
+        )?;
+        let rows = stmt.query_map([now], PushSubscriptionRow::from_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn push_subscriptions(&self) -> Result<Vec<PushSubscriptionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT * FROM push_subscription ORDER BY created_ms")?;
+        let rows = stmt.query_map([], PushSubscriptionRow::from_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn push_subscription_delete(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("DELETE FROM push_subscription WHERE id=?1", [id])? > 0)
+    }
+
+    pub fn push_subscription_delete_endpoint(&self, endpoint: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "DELETE FROM push_subscription WHERE endpoint=?1",
+            [endpoint],
+        )? > 0)
+    }
+
+    /// A delivery landed: the device is alive, and any run of failures ends.
+    pub fn push_subscription_ok(&self, id: &str, now: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE push_subscription SET last_ok_ms=?2, fail_count=0 WHERE id=?1",
+            rusqlite::params![id, now],
+        )?;
+        Ok(())
+    }
+
+    /// A delivery did not land; returns the run of failures so far.
+    pub fn push_subscription_failed(&self, id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE push_subscription SET fail_count=fail_count+1 WHERE id=?1",
+            [id],
+        )?;
+        conn.query_row(
+            "SELECT fail_count FROM push_subscription WHERE id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .map_err(Into::into)
     }
 
     // ---- review ----

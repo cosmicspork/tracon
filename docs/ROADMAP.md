@@ -423,7 +423,8 @@ a channel binding, so there is nothing for a subagent to inherit; and
       and passing an endless SSE response through a fetch handler breaks it. Tested
       by loading the worker against stubs rather than through a browser, so the
       no-`/api` rule is checked on every PR.
-- [x] Notification sinks bound per channel (pager for personal and client). The task
+- [x] Notification sinks bound per channel (a pager bridge, then; every node pushes
+      Web Push to its own devices since Phase 8). The task
       reads the bus rather than the manager, which is what makes a *peer's* approval
       reach the phone: mirrored state is published untapped, and `publish_untapped`
       never reaches `Manager::publish_queue`. Hooking the manager would have missed

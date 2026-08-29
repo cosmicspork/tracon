@@ -41,6 +41,11 @@ hex.workspace = true
 sha2.workspace = true
 mime_guess.workspace = true
 rand = "0.9"
+# Web Push: P-256 ECDH + ES256 for VAPID (RFC 8292), AES-128-GCM for the
+# payload (RFC 8291). Pure Rust, so the static musl build stays static.
+p256 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 kube = { version = "4", default-features = false, features = ["client", "rustls-tls", "ws"] }
 k8s-openapi = { version = "0.28", features = ["v1_33"] }

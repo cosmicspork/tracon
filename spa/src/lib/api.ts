@@ -4,14 +4,15 @@
 import type {
   ChannelInfo,
   ChannelMetrics,
+  Document,
   Event,
   Invite,
-  Document,
   MeshState,
   NodeInfo,
   Promotion,
   PromotionItem,
   ProviderInfo,
+  PushDevice,
   Queue,
   RecallHit,
   Review,
@@ -67,6 +68,17 @@ export const api = {
   nodes: () => call<NodeInfo[]>('GET', '/api/nodes'),
   mesh: () => call<MeshState>('GET', '/api/mesh'),
   channels: () => call<ChannelInfo[]>('GET', '/api/channels'),
+  /** Dotted keys nest; `null` removes. Handed to every member of the channel. */
+  putChannelBindings: (name: string, patch: Record<string, unknown>) =>
+    call<{ name: string; bindings: Record<string, unknown> }>('PUT', `/api/channels/${name}/bindings`, patch),
+  // Push: this node pushes to the phones subscribed here.
+  pushKey: () => call<{ key: string }>('GET', '/api/push/key'),
+  pushDevices: () => call<{ devices: PushDevice[] }>('GET', '/api/push/subscriptions'),
+  putPushSubscription: (sub: unknown) => call<{ id: string }>('POST', '/api/push/subscriptions', sub),
+  deletePushSubscription: (id: string) => call<void>('DELETE', `/api/push/subscriptions/${id}`),
+  deletePushSubscriptionByEndpoint: (endpoint: string) =>
+    call<void>('DELETE', '/api/push/subscriptions', { endpoint }),
+  testPush: () => call<{ sent: { id: string; outcome: string }[] }>('POST', '/api/push/test', {}),
   queue: () => call<Queue>('GET', '/api/queue'),
   sessions: () => call<Session[]>('GET', '/api/sessions'),
   session: (id: string) =>

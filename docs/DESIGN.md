@@ -210,7 +210,7 @@ Three flows, as text. Each ends with the questions it raised and the decisions t
 ### Approval
 
 ```
-notification (pager / tray / browser)
+notification (phone push / tray / browser)
   → queue, item at top, state: new
   → open item
       → claim: automatic on open, released on decide, back, or client disconnect

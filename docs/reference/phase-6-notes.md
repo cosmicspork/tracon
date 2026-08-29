@@ -3,6 +3,11 @@
 Written 2026-08-29, while building it. What the roadmap does not have room for:
 the decisions, the runbooks, and the things that only showed up when it ran.
 
+> **Superseded in part.** The pager bridge, the `notify.sink`/`notify.node` bindings
+> and the cluster runbook below were replaced in Phase 8 by Web Push from every node
+> to its own devices; see ARCHITECTURE "Notification sinks". Kept as the record of
+> what was built and why.
+
 ## The gap the phase opened with
 
 The exit criterion is directing a task from the phone with both laptops closed, so

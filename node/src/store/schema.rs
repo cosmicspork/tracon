@@ -250,6 +250,25 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX embedding_source ON embedding(source_table, source_id);
     CREATE INDEX embedding_channel ON embedding(channel);
     "#,
+    // 11: the phones this node pushes to. A subscription is the public half
+    // of a device key pair plus the push service's URL for it; the node can
+    // seal to it but never read a push back. Tied to the browser session that
+    // registered it, so revoking a client also silences its devices; a NULL
+    // session is a browser on this machine, which never logs in.
+    r#"
+    CREATE TABLE push_subscription (
+        id           TEXT PRIMARY KEY,
+        session_hash TEXT,
+        endpoint     TEXT NOT NULL UNIQUE,
+        p256dh       TEXT NOT NULL,
+        auth         TEXT NOT NULL,
+        user_agent   TEXT,
+        created_ms   INTEGER NOT NULL,
+        last_ok_ms   INTEGER,
+        fail_count   INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX push_subscription_session ON push_subscription(session_hash);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build
