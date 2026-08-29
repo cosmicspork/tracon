@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 use tracon_sync::work::{Readiness, WorkItem};
 use tracon_sync::{Applied, Change, ChangeOp};
 
+use super::vectors::Neighbour;
+
 use super::{now_ms, Result, SessionRow, Store, StoreError};
 
 /// Kinds a memory can be. Directives are human-authored and always injected.
@@ -230,6 +232,66 @@ impl PromotionRow {
             "created_ms": self.created_ms,
         })
     }
+}
+
+/// How much a vector hit is worth, by its position in the neighbour list.
+///
+/// Bounded below one tier step on purpose. The tiers are not a relevance
+/// heuristic — they are a decision that the operator's standing directives
+/// outrank facts, and promoted lessons outrank documents. A semantic match is
+/// evidence about relevance, not about that, so it reorders *within* a tier
+/// and can never carry a stale fact above a directive.
+fn vector_bonus(pos: usize) -> f64 {
+    0.9 / (1.0 + pos as f64)
+}
+
+/// The best chunk per record, as `id -> (position, offset, len)`. A document
+/// matching in three places is one hit at its nearest chunk, not three.
+fn nearest_by_source<'a>(
+    vectors: &'a [Neighbour],
+    table: &str,
+) -> std::collections::HashMap<&'a str, (usize, i64, i64)> {
+    let mut out = std::collections::HashMap::new();
+    for (pos, n) in vectors
+        .iter()
+        .filter(|n| n.source_table == table)
+        .enumerate()
+    {
+        out.entry(n.source_id.as_str())
+            .or_insert((pos, n.offset, n.len));
+    }
+    out
+}
+
+/// What a document is embedded as. The title carries real meaning and is
+/// worth indexing — but the corpus's own documents start with the title as an
+/// H1, and prepending it again puts it in the snippet twice.
+pub fn embed_text(title: &str, body: &str) -> String {
+    if title.is_empty() {
+        return body.to_string();
+    }
+    let head = body.trim_start().trim_start_matches('#').trim_start();
+    if head.starts_with(title) {
+        return body.to_string();
+    }
+    format!("{title}\n\n{body}")
+}
+
+/// The text a vector hit actually matched, read back out of the record. The
+/// embedder indexes a document as title then body, so offsets index that.
+fn span_of(title: &str, body: &str, offset: i64, len: i64) -> String {
+    let text = embed_text(title, body);
+    let start = (offset.max(0) as usize).min(text.len());
+    let end = ((offset + len).max(0) as usize).min(text.len());
+    // Offsets came from this text, but a record edited since indexing may be
+    // shorter; falling back to the head is better than panicking on a slice.
+    let slice = text.get(start..end).unwrap_or("");
+    let slice = if slice.trim().is_empty() {
+        &text
+    } else {
+        slice
+    };
+    slice.trim().chars().take(400).collect()
 }
 
 /// Turn free text into an FTS5 query: each word quoted, any word may match,
@@ -525,18 +587,11 @@ impl Store {
         let rows = stmt.query_map([], |r| {
             let title: String = r.get(2)?;
             let body: String = r.get(3)?;
-            // The title is part of what a document is about, so it is embedded
-            // with it rather than being searchable only through FTS.
-            let text = if title.is_empty() {
-                body
-            } else {
-                format!("{title}\n\n{body}")
-            };
             Ok((
                 "document".to_string(),
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                text,
+                embed_text(&title, &body),
             ))
         })?;
         for row in rows {
@@ -568,33 +623,103 @@ impl Store {
         text: &str,
         limit: usize,
     ) -> Result<Vec<RecallHit>> {
+        self.doc_search_hybrid(channel, kind, text, limit, &[])
+    }
+
+    /// The same, with the vector index's neighbours folded in. An empty
+    /// `vectors` is the text-only path above, unchanged — which is what makes
+    /// "a node with no embedding endpoint behaves exactly as before" a
+    /// property of the code rather than a claim about it.
+    pub fn doc_search_hybrid(
+        &self,
+        channel: Option<&str>,
+        kind: Option<&str>,
+        text: &str,
+        limit: usize,
+        vectors: &[Neighbour],
+    ) -> Result<Vec<RecallHit>> {
+        let near = nearest_by_source(vectors, "document");
         let q = fts_query(text);
-        if q.is_empty() {
+        if q.is_empty() && near.is_empty() {
             return Ok(Vec::new());
         }
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT d.id, d.slug, d.title, snippet(document_fts, 1, '', '', '…', 14) AS snip, bm25(document_fts) AS score
-             FROM document_fts JOIN document d ON d.rowid = document_fts.rowid
-             WHERE document_fts MATCH ?1 AND d.deleted = 0
-               AND (?2 IS NULL OR d.channel = ?2) AND (?3 IS NULL OR d.kind = ?3)
-             ORDER BY score LIMIT ?4",
-        )?;
-        let rows = stmt
-            .query_map(params![q, channel, kind, limit as i64], |r| {
-                Ok(RecallHit {
-                    kind: "document".into(),
-                    id: r.get(0)?,
-                    slug: Some(r.get(1)?),
-                    title: Some(r.get(2)?),
-                    text: r.get(3)?,
-                    scope: None,
-                    confidence: None,
-                    rank: 3.0 + r.get::<_, f64>(4)?,
-                })
-            })?
-            .collect::<std::result::Result<_, _>>()?;
-        Ok(rows)
+        // Scoped: `doc_by_id` below takes the same lock, and this mutex is not
+        // reentrant.
+        let mut hits: Vec<RecallHit> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT d.id, d.slug, d.title, snippet(document_fts, 1, '', '', '…', 14) AS snip, bm25(document_fts) AS score
+                 FROM document_fts JOIN document d ON d.rowid = document_fts.rowid
+                 WHERE document_fts MATCH ?1 AND d.deleted = 0
+                   AND (?2 IS NULL OR d.channel = ?2) AND (?3 IS NULL OR d.kind = ?3)
+                 ORDER BY score LIMIT ?4",
+            )?;
+            let rows: Vec<RecallHit> = stmt
+                .query_map(params![q, channel, kind, limit as i64], |r| {
+                    Ok(RecallHit {
+                        kind: "document".into(),
+                        id: r.get(0)?,
+                        slug: Some(r.get(1)?),
+                        title: Some(r.get(2)?),
+                        text: r.get(3)?,
+                        scope: None,
+                        confidence: None,
+                        rank: 3.0 + r.get::<_, f64>(4)?,
+                    })
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        if near.is_empty() {
+            return Ok(hits);
+        }
+        // A document FTS already found is promoted rather than repeated.
+        for h in hits.iter_mut() {
+            if let Some((pos, ..)) = near.get(h.id.as_str()) {
+                h.rank -= vector_bonus(*pos);
+            }
+        }
+        // And one FTS missed enters at the document tier with no lexical score
+        // of its own — which is the entire reason for having vectors.
+        let found: std::collections::HashSet<&str> = hits
+            .iter()
+            .map(|h| h.id.as_str())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect();
+        let mut fresh = Vec::new();
+        for (id, n) in near.iter() {
+            if found.contains(id) {
+                continue;
+            }
+            let Some(row) = self.doc_by_id(id)? else {
+                continue;
+            };
+            if row.deleted != 0
+                || channel.is_some_and(|c| c != row.channel)
+                || kind.is_some_and(|k| k != row.kind)
+            {
+                continue;
+            }
+            fresh.push(RecallHit {
+                kind: "document".into(),
+                id: row.id.clone(),
+                slug: Some(row.slug),
+                title: Some(row.title.clone()),
+                text: span_of(&row.title, &row.body, n.1, n.2),
+                scope: None,
+                confidence: None,
+                rank: 3.0 - vector_bonus(n.0),
+            });
+        }
+        hits.extend(fresh);
+        hits.sort_by(|a, b| {
+            a.rank
+                .partial_cmp(&b.rank)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits.truncate(limit);
+        Ok(hits)
     }
 
     // ---- memory ----
@@ -663,8 +788,27 @@ impl Store {
         kinds: Option<&[String]>,
         limit: usize,
     ) -> Result<Vec<RecallHit>> {
+        self.recall_hybrid(channel, text, project_id, session_id, kinds, limit, &[])
+    }
+
+    /// The same, with the vector index folded in. The tiers survive: they are
+    /// a decision about what the operator's own directives are worth, not a
+    /// relevance heuristic, and a semantic match is not a reason to rank a
+    /// stale fact above a standing instruction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recall_hybrid(
+        &self,
+        channel: &str,
+        text: &str,
+        project_id: Option<&str>,
+        session_id: Option<&str>,
+        kinds: Option<&[String]>,
+        limit: usize,
+        vectors: &[Neighbour],
+    ) -> Result<Vec<RecallHit>> {
+        let near = nearest_by_source(vectors, "memory");
         let q = fts_query(text);
-        if q.is_empty() {
+        if q.is_empty() && near.is_empty() {
             return Ok(Vec::new());
         }
         let want = |k: &str| {
@@ -717,6 +861,12 @@ impl Store {
                     KIND_LESSON => continue,
                     _ => 4.0 + score,
                 };
+                // A memory the vector index also liked is promoted within its
+                // tier rather than listed twice.
+                let rank = rank
+                    - near
+                        .get(id.as_str())
+                        .map_or(0.0, |(p, ..)| vector_bonus(*p));
                 hits.push(RecallHit {
                     kind,
                     id,
@@ -729,8 +879,67 @@ impl Store {
                 });
             }
         }
+        // Memories FTS missed entirely. They are fetched through the same
+        // scope predicate as the search above: a semantic match is never a way
+        // to see another project's or another session's memory.
+        if !near.is_empty() {
+            let seen: std::collections::HashSet<String> =
+                hits.iter().map(|h| h.id.clone()).collect();
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT m.id, m.kind, m.body, m.scope, m.confidence, m.state, m.created_ms
+                 FROM memory m
+                 WHERE m.id = ?1 AND m.channel = ?2 AND m.deleted = 0
+                   AND m.state IN ('active', 'promoted')
+                   AND (m.scope = 'global' OR m.scope = 'client'
+                        OR (m.scope = 'project' AND m.scope_ref = ?3)
+                        OR (m.scope = 'session' AND m.scope_ref = ?4))",
+            )?;
+            for (id, (pos, ..)) in near.iter() {
+                if seen.contains(*id) {
+                    continue;
+                }
+                let row = stmt.query_row(params![id, channel, project_id, session_id], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, f64>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, i64>(6)?,
+                    ))
+                });
+                let Ok((id, kind, body, scope, confidence, state, created_ms)) = row else {
+                    continue;
+                };
+                if !want(&kind) || (kind == KIND_LESSON && state != "promoted") {
+                    continue;
+                }
+                // No lexical score to add to, so the tier alone carries it.
+                let tier = match kind.as_str() {
+                    KIND_DIRECTIVE => 0.0,
+                    KIND_FACT => {
+                        let age = (now - created_ms as f64).max(0.0);
+                        1.0 - confidence * 0.5f64.powf(age / FACT_HALF_LIFE_MS)
+                    }
+                    KIND_LESSON => 2.0,
+                    _ => 4.0,
+                };
+                hits.push(RecallHit {
+                    kind,
+                    id,
+                    slug: None,
+                    title: None,
+                    text: body,
+                    scope: Some(scope),
+                    confidence: Some(confidence),
+                    rank: tier - vector_bonus(*pos),
+                });
+            }
+        }
         if want("document") {
-            hits.extend(self.doc_search(Some(channel), None, text, limit)?);
+            hits.extend(self.doc_search_hybrid(Some(channel), None, text, limit, vectors)?);
         }
         hits.sort_by(|a, b| {
             a.rank

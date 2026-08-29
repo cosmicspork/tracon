@@ -54,6 +54,7 @@ pub fn definitions() -> Vec<Value> {
 }
 
 pub async fn call(
+    tools: &super::Tools,
     access: &SessionAccess,
     ctx: &CallContext,
     name: &str,
@@ -77,15 +78,26 @@ pub async fn call(
                     .collect()
             });
             let limit = args["limit"].as_u64().unwrap_or(8).clamp(1, 50) as usize;
+            let near = crate::embed::neighbours(
+                &tools.cfg,
+                &access.store,
+                &tools.http,
+                access.manager.probe_token(),
+                Some(&ctx.channel),
+                query,
+                limit,
+            )
+            .await;
             let hits = access
                 .store
-                .recall(
+                .recall_hybrid(
                     &ctx.channel,
                     query,
                     project_id.as_deref(),
                     Some(&ctx.session_id),
                     kinds.as_deref(),
                     limit,
+                    &near.hits,
                 )
                 .map_err(|e| e.to_string())?;
             Ok(json!({ "hits": hits }))

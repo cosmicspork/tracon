@@ -821,10 +821,24 @@ pub async fn list_docs(
     Query(q): Query<DocQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     if let Some(text) = q.q.as_deref().filter(|t| !t.trim().is_empty()) {
-        let hits = s
-            .store()
-            .doc_search(q.channel.as_deref(), q.kind.as_deref(), text, 50)?;
-        return Ok(Json(json!({ "hits": hits })));
+        let near = crate::embed::neighbours(
+            &s.cfg,
+            s.store(),
+            &s.tools.http,
+            s.manager.probe_token(),
+            q.channel.as_deref(),
+            text,
+            50,
+        )
+        .await;
+        let hits = s.store().doc_search_hybrid(
+            q.channel.as_deref(),
+            q.kind.as_deref(),
+            text,
+            50,
+            &near.hits,
+        )?;
+        return Ok(Json(json!({ "hits": hits, "text_only": near.degraded })));
     }
     let docs = s.store().doc_list(q.channel.as_deref())?;
     let docs: Vec<_> = docs
@@ -1097,10 +1111,26 @@ pub async fn list_memories(
         "channel is required".into(),
     ))?;
     if let Some(text) = q.q.as_deref().filter(|t| !t.trim().is_empty()) {
-        let hits = s
-            .store()
-            .recall(&channel, text, q.project_id.as_deref(), None, None, 20)?;
-        return Ok(Json(json!({ "hits": hits })));
+        let near = crate::embed::neighbours(
+            &s.cfg,
+            s.store(),
+            &s.tools.http,
+            s.manager.probe_token(),
+            Some(&channel),
+            text,
+            20,
+        )
+        .await;
+        let hits = s.store().recall_hybrid(
+            &channel,
+            text,
+            q.project_id.as_deref(),
+            None,
+            None,
+            20,
+            &near.hits,
+        )?;
+        return Ok(Json(json!({ "hits": hits, "text_only": near.degraded })));
     }
     let rows = s.store().memory_list(&channel, q.state.as_deref(), 200)?;
     Ok(Json(json!({ "memories": rows })))
