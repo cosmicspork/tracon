@@ -2,6 +2,7 @@
 //! and published to the mesh, project identity, and the orientation a session
 //! starts with. Reads are always local; see `store::corpus`.
 
+pub mod chunk;
 pub mod import;
 pub mod orientation;
 pub mod project;
