@@ -141,9 +141,25 @@ mostly cached startup context rather than counting only the visible prompt.
 Claude Code is the special case. Its `control_request` / `control_response` path is
 functionally equivalent to ACP permission requests but is not ACP.
 
-The adapter trait exists from the first commit; only the omp adapter is built until a
-concrete task needs another. Adapters are the part of the system that rots, and three
+The adapter trait exists from the first commit; only the omp adapter was built until a
+concrete task needed another. Adapters are the part of the system that rots, and three
 of them on day one is scope.
+
+**Built (Phase 7): the Claude Code adapter.** What the table above records as its mode
+is out of date in one respect — `--permission-prompt-tool` is no longer in the CLI's
+help, and a reading of the published documentation concludes that external permission
+brokering needs the TypeScript SDK. It does not. The control protocol is in the shipped
+binary, and the SDK is a wrapper that spawns that same binary and speaks stream-json to
+it, so the adapter speaks it directly: `can_use_tool` arrives as a `control_request` and
+is answered with `{behavior: "allow"}` or `{behavior: "deny", message}`. The frames are
+recorded in `reference/phase-7-notes.md`, because they are in neither the help nor the
+docs.
+
+Making room for it turned the seam into one. Four things outside the trait had spelled
+omp — the state directory, both runners' state variable, the harness's config files, and
+the construction of the adapter itself, which meant `[harness] id` was read nowhere at
+all and setting it to anything ran omp regardless. A harness now declares its own state
+layout and config files, and an unknown id refuses to start rather than falling back.
 
 Version-pin harnesses per node, record the version on every session, and check
 compatibility at session start. This layer is the most likely thing to break and it will
@@ -186,7 +202,7 @@ Phase 4.
 - Provider credentials live in the node's sealed store with `channels` and `nodes`
   bindings like any other, are handed off over the mesh with channel keys, and never
   appear on a harness volume. `agent.db` on the volume, `harness import-credentials`,
-  and `harness shell` retire once this is in real use.
+  and `harness shell` have since been removed.
 - The gateway is the enforcement point for provider bindings (a channel bound to local
   models is refused a hosted provider, fail closed) and the counting point for per-
   channel cost ceilings: every model call passes through it, so usage is measured where
@@ -522,12 +538,14 @@ named processing node and a named provider.
 
 | Channel | Processing node | Provider | Sink | Brokered tools |
 |---|---|---|---|---|
-| Personal | hub | DigitalOcean GradientAI | pager | `gh` |
-| Client | hub | DigitalOcean GradientAI (permitted by contract) | pager | `gh` |
+| Personal | hub | DigitalOcean GradientAI | pager | consulta |
+| Client | hub | DigitalOcean GradientAI (permitted by contract) | pager | consulta |
 | Work | work laptop node | Local models only | desktop wrapper | `mr_status` / `mr_comment` (GitLab), `issue` / `issue_comment` (Jira), consulta (work node only, by node binding) |
 
 Work-channel embeddings run locally on the laptop. Embedding models are small enough
 that no external provider is required, which removes the contract question entirely.
+`gh` is not in that last column on purpose: it is a node-side binary the node runs
+itself after an approval, never a tool an agent may call.
 Work-channel consolidation runs against a small local model for the same reason.
 
 ## The hub
@@ -584,9 +602,14 @@ Being the only always-on peer is worth more than the sync:
 - Metrics rollups
 - Somewhere for the phone to talk to
 
-Degraded mode is explicit: **hub unreachable means FTS-only recall from the local
-replica, no semantic search.** Naming this prevents the hub from quietly becoming
-load-bearing.
+Degraded mode is explicit: **hub unreachable means recall from the local replica only.**
+Naming this prevents the hub from quietly becoming load-bearing.
+
+*Revised in Phase 7:* semantic search is not among the things a hub outage costs. The
+vector index is node-local — it cannot replicate, because a vector is not a safe form of
+encrypted content — so every node embeds its own replica and searches it locally. What a
+hub outage costs is the other nodes' writes, not the ability to search meaningfully.
+Embedding generation on receipt is therefore each node's own job rather than the hub's.
 
 ### Mesh frames
 
@@ -679,18 +702,37 @@ injects directives and facts at or above 0.7 confidence for the session's projec
 
 FTS5 first, directives ranked above facts. The corpus is small, the highest-value
 lookups are exact ("what is the test command"), and vectors are the one part of the
-store that does not export as plain text. Add `sqlite-vec` alongside FTS in the same
-file (no server) and a reranker on top only once FTS demonstrably misses things in
-real use. Pure vector search is bad at exact directive lookup either way, so FTS is
-the floor, not a stopgap.
+store that does not export as plain text. Pure vector search is bad at exact directive
+lookup either way, so FTS is the floor, not a stopgap.
 
 Pin the embedding model. Store model name and dimension on every vector row, or
 incremental migration is impossible and stale vectors are undetectable.
 
+**Built (Phase 7).** `sqlite-vec` alongside FTS in the same file, compiled into the
+binary rather than loaded as an extension, so the release is still one static file. Two
+portability bugs had to be worked around and are recorded in `reference/phase-7-notes.md`;
+both would have broken the musl release rather than degraded anything.
+
+The embedder is an OpenAI-shaped `/v1/embeddings` endpoint named in `[embed]` config, not
+a model linked into the node. That is what lets the rule above be expressed rather than
+merely intended: a work channel points at a `llama-server` on the same machine and
+nothing leaves it, while another channel may name a `[providers]` entry and go through
+the gateway, where its provider binding and daily ceiling still apply.
+
+A document is chunked on its headings — one vector for a whole guide averages away the
+paragraph that answers the question — and each chunk records its span, so a hit shows the
+text it matched. A memory is atomic already and embeds whole. The fused ranking keeps the
+tiers: the vector contribution is bounded below one tier step, because "directives above
+facts" is a decision about whose instructions win, not a relevance heuristic for a better
+signal to overrule.
+
+No reranker. FTS plus vectors was enough for a corpus this size; a reranker waits for the
+same kind of evidence that vectors did.
+
 Phase 0 found that DigitalOcean exposes embeddings synchronously but does not include
 embeddings in batch inference, and its reranker is a knowledge-base feature rather than
-a standalone endpoint. If vectors become necessary, evaluate BGE-M3 or Qwen3 Embedding
-0.6B at that time; model availability and pricing are operational facts, not permanent
+a standalone endpoint. BGE-M3 and Qwen3 Embedding 0.6B remain the candidates for the
+local endpoint; model availability and pricing are operational facts, not permanent
 architecture.
 
 ### Curation
@@ -917,9 +959,11 @@ Every node serves the same embedded SPA. Client type is a matter of shell.
 The one capability with no other path: laptops sleep, Coder workspaces stop, the homelab
 pod does not.
 
-- **The phone is not a node.** No local replica, no keys at rest, reads over the hub,
-  useless offline. iOS evicts PWA storage. This is a deliberate exception to the
-  every-node-replicates rule.
+- **The phone is not a node.** No local replica, no keys at rest, useless offline.
+  iOS evicts PWA storage. This is a deliberate exception to the every-node-replicates
+  rule. *Revised in Phase 6:* it reads a node directly over an HTTPS ingress with a
+  session cookie rather than over the hub — the hub still never talks to a browser.
+  See "Reaching a node".
 - A backgrounded PWA cannot hold a socket. Notifications go through pager.
 - **Scope is directing work, not writing code.** Read a diff, approve or reject, send a
   prompt, read output, kill a stuck session.

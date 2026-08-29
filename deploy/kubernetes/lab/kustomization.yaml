@@ -1,6 +1,11 @@
 # The homelab proof: a scratch namespace outside Flux, applied by hand and
 # deleted after the phase-3 run.
 #   kubectl --context=do-nyc1-homelab apply -k deploy/kubernetes/lab
+#
+# The lab node that runs continuously is in the `homelab` repo and reconciled by
+# Flux; this overlay is only for standing a scratch one up by hand. Keep the tag
+# at or above the release that added operator auth (0.5.0): an ingress must
+# never stand in front of a node image with no auth guard.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: tracon-lab
@@ -9,7 +14,7 @@ resources:
   - ../base
 images:
   - name: ghcr.io/cosmicspork/tracon-node
-    newTag: "0.2.0"
+    newTag: "0.5.0"
 patches:
   - target:
       kind: PersistentVolumeClaim
