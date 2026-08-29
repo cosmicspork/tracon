@@ -218,6 +218,38 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE review ADD COLUMN revision_patch TEXT;
     "#,
+    // 10: the vector index, beside FTS5 rather than instead of it.
+    //
+    // This is node-local on purpose, and the omission from
+    // `tracon_sync::TABLES` is the enforcement: a vector is not a safe form of
+    // encrypted content, because embedding inversion recovers a good deal of
+    // the source text from the vector alone. Replicating one would hand the
+    // hub a readable index of a channel whose contents it cannot open. So each
+    // node embeds its own replica, and `apply_changes` refuses the table by
+    // name if anything ever tries to send one.
+    //
+    // `model` and `dim` are per row, not per database: without them a stale
+    // vector is undetectable and changing the embedding model means throwing
+    // the whole index away rather than migrating it. `text_hash` is what makes
+    // an edit re-embed exactly the chunks that changed.
+    r#"
+    CREATE TABLE embedding (
+        id           INTEGER PRIMARY KEY,
+        source_table TEXT NOT NULL,
+        source_id    TEXT NOT NULL,
+        chunk_ix     INTEGER NOT NULL,
+        channel      TEXT NOT NULL,
+        model        TEXT NOT NULL,
+        dim          INTEGER NOT NULL,
+        text_hash    TEXT NOT NULL,
+        offset       INTEGER NOT NULL,
+        len          INTEGER NOT NULL,
+        updated_ms   INTEGER NOT NULL,
+        UNIQUE (source_table, source_id, chunk_ix)
+    );
+    CREATE INDEX embedding_source ON embedding(source_table, source_id);
+    CREATE INDEX embedding_channel ON embedding(channel);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build
