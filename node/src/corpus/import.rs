@@ -1,4 +1,4 @@
-//! Bringing a notebook directory in: flat `<kind>-<slug>.md` files, no
+//! Bringing a docs directory in: flat `<kind>-<slug>.md` files, no
 //! frontmatter, `archive/` skipped. The filename is the slug; the kind is its
 //! prefix; the title is the first heading.
 
@@ -52,7 +52,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_notebook_directory_imports_by_filename() {
+    fn a_docs_directory_imports_by_filename() {
         let dir = std::env::temp_dir().join(format!("tracon-import-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("archive")).unwrap();

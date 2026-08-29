@@ -866,7 +866,7 @@ pub struct PutDoc {
 
 /// `PUT /api/docs/{channel}/{slug}` with `If-Match: <hash>` to refuse
 /// overwriting an edit not yet seen; a conflict returns 412 with the current
-/// hash and body, like the notebook did.
+/// hash and body, the editor contract the corpus inherited.
 pub async fn put_doc(
     State(s): State<AppState>,
     Path((channel, slug)): Path<(String, String)>,

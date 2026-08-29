@@ -555,7 +555,7 @@ mod tests {
 
     fn hello() -> Payload {
         Payload::Hello {
-            node: serde_json::json!({"name": "bazzite"}),
+            node: serde_json::json!({"name": "laptop"}),
             contract: crate::CONTRACT_VERSION,
         }
     }

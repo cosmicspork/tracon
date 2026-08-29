@@ -1,7 +1,8 @@
 //! tracon mesh wire contract. One crate, depended on by the node and the hub, so
 //! every byte that crosses a machine boundary is defined in exactly one place.
 //!
-//! The shapes are borrowed from svastha's trust contract (identity derivation,
+//! The shapes are borrowed from an earlier end-to-end-encrypted project's trust
+//! contract (identity derivation,
 //! ECIES sealed boxes, seal-then-sign envelopes, signed relay requests, key
 //! epochs) and re-labelled; the crate is vendored rather than depended on so
 //! tracon's wire contract can move on its own cadence. `spec/README.md` is the

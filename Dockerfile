@@ -1,6 +1,6 @@
 # The hub image. Hub only: no node, no SPA. Pure-Rust TLS-free binary, so the
 # runtime needs nothing but CA roots (for nothing today; kept for parity with
-# the other homelab images and any future outbound call).
+# the other images and any future outbound call).
 
 FROM rust:1-slim-bookworm AS builder
 # The replica's SQLite is bundled and compiled in.

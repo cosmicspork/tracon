@@ -22,8 +22,7 @@ Two harnesses have adapters: `omp` over ACP, and Claude Code over its stream-jso
 control protocol. A node runs one, chosen with `[harness] id` and pinned by
 `[harness] version`; the pin is checked twice and an unknown id refuses to start. What is not built is listed honestly at the end of each phase in
 [docs/ROADMAP.md](docs/ROADMAP.md); the ones worth knowing here are that the desktop
-wrapper is neither bundled nor signed, hub-side rollups do not exist, and Switchboard
-has not been retired yet.
+wrapper is unsigned and hub-side rollups do not exist.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for phasing,
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design record,
@@ -34,7 +33,7 @@ implementation learned that the design did not predict.
 ## What it is
 
 A single statically linked Rust binary that can run as a node on any machine able to
-establish the harness boundary: laptops, replacement Coder runners, or homelab
+establish the harness boundary: laptops, replacement Coder runners, or always-on
 Kubernetes pods. Each node supervises local agent harnesses, enforces policy, brokers
 credentials and tools, and serves an embedded SPA. Nodes dial out to an always-on hub
 that relays end-to-end encrypted frames, so any node's interface can see and control
@@ -45,7 +44,7 @@ work happening on any other.
 It is not a coding agent. It drives omp, opencode, and Claude Code over their existing
 protocols and contains no model loop of its own. Harnesses are meant to be replaceable.
 
-It is not a work management app. Clients, invoicing, and time billing stay in Kritee.
+It is not a work management app. Clients, invoicing, and time billing live elsewhere.
 
 It is not multi-user. One operator holds the keys. Channel separation is cryptographic
 isolation between that operator's contexts, not tenancy.
@@ -62,14 +61,14 @@ Four problems, in the order they hurt:
 3. **Unenforced rules.** Working agreements live in a markdown file the agent may have
    forgotten by hour two. Worktree not main checkout, review before publish, no merge,
    no transition, no production deploy. All enforceable, none enforced.
-4. **No visibility when the laptops are closed.** Homelab pods stay awake. Nothing today
-   lets a phone reach them.
+4. **No visibility when the laptops are closed.** The cluster's pods stay awake. Nothing
+   today lets a phone reach them.
 
 ## Shape
 
 ```
                         ┌──────────────────────┐
-                        │  hub (homelab)       │
+                        │  hub (cluster)       │
                         │  always-on, relays   │
                         │  ciphertext          │
                         └──────────┬───────────┘
@@ -106,18 +105,13 @@ These constrain everything else and are unlikely to change.
   orchestration layer becomes obsolete, the memory, documents, and work ledger survive
   it.
 
-## Repos this replaces
+## Where it came from
 
-| Repo | Disposition |
-|---|---|
-| `review` | Contract absorbed; the broker makes it enforcing rather than advisory |
-| `consulta` | Absorbed as node MCP tools (`query`, `describe`); its DB credential is the first thing the broker holds |
-| `notebook` | Document corpus absorbed; the `<type>-<slug>` prefix scheme is kept |
-| `switchboard` | Superseded by the desktop wrapper; retired last |
-
-`pager` is retired: phone push is built into the node and the PWA.
-`svastha` contributes the relay and trust-binding patterns. `homelab` hosts the hub.
-`kritee` is unaffected.
+tracon grew out of a handful of personal tools: a review contract that was advisory and
+is enforcing here, a database helper that became the `consulta` MCP tools, a markdown
+notes app whose `<type>-<slug>` prefix scheme the corpus kept, and an end-to-end-encrypted
+relay whose trust binding the hub reuses. Phone push was once an external bridge and is
+now built in.
 
 ## Running the node
 
@@ -149,11 +143,11 @@ tracon service install              # run it under systemd or launchd
 As a pod (the work topology), the node is an image rather than a binary, and the
 boundary is Kubernetes: one harness pod per session, a NetworkPolicy that makes the node
 the harness's only route, and the node serving the allowlist proxy itself. The manifests
-are in `deploy/kubernetes/base`; `deploy/kubernetes/lab` is the homelab overlay the
-topology was proven on.
+are in `deploy/kubernetes/base`, ready for a kustomize overlay that sets the
+namespace, the image tag and the storage class.
 
 ```sh
-kubectl apply -k deploy/kubernetes/lab
+kubectl apply -k deploy/kubernetes/base
 kubectl -n tracon-lab exec deploy/tracon-node -- tracon check-boundary --deep
 kubectl -n tracon-lab port-forward deploy/tracon-node 7420:7420
 ```
@@ -181,7 +175,7 @@ on a Linux host; `[gateway] harness_listen` takes either form.
 
 ### The mesh
 
-Nodes see each other through the hub, an always-on relay in the homelab cluster that
+Nodes see each other through the hub, an always-on relay on a cluster somewhere that
 routes sealed frames per channel and can read none of them. Every node dials out;
 nothing accepts inbound connections. A hub outage costs latency: local sessions
 continue, and what was queued is delivered when it returns.
@@ -192,13 +186,13 @@ TRACON_HUB_ADMIT=<first node id> TRACON_HUB_DATA_DIR=/var/lib/tracon-hub tracon-
 
 # the first node
 tracon mesh id                              # its id, for TRACON_HUB_ADMIT
-tracon mesh init --hub https://tracon-hub.0x69.xyz
+tracon mesh init --hub https://hub.example.com
 tracon channel create personal
 tracon serve
 
 # every other node: invite from an enrolled node, accept on the new one
 tracon mesh invite --channels personal      # prints a code, a URL, a QR, and this node's fingerprint
-tracon enroll https://tracon-hub.0x69.xyz/#enroll=7KQ4M2XA   # on the new machine; prints its fingerprint
+tracon enroll https://hub.example.com/#enroll=7KQ4M2XA   # on the new machine; prints its fingerprint
 ```
 
 The inviter shows the new node's name and fingerprint and asks whether it matches what
@@ -225,7 +219,7 @@ sealed once and set aside.
 ### The corpus
 
 Every node keeps documents and memories, replicated through the hub and read locally
-always. `tracon doc import <dir>` brings a notebook directory in (`<kind>-<slug>.md`);
+always. `tracon doc import <dir>` brings a directory of markdown in (`<kind>-<slug>.md`);
 `tracon doc ls|get|put|rm|export` and the Documents screen read and edit them, with the
 hash last read as the edit's precondition. Agents get `recall`, `retain`, `doc_search`,
 `doc_read`, and `doc_write` (asked); the operator's directives (`tracon memory add`)
@@ -442,7 +436,7 @@ host-side recipe rather than something a session performs.
 3. [docs/DESIGN.md](docs/DESIGN.md) for the interface: principles, jobs, states, flows
 
 Phase 0 established the ACP message shapes, restricted-harness behavior, and one working
-boundary on Bazzite. The work Coder template's single Envbuilder container was privileged
+boundary on an immutable Fedora host with rootless Podman. The work Coder template's single Envbuilder container was privileged
 and granted passwordless `sudo`, so it could not host a gated harness; Phase 3 replaced
 that topology with one harness pod per session under a NetworkPolicy, which is what made
 work-side enforcement possible. Browser-over-TUI was settled before Phase 1 from using

@@ -1,6 +1,6 @@
 //! A minimal S3 client: PUT, GET, DELETE, and a prefix LIST, signed with
 //! SigV4. Three verbs do not justify an SDK; this is the wire contract and
-//! nothing else, and it works against DigitalOcean Spaces as well as S3.
+//! nothing else, and it works against any S3-compatible store.
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -11,7 +11,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone, Debug)]
 pub struct S3Config {
-    /// e.g. `https://nyc3.digitaloceanspaces.com`
+    /// e.g. `https://s3.us-east-1.amazonaws.com` or a provider's equivalent
     pub endpoint: String,
     pub region: String,
     pub bucket: String,

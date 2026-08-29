@@ -15,7 +15,7 @@ pub const DOC_READ: &str = "doc_read";
 pub const DOC_SEARCH: &str = "doc_search";
 pub const DOC_WRITE: &str = "doc_write";
 
-/// The notebook prefixes, kept as the document's kind.
+/// The filename prefixes, kept as the document's kind.
 pub const KINDS: &[&str] = &[
     "note",
     "repo",
@@ -266,7 +266,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     #[test]
-    fn kinds_and_titles_follow_the_notebook_scheme() {
+    fn kinds_and_titles_follow_the_prefix_scheme() {
         assert_eq!(kind_of("guide-workspace"), "guide");
         assert_eq!(kind_of("ref"), "ref");
         assert_eq!(kind_of("refx-y"), "other");

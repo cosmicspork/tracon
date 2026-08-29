@@ -43,7 +43,7 @@ coding agents. It does not implement an agent loop.
 
 ```
                         ┌──────────────────────┐
-                        │   hub (homelab)      │
+                        │   hub (cluster)      │
                         │   always-on          │
                         │   relay: routes      │
                         │   ciphertext per     │
@@ -89,7 +89,7 @@ A single statically linked Rust binary. Responsibilities:
 
 Explicitly **not** responsibilities: model inference, an agent loop, prompt
 construction beyond assembling injected context, business domain (see
-[Kritee](#kritee-is-out-of-scope)).
+[Personal accounting is out of scope](#personal-accounting-is-out-of-scope)).
 
 ### Build constraints
 
@@ -107,10 +107,10 @@ construction beyond assembling injected context, business domain (see
 
 ### Distribution
 
-Fetched as a binary by a one-line bootstrap. **Not** shipped via the dotfiles repo. The
-dotfiles repo is configured for interactive human use and is heavy; agent-only
+Fetched as a binary by a one-line bootstrap. **Not** shipped with the operator's shell
+configuration. That is configured for interactive human use and is heavy; agent-only
 environments should not pay for it, and coupling the two means every node change
-requires a dotfiles change.
+requires a change there too.
 
 ## Harness control
 
@@ -264,7 +264,7 @@ Work-side enforcement therefore requires a replacement topology: an unprivileged
 runner separated from the node, with the node holding its exec pipe and being its only
 permitted network route.
 
-Phase 0 established one working topology on Bazzite with rootless Podman. The node owns:
+Phase 0 established one working topology on an immutable Fedora host with rootless Podman. The node owns:
 
 - an **internal network** (`--internal --disable-dns`), which has no route to the
   internet and, in rootless Podman, none to the host either;
@@ -313,7 +313,7 @@ re-decided. Evidence is in
   nothing of the operator's leaks into a session either.
 
 - **On Linux the gateway forward is a Unix socket, and the gateway runs unconfined
-  under SELinux.** Found in Phase 2 on the Bazzite node: `host.containers.internal` is
+  under SELinux.** Found in Phase 2 on the SELinux node: `host.containers.internal` is
   a pasta interface address, not loopback, so the TCP forward cannot reach a loopback
   listener; and SELinux's `connectto` forbids a confined container connecting to an
   unconfined listener's socket whatever the file is labelled. The gateway is the trusted
@@ -321,11 +321,11 @@ re-decided. Evidence is in
   the harness keeps its confinement. The deep check asserts the forward carries
   traffic. Evidence in [`reference/phase-2-notes.md`](reference/phase-2-notes.md).
 
-Bazzite is evidence for the design, not a Phase 1 platform requirement. macOS with a
+That host is evidence for the design, not a Phase 1 platform requirement. macOS with a
 Podman VM, another Linux host, or a managed web environment qualifies only if it can
 provide the same capabilities and pass the same checks. **macOS with a Podman machine was
 the first implemented node** and qualifies: the boundary holds inside the VM, and the
-implementation notes below record where it differs from the Bazzite proof. Claude Code for web can be used
+implementation notes below record where it differs from the Linux proof. Claude Code for web can be used
 to implement Phase 1; it is not a Phase 1 runtime unless its environment can host the
 persistent node, isolated runner, state, and reachable SPA.
 
@@ -373,8 +373,8 @@ same `boundary::Backend` seam, and both answer the same five checks.
 
 The manifests a node expects around it are in `deploy/kubernetes/base` and printed by
 `tracon setup` on this runtime; the node verifies them and does not create them. The
-Coder template that carries this to the work cluster is not in this repository (see
-`deploy/coder/README.md`); the topology was built and proven on the homelab cluster.
+Coder template that carries this to the work cluster is not in this repository; the
+topology was built and proven on a Kubernetes cluster with Cilium network policies.
 
 ### Boundary check
 
@@ -531,15 +531,15 @@ is not bound to refuses rather than falling back to a default provider. Bindings
 recorded as data alongside the event log (channel, node, provider, effective date) so
 "where did this content go" is a query rather than a recollection.
 
-This generalizes the pattern svastha already uses: trust is extended explicitly to a
+This generalizes a pattern an earlier end-to-end-encrypted project already used: trust is extended explicitly to a
 named processing node and a named provider.
 
 ### Current bindings
 
 | Channel | Processing node | Provider | Sink | Brokered tools |
 |---|---|---|---|---|
-| Personal | hub | DigitalOcean GradientAI | phone push | consulta |
-| Client | hub | DigitalOcean GradientAI (permitted by contract) | phone push | consulta |
+| Personal | hub | a hosted inference API | phone push | consulta |
+| Client | hub | a hosted inference API (permitted by contract) | phone push | consulta |
 | Work | work laptop node | Local models only | desktop wrapper | `mr_status` / `mr_comment` (GitLab), `issue` / `issue_comment` (Jira), consulta (work node only, by node binding) |
 
 Work-channel embeddings run locally on the laptop. Embedding models are small enough
@@ -550,7 +550,7 @@ Work-channel consolidation runs against a small local model for the same reason.
 
 ## The hub
 
-An always-on node in the homelab Kubernetes cluster. It is a **peer with a role**, not a
+An always-on node in a Kubernetes cluster. It is a **peer with a role**, not a
 service tier. The role has two halves that arrive in different phases:
 
 1. **Relay.** Routes ciphertext frames between nodes, keyed per channel. This is all the
@@ -641,7 +641,7 @@ another node than the verified sender are dropped and counted.
 
 ### Trust asymmetry
 
-The homelab is DigitalOcean Kubernetes, which is rented infrastructure. The hub is
+The cluster is a managed Kubernetes offering, which is rented infrastructure. The hub is
 therefore the highest-value target and the least-controlled box simultaneously.
 
 Resolution: **the hub decrypts personal and client channels. Work channels are handled
@@ -729,9 +729,9 @@ signal to overrule.
 No reranker. FTS plus vectors was enough for a corpus this size; a reranker waits for the
 same kind of evidence that vectors did.
 
-Phase 0 found that DigitalOcean exposes embeddings synchronously but does not include
-embeddings in batch inference, and its reranker is a knowledge-base feature rather than
-a standalone endpoint. BGE-M3 and Qwen3 Embedding 0.6B remain the candidates for the
+Phase 0 found that the hosted inference API in question exposes embeddings synchronously
+but does not include them in batch inference, and its reranker is a knowledge-base
+feature rather than a standalone endpoint. BGE-M3 and Qwen3 Embedding 0.6B remain the candidates for the
 local endpoint; model availability and pricing are operational facts, not permanent
 architecture.
 
@@ -754,7 +754,7 @@ conflating them breaks both.
 | Use | Injected | Read deliberately |
 | Lifecycle | Decays | Edited as a whole artifact |
 
-The notebook `<type>-<slug>.md` prefix scheme (`note-`, `repo-`, `meeting-`, `inbox-`,
+The `<type>-<slug>.md` filename prefix scheme (`note-`, `repo-`, `meeting-`, `inbox-`,
 `proposal-`, `plan-`, `guide-`, `ref-`, `architecture-`) is already a kind column. Keep
 it.
 
@@ -766,8 +766,8 @@ documents chunked but always returned with their slug.
 *Built (Phase 4):* `document(channel, slug, kind, title, body, hash)` with an FTS5 index;
 `doc_search` returns slugs and snippets, `doc_read` the body, `doc_write` is asked;
 edits carry the hash last read (`If-Match`, 412 with the current state). The Documents
-screen reads, searches, and edits; `tracon doc import|export` move a notebook directory
-in and out as plain files.
+screen reads, searches, and edits; `tracon doc import|export` move a directory of
+markdown in and out as plain files.
 
 ### Generated orientation files
 
@@ -777,7 +777,7 @@ shared conventions from the doc corpus, node facts filled from what the node kno
 itself, channel policy layered on top, materialized into the scratch config directory.
 
 The shared portion is small. Conventional commits, branch naming, the code comments
-philosophy, the notebook prefix scheme. Everything else is environment-specific, and the
+philosophy, the filename prefix scheme. Everything else is environment-specific, and the
 work-side ownership table (maintains / shares / someone else's) has no personal
 equivalent. This is three layers assembled per session, not one file with conditionals.
 
@@ -805,8 +805,8 @@ Three things worth stealing:
 2. **Hash IDs.** Nodes must mint work items offline during a hub outage without
    collision.
 3. **`discovered-from` edge.** Work found mid-session is recorded and linked to its
-   origin instead of evaporating when the session dies. This is what replaces notebook's
-   `- [ ]` dashboard scanning.
+   origin instead of evaporating when the session dies. This is what replaces scanning
+   markdown for `- [ ]` lines.
 
 Storage is the node's SQLite, namespaced to the channel. The repo constraint is satisfied
 by construction.
@@ -956,8 +956,8 @@ Every node serves the same embedded SPA. Client type is a matter of shell.
 
 ### PWA
 
-The one capability with no other path: laptops sleep, Coder workspaces stop, the homelab
-pod does not.
+The one capability with no other path: laptops sleep, Coder workspaces stop, the
+cluster pod does not.
 
 - **The phone is not a node.** No local replica, no keys at rest, useless offline.
   iOS evicts PWA storage. This is a deliberate exception to the every-node-replicates
@@ -983,16 +983,16 @@ command-tab, global hotkey, and system notifications. Tauri provides all four, a
 Rust, so on desktop the node and its shell are one binary sharing types with no invented
 serialization boundary.
 
-**The wrapper supersedes Switchboard**, which retires. The node itself is supervised by
-the platform (launchd on macOS, systemd user units on Bazzite, container lifecycle in
-Coder); the wrapper is a tray client of a node that is already running, not its
-supervisor. Switchboard's units move; its role is not reimplemented in Tauri, which
-would be a lot of platform surface for what is wanted from native.
+**The wrapper supersedes the earlier menu-bar supervisor**, which retires. The node
+itself is supervised by the platform (launchd on macOS, systemd user units on Linux,
+container lifecycle in Coder) or, since Phase 7, by the wrapper itself; the wrapper's
+role as a service toggler is not reimplemented in Tauri, which would be a lot of
+platform surface for what is wanted from native.
 
 - Collapses to tray when not in use, so it command-tabs alongside Teams and Outlook.
 - **No terminal.** Deferred until genuinely needed.
 - **Editing is diff editing, not an editor.** `@codemirror/merge` for editable unified
-  diffs, reusing the CodeMirror already present in review and notebook. Edits become
+  diffs, reusing the CodeMirror the earlier tools already used. Edits become
   `/revise` submissions.
 
 **Built (Phase 6).** The wrapper is a tray client and nothing more: it supervises
@@ -1117,9 +1117,9 @@ separation for one operator's contexts, not multi-user isolation. This is delibe
 Recorded here so that nobody, including the author in a year, attempts to retrofit
 multi-user onto it.
 
-### Kritee is out of scope
+### Personal accounting is out of scope
 
-Kritee stays in the business tool domain. tracon owns node, session, event,
+Accounting stays in the business tool domain. tracon owns node, session, event,
 work item, memory, document, and policy. It does not grow clients, invoicing, or a
 business domain. Project separation is channels, not a `Client` table.
 
@@ -1138,7 +1138,7 @@ the operator out of the running node.
 ## Data lifecycle
 
 **Backups.** Once the hub is the source of truth for memory, docs, work items, and
-metrics, it is a DigitalOcean PVC. Encrypted snapshots to object storage, with a restore
+metrics, it is one persistent volume. Encrypted snapshots to object storage, with a restore
 path that has actually been exercised. Hub failure is survivable; hub failure without a
 tested restore costs years of accumulated context.
 
@@ -1163,15 +1163,15 @@ claim/release (see [Metrics](#metrics)); the mesh frame format (see
 
 ## Prior art and salvage
 
-| Repo | Disposition |
-|---|---|
-| `review` | Contract absorbed. Broker makes it enforcing. Repo retired. |
-| `notebook` | Document corpus absorbed. Prefix scheme kept. Repo retired. |
-| `switchboard` | Superseded by the desktop wrapper. Retired last, after it stops supervising the things being replaced. On Linux it installs nothing, so what moves is macOS-only. Its display-linked theme switcher was **deliberately killed** in Phase 6 rather than rehomed. |
-| `pager` | Retired. Its phone-push role moved into the node and the PWA (Phase 8). |
-| `svastha` | Relay and trust-binding patterns reused. |
-| `consulta` | Absorbed as node MCP tools (`query`, `describe`) with a node-owned Python sidecar. Guard contract kept. Repo retired after the tool has been in real use. |
-| `kritee` | Out of scope. Unchanged. |
+tracon absorbed a handful of the operator's earlier tools rather than living beside
+them: a review contract (advisory there, enforced by the broker here), a document
+notes app (its corpus and `<type>-<slug>` prefix scheme kept), a database helper
+(`consulta`, now the node's MCP tools with the guard contract kept, the repo retiring
+once the tools have been in real use), an end-to-end-encrypted relay (its trust-binding
+pattern reused in the hub), a menu-bar service supervisor (superseded by the wrapper;
+its display-linked theme switcher was **deliberately killed** in Phase 6 rather than
+rehomed), and a phone-push bridge (retired in Phase 8, when push moved into the node).
+Personal accounting stayed where it was.
 
 ## What rots and what does not
 

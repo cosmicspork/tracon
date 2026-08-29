@@ -25,7 +25,7 @@ answer the same five checks from Kubernetes objects instead.
 | probe container created, never started | probe pod with a scheduling gate: admitted, never scheduled |
 | `podman run -i` stdio | `pods/attach` |
 
-## Lab proof (homelab, Cilium, k8s 1.35), 2026-08-28
+## Lab proof (managed Kubernetes, Cilium, k8s 1.35), 2026-08-28
 
 `kubectl apply -k deploy/kubernetes/lab` into `tracon-lab` (outside Flux), image
 `ghcr.io/cosmicspork/tracon-node:0.2.0`, harness `tracon-harness:0.2.0`. Two findings
@@ -44,7 +44,7 @@ on the first run, both fixed the same day:
 With those, inside the node pod:
 
 ```
-ok   runtime                api reachable; pods/attach/log and networkpolicies granted in tracon-lab; node general-ihxil
+ok   runtime                api reachable; pods/attach/log and networkpolicies granted in tracon-lab; node pool-1-abcde
 ok   harness_unprivileged   non-root uid 65532, no capabilities, no escalation, seccomp RuntimeDefault
 ok   no_runtime_socket      no host namespaces, no API token, no hostPath; only the state claim
 ok   network_isolated       no resolver; tracon-harness allows egress only to the node pod on the forward and proxy ports

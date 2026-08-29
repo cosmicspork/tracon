@@ -21,8 +21,8 @@
   function notifies(bindings: Record<string, unknown>): boolean {
     const n = (bindings.notify ?? {}) as Record<string, unknown>
     if (typeof n.enabled === 'boolean') return n.enabled
-    // The Phase 6 shape: a pager sink meant push, a tray sink meant not the phone.
-    if (typeof n.sink === 'string') return n.sink === 'pager'
+    // The Phase 6 shape: a named bridge meant push, the tray meant not the phone.
+    if (typeof n.sink === 'string') return n.sink !== 'tray'
     return true
   }
 
