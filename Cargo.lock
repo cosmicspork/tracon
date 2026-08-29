@@ -2814,6 +2814,7 @@ dependencies = [
  "sha2 0.10.9",
  "sqlite-vec",
  "sqlparser",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-stream",

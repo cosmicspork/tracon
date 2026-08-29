@@ -4,6 +4,10 @@
 //! marker words — so "the nearest neighbour is the right document" is a claim
 //! about the indexing and search path rather than about a model.
 
+#[path = "support/mod.rs"]
+mod support;
+use support::state;
+
 use std::sync::{Arc, Mutex};
 
 use axum::{extract::State, routing::post, Json, Router};
@@ -175,6 +179,7 @@ fn setup(base: &str) -> (Arc<Store>, Embedder) {
 
 #[tokio::test]
 async fn a_query_finds_the_document_that_means_the_same_thing() {
+    state::isolate();
     let (_stub, base) = stub().await;
     let (store, e) = setup(&base);
     let d1 = doc(&store, "d1", "personal", "guide-testing", "Running the suite",
@@ -201,6 +206,7 @@ async fn a_query_finds_the_document_that_means_the_same_thing() {
 /// that matched rather than the top of the file.
 #[tokio::test]
 async fn a_hit_points_at_the_text_it_matched() {
+    state::isolate();
     let (_stub, base) = stub().await;
     let (store, e) = setup(&base);
     let body = "# Guide\n\nSomething unrelated entirely, at some length so it stands as its own section.\n\n\
@@ -221,6 +227,7 @@ async fn a_hit_points_at_the_text_it_matched() {
 /// re-embeds the whole corpus.
 #[tokio::test]
 async fn nothing_is_re_embedded_when_nothing_changed() {
+    state::isolate();
     let (s, base) = stub().await;
     let (store, e) = setup(&base);
     doc(
@@ -244,6 +251,7 @@ async fn nothing_is_re_embedded_when_nothing_changed() {
 
 #[tokio::test]
 async fn an_edit_re_embeds_and_leaves_no_stale_vector() {
+    state::isolate();
     let (_stub, base) = stub().await;
     let (store, e) = setup(&base);
     doc(
@@ -282,6 +290,7 @@ async fn an_edit_re_embeds_and_leaves_no_stale_vector() {
 /// cleared for it too.
 #[tokio::test]
 async fn deleting_a_document_removes_its_vectors() {
+    state::isolate();
     let (_stub, base) = stub().await;
     let (store, e) = setup(&base);
     let d1 = doc(
@@ -308,6 +317,7 @@ async fn deleting_a_document_removes_its_vectors() {
 /// started one. It must cost search quality and nothing else.
 #[tokio::test]
 async fn a_dead_endpoint_is_an_error_not_a_panic() {
+    state::isolate();
     let (store, e) = setup("http://127.0.0.1:1");
     doc(
         &store,
@@ -331,6 +341,7 @@ async fn a_dead_endpoint_is_an_error_not_a_panic() {
 
 #[tokio::test]
 async fn a_failing_endpoint_leaves_the_index_consistent() {
+    state::isolate();
     let (s, base) = stub().await;
     let (store, e) = setup(&base);
     doc(
@@ -366,6 +377,7 @@ async fn a_failing_endpoint_leaves_the_index_consistent() {
 /// produce an index that cannot be searched. Catch it at the first call.
 #[tokio::test]
 async fn a_dimension_mismatch_is_refused() {
+    state::isolate();
     let (s, base) = stub().await;
     let (store, e) = setup(&base);
     *s.wrong_dim.lock().unwrap() = true;
@@ -387,6 +399,7 @@ async fn a_dimension_mismatch_is_refused() {
 
 #[tokio::test]
 async fn a_memory_is_indexed_as_one_chunk_on_its_own_channel() {
+    state::isolate();
     let (_stub, base) = stub().await;
     let (store, e) = setup(&base);
     memory(&store, "work", "m1", "the check command is pest");
@@ -406,6 +419,7 @@ async fn a_memory_is_indexed_as_one_chunk_on_its_own_channel() {
 /// cannot answer, because it shares no words with the document that answers it.
 #[tokio::test]
 async fn a_query_fts_cannot_answer_is_answered_by_the_vector_leg() {
+    state::isolate();
     let (_stub, base) = stub().await;
     let (store, e) = setup(&base);
     doc(&store, "d1", "personal", "guide-testing", "Running the suite",
@@ -446,6 +460,7 @@ async fn a_query_fts_cannot_answer_is_answered_by_the_vector_leg() {
 /// they do not overturn it.
 #[tokio::test]
 async fn a_semantic_match_does_not_outrank_the_operators_own_directive() {
+    state::isolate();
     let (_stub, base) = stub().await;
     let (store, e) = setup(&base);
     memory_kind(
@@ -483,6 +498,7 @@ async fn a_semantic_match_does_not_outrank_the_operators_own_directive() {
 /// the vector leg goes through the same scope predicate as the text one.
 #[tokio::test]
 async fn the_vector_leg_respects_memory_scope() {
+    state::isolate();
     let (_stub, base) = stub().await;
     let (store, e) = setup(&base);
     store
@@ -529,6 +545,7 @@ async fn the_vector_leg_respects_memory_scope() {
 /// With no vectors the hybrid path must be the text path, exactly.
 #[tokio::test]
 async fn no_vectors_is_the_text_only_ranking_unchanged() {
+    state::isolate();
     let (_stub, base) = stub().await;
     let (store, _e) = setup(&base);
     doc(
@@ -551,6 +568,7 @@ async fn no_vectors_is_the_text_only_ranking_unchanged() {
 /// title again is how a snippet ends up saying it twice.
 #[tokio::test]
 async fn a_title_the_body_already_carries_is_not_repeated() {
+    state::isolate();
     let (_stub, base) = stub().await;
     let (store, e) = setup(&base);
     let d1 = doc(
@@ -582,6 +600,7 @@ async fn a_title_the_body_already_carries_is_not_repeated() {
 /// edit and the secret can be a Secret in a pod.
 #[tokio::test]
 async fn a_key_file_is_presented_to_the_endpoint() {
+    state::isolate();
     let (s, base) = stub().await;
     let dir = std::env::temp_dir().join(format!("tracon-embed-key-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -620,6 +639,7 @@ async fn a_key_file_is_presented_to_the_endpoint() {
 /// With no key file, nothing is sent — the common loopback case.
 #[tokio::test]
 async fn no_key_file_sends_no_authorization() {
+    state::isolate();
     let (s, base) = stub().await;
     let (_store, e) = setup(&base);
     e.embed_query("anything", "t").await.unwrap();

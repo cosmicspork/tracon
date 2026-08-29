@@ -3,109 +3,18 @@
 //! are hashes, discovered work links back to its origin, and events inherit
 //! the session's item.
 
-use std::sync::Arc;
+#[path = "support/mod.rs"]
+mod support;
+use support::harness::harness;
+use support::http::call;
+use support::state;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use tracon::{
-    broker::Broker,
-    config::Config,
-    http::api::AppState,
-    mcp::Tools,
-    session::Manager,
-    store::{now_ms, NewEvent, SessionRow, Store},
-    stream::Bus,
-};
-
-#[path = "support/fake.rs"]
-mod fake;
-#[path = "support/state.rs"]
-mod state;
-use fake::FakeAdapter;
-
-struct H {
-    harness: axum::Router,
-    operator: axum::Router,
-    store: Arc<Store>,
-    manager: Manager,
-}
-
-async fn harness() -> H {
-    let store = Arc::new(Store::open_in_memory().unwrap());
-    store.ensure_peer_node("n1").unwrap();
-    let cfg = Arc::new(Config::default());
-    let tools = Arc::new(Tools {
-        broker: Broker::default().shared(),
-        cfg: cfg.clone(),
-        policy: tracon::policy::Policy::shipped_shared(),
-        http: reqwest::Client::new(),
-        session: Default::default(),
-    });
-    let manager = Manager::new(
-        store.clone(),
-        Bus::new(),
-        cfg.clone(),
-        "n1".into(),
-        tools.clone(),
-        Default::default(),
-        Arc::new(tracon::runner::local::LocalBackend),
-    );
-    let _ = tools.session.set(tracon::mcp::SessionAccess {
-        store: store.clone(),
-        manager: manager.clone(),
-    });
-    let state = AppState {
-        manager: manager.clone(),
-        cfg,
-        adapter: Arc::new(FakeAdapter {
-            tx: Arc::new(tokio::sync::Mutex::new(None)),
-            tokens: Arc::new(tokio::sync::Mutex::new(0)),
-        }),
-        node_id: "n1".into(),
-        tools,
-        mesh: None,
-        auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
-    };
-    H {
-        harness: tracon::http::harness_router(state.clone()),
-        operator: tracon::http::router(state),
-        store,
-        manager,
-    }
-}
-
-async fn call(
-    app: &axum::Router,
-    method: &str,
-    uri: &str,
-    body: Option<Value>,
-) -> (StatusCode, Value) {
-    let mut b = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("host", "127.0.0.1:7420");
-    if body.is_some() {
-        b = b.header("content-type", "application/json");
-    }
-    let req = b
-        .body(match body {
-            Some(v) => Body::from(v.to_string()),
-            None => Body::empty(),
-        })
-        .unwrap();
-    let res = app.clone().oneshot(req).await.unwrap();
-    let status = res.status();
-    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
-        .await
-        .unwrap();
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-    )
-}
+use tracon::store::{now_ms, NewEvent, SessionRow};
 
 async fn mcp(app: &axum::Router, sid: &str, token: &str, name: &str, args: Value) -> Value {
     let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}});
@@ -131,7 +40,7 @@ fn session_row(id: &str, item: Option<&str>) -> SessionRow {
         node_id: "n1".into(),
         channel: "personal".into(),
         work_item_id: item.map(str::to_string),
-        repo_path: "/tmp/repo".into(),
+        repo_path: "/nonexistent/repo".into(),
         worktree_path: None,
         branch: "feat/x".into(),
         harness_id: "fake".into(),

@@ -195,8 +195,8 @@ mod tests {
 
     /// A repo with an `origin` remote, so the worktree has a real base to
     /// branch from.
-    async fn fixture() -> (tempdir::TempDir, PathBuf) {
-        let tmp = tempdir::TempDir::new();
+    async fn fixture() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
         let origin = tmp.path().join("origin.git");
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&origin).unwrap();
@@ -249,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_repo_is_refused() {
-        let tmp = tempdir::TempDir::new();
+        let tmp = tempfile::tempdir().unwrap();
         let err = create(
             &tmp.path().join("nope"),
             &tmp.path().join("work"),
@@ -259,35 +259,5 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, WorktreeError::NoRepo(_)));
-    }
-
-    /// Minimal scoped temp dir; avoids a dependency for four tests.
-    pub mod tempdir {
-        use std::path::{Path, PathBuf};
-
-        pub struct TempDir(PathBuf);
-
-        impl TempDir {
-            #[allow(clippy::new_without_default)]
-            pub fn new() -> Self {
-                let base = std::env::temp_dir().join(format!(
-                    "tracon-test-{}-{:?}",
-                    std::process::id(),
-                    std::thread::current().id()
-                ));
-                let _ = std::fs::remove_dir_all(&base);
-                std::fs::create_dir_all(&base).unwrap();
-                Self(base)
-            }
-            pub fn path(&self) -> &Path {
-                &self.0
-            }
-        }
-
-        impl Drop for TempDir {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
     }
 }

@@ -15,12 +15,9 @@ use proto::keys::Identity;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-}
+#[path = "support/mod.rs"]
+mod support;
+use support::now;
 
 struct Hub {
     app: Router,

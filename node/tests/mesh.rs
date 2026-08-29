@@ -2,10 +2,12 @@
 //! not spawned; the test drives `drain_once` / `pull_once` so every step is
 //! deterministic.
 
+#[path = "support/mod.rs"]
+mod support;
+use support::state;
+
 use std::sync::Arc;
 
-use hub::store::{Member, MemberStore, MemoryFrames, MemoryMembers};
-use hub::HubConfig;
 use proto::envelope::DataKey;
 use proto::frame::{Payload, MESH_CHANNEL};
 use proto::keyring::Keyring;
@@ -14,11 +16,8 @@ use serde_json::json;
 use tracon::config::Config;
 use tracon::mesh::client::MeshClient;
 use tracon::mesh::HubState;
-use tracon::store::{now_ms, NewEvent, NodeRow, SessionRow, Store};
+use tracon::store::{now_ms, NewEvent, Store};
 use tracon::stream::{Bus, Frame};
-
-#[path = "support/state.rs"]
-mod state;
 
 struct Node {
     id: Identity,
@@ -28,98 +27,30 @@ struct Node {
 }
 
 /// The next frame that is not the hub-state banner update.
-fn next_frame(rx: &mut tokio::sync::broadcast::Receiver<Frame>) -> Frame {
+async fn next_frame(rx: &mut tokio::sync::broadcast::Receiver<Frame>) -> Frame {
     loop {
-        let f = rx.try_recv().expect("a frame");
+        // The frame is published from another task; a non-blocking receive
+        // here would be a race, not a check.
+        let f = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a frame before the deadline")
+            .expect("the bus is open");
         if !matches!(f, Frame::Mesh(_)) {
             return f;
         }
     }
 }
 
-fn node_row(id: &Identity, name: &str) -> NodeRow {
-    NodeRow {
-        id: id.node_id(),
-        name: name.into(),
-        state: "ready".into(),
-        failed_check: None,
-        failed_detail: None,
-        harness_id: "fake".into(),
-        harness_pinned: "1".into(),
-        harness_found: Some("1".into()),
-        models_json: Some("[]".into()),
-        checked_at_ms: Some(now_ms()),
-        is_self: 1,
-        x25519_pub: Some(id.x25519_hex()),
-        last_seen_ms: None,
-        reachable: 1,
-    }
-}
-
-fn session(node: &str, id: &str, channel: &str) -> SessionRow {
-    SessionRow {
-        id: id.into(),
-        node_id: node.into(),
-        channel: channel.into(),
-        work_item_id: None,
-        repo_path: "/r".into(),
-        worktree_path: None,
-        branch: "b".into(),
-        harness_id: "fake".into(),
-        harness_version: "1".into(),
-        harness_session_id: None,
-        container_name: None,
-        model: "m".into(),
-        project_id: None,
-        phase: "execute".into(),
-        policy_version: None,
-        review_id: None,
-        budget_tokens: 10,
-        tokens_used: 0,
-        cost_usd: None,
-        context_used: None,
-        context_size: None,
-        state: "running".into(),
-        end_reason: None,
-        last_error: None,
-        turn_active: 0,
-        draft: None,
-        draft_updated_ms: None,
-        created_ms: 1,
-        started_mono_ms: None,
-        ended_mono_ms: None,
-        updated_ms: 1,
-    }
-}
-
-async fn start_hub(admitted: &[(&Identity, &[&str])]) -> String {
-    let members = Arc::new(MemoryMembers::new());
-    for (id, channels) in admitted {
-        members
-            .put(&Member {
-                node_id: id.node_id(),
-                x25519_pub: id.x25519_hex(),
-                name: "n".into(),
-                channels: channels.iter().map(|s| s.to_string()).collect(),
-                admitted_ms: 0,
-                admitted_by: "test".into(),
-                role: Default::default(),
-            })
-            .unwrap();
-    }
-    let app = hub::app(Arc::new(MemoryFrames::new()), members, HubConfig::default());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    format!("http://{addr}")
-}
-
 fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Node {
     let id = Identity::from_seed(&[seed; 32]);
     let store = Arc::new(Store::open_in_memory().unwrap());
-    store.put_node(&node_row(&id, name)).unwrap();
+    store
+        .put_node(&{
+            let mut r = support::rows::node_row(&id.node_id(), name);
+            r.x25519_pub = Some(id.x25519_hex());
+            r
+        })
+        .unwrap();
     for (c, ring) in rings {
         store.channel_put(c, &ring.to_bytes(), "{}").unwrap();
         store.node_channel_add(&id.node_id(), c).unwrap();
@@ -147,7 +78,7 @@ fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Node {
 async fn pair() -> (Node, Node) {
     let a_id = Identity::from_seed(&[1u8; 32]);
     let b_id = Identity::from_seed(&[2u8; 32]);
-    let hub = start_hub(&[
+    let hub = support::mesh::start_hub(&[
         (&a_id, &[MESH_CHANNEL, "personal", "secret"]),
         (&b_id, &[MESH_CHANNEL, "personal", "secret"]),
     ])
@@ -197,7 +128,7 @@ async fn hello_makes_a_peer_visible_and_presence_ages_it_out() {
     assert_eq!(peer.is_self, 0);
     assert_eq!(peer.reachable, 1);
     assert!(peer.last_seen_ms.is_some());
-    let f = next_frame(&mut b_sub);
+    let f = next_frame(&mut b_sub).await;
     assert!(matches!(f, Frame::Node(ref v) if v["id"] == a.id.node_id() && v["is_self"] == false));
     assert!(matches!(b.client.snapshot().hub, HubState::Connected));
 
@@ -205,7 +136,7 @@ async fn hello_makes_a_peer_visible_and_presence_ages_it_out() {
     b.client.presence_tick(now_ms() + 3 * 60_000 + 1);
     let peer = b.store.get_node(&a.id.node_id()).unwrap().unwrap();
     assert_eq!(peer.reachable, 0);
-    let f = next_frame(&mut b_sub);
+    let f = next_frame(&mut b_sub).await;
     assert!(matches!(f, Frame::Node(ref v) if v["reachable"] == false));
     // A's own hello echoed back changes nothing on A.
     assert_eq!(a.client.pull_once().await.unwrap(), 0);
@@ -216,7 +147,7 @@ async fn sessions_and_events_mirror_once_and_reach_the_bus() {
     state::isolate();
     let (a, b) = pair().await;
     let mut b_sub = b.bus.subscribe();
-    let row = session(&a.id.node_id(), "s1", "personal");
+    let row = support::rows::session_row("s1", &a.id.node_id(), "personal");
     a.store.insert_session(&row).unwrap();
     a.client.on_frame(&Frame::Session(Box::new(row.clone())));
     let ev = Frame::Event {
@@ -248,7 +179,7 @@ async fn sessions_and_events_mirror_once_and_reach_the_bus() {
     let events = b.store.events_after("s1", -1, 10).unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].node_id, a.id.node_id());
-    assert!(matches!(next_frame(&mut b_sub), Frame::Session(_)));
+    assert!(matches!(next_frame(&mut b_sub).await, Frame::Session(_)));
     assert!(
         matches!(b_sub.try_recv().unwrap(), Frame::Event { node_id, seq, .. } if node_id == a.id.node_id() && seq == 1)
     );
@@ -269,7 +200,7 @@ async fn a_peer_cannot_speak_for_another_node_and_unknown_keys_are_counted() {
     state::isolate();
     let (a, b) = pair().await;
     // A claims a session belongs to B.
-    let row = session(&b.id.node_id(), "forged", "personal");
+    let row = support::rows::session_row("forged", &b.id.node_id(), "personal");
     a.client
         .enqueue("personal", None, &Payload::Session(json!(row)))
         .unwrap();
@@ -297,7 +228,7 @@ async fn a_peer_cannot_speak_for_another_node_and_unknown_keys_are_counted() {
 async fn queue_frames_expire_answered_requests_and_snapshots_close_lost_sessions() {
     state::isolate();
     let (a, b) = pair().await;
-    let row = session(&a.id.node_id(), "s1", "personal");
+    let row = support::rows::session_row("s1", &a.id.node_id(), "personal");
     a.store.insert_session(&row).unwrap();
     a.client.on_frame(&Frame::Session(Box::new(row.clone())));
     let perm = tracon::store::PermissionRow {
@@ -380,7 +311,9 @@ async fn outbox_survives_a_hub_outage_and_members_are_learned() {
     ));
 
     // The real hub comes up; a fresh client on the same store drains it.
-    let hub = start_hub(&[(&a_id, &[MESH_CHANNEL]), (&b_id, &[MESH_CHANNEL, "work"])]).await;
+    let hub =
+        support::mesh::start_hub(&[(&a_id, &[MESH_CHANNEL]), (&b_id, &[MESH_CHANNEL, "work"])])
+            .await;
     let mut cfg = Config::default();
     cfg.mesh.hub_url = Some(hub.clone());
     let client = MeshClient::new(
@@ -411,7 +344,13 @@ async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
     use tracon::session::{Manager, NewSession, SessionError};
     let id = Identity::from_seed(&[5u8; 32]);
     let store = Arc::new(Store::open_in_memory().unwrap());
-    store.put_node(&node_row(&id, "n")).unwrap();
+    store
+        .put_node(&{
+            let mut r = support::rows::node_row(&id.node_id(), "n");
+            r.x25519_pub = Some(id.x25519_hex());
+            r
+        })
+        .unwrap();
     let mut cfg = Config::default();
     cfg.mesh.hub_url = Some("http://127.0.0.1:1".into());
     let tools = Arc::new(tracon::mcp::Tools {

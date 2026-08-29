@@ -3,32 +3,28 @@
 //! fake harness, one real hub router, two mesh clients with their loops
 //! running.
 
-#[path = "support/fake.rs"]
-mod fake;
-#[path = "support/state.rs"]
-mod state;
+#[path = "support/mod.rs"]
+mod support;
+use support::state;
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use fake::FakeAdapter;
-use hub::store::{Member, MemberStore, MemoryFrames, MemoryMembers};
-use hub::HubConfig;
+use axum::http::StatusCode;
 use proto::envelope::DataKey;
 use proto::frame::MESH_CHANNEL;
 use proto::keyring::Keyring;
 use proto::keys::Identity;
-use serde_json::{json, Value};
+use serde_json::json;
+use support::fake::FakeAdapter;
+use support::http::call;
+use support::mesh::{identity, wait_for};
 use tokio::sync::Mutex;
-use tower::ServiceExt;
 use tracon::adapter::HarnessEvent;
 use tracon::config::Config;
 use tracon::http::api::AppState;
 use tracon::mesh::client::MeshClient;
 use tracon::session::Manager;
-use tracon::store::{now_ms, NodeRow, Store};
+use tracon::store::Store;
 use tracon::stream::Bus;
 
 struct Node {
@@ -39,53 +35,14 @@ struct Node {
     adapter: Arc<FakeAdapter>,
 }
 
-fn identity(seed: u8) -> Identity {
-    Identity::from_seed(&[seed; 32])
-}
-
-async fn start_hub(ids: &[&Identity]) -> String {
-    let members = Arc::new(MemoryMembers::new());
-    for id in ids {
-        members
-            .put(&Member {
-                node_id: id.node_id(),
-                x25519_pub: id.x25519_hex(),
-                name: "n".into(),
-                channels: vec![MESH_CHANNEL.into(), "personal".into()],
-                admitted_ms: 0,
-                admitted_by: "t".into(),
-                role: Default::default(),
-            })
-            .unwrap();
-    }
-    let app = hub::app(Arc::new(MemoryFrames::new()), members, HubConfig::default());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    format!("http://{addr}")
-}
-
 async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Node {
     let id = identity(seed);
     let store = Arc::new(Store::open_in_memory().unwrap());
     store
-        .put_node(&NodeRow {
-            id: id.node_id(),
-            name: name.into(),
-            state: "ready".into(),
-            failed_check: None,
-            failed_detail: None,
-            harness_id: "fake".into(),
-            harness_pinned: "1.0.0".into(),
-            harness_found: Some("1.0.0".into()),
-            models_json: Some(r#"[{"value":"m/a","name":"A"}]"#.into()),
-            checked_at_ms: Some(now_ms()),
-            is_self: 1,
-            x25519_pub: Some(id.x25519_hex()),
-            last_seen_ms: None,
-            reachable: 1,
+        .put_node(&{
+            let mut r = support::rows::node_row(&id.node_id(), name);
+            r.x25519_pub = Some(id.x25519_hex());
+            r
         })
         .unwrap();
     for (c, ring) in rings {
@@ -149,47 +106,10 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
     }
 }
 
-async fn call(
-    app: &axum::Router,
-    method: &str,
-    uri: &str,
-    body: Option<Value>,
-) -> (StatusCode, Value) {
-    let mut b = Request::builder().method(method).uri(uri);
-    if body.is_some() {
-        b = b.header("content-type", "application/json");
-    }
-    let req = b
-        .body(match body {
-            Some(v) => Body::from(v.to_string()),
-            None => Body::empty(),
-        })
-        .unwrap();
-    let res = app.clone().oneshot(req).await.unwrap();
-    let status = res.status();
-    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
-        .await
-        .unwrap();
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-    )
-}
-
-async fn wait_for<F: Fn() -> bool>(what: &str, f: F) {
-    for _ in 0..200 {
-        if f() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("timed out waiting for {what}");
-}
-
 async fn pair() -> (Node, Node) {
     let a_id = identity(1);
     let b_id = identity(2);
-    let hub = start_hub(&[&a_id, &b_id]).await;
+    let hub = support::mesh::start_hub_personal(&[&a_id, &b_id]).await;
     let mesh = Keyring::genesis(&a_id.x25519_public(), &DataKey::generate());
     let personal = Keyring::genesis(&a_id.x25519_public(), &DataKey::generate());
     let b_mesh = mesh.wrap_for(&a_id, &b_id.x25519_public()).unwrap();

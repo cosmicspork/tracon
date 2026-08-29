@@ -55,6 +55,9 @@ pub struct Providers {
     backend: Arc<dyn Backend>,
     node_id: String,
     bus: Bus,
+    /// Where login stores live: `<state>/providers` unless a test says
+    /// otherwise, so two tests logging in at once never share one.
+    store_root: PathBuf,
     inflight: Mutex<HashMap<String, Inflight>>,
     /// The last thing that happened to a provider that is not in the broker:
     /// a login that failed, a refresh that failed.
@@ -89,6 +92,29 @@ impl Providers {
         node_id: String,
         bus: Bus,
     ) -> Arc<Self> {
+        Self::new_in(
+            Self::store_root(),
+            cfg,
+            broker,
+            store_key,
+            adapter,
+            backend,
+            node_id,
+            bus,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_in(
+        store_root: PathBuf,
+        cfg: Arc<Config>,
+        broker: SharedBroker,
+        store_key: DataKey,
+        adapter: Arc<dyn HarnessAdapter>,
+        backend: Arc<dyn Backend>,
+        node_id: String,
+        bus: Bus,
+    ) -> Arc<Self> {
         Arc::new(Self {
             cfg,
             broker,
@@ -97,6 +123,7 @@ impl Providers {
             backend,
             node_id,
             bus,
+            store_root,
             inflight: Mutex::new(HashMap::new()),
             notes: Mutex::new(HashMap::new()),
             on_connected: std::sync::OnceLock::new(),
@@ -107,10 +134,15 @@ impl Providers {
         let _ = self.on_connected.set(f);
     }
 
-    /// The node-owned login store for one provider. Under the state
-    /// directory so a pod-hosted node reaches it as a subPath of its claim.
-    pub fn store_dir(provider: &str) -> PathBuf {
-        Config::state_dir().join("providers").join(provider)
+    /// Where the node-owned login stores live. Under the state directory so
+    /// a pod-hosted node reaches them as a subPath of its claim.
+    pub fn store_root() -> PathBuf {
+        Config::state_dir().join("providers")
+    }
+
+    /// The login store for one provider.
+    pub fn store_dir(&self, provider: &str) -> PathBuf {
+        self.store_root.join(provider)
     }
 
     /// Every configured provider with its state: `connected` (a credential is
@@ -179,7 +211,7 @@ impl Providers {
     }
 
     fn runner_for(&self, provider: &str) -> std::io::Result<Arc<dyn crate::runner::Runner>> {
-        let dir = Self::store_dir(provider);
+        let dir = self.store_dir(provider);
         std::fs::create_dir_all(dir.join("agent"))?;
         #[cfg(unix)]
         {
@@ -335,7 +367,7 @@ impl Providers {
         login: &str,
         channels: Vec<String>,
     ) -> Result<(), ProviderError> {
-        let dir = Self::store_dir(name);
+        let dir = self.store_dir(name);
         let tok: LiftedToken = self
             .adapter
             .lift(&dir, login)

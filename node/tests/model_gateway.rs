@@ -2,6 +2,10 @@
 //! the broker's credential does, bindings refuse before anything is forwarded,
 //! and what passed through is counted.
 
+#[path = "support/mod.rs"]
+mod support;
+use support::state;
+
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -20,11 +24,7 @@ use tracon::{
     stream::Bus,
 };
 
-#[path = "support/fake.rs"]
-mod fake;
-#[path = "support/state.rs"]
-mod state;
-use fake::FakeAdapter;
+use support::fake::FakeAdapter;
 
 /// `(method, uri, headers, body)` as the stub saw it.
 type SeenRequest = (String, String, Vec<(String, String)>, String);

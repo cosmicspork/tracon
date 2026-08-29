@@ -3,6 +3,10 @@
 //! offline edits resolve to the same winner everywhere once the hub returns,
 //! and a delete travels the same way.
 
+#[path = "support/mod.rs"]
+mod support;
+use support::state;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,11 +18,12 @@ use proto::frame::MESH_CHANNEL;
 use proto::keyring::Keyring;
 use proto::keys::Identity;
 use serde_json::{json, Value};
+use support::mesh::{identity, wait_for};
 use tracon::config::Config;
 use tracon::corpus;
 use tracon::mesh::client::MeshClient;
 use tracon::mesh::HubState;
-use tracon::store::{now_ms, NodeRow, Store};
+use tracon::store::{now_ms, Store};
 use tracon::stream::Bus;
 use tracon_sync::ChangeOp;
 
@@ -100,29 +105,17 @@ struct Node {
     client: Arc<MeshClient>,
 }
 
-fn identity(seed: u8) -> Identity {
-    Identity::from_seed(&[seed; 32])
-}
-
 fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Node {
     let id = identity(seed);
     let store = Arc::new(Store::open_in_memory().unwrap());
     store
-        .put_node(&NodeRow {
-            id: id.node_id(),
-            name: name.into(),
-            state: "ready".into(),
-            failed_check: None,
-            failed_detail: None,
-            harness_id: "fake".into(),
-            harness_pinned: "1".into(),
-            harness_found: Some("1".into()),
-            models_json: None,
-            checked_at_ms: Some(now_ms()),
-            is_self: 1,
-            x25519_pub: Some(id.x25519_hex()),
-            last_seen_ms: None,
-            reachable: 1,
+        .put_node(&{
+            let mut r = support::rows::node_row(&id.node_id(), name);
+            r.harness_pinned = "1".into();
+            r.harness_found = Some("1".into());
+            r.models_json = None;
+            r.x25519_pub = Some(id.x25519_hex());
+            r
         })
         .unwrap();
     for (c, ring) in rings {
@@ -149,16 +142,6 @@ fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Node {
         bus,
         client,
     }
-}
-
-async fn wait_for<F: Fn() -> bool>(what: &str, f: F) {
-    for _ in 0..400 {
-        if f() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("timed out waiting for {what}");
 }
 
 fn doc(slug: &str, body: &str) -> Value {
@@ -210,6 +193,7 @@ async fn pair() -> (Hub, Node, Node) {
 
 #[tokio::test]
 async fn records_converge_through_the_hub_and_survive_its_absence() {
+    state::isolate();
     let (mut hub, a, b) = pair().await;
     let (ai, bi) = (a.id.node_id(), b.id.node_id());
 
@@ -358,6 +342,7 @@ async fn records_converge_through_the_hub_and_survive_its_absence() {
 
 #[tokio::test]
 async fn a_late_joiner_backfills_records_from_each_site() {
+    state::isolate();
     let (hub, a, b) = pair().await;
     let (ai, bi) = (a.id.node_id(), b.id.node_id());
     corpus::write(

@@ -2,15 +2,16 @@
 //! the operator's paste-back reaches its stdin, and what it stores is lifted
 //! into the broker as an `oauth` credential pinned to this node.
 
+#[path = "support/mod.rs"]
+mod support;
+use support::state;
+
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
-
-#[path = "support/state.rs"]
-mod state;
 
 use tracon::{
     adapter::{
@@ -116,11 +117,15 @@ impl HarnessAdapter for LoginFake {
     }
 }
 
-fn providers(fake: Arc<LoginFake>) -> (Arc<Providers>, tracon::broker::SharedBroker, Bus) {
+fn providers(
+    name: &str,
+    fake: Arc<LoginFake>,
+) -> (Arc<Providers>, tracon::broker::SharedBroker, Bus) {
     let bus = Bus::new();
     let broker = Broker::default().shared();
     let cfg = Arc::new(Config::default()); // anthropic has a login; openai does not
-    let p = Providers::new(
+    let p = Providers::new_in(
+        state::scratch(name),
         cfg,
         broker.clone(),
         proto::envelope::DataKey::from_bytes([9u8; 32]),
@@ -136,9 +141,8 @@ fn providers(fake: Arc<LoginFake>) -> (Arc<Providers>, tracon::broker::SharedBro
 async fn connect_paste_back_lifts_the_token_into_the_broker() {
     state::isolate();
     let fake = Arc::new(LoginFake::default());
-    let (p, broker, bus) = providers(fake.clone());
+    let (p, broker, bus) = providers("connect_paste_back", fake.clone());
     let mut frames = bus.subscribe();
-    let _ = std::fs::remove_dir_all(Providers::store_dir("anthropic"));
 
     let url = p.connect("anthropic", vec!["work".into()]).await.unwrap();
     assert_eq!(url, "https://login.example/anthropic");
@@ -216,14 +220,13 @@ async fn connect_paste_back_lifts_the_token_into_the_broker() {
 
     p.disconnect("anthropic").await.unwrap();
     assert!(broker.read().unwrap().get("anthropic").is_none());
-    let _ = std::fs::remove_dir_all(Providers::store_dir("anthropic"));
 }
 
 #[tokio::test]
 async fn a_provider_without_a_login_flow_says_so_and_a_failed_login_is_reported() {
     state::isolate();
     let fake = Arc::new(LoginFake::default());
-    let (p, broker, _bus) = providers(fake);
+    let (p, broker, _bus) = providers("failures", fake);
     assert!(matches!(
         p.connect("openai", vec![]).await.unwrap_err(),
         tracon::providers::ProviderError::NoLogin(_)
@@ -257,5 +260,4 @@ async fn a_provider_without_a_login_flow_says_so_and_a_failed_login_is_reported(
     .await
     .expect("failure recorded");
     assert!(broker.read().unwrap().is_empty());
-    let _ = std::fs::remove_dir_all(Providers::store_dir("anthropic"));
 }

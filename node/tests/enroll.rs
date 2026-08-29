@@ -1,11 +1,13 @@
 //! The enrollment flow end to end, in one process: a hub, an enrolled node
 //! that invites, and a fresh node that accepts and ends up holding the keys.
 
+#[path = "support/mod.rs"]
+mod support;
+use support::state;
+
 use std::sync::Arc;
 use std::time::Duration;
 
-use hub::store::{Member, MemberStore, MemoryFrames, MemoryMembers};
-use hub::HubConfig;
 use proto::envelope::DataKey;
 use proto::frame::MESH_CHANNEL;
 use proto::keyring::Keyring;
@@ -18,35 +20,12 @@ impl enroll::Progress for Quiet {
     fn say(&self, _: &str) {}
 }
 
-async fn start_hub(admitted: &[&Identity]) -> String {
-    let members = Arc::new(MemoryMembers::new());
-    for id in admitted {
-        members
-            .put(&Member {
-                node_id: id.node_id(),
-                x25519_pub: id.x25519_hex(),
-                name: "first".into(),
-                channels: vec![MESH_CHANNEL.into(), "personal".into()],
-                admitted_ms: 0,
-                admitted_by: "env".into(),
-                role: Default::default(),
-            })
-            .unwrap();
-    }
-    let app = hub::app(Arc::new(MemoryFrames::new()), members, HubConfig::default());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    format!("http://{addr}")
-}
-
 #[tokio::test]
 async fn a_fresh_node_is_invited_admitted_and_handed_keys() {
+    state::isolate();
     let a = Identity::from_seed(&[1u8; 32]);
     let b = Identity::from_seed(&[2u8; 32]);
-    let hub = start_hub(&[&a]).await;
+    let hub = support::mesh::start_hub_personal(&[&a]).await;
 
     // A holds keys for @mesh and personal.
     let a_store = Store::open_in_memory().unwrap();
@@ -85,12 +64,16 @@ async fn a_fresh_node_is_invited_admitted_and_handed_keys() {
     });
 
     // A sees the request, checks the fingerprint, admits.
-    let req = loop {
-        if let Some(r) = enroll::poll_invite(&a, &hub, &inv.code).await.unwrap() {
-            break r;
+    let req = tokio::time::timeout(support::mesh::WAIT, async {
+        loop {
+            if let Some(r) = enroll::poll_invite(&a, &hub, &inv.code).await.unwrap() {
+                break r;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
+    })
+    .await
+    .expect("B's enrollment request reached the hub");
     assert_eq!(req.node_id, b.node_id());
     assert_eq!(req.name, "laptop");
     assert_eq!(
@@ -144,9 +127,10 @@ async fn a_fresh_node_is_invited_admitted_and_handed_keys() {
 
 #[tokio::test]
 async fn admit_refuses_channels_this_node_cannot_hand_off() {
+    state::isolate();
     let a = Identity::from_seed(&[1u8; 32]);
     let b = Identity::from_seed(&[2u8; 32]);
-    let hub = start_hub(&[&a]).await;
+    let hub = support::mesh::start_hub_personal(&[&a]).await;
     let a_store = Store::open_in_memory().unwrap();
     let ring = Keyring::genesis(&a.x25519_public(), &DataKey::generate());
     a_store
@@ -175,6 +159,7 @@ async fn admit_refuses_channels_this_node_cannot_hand_off() {
 
 #[tokio::test]
 async fn key_handoff_merges_epochs() {
+    state::isolate();
     let a = Identity::from_seed(&[1u8; 32]);
     let b = Identity::from_seed(&[2u8; 32]);
     let store = Store::open_in_memory().unwrap();
