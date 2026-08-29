@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/cosmicspork/tracon/compare/v0.4.0...v0.5.0) (2026-08-28)
+
+
+### Features
+
+* edit a reviewed diff and send it back as a patch ([#66](https://github.com/cosmicspork/tracon/issues/66)) ([7b405f0](https://github.com/cosmicspork/tracon/commit/7b405f010c189221859d8df2682fcb82fe2382a4))
+* **node:** install the node under systemd or launchd ([#67](https://github.com/cosmicspork/tracon/issues/67)) ([b1f2658](https://github.com/cosmicspork/tracon/commit/b1f2658534448c29758f9dd9c7eb996f57eed12f))
+* **node:** operator token and cookie auth for off-machine clients ([#62](https://github.com/cosmicspork/tracon/issues/62)) ([1a2cc01](https://github.com/cosmicspork/tracon/commit/1a2cc01c5a27ffe7b1626d7063f3057266e44943))
+* **node:** push what waits on the operator to a channel's sink ([#64](https://github.com/cosmicspork/tracon/issues/64)) ([62b5327](https://github.com/cosmicspork/tracon/commit/62b53279d79b105247e1581d078fc686546c22ec))
+* **spa:** make the interface installable ([#65](https://github.com/cosmicspork/tracon/issues/65)) ([4efe664](https://github.com/cosmicspork/tracon/commit/4efe6644f5b68abf155ef31006f15435398a198a))
+* **wrapper:** a Tauri tray client for a running node ([#68](https://github.com/cosmicspork/tracon/issues/68)) ([3e50d79](https://github.com/cosmicspork/tracon/commit/3e50d794fba62a460aae357d8452a7aa6ed194c2))
+
 ## [0.4.0](https://github.com/cosmicspork/tracon/compare/v0.3.0...v0.4.0) (2026-08-28)
 
 
