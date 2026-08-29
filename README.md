@@ -310,14 +310,22 @@ PWA — manifest, icons, and a service worker that caches the shell and never ca
 API, because a stale queue is worse than an honest "cannot reach the node". A desktop
 wrapper (`wrapper/`, its own cargo workspace) adds what is actually wanted from native:
 a tray showing what is waiting, a global hotkey, command-tab presence, and system
-notifications. It supervises nothing and holds no session state.
+notifications. It holds no session state — the window is the interface the node serves,
+so a crash there is a reconnect and never lost work.
 
-The node is run by the platform, not by hand or by the wrapper:
+Something has to run the node, which does not daemonize. Either the platform:
 
 ```bash
 tracon service install     # a systemd user unit, or a LaunchAgent on macOS
 tracon service status
 ```
+
+or the wrapper itself, which is the better answer on a laptop where the node is only
+wanted while you are logged in. It starts one on launch and stops it on quit, and it
+**adopts** a node that is already answering rather than starting a second — two nodes
+over one state directory would fight over the same database and harness socket. So a
+machine that must stay reachable through logout keeps the unit, and running both is not
+a mistake you can make.
 
 Off its own machine, the node wants a credential. Loopback is unchanged — the CLI and
 `just dev` need nothing — but anything else needs a token:

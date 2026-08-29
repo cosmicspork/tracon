@@ -1007,6 +1007,15 @@ against the text it changed from, and emits a patch. The patch travels with the 
 still a *request*, and the agent is still the only writer to the worktree. Desktop only,
 and the editor is lazy-loaded so the phone never fetches it.
 
+**Built (Phase 7): it can run the node too.** The node does not daemonize, so
+something has to run it, and on a laptop that something is better as a tray icon
+than a unit file — the node is wanted while you are logged in. It adopts a node
+that is already answering rather than starting a second one, because two over
+one state directory would fight over the same SQLite file and harness socket, so
+`tracon service install` stays correct for a machine that must survive logout.
+Quitting stops it with the same SIGTERM-and-wait the unit uses, since shutdown
+tears down session containers and cutting that short leaks them.
+
 ### Reach across nodes
 
 The interface talks only to the node that served it. That node mirrors every peer's

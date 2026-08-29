@@ -175,11 +175,52 @@ That path needed the gateway's node-side token widened from GET-only to permit
 POST — on an embeddings path and nothing else, since that token carries no
 channel and anything it reaches is outside the per-channel bindings.
 
-**Nothing here has been run against a real embedding model.** The live check
-used a stub that scores a handful of topic words, which is enough to prove the
-wiring — backfill, bus-driven indexing, ranking, the degraded path — but says
-nothing about retrieval quality. Choosing between BGE-M3 and Qwen3 Embedding
-0.6B is still open.
+### What this host actually runs
+
+Qwen3-Embedding-0.6B at f16, served by the existing `llama-server` router rather
+than a second process. It is one section in `~/.config/llama-models.ini`; the
+router loads it on demand, so it costs nothing at rest:
+
+```ini
+[Qwen/Qwen3-Embedding-0.6B-GGUF:F16]
+hf-repo = Qwen/Qwen3-Embedding-0.6B-GGUF:F16
+embedding = true
+pooling = last
+ctx-size = 8192
+```
+
+Two traps. **The section name must match the id the router derives**, and it
+capitalises the quant: `:F16`, not the `:f16` you wrote in `hf-repo`. A
+mismatched name silently defines a *second* model instead of configuring the
+one that loads, so `embedding = true` never applies — the router's own comment
+warns about this and it is easy to hit anyway. Confirm against `GET /v1/models`.
+And **`pooling = last` is Qwen3-Embedding's own**: it takes the final token's
+hidden state, not a mean. Getting it wrong yields vectors that are plausible and
+quietly worse.
+
+f16 over Q8_0 because the weights are ~1.2 GB either way, and quantisation costs
+more in an embedding — a wrong logit is usually recoverable, a wrong vector just
+mis-ranks.
+
+The node reaches it with `api_key_file` pointing at the same key file
+`llama-server --api-key-file` reads.
+
+### The instruction prefix is not worth it here
+
+Qwen3-Embedding is asymmetric and documented as wanting `Instruct: …\nQuery: …`
+on the query side. Measured on this corpus, it does not help: the margin between
+the right document and the best wrong one was **+0.2426 raw against +0.2304
+instructed**. It lowers every similarity and slightly narrows the gap, which is
+the only thing that matters for ranking. So there is no `query_prefix` option —
+it was measured before being built, and the measurement said no.
+
+### Retrieval quality, honestly
+
+Embedding this corpus is 177 chunks and about 20 seconds. Queries whose answer
+is plainly in a document work well ("where do the kubernetes manifests live" →
+`guide-workspace`, well clear of the field). Vaguer questions land in the right
+neighbourhood rather than on the right line, which is what a corpus of project
+plans supports. FTS remains the floor for exact lookups, which is the design.
 
 ## The live check, for repeating it
 
@@ -199,3 +240,43 @@ curl -s "$TRACON_URL/api/docs?channel=personal&q=how%20do%20I%20verify%20my%20wo
 The query shares no words with the document that answers it, which is the point.
 With the endpoint stopped, the same query returns `"text_only": true` and
 whatever FTS can find.
+
+## The wrapper as the node's supervisor
+
+On a laptop the node is wanted while you are logged in, so the tray app runs it
+instead of a unit file. It **adopts before it spawns** — two nodes over one state
+directory would fight over the same SQLite file and harness socket — so a node
+already answering on `TRACON_URL` is used and never stopped.
+
+Switching to it:
+
+```sh
+tracon service uninstall        # state and credentials are untouched
+tracon-wrapper                  # starts the node, or adopts one
+```
+
+and back:
+
+```sh
+tracon service install
+```
+
+`GDK_BACKEND=x11` and `WEBKIT_DISABLE_COMPOSITING_MODE=1` are needed on this
+host (the session is Wayland); the installed desktop entry sets both.
+
+**A signal has to be handled, not only Quit.** The window closes to the tray, so
+the tray's Quit is the only path through Tauri's `RunEvent::Exit` — which means
+`kill`, or a logout sending the same signal, took the app away and left the node
+running with nothing owning it. Verified by doing it. SIGINT and SIGTERM now
+route through `exit` so the same shutdown runs either way.
+
+Both guarantees are worth re-checking after any change here, and both are one
+command each:
+
+```sh
+# it must not start a second node, and must not stop one it did not start
+tracon serve & sleep 5; tracon-wrapper & sleep 8
+pgrep -cf 'tracon serve'          # 1
+kill -TERM $(pgrep -x tracon-wrapper); sleep 5
+pgrep -cf 'tracon serve'          # still 1
+```
