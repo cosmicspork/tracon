@@ -194,6 +194,16 @@ export const api = {
   providerCode: (name: string, code: string) =>
     call<void>('POST', `/api/providers/${name}/code`, { code }),
   disconnectProvider: (name: string) => call<void>('POST', `/api/providers/${name}/disconnect`),
+  // Node-scoped provider actions: the serving node runs them itself or seals
+  // the command to the owner. Works for every node, this one included.
+  nodeConnectProvider: (nodeId: string, name: string, channels: string[]) =>
+    call<{ name: string; url: string }>(`POST`, `/api/nodes/${nodeId}/providers/${name}/connect`, {
+      channels,
+    }),
+  nodeProviderCode: (nodeId: string, name: string, code: string) =>
+    call<{ ok: boolean }>('POST', `/api/nodes/${nodeId}/providers/${name}/code`, { code }),
+  nodeDisconnectProvider: (nodeId: string, name: string) =>
+    call<{ ok: boolean }>('POST', `/api/nodes/${nodeId}/providers/${name}/disconnect`),
   // The work ledger.
   work: (channel: string, opts: { project_id?: string; state?: string } = {}) => {
     const q = new URLSearchParams({ channel })

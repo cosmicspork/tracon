@@ -1331,11 +1331,19 @@ pub async fn connect_provider(
     body: Option<Json<ConnectBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let channels = body.map(|Json(b)| b.channels).unwrap_or_default();
-    let url = providers_of(&s)?
-        .connect(&name, channels)
+    connect_local(&s, &name, channels).await.map(Json)
+}
+
+async fn connect_local(
+    s: &AppState,
+    name: &str,
+    channels: Vec<String>,
+) -> ApiResult<serde_json::Value> {
+    let url = providers_of(s)?
+        .connect(name, channels)
         .await
         .map_err(provider_err)?;
-    Ok(Json(json!({ "name": name, "url": url })))
+    Ok(json!({ "name": name, "url": url }))
 }
 
 #[derive(Deserialize)]
@@ -1348,22 +1356,121 @@ pub async fn provider_code(
     Path(name): Path<String>,
     Json(body): Json<CodeBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    providers_of(&s)?
-        .code(&name, &body.code)
+    code_local(&s, &name, &body.code).await.map(Json)
+}
+
+async fn code_local(s: &AppState, name: &str, code: &str) -> ApiResult<serde_json::Value> {
+    providers_of(s)?
+        .code(name, code)
         .await
         .map_err(provider_err)?;
-    Ok(Json(json!({ "ok": true })))
+    Ok(json!({ "ok": true }))
 }
 
 pub async fn disconnect_provider(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    providers_of(&s)?
-        .disconnect(&name)
+    disconnect_local(&s, &name).await.map(Json)
+}
+
+async fn disconnect_local(s: &AppState, name: &str) -> ApiResult<serde_json::Value> {
+    providers_of(s)?
+        .disconnect(name)
         .await
         .map_err(provider_err)?;
-    Ok(Json(json!({ "ok": true })))
+    Ok(json!({ "ok": true }))
+}
+
+/// The login URL scrape inside a connect can take up to a minute on the
+/// owner, so its command gets more rope than `[mesh] command_timeout_secs`.
+const PROVIDER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Run a provider command on `node_id`: here when it is this node, sealed to
+/// the owner otherwise. The owner's refusal comes back as it phrased it.
+async fn peer_command(
+    s: &AppState,
+    node_id: &str,
+    command: proto::frame::Command,
+    timeout: std::time::Duration,
+) -> ApiResult<serde_json::Value> {
+    use crate::mesh::forward::CommandError;
+    let mesh = s.mesh.as_ref().ok_or(ApiError(
+        StatusCode::CONFLICT,
+        "no hub configured; this node cannot reach peers".into(),
+    ))?;
+    if !mesh.peer_reachable(node_id) {
+        return Err(ApiError(
+            StatusCode::GATEWAY_TIMEOUT,
+            "that node is unreachable; try again when it returns".into(),
+        ));
+    }
+    mesh.command(node_id, command, timeout)
+        .await
+        .map_err(|e| match e {
+            CommandError::Timeout => ApiError(StatusCode::GATEWAY_TIMEOUT, e.to_string()),
+            CommandError::Refused(m) => ApiError(StatusCode::CONFLICT, m),
+            CommandError::Local(m) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, m),
+        })
+}
+
+pub async fn node_connect_provider(
+    State(s): State<AppState>,
+    Path((node_id, name)): Path<(String, String)>,
+    body: Option<Json<ConnectBody>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let channels = body.map(|Json(b)| b.channels).unwrap_or_default();
+    if node_id == s.node_id {
+        return connect_local(&s, &name, channels).await.map(Json);
+    }
+    peer_command(
+        &s,
+        &node_id,
+        proto::frame::Command::ProviderConnect { name, channels },
+        PROVIDER_CONNECT_TIMEOUT,
+    )
+    .await
+    .map(Json)
+}
+
+pub async fn node_provider_code(
+    State(s): State<AppState>,
+    Path((node_id, name)): Path<(String, String)>,
+    Json(body): Json<CodeBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if node_id == s.node_id {
+        return code_local(&s, &name, &body.code).await.map(Json);
+    }
+    let timeout = std::time::Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1));
+    peer_command(
+        &s,
+        &node_id,
+        proto::frame::Command::ProviderCode {
+            name,
+            code: body.code,
+        },
+        timeout,
+    )
+    .await
+    .map(Json)
+}
+
+pub async fn node_disconnect_provider(
+    State(s): State<AppState>,
+    Path((node_id, name)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if node_id == s.node_id {
+        return disconnect_local(&s, &name).await.map(Json);
+    }
+    let timeout = std::time::Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1));
+    peer_command(
+        &s,
+        &node_id,
+        proto::frame::Command::ProviderDisconnect { name },
+        timeout,
+    )
+    .await
+    .map(Json)
 }
 
 /// Each configured provider and whether a credential for it is usable here.

@@ -73,6 +73,18 @@ pub fn router(state: AppState) -> Router {
             post(api::disconnect_provider),
         )
         .route("/api/nodes", get(api::list_nodes))
+        .route(
+            "/api/nodes/{id}/providers/{name}/connect",
+            post(api::node_connect_provider),
+        )
+        .route(
+            "/api/nodes/{id}/providers/{name}/code",
+            post(api::node_provider_code),
+        )
+        .route(
+            "/api/nodes/{id}/providers/{name}/disconnect",
+            post(api::node_disconnect_provider),
+        )
         .route("/api/mesh", get(api::get_mesh))
         .route("/api/channels", get(api::list_channels))
         .route("/api/mesh/invite", post(api::open_invite))
