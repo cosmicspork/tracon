@@ -4,6 +4,7 @@
   import { store } from '../lib/store.svelte'
 
   import ChannelMeters from '../components/ChannelMeters.svelte'
+  import Credentials from '../components/Credentials.svelte'
   import Notifications from '../components/Notifications.svelte'
   import ProviderCard from '../components/ProviderCard.svelte'
 
@@ -106,6 +107,7 @@
       {/if}
     {/each}
   </div>
+  <Credentials />
   <ChannelMeters />
 {/if}
 

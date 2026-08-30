@@ -285,6 +285,27 @@ impl Broker {
         self.credentials.remove(name).is_some()
     }
 
+    /// What the interface may see of each credential: names, kinds, and
+    /// bindings, plus the env *key names* alone — never a value, keeping the
+    /// module's rule that no accessor returns a secret a response could carry.
+    pub fn summaries(&self) -> Vec<Value> {
+        self.credentials
+            .iter()
+            .map(|(name, c)| {
+                serde_json::json!({
+                    "name": name,
+                    "kind": c.kind,
+                    "provider": c.provider,
+                    "channels": c.channels,
+                    "nodes": c.nodes,
+                    "identity": c.identity,
+                    "expires_ms": c.expires_ms,
+                    "env_keys": c.env.keys().collect::<Vec<_>>(),
+                })
+            })
+            .collect()
+    }
+
     /// Credentials pinned to `node_id`: what an enrollment or a share hands
     /// off. A credential with no `nodes` list is this node's alone and never
     /// travels.

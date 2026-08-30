@@ -1310,6 +1310,81 @@ fn provider_err(e: crate::providers::ProviderError) -> ApiError {
     ApiError(status, e.to_string())
 }
 
+/// What the broker holds: names, kinds, bindings, env key names. Never a
+/// value — the response shape is the broker's `summaries`, which cannot
+/// carry one.
+pub async fn list_credentials(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let b = s.tools.broker.read().unwrap();
+    Ok(Json(json!({ "credentials": b.summaries() })))
+}
+
+#[derive(Deserialize)]
+pub struct ShareBody {
+    to: String,
+}
+
+/// Hand one credential to another member, direct-sealed over the hub. The
+/// operator sharing from the interface is the explicit widening of the node
+/// pin the CLI refuses to do implicitly: the target is added to `nodes` (and
+/// this node too, where the list was empty and meant "here only"), sealed to
+/// the store, and the handoff queued through the outbox.
+pub async fn share_credential(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<ShareBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let to = body.to;
+    if to == s.node_id {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "that credential is already here".into(),
+        ));
+    }
+    let mesh = s.mesh.as_ref().ok_or(ApiError(
+        StatusCode::CONFLICT,
+        "no hub configured; there is nobody to share with".into(),
+    ))?;
+    let node = s.store().get_node(&to)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        format!("no node {to} in this mesh"),
+    ))?;
+    if node.x25519_pub.is_none() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "{} has not said hello yet; nothing can be sealed to it",
+                node.name
+            ),
+        ));
+    }
+    let identity = crate::mesh::identity::load_or_generate()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .0;
+    let rows = {
+        let mut broker = s.tools.broker.write().unwrap();
+        let mut cred = broker.get(&name).cloned().ok_or(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no credential named {name}"),
+        ))?;
+        if !cred.nodes.iter().any(|n| n == &to) {
+            // An empty list means "the node holding the file": pinning the
+            // target without also pinning this node would lock it out here.
+            if cred.nodes.is_empty() {
+                cred.nodes.push(s.node_id.clone());
+            }
+            cred.nodes.push(to.clone());
+            broker.put(&name, cred.clone());
+            broker
+                .save(&identity.credential_store_key())
+                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        }
+        crate::broker::Broker::handoff_rows(&[(name.clone(), cred)])
+    };
+    mesh.send_credential_handoff(&to, rows)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(json!({ "shared": name, "to": to })))
+}
+
 pub async fn list_providers(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     match s.manager.providers() {
         Some(p) => Ok(Json(json!(p.list()))),

@@ -65,6 +65,8 @@ pub fn router(state: AppState) -> Router {
             "/api/memories/{id}",
             axum::routing::delete(api::delete_memory),
         )
+        .route("/api/credentials", get(api::list_credentials))
+        .route("/api/credentials/{name}/share", post(api::share_credential))
         .route("/api/providers", get(api::list_providers))
         .route("/api/providers/{name}/connect", post(api::connect_provider))
         .route("/api/providers/{name}/code", post(api::provider_code))

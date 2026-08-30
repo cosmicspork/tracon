@@ -58,8 +58,11 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
     cfg.mesh.command_timeout_secs = 10;
     cfg.session.permission_timeout_secs = 30;
     let cfg = Arc::new(cfg);
+    // One broker for tools, providers, and the mesh client, as `serve` wires
+    // it — a lifted or handed-off credential is visible everywhere.
+    let broker = tracon::broker::Broker::default().shared();
     let tools = Arc::new(tracon::mcp::Tools {
-        broker: Default::default(),
+        broker: broker.clone(),
         cfg: cfg.clone(),
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
@@ -83,6 +86,10 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
         Default::default(),
     );
     bus.with_tap(client.spawn());
+    client.set_broker(
+        broker.clone(),
+        state::scratch(&format!("e2e-cred-{name}")).join("credentials.sealed"),
+    );
     manager.set_mesh(client.clone());
     let adapter = Arc::new(FakeAdapter {
         tx: Arc::new(Mutex::new(None)),
@@ -101,7 +108,6 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
     // Providers wired the way `serve` wires them: the login fake instead of a
     // real harness, and every published summary carried into the node row so
     // it rides the hello.
-    let broker = tracon::broker::Broker::default().shared();
     let providers = tracon::providers::Providers::new_in(
         state::scratch(&format!("e2e-providers-{name}")),
         state.cfg.clone(),
@@ -331,6 +337,60 @@ async fn a_peers_providers_are_driven_from_here() {
         .as_str()
         .unwrap()
         .contains("unreachable"));
+}
+
+#[tokio::test]
+async fn a_credential_is_shared_to_a_peer_and_nothing_leaks_on_the_way() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+
+    // A holds a tool credential pinned nowhere: this node only.
+    a.broker.write().unwrap().put("jira", {
+        let mut c = tracon::broker::Credential::default();
+        c.env
+            .insert("JIRA_TOKEN".into(), "fake-secret-for-tests".into());
+        c.channels = vec!["personal".into()];
+        c
+    });
+
+    // The listing shows the key names and bindings, never the value.
+    let (st, v) = call(&a.app, "GET", "/api/credentials", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v["credentials"][0]["name"], "jira");
+    assert_eq!(v["credentials"][0]["env_keys"][0], "JIRA_TOKEN");
+    assert!(!v.to_string().contains("fake-secret-for-tests"));
+
+    // Sharing from the interface widens the pin explicitly — this node stays
+    // allowed — and hands the credential to B, sealed to B alone.
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        "/api/credentials/jira/share",
+        Some(json!({ "to": bi })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    wait_for("B to hold the credential", || {
+        b.broker.read().unwrap().get("jira").is_some()
+    })
+    .await;
+    {
+        let b_broker = b.broker.read().unwrap();
+        let cred = b_broker.get("jira").unwrap();
+        assert!(cred.allows_node(&bi));
+        assert!(cred.allows_node(&a.id.node_id()));
+    }
+
+    // Sharing something that does not exist says so.
+    let (st, _) = call(
+        &a.app,
+        "POST",
+        "/api/credentials/nope/share",
+        Some(json!({ "to": bi })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

@@ -4,6 +4,7 @@
 import type {
   ChannelInfo,
   ChannelMetrics,
+  CredentialSummary,
   Document,
   Event,
   ForgeList,
@@ -188,6 +189,9 @@ export const api = {
     call<{ state: string }>('POST', `/api/promotions/${id}/verdict`, { verdicts }),
   batchPromotions: () => call<{ created: string[] }>('POST', '/api/promotions/batch'),
   // Providers: connect through the harness's own login, paste the code back.
+  credentials: () => call<{ credentials: CredentialSummary[] }>('GET', '/api/credentials'),
+  shareCredential: (name: string, to: string) =>
+    call<{ shared: string; to: string }>('POST', `/api/credentials/${name}/share`, { to }),
   providers: () => call<ProviderInfo[]>('GET', '/api/providers'),
   connectProvider: (name: string, channels: string[]) =>
     call<{ name: string; url: string }>('POST', `/api/providers/${name}/connect`, { channels }),

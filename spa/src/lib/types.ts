@@ -40,6 +40,18 @@ export interface ProviderInfo {
   updated_ms: number | null
 }
 
+/** What the broker will say about a credential: bindings and key names, never a value. */
+export interface CredentialSummary {
+  name: string
+  kind: string
+  provider: string | null
+  channels: string[]
+  nodes: string[]
+  identity: string | null
+  expires_ms: number | null
+  env_keys: string[]
+}
+
 /** Hub reachability, from `/api/mesh` and the `mesh` stream event. */
 export interface MeshState {
   hub: { state: 'disabled' } | { state: 'connected' } | { state: 'unreachable'; since_ms: number }

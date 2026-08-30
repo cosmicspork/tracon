@@ -103,6 +103,21 @@ impl MeshClient {
         });
     }
 
+    /// Direct-seal credentials to a member, through the outbox — the same
+    /// payload enrollment hands over, so the receiver's pin rule applies.
+    pub fn send_credential_handoff(
+        &self,
+        node_id: &str,
+        credentials: Vec<Value>,
+    ) -> Result<(), String> {
+        self.enqueue_direct(
+            MESH_CHANNEL,
+            node_id,
+            &Payload::CredentialHandoff { credentials },
+        )
+        .map_err(|e| e.to_string())
+    }
+
     /// Ask a session's owner for the events this node has not mirrored.
     pub fn request_backfill(&self, node_id: &str, session_id: &str) {
         let after = self
