@@ -16,6 +16,8 @@ export interface NodeInfo {
   reachable: boolean
   last_seen_ms: number | null
   x25519_pub?: string | null
+  /** The node's provider summary, carried in its hello. Absent from older builds. */
+  providers?: ProviderInfo[] | null
 }
 
 export interface ModelOption {

@@ -51,6 +51,7 @@ impl Harness {
                 x25519_pub: None,
                 last_seen_ms: None,
                 reachable: 1,
+                providers_json: None,
             })
             .unwrap();
         let events = Arc::new(Mutex::new(None));
@@ -229,6 +230,7 @@ async fn a_refused_node_refuses_sessions_and_says_which_check_failed() {
             x25519_pub: None,
             last_seen_ms: None,
             reachable: 1,
+            providers_json: None,
         })
         .unwrap();
     let (status, body) = h
@@ -271,6 +273,7 @@ async fn a_version_mismatch_blocks_new_sessions() {
             x25519_pub: None,
             last_seen_ms: None,
             reachable: 1,
+            providers_json: None,
         })
         .unwrap();
     let (status, body) = h
@@ -487,6 +490,7 @@ impl Rig {
                 x25519_pub: None,
                 last_seen_ms: None,
                 reachable: 1,
+                providers_json: None,
             })
             .unwrap();
         let session_id = insert_running_session(&store, budget);
@@ -999,6 +1003,7 @@ async fn orientation(tag: &str) -> Orientation {
             x25519_pub: None,
             last_seen_ms: None,
             reachable: 1,
+            providers_json: None,
         })
         .unwrap();
     // Something to be told: a directive on the channel.
