@@ -1,7 +1,8 @@
 <script lang="ts">
   // Enroll a new node: three moments. Invite (code, URL, QR, this node's
   // fingerprint), received (the other node answered; confirm its fingerprint),
-  // enrolled. Browser only; the phone cannot compare fingerprints usefully.
+  // enrolled. The confirm is read-decide-send — comparing two short strings —
+  // so the phone does it too: a node is stood up from wherever you are.
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { store } from '../lib/store.svelte'
@@ -104,8 +105,9 @@
     {/if}
     <div class="kv">
       <span class="k">Code</span><span class="big">{invite.display_code}</span>
-      <span class="k">On the new machine</span>
-      <span class="v">curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | sh</span>
+      <span class="k">On the new machine — one line installs, enrolls, sets up, and runs</span>
+      <span class="v">curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | TRACON_ENROLL='{invite.url}' sh</span>
+      <span class="k">Or with tracon already installed</span>
       <span class="v">tracon enroll {invite.url}</span>
       <span class="k">This node's fingerprint</span><span class="fp">{invite.own_fingerprint}</span>
       <span class="ttl">{remaining > 0 ? `expires in ${mmss(remaining)}` : 'expired'}</span>

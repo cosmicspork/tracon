@@ -2,7 +2,6 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { store } from '../lib/store.svelte'
-  import { surface } from '../lib/surface.svelte'
 
   import ChannelMeters from '../components/ChannelMeters.svelte'
   import Notifications from '../components/Notifications.svelte'
@@ -61,7 +60,7 @@
   <b
     >{#if meshed}{nodes.length} enrolled · {reachable} reachable{:else}this machine · no hub configured{/if}</b
   >
-  {#if meshed && !surface.phone}
+  {#if meshed}
     <a class="lnk r" href="/nodes/enroll">Enroll a new node</a>
   {/if}
 </div>
@@ -172,9 +171,6 @@
       {/if}
     {/each}
   </div>
-  {#if meshed && surface.phone}
-    <div class="empty">Enrolling a node needs a desktop browser.</div>
-  {/if}
   <ChannelMeters />
 {/if}
 

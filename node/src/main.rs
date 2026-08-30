@@ -695,10 +695,12 @@ async fn invite_command(channels: Vec<String>, ttl: u64, yes: bool) -> Result<()
     }
     let inv = enroll::open_invite(&id, &hub, &channels, Some(ttl)).await?;
     println!("invitation code: {}", inv.display_code());
-    println!("on the new machine:");
+    println!("on the new machine, one line — install, enroll, set up, and run:");
     println!(
-        "  curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | sh"
+        "  curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | TRACON_ENROLL='{}' sh",
+        inv.url
     );
+    println!("or with tracon already installed:");
     println!("  tracon enroll {}", inv.url);
     if let Some(qr) = enroll::qr_text(&inv.url) {
         println!("{qr}");
