@@ -98,15 +98,15 @@ impl Store {
         conn.execute(
             "INSERT INTO node (id, name, state, failed_check, failed_detail, harness_id,
                 harness_pinned, harness_found, models_json, checked_at_ms, is_self, x25519_pub,
-                last_seen_ms, reachable)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                last_seen_ms, reachable, providers_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
              ON CONFLICT(id) DO UPDATE SET name=?2, state=?3, failed_check=?4, failed_detail=?5,
                 harness_id=?6, harness_pinned=?7, harness_found=?8, models_json=?9, checked_at_ms=?10,
-                is_self=?11, x25519_pub=?12, last_seen_ms=?13, reachable=?14",
+                is_self=?11, x25519_pub=?12, last_seen_ms=?13, reachable=?14, providers_json=?15",
             rusqlite::params![
                 n.id, n.name, n.state, n.failed_check, n.failed_detail, n.harness_id,
                 n.harness_pinned, n.harness_found, n.models_json, n.checked_at_ms, n.is_self,
-                n.x25519_pub, n.last_seen_ms, n.reachable
+                n.x25519_pub, n.last_seen_ms, n.reachable, n.providers_json
             ],
         )?;
         Ok(())
@@ -121,6 +121,16 @@ impl Store {
         })
         .optional()
         .map_err(Into::into)
+    }
+
+    /// Update only this node's provider summary, for the hello and the mirror.
+    pub fn set_node_providers(&self, id: &str, providers_json: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE node SET providers_json=?2 WHERE id=?1",
+            [id, providers_json],
+        )?;
+        Ok(())
     }
 
     pub fn list_nodes(&self) -> Result<Vec<NodeRow>> {
@@ -244,6 +254,27 @@ impl Store {
                 .query_map([], SessionRow::from_row)?
                 .collect::<std::result::Result<_, _>>()?,
         };
+        Ok(rows)
+    }
+
+    /// Every repository sessions have run against, most recently used first.
+    /// The session table is never pruned, so this is the node's whole memory
+    /// of where work happens.
+    pub fn recent_repos(&self, limit: usize) -> Result<Vec<RecentRepo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT repo_path, MAX(created_ms), COUNT(*) FROM session \
+             GROUP BY repo_path ORDER BY 2 DESC LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                Ok(RecentRepo {
+                    repo_path: row.get(0)?,
+                    last_used_ms: row.get(1)?,
+                    sessions: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
@@ -1099,6 +1130,10 @@ mod records {
         /// 0 once the hub has not heard from a peer within the presence window.
         #[serde(default = "one")]
         pub reachable: i64,
+        /// The node's provider summary as its `Providers::list()` reports it,
+        /// carried in the hello like `models_json`. NULL from older builds.
+        #[serde(default)]
+        pub providers_json: Option<String>,
     }
 
     fn one() -> i64 {
@@ -1131,6 +1166,10 @@ mod records {
                 "reachable": self.reachable != 0,
                 "last_seen_ms": self.last_seen_ms,
                 "x25519_pub": self.x25519_pub,
+                "providers": self
+                    .providers_json
+                    .as_deref()
+                    .and_then(|p| serde_json::from_str::<Value>(p).ok()),
             })
         }
 
@@ -1153,6 +1192,10 @@ mod records {
                 x25519_pub: s("x25519_pub"),
                 last_seen_ms: None,
                 reachable: 1,
+                providers_json: v
+                    .get("providers")
+                    .filter(|p| !p.is_null())
+                    .map(|p| p.to_string()),
             })
         }
     }
@@ -1174,8 +1217,17 @@ mod records {
                 x25519_pub: r.get("x25519_pub")?,
                 last_seen_ms: r.get("last_seen_ms")?,
                 reachable: r.get("reachable")?,
+                providers_json: r.get("providers_json")?,
             })
         }
+    }
+
+    /// One repository the node has run sessions against.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RecentRepo {
+        pub repo_path: String,
+        pub last_used_ms: i64,
+        pub sessions: i64,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1980,9 +2032,27 @@ mod tests {
             x25519_pub: None,
             last_seen_ms: None,
             reachable: 1,
+            providers_json: None,
         };
         store.put_node(&n).unwrap();
         n.id
+    }
+
+    #[test]
+    fn a_nodes_provider_summary_round_trips_the_wire_shape() {
+        let store = Store::open_in_memory().unwrap();
+        let id = node(&store);
+        let summary = r#"[{"name":"anthropic","state":"connected"}]"#;
+        store.set_node_providers(&id, summary).unwrap();
+        let v = store.get_node(&id).unwrap().unwrap().to_json();
+        assert_eq!(v["providers"][0]["name"], "anthropic");
+        // A peer reads the row off the wire: the summary survives.
+        let back = NodeRow::from_json(&v).unwrap();
+        assert_eq!(back.providers_json.as_deref(), Some(summary));
+        // A row from an older build has no providers field at all.
+        let mut old = v.clone();
+        old.as_object_mut().unwrap().remove("providers");
+        assert!(NodeRow::from_json(&old).unwrap().providers_json.is_none());
     }
 
     fn session(store: &Store, id: &str, node_id: &str) {
@@ -2168,6 +2238,7 @@ mod migration_tests {
                 x25519_pub: None,
                 last_seen_ms: None,
                 reachable: 1,
+                providers_json: None,
             })
             .unwrap();
         let conn = store.conn.lock().unwrap();

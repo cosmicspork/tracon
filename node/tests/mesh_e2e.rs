@@ -33,6 +33,7 @@ struct Node {
     store: Arc<Store>,
     client: Arc<MeshClient>,
     adapter: Arc<FakeAdapter>,
+    broker: tracon::broker::SharedBroker,
 }
 
 async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Node {
@@ -57,8 +58,11 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
     cfg.mesh.command_timeout_secs = 10;
     cfg.session.permission_timeout_secs = 30;
     let cfg = Arc::new(cfg);
+    // One broker for tools, providers, and the mesh client, as `serve` wires
+    // it — a lifted or handed-off credential is visible everywhere.
+    let broker = tracon::broker::Broker::default().shared();
     let tools = Arc::new(tracon::mcp::Tools {
-        broker: Default::default(),
+        broker: broker.clone(),
         cfg: cfg.clone(),
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
@@ -82,6 +86,10 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
         Default::default(),
     );
     bus.with_tap(client.spawn());
+    client.set_broker(
+        broker.clone(),
+        state::scratch(&format!("e2e-cred-{name}")).join("credentials.sealed"),
+    );
     manager.set_mesh(client.clone());
     let adapter = Arc::new(FakeAdapter {
         tx: Arc::new(Mutex::new(None)),
@@ -97,12 +105,38 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
         auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
     };
     client.set_executor(Arc::new(state.clone()));
+    // Providers wired the way `serve` wires them: the login fake instead of a
+    // real harness, and every published summary carried into the node row so
+    // it rides the hello.
+    let providers = tracon::providers::Providers::new_in(
+        state::scratch(&format!("e2e-providers-{name}")),
+        state.cfg.clone(),
+        broker.clone(),
+        DataKey::from_bytes([seed; 32]),
+        Arc::new(support::login_fake::LoginFake::default()),
+        Arc::new(tracon::runner::local::LocalBackend),
+        id.node_id(),
+        bus.clone(),
+    );
+    let (ps, pb, pid) = (store.clone(), bus.clone(), id.node_id());
+    let carry = move |list: Vec<serde_json::Value>| {
+        let json = serde_json::Value::Array(list).to_string();
+        if ps.set_node_providers(&pid, &json).is_ok() {
+            if let Ok(Some(row)) = ps.get_node(&pid) {
+                pb.publish(tracon::stream::Frame::Node(row.to_json()));
+            }
+        }
+    };
+    carry(providers.list());
+    providers.set_on_publish(Box::new(carry));
+    state.manager.set_providers(providers);
     Node {
         id,
         app: tracon::http::router(state),
         store,
         client,
         adapter,
+        broker,
     }
 }
 
@@ -221,6 +255,142 @@ async fn a_session_on_b_is_driven_from_a() {
         .iter()
         .all(|e| e.node_id == bi));
     let _ = ai;
+}
+
+#[tokio::test]
+async fn a_peers_providers_are_driven_from_here() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+
+    // Connect B's provider from A's operator API: the command crosses the
+    // hub, B starts its login, and the sign-in URL comes back in the ack.
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        &format!("/api/nodes/{bi}/providers/anthropic/connect"),
+        Some(json!({ "channels": ["personal"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["url"], "https://login.example/anthropic");
+
+    // Paste the code back from A; B lifts the credential into its broker.
+    // A's broker never sees it.
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        &format!("/api/nodes/{bi}/providers/anthropic/code"),
+        Some(json!({ "code": "the-code" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    wait_for("B to lift the credential", || {
+        b.broker.read().unwrap().get("anthropic").is_some()
+    })
+    .await;
+    assert!(a.broker.read().unwrap().get("anthropic").is_none());
+
+    // The connected state rides B's hello into A's view of the mesh.
+    b.client.hello().await.unwrap();
+    wait_for("A to see B's provider connected", || {
+        a.store
+            .get_node(&bi)
+            .ok()
+            .flatten()
+            .and_then(|n| n.providers_json)
+            .is_some_and(|p| p.contains("\"connected\""))
+    })
+    .await;
+    let (_, nodes) = call(&a.app, "GET", "/api/nodes", None).await;
+    let beta = nodes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == bi)
+        .unwrap();
+    assert_eq!(beta["providers"][0]["name"], "anthropic");
+
+    // Self-addressed goes local: A driving its own provider by node id.
+    let ai = a.id.node_id();
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        &format!("/api/nodes/{ai}/providers/anthropic/connect"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["url"], "https://login.example/anthropic");
+
+    // An unreachable owner is refused up front, not timed out.
+    a.store.set_reachable(&bi, false).unwrap();
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        &format!("/api/nodes/{bi}/providers/anthropic/disconnect"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::GATEWAY_TIMEOUT, "{v}");
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("unreachable"));
+}
+
+#[tokio::test]
+async fn a_credential_is_shared_to_a_peer_and_nothing_leaks_on_the_way() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+
+    // A holds a tool credential pinned nowhere: this node only.
+    a.broker.write().unwrap().put("jira", {
+        let mut c = tracon::broker::Credential::default();
+        c.env
+            .insert("JIRA_TOKEN".into(), "fake-secret-for-tests".into());
+        c.channels = vec!["personal".into()];
+        c
+    });
+
+    // The listing shows the key names and bindings, never the value.
+    let (st, v) = call(&a.app, "GET", "/api/credentials", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v["credentials"][0]["name"], "jira");
+    assert_eq!(v["credentials"][0]["env_keys"][0], "JIRA_TOKEN");
+    assert!(!v.to_string().contains("fake-secret-for-tests"));
+
+    // Sharing from the interface widens the pin explicitly — this node stays
+    // allowed — and hands the credential to B, sealed to B alone.
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        "/api/credentials/jira/share",
+        Some(json!({ "to": bi })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    wait_for("B to hold the credential", || {
+        b.broker.read().unwrap().get("jira").is_some()
+    })
+    .await;
+    {
+        let b_broker = b.broker.read().unwrap();
+        let cred = b_broker.get("jira").unwrap();
+        assert!(cred.allows_node(&bi));
+        assert!(cred.allows_node(&a.id.node_id()));
+    }
+
+    // Sharing something that does not exist says so.
+    let (st, _) = call(
+        &a.app,
+        "POST",
+        "/api/credentials/nope/share",
+        Some(json!({ "to": bi })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

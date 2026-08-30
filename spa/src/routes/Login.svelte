@@ -1,18 +1,21 @@
 <script lang="ts">
   import { ApiError } from '../lib/api'
+  import { insecureContext, takeToken } from '../lib/auth'
   import { store } from '../lib/store.svelte'
 
   let token = $state('')
   let busy = $state(false)
   let error = $state<string | null>(null)
 
-  async function submit(e: SubmitEvent) {
-    e.preventDefault()
-    if (!token.trim() || busy) return
+  // The cookie is Secure: over plain http off this machine the exchange would
+  // succeed and the cookie silently vanish, looping back here. Say so instead.
+  const insecure = insecureContext(location.protocol, location.hostname)
+
+  async function signIn(t: string) {
     busy = true
     error = null
     try {
-      await store.signIn(token.trim())
+      await store.signIn(t)
       token = ''
     } catch (err) {
       error =
@@ -22,6 +25,19 @@
     } finally {
       busy = false
     }
+  }
+
+  // A scanned login QR left its token in the stash; spend it. Runs once —
+  // the stash empties on take, so a failure falls back to the form.
+  $effect(() => {
+    const t = takeToken()
+    if (t && !insecure) void signIn(t)
+  })
+
+  async function submit(e: SubmitEvent) {
+    e.preventDefault()
+    if (!token.trim() || busy) return
+    await signIn(token.trim())
   }
 </script>
 
@@ -44,6 +60,12 @@
       autofocus
       disabled={busy}
     />
+    {#if insecure}
+      <p class="err">
+        This page is plain http, so the login cookie cannot be kept. Reach the
+        node over HTTPS — an ingress, a reverse proxy, or a tailnet name.
+      </p>
+    {/if}
     {#if error}<p class="err">{error}</p>{/if}
     <button type="submit" disabled={busy || !token.trim()}>{busy ? 'Checking…' : 'Log in'}</button>
     <small>The token is exchanged for a cookie this browser holds. It is not stored here.</small>

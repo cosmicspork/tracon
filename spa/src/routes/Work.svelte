@@ -3,7 +3,6 @@
   import { api } from '../lib/api'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
-  import { surface } from '../lib/surface.svelte'
   import type { WorkView } from '../lib/types'
   import { workState } from '../lib/work'
 
@@ -59,9 +58,7 @@
 <div class="h4">
   Work
   <b>{items.length - closed.length} open on {channel || '…'}{closed.length ? ` · ${closed.length} closed` : ''}</b>
-  {#if !surface.phone}
-    <button class="lnk r" onclick={() => (adding = !adding)}>{adding ? 'Cancel' : 'New item'}</button>
-  {/if}
+  <button class="lnk r" onclick={() => (adding = !adding)}>{adding ? 'Cancel' : 'New item'}</button>
 </div>
 
 {#if channels.length > 1}
@@ -192,5 +189,16 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+  /* Adding an item is directing work, so the phone gets it too: full-width
+     fields, 16px inputs so iOS does not zoom the form. */
+  @media (max-width: 700px) {
+    .new input,
+    .new textarea {
+      font-size: 16px;
+    }
+    .row2 {
+      flex-wrap: wrap;
+    }
   }
 </style>

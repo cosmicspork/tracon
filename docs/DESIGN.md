@@ -1,439 +1,187 @@
 # Design
 
-Interface design record for tracon. Companion to `ARCHITECTURE.md` (what the system
-does) and `ROADMAP.md` (when). This file covers what the operator sees and how the
-interface decides things. Steps 1 through 4 of the design ladder are here.
+Interface design record. Companion to `ARCHITECTURE.md` (the rules) and `ROADMAP.md`
+(what is to be built). The screens are the record rather than a separate wireframe
+file: `spa/src/app.css` holds the tokens and `spa/src/routes/` the screens. The
+visual direction is **Ledger × Tonal**: Instrument Sans with Fragment Mono for every
+value, tonal surfaces with no outlines, state carried by a 3px bar and a wash, text
+links for actions, dark first with light derived.
 
-Phase 1 is built, and Phases 2 through 6 on top of it. The visual direction was settled
-on 2026-08-24 and the screens are the record rather than a separate wireframe file:
-`spa/src/app.css` holds the tokens and `spa/src/routes/` the screens — five at Phase 1,
-thirteen now. **Ledger × Tonal**: Instrument Sans with Fragment
-Mono for every value, tonal surfaces with no outlines, state carried by a 3px bar and a
-wash on a fixed-column grid, text-link actions, dark first with light derived. What each
-decision below cost or changed in the building is recorded with it.
+## Principles
 
-## 1. Interface principles
-
-Derived from the system principles. Each one is kept only because it changes a real
-decision; the decision it changes is listed with it.
+Each one is kept only because it changes a real decision; the decision it changes is
+listed with it.
 
 1. **Waiting-on-you comes first.** The interface exists to direct work, so the home
-   screen on every surface is the queue of things blocked on the operator, not a list
-   of sessions. Running output is secondary and never displaces an approval.
-   *Decides:* home screen, sort order, what a notification opens to.
+   screen on every surface is the queue of things blocked on the operator. Running
+   output is secondary and never displaces an approval.
+   *Decides:* home screen, sort order, what a notification opens to, the first-run
+   checklist living in the queue's empty state.
 
-2. **Enforcement is visible.** Every approval shows the node it came from, and a node
-   that has refused to run harnesses (boundary check failed) says so wherever it would
-   otherwise offer work. No screen implies a session is gated when the node could not
-   gate it, and no node runs ungated.
-   *Decides:* the node chip is part of the approval card, not a separate page; a refused
-   node shows its failed check on the nodes screen and in the new-session form.
+2. **Enforcement is visible.** Every approval shows the node it came from, and a
+   node that has refused to run harnesses says so wherever it would otherwise offer
+   work. No screen implies a session is gated when the node could not gate it.
+   *Decides:* the node chip is part of every card; a refused node shows its failed
+   check on the Nodes screen and in the new-session form.
 
-3. **Degraded is a state, not an error.** Hub unreachable is expected and the interface
-   says what still works: local sessions continue, auto-allowed actions proceed,
-   approvals queue locally and are answered when the hub returns. No error toasts for
-   an expected condition.
-   *Decides:* a persistent hub banner instead of modal errors; controls that need the
-   hub are disabled with a reason, not hidden.
+3. **Degraded is a state, not an error.** Hub unreachable is expected, and the
+   interface says what still works. No error toasts for an expected condition.
+   *Decides:* a persistent quiet banner instead of modal errors; controls that need
+   the hub are disabled with a reason, not hidden; a search that cannot reach its
+   embedder says `text only` rather than quietly returning less.
 
-4. **Read, decide, send.** The phone directs; it does not edit. Anything needing a
-   keyboard and a wide screen is desktop-only and says so where it would otherwise
-   appear. Capability is gated by surface, not by screen width.
-   *Decides:* the diff editor is never rendered on the phone; the verdict control shows
-   "edit on desktop" rather than a disabled button with no explanation.
+4. **The phone is a full seat; only editing is desktop.** Directing work — starting
+   it, adding it, answering for it, provisioning the nodes and providers that run
+   it, enrolling a new machine — is read-decide-send and belongs on every surface.
+   The one job that genuinely needs a keyboard and a wide screen is editing a diff
+   by hand, and the phone is told so in words where the editor would be.
+   *Decides:* the diff editor is never rendered on the phone; everything else is
+   un-gated, with 16px inputs and stacked layouts under 700px. (This principle
+   originally read "the phone directs; it does not edit" and was over-applied to
+   work-item creation, provider sign-in, and enrollment — all read-decide-send jobs.
+   Reversed in the anywhere batch; the OAuth paste-back in particular belongs on the
+   device where the password manager lives.)
 
-5. **The diff is the unit of review.** Not the file tree, not the repo, not the session
+5. **The diff is the unit of review.** Not the file tree, not the repo, not the
    transcript. Review means reading a diff against its requirements and returning a
-   verdict. Editing means editing that diff and submitting it as `/revise`.
+   verdict; editing means editing that diff and submitting it as a request for
+   changes.
    *Decides:* no file browser; the diff viewer is the most invested component; the
-   review session's requirements are shown beside the diff, not the implementation
-   transcript.
-
-6. **Nothing is lost when the client dies.** Sessions live in the node, so the interface
-   never holds state the node does not have. Unsent prompt drafts are held by the node
-   per session; diff edits are the one desktop-only exception and sit in local storage
-   until submitted.
-   *Decides:* reconnect is silent and resumes where the node is, draft prompt included.
-
-## 2. Jobs and surfaces
-
-Every job the operator needs, and which surface it must work on. "Read" means the
-surface shows it but cannot act. Phase is when the job first exists.
-
-| Job | Browser | Tray | Phone | Phase |
-|---|---|---|---|---|
-| See what is waiting on me, across all nodes | yes | yes | yes | 1 |
-| Answer a harness permission request | yes | yes | yes | 1 |
-| Read a diff and return approve / reject | yes | yes | yes | 1 |
-| Edit a diff and submit it as `/revise` | yes | no | no | 6 |
-| Start a session (model required, budget) | yes | no | minimal | 1 |
-| Send a prompt into a running session | yes | no | yes | 1 |
-| Read session output as it streams | yes | no | yes | 1 |
-| Kill a session (confirm on tray and phone) | yes | yes | yes | 1 |
-| See node capability and hub reachability | yes | yes | yes | 1 / 2 |
-| Enroll a new node | yes | no | no | 2 |
-| Run a brokered query against the work DB | no (agent-only) | no | no | 1 |
-| Read a document by slug | yes | no | yes | 4 |
-| Review the nightly memory-promotion batch | yes | no | read + verdict | 4 |
-| Browse ready work; follow `discovered-from` | yes | no | read | 5 |
-| Pick a work item when starting a session | yes | no | minimal | 5 |
-| See today's cost per channel against the ceiling | yes | yes | yes | 5 |
-
-What falls out:
-
-- The **queue** is the only screen all three surfaces need in Phase 1. It is designed
-  first.
-- Two kinds of thing sit in the queue: **harness permission requests** (ACP, short-lived,
-  denied by default if unanswered) and **review approvals** (submitted artifacts, live
-  until decided or stale). They share a queue and differ in card.
-- The **phone column** is short. Every "yes" there is a commitment to make that job work
-  in one hand on a 390px screen.
-- The tray is the queue plus a kill switch. It does not stream output.
-- The brokered tools row is there to record that consulta has no human surface at all.
-
-## 3. Content and states
-
-The nouns come from the schema. The states are where the interface work is. Each state
-has a one-line answer to "what does the operator see."
-
-### Node
-
-| State | What the operator sees |
-|---|---|
-| Ready | Plain chip with node name. The default, unmarked. |
-| Refused (boundary check failed) | Chip marked critical with the failed check; no sessions offered on this node; still relays and serves. |
-| Reachable | Nothing; presence is the default. |
-| Unreachable | Chip dims; its sessions show last-seen; its approvals stay in the queue but cannot be decided. |
-| Harness version mismatch | Warning on the chip; new sessions on this node blocked with the version pair shown. |
-
-### Hub
-
-| State | What the operator sees |
-|---|---|
-| Reachable | Nothing. |
-| Unreachable | One persistent banner: "Hub unreachable. Local sessions continue; approvals will be delivered when it returns; search is local." Not dismissable, not modal. Search stays as good as this node's own replica — semantic search is local too, so a hub outage does not cost it. |
-| Restored | Banner flips to "Hub reconnected, N items delivered" briefly, then goes. |
-
-### Session
-
-| State | What the operator sees |
-|---|---|
-| Starting | Row with worktree path and model; no output yet. |
-| Running | Streaming output; prompt input enabled; budget meter moving. |
-| Waiting on you | Row rises to the top of the queue with the request attached; the session screen shows the request inline above the input. |
-| Waiting on a check | "Running `just test`" with elapsed time; prompt input disabled with that reason. |
-| Over budget, killed | Row marked killed with the number; output frozen; "resume with more budget" is a new session, not a button on this one. |
-| Ended at item close | Row marked closed with the work item; output frozen. |
-| Failed | Row marked failed with the last harness error; output frozen. |
-
-### Approval (review)
-
-| State | What the operator sees |
-|---|---|
-| New | Card in the queue with summary, diff size, node chip, age. |
-| Claimed by you | Card shows "claimed" with the claim time; timer running. |
-| Stale | Card shows "changed since submit" with the files that moved; approve is disabled; resubmit is the only path. |
-| Over size cap | Card shows the size against the cap; approve disabled; the agent is told to split. |
-| Decided: approved | Leaves the queue; the session shows the verdict and the broker's post result. |
-| Decided: rejected | Leaves the queue; the session shows the verdict and reason. |
-| Decided: edited | Leaves the queue; the session shows the `/revise` submission. |
-
-### Permission request (harness)
-
-| State | What the operator sees |
-|---|---|
-| New | Card with the tool, its arguments, and the node chip. |
-| Answered | Leaves the queue. |
-| Expired (harness gave up, denied by default) | Leaves the queue; the session shows "denied: unanswered" at that point in the output. |
-
-### Diff
-
-| State | What the operator sees |
-|---|---|
-| Read-only | Unified diff, file list, per-file blob hash check. On the phone the file list *is* the diff: each file folds open to its hunks, because the list decides most reviews and 390px will not hold both. |
-| Editable (browser only) | *Built in Phase 6.* Each reviewed file opens as a unified merge view: the agent's change inline, the result editable. The button becomes "Send edits and request changes", because an edit **is** a request for changes — the patch travels with the notes and the agent applies it, which is what keeps the agent the only writer to the worktree. Files that changed since submit are left read-only rather than edited against text that has moved. Unsent edits sit in browser storage keyed by review id *and* head sha, so a resubmission cannot resurrect edits against a diff that no longer exists. |
-| Conflicts with worktree | Files that changed are marked; editing disabled for those files. |
-
-### Work item (Phase 5)
-
-| State | What the operator sees |
-|---|---|
-| Ready | In the ready list, sorted by the deterministic topo order. |
-| Blocked | Shown with what blocks it; cannot be picked for a session. |
-| In session | Linked to the session; cannot be picked again. |
-| Closed | Out of the list; reachable from its session. |
-| Discovered-from | Shows the parent item and the session that found it. |
-
-*Built:* the Work screen (`/work`) groups ready, blocked, in-session, and closed; the
-item view (`/work/:id`) shows the plan, dependencies, the discovered-from chain, the
-sessions by phase and outcome, and Plan / Execute buttons that prefill the new-session
-form; Execute is disabled with "needs a plan" until a plan session has written one.
-
-### Channel
-
-| State | What the operator sees |
-|---|---|
-| Under ceiling | Cost figure, plain. |
-| Near ceiling (>80%) | Cost figure marked warn. |
-| At ceiling | Cost figure marked critical; new sessions on this channel refused with that reason. |
-| Not bound to this node | The channel's tools and sessions are not offered here; the reason is shown if asked. |
-
-### Memory promotion (Phase 4)
-
-| State | What the operator sees |
-|---|---|
-| Proposed | In the nightly batch with kind, scope, source session. |
-| Promoted / rejected | Out of the batch. |
-
-### Document (Phase 4)
-
-| State | What the operator sees |
-|---|---|
-| Listed | Under its kind, with slug and age; search by content across the channel. |
-| Read | Rendered markdown, the hash in the header. |
-| Editing | A textarea; Save is disabled until the text differs. |
-| Changed elsewhere | While editing: a quiet banner. On save: the other version, "take theirs" or "keep mine". |
-
-### Three states designed as first-class, not as badges
-
-- **Waiting on you.** The whole point. One visual treatment, used on the queue card, the
-  session row, and the notification.
-- **Refused (boundary check failed).** Honest refusal. One treatment on the node chip,
-  and the reason wherever the node would otherwise offer work.
-- **Degraded (hub unreachable).** Local-first made visible. One banner, one disabled
-  style with a reason.
-
-## 4. Flows
-
-Three flows, as text. Each ends with the questions it raised and the decisions taken.
-
-### Approval
-
-```
-notification (phone push / tray / browser)
-  → queue, item at top, state: new
-  → open item
-      → claim: automatic on open, released on decide, back, or client disconnect
-      → state: claimed, timer starts
-  → read summary and requirements
-  → read diff
-      stale?        approve disabled, "resubmit" is the only path
-      over cap?     approve disabled, agent told to split
-  → decide
-      approve   → broker posts the approved bytes → session shows result
-      reject    → reason (required, one line) → session shows verdict + reason
-      changes   → notes, required → review stays open → agent edits and resubmits
-                  (an editable diff in the browser is Phase 6; see below)
-  → release, timer stops
-  → next item in the queue, or the queue itself if empty
-
-queue order: waiting-on-you; permission requests before reviews; then oldest first
-```
-
-Decisions taken in drawing this:
-
-- **Claim on open, not on a separate control.** Single operator, so claim is a metric,
-  not a lock; an explicit "claim" button is friction that measures nothing extra.
-  Release happens on decide, on navigating away, or 60 seconds after client
-  disconnect, so a dropped socket does not zero the attention count.
-  *Built:* the interface releases when the operator leaves the screen, and a sweeper on
-  the node lapses claims a vanished client left behind. The response to opening a review
-  claims first and reads after, so it never describes a state already untrue.
-- **Reject requires a reason.** The verdict goes back to the agent; a bare reject
-  teaches it nothing. One line, required.
-- **Stale and over-cap block approve.** Not a warning. The agent resubmits.
-  *Built:* each file's git blob hash is recorded at submit; approving a branch that moved
-  is refused and the changed files are named. The cap arrived in Phase 5 —
-  `[review] max_diff_lines` and `max_files`, refused before the checks run.
-- **Edit is browser-only and replaces the verdict.** An edited diff is a `/revise`
-  submission, not an approval of something the operator changed.
-
-### Start a session
-
-```
-new session
-  → choose channel (bound to this node, under ceiling)
-  → choose work item                     Phase 1: optional; Phase 5: required, from ready list
-  → choose model                          required; no default; validation failure without it
-  → set budget                            default from channel policy, editable
-  → node chosen by binding                shown, not chosen
-  → worktree created from origin/<default>
-  → Phase 5: execute gated on a plan artifact from a plan session
-  → session screen, state: starting
-```
-
-Decisions taken:
-
-- **Model has no default.** The architecture says a spec without a model is a
-  validation failure; the form makes it a required field with no preselection, so the
-  failure is impossible to reach rather than reported.
-- **Node is shown, not picked.** Bindings decide it. If the bound node has refused
-  (boundary check failed), the form says which check and cannot start.
-- **Work item optional in Phase 1.** The column is nullable from the start; the form
-  grows a required picker in Phase 5.
-
-### Degraded
-
-```
-hub becomes unreachable
-  → banner appears on every surface
-  → local sessions continue unchanged
-  → auto-allowed actions continue
-  → approvals raised locally queue locally; the phone cannot see them
-  → recall falls back to FTS; the agent is not told anything changed
-  → controls needing the hub disable with the reason
-
-hub returns
-  → queued items delivered; banner shows the count briefly
-  → phone catches up
-```
-
-Decisions taken:
-
-- **The phone is blind during a hub outage.** *Reversed in Phase 6.* The phone reaches a
-  node directly over an HTTPS ingress with a session cookie, so a hub outage costs it
-  the other nodes' state and not its own. What was decided here — that the interface says
-  so rather than showing an empty queue as if nothing is waiting — still holds, and is
-  what the hub-unreachable banner does.
-- **The agent is not told about degradation.** Text-only recall is silent to the harness.
-  The operator sees it: the hub banner for a hub outage, and `· text only · no semantic
-  search` on the Documents screen when this node embeds but cannot reach its endpoint.
-
-## What Phase 1 did not build
-
-Recorded so the gaps were visible rather than assumed closed. All four have since been
-built; each line says where, so this stays a record of the order things arrived in
-rather than a list of things that are missing.
-
-- **Editable diffs.** "Request changes" carried notes only; editing the diff itself
-  arrived in Phase 6 (`spa/src/components/DiffEditor.svelte`).
-- **Diff size cap at submit.** Arrived in Phase 5 (`[review] max_diff_lines`,
-  `max_files`).
-- **`waiting_on_check`.** Defined in the schema and unreachable until deterministic
-  supervision arrived in Phase 5 (`node/src/review/checks.rs`).
-- **The tray.** Arrived in Phase 6 with the desktop wrapper (`wrapper/src/tray.rs`).
-
-## What Phase 2 built
-
-Signed off 2026-08-28 against static mockups rendered in the interface's own tokens.
-
-- **Nodes.** A list: this node first, then peers, each with the 3px bar. Unreachable is
-  the new state — the bar and text drop to `--dim`, the card keeps its place, and the
-  second line says when the node was last seen and what it holds that cannot be decided.
-  "Enroll a new node" sits in the header, browser only.
-- **Hub banner.** One persistent, non-dismissable banner in a new quiet treatment,
-  `.banner.dim`: amber stays reserved for waiting-on-you and the accent for the agent
-  working, so degraded is quieter than both. The full sentence wraps on the phone. A
-  transient "hub reconnected · N items delivered" follows the outage.
-- **Node chips.** On every queue card, session row, and session header, in the existing
-  chip style; `you` marks the serving node. When the owner is unreachable the card is
-  *held*: dimmed, actions replaced by the reason, still in the queue.
-- **Remote sessions.** Identical to local ones plus the chip. A prompt typed for an
-  unreachable owner is queued on the serving node and sent when it returns — the box
-  stays open and says so; Kill disables.
-- **New session.** When several nodes carry the channel, radios appear within that set;
-  refused, unreachable, and mismatched nodes are listed but not selectable, with the
-  reason. Bindings decide the set; the operator picks within it.
-- **Enroll.** Three moments on one screen: invite (channels, code shown as `7KQ4 M2XA`,
-  URL, QR, this node's fingerprint, expiry), received (the other node's name and
-  fingerprint; "Fingerprints match, admit" or "They differ — cancel"), enrolled.
-
-## What Phase 3 built
-
-Nothing visible. The pod-hosted node serves the same interface and reports the same
-five checks; a refused work node shows its failed check exactly as a laptop would. The
-one new thing an operator meets is a queue card of kind `tool`: a brokered call the
-policy did not name, waiting for the same allow-or-reject as a harness permission.
-
-## What Phase 4 built
-
-Checked against screenshots of the built screens rather than static mockups: each
-screen was small enough to build and look at in one sitting, and the tokens are the
-record.
-
-- **Connect a provider.** Cards under the serving node on the Nodes screen. Pending is
-  the amber treatment with the sign-in link and a paste-back field; connected shows
-  the identity and when the token refreshes; failed shows the reason and "Try again".
-  A provider without a login flow says "API key only" and names the CLI. The phone
-  shows the link and nothing to paste into.
-- **Memory batch.** The third queue kind, after reviews, in the waiting treatment. Its
-  screen lists each proposed memory with kind, scope, confidence, age, and source, a
-  Reject/Promote pair per item, promote-all / reject-all, and one Send. Decided items
-  keep their chip. The phone stacks the actions under each item and can decide.
-- **Documents.** A fifth destination on the rail and the tab bar. The list is grouped
-  by kind with a channel picker and content search; a document renders as markdown
-  with its hash in the header; the editor is a textarea, browser only, that saves with
-  the hash last read and shows the other version on a conflict. The header says when
-  search is local because the hub is down.
-- **Orientation.** Not a screen: an `orientation` event at the top of every session's
-  log, so the transcript shows what the agent was told.
-
-## What Phase 5 built
-
-Mockup-first: one page of static screens in the interface's tokens, then the Svelte,
-checked with headless screenshots at 1280 and 390 wide.
-
-- **Work.** A sixth destination on the rail and the tab bar. Ready items in the node's
-  order with priority and age in the mono column; blocked items name their blockers by
-  id and title, or say the item has not reached this node; in-session items link to
-  the session; closed items fold. New item is desktop-only; the phone reads.
-- **New session.** A phase control and a picker over the ready list in place of the
-  free-text field: blocked and in-session items are not offered, each shows "planned"
-  or "needs a plan", and execute refuses an unplanned item before the click. The
-  channel line shows today's tokens against the ceiling; at the ceiling the start
-  button says so and is disabled — the 429 the node would return, shown first.
-- **Session.** Phase chip, policy version, and item link in the header. "Waiting on a
-  check" uses the accent, not amber: it waits on the node, not on you; the banner names
-  the command and counts up. Check results fold with their tail (failures open); the
-  refusal is in the log. Phase ends get their own labels — Planned, Reviewed, Ended ·
-  item closed — so the Ended list says what each session produced.
-- **Review.** The card carries "checks ✓" and the fresh session's chip (approves /
-  changes suggested / reviewing). The approval screen adds the checks that passed, a
-  provenance strip (model · phase, item, policy version, reviewed by, commit), and the
-  verdict block — accent for approve, amber for request changes; findings by severity,
-  path, note — above the human's controls, which did not move.
-- **Channel cost.** Meters per channel under the nodes: plain, warn above 80%, crit at
-  the ceiling where sessions are refused; a channel with no ceiling shows its count and
-  says so. On the phone too: the one Phase 5 job on every surface.
-- **Metrics.** `/metrics` from the meters' header: the two numbers first, then the rest,
-  7/30/90-day windows, "as seen from this node".
-
-## What Phase 6 built
-
-- **Login.** A full-screen gate, not a route: every screen needs auth, so none should
-  spend a URL on it. It appears only when the node asks for one — the store tells "log
-  in" from "node is down" by probing a request that can answer, because `EventSource`
-  reports no status and the two want different screens. The token is exchanged for a
-  cookie and never stored; the screen says so.
-- **Installable.** Manifest, icons drawn from the rail's own mark, and a service
-  worker that caches the shell and refuses to touch `/api`. Nothing about the interface
-  changes when it is installed; it simply opens without a browser around it.
-- **Editing a diff.** "Edit the diff" sits under the read-only diff on desktop, and
-  becomes per-file merge views. The verdict button changes to "Send edits and request
-  changes" once anything is edited, which is the whole semantic: an edit is a request,
-  not an approval. The phone gets the sentence saying where to do it instead of a
-  disabled control with no explanation.
-- **The tray.** What is waiting, in one list across all three kinds, each opening the
-  window at its route. Killing is a submenu — destructive, and easy to mis-click beside
-  the thing it would end. The tooltip is the count. It does not stream output.
-
-## Decisions from the flows
-
-Taken 2026-08-24. The first is also recorded in `ARCHITECTURE.md` under the client
-crash invariant.
-
-1. **Drafts.** The node holds unsent prompt drafts per session, so a client crash or a
-   phone eviction loses nothing typed. Diff edits are desktop-only and live in the
-   browser's local storage until submitted as `/revise`; losing one costs a re-edit on a
-   machine that was not going to be evicted.
-2. **Claim grace period.** A claim releases 60 seconds after the client disconnects. A
+   requirements sit beside the diff, not the implementation transcript. On the phone
+   the file list *is* the diff — each file folds open — because the list decides
+   most reviews and 390px will not hold both.
+
+6. **Nothing is lost when the client dies.** Sessions live in the node, so the
+   interface never holds state the node does not have. Unsent prompt drafts are held
+   by the node per session; diff edits are the one desktop-only exception, in local
+   storage keyed by review id and head sha so a resubmission cannot resurrect edits
+   against a diff that no longer exists.
+   *Decides:* reconnect is silent and resumes where the node is, draft included; the
+   login QR's token rides the URL fragment and is stripped before anything renders.
+
+## Jobs and surfaces
+
+Every job, and which surface it works on. "Read" means the surface shows it but
+cannot act.
+
+| Job | Browser | Tray | Phone |
+|---|---|---|---|
+| See what is waiting, across all nodes | yes | yes | yes |
+| Answer a permission request | yes | yes | yes |
+| Read a diff, return approve / reject | yes | yes | yes |
+| Edit a diff and send it back | yes | no | no — told where to |
+| Start a session (repo pick, model preselect) | yes | no | yes |
+| Add a work item | yes | no | yes |
+| Send a prompt into a running session | yes | no | yes |
+| Read session output as it streams | yes | no | yes |
+| Kill a session | yes | confirm | confirm |
+| Connect / disconnect a provider, any node's | yes | no | yes |
+| See and share broker credentials | yes | no | yes |
+| Enroll a new node (invite + fingerprint confirm) | yes | no | yes |
+| Review the nightly memory batch | yes | no | yes |
+| Browse work; follow `discovered-from` | yes | no | yes |
+| Read and edit documents | yes | no | read |
+| See cost per channel against the ceiling | yes | yes | yes |
+
+The tray is the queue plus a kill switch, one level down because it is destructive.
+It does not stream output.
+
+## States
+
+The states are where the interface work is; each has a one-line answer to "what does
+the operator see."
+
+**Node** — ready: plain chip, unmarked. Refused: critical chip with the failed
+check; no sessions offered; still relays and serves. Unreachable: dims, keeps its
+place, says when last seen and what it holds that cannot be decided. Version
+mismatch: warning with the version pair; new sessions blocked.
+
+**Hub** — reachable: nothing. Unreachable: one persistent, non-dismissable, quiet
+banner saying what still works. Restored: "reconnected, N items delivered", briefly.
+
+**Session** — starting, running (streaming, input enabled, meter moving), waiting on
+you (rises to the queue top, request inline above the input), waiting on a check
+(the command and elapsed time, input disabled with that reason, accent not amber —
+it waits on the node, not on you), over budget (killed with the number; resume is a
+new session, not a button), ended (labelled by what it produced: planned, reviewed,
+item closed), failed (the last harness error, frozen).
+
+**Review** — new, claimed (timer running), stale ("changed since submit" with the
+files; approve disabled; resubmit is the only path), over the size cap (approve
+disabled; the agent is told to split), decided (leaves the queue; the session shows
+the verdict, reason, or publish result).
+
+**Permission** — new (tool, arguments, node chip), answered (leaves the queue),
+expired (denied by default; the session shows "denied: unanswered" at that point).
+
+**Provider** — connected (identity, refresh time), pending ("open the link, sign in,
+paste what it gives you back" — the paste-back on every surface), failed (reason and
+try again), disconnected. A peer's cards render from its hello with the same acts;
+the sign-in URL from a peer's ack shows immediately, ahead of the mirror.
+
+**Work item** — ready (in the deterministic order), blocked (named blockers; cannot
+be picked), in session (linked), closed (folds), discovered-from (shows the parent
+and the session that found it).
+
+**Channel** — under ceiling (plain), near (warn above 80%), at (critical; new
+sessions refused with that reason — the 429 shown before the click).
+
+Three states are designed first-class, not as badges: **waiting on you** (one
+treatment on card, row, and notification), **refused** (honest refusal, with the
+reason wherever the node would otherwise offer work), and **degraded** (one banner,
+one disabled-with-reason style).
+
+## Flows
+
+**Approval.** Notification → queue (item at top) → open (claim is automatic on open,
+released on decide, back, or 60s after the client vanishes — claim is a metric, not
+a lock) → read requirements and diff → decide. Reject requires a one-line reason:
+the verdict goes back to the agent, and a bare reject teaches it nothing. Stale and
+over-cap block approve rather than warn. An edit replaces the verdict — it *is* a
+request for changes.
+
+**Start a session.** Channel (under its ceiling) → repository (recents, managed
+clones, browse-a-forge, or a typed path) → work item from the ready list (execute
+refused without the item's plan, before the click) → model (required, no silent
+default; the last used is preselected when the node offers it) → budget (from the
+channel's binding, editable) → node (bindings decide the eligible set; the operator
+picks within it; refused, unreachable, and mismatched nodes are listed with the
+reason and not selectable).
+
+**First run.** Until the first session exists, the queue's empty state is a
+three-step checklist — connect a provider, add a work item, start a plan session —
+each linking where it is done, each marked off as the state it derives from
+appears. Gone for good once any session exists.
+
+**Enroll.** Invite (channels to hand off, code, QR, the one-line bootstrap, this
+node's fingerprint, expiry) → received (the other node's name and fingerprint;
+"fingerprints match, admit" or "they differ — cancel") → enrolled. The confirm is
+reading two short strings, so the phone does it too.
+
+**Degraded.** Hub gone: banner everywhere, local sessions continue, auto-allowed
+actions continue, approvals queue and deliver on return, recall falls back to the
+local replica — and the agent is not told anything changed; degradation is the
+operator's information, not the model's.
+
+## Decisions
+
+1. **Drafts.** The node holds unsent prompt drafts per session. Diff edits live in
+   desktop local storage until submitted; losing one costs a re-edit on the machine
+   least likely to be evicted.
+2. **Claim grace.** A claim releases 60 seconds after its client disconnects: a
    dropped socket does not zero the attention count; a closed laptop does.
-3. **Node modes.** There is one. A node enforces or refuses to run harnesses. No
-   advisory answers exist anywhere in the interface.
-4. **Queue order.** Waiting-on-you first. Within that, harness permission requests
-   before review approvals, because permission requests expire and reviews do not.
-   Then by age, oldest first.
-5. **Kill confirmation.** Confirm on phone and tray, where a stray tap is likely.
-   Immediate in the browser.
-   *Built:* the phone's Kill becomes "Kill — tap again" with a Cancel beside it. The tray
-   arrives with the desktop wrapper in Phase 6.
+3. **One node mode.** A node enforces or refuses to run harnesses. No advisory
+   answers exist anywhere in the interface.
+4. **Queue order.** Waiting-on-you first; permission requests before reviews
+   (requests expire, reviews do not); then oldest first.
+5. **Kill confirmation.** Confirm on phone and tray, where a stray tap is likely;
+   immediate in the browser.
+6. **Login over plain http off the machine is refused in words** — the Secure
+   cookie would silently vanish and loop the login screen, so the screen explains
+   the HTTPS requirement instead.
+7. **Fixture mode is the screenshot rig.** `TRACON_FIXTURES=1` serves the interface
+   against canned state with request-time timestamps, so the README's images
+   regenerate without a node and never age.
+
+The build order and what each phase changed live in
+[reference/](reference/) and the git history; this file stays the current record.

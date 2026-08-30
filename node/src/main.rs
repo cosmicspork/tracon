@@ -150,7 +150,12 @@ enum AuthCommand {
     /// Issue an operator token, printed once. Until one exists this node
     /// answers only to loopback; with one, a client that presents it gets a
     /// cookie and can reach the node from anywhere.
-    Issue,
+    Issue {
+        /// Where clients reach this node (an ingress, a tailnet HTTPS name).
+        /// With one, a login link and a QR to scan are printed as well.
+        #[arg(long)]
+        url: Option<String>,
+    },
     /// Remove the operator token and log every client out: loopback only again.
     Revoke,
     /// What is logged in, and whether a token is set at all.
@@ -690,10 +695,12 @@ async fn invite_command(channels: Vec<String>, ttl: u64, yes: bool) -> Result<()
     }
     let inv = enroll::open_invite(&id, &hub, &channels, Some(ttl)).await?;
     println!("invitation code: {}", inv.display_code());
-    println!("on the new machine:");
+    println!("on the new machine, one line — install, enroll, set up, and run:");
     println!(
-        "  curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | sh"
+        "  curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | TRACON_ENROLL='{}' sh",
+        inv.url
     );
+    println!("or with tracon already installed:");
     println!("  tracon enroll {}", inv.url);
     if let Some(qr) = enroll::qr_text(&inv.url) {
         println!("{qr}");
@@ -890,7 +897,7 @@ async fn node_call(
 async fn auth_command(cmd: AuthCommand) -> Result<()> {
     use reqwest::Method;
     match cmd {
-        AuthCommand::Issue => {
+        AuthCommand::Issue { url } => {
             use base64::Engine;
             use rand::RngCore;
             let mut raw = [0u8; 32];
@@ -913,6 +920,30 @@ async fn auth_command(cmd: AuthCommand) -> Result<()> {
             println!();
             println!("Shown once. Any client that presents it gets a cookie for this node.");
             println!("Every client logged in with the previous token has been logged out.");
+            // A phone types this badly; a QR carries it. The token rides the
+            // URL fragment, which browsers never send, so it stays out of
+            // server and proxy logs.
+            let base = url.or_else(|| {
+                let u = node_url();
+                (!["127.0.0.1", "localhost", "[::1]", "::1"]
+                    .iter()
+                    .any(|h| u.contains(h)))
+                .then_some(u)
+            });
+            match base {
+                Some(b) => {
+                    let login = format!("{}/#token={token}", b.trim_end_matches('/'));
+                    println!();
+                    println!("Scan to log in:");
+                    if let Some(q) = tracon::mesh::enroll::qr_text(&login) {
+                        println!("{q}");
+                    }
+                    println!("{login}");
+                }
+                None => {
+                    println!("For a login QR a phone can scan, pass --url https://<how clients reach this node>.");
+                }
+            }
             Ok(())
         }
         AuthCommand::Revoke => {

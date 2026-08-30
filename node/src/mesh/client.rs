@@ -635,6 +635,7 @@ impl MeshClient {
                     x25519_pub: m["x25519_pub"].as_str().map(String::from),
                     last_seen_ms: None,
                     reachable: 0,
+                    providers_json: None,
                 });
             }
         }

@@ -8,6 +8,7 @@ pub mod events;
 pub mod fake;
 pub mod harness;
 pub mod http;
+pub mod login_fake;
 pub mod mesh;
 pub mod rows;
 pub mod state;

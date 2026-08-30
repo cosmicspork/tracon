@@ -1,4 +1,5 @@
 <script lang="ts">
+  import RepoPicker from '../components/RepoPicker.svelte'
   import { api } from '../lib/api'
   import { eligibleNodes } from '../lib/nodes'
   import { router } from '../lib/router.svelte'
@@ -46,6 +47,23 @@
       .workReady(channel)
       .then((d) => (ready_items = d.items))
       .catch(() => (ready_items = []))
+  })
+  // The last model used is the likely next one: preselect it when the chosen
+  // node offers it. The choice stays explicit — the field is still required,
+  // nothing is preselected on a node that never ran that model, and the
+  // server still refuses a session without one.
+  let preselected = false
+  $effect(() => {
+    if (preselected || model !== '') return
+    const models = node?.models ?? []
+    if (models.length === 0) return
+    const last = [...store.sessions.values()]
+      .sort((a, b) => b.created_ms - a.created_ms)
+      .find((s) => models.some((m) => m.value === s.model))
+    if (last) {
+      model = last.model
+      preselected = true
+    }
   })
   // The budget default is the channel's binding for the phase, then the node's.
   $effect(() => {
@@ -97,10 +115,10 @@
       >
     {/if}
   </label>
-  <label>
+  <div class="field">
     <span>Repository <em class="req">required</em></span>
-    <input bind:value={repo} placeholder="/Users/you/src/project" spellcheck="false" />
-  </label>
+    <RepoPicker bind:value={repo} {channel} />
+  </div>
   <label>
     <span>Branch</span>
     <input bind:value={branch} placeholder="feat/…  (a name is generated if empty)" spellcheck="false" />

@@ -16,6 +16,8 @@ export interface NodeInfo {
   reachable: boolean
   last_seen_ms: number | null
   x25519_pub?: string | null
+  /** The node's provider summary, carried in its hello. Absent from older builds. */
+  providers?: ProviderInfo[] | null
 }
 
 export interface ModelOption {
@@ -36,6 +38,18 @@ export interface ProviderInfo {
   expires_ms: number | null
   channels: string[]
   updated_ms: number | null
+}
+
+/** What the broker will say about a credential: bindings and key names, never a value. */
+export interface CredentialSummary {
+  name: string
+  kind: string
+  provider: string | null
+  channels: string[]
+  nodes: string[]
+  identity: string | null
+  expires_ms: number | null
+  env_keys: string[]
 }
 
 /** Hub reachability, from `/api/mesh` and the `mesh` stream event. */
@@ -256,6 +270,38 @@ export interface ChannelMetrics {
   human_seconds: number
   agent_seconds: number
   sessions: number
+}
+
+/** One repository this node has run sessions against. */
+export interface RecentRepo {
+  repo_path: string
+  last_used_ms: number
+  sessions: number
+}
+
+/** A clone the node manages under its own state, ready before any session. */
+export interface ManagedRepo {
+  repo_path: string
+  full_name: string
+  host: string
+}
+
+/** One repository as a forge lists it. */
+export interface ForgeRepo {
+  host: string
+  owner: string
+  name: string
+  full_name: string
+  private: boolean
+  default_branch: string | null
+  pushed_at: string | null
+}
+
+/** One forge's listing: repositories, or why there are none to show. */
+export interface ForgeList {
+  forge: string
+  repos: ForgeRepo[]
+  error?: string
 }
 
 export interface Queue {

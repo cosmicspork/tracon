@@ -34,13 +34,23 @@ pub struct Worktree {
 const GIT_SAFE: &[&str] = &["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor="];
 
 async fn git(repo: &Path, op: &'static str, args: &[&str]) -> Result<String, WorktreeError> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(GIT_SAFE)
-        .args(args)
-        .output()
-        .await?;
+    git_with_env(repo, op, args, &[]).await
+}
+
+/// Same, with extra environment — how a fetch against a managed clone gets
+/// its forge auth (`forge::git_env_for`) without the token touching argv.
+async fn git_with_env(
+    repo: &Path,
+    op: &'static str,
+    args: &[&str],
+    env: &[(String, String)],
+) -> Result<String, WorktreeError> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo).args(GIT_SAFE).args(args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().await?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
@@ -93,11 +103,14 @@ fn worktree_path(root: &Path, repo: &Path, slug: &str) -> PathBuf {
 }
 
 /// Fetch, then create a worktree on `branch` based on `origin/<default>`.
+/// `env` is extra environment for the fetch — forge auth for a managed clone,
+/// empty for the operator's own checkouts.
 pub async fn create(
     repo: &Path,
     root: &Path,
     branch: &str,
     slug: &str,
+    env: &[(String, String)],
 ) -> Result<Worktree, WorktreeError> {
     if !repo.exists() {
         return Err(WorktreeError::NoRepo(repo.to_path_buf()));
@@ -105,7 +118,7 @@ pub async fn create(
     if !repo.join(".git").exists() {
         return Err(WorktreeError::NotGit(repo.to_path_buf()));
     }
-    git(repo, "fetch", &["fetch", "origin"]).await?;
+    git_with_env(repo, "fetch", &["fetch", "origin"], env).await?;
     let default = default_branch(repo).await?;
     let base = format!("origin/{default}");
     let dirty = is_dirty(repo).await;
@@ -215,7 +228,9 @@ mod tests {
     async fn creates_a_branch_from_origin_default() {
         let (tmp, repo) = fixture().await;
         let root = tmp.path().join("work");
-        let wt = create(&repo, &root, "feat/thing", "thing").await.unwrap();
+        let wt = create(&repo, &root, "feat/thing", "thing", &[])
+            .await
+            .unwrap();
         assert!(wt.path.join("README.md").exists());
         assert_eq!(wt.branch, "feat/thing");
         assert_eq!(wt.base, "origin/main");
@@ -231,8 +246,8 @@ mod tests {
     async fn two_sessions_on_one_repo_get_distinct_worktrees() {
         let (tmp, repo) = fixture().await;
         let root = tmp.path().join("work");
-        let a = create(&repo, &root, "feat/a", "same").await.unwrap();
-        let b = create(&repo, &root, "feat/b", "same").await.unwrap();
+        let a = create(&repo, &root, "feat/a", "same", &[]).await.unwrap();
+        let b = create(&repo, &root, "feat/b", "same", &[]).await.unwrap();
         assert_ne!(a.path, b.path);
         assert!(b.path.to_string_lossy().ends_with("-same-2"));
     }
@@ -242,9 +257,29 @@ mod tests {
         let (tmp, repo) = fixture().await;
         std::fs::write(repo.join("scratch.txt"), "parked work").unwrap();
         let root = tmp.path().join("work");
-        let wt = create(&repo, &root, "feat/thing", "thing").await.unwrap();
+        let wt = create(&repo, &root, "feat/thing", "thing", &[])
+            .await
+            .unwrap();
         assert!(wt.main_checkout_dirty);
         assert!(repo.join("scratch.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn the_fetch_env_reaches_git() {
+        let (tmp, repo) = fixture().await;
+        let root = tmp.path().join("work");
+        // A deliberately unparseable GIT_CONFIG_* pair — the same mechanism
+        // the forge auth env uses: if the env reaches git the fetch fails
+        // loudly, and if it were dropped this would pass silently.
+        let env = vec![
+            ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+            ("GIT_CONFIG_KEY_0".to_string(), String::new()),
+            ("GIT_CONFIG_VALUE_0".to_string(), "x".to_string()),
+        ];
+        let err = create(&repo, &root, "feat/env", "env", &env)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorktreeError::Git { op: "fetch", .. }));
     }
 
     #[tokio::test]
@@ -255,6 +290,7 @@ mod tests {
             &tmp.path().join("work"),
             "feat/x",
             "x",
+            &[],
         )
         .await
         .unwrap_err();

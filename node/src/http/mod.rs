@@ -65,6 +65,8 @@ pub fn router(state: AppState) -> Router {
             "/api/memories/{id}",
             axum::routing::delete(api::delete_memory),
         )
+        .route("/api/credentials", get(api::list_credentials))
+        .route("/api/credentials/{name}/share", post(api::share_credential))
         .route("/api/providers", get(api::list_providers))
         .route("/api/providers/{name}/connect", post(api::connect_provider))
         .route("/api/providers/{name}/code", post(api::provider_code))
@@ -73,6 +75,18 @@ pub fn router(state: AppState) -> Router {
             post(api::disconnect_provider),
         )
         .route("/api/nodes", get(api::list_nodes))
+        .route(
+            "/api/nodes/{id}/providers/{name}/connect",
+            post(api::node_connect_provider),
+        )
+        .route(
+            "/api/nodes/{id}/providers/{name}/code",
+            post(api::node_provider_code),
+        )
+        .route(
+            "/api/nodes/{id}/providers/{name}/disconnect",
+            post(api::node_disconnect_provider),
+        )
         .route("/api/mesh", get(api::get_mesh))
         .route("/api/channels", get(api::list_channels))
         .route("/api/mesh/invite", post(api::open_invite))
@@ -81,6 +95,9 @@ pub fn router(state: AppState) -> Router {
             get(api::poll_invite).delete(api::cancel_invite),
         )
         .route("/api/mesh/invite/{code}/admit", post(api::admit_invite))
+        .route("/api/repos/recent", get(api::recent_repos))
+        .route("/api/repos/clone", post(api::clone_repo))
+        .route("/api/forge/repos", get(api::forge_repos))
         .route(
             "/api/sessions",
             get(api::list_sessions).post(api::create_session),
@@ -332,6 +349,21 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                 let _ = api::probe_models_into_store(&s, b.as_ref()).await;
             });
         }));
+        // Every provider change lands in this node's row and rides the hello,
+        // so a peer's interface renders and drives these providers.
+        let pub_store = store.clone();
+        let pub_bus = bus.clone();
+        let pub_id = state.node_id.clone();
+        let carry = move |list: Vec<serde_json::Value>| {
+            let json = serde_json::Value::Array(list).to_string();
+            if pub_store.set_node_providers(&pub_id, &json).is_ok() {
+                if let Ok(Some(row)) = pub_store.get_node(&pub_id) {
+                    pub_bus.publish(crate::stream::Frame::Node(row.to_json()));
+                }
+            }
+        };
+        carry(providers.list()); // seed the row before the first hello
+        providers.set_on_publish(Box::new(carry));
         state.manager.set_providers(providers.clone());
         tokio::spawn(providers.refresh_loop());
     }
@@ -528,6 +560,7 @@ async fn init_node(
         x25519_pub: Some(identity.x25519_hex()),
         last_seen_ms: Some(now_ms()),
         reachable: 1,
+        providers_json: None,
         name: cfg.node_name.clone(),
         state: if ready { "ready" } else { "refused" }.into(),
         failed_check: failed.as_ref().map(|f| f.id.as_str().to_string()),

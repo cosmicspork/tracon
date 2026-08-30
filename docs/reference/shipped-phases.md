@@ -1,0 +1,559 @@
+# Shipped phases: the record
+
+The roadmap used to carry each shipped phase in full. That record moved here when
+the roadmap was refocused on what is still to be built; nothing below was edited in
+the move. Each phase also has its own notes file beside this one with what the
+implementation learned.
+
+## Phase 0: Validate the assumptions
+
+Validation work completed on 2026-08-24. The ACP, restricted-harness, and Linux
+boundary assumptions passed. The assumed work Coder boundary failed: the current
+single-container template cannot enforce the gate. Evidence remains in the
+[`ACP capture`](reference/acp-omp-18.0.4-session.jsonl),
+[`restricted-session capture`](reference/acp-omp-restricted-session.jsonl),
+[`restricted-session driver`](reference/acp-drive-restricted.py), and
+[`gateway configuration`](reference/gateway-tinyproxy.conf).
+
+- [x] **Read a real ACP session end to end.** `omp acp` 18.0.4 uses newline-delimited
+      JSON-RPC. The capture establishes session configuration, tool and permission
+      updates, streaming output, and usage events needed by the adapter.
+- [x] **Drive one real task with the harness under restriction.** With network closed,
+      no publishing CLIs, and no `.env`, omp completed local work, reported denied
+      publishing accurately, and stopped without retries or attempts to route around
+      the gate.
+- [x] **Check the devcontainer Docker socket situation.** The current template exposes
+      neither Docker CLI nor `/var/run/docker.sock`, and the sampled devcontainer files
+      declare neither Docker feature nor socket mount. That does not establish a
+      boundary: the template's sole Envbuilder container is privileged.
+- [x] **Find the Coder autostop policy.** The configured autostop duration is 8 hours.
+      Background work therefore needs an active workspace or explicit restart handling.
+- [x] **Check the container privilege and capabilities.** This fails the original
+      topology assumption: the template sets `privileged = true`; `coder` has
+      passwordless `sudo`; root has `CapEff: 000001ffffffffff`. There is no separate
+      inner runner, so this topology cannot run a gated harness.
+- [x] **Stand up one host boundary by hand.** Rootless Podman on an immutable Fedora
+      host, harness in a
+      container on an internal network, node-side process holding the exec pipe.
+      Confirm the harness can still reach the model provider through the node and
+      nothing else.
+- [x] **Check Python and `uv` in the Coder environment.** The template creates no
+      separate outer pod: Coder runs in the Envbuilder devcontainer. It has Python
+      3.9.2; `uv` is absent but its installer is reachable. The replacement topology
+      must provision sidecar dependencies independently.
+- [x] **Check the hosted inference API's embeddings, reranking, and batch inference.**
+      Embeddings use
+      synchronous endpoints and are not supported by batch inference. Reranking is a
+      knowledge-base feature, not a standalone endpoint. Candidate embedding models are
+      deferred to Phase 4, after FTS demonstrates a need.
+- [x] **Decide the human-time signal.** Claim/release on approval items. Browser
+      heartbeat measures tab focus, not attention, and puts the SPA in the loop for a
+      metric. Decided here because it changes the event schema and is expensive to
+      retrofit.
+
+Outcome: the adapter, restricted-harness, and Linux boundary checks passed. The
+original work-boundary criterion failed and produced the Phase 3 replacement-topology
+requirement. It did not create an advisory mode or establish the current Coder workspace
+as a valid node.
+
+## Phase 1: Node and gate, one machine, no mesh
+
+The smallest thing that changes behavior. Phase 1 runs on any one machine that can host
+the persistent node and isolated runner, retain state, expose the SPA to the operator,
+and pass the startup boundary check. One Linux host proved one implementation; it is not the
+required platform. macOS, another Linux host, or a managed environment qualifies by
+capability, not product name.
+
+Claude Code for web, omp, or another harness may be used outside tracon to implement
+this phase. That is the bootstrap escape hatch, not a claim that the implementation
+environment can run the node. Dogfooding starts once one eligible machine passes the
+checks and completes the phase.
+
+Node:
+
+- [x] Rust binary, static musl, `x86_64` and `aarch64`. Built with `cargo zigbuild`
+      and asserted static in CI on every change, so a dependency that cannot
+      cross-compile is caught by the change that adds it. macOS builds natively and is
+      not musl.
+- [x] Host boundary as code: internal network, gateway container with the allowlist
+      proxy and node-socket forward, harness container. Exactly what Phase 0 established
+      by hand on Linux, generalized behind capability checks.
+- [x] Startup boundary check; refusal to run harnesses surfaced with the failed check
+- [x] ACP adapter for omp, with a harness adapter trait from day one. One harness until
+      a concrete task needs a second; adapters are the part that rots.
+- [x] Session lifecycle: worktree creation and branch, git identity materialized,
+      spawn inside the boundary, stream, teardown
+- [x] Config materialized to a scratch directory, nothing written to the repo
+- [x] Embedded SPA (`rust-embed`), served locally: queue, session screen with streaming
+      output and prompt input, approval detail, nodes, new-session form with a required
+      model field. Built in the Ledger × Tonal direction settled 2026-08-24. The approval
+      screen is a stub until the review contract lands; there is nothing to approve yet.
+- [x] Local SQLite: `node`, `session`, `event` tables
+- [x] `work_item_id` nullable column on `session` and `event` from the start, even
+      though the ledger does not exist yet. Adding the graph later is additive; not
+      having the column forces a rewrite.
+- [x] Durations recorded monotonically on the node that observed them
+
+Gate:
+
+- [x] Permission handling: ACP `session/request_permission` routed to the queue
+      (Claude Code `control_request` when that adapter lands)
+- [x] Local policy evaluation, signed bundles, fail closed on approve
+- [x] Credential broker, sealed, harness has no read path
+- [x] **consulta absorbed as the first brokered tool.** Node exposes `query` and
+      `describe` MCP tools; the Python sidecar is spawned and owned by the node with the
+      DB credential injected from the broker. Guard ported to Rust (`sqlparser-rs`) so the
+      node refuses before spawning; consulta's own guard stays as the second, independent
+      check. Smallest blast radius of any credential, read-only by construction, and it
+      exercises the whole tool → node → broker → external path before `gh` does.
+      Verified against a real harness: the agent queried a database it has no credential
+      for, and a `DELETE` was refused by the node before the sidecar was spawned. The
+      Oracle profile is a credential-store entry away; only SQLite has been exercised.
+- [x] `gh` and `glab` behind the broker; the harness gains a push path only through it
+- [x] Absorb the `review` submit schema and verdict contract
+- [x] `/revise` flow, including code edits (agent stays the only worktree writer).
+      "Request changes" keeps one evolving thread: the notes go back through
+      `review_status`, the agent edits and resubmits against the same review. Editing a
+      diff in the browser and submitting it back is Phase 6, with the desktop wrapper;
+      the operator asks for the change and the agent makes it, which keeps the agent the
+      only writer to the worktree.
+- [x] Blob hash recorded at submit, stale-diff conflicts surfaced
+- [x] Tool surface reduction before gating (`--tools`), available per node but **off by
+      default**. omp's `--tools` is a whitelist that does not accept its shell, so any
+      list at all removes the shell, and without a shell the agent cannot commit and the
+      review contract has nothing to carry. Found by running it: the agent did not report
+      being stuck, it began reading `.git/refs` by hand instead. Reduce deliberately once
+      you know what a channel needs; the boundary and policy bound the surface either way.
+- [x] Encode the five working agreements as policy: worktree not main checkout, review
+      before publish, no merge, no transition, no production deploy. Shipped as the
+      starting bundle, so the rules are data from the first run rather than prose.
+
+Session budgets are enforced in tokens, accumulated from each turn's reported usage and
+checked when the turn ends. A single long turn can therefore overshoot: ACP reports usage
+per turn, not continuously. Mid-turn enforcement needs a usage snapshot the adapter does
+not have yet, and per-channel ceilings are Phase 5.
+
+Phase 1 completed 2026-08-25. The node establishes and
+verifies its boundary, spawns `omp` inside it, runs a session end to end (worktree, prompt,
+permission request routed to the queue, answer, budget kill, teardown), streams events over
+SSE, and serves the interface those screens were designed for. The broker now holds
+credentials the harness cannot read, and reaches them out as MCP tools over the gateway
+forward, authorised per session. Review before publish is enforced rather than instructed:
+the agent has no forge token, the node captures the diff and publishes the approved bytes,
+and a branch that moved after submit cannot be approved. Policy decides what the node
+answers without asking, what it refuses with a reason, and what reaches the queue; the
+five working agreements ship as its starting bundle.
+
+Not yet dogfooded: the exit criterion says tracon is built through tracon from here, and
+that has not happened yet — this phase was built with an external harness, which is the
+bootstrap escape hatch the phase allows. The first real test of the exit criterion is
+using it.
+
+Exit criteria: a full task is driven from the browser against one boundary-capable node,
+start to finish, with `gh` and the consulta credential reachable only through the node.
+From here on, tracon is built through tracon.
+
+## Phase 2: Mesh
+
+- [x] Hub deployed to the cluster **as the relay**: opaque frame routing, keyed
+      per channel, modeled on an earlier encrypted relay. Sync and processing come in Phase 4;
+      here it only routes. Built as the `hub/` crate (`tracon-hub`): signed requests
+      with the signature as the replay nonce, per-channel sequence, cursor pull with a
+      `410` resync when behind retention, payload-free SSE pokes, members as routing
+      metadata, enrollment slots. It holds no channel keys and opens no frame. The
+      cluster's manifests live with the cluster; the pod goes live with the first
+      release that publishes the image.
+- [x] Node keypair on first run, enrollment via short-lived code from an enrolled node.
+      `<state>/node-identity.seed`; the node id is the Ed25519 public key (a Phase 1
+      database is rekeyed once). `tracon mesh invite` / `tracon enroll`, or the Enroll
+      screen: slot on the hub, public keys and a name in the clear, fingerprints
+      compared by the operator before admission, then keys and policy handed off
+      direct-sealed.
+- [x] Channel model and key scoping. A channel is a keyring of epochs wrapped to each
+      member node; frames seal under the newest epoch with the channel and epoch bound
+      into the AEAD data, so the hub cannot re-label a frame. `tracon channel create`,
+      handoff by enrollment, union merge on re-handoff. Bindings are recorded per
+      channel; only membership is enforced in this phase.
+- [x] Policy signing key generated and kept off the hub. Unchanged where it lives;
+      bundles travel as direct-sealed frames, the public key is trusted only from the
+      enrollment handoff, and a bundle signed by any other key is refused and shown.
+      `tracon policy push` hands a new bundle to every member; it takes effect without
+      a restart.
+- [x] Second boundary-capable node on another host, bootstrapped by one-line binary
+      fetch, not the operator's shell setup. `install.sh` fetches the static musl
+      binary and verifies
+      the release checksum; the container definitions ship inside the binary so
+      `tracon setup` builds the images. Stood up on the Linux host: the Linux
+      gateway forward is a Unix socket, and two SELinux constraints were found by
+      running it ([`phase-2-notes`](reference/phase-2-notes.md)).
+- [x] Harness state directory as a node-owned volume (the `OMP_STATE_DIR` pattern).
+      The volume is the only credential store the harness sees; the operator's
+      `~/.omp` is never mounted again. `tracon harness import-credentials` copies a
+      store in once; `tracon harness shell` logs in where none exists. `OMP_STATE_DIR`
+      is set but unverifiable against omp's stripped binary, so the mount stays at
+      `/root/.omp`.
+- [x] SPA connects to the mesh regardless of which node served it. The interface talks
+      only to the node that served it; that node mirrors every peer's sessions,
+      requests, and reviews into the same tables scoped by node, and forwards
+      prompt / answer / kill / verdict / create to the owner as sealed commands. A
+      prompt to an unreachable owner is queued and sent when it returns; the rest fail
+      honestly. Node chips everywhere, held cards for unreachable owners, one quiet
+      hub banner, an Enroll screen, and a node pick within a channel's binding.
+
+Phase 2 implementation completed 2026-08-28. The exit criterion is demonstrated
+end to end in-process (`node/tests/mesh_e2e.rs`: two managers with the fake harness, two
+live mesh clients, one real hub router; a session created on B from A's API, its outcome
+and events mirrored back, a forwarded kill refused as the owner phrases it, a queued
+prompt to an unreachable owner). The two-machine run — hub on the cluster, the
+macOS node and the Linux node enrolled, a session on one driven from the other's
+browser — waits on the first release (which publishes the hub image and the node
+binaries) and the cluster deploy; the Linux node already passes its boundary check with
+the socket forward.
+
+Not built in this phase, recorded so it is not assumed: live chunks and tool progress are
+not forwarded (the remote view is message-granular; the persisted message arrives at
+turn end); drafts are per interface, not mirrored; channel bindings beyond membership
+are recorded but not enforced; `tracon channel rotate` (a new epoch plus re-handoff) is
+a small follow-up on the keyring that already supports it.
+
+Exit criteria: a session running on either eligible node is visible and controllable
+from the browser served by the other, proving cross-machine reach without depending on
+the blocked work topology.
+
+## Phase 3: The work node enforces
+
+The current work topology is privileged and cannot enforce the gate. Phase 3 replaces
+it with a boundary the node can verify.
+
+- [x] Replace the privileged single-container Envbuilder workspace with a node-owned,
+      unprivileged harness runner topology. Built as a second boundary backend
+      (`[runtime] kind = "kubernetes"`): the node is an unprivileged pod that creates
+      one harness pod per session, and two NetworkPolicies make it the harness's only
+      route. Proven on the cluster ([`phase-3-notes`](reference/phase-3-notes.md)); the Coder template that carries
+      it to the work cluster is written on a host that can reach that environment,
+      against [`deploy/coder/README.md`](../deploy/coder/README.md).
+- [x] Node outside the harness container, with a node-owned exec pipe. `pods/attach`
+      over a WebSocket the node opens; killing a session deletes the pod.
+- [x] Harness runner on an internal network with the node as its only route out. No
+      resolver, no API token; egress only to `tracon.dev/role=node` on the forward and
+      proxy ports; the node serves the CONNECT allowlist proxy itself.
+- [x] Startup boundary check passes on the live pod. The same five checks, answered
+      from a gated probe pod, the policy's shape, and a `SelfSubjectAccessReview` per
+      verb; all five pass on the lab pod. The work pod is pending the template.
+- [x] Broker holds `glab`, `acli`; consulta bound to the work channel and the work
+      node. As credentials (`glab`, `jira`) behind narrow REST tools — `mr_status`,
+      `mr_comment`, `issue`, `issue_comment` — and a `nodes` binding on every
+      credential, so "work node only" is data.
+- [x] Work-channel policy: no merge, no transition, no production deploy, enforced at
+      the broker rather than the prompt. Those verbs are not tools; the token that could
+      do them never leaves the node. Policy also decides every tool call before the
+      broker is touched, and a call the bundle does not name is asked, not run.
+
+Phase 3 implementation completed 2026-08-28. The runner topology is built and proven
+on the cluster: all five checks pass inside the node pod, the deep probe shows
+a harness pod with no route but the node, and a session creates its pod, mounts the
+worktree as subpaths of the shared claim, and attaches. Not yet done: a turn with model
+credentials in the lab, the Coder template itself, and therefore the boundary check on
+the live work pod — that is the operator's next step on a host that can reach it.
+`review` and `consulta` can be archived once the work node has run real tasks through
+these tools.
+
+Exit criteria: an agent physically cannot post to GitLab or Jira, or reach the work
+database, except through the node, and `review` and `consulta` can be archived.
+
+## Phase 4: Memory, documents, hub
+
+- [x] **Model credentials brokered.** The harness holds a placeholder key (its session
+      token) and reaches every provider through `/model/<provider>/…` on the node's
+      harness listener; the node injects the credential from its sealed store
+      (`credentials.sealed`, under a key derived from the identity seed), enforces the
+      channel's provider bindings, and counts usage per request (`GET /api/usage`).
+      Login and refresh run `omp auth-broker login` / `omp token --force-refresh` as
+      node-owned subprocesses against a per-provider store never mounted into a
+      session; the Nodes screen carries the "connect a provider" card with the
+      sign-in link and the paste-back. `agent.db`, `harness import-credentials`, and
+      `harness shell` are gone. The spike behind it and what could not be verified (a
+      live Anthropic subscription token: the operator's had expired) are in
+      [`phase-4-notes`](reference/phase-4-notes.md).
+- [x] Hub-and-spoke sync: site ID, monotonic sequence, hub-assigned ordering, cursor
+      pull, HLC plus LWW. The `sync` crate: `change_log` keyed on `(site, site_seq)`, a
+      persisted HLC, row-level last-writer-wins on `(hlc_ms, hlc_ctr, site)`, tombstones;
+      `changes` / `changes_request` / `changes_batch` payloads under contract version 2.
+      Found on the way and fixed: the Phase 2 client deadlocked on its first hub outage.
+- [x] Full local replica on every node, reads always local. Documents, memories, and
+      batches are replicated tables on every node; recall and the interface never wait
+      on the hub, and a late joiner backfills each site's log when it is handed a key.
+- [x] Hub decrypts personal and client channels; work channels ordered and forwarded
+      opaquely. The hub has an identity and a `hub.db` replica; `tracon channel share
+      --hub` admits it into a channel (role `hub`) and hands it the keyring. A channel
+      nobody shares stays ciphertext because there is no key, and the hub counts what it
+      could not open.
+- [x] Document store, the filename prefix scheme as the kind column. `tracon doc
+      import|ls|get|put|rm|export`, `GET/PUT/DELETE /api/docs/{channel}/{slug}` with the
+      `If-Match`/412 edit contract, `doc_read` / `doc_search` / `doc_write` for
+      agents (the write is asked), and a Documents screen with search, markdown, and a
+      conflict-aware editor. The operator's notes (12 documents) and the workspace
+      README imported.
+- [x] Memory store: scope and kind axes, MCP `retain` / `recall` tools. Directives are
+      the operator's (`tracon memory add`, `POST /api/memories`); `retain` writes facts,
+      lessons, and episodes, and holds a lesson (or a fact under 0.7 confidence) as a
+      candidate for the batch. Every session gets the MCP server now.
+- [x] Bank identity from channel and project ID, never cwd or git root:
+      `sha256(channel ‖ canonical remote)`, recorded as `session.project_id`.
+- [x] **Retrieval starts FTS5-only.** Directives ranked above facts (by confidence and a
+      90-day half-life), then promoted lessons, then documents with snippets; episodes
+      only when asked. `sqlite-vec` and a reranker wait for FTS to demonstrably miss.
+- [x] Embedding model name and dimension stored per vector row. Built in Phase 7: on
+      every row, not per database, so a stale vector is detectable and a model change is
+      a rebuild rather than a silent mixing of incomparable vectors.
+- [x] Processing node and provider bindings, enforced fail-closed, recorded as data. A
+      channel's `bindings_json` carries `providers` (the gateway refuses anything off the
+      list) and `processing` (`hub` or a node id: who batches it). Both are handed off
+      with the keyring.
+- [x] Local embeddings on the work node. Built in Phase 7, as configuration rather than
+      as a linked-in model: `[embed] base_url` points at an OpenAI-shaped endpoint, so a
+      work channel is served by something on the same machine and nothing leaves it.
+- [x] Generated per-session orientation file: guides on the channel, this node's facts,
+      the bundle's deny rules with reasons, then directives and confident facts —
+      capped, mounted read-only, passed as `--append-system-prompt`, recorded as an
+      `orientation` event. Nothing in the worktree.
+- [x] Memory promotion routed through the approval queue, batched nightly. The batch is
+      a synced `promotion` record built by whoever the channel's `processing` binding
+      names (the hub at 03:00 UTC, the node at `[memory] promote_at`); verdicts are
+      per item, local writes, and converge; the third queue kind, after reviews.
+- [x] Degraded mode verified: hub unreachable means FTS-only, work continues
+      (`node/tests/sync_e2e.rs`: recall and the outbox with the hub answering 503,
+      concurrent offline edits converging on its return, a delete across a second
+      outage).
+- [x] Encrypted hub snapshots to object storage, restore exercised at least once —
+      against a directory bucket in `hub/tests/snapshot.rs`; the run against Spaces
+      waits on a bucket and a key in the cluster's secrets.
+
+Imported: the operator's notes directory and this host's workspace `README.md` (as
+`guide-workspace`). The work-side README is imported from a host that can reach it.
+The old notes app stays runnable against `tracon doc export` until the operator has
+lived in the Documents screen.
+
+Phase 4 implementation completed 2026-08-28 except the vector items, which waited on
+FTS missing something and were built in Phase 7. Not done, recorded so it is not assumed: a live subscription
+token through the gateway (the operator's Anthropic refresh token had expired; the
+header shape is from the public clients and marked unverified); the snapshot run
+against object storage; the hub's replica on the cluster, which arrives with the next
+release; the work-side README import.
+
+Exit criteria: the old notes app can be archived, and the two orientation files stop drifting
+because there is only one source.
+
+## Phase 5: Ledger, phases, metrics
+
+- [x] Work item store: hash IDs, dependency edges, `discovered-from`. The `work_item`
+      table replicates through the `sync` crate like documents; ids are
+      `sha256(channel, project, site, created_ms, title)` so two nodes mint offline
+      without collision; `deps_json` holds the edges, `discovered_from` and
+      `discovered_by_session` the origin. `tracon work add|ls|ready|show|close|dep|rm`,
+      `/api/work`, and the Work screen.
+- [x] Ready-work query, deterministic topological sort. `tracon_sync::work::status`:
+      Kahn over the open subgraph with ids as the tiebreak, then
+      `(priority desc, created_ms asc, id asc)`; unknown deps block and say so; cycles
+      block every member. Every replica lists the same order.
+- [x] Session requires a work item; ready-work injected at start; session ends at item
+      close. Plan and execute sessions are refused without a ready, unheld item (422 with
+      the blocker named); the orientation carries the item and the project's ready work;
+      `work_close` (or a close from the interface, or a publish) ends the holding session
+      once its turn is over, reason `item_close`.
+- [x] Plan / execute / review as separate spawned sessions. The operator starts plan and
+      execute; the plan session ends by writing `plan-<item>` (`doc_write` to that one
+      slug is not asked); the node spawns the review session at submit.
+- [x] Model required in every session spec, validated at spawn. Since Phase 1; the spec
+      now also names the phase, and a review session's model comes from the channel's
+      `phases.review.model` binding — nothing is inherited.
+- [x] Per-session budget enforced by killing the session. Since Phase 1; the default now
+      comes from the channel's per-phase binding before the node's.
+- [x] Deterministic supervision between phases. At `submit_review`, after the diff is
+      captured and before anyone reads it, the node runs the worktree's `.tracon/checks`
+      (else `[supervision] checks`, default `just check`) in a throwaway harness
+      container with the worktree mounted and nothing else. A failure refuses the
+      submission with the exit code and tail; the passing list is recorded on the review.
+      `just analyse` / `just test` are whatever the project's file names.
+- [x] Review sessions run with fresh context: requirements and diff only. A
+      `review`-phase session on a fresh worktree at the reviewed commit, offered only
+      `recall`, `doc_read`, `doc_search`, `review_verdict`; its verdict lands on the card
+      for the human, who still decides.
+- [x] Diff size cap at submit. `[review] max_diff_lines` (800) and `max_files` (40);
+      over either is refused before the checks with "split the change".
+- [x] Execute phase gated on a plan artifact. Refused with 422 until the item carries a
+      plan document; `phases.execute.requires_plan=false` on a channel is the recorded
+      bypass.
+- [x] Metrics rollups: approvals per accepted change, cost per accepted change.
+      `GET /api/metrics`, `tracon metrics`, the Metrics screen: approvals (permission
+      answers + review verdicts) and gateway tokens per accepted change, priced only where
+      `[providers.<p>.price]` is set. As seen from the node asked.
+- [x] Per-channel daily cost ceiling enforced by the node. Binding
+      `ceiling_tokens_per_day`, gateway tokens since local midnight: new sessions refused
+      with 429 and the figures, and the gateway refuses every call at the ceiling so a
+      running session stops spending. Meters on the Nodes screen.
+- [x] Provenance queryable per commit: model, prompt, approval, policy version.
+      `GET /api/provenance/{sha}`, `tracon provenance <sha>`: the review, the item and
+      its plan, the implementing and review sessions with their models and the policy
+      version they started under, the prompts, the approvals, the checks that passed.
+
+Phase 5 implementation completed 2026-08-28, in eight PRs after a reviewer's security
+patch (#52). Everything is tested in-process against the fake harness and a real
+worktree; the two-node run of the ledger and a real plan → execute → review chain
+through the gateway wait on the next release and a connected provider. Not built,
+recorded so it is not assumed: hub-side rollups (metrics are computed on the node from
+its own usage table and the mirrored sessions); mid-turn ceiling enforcement (the gateway
+refuses the next call, the harness surfaces the error, the operator decides); a cost in
+dollars for subscriptions (tokens are the unit; a price is per provider, optional).
+
+Exit criteria met: a session's model is on its own spec and a review session's model is
+a channel binding, so there is nothing for a subagent to inherit; and
+`tracon metrics` prints tokens per accepted change.
+
+## Phase 6: Clients
+
+- [x] PWA: manifest, service worker, no local replica, no keys at rest. The worker
+      caches the shell and the hashed assets and refuses to touch `/api` — a cached
+      queue you cannot act on is worse than one that says the node is unreachable,
+      and passing an endless SSE response through a fetch handler breaks it. Tested
+      by loading the worker against stubs rather than through a browser, so the
+      no-`/api` rule is checked on every PR.
+- [x] Notification sinks bound per channel (an external push bridge, then; every node pushes
+      Web Push to its own devices since Phase 8). The task
+      reads the bus rather than the manager, which is what makes a *peer's* approval
+      reach the phone: mirrored state is published untapped, and `publish_untapped`
+      never reaches `Manager::publish_queue`. Hooking the manager would have missed
+      exactly the case this phase exists for.
+- [x] Tauri desktop wrapper: tray, command-tab, global hotkey, system notifications.
+      Its own cargo workspace, so the node and hub stay buildable on a machine with
+      no webkit or gtk headers.
+- [x] Node supervised by the platform: `tracon service install` writes a systemd user
+      unit or a LaunchAgent and starts it. Host-side CLI only, never a tool, so a
+      session that breaks the build cannot restart the node that gates it. Coder
+      needed nothing — there the container lifecycle already is the supervisor.
+      The old menu-bar supervisor installed nothing on Linux; its units are a
+      macOS-only migration.
+- [x] Work approvals surface in the wrapper tray, with a kill switch one level down
+      because killing is destructive and easy to mis-click. The tray does not stream
+      output; anything worth reading opens the window at that route.
+- [x] `@codemirror/merge` editable diffs feeding `/revise`. An edit is a request for
+      changes carrying a patch, never an approval of something the operator altered:
+      the agent applies it and resubmits, so the agent stays the only writer to the
+      worktree. Lazy-loaded, so the phone never pays for the editor.
+- [ ] Retire the menu-bar supervisor, after supervision has moved and the notes and
+      review tools are gone
+- [x] Rehome or deliberately kill the display-linked theme switcher — **killed**, see
+      `reference/phase-6-notes.md`. It is a macOS-only behaviour that nothing in
+      tracon depends on, and rehoming it means a System Events code path in the
+      wrapper forever.
+
+Reaching a node from off its own machine needed an answer this phase did not have.
+The corpus said the phone "reads over the hub" and also that "the hub never talks to
+a browser", and the operator API had no authentication at all — only a loopback Host
+check. So the node grew one: an operator token exchanged for an HttpOnly cookie, with
+loopback unchanged, and the lab node reached through an ingress. The hub-mediated path
+stays unbuilt and unneeded; documented under Clients.
+
+Not built: the wrapper is not bundled or signed, and macOS is not in CI — the plist
+and the launchctl path are written but built only on a Mac. Hub-side rollups and the
+phone's read-over-the-hub path remain later phases.
+
+Exit criteria: a task can be directed from the phone with both laptops closed, and
+the menu-bar supervisor can be archived. The first half is built and waits on the release and
+the cluster deploy; the second is the operator's, after the mac migration.
+
+## Phase 7: A second harness, and retrieval by meaning
+
+Both items were on the Deferred list, waiting for a task that needed them.
+
+- [x] Claude Code adapter, over its `control_request` / `can_use_tool` protocol rather
+      than ACP. The frames are in neither the CLI's help nor the published docs — they
+      were read out of the shipped binary and confirmed against a live run, and are
+      recorded in `reference/phase-7-notes.md`. `--permission-mode default` and
+      `--strict-mcp-config` are load-bearing and have a test saying so: `dontAsk` or
+      `bypassPermissions` would let the harness answer its own tool calls and the
+      operator's queue would simply stay empty.
+- [x] The harness seam made real. `[harness] id` was declared and read nowhere, so it
+      selected nothing; the state directory, both runners' state variable, and the
+      harness's own config files were all spelled `omp` outside the trait. An unknown
+      harness id now refuses to start rather than silently running omp under a version
+      pin that does not describe it.
+- [x] `sqlite-vec` compiled into the binary, so the release is still one static file.
+      Two portability bugs stood in the way and would have broken the musl release
+      outright; both are recorded in the notes.
+- [x] Embeddings from an endpoint named in config, not a model linked into the node.
+      That is what makes "work-channel embeddings stay on the work machine" something
+      the configuration expresses rather than something the code hopes for.
+- [x] Documents chunked on their headings, each chunk carrying its span so a hit shows
+      the text it matched, and its hash so an edit re-embeds only what changed.
+- [x] Hybrid ranking. The vector contribution is bounded below one tier step: directives
+      above facts is a decision about whose instructions win, not a relevance heuristic
+      for a better signal to overrule.
+- [x] An honest signal when this node embeds but cannot reach its endpoint. A search
+      that quietly got worse is what nobody notices.
+
+The vector index is node-local and absent from `tracon_sync::TABLES`, which is the
+enforcement rather than the intention — `apply_changes` refuses a table it does not know.
+A vector is not a safe form of encrypted content: inversion recovers much of the source
+text from the vector alone, so replicating one would hand the hub a readable index of a
+channel it cannot open. Every node embeds its own replica instead, which also means a hub
+outage no longer costs semantic search — the degraded-mode contract in ARCHITECTURE and
+DESIGN was corrected to match.
+
+Not built, recorded so it is not assumed: no reranker; the Claude Code adapter has no
+`login` / `refresh` / `lift`, because the gateway injects the credential and there is no
+harness-side login to run; a node set to `[harness] id = "claude"` must also point
+`harness_image` at the second image, and getting that wrong surfaces as the version
+mismatch it is; and nothing has been run against a real embedding model yet — the live
+verification used a stub, so the model choice (BGE-M3 or Qwen3 Embedding 0.6B) is still
+the operator's.
+
+Exit criteria: a session can run under either harness with the same queue, policy and
+budget; and a question that shares no words with the document that answers it finds it.
+Both are covered by tests, the second being the standard Phase 4 set for building this
+at all.
+
+## Phase 8: Standing on its own
+
+Not a capability phase. The repository stopped depending on things outside it — an
+external push bridge, a cross-compiler that existed for one target, a test suite that
+wrote into the operator's real state — and started shipping everything it has.
+
+- [x] Phone push from the node itself: RFC 8291 payload encryption and RFC 8292 VAPID
+      over pure-Rust crates, so a static binary still does it. Every node pushes to
+      the devices subscribed at it; the bound-node binding is gone, and removing it was
+      the whole fan-out, because peers' queues already arrived mirrored. A subscription
+      follows the browser session that made it, so a revoked login silences its devices.
+      `notify.enabled` per channel, on by default; the Phase 6 sink values still read.
+- [x] Every release attaches the binaries and the desktop app: `tracon` and
+      `tracon-hub` static for Linux x86_64, `tracon` for Apple Silicon, and the wrapper
+      as AppImage, `.deb` and `.dmg` with the node inside it as a sidecar. The wrapper's
+      version follows the workspace. Zig and the aarch64 Linux target are gone; the one
+      remaining musl leg builds with the native toolchain on every PR, since that is
+      what caught `sqlite-vec` the first time.
+- [x] The node compiles and runs its unit tests on macOS on every PR. It had never been
+      built there in CI despite carrying a launchd path.
+- [x] The test suite cannot reach the operator's state directory: one support module
+      per binary, the guard first in every test, a script that refuses a file without
+      it, and each provider-login test owning its store. The wall-clock guesses
+      (`try_recv().expect`, a quiet-window drain, an unbounded poll, eighteen fixed
+      2.6-second sleeps) became condition waits with deadlines.
+- [x] The repository names nothing but itself and `consulta`: no other project of the
+      operator's, no personal cluster, domain, host or path. `scripts/scrub-check.sh`
+      keeps it that way.
+- [x] A README that installs and sets the thing up: every config key with its default,
+      every command, the hub's environment, and the two rules that generate support
+      questions (loopback needs nothing; the cookie needs TLS).
+
+Not built, recorded so it is not assumed: a real phone has not yet received a push from
+this code — the wire is proven against a fake push service that decrypts with the
+device key and checks the VAPID header, and the node's endpoints are proven live, but
+the first Web Push to a handset is the operator's step after deploy. Windows is not a
+target. The desktop app is unsigned. The AppImage is large (it carries webkit), which
+is Tauri's doing rather than ours.
+
+Exit criteria: a fresh machine goes from the README's one-liner to a running node with
+a phone subscribed, using only what the release attaches; and `cargo test` on a machine
+that also runs a node leaves that node's state byte-for-byte unchanged. The second is
+checked; the first is checked up to the phone.
+

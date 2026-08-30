@@ -11,7 +11,7 @@
 
 /// The wire contract version, reported by the hub at `GET /v0/info`. Advances
 /// additively; moving it does not rotate any key. See [`CONTRACT_MAJOR`].
-pub const CONTRACT_VERSION: u32 = 2;
+pub const CONTRACT_VERSION: u32 = 3;
 
 /// The cryptographic era embedded in every HKDF and signing label. Bumps only on
 /// a key-rotating break. Holding it fixed across [`CONTRACT_VERSION`] bumps is

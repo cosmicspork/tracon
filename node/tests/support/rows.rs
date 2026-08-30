@@ -22,6 +22,7 @@ pub fn node_row(id: &str, name: &str) -> NodeRow {
         x25519_pub: None,
         last_seen_ms: None,
         reachable: 1,
+        providers_json: None,
     }
 }
 

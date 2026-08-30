@@ -24,7 +24,7 @@ pub trait CommandExecutor: Send + Sync {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
-    #[error("the owner did not answer in time")]
+    #[error("the owner did not answer in time (unreachable, or on an older build)")]
     Timeout,
     #[error("{0}")]
     Refused(String),
@@ -101,6 +101,21 @@ impl MeshClient {
                 tracing::warn!(to = %sender, error = %e, "could not queue an ack");
             }
         });
+    }
+
+    /// Direct-seal credentials to a member, through the outbox — the same
+    /// payload enrollment hands over, so the receiver's pin rule applies.
+    pub fn send_credential_handoff(
+        &self,
+        node_id: &str,
+        credentials: Vec<Value>,
+    ) -> Result<(), String> {
+        self.enqueue_direct(
+            MESH_CHANNEL,
+            node_id,
+            &Payload::CredentialHandoff { credentials },
+        )
+        .map_err(|e| e.to_string())
     }
 
     /// Ask a session's owner for the events this node has not mirrored.

@@ -65,6 +65,9 @@ pub struct Providers {
     /// What to do once a provider is connected: the model probe, once the
     /// node exists to run it.
     on_connected: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// What to do with every published summary: the node row carries it into
+    /// the hello, so peers see and drive this node's providers.
+    on_publish: std::sync::OnceLock<Box<dyn Fn(Vec<serde_json::Value>) + Send + Sync>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -127,11 +130,16 @@ impl Providers {
             inflight: Mutex::new(HashMap::new()),
             notes: Mutex::new(HashMap::new()),
             on_connected: std::sync::OnceLock::new(),
+            on_publish: std::sync::OnceLock::new(),
         })
     }
 
     pub fn set_on_connected(&self, f: Box<dyn Fn() + Send + Sync>) {
         let _ = self.on_connected.set(f);
+    }
+
+    pub fn set_on_publish(&self, f: Box<dyn Fn(Vec<serde_json::Value>) + Send + Sync>) {
+        let _ = self.on_publish.set(f);
     }
 
     /// Where the node-owned login stores live. Under the state directory so
@@ -183,9 +191,11 @@ impl Providers {
     }
 
     fn publish(&self) {
-        self.bus.publish(Frame::Providers {
-            providers: self.list(),
-        });
+        let list = self.list();
+        if let Some(f) = self.on_publish.get() {
+            f(list.clone());
+        }
+        self.bus.publish(Frame::Providers { providers: list });
     }
 
     fn note(&self, name: &str, state: &'static str, error: Option<String>) {

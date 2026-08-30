@@ -1,5 +1,5 @@
 {
-  "contract_version": 2,
+  "contract_version": 3,
   "vectors": [
     {
       "credential_store_key_hex": "e6344cfc9d51c5616225a1e61621aa1d3ce168d4d99e6e3cfd686f0e742a995b",

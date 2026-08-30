@@ -298,6 +298,82 @@ pub async fn list_sessions(
     Ok(Json(json!(rows)))
 }
 
+/// Where sessions have run before, most recent first, so the form can offer a
+/// pick instead of demanding a typed path. Managed clones ride along, so a
+/// repo cloned from a forge is offered before it has ever run a session.
+pub async fn recent_repos(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let rows = s.store().recent_repos(20)?;
+    let managed: Vec<serde_json::Value> = crate::forge::managed_repos(&Config::state_dir())
+        .into_iter()
+        .map(|r| {
+            let path = crate::forge::managed_root(&Config::state_dir())
+                .join(&r.host)
+                .join(&r.owner)
+                .join(&r.name);
+            json!({ "repo_path": path, "full_name": r.full_name, "host": r.host })
+        })
+        .collect();
+    Ok(Json(json!({ "repos": rows, "managed": managed })))
+}
+
+#[derive(Deserialize)]
+pub struct ForgeQuery {
+    channel: String,
+}
+
+/// The operator's repositories on every forge whose credential this channel
+/// may use. A forge with no credential at all is absent; one this channel is
+/// not bound to answers with the refusal, per forge, so one dead forge never
+/// hides another's list.
+pub async fn forge_repos(
+    State(s): State<AppState>,
+    Query(q): Query<ForgeQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let out =
+        crate::forge::list_repos(&s.tools.http, &s.tools.broker, &q.channel, &s.node_id).await;
+    Ok(Json(json!({ "forges": out })))
+}
+
+#[derive(Deserialize)]
+pub struct CloneBody {
+    channel: String,
+    forge: String,
+    host: String,
+    owner: String,
+    name: String,
+}
+
+/// Clone into the managed root, with the forge credential injected through
+/// the environment. Idempotent: an existing clone answers with its path.
+pub async fn clone_repo(
+    State(s): State<AppState>,
+    Json(b): Json<CloneBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let forge = crate::forge::Forge::parse(&b.forge)
+        .ok_or_else(|| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "no such forge"))?;
+    let root = crate::forge::managed_root(&Config::state_dir());
+    let dest = crate::forge::clone_dest(&root, &b.host, &b.owner, &b.name)
+        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    let env = {
+        let broker = s.tools.broker.read().unwrap();
+        let cred = broker
+            .env_for(forge.credential(), &b.channel, &s.node_id)
+            .map_err(|e| ApiError::new(StatusCode::CONFLICT, e.to_string()))?;
+        match forge.token(&cred) {
+            Some(t) => crate::forge::git_credential_env(forge, t),
+            None => Vec::new(), // a credential without a token: try anonymously
+        }
+    };
+    let cloned = tokio::time::timeout(
+        std::time::Duration::from_secs(600),
+        crate::forge::clone(env, &b.host, &b.owner, &b.name, &dest),
+    )
+    .await
+    .map_err(|_| ApiError::new(StatusCode::GATEWAY_TIMEOUT, "the clone ran out of time"))?;
+    cloned.map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(json!({ "repo_path": dest })))
+}
+
 pub async fn create_session(
     State(s): State<AppState>,
     Json(spec): Json<NewSession>,
@@ -1234,6 +1310,81 @@ fn provider_err(e: crate::providers::ProviderError) -> ApiError {
     ApiError(status, e.to_string())
 }
 
+/// What the broker holds: names, kinds, bindings, env key names. Never a
+/// value — the response shape is the broker's `summaries`, which cannot
+/// carry one.
+pub async fn list_credentials(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let b = s.tools.broker.read().unwrap();
+    Ok(Json(json!({ "credentials": b.summaries() })))
+}
+
+#[derive(Deserialize)]
+pub struct ShareBody {
+    to: String,
+}
+
+/// Hand one credential to another member, direct-sealed over the hub. The
+/// operator sharing from the interface is the explicit widening of the node
+/// pin the CLI refuses to do implicitly: the target is added to `nodes` (and
+/// this node too, where the list was empty and meant "here only"), sealed to
+/// the store, and the handoff queued through the outbox.
+pub async fn share_credential(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<ShareBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let to = body.to;
+    if to == s.node_id {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "that credential is already here".into(),
+        ));
+    }
+    let mesh = s.mesh.as_ref().ok_or(ApiError(
+        StatusCode::CONFLICT,
+        "no hub configured; there is nobody to share with".into(),
+    ))?;
+    let node = s.store().get_node(&to)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        format!("no node {to} in this mesh"),
+    ))?;
+    if node.x25519_pub.is_none() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "{} has not said hello yet; nothing can be sealed to it",
+                node.name
+            ),
+        ));
+    }
+    let identity = crate::mesh::identity::load_or_generate()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .0;
+    let rows = {
+        let mut broker = s.tools.broker.write().unwrap();
+        let mut cred = broker.get(&name).cloned().ok_or(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no credential named {name}"),
+        ))?;
+        if !cred.nodes.iter().any(|n| n == &to) {
+            // An empty list means "the node holding the file": pinning the
+            // target without also pinning this node would lock it out here.
+            if cred.nodes.is_empty() {
+                cred.nodes.push(s.node_id.clone());
+            }
+            cred.nodes.push(to.clone());
+            broker.put(&name, cred.clone());
+            broker
+                .save(&identity.credential_store_key())
+                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        }
+        crate::broker::Broker::handoff_rows(&[(name.clone(), cred)])
+    };
+    mesh.send_credential_handoff(&to, rows)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(json!({ "shared": name, "to": to })))
+}
+
 pub async fn list_providers(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     match s.manager.providers() {
         Some(p) => Ok(Json(json!(p.list()))),
@@ -1255,11 +1406,19 @@ pub async fn connect_provider(
     body: Option<Json<ConnectBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let channels = body.map(|Json(b)| b.channels).unwrap_or_default();
-    let url = providers_of(&s)?
-        .connect(&name, channels)
+    connect_local(&s, &name, channels).await.map(Json)
+}
+
+async fn connect_local(
+    s: &AppState,
+    name: &str,
+    channels: Vec<String>,
+) -> ApiResult<serde_json::Value> {
+    let url = providers_of(s)?
+        .connect(name, channels)
         .await
         .map_err(provider_err)?;
-    Ok(Json(json!({ "name": name, "url": url })))
+    Ok(json!({ "name": name, "url": url }))
 }
 
 #[derive(Deserialize)]
@@ -1272,22 +1431,121 @@ pub async fn provider_code(
     Path(name): Path<String>,
     Json(body): Json<CodeBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    providers_of(&s)?
-        .code(&name, &body.code)
+    code_local(&s, &name, &body.code).await.map(Json)
+}
+
+async fn code_local(s: &AppState, name: &str, code: &str) -> ApiResult<serde_json::Value> {
+    providers_of(s)?
+        .code(name, code)
         .await
         .map_err(provider_err)?;
-    Ok(Json(json!({ "ok": true })))
+    Ok(json!({ "ok": true }))
 }
 
 pub async fn disconnect_provider(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    providers_of(&s)?
-        .disconnect(&name)
+    disconnect_local(&s, &name).await.map(Json)
+}
+
+async fn disconnect_local(s: &AppState, name: &str) -> ApiResult<serde_json::Value> {
+    providers_of(s)?
+        .disconnect(name)
         .await
         .map_err(provider_err)?;
-    Ok(Json(json!({ "ok": true })))
+    Ok(json!({ "ok": true }))
+}
+
+/// The login URL scrape inside a connect can take up to a minute on the
+/// owner, so its command gets more rope than `[mesh] command_timeout_secs`.
+const PROVIDER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Run a provider command on `node_id`: here when it is this node, sealed to
+/// the owner otherwise. The owner's refusal comes back as it phrased it.
+async fn peer_command(
+    s: &AppState,
+    node_id: &str,
+    command: proto::frame::Command,
+    timeout: std::time::Duration,
+) -> ApiResult<serde_json::Value> {
+    use crate::mesh::forward::CommandError;
+    let mesh = s.mesh.as_ref().ok_or(ApiError(
+        StatusCode::CONFLICT,
+        "no hub configured; this node cannot reach peers".into(),
+    ))?;
+    if !mesh.peer_reachable(node_id) {
+        return Err(ApiError(
+            StatusCode::GATEWAY_TIMEOUT,
+            "that node is unreachable; try again when it returns".into(),
+        ));
+    }
+    mesh.command(node_id, command, timeout)
+        .await
+        .map_err(|e| match e {
+            CommandError::Timeout => ApiError(StatusCode::GATEWAY_TIMEOUT, e.to_string()),
+            CommandError::Refused(m) => ApiError(StatusCode::CONFLICT, m),
+            CommandError::Local(m) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, m),
+        })
+}
+
+pub async fn node_connect_provider(
+    State(s): State<AppState>,
+    Path((node_id, name)): Path<(String, String)>,
+    body: Option<Json<ConnectBody>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let channels = body.map(|Json(b)| b.channels).unwrap_or_default();
+    if node_id == s.node_id {
+        return connect_local(&s, &name, channels).await.map(Json);
+    }
+    peer_command(
+        &s,
+        &node_id,
+        proto::frame::Command::ProviderConnect { name, channels },
+        PROVIDER_CONNECT_TIMEOUT,
+    )
+    .await
+    .map(Json)
+}
+
+pub async fn node_provider_code(
+    State(s): State<AppState>,
+    Path((node_id, name)): Path<(String, String)>,
+    Json(body): Json<CodeBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if node_id == s.node_id {
+        return code_local(&s, &name, &body.code).await.map(Json);
+    }
+    let timeout = std::time::Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1));
+    peer_command(
+        &s,
+        &node_id,
+        proto::frame::Command::ProviderCode {
+            name,
+            code: body.code,
+        },
+        timeout,
+    )
+    .await
+    .map(Json)
+}
+
+pub async fn node_disconnect_provider(
+    State(s): State<AppState>,
+    Path((node_id, name)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if node_id == s.node_id {
+        return disconnect_local(&s, &name).await.map(Json);
+    }
+    let timeout = std::time::Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1));
+    peer_command(
+        &s,
+        &node_id,
+        proto::frame::Command::ProviderDisconnect { name },
+        timeout,
+    )
+    .await
+    .map(Json)
 }
 
 /// Each configured provider and whether a credential for it is usable here.
@@ -1600,6 +1858,33 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 )
                 .await
             }
+            // The provider commands run exactly what a local request would:
+            // the login subprocess, its stdin, and the lifted credential all
+            // stay on this node. Only the URL and the ack travel.
+            C::ProviderConnect { name, channels } => match providers_of(self) {
+                Ok(p) => p
+                    .connect(&name, channels)
+                    .await
+                    .map(|url| json!({ "name": name, "url": url }))
+                    .map_err(provider_err),
+                Err(e) => Err(e),
+            },
+            C::ProviderCode { name, code } => match providers_of(self) {
+                Ok(p) => p
+                    .code(&name, &code)
+                    .await
+                    .map(|_| json!({ "ok": true }))
+                    .map_err(provider_err),
+                Err(e) => Err(e),
+            },
+            C::ProviderDisconnect { name } => match providers_of(self) {
+                Ok(p) => p
+                    .disconnect(&name)
+                    .await
+                    .map(|_| json!({ "ok": true }))
+                    .map_err(provider_err),
+                Err(e) => Err(e),
+            },
         };
         r.map_err(|e| e.1)
     }

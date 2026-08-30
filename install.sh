@@ -9,6 +9,9 @@
 # Environment:
 #   TRACON_VERSION   a tag like v0.2.0 (default: latest release)
 #   TRACON_BIN_DIR   where to put the binary (default: ~/.local/bin)
+#   TRACON_ENROLL    an invitation URL: after installing, enroll in the mesh,
+#                    then set up the boundary and the service. One line from
+#                    a cloud console's user-data to a serving node.
 set -eu
 
 repo="cosmicspork/tracon"
@@ -61,6 +64,33 @@ case ":$PATH:" in
   *":$bin_dir:"*) ;;
   *) echo "tracon: add $bin_dir to your PATH" ;;
 esac
+
+if [ -n "${TRACON_ENROLL:-}" ]; then
+  # Bootstrap: enroll (blocks until the inviter admits, up to ten minutes),
+  # then best-effort setup and service install. Install already succeeded, so
+  # the non-fatal steps warn and continue rather than abort under set -e.
+  echo "tracon: enrolling"
+  if ! "$bin_dir/tracon" enroll "$TRACON_ENROLL"; then
+    echo "tracon: enroll failed or was not admitted in time; rerun with:" >&2
+    echo "  tracon enroll <invitation url>" >&2
+    exit 1
+  fi
+  if ! "$bin_dir/tracon" setup; then
+    echo "tracon: setup failed (rootless podman missing?); the node still serves" >&2
+    echo "  and relays without a boundary. Fix and rerun: tracon setup" >&2
+  fi
+  if ! "$bin_dir/tracon" service install; then
+    echo "tracon: could not install the service; run the node yourself:" >&2
+    echo "  tracon service install   (or: tracon serve)" >&2
+  fi
+  cat <<EOF
+
+enrolled. next, on this machine:
+  tracon check-boundary --deep          prove the boundary
+  tracon auth issue --url <https url>   to reach this node from a phone
+EOF
+  exit 0
+fi
 
 cat <<EOF
 

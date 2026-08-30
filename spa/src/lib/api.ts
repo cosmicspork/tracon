@@ -4,9 +4,12 @@
 import type {
   ChannelInfo,
   ChannelMetrics,
+  CredentialSummary,
   Document,
   Event,
+  ForgeList,
   Invite,
+  ManagedRepo,
   MeshState,
   NodeInfo,
   Promotion,
@@ -15,6 +18,7 @@ import type {
   PushDevice,
   Queue,
   RecallHit,
+  RecentRepo,
   Review,
   Session,
   WorkItem,
@@ -80,6 +84,12 @@ export const api = {
     call<void>('DELETE', '/api/push/subscriptions', { endpoint }),
   testPush: () => call<{ sent: { id: string; outcome: string }[] }>('POST', '/api/push/test', {}),
   queue: () => call<Queue>('GET', '/api/queue'),
+  recentRepos: () =>
+    call<{ repos: RecentRepo[]; managed: ManagedRepo[] }>('GET', '/api/repos/recent'),
+  forgeRepos: (channel: string) =>
+    call<{ forges: ForgeList[] }>('GET', `/api/forge/repos?channel=${encodeURIComponent(channel)}`),
+  cloneRepo: (b: { channel: string; forge: string; host: string; owner: string; name: string }) =>
+    call<{ repo_path: string }>('POST', '/api/repos/clone', b),
   sessions: () => call<Session[]>('GET', '/api/sessions'),
   session: (id: string) =>
     call<{ session: Session; waiting: unknown[] }>('GET', `/api/sessions/${id}`),
@@ -179,12 +189,25 @@ export const api = {
     call<{ state: string }>('POST', `/api/promotions/${id}/verdict`, { verdicts }),
   batchPromotions: () => call<{ created: string[] }>('POST', '/api/promotions/batch'),
   // Providers: connect through the harness's own login, paste the code back.
+  credentials: () => call<{ credentials: CredentialSummary[] }>('GET', '/api/credentials'),
+  shareCredential: (name: string, to: string) =>
+    call<{ shared: string; to: string }>('POST', `/api/credentials/${name}/share`, { to }),
   providers: () => call<ProviderInfo[]>('GET', '/api/providers'),
   connectProvider: (name: string, channels: string[]) =>
     call<{ name: string; url: string }>('POST', `/api/providers/${name}/connect`, { channels }),
   providerCode: (name: string, code: string) =>
     call<void>('POST', `/api/providers/${name}/code`, { code }),
   disconnectProvider: (name: string) => call<void>('POST', `/api/providers/${name}/disconnect`),
+  // Node-scoped provider actions: the serving node runs them itself or seals
+  // the command to the owner. Works for every node, this one included.
+  nodeConnectProvider: (nodeId: string, name: string, channels: string[]) =>
+    call<{ name: string; url: string }>(`POST`, `/api/nodes/${nodeId}/providers/${name}/connect`, {
+      channels,
+    }),
+  nodeProviderCode: (nodeId: string, name: string, code: string) =>
+    call<{ ok: boolean }>('POST', `/api/nodes/${nodeId}/providers/${name}/code`, { code }),
+  nodeDisconnectProvider: (nodeId: string, name: string) =>
+    call<{ ok: boolean }>('POST', `/api/nodes/${nodeId}/providers/${name}/disconnect`),
   // The work ledger.
   work: (channel: string, opts: { project_id?: string; state?: string } = {}) => {
     const q = new URLSearchParams({ channel })

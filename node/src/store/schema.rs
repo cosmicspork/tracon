@@ -269,6 +269,12 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX push_subscription_session ON push_subscription(session_hash);
     "#,
+    // 12: each node's provider summary, carried in the hello like its models,
+    // so a peer's interface can render and drive them (contract 3). NULL on
+    // rows from older builds; sender-owned, mirrored as received.
+    r#"
+    ALTER TABLE node ADD COLUMN providers_json TEXT;
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build
