@@ -247,6 +247,27 @@ impl Store {
         Ok(rows)
     }
 
+    /// Every repository sessions have run against, most recently used first.
+    /// The session table is never pruned, so this is the node's whole memory
+    /// of where work happens.
+    pub fn recent_repos(&self, limit: usize) -> Result<Vec<RecentRepo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT repo_path, MAX(created_ms), COUNT(*) FROM session \
+             GROUP BY repo_path ORDER BY 2 DESC LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                Ok(RecentRepo {
+                    repo_path: row.get(0)?,
+                    last_used_ms: row.get(1)?,
+                    sessions: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Applies a set of column updates to one session and stamps `updated_ms`.
     pub fn update_session(&self, id: &str, patch: SessionPatch) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -1176,6 +1197,14 @@ mod records {
                 reachable: r.get("reachable")?,
             })
         }
+    }
+
+    /// One repository the node has run sessions against.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RecentRepo {
+        pub repo_path: String,
+        pub last_used_ms: i64,
+        pub sessions: i64,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

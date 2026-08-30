@@ -15,6 +15,7 @@ import type {
   PushDevice,
   Queue,
   RecallHit,
+  RecentRepo,
   Review,
   Session,
   WorkItem,
@@ -80,6 +81,7 @@ export const api = {
     call<void>('DELETE', '/api/push/subscriptions', { endpoint }),
   testPush: () => call<{ sent: { id: string; outcome: string }[] }>('POST', '/api/push/test', {}),
   queue: () => call<Queue>('GET', '/api/queue'),
+  recentRepos: () => call<{ repos: RecentRepo[] }>('GET', '/api/repos/recent'),
   sessions: () => call<Session[]>('GET', '/api/sessions'),
   session: (id: string) =>
     call<{ session: Session; waiting: unknown[] }>('GET', `/api/sessions/${id}`),

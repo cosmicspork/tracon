@@ -81,6 +81,7 @@ pub fn router(state: AppState) -> Router {
             get(api::poll_invite).delete(api::cancel_invite),
         )
         .route("/api/mesh/invite/{code}/admit", post(api::admit_invite))
+        .route("/api/repos/recent", get(api::recent_repos))
         .route(
             "/api/sessions",
             get(api::list_sessions).post(api::create_session),

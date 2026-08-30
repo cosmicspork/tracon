@@ -298,6 +298,13 @@ pub async fn list_sessions(
     Ok(Json(json!(rows)))
 }
 
+/// Where sessions have run before, most recent first, so the form can offer a
+/// pick instead of demanding a typed path.
+pub async fn recent_repos(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let rows = s.store().recent_repos(20)?;
+    Ok(Json(json!({ "repos": rows })))
+}
+
 pub async fn create_session(
     State(s): State<AppState>,
     Json(spec): Json<NewSession>,

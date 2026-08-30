@@ -258,6 +258,13 @@ export interface ChannelMetrics {
   sessions: number
 }
 
+/** One repository this node has run sessions against. */
+export interface RecentRepo {
+  repo_path: string
+  last_used_ms: number
+  sessions: number
+}
+
 export interface Queue {
   waiting: Permission[]
   reviews: Review[]

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import RepoPicker from '../components/RepoPicker.svelte'
   import { api } from '../lib/api'
   import { eligibleNodes } from '../lib/nodes'
   import { router } from '../lib/router.svelte'
@@ -97,10 +98,10 @@
       >
     {/if}
   </label>
-  <label>
+  <div class="field">
     <span>Repository <em class="req">required</em></span>
-    <input bind:value={repo} placeholder="/Users/you/src/project" spellcheck="false" />
-  </label>
+    <RepoPicker bind:value={repo} />
+  </div>
   <label>
     <span>Branch</span>
     <input bind:value={branch} placeholder="feat/…  (a name is generated if empty)" spellcheck="false" />
