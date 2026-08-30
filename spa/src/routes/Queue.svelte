@@ -1,4 +1,5 @@
 <script lang="ts">
+  import FirstRun from '../components/FirstRun.svelte'
   import PermissionCard from '../components/PermissionCard.svelte'
   import PromotionCard from '../components/PromotionCard.svelte'
   import ReviewCard from '../components/ReviewCard.svelte'
@@ -19,7 +20,11 @@
     Waiting on you <b>{waiting.length + reviews.length + promotions.length} · requests before reviews · oldest first</b>
   </div>
   {#if waiting.length === 0 && reviews.length === 0 && promotions.length === 0}
-    <div class="empty">Nothing is waiting on you.</div>
+    {#if store.sessions.size === 0}
+      <FirstRun />
+    {:else}
+      <div class="empty">Nothing is waiting on you.</div>
+    {/if}
   {:else}
     <div class="rows">
       <!-- Requests expire; reviews do not. Requests come first. -->

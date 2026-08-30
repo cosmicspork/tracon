@@ -48,6 +48,23 @@
       .then((d) => (ready_items = d.items))
       .catch(() => (ready_items = []))
   })
+  // The last model used is the likely next one: preselect it when the chosen
+  // node offers it. The choice stays explicit — the field is still required,
+  // nothing is preselected on a node that never ran that model, and the
+  // server still refuses a session without one.
+  let preselected = false
+  $effect(() => {
+    if (preselected || model !== '') return
+    const models = node?.models ?? []
+    if (models.length === 0) return
+    const last = [...store.sessions.values()]
+      .sort((a, b) => b.created_ms - a.created_ms)
+      .find((s) => models.some((m) => m.value === s.model))
+    if (last) {
+      model = last.model
+      preselected = true
+    }
+  })
   // The budget default is the channel's binding for the phase, then the node's.
   $effect(() => {
     const phases = channelInfo?.bindings?.phases as Record<string, { budget_tokens?: number }> | undefined
