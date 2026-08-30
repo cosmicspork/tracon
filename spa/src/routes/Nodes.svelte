@@ -138,28 +138,24 @@
               <span class="pst">
                 {#if p.state === 'connected'}
                   <span class="l"><span class="chip">connected</span>{#if p.channels.length} · {p.channels.join(', ')}{/if}{#if expiry(p)} · {expiry(p)}{/if}</span>
-                  {#if !surface.phone}
-                    <span><button class="lnk d" onclick={() => disconnect(p)} disabled={busy[p.name]}>Disconnect</button></span>
-                  {/if}
+                  <span><button class="lnk d" onclick={() => disconnect(p)} disabled={busy[p.name]}>Disconnect</button></span>
                 {:else if p.state === 'pending'}
                   <span class="l warn"><span class="chip warn">connect</span> · open the link, sign in, paste what it gives you back</span>
                   <span><a class="lnk" href={p.url} target="_blank" rel="noopener">Open {p.name} sign-in</a></span>
-                  {#if !surface.phone}
-                    <span class="paste">
-                      <input
-                        placeholder="redirect URL or code"
-                        bind:value={codes[p.name]}
-                        onkeydown={(e) => e.key === 'Enter' && paste(p)}
-                      />
-                      <button class="btn p" onclick={() => paste(p)} disabled={busy[p.name] || !(codes[p.name] ?? '').trim()}>Paste back</button>
-                      <button class="lnk d" onclick={() => disconnect(p)} disabled={busy[p.name]}>Cancel</button>
-                    </span>
-                  {/if}
+                  <span class="paste">
+                    <input
+                      placeholder="redirect URL or code"
+                      bind:value={codes[p.name]}
+                      onkeydown={(e) => e.key === 'Enter' && paste(p)}
+                    />
+                    <button class="btn p" onclick={() => paste(p)} disabled={busy[p.name] || !(codes[p.name] ?? '').trim()}>Paste back</button>
+                    <button class="lnk d" onclick={() => disconnect(p)} disabled={busy[p.name]}>Cancel</button>
+                  </span>
                 {:else}
                   <span class="l off" class:bad={p.state === 'failed'}
                     ><span class="chip" class:off={p.state !== 'failed'} class:bad={p.state === 'failed'}>{p.state === 'failed' ? 'failed' : 'disconnected'}</span>{#if p.error} · {p.error}{/if}</span
                   >
-                  {#if p.can_login && !surface.phone}
+                  {#if p.can_login}
                     <span><button class="lnk" onclick={() => connect(p)} disabled={busy[p.name]}>{p.state === 'failed' ? 'Try again' : 'Connect'}</button></span>
                   {:else if !p.can_login}
                     <span>API key only: <code>tracon credential import</code> on this node.</span>
@@ -357,6 +353,22 @@
     }
     .st {
       grid-column: 2;
+    }
+    /* Signing in to a provider is a phone job — the sign-in happens where the
+       password manager is. Stack the paste-back; 16px stops iOS zoom. */
+    .prov {
+      grid-template-columns: 3px minmax(0, 1fr);
+      gap: 4px 12px;
+    }
+    .pst {
+      grid-column: 2;
+    }
+    .paste {
+      flex-wrap: wrap;
+    }
+    .paste input {
+      flex-basis: 100%;
+      font-size: 16px;
     }
   }
 </style>
