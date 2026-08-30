@@ -1676,6 +1676,33 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 )
                 .await
             }
+            // The provider commands run exactly what a local request would:
+            // the login subprocess, its stdin, and the lifted credential all
+            // stay on this node. Only the URL and the ack travel.
+            C::ProviderConnect { name, channels } => match providers_of(self) {
+                Ok(p) => p
+                    .connect(&name, channels)
+                    .await
+                    .map(|url| json!({ "name": name, "url": url }))
+                    .map_err(provider_err),
+                Err(e) => Err(e),
+            },
+            C::ProviderCode { name, code } => match providers_of(self) {
+                Ok(p) => p
+                    .code(&name, &code)
+                    .await
+                    .map(|_| json!({ "ok": true }))
+                    .map_err(provider_err),
+                Err(e) => Err(e),
+            },
+            C::ProviderDisconnect { name } => match providers_of(self) {
+                Ok(p) => p
+                    .disconnect(&name)
+                    .await
+                    .map(|_| json!({ "ok": true }))
+                    .map_err(provider_err),
+                Err(e) => Err(e),
+            },
         };
         r.map_err(|e| e.1)
     }

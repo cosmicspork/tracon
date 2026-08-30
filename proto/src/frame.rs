@@ -236,6 +236,22 @@ pub enum Command {
         #[serde(default)]
         patch: Option<String>,
     },
+    /// Contract 3: a peer's providers, driven from another node's interface.
+    /// The paste-back flow is request/response shaped — start the login and
+    /// get the sign-in URL back, send the pasted code, disconnect — so it
+    /// rides the command path; the login subprocess stays on the owner.
+    ProviderConnect {
+        name: String,
+        #[serde(default)]
+        channels: Vec<String>,
+    },
+    ProviderCode {
+        name: String,
+        code: String,
+    },
+    ProviderDisconnect {
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -691,6 +707,39 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v["op"], "prompt");
+    }
+
+    /// The contract-3 command ops, round-tripped: the wire names are pinned,
+    /// and `channels` defaults so a bare connect still parses.
+    #[test]
+    fn provider_command_wire_names_are_stable() {
+        let v = serde_json::to_value(Command::ProviderConnect {
+            name: "anthropic".into(),
+            channels: vec!["personal".into()],
+        })
+        .unwrap();
+        assert_eq!(v["op"], "provider_connect");
+        let back: Command =
+            serde_json::from_value(serde_json::json!({ "op": "provider_connect", "name": "a" }))
+                .unwrap();
+        assert_eq!(
+            back,
+            Command::ProviderConnect {
+                name: "a".into(),
+                channels: vec![],
+            }
+        );
+        let v = serde_json::to_value(Command::ProviderCode {
+            name: "anthropic".into(),
+            code: "c".into(),
+        })
+        .unwrap();
+        assert_eq!(v["op"], "provider_code");
+        let v = serde_json::to_value(Command::ProviderDisconnect {
+            name: "anthropic".into(),
+        })
+        .unwrap();
+        assert_eq!(v["op"], "provider_disconnect");
     }
 
     #[derive(serde::Deserialize)]

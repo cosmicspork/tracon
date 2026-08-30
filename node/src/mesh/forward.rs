@@ -24,7 +24,7 @@ pub trait CommandExecutor: Send + Sync {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
-    #[error("the owner did not answer in time")]
+    #[error("the owner did not answer in time (unreachable, or on an older build)")]
     Timeout,
     #[error("{0}")]
     Refused(String),

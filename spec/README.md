@@ -93,11 +93,17 @@ delete. Version 2 added these three kinds. The replicated tables are `document`,
 `memory`, `promotion`, and (sync schema step 2, no contract change) `work_item`, whose
 id is `hex(sha256("tracon/work-item" ‖ 0x1f ‖ channel ‖ 0x1f ‖ project ‖ 0x1f ‖ site ‖
 0x1f ‖ created_ms ‖ 0x1f ‖ title))` — pinned in `sync/src/work.rs`.
-Commands are discriminated on `op`: `create`, `prompt`, `answer`, `kill`, `verdict`.
+Commands are discriminated on `op`: `create`, `prompt`, `answer`, `kill`, `verdict`,
+and (version 3) `provider_connect`, `provider_code`, `provider_disconnect` — a peer's
+providers driven from another node's interface, executed by the owner exactly as a
+local request; `provider_connect` acks with the sign-in URL.
 A `verdict` command may carry an optional `patch`: a unified diff the operator edited
 by hand, applied by the agent on the owning node. Additive and defaulted, so a node on
 an older build reads the rest of the verdict unchanged and the contract version is
-unmoved.
+unmoved. Version 3 also adds an optional `providers` field to the `node` payload's
+row (absent on older builds); a new command op fails whole-payload deserialization on
+an older node, which drops the frame — the sender times out rather than erring, hence
+the version bump.
 
 ## Hub requests (`auth.rs`)
 
