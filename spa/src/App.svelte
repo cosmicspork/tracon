@@ -12,11 +12,23 @@
   import Session from './routes/Session.svelte'
   import Enroll from './routes/Enroll.svelte'
   import Login from './routes/Login.svelte'
+  import { stashToken, tokenFromHash } from './lib/auth'
   import { clock } from './lib/clock.svelte'
   import { formatAge } from './lib/format'
   import { router } from './lib/router.svelte'
   import { store } from './lib/store.svelte'
   import { surface } from './lib/surface.svelte'
+
+  // A login QR lands with the token in the fragment. Stash it and strip the
+  // address bar before anything else renders; if this browser is already
+  // logged in the stash is simply never spent.
+  {
+    const t = tokenFromHash(location.hash)
+    if (t) {
+      stashToken(t)
+      history.replaceState(null, '', location.pathname + location.search)
+    }
+  }
 
   router.start()
   surface.start()
