@@ -6,7 +6,9 @@ import type {
   ChannelMetrics,
   Document,
   Event,
+  ForgeList,
   Invite,
+  ManagedRepo,
   MeshState,
   NodeInfo,
   Promotion,
@@ -81,7 +83,12 @@ export const api = {
     call<void>('DELETE', '/api/push/subscriptions', { endpoint }),
   testPush: () => call<{ sent: { id: string; outcome: string }[] }>('POST', '/api/push/test', {}),
   queue: () => call<Queue>('GET', '/api/queue'),
-  recentRepos: () => call<{ repos: RecentRepo[] }>('GET', '/api/repos/recent'),
+  recentRepos: () =>
+    call<{ repos: RecentRepo[]; managed: ManagedRepo[] }>('GET', '/api/repos/recent'),
+  forgeRepos: (channel: string) =>
+    call<{ forges: ForgeList[] }>('GET', `/api/forge/repos?channel=${encodeURIComponent(channel)}`),
+  cloneRepo: (b: { channel: string; forge: string; host: string; owner: string; name: string }) =>
+    call<{ repo_path: string }>('POST', '/api/repos/clone', b),
   sessions: () => call<Session[]>('GET', '/api/sessions'),
   session: (id: string) =>
     call<{ session: Session; waiting: unknown[] }>('GET', `/api/sessions/${id}`),

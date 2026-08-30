@@ -117,7 +117,7 @@
   </label>
   <div class="field">
     <span>Repository <em class="req">required</em></span>
-    <RepoPicker bind:value={repo} />
+    <RepoPicker bind:value={repo} {channel} />
   </div>
   <label>
     <span>Branch</span>

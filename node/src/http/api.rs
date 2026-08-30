@@ -299,10 +299,79 @@ pub async fn list_sessions(
 }
 
 /// Where sessions have run before, most recent first, so the form can offer a
-/// pick instead of demanding a typed path.
+/// pick instead of demanding a typed path. Managed clones ride along, so a
+/// repo cloned from a forge is offered before it has ever run a session.
 pub async fn recent_repos(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let rows = s.store().recent_repos(20)?;
-    Ok(Json(json!({ "repos": rows })))
+    let managed: Vec<serde_json::Value> = crate::forge::managed_repos(&Config::state_dir())
+        .into_iter()
+        .map(|r| {
+            let path = crate::forge::managed_root(&Config::state_dir())
+                .join(&r.host)
+                .join(&r.owner)
+                .join(&r.name);
+            json!({ "repo_path": path, "full_name": r.full_name, "host": r.host })
+        })
+        .collect();
+    Ok(Json(json!({ "repos": rows, "managed": managed })))
+}
+
+#[derive(Deserialize)]
+pub struct ForgeQuery {
+    channel: String,
+}
+
+/// The operator's repositories on every forge whose credential this channel
+/// may use. A forge with no credential at all is absent; one this channel is
+/// not bound to answers with the refusal, per forge, so one dead forge never
+/// hides another's list.
+pub async fn forge_repos(
+    State(s): State<AppState>,
+    Query(q): Query<ForgeQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let out =
+        crate::forge::list_repos(&s.tools.http, &s.tools.broker, &q.channel, &s.node_id).await;
+    Ok(Json(json!({ "forges": out })))
+}
+
+#[derive(Deserialize)]
+pub struct CloneBody {
+    channel: String,
+    forge: String,
+    host: String,
+    owner: String,
+    name: String,
+}
+
+/// Clone into the managed root, with the forge credential injected through
+/// the environment. Idempotent: an existing clone answers with its path.
+pub async fn clone_repo(
+    State(s): State<AppState>,
+    Json(b): Json<CloneBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let forge = crate::forge::Forge::parse(&b.forge)
+        .ok_or_else(|| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "no such forge"))?;
+    let root = crate::forge::managed_root(&Config::state_dir());
+    let dest = crate::forge::clone_dest(&root, &b.host, &b.owner, &b.name)
+        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    let env = {
+        let broker = s.tools.broker.read().unwrap();
+        let cred = broker
+            .env_for(forge.credential(), &b.channel, &s.node_id)
+            .map_err(|e| ApiError::new(StatusCode::CONFLICT, e.to_string()))?;
+        match forge.token(&cred) {
+            Some(t) => crate::forge::git_credential_env(forge, t),
+            None => Vec::new(), // a credential without a token: try anonymously
+        }
+    };
+    let cloned = tokio::time::timeout(
+        std::time::Duration::from_secs(600),
+        crate::forge::clone(env, &b.host, &b.owner, &b.name, &dest),
+    )
+    .await
+    .map_err(|_| ApiError::new(StatusCode::GATEWAY_TIMEOUT, "the clone ran out of time"))?;
+    cloned.map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(json!({ "repo_path": dest })))
 }
 
 pub async fn create_session(

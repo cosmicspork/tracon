@@ -568,7 +568,18 @@ impl Manager {
                     .await?
             }
             None => {
-                worktree::create(&repo, &self.cfg.session.worktree_root, &branch, &slug).await?
+                // A managed clone (under the node's repos root) fetches with
+                // the forge credential its channel is bound to; anywhere else
+                // uses the operator's own git auth, as before.
+                let env = crate::forge::git_env_for(
+                    &self.tools.broker,
+                    &crate::config::Config::state_dir(),
+                    &spec.channel,
+                    &repo,
+                    &self.node_id,
+                );
+                worktree::create(&repo, &self.cfg.session.worktree_root, &branch, &slug, &env)
+                    .await?
             }
         };
         self.store.update_session(

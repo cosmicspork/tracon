@@ -82,6 +82,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/mesh/invite/{code}/admit", post(api::admit_invite))
         .route("/api/repos/recent", get(api::recent_repos))
+        .route("/api/repos/clone", post(api::clone_repo))
+        .route("/api/forge/repos", get(api::forge_repos))
         .route(
             "/api/sessions",
             get(api::list_sessions).post(api::create_session),

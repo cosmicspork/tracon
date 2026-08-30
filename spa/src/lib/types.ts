@@ -265,6 +265,31 @@ export interface RecentRepo {
   sessions: number
 }
 
+/** A clone the node manages under its own state, ready before any session. */
+export interface ManagedRepo {
+  repo_path: string
+  full_name: string
+  host: string
+}
+
+/** One repository as a forge lists it. */
+export interface ForgeRepo {
+  host: string
+  owner: string
+  name: string
+  full_name: string
+  private: boolean
+  default_branch: string | null
+  pushed_at: string | null
+}
+
+/** One forge's listing: repositories, or why there are none to show. */
+export interface ForgeList {
+  forge: string
+  repos: ForgeRepo[]
+  error?: string
+}
+
 export interface Queue {
   waiting: Permission[]
   reviews: Review[]
