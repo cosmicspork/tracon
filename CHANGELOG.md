@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.8.0](https://github.com/cosmicspork/tracon/compare/v0.7.0...v0.8.0) (2026-08-31)
+
+
+### Features
+
+* a settings pane, so a node is stood up without a shell on it ([#94](https://github.com/cosmicspork/tracon/issues/94)) ([b29e15f](https://github.com/cosmicspork/tracon/commit/b29e15fda70e8047fd353c18a9fd9978fe134c6f))
+
+
+### Bug Fixes
+
+* resolve the podman binary without a login-shell PATH ([#90](https://github.com/cosmicspork/tracon/issues/90)) ([0a1424c](https://github.com/cosmicspork/tracon/commit/0a1424c35efd24c37d62503332f6cea2055f438e))
+* **spa:** coarser ages, honest session rows, an unclipped rail ([#93](https://github.com/cosmicspork/tracon/issues/93)) ([d7a6878](https://github.com/cosmicspork/tracon/commit/d7a687853ee84d9b6ac21d5c9f5ca3f3556e3874))
+* **wrapper:** one template tray icon, and a dock icon that opens the window ([#91](https://github.com/cosmicspork/tracon/issues/91)) ([393a387](https://github.com/cosmicspork/tracon/commit/393a38738132de1c172dadd81f8c36aa3ddf5729))
+
 ## [0.7.0](https://github.com/cosmicspork/tracon/compare/v0.6.0...v0.7.0) (2026-08-31)
 
 
