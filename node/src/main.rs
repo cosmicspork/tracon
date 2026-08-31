@@ -549,7 +549,7 @@ async fn mesh_command(cmd: MeshCommand) -> Result<()> {
         MeshCommand::Init { hub } => {
             let (id, _) = identity::load_or_generate()?;
             let store = tracon::store::Store::open(&config::Config::db_path())?;
-            create_channel(&store, &id, proto::frame::MESH_CHANNEL)?;
+            tracon::mesh::channels::create(&store, &id, proto::frame::MESH_CHANNEL)?;
             let mut cfg = config::Config::try_load().map_err(|e| anyhow::anyhow!(e))?;
             cfg.mesh.hub_url = Some(hub.trim_end_matches('/').to_string());
             cfg.save()?;
@@ -767,23 +767,17 @@ async fn channel_command(cmd: ChannelCommand) -> Result<()> {
             Ok(())
         }
         ChannelCommand::Create { name } => {
-            if !proto::frame::valid_channel(&name) {
-                anyhow::bail!("channel names are lowercase [a-z0-9@._-], at most 64 characters");
-            }
             let (id, _) = tracon::mesh::identity::load_or_generate()?;
-            create_channel(&store, &id, &name)?;
             let cfg = config::Config::load();
-            if let Some(hub) = &cfg.mesh.hub_url {
-                // So an invite can hand it off: the hub only lets a node grant
-                // a channel it is recorded in.
-                match tracon::mesh::enroll::sync_own_channels(&store, &id, hub, &cfg.node_name)
-                    .await
-                {
-                    Ok(_) => println!("hub record updated"),
-                    Err(e) => {
-                        println!("hub record not updated ({e}); it is synced on the next invite")
-                    }
-                }
+            let (created, note) =
+                tracon::mesh::channels::create_and_sync(&store, &id, &name, &cfg).await?;
+            if !created.minted {
+                println!("channel {name} already exists here");
+            }
+            match note {
+                None if cfg.mesh.hub_url.is_some() => println!("hub record updated"),
+                None => {}
+                Some(why) => println!("{why}"),
             }
             println!("created channel {name}; hand its key to other nodes with tracon mesh invite");
             Ok(())
@@ -831,25 +825,6 @@ async fn channel_command(cmd: ChannelCommand) -> Result<()> {
             Ok(())
         }
     }
-}
-
-/// Mint a genesis keyring for `name` wrapped to this node, unless one exists.
-fn create_channel(
-    store: &tracon::store::Store,
-    id: &proto::keys::Identity,
-    name: &str,
-) -> Result<()> {
-    if store.channel_get(name)?.is_some() {
-        println!("channel {name} already exists here");
-    } else {
-        let ring = proto::keyring::Keyring::genesis(
-            &id.x25519_public(),
-            &proto::envelope::DataKey::generate(),
-        );
-        store.channel_put(name, &ring.to_bytes(), "{}")?;
-    }
-    store.node_channel_add(&id.node_id(), name)?;
-    Ok(())
 }
 
 /// The running node's operator API. The CLI goes through it rather than the

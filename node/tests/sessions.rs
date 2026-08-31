@@ -88,6 +88,7 @@ impl Harness {
             tools,
             mesh: None,
             auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
+            enroll: Default::default(),
         });
         Self { app, store }
     }
@@ -826,6 +827,7 @@ async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
         tools,
         mesh: None,
         auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
+        enroll: Default::default(),
     });
     (app, store, manager)
 }
@@ -1201,6 +1203,7 @@ async fn writing_the_plan_document_ends_the_plan_phase() {
         tools: tools.clone(),
         mesh: None,
         auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
+        enroll: Default::default(),
     };
     let harness_app = tracon::http::harness_router(state);
     let token = manager

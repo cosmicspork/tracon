@@ -13,7 +13,8 @@
 
 use std::path::PathBuf;
 
-/// Point `TRACON_STATE_DIR` at a throwaway directory for this test process.
+/// Point `TRACON_STATE_DIR` and `TRACON_CONFIG_DIR` at a throwaway directory
+/// for this test process.
 ///
 /// The directory is cleared first: a run that was killed leaves its state
 /// behind, and a recycled pid would otherwise hand the next run a populated
@@ -30,6 +31,11 @@ pub fn isolate() {
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
         std::env::set_var("TRACON_STATE_DIR", &dir);
+        // node.toml is not under the state directory on every platform, and
+        // the interface writes it now. Same throwaway, same reason.
+        if std::env::var_os("TRACON_CONFIG_DIR").is_none() {
+            std::env::set_var("TRACON_CONFIG_DIR", &dir);
+        }
     });
 }
 

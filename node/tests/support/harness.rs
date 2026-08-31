@@ -59,6 +59,7 @@ pub async fn harness_with(cfg: Config) -> Harness {
         tools,
         mesh: None,
         auth: Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
+        enroll: Default::default(),
     };
     Harness {
         harness: tracon::http::harness_router(state.clone()),

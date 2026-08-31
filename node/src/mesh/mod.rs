@@ -1,6 +1,7 @@
 //! The node's side of the mesh: its identity, the hub client, the mirror of
 //! peer state, and (later) command forwarding.
 
+pub mod channels;
 pub mod client;
 pub mod enroll;
 pub mod forward;

@@ -103,6 +103,7 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
         tools,
         mesh: Some(client.clone()),
         auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
+        enroll: Default::default(),
     };
     client.set_executor(Arc::new(state.clone()));
     // Providers wired the way `serve` wires them: the login fake instead of a

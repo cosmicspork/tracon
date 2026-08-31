@@ -30,6 +30,8 @@ pub struct AppState {
     pub mesh: Option<Arc<crate::mesh::client::MeshClient>>,
     /// Who the operator API answers to.
     pub auth: Arc<super::auth::AuthState>,
+    /// An enrolment this node started from the interface, if any.
+    pub enroll: Arc<std::sync::Mutex<EnrollJob>>,
 }
 
 impl AppState {
@@ -90,14 +92,38 @@ impl From<crate::store::StoreError> for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
-pub async fn get_node(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(node_json(&s)?))
+pub async fn get_node(
+    State(s): State<AppState>,
+    parts: axum::http::request::Parts,
+) -> ApiResult<Json<serde_json::Value>> {
+    let mut v = node_json(&s)?;
+    // Whether this client may change what the node *is*. The interface asks
+    // rather than guesses, and disables those controls with a reason instead
+    // of hiding them.
+    v["loopback"] = json!(super::auth::extensions_are_loopback(&parts.extensions));
+    Ok(Json(v))
 }
 
 /// Every node this one knows: itself first, then peers as the mesh reports them.
-pub async fn list_nodes(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn list_nodes(
+    State(s): State<AppState>,
+    parts: axum::http::request::Parts,
+) -> ApiResult<Json<serde_json::Value>> {
     let rows = s.store().list_nodes()?;
-    let mut out: Vec<serde_json::Value> = rows.iter().map(node_row_json).collect();
+    let local = super::auth::extensions_are_loopback(&parts.extensions);
+    let mut out: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            let mut v = node_row_json(r);
+            // Only ever on this node's own row: it is a fact about how the
+            // client reached *here*, not about a peer. This list is what the
+            // interface keeps its node in, so the answer has to live here too.
+            if r.is_self == 1 {
+                v["loopback"] = json!(local);
+            }
+            v
+        })
+        .collect();
     out.sort_by_key(|n| n["is_self"] != true);
     Ok(Json(json!(out)))
 }
@@ -1888,4 +1914,353 @@ impl crate::mesh::forward::CommandExecutor for AppState {
         };
         r.map_err(|e| e.1)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Settings: standing a node up without a shell on it.
+// ---------------------------------------------------------------------------
+
+/// Re-run the boundary checks and record the verdict.
+///
+/// The refusal is a snapshot taken at startup, and an operator who has just
+/// started the runtime or run setup should not have to restart the node to be
+/// believed. Publishing the node frame is what clears the banner live.
+pub async fn recheck_boundary(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let backend = s.manager.backend().clone();
+    let report = backend.check_all(&s.cfg, false).await;
+    let row = super::verify_node(
+        s.store(),
+        &s.cfg,
+        s.adapter.as_ref(),
+        backend.as_ref(),
+        &s.node_id,
+        None,
+    )
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    s.manager
+        .bus()
+        .publish(crate::stream::Frame::Node(node_json(&s)?));
+    Ok(Json(json!({ "state": row.state, "checks": report })))
+}
+
+#[derive(Deserialize)]
+pub struct SetupBody {
+    #[serde(default)]
+    pub rebuild: bool,
+}
+
+/// Build the network, gateway and images this node's boundary needs, then
+/// re-check. Blocking: image builds are minutes, not seconds, and there is
+/// nothing useful to show mid-flight that the verdict does not say better.
+pub async fn run_setup(
+    State(s): State<AppState>,
+    body: Option<Json<SetupBody>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let rebuild = body.map(|b| b.rebuild).unwrap_or(false);
+    let backend = s.manager.backend().clone();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(600),
+        backend.setup(&s.cfg, rebuild),
+    )
+    .await
+    .map_err(|_| {
+        ApiError(
+            StatusCode::GATEWAY_TIMEOUT,
+            "setup is still running after ten minutes; check the node's log".into(),
+        )
+    })?
+    .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
+    recheck_boundary(State(s)).await
+}
+
+#[derive(Deserialize)]
+pub struct ChannelBody {
+    pub name: String,
+}
+
+/// Create a channel: mint its key here and record that this node holds it.
+pub async fn create_channel(
+    State(s): State<AppState>,
+    Json(body): Json<ChannelBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let identity = crate::mesh::identity::load_or_generate()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .0;
+    let (created, note) =
+        crate::mesh::channels::create_and_sync(s.store(), &identity, &body.name, &s.cfg)
+            .await
+            .map_err(|e| match e {
+                crate::mesh::channels::ChannelError::Name => {
+                    ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
+                }
+                other => ApiError(StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+            })?;
+    Ok(Json(
+        json!({ "name": body.name, "created": created.minted, "note": note }),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct ImportBody {
+    pub toml: String,
+}
+
+/// Seal credentials handed over as text. The paste is the same secret the
+/// file would have held, and it is never written to disk in the clear.
+pub async fn import_credentials(
+    State(s): State<AppState>,
+    Json(body): Json<ImportBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let parsed = crate::broker::Broker::parse_text(&body.toml)
+        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    if parsed.is_empty() {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "no credentials in that; expected [credentials.<name>] tables".into(),
+        ));
+    }
+    let identity = crate::mesh::identity::load_or_generate()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .0;
+    let names: Vec<String> = {
+        let mut broker = s.tools.broker.write().unwrap();
+        let mut names = Vec::new();
+        for (name, cred) in parsed.iter() {
+            broker.put(name, cred.clone());
+            names.push(name.to_string());
+        }
+        broker
+            .save(&identity.credential_store_key())
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        names
+    };
+    // Names only: a value that went in never comes back out.
+    Ok(Json(json!({ "imported": names })))
+}
+
+/// The configuration this interface writes.
+pub async fn get_config(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let cfg = Config::try_load().map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut v = super::settings::config_view(&cfg);
+    // What is running, so the pane can say a change is owed a restart rather
+    // than pretend it already took.
+    v["running"] = json!({
+        "harness_id": s.cfg.harness.id,
+        "harness_version": s.cfg.harness.version,
+        "node_name": s.cfg.node_name,
+    });
+    Ok(Json(v))
+}
+
+/// Write the configuration. Loopback only: these keys decide which binaries
+/// the node executes.
+pub async fn put_config(
+    _: super::auth::Loopback,
+    Json(patch): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // try_load, never load: a node.toml that does not parse must be reported,
+    // not silently replaced with defaults plus this patch.
+    let mut cfg = Config::try_load().map_err(|e| {
+        ApiError(
+            StatusCode::CONFLICT,
+            format!("node.toml does not parse, so it will not be rewritten: {e}"),
+        )
+    })?;
+    let changed = super::settings::apply(&mut cfg, &patch)
+        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    if !changed.is_empty() {
+        cfg.save()
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    Ok(Json(json!({
+        "changed": changed,
+        // The running node holds its config in an Arc taken at startup.
+        "restart_required": !changed.is_empty(),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct HubBody {
+    pub hub_url: String,
+}
+
+/// The first node: mint the mesh channel here and point this node at a hub.
+/// Loopback only — this decides which hub the node trusts.
+pub async fn mesh_init(
+    _: super::auth::Loopback,
+    State(s): State<AppState>,
+    Json(body): Json<HubBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let hub = body.hub_url.trim().trim_end_matches('/').to_string();
+    if !hub.starts_with("https://") && !hub.starts_with("http://") {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a hub is an http(s) URL".into(),
+        ));
+    }
+    let identity = crate::mesh::identity::load_or_generate()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .0;
+    crate::mesh::channels::create(s.store(), &identity, proto::frame::MESH_CHANNEL)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut cfg = Config::try_load().map_err(|e| {
+        ApiError(
+            StatusCode::CONFLICT,
+            format!("node.toml does not parse, so it will not be rewritten: {e}"),
+        )
+    })?;
+    cfg.mesh.hub_url = Some(hub.clone());
+    cfg.save()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(json!({
+        "hub_url": hub,
+        "node_id": identity.node_id(),
+        // The hub only talks to a node it has been told to admit, and this
+        // node only dials out once it restarts with the new config.
+        "admit_with": format!("TRACON_HUB_ADMIT={}", identity.node_id()),
+        "restart_required": true,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct QrBody {
+    pub text: String,
+}
+
+/// Render a QR for text the client already holds. The operator token is minted
+/// in the browser and never sent here; this draws the login URL that carries
+/// it in a fragment, which is the same thing the CLI prints.
+pub async fn qr(Json(body): Json<QrBody>) -> ApiResult<Json<serde_json::Value>> {
+    if body.text.len() > 2048 {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "too long to encode as a QR".into(),
+        ));
+    }
+    Ok(Json(
+        json!({ "svg": crate::mesh::enroll::qr_svg(&body.text) }),
+    ))
+}
+
+/// An enrolment in flight, so the interface can watch one it started.
+///
+/// Joining a mesh waits on a human at the other end confirming a fingerprint,
+/// which is minutes, not seconds. One slot: a node joins one mesh.
+#[derive(Default)]
+pub struct EnrollJob {
+    pub lines: Vec<String>,
+    pub done: bool,
+    pub error: Option<String>,
+    pub channels: Vec<String>,
+}
+
+/// Collects `enroll::accept`'s progress for the interface to poll.
+struct BufProgress(Arc<std::sync::Mutex<EnrollJob>>);
+
+impl crate::mesh::enroll::Progress for BufProgress {
+    fn say(&self, line: &str) {
+        if let Ok(mut job) = self.0.lock() {
+            job.lines.push(line.to_string());
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct EnrollBody {
+    pub invitation: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Join a mesh from an invitation. Loopback only: this sets the trust root.
+pub async fn start_enroll(
+    _: super::auth::Loopback,
+    State(s): State<AppState>,
+    Json(body): Json<EnrollBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (hub_from_url, code) = proto::enroll::parse_invite(&body.invitation).ok_or(ApiError(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "that is not an invitation URL or code".into(),
+    ))?;
+    let hub = hub_from_url.ok_or(ApiError(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "paste the full invitation URL: a bare code does not say which hub".into(),
+    ))?;
+    {
+        let job = s.enroll.lock().unwrap();
+        if !job.lines.is_empty() && !job.done {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "an enrolment is already running".into(),
+            ));
+        }
+    }
+    let identity = crate::mesh::identity::load_or_generate()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .0;
+    let name = body.name.unwrap_or_else(|| s.cfg.node_name.clone());
+    *s.enroll.lock().unwrap() = EnrollJob {
+        lines: vec![format!("joining {hub}")],
+        ..Default::default()
+    };
+
+    let slot = s.enroll.clone();
+    let store = s.store().clone();
+    tokio::spawn(async move {
+        let facts = format!("{} {}", std::env::consts::ARCH, std::env::consts::OS);
+        let progress = BufProgress(slot.clone());
+        let outcome = crate::mesh::enroll::accept(
+            store,
+            &identity,
+            &hub,
+            &code,
+            &name,
+            &facts,
+            std::time::Duration::from_secs(600),
+            &progress,
+        )
+        .await;
+        let mut job = slot.lock().unwrap();
+        match outcome {
+            Ok(channels) => {
+                // The hub is written only once the mesh has actually taken
+                // this node: a config pointing at a hub that refused it is
+                // worse than no config at all.
+                match Config::try_load() {
+                    Ok(mut cfg) => {
+                        cfg.mesh.hub_url = Some(hub.trim_end_matches('/').to_string());
+                        if let Err(e) = cfg.save() {
+                            job.error =
+                                Some(format!("enrolled, but node.toml was not written: {e}"));
+                        }
+                    }
+                    Err(e) => {
+                        job.error = Some(format!("enrolled, but node.toml does not parse: {e}"))
+                    }
+                }
+                job.lines
+                    .push("enrolled; restart the node to dial the hub".into());
+                job.channels = channels;
+            }
+            Err(e) => job.error = Some(e.to_string()),
+        }
+        job.done = true;
+    });
+    Ok(Json(json!({ "started": true })))
+}
+
+/// Where an enrolment has got to.
+pub async fn enroll_status(
+    _: super::auth::Loopback,
+    State(s): State<AppState>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let job = s.enroll.lock().unwrap();
+    Ok(Json(json!({
+        "lines": job.lines,
+        "done": job.done,
+        "error": job.error,
+        "channels": job.channels,
+        "restart_required": job.done && job.error.is_none(),
+    })))
 }

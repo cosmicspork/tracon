@@ -85,6 +85,7 @@ fn node_with(broker: SharedBroker) -> axum::Router {
         tools,
         mesh: None,
         auth: Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
+        enroll: Default::default(),
     };
     tracon::http::router(state)
 }
