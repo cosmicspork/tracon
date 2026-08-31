@@ -1,7 +1,7 @@
 <script lang="ts">
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
-  import { nodeById, nodeLabel, unreachableReason } from '../lib/nodes'
+  import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
   import { store } from '../lib/store.svelte'
   import { reviewChecks, reviewVerdict, type Review } from '../lib/types'
 
@@ -28,7 +28,7 @@
     <em>{review.state === 'revising' ? 'Changes requested' : 'Review'}</em>
     {review.title}
     <small
-      ><span class="chip" class:self={owner?.is_self} class:off={held !== null}>{nodeLabel(store.nodes, review.node_id)}</span> · {noun} · {files} files · +{review.added} −{review.removed} · {review.channel}{review.claimed_ms
+      ><span class="chip" class:self={owner?.is_self} class:off={held !== null}>{chipLabel(store.nodes, review.node_id)}</span> · {noun} · {files} files · +{review.added} −{review.removed} · {review.channel}{review.claimed_ms
         ? ' · claimed'
         : ''}{#if checks.length} · checks ✓{/if}{#if verdict}
         · <span class="chip" class:warn={verdict.verdict === 'request_changes'} class:ok={verdict.verdict === 'approve'}>{verdict.verdict === 'approve' ? 'approves' : 'changes suggested'}</span>{:else if review.review_session_id}

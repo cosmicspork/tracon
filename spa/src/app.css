@@ -128,6 +128,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   color: var(--wait);
 }
 .banner b { font-weight: 400; color: var(--ink); }
+/* What to do about it, under what happened. */
+.banner i { display: block; margin-top: 3px; font-style: normal; color: var(--ink2); }
 /* Waiting on someone else, not on you. */
 .banner.ok {
   background: linear-gradient(90deg, var(--wash-run), var(--s1) 50%);
@@ -168,5 +170,5 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .chip.bad { color: var(--crit); }
 .chip.bad::before { background: var(--crit); }
 .chip.warn::before { background: var(--wait); }
-/* The node that served this interface. */
-.chip.self::after { content: 'you'; font-size: 10px; color: var(--dim); letter-spacing: 0.08em; }
+/* The node that served this interface. Named "you" by chipLabel where the
+   chip stands for another thing's owner; the node pickers keep real names. */
