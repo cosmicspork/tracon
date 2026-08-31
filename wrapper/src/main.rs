@@ -163,7 +163,9 @@ fn main() {
                 tauri::RunEvent::Exit => stopper.stop(),
                 // The dock icon and the app switcher both reactivate rather
                 // than launch, and the window they would raise was hidden by
-                // the close button. Without this the icon is inert.
+                // the close button. Without this the icon is inert. macOS
+                // only: nothing else has a dock to click.
+                #[cfg(target_os = "macos")]
                 tauri::RunEvent::Reopen { .. } => show_window(_app),
                 _ => {}
             }
