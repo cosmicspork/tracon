@@ -240,7 +240,11 @@
   .lbl { flex: 1; }
   .n { font: 12px var(--mono); color: var(--wait); }
   .sp { flex: 1; }
-  .foot { padding: 8px 16px; font: 11.5px var(--mono); color: var(--dim); display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  /* `lbl` is what hides this when the rail is narrow, and `lbl` also grows.
+     A footer that grows strands its own text at the top of the leftover
+     space, which is where it sat. It sits at the bottom because `sp` above
+     it grows; this must not. */
+  .foot { padding: 8px 16px; font: 11.5px var(--mono); color: var(--dim); display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: none; }
   .foot span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .rail button { color: var(--dim); }
   .rail button:hover { color: var(--ink); }
