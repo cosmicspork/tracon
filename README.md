@@ -42,7 +42,15 @@ tracon check-boundary --deep   # prove the boundary, including an egress probe f
 tracon service install         # run the node under systemd or launchd
 ```
 
-Open `http://127.0.0.1:7420`. The queue walks you through the rest: **connect a
+If `tracon setup` cannot find podman — a node started from a desktop launcher
+inherits a minimal PATH — set `podman` under `[boundary]` in `node.toml` to its
+full path. The interface says so too, in the refusal it shows.
+
+Open `http://127.0.0.1:7420`. **Settings** covers the rest of the install from
+the interface: prove the boundary, run setup, choose the harness, import a
+credential, create a channel, and issue the token a phone logs in with. What
+rewrites `node.toml` or picks the hub is done at the node itself and says so
+when you are somewhere else. The queue walks you through the work: **connect a
 provider** (the harness's own sign-in runs on the node; you open the link and paste
 the code back — an API key works too, `tracon credential import creds.toml`), **add a
 work item**, and **start a plan session**. A session is always a phase of one work
@@ -214,13 +222,13 @@ tracon channel bind work notify.enabled=false   # the desktop tray is enough for
 | | |
 |---|---|
 | `tracon serve [--listen]` | run the node |
-| `tracon setup [--rebuild]`, `check-boundary [--deep]` | the boundary |
+| `tracon setup [--rebuild]`, `check-boundary [--deep]` | the boundary (also on the Settings screen) |
 | `tracon service install\|uninstall\|status` | the platform supervisor |
 | `tracon auth issue [--url]\|revoke\|sessions` | off-machine access; `--url` prints the login QR |
 | `tracon push ls\|rm <id>\|test` | the phones this node pushes to |
 | `tracon mesh id\|init\|invite\|members\|remove\|admit`, `enroll` | the mesh |
 | `tracon channel create\|list\|bind\|share` | channels and their bindings |
-| `tracon credential import\|ls\|rm\|share` | what the broker holds |
+| `tracon credential import\|ls\|rm\|share` | what the broker holds (import is also on Settings) |
 | `tracon doc import\|ls\|get\|put\|rm\|export` | documents |
 | `tracon memory ls\|add\|rm\|recall\|batch` | memories, and the promotion batch on demand |
 | `tracon work add\|ls\|ready\|show\|close\|dep\|rm` | the ledger |
@@ -243,6 +251,7 @@ version = "18.0.4"                  # pinned; checked against the image and the 
 tools = []                          # extra tool names to offer; empty is everything the harness has
 
 [boundary]                          # the rootless-Podman boundary a laptop establishes
+podman = ""                         # empty: found on PATH, then the usual install locations
 network = "tracon-int"
 subnet = "10.89.0.0/24"
 gateway_ip = "10.89.0.2"
