@@ -4370,6 +4370,7 @@ dependencies = [
 name = "tracon-wrapper"
 version = "0.8.0"
 dependencies = [
+ "dirs",
  "futures-util",
  "reqwest 0.12.28",
  "serde",
