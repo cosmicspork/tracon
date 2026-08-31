@@ -4,7 +4,7 @@
   // command to the owner, and the login subprocess never leaves the owner.
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
-  import { formatAge } from '../lib/format'
+  import { formatDuration } from '../lib/format'
   import type { ProviderInfo } from '../lib/types'
 
   let { p, nodeId }: { p: ProviderInfo; nodeId: string } = $props()
@@ -55,7 +55,7 @@
   function expiry(): string {
     if (!p.expires_ms) return ''
     const left = p.expires_ms - clock.now
-    return left <= 0 ? 'expired' : `refreshes in ${formatAge(clock.now - left, clock.now)}`
+    return left <= 0 ? 'expired' : `refreshes in ${formatDuration(left)}`
   }
 </script>
 

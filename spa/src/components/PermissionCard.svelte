@@ -2,7 +2,7 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
-  import { nodeById, nodeLabel, unreachableReason } from '../lib/nodes'
+  import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
   import { permissionOptions, type Permission } from '../lib/types'
   import { store } from '../lib/store.svelte'
 
@@ -60,7 +60,7 @@
     <em>Permission</em>
     {permission.title}
     <small
-      ><span class="chip" class:self={owner?.is_self} class:off={held !== null}>{nodeLabel(store.nodes, permission.node_id)}</span> · {permission.kind ?? 'tool'} · {formatExpiry(permission.expires_ms, clock.now)}{command &&
+      ><span class="chip" class:self={owner?.is_self} class:off={held !== null}>{chipLabel(store.nodes, permission.node_id)}</span> · {permission.kind ?? 'tool'} · {formatExpiry(permission.expires_ms, clock.now)}{command &&
       command !== permission.title
         ? ` · ${command}`
         : ''}{error ? ` · ${error}` : ''}</small

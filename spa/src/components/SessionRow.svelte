@@ -1,7 +1,7 @@
 <script lang="ts">
   import { clock } from '../lib/clock.svelte'
-  import { formatAge, formatBudget } from '../lib/format'
-  import { nodeById, nodeLabel } from '../lib/nodes'
+  import { formatAge, formatBudget, formatDuration } from '../lib/format'
+  import { chipLabel, nodeById } from '../lib/nodes'
   import { store } from '../lib/store.svelte'
   import type { Session } from '../lib/types'
 
@@ -39,12 +39,23 @@
   const repo = $derived(session.repo_path.split('/').at(-1) ?? session.repo_path)
   const owner = $derived(nodeById(store.nodes, session.node_id))
   const stale = $derived(owner !== undefined && !owner.is_self && !owner.reachable)
+  // An ended session's last update is when it ended, and showing that as a
+  // bare number reads as how long it ran. Say which: how long it took, with
+  // the moment it happened on hover.
+  const ended = $derived(
+    session.state === 'closed' || session.state === 'failed' || session.state === 'killed_budget',
+  )
+  const when = $derived(new Date(session.updated_ms).toLocaleString())
 </script>
 
 <a class="row {tone}" class:stale href="/sessions/{session.id}">
   <span class="bar"></span>
-  <span class="chip" class:self={owner?.is_self} class:off={stale}>{nodeLabel(store.nodes, session.node_id)}</span>
-  <span class="mono age">{formatAge(session.updated_ms, clock.now)}</span>
+  <span class="chip" class:self={owner?.is_self} class:off={stale}>{chipLabel(store.nodes, session.node_id)}</span>
+  {#if ended}
+    <span class="mono age" title="ended {when}">ran {formatDuration(session.updated_ms - session.created_ms)}</span>
+  {:else}
+    <span class="mono age" title="last update {when}">{formatAge(session.updated_ms, clock.now)}</span>
+  {/if}
   <span class="t">
     <em>{kind}</em>
     {session.branch}
@@ -60,7 +71,7 @@
 <style>
   .row {
     display: grid;
-    grid-template-columns: 3px 84px 48px minmax(0, 1fr) 84px;
+    grid-template-columns: 3px 84px 68px minmax(0, 1fr) 84px;
     gap: 0 14px;
     align-items: center;
     background: var(--s1);

@@ -23,6 +23,15 @@ export function nodeLabel(nodes: NodeInfo[], id: string): string {
 }
 
 /**
+ * How a node is named on a chip that belongs to something else — a session, a
+ * review, a permission. This node is "you": its hostname is the one name the
+ * operator never needs told, and it is usually the longest.
+ */
+export function chipLabel(nodes: NodeInfo[], id: string): string {
+  return nodeById(nodes, id)?.is_self ? 'you' : nodeLabel(nodes, id)
+}
+
+/**
  * Why a command for something `nodeId` owns cannot be sent right now, or null
  * when it can. Local things are always actionable; a peer must be reachable.
  */

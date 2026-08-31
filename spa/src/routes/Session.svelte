@@ -4,7 +4,7 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatBudget, formatTokens } from '../lib/format'
-  import { nodeById, nodeLabel, unreachableReason } from '../lib/nodes'
+  import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
   import { isTerminal } from '../lib/types'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
@@ -124,7 +124,7 @@
     <span class="model">{session.model}</span>
     <span class="chip">{session.phase}</span>
     <span class="chip" class:self={owner?.is_self} class:off={unreachable !== null}
-      >{nodeLabel(store.nodes, session.node_id)}{unreachable !== null && owner?.last_seen_ms
+      >{chipLabel(store.nodes, session.node_id)}{unreachable !== null && owner?.last_seen_ms
         ? ` · last seen ${formatAge(owner.last_seen_ms, clock.now)}`
         : ''}</span
     >

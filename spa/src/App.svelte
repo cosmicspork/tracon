@@ -15,6 +15,7 @@
   import { stashToken, tokenFromHash } from './lib/auth'
   import { clock } from './lib/clock.svelte'
   import { formatAge } from './lib/format'
+  import { remedy } from './lib/refusal'
   import { router } from './lib/router.svelte'
   import { store } from './lib/store.svelte'
   import { surface } from './lib/surface.svelte'
@@ -88,10 +89,18 @@
 {:else}
 <div class="shell" class:narrow={collapsed}>
   <nav class="rail">
-    <div class="brand">
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 12l6-6" /><circle cx="12" cy="12" r="1.4" fill="currentColor" /></svg>
-      <span class="lbl">tracon</span>
-    </div>
+    {#if collapsed}
+      <!-- Collapsed, the mark is the only thing at the top of the rail and it
+           reads as a button. Make it one: the way back out. -->
+      <button class="brand" type="button" onclick={toggleRail} aria-label="Expand navigation" title="Expand">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 12l6-6" /><circle cx="12" cy="12" r="1.4" fill="currentColor" /></svg>
+      </button>
+    {:else}
+      <div class="brand">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 12l6-6" /><circle cx="12" cy="12" r="1.4" fill="currentColor" /></svg>
+        <span class="lbl">tracon</span>
+      </div>
+    {/if}
     <a href="/" class:on={nav === 'queue'}>
       <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
       <span class="lbl">Queue</span>
@@ -118,7 +127,10 @@
       <span class="lbl">New session</span>
     </a>
     <span class="sp"></span>
-    <div class="foot lbl">{store.node?.name ?? '…'} · {store.connected ? 'connected' : 'offline'} · {hubLabel}</div>
+    <div class="foot lbl" title="{store.node?.name ?? 'this node'} · {store.connected ? 'connected' : 'offline'} · {hubLabel}">
+      <span>{store.node?.name ?? '…'}</span>
+      <span>{store.connected ? 'connected' : 'offline'} · {hubLabel}</span>
+    </div>
     <button class="collapse" type="button" onclick={toggleRail} title="Collapse">
       <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" /></svg>
       <span class="lbl">Collapse</span>
@@ -130,7 +142,10 @@
       <div class="banner crit">node unreachable <b>· reconnecting; state lives on the node, nothing typed is lost</b></div>
     {/if}
     {#if store.node?.state === 'refused'}
-      <div class="banner crit">refusing to run harnesses <b>· {store.node.failed_check}: {store.node.failed_detail}</b></div>
+      <div class="banner crit">
+        refusing to run harnesses <b>· {store.node.failed_check}: {store.node.failed_detail}</b>
+        <i>{remedy(store.node.failed_check)}</i>
+      </div>
     {/if}
     <!-- Degraded is a state, not an error: quiet, persistent, not dismissable. -->
     {#if hubDown}
@@ -203,6 +218,7 @@
   .shell { display: grid; grid-template-columns: 172px minmax(0, 1fr); min-height: 100vh; }
   .shell.narrow { grid-template-columns: 52px minmax(0, 1fr); }
   .rail { background: var(--s1); display: flex; flex-direction: column; padding: 12px 0; gap: 2px; overflow: hidden; position: sticky; top: 0; height: 100vh; }
+  button.brand { background: none; border: 0; cursor: pointer; color: inherit; width: 100%; }
   .brand { display: flex; align-items: center; gap: 10px; padding: 4px 16px 14px; font: 600 15px var(--sans); letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
   .rail svg { width: 17px; height: 17px; flex-shrink: 0; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
   .rail a, .rail button { display: flex; align-items: center; gap: 10px; padding: 8px 16px; color: var(--ink2); text-decoration: none; font: 500 14px var(--sans); white-space: nowrap; position: relative; background: none; border: 0; cursor: pointer; text-align: left; }
@@ -210,7 +226,8 @@
   .lbl { flex: 1; }
   .n { font: 12px var(--mono); color: var(--wait); }
   .sp { flex: 1; }
-  .foot { padding: 8px 16px; font: 11.5px var(--mono); color: var(--dim); white-space: nowrap; }
+  .foot { padding: 8px 16px; font: 11.5px var(--mono); color: var(--dim); display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .foot span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .rail button { color: var(--dim); }
   .rail button:hover { color: var(--ink); }
   .narrow .lbl { display: none; }
