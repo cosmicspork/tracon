@@ -72,6 +72,10 @@ jobs:
   # The node has a launchd path and a macOS worktree root; a release leg that
   # only compiles it for the first time on the day of the release would fail
   # then. So it compiles and runs its unit tests on every change.
+  #
+  # Both steps are --release: the release profile is what the release leg
+  # builds, and staying on one profile means the dependency graph is compiled
+  # once rather than once per profile on the slowest runner here.
   macos:
     runs-on: macos-latest
     steps:
@@ -79,7 +83,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --bin tracon
-      - run: cargo test -p tracon --lib
+      - run: cargo test --release -p tracon --lib
 
   # The desktop wrapper is its own workspace and needs webkit and gtk headers,
   # so it is built here rather than by the `node` job — which must keep working
