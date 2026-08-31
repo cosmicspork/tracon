@@ -2,15 +2,18 @@
 // interface can say what the node said, not "request failed".
 
 import type {
+  BoundaryResult,
   ChannelInfo,
   ChannelMetrics,
   CredentialSummary,
   Document,
+  EnrollStatus,
   Event,
   ForgeList,
   Invite,
   ManagedRepo,
   MeshState,
+  NodeConfig,
   NodeInfo,
   Promotion,
   PromotionItem,
@@ -190,6 +193,25 @@ export const api = {
   batchPromotions: () => call<{ created: string[] }>('POST', '/api/promotions/batch'),
   // Providers: connect through the harness's own login, paste the code back.
   credentials: () => call<{ credentials: CredentialSummary[] }>('GET', '/api/credentials'),
+  importCredentials: (toml: string) =>
+    call<{ imported: string[] }>('POST', '/api/credentials/import', { toml }),
+  createChannel: (name: string) =>
+    call<{ name: string; created: boolean; note: string | null }>('POST', '/api/channels', { name }),
+  checkBoundary: () => call<BoundaryResult>('POST', '/api/boundary/check'),
+  runSetup: (rebuild = false) => call<BoundaryResult>('POST', '/api/boundary/setup', { rebuild }),
+  config: () => call<NodeConfig>('GET', '/api/config'),
+  putConfig: (patch: unknown) =>
+    call<{ changed: string[]; restart_required: boolean }>('PUT', '/api/config', patch),
+  qr: (text: string) => call<{ svg: string }>('POST', '/api/auth/qr', { text }),
+  setToken: (tokenHash: string) =>
+    call<{ ok: boolean }>('POST', '/api/auth/token', { token_hash: tokenHash }),
+  meshInit: (hubUrl: string) =>
+    call<{ hub_url: string; node_id: string; admit_with: string }>('POST', '/api/mesh/init', {
+      hub_url: hubUrl,
+    }),
+  startEnroll: (invitation: string) =>
+    call<{ started: boolean }>('POST', '/api/mesh/enroll', { invitation }),
+  enrollStatus: () => call<EnrollStatus>('GET', '/api/mesh/enroll'),
   shareCredential: (name: string, to: string) =>
     call<{ shared: string; to: string }>('POST', `/api/credentials/${name}/share`, { to }),
   providers: () => call<ProviderInfo[]>('GET', '/api/providers'),

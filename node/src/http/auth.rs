@@ -155,9 +155,40 @@ fn is_public(req: &Request) -> bool {
 /// Whether the caller is on this machine. A request with no peer address is
 /// treated as remote: the guard fails closed.
 fn peer_is_loopback(req: &Request) -> bool {
-    req.extensions()
-        .get::<ConnectInfo<SocketAddr>>()
+    extensions_are_loopback(req.extensions())
+}
+
+/// The same question, asked of the parts an extractor sees.
+pub(crate) fn extensions_are_loopback(ext: &axum::http::Extensions) -> bool {
+    ext.get::<ConnectInfo<SocketAddr>>()
         .is_some_and(|ci| ci.0.ip().is_loopback())
+}
+
+/// A handler that runs only for a caller on the node's own machine.
+///
+/// The operator token is one credential for one operator, so it is not the
+/// thing to hang this on: a phone holding it is the operator too. What
+/// separates these routes is that they rewrite what the node *is* — the
+/// binaries it executes, the file it reads its configuration from, the hub it
+/// trusts — where a stolen cookie would otherwise be remote code execution.
+/// Standing a node up is done at the node.
+pub struct Loopback;
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Loopback {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        if extensions_are_loopback(&parts.extensions) {
+            return Ok(Loopback);
+        }
+        Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "this is done at the node itself: open the interface on the node's own machine",
+        ))
+    }
 }
 
 fn peer_ip(req: &Request) -> Option<IpAddr> {

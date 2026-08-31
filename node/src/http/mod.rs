@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 mod mcp;
 pub mod push;
+pub mod settings;
 mod spa;
 mod stream;
 
@@ -34,6 +35,16 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(api::health))
         .route("/api/node", get(api::get_node))
         .route("/api/node/refresh-models", post(api::refresh_models))
+        .route("/api/boundary/check", post(api::recheck_boundary))
+        .route("/api/boundary/setup", post(api::run_setup))
+        .route("/api/config", get(api::get_config).put(api::put_config))
+        .route("/api/auth/qr", post(api::qr))
+        .route("/api/mesh/init", post(api::mesh_init))
+        .route(
+            "/api/mesh/enroll",
+            get(api::enroll_status).post(api::start_enroll),
+        )
+        .route("/api/credentials/import", post(api::import_credentials))
         .route("/api/usage", get(api::usage))
         .route("/api/metrics", get(api::metrics))
         .route("/api/provenance/{sha}", get(api::provenance))
@@ -88,7 +99,10 @@ pub fn router(state: AppState) -> Router {
             post(api::node_disconnect_provider),
         )
         .route("/api/mesh", get(api::get_mesh))
-        .route("/api/channels", get(api::list_channels))
+        .route(
+            "/api/channels",
+            get(api::list_channels).post(api::create_channel),
+        )
         .route("/api/mesh/invite", post(api::open_invite))
         .route(
             "/api/mesh/invite/{code}",
@@ -317,6 +331,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         tools,
         mesh,
         auth: Arc::new(auth::AuthState::load(&store, listen.ip().to_string())),
+        enroll: Arc::new(std::sync::Mutex::new(api::EnrollJob::default())),
     };
     if let Some(m) = &state.mesh {
         m.set_executor(Arc::new(state.clone()));
@@ -510,18 +525,40 @@ async fn init_node(
         }
         _ => {}
     }
-    let report = backend.check_all(cfg, false).await;
-    let failed = report.first_failure().cloned();
-    let ready = failed.is_none();
-    if let Some(f) = &failed {
-        tracing::warn!(check = f.id.as_str(), detail = %f.detail, "refusing to run harnesses");
-    }
-
     if let Some(p) = crate::session::materialize::retire_harness_credentials() {
         tracing::warn!(
             path = %p.display(),
             "a credential store was on the harness volume; set aside — models are brokered through the gateway now"
         );
+    }
+    verify_node(store, cfg, adapter, backend, &id, Some(&identity)).await?;
+    // This node is always bound to the channels it holds keys for.
+    for c in store.channel_list()? {
+        store.node_channel_add(&id, &c.name)?;
+    }
+    Ok((id, identity))
+}
+
+/// Run the boundary checks, probe the harness, and record what this node is.
+///
+/// Startup calls it, and so does a re-check from the interface: an operator
+/// who has just started the runtime should not have to restart the node to be
+/// believed. The harness probe belongs to it, not to startup, because a node
+/// that goes refused → ready without one has no recorded version and blocks
+/// every new session on a mismatch against `None`.
+pub(crate) async fn verify_node(
+    store: &Arc<Store>,
+    cfg: &Arc<Config>,
+    adapter: &dyn HarnessAdapter,
+    backend: &dyn boundary::Backend,
+    id: &str,
+    identity: Option<&proto::keys::Identity>,
+) -> Result<NodeRow> {
+    let report = backend.check_all(cfg, false).await;
+    let failed = report.first_failure().cloned();
+    let ready = failed.is_none();
+    if let Some(f) = &failed {
+        tracing::warn!(check = f.id.as_str(), detail = %f.detail, "refusing to run harnesses");
     }
     let found = if ready {
         let runner = backend.runner(
@@ -544,20 +581,21 @@ async fn init_node(
     } else {
         None
     };
+    let previous = store.get_node(id).ok().flatten();
     // The model list is probed once the gateway is listening (see `serve`);
     // until then the previous run's list stands.
-    let models: Vec<crate::adapter::ModelOption> = store
-        .get_node(&id)
-        .ok()
-        .flatten()
-        .and_then(|n| n.models_json)
+    let models: Vec<crate::adapter::ModelOption> = previous
+        .as_ref()
+        .and_then(|n| n.models_json.clone())
         .and_then(|j| serde_json::from_str(&j).ok())
         .unwrap_or_default();
 
-    store.put_node(&NodeRow {
-        id: id.clone(),
+    let row = NodeRow {
+        id: id.to_string(),
         is_self: 1,
-        x25519_pub: Some(identity.x25519_hex()),
+        x25519_pub: identity
+            .map(|i| i.x25519_hex())
+            .or_else(|| previous.as_ref().and_then(|n| n.x25519_pub.clone())),
         last_seen_ms: Some(now_ms()),
         reachable: 1,
         providers_json: None,
@@ -570,12 +608,9 @@ async fn init_node(
         harness_found: found,
         models_json: serde_json::to_string(&models).ok(),
         checked_at_ms: Some(now_ms()),
-    })?;
-    // This node is always bound to the channels it holds keys for.
-    for c in store.channel_list()? {
-        store.node_channel_add(&id, &c.name)?;
-    }
-    Ok((id, identity))
+    };
+    store.put_node(&row)?;
+    Ok(row)
 }
 
 async fn shutdown_signal() {

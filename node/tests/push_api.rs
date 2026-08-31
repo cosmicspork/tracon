@@ -68,6 +68,7 @@ fn node() -> Node {
         tools,
         mesh: None,
         auth: Arc::new(AuthState::load(&store, "127.0.0.1".into())),
+        enroll: Default::default(),
     };
     let app = tracon::http::router(state.clone())
         .layer(axum::middleware::from_fn_with_state(state, auth::guard));

@@ -18,6 +18,12 @@ export interface NodeInfo {
   x25519_pub?: string | null
   /** The node's provider summary, carried in its hello. Absent from older builds. */
   providers?: ProviderInfo[] | null
+  /**
+   * Whether *this client* reached the node over loopback, and so may change
+   * what the node is rather than only what it does. Only ever set on the
+   * serving node's own row, by the request that asked.
+   */
+  loopback?: boolean
 }
 
 export interface ModelOption {
@@ -407,4 +413,37 @@ export function permissionOptions(p: Permission): { option_id: string; name: str
   } catch {
     return []
   }
+}
+
+/** One boundary check, as the node reports it. */
+export interface BoundaryCheck {
+  id: string
+  ok: boolean
+  detail: string
+}
+
+export interface BoundaryResult {
+  state: string
+  checks: { checks: BoundaryCheck[] }
+}
+
+/** The settings the interface writes, and the context it needs to explain them. */
+export interface NodeConfig {
+  node_name: string
+  harness: { id: string; version: string; tools: string[] }
+  session: { budget_tokens: number; permission_timeout_secs: number }
+  review: { max_diff_lines: number; max_files: number }
+  gateway: { allow_hosts: string[] }
+  publish: { gh: string; glab: string; git: string }
+  boundary: { podman: string }
+  readonly: { hub_url: string | null; runtime: string; config_path: string }
+  running: { harness_id: string; harness_version: string; node_name: string }
+}
+
+export interface EnrollStatus {
+  lines: string[]
+  done: boolean
+  error: string | null
+  channels: string[]
+  restart_required: boolean
 }

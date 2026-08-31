@@ -66,6 +66,7 @@ fn node() -> Node {
         tools,
         mesh: None,
         auth: Arc::new(AuthState::load(&store, "127.0.0.1".into())),
+        enroll: Default::default(),
     };
     let app = tracon::http::router(state.clone())
         .layer(axum::middleware::from_fn_with_state(state, auth::guard));
@@ -566,6 +567,7 @@ async fn the_harness_router_carries_no_operator_api() {
         }),
         mesh: None,
         auth: Arc::new(AuthState::new("127.0.0.1".into(), None)),
+        enroll: Default::default(),
     };
     let harness = tracon::http::harness_router(state);
     let ping = harness

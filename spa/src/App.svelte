@@ -9,6 +9,7 @@
   import NewSession from './routes/NewSession.svelte'
   import Nodes from './routes/Nodes.svelte'
   import Queue from './routes/Queue.svelte'
+  import Settings from './routes/Settings.svelte'
   import Session from './routes/Session.svelte'
   import Enroll from './routes/Enroll.svelte'
   import Login from './routes/Login.svelte'
@@ -57,14 +58,17 @@
   const reviewId = $derived(router.path.match(/^\/reviews\/([^/]+)/)?.[1] ?? null)
   const promotionId = $derived(router.path.match(/^\/promotions\/([^/]+)/)?.[1] ?? null)
   const enroll = $derived(router.path === '/nodes/enroll')
+  const settings = $derived(router.path === '/settings')
   const docRef = $derived(router.path.match(/^\/docs\/([^/]+)\/([^/]+)(\/edit)?$/))
   const docEdit = $derived(Boolean(docRef?.[3]))
   const workId = $derived(router.path.match(/^\/work\/([^/]+)/)?.[1] ?? null)
   const nav = $derived(
     sessionId || router.path === '/sessions'
       ? 'sessions'
-      : router.path === '/nodes' || enroll
-        ? 'nodes'
+      : settings
+        ? 'settings'
+        : router.path === '/nodes' || enroll
+          ? 'nodes'
         : router.path === '/new'
           ? 'new'
           : router.path.startsWith('/docs')
@@ -127,6 +131,10 @@
       <span class="lbl">New session</span>
     </a>
     <span class="sp"></span>
+    <a href="/settings" class:on={nav === 'settings'}>
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" /></svg>
+      <span class="lbl">Settings</span>
+    </a>
     <div class="foot lbl" title="{store.node?.name ?? 'this node'} · {store.connected ? 'connected' : 'offline'} · {hubLabel}">
       <span>{store.node?.name ?? '…'}</span>
       <span>{store.connected ? 'connected' : 'offline'} · {hubLabel}</span>
@@ -175,6 +183,8 @@
       <Doc channel={docRef[1]} slug={docRef[2]} edit={docEdit} />
     {:else if nav === 'docs'}
       <Docs />
+    {:else if settings}
+      <Settings />
     {:else if nav === 'new'}
       <NewSession />
     {:else}
@@ -210,6 +220,10 @@
       <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
       <span>New</span>
     </a>
+    <a href="/settings" class:on={nav === 'settings'}>
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" /></svg>
+      <span>Setup</span>
+    </a>
   </nav>
 </div>
 {/if}
@@ -244,7 +258,7 @@
     main { padding: 14px 12px calc(72px + env(safe-area-inset-bottom)); }
     .tabs {
       display: grid;
-      grid-template-columns: repeat(6, 1fr);
+      grid-template-columns: repeat(7, 1fr);
       position: fixed;
       inset: auto 0 0 0;
       background: var(--s1);

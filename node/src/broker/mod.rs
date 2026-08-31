@@ -201,6 +201,13 @@ impl Broker {
         // rather than loaded: the documented guarantee is enforcement, not
         // advice. A refused store brokers nothing, which fails closed.
         Self::refuse_if_too_open(path)?;
+        Self::parse_text(text)
+    }
+
+    /// Parse a plaintext store that never was a file. The mode check exists
+    /// to stop a secret sitting readable on disk; text handed straight to the
+    /// node has no mode to check, and is never written down.
+    pub fn parse_text(text: &str) -> Result<Self, BrokerError> {
         toml::from_str(text).map_err(|e| BrokerError::Parse(e.to_string()))
     }
 

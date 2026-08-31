@@ -150,6 +150,7 @@ async fn app(store: Arc<Store>) -> axum::Router {
         tools,
         mesh: None,
         auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
+        enroll: Default::default(),
     })
 }
 

@@ -594,10 +594,29 @@ fn hostname() -> String {
 }
 
 impl Config {
+    /// Where `node.toml` lives.
+    ///
+    /// Guarded the way `state_dir` is, and for the same reason: the interface
+    /// writes this file now, so a test that exercises that code path would
+    /// rewrite the operator's real configuration. `TRACON_CONFIG_DIR`
+    /// overrides it — integration tests use it, since they link the library
+    /// without `cfg(test)`.
     pub fn config_path() -> PathBuf {
+        Self::config_dir_from(std::env::var_os("TRACON_CONFIG_DIR")).join("node.toml")
+    }
+
+    /// `config_path`'s directory with the override handed in, so both
+    /// branches are testable without touching the process environment.
+    fn config_dir_from(override_dir: Option<std::ffi::OsString>) -> PathBuf {
+        if let Some(dir) = override_dir {
+            return PathBuf::from(dir);
+        }
+        if cfg!(test) {
+            return test_state_dir();
+        }
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("tracon/node.toml")
+            .join("tracon")
     }
 
     /// State the node owns: database, gateway allowlist, per-session scratch,
