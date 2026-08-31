@@ -72,6 +72,24 @@ fn binary_from(
     "tracon".into()
 }
 
+/// Launched from Finder, this process carries launchd's minimal PATH, and the
+/// node's children (podman, gh, glab) live in the package-manager prefixes a
+/// login shell would have added. Append them so the node behaves the same
+/// double-clicked as it does from a terminal.
+fn enriched_path(current: Option<String>) -> String {
+    let mut path = current.unwrap_or_default();
+    for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        let present = std::env::split_paths(&path).any(|p| p == std::path::Path::new(dir));
+        if !present {
+            if !path.is_empty() {
+                path.push(':');
+            }
+            path.push_str(dir);
+        }
+    }
+    path
+}
+
 async fn answering(http: &reqwest::Client, url: &str) -> bool {
     http.get(format!("{url}/api/node"))
         .timeout(Duration::from_secs(2))
@@ -93,6 +111,7 @@ impl Node {
         // debugging story for a wrapper that owns a child process.
         let child = Command::new(binary())
             .arg("serve")
+            .env("PATH", enriched_path(std::env::var("PATH").ok()))
             .stdin(Stdio::null())
             .spawn()?;
         *self.child.lock().unwrap() = Some(child);
@@ -246,6 +265,15 @@ mod tests {
         let got = binary_from(None, exe, home);
         assert_eq!(got, dir.join("home/.local/bin/tracon").to_string_lossy());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_path_gains_the_package_manager_prefixes_once() {
+        let got = enriched_path(Some("/usr/bin:/bin".into()));
+        assert_eq!(got, "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin");
+        // Already present: untouched, not appended again.
+        assert_eq!(enriched_path(Some(got.clone())), got);
+        assert_eq!(enriched_path(None), "/opt/homebrew/bin:/usr/local/bin");
     }
 
     /// Stopping a node this process did not start would kill something the

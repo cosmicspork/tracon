@@ -300,6 +300,10 @@ pub struct Harness {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Boundary {
+    /// The podman binary. Empty: resolved from PATH, then well-known install
+    /// locations — a node launched from Finder inherits launchd's minimal
+    /// PATH, which has no Homebrew.
+    pub podman: String,
     pub network: String,
     pub subnet: String,
     pub gateway_ip: String,
@@ -457,6 +461,7 @@ impl Default for Config {
                 tools: Vec::new(),
             },
             boundary: Boundary {
+                podman: String::new(),
                 network: "tracon-int".into(),
                 subnet: "10.89.0.0/24".into(),
                 gateway_ip: "10.89.0.2".into(),
