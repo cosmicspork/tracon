@@ -159,13 +159,32 @@ fn main() {
             // it. Exit is the last event, and stopping is synchronous on
             // purpose: the process must not go away while the node is still
             // tearing down its containers.
-            if let tauri::RunEvent::Exit = event {
-                stopper.stop();
+            match event {
+                tauri::RunEvent::Exit => stopper.stop(),
+                // The dock icon and the app switcher both reactivate rather
+                // than launch, and the window they would raise was hidden by
+                // the close button. Without this the icon is inert. macOS
+                // only: nothing else has a dock to click.
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { .. } => show_window(_app),
+                _ => {}
             }
         });
 }
 
-/// Show and focus the window, or hide it if it already has focus.
+/// Raise the window: the one thing every path back to it wants.
+pub fn show_window(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+}
+
+/// Show and focus the window, or hide it if it already has focus. For the
+/// hotkey, where the window may be visible but buried under what has focus:
+/// summoning it is what was asked for, and a second press dismisses it.
 pub fn toggle_window(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
@@ -175,9 +194,21 @@ pub fn toggle_window(app: &tauri::AppHandle) {
     if visible && focused {
         let _ = window.hide();
     } else {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+        show_window(app);
+    }
+}
+
+/// The tray's toggle, on visibility alone. Clicking the menu bar deactivates
+/// the app first, so a focus test there reports "not focused" for a window
+/// that is plainly on screen and the window flashes instead of hiding.
+pub fn tray_toggle_window(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+    } else {
+        show_window(app);
     }
 }
 
@@ -188,8 +219,6 @@ pub fn open_at(app: &tauri::AppHandle, path: &str) {
         if let Ok(parsed) = url.parse() {
             let _ = window.navigate(parsed);
         }
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
     }
+    show_window(app);
 }
