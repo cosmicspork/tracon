@@ -43,8 +43,12 @@ to Deferred or Never.
 2. **Hub-side rollups.** The hub's replica can already index shared channels;
    nothing yet summarizes a day's work across nodes into one digest. The nightly
    batch is the natural place.
-3. **A signed desktop app.** The wrapper ships unsigned; macOS wants a right-click →
-   Open and Windows is not a target. Signing is distribution work, not code.
+3. **A signed desktop app, and then self-update.** The wrapper ships unsigned;
+   macOS wants a right-click → Open and Windows is not a target. Signing is
+   distribution work, not code. Self-update waits behind it: an unsigned app that
+   replaces itself is a worse experience than one you replace by hand, and the
+   bundle carries the node as a sidecar, so an updater has to move both or leave
+   the tray and the node at different versions.
 4. **Forge listing beyond the first page.** The repository browse reads one page
    (100 repositories, most recently active first). Enough until someone's forge is
    not; pagination is additive to the same endpoint.
@@ -79,8 +83,11 @@ Out of scope by decision, recorded so it is not rediscovered as a good idea.
 - **Anything written into project repos.** No `.claude/`, no `AGENTS.md`, no tracon
   files of any kind. Config is materialized into scratch directories at session
   start.
-- **A full editor.** Diff editing only. The moment a file tree, LSP wiring, and a
-  settings pane appear, this has become a second project.
+- **A full editor.** Diff editing only. The moment a file tree, LSP wiring, and
+  per-project editor preferences appear, this has become a second project.
+  Configuring the *node* — its boundary, harness, credentials, channels and
+  access — is not that, and belongs in the interface: an operator should never
+  need a shell to stand a node up.
 - **Business domain in tracon.** Clients, invoicing, and time billing stay
   elsewhere.
 
