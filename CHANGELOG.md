@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0](https://github.com/cosmicspork/tracon/compare/v0.6.0...v0.7.0) (2026-08-31)
+
+
+### ⚠ BREAKING CHANGES
+
+* CONTRACT_VERSION 2 -> 3. A node on this release drops frames from, and has its frames dropped by, any peer still on 0.6.0; the hub and every node must be upgraded together.
+
+### Features
+
+* anywhere operations — phone-first provisioning, forge repos, and mesh provider control ([#87](https://github.com/cosmicspork/tracon/issues/87)) ([72c28f3](https://github.com/cosmicspork/tracon/commit/72c28f37f1f8f2efa764151088e2783addabfaf6))
+
 ## [0.6.0](https://github.com/cosmicspork/tracon/compare/v0.5.0...v0.6.0) (2026-08-29)
 
 
