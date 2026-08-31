@@ -11,9 +11,13 @@ use tauri::{
     AppHandle,
 };
 
-use crate::{open_at, queue, toggle_window, State};
+use crate::{open_at, queue, tray_toggle_window, State};
 
 const TRAY_ID: &str = "tracon";
+/// The menu bar glyph, rendered from `icons/tray.svg`. A template icon is
+/// drawn from its alpha channel alone, so this is black on transparent —
+/// handing macOS the full-colour app icon paints a filled square instead.
+const TRAY_ICON: &[u8] = include_bytes!("../icons/tray-44.png");
 /// Beyond this the menu is a wall of text; the window is better for that.
 const MAX_LISTED: usize = 8;
 
@@ -23,7 +27,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         &[&MenuItem::with_id(app, "open", "Open", true, None::<&str>)?],
     )?;
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(app.default_window_icon().cloned().unwrap())
+        .icon(tauri::image::Image::from_bytes(TRAY_ICON)?)
         .icon_as_template(true)
         .tooltip("tracon")
         .menu(&menu)
@@ -33,7 +37,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             // the right click, where a menu belongs.
             if let TrayIconEvent::Click { button, .. } = event {
                 if button == tauri::tray::MouseButton::Left {
-                    toggle_window(tray.app_handle());
+                    tray_toggle_window(tray.app_handle());
                 }
             }
         })
@@ -169,7 +173,7 @@ fn truncate(s: &str) -> String {
 
 fn on_menu(app: &AppHandle, id: &str) {
     match id {
-        "open" => toggle_window(app),
+        "open" => crate::show_window(app),
         "quit" => app.exit(0),
         "noop" => {}
         other => {
