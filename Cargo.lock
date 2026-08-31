@@ -2962,7 +2962,7 @@ dependencies = [
 
 [[package]]
 name = "tracon"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3013,7 +3013,7 @@ dependencies = [
 
 [[package]]
 name = "tracon-hub"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "axum",
  "clap",
@@ -3039,7 +3039,7 @@ dependencies = [
 
 [[package]]
 name = "tracon-proto"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "base64",
  "chacha20poly1305",
@@ -3057,7 +3057,7 @@ dependencies = [
 
 [[package]]
 name = "tracon-sync"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "hex",
  "rusqlite",
