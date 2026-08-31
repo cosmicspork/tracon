@@ -18,9 +18,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod node;
+mod prefs;
 mod queue;
 mod tray;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::{Manager, WindowEvent};
@@ -45,10 +47,21 @@ pub struct State {
     pub node_error: Mutex<Option<String>>,
 }
 
+/// Set when the tray's Quit runs, so the ⌘Q preference does not veto the one
+/// control whose entire job is to end the app.
+static QUITTING: AtomicBool = AtomicBool::new(false);
+
+/// End the app for real, whatever ⌘Q is set to do.
+pub fn quit(app: &tauri::AppHandle) {
+    QUITTING.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
+
 fn main() {
     let state = Arc::new(State::default());
     let supervisor = Arc::new(node::Node::default());
     let stopper = supervisor.clone();
+    let preferences = Arc::new(prefs::Store::new());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -65,6 +78,7 @@ fn main() {
         )
         .manage(state.clone())
         .manage(supervisor.clone())
+        .manage(preferences.clone())
         .setup(move |app| {
             let handle = app.handle().clone();
             tray::install(&handle)?;
@@ -78,6 +92,7 @@ fn main() {
                 let handle = handle.clone();
                 let st = state.clone();
                 let node = supervisor.clone();
+                let launch_visible = preferences.get().open_window_at_launch;
                 tauri::async_runtime::spawn(async move {
                     let http = reqwest::Client::new();
                     let url = node_url();
@@ -87,6 +102,12 @@ fn main() {
                                 if let Ok(parsed) = url.parse() {
                                     let _ = window.navigate(parsed);
                                 }
+                            }
+                            // Only now: showing the window before the node
+                            // answers shows the failure page of a node that
+                            // is merely still starting.
+                            if launch_visible {
+                                show_window(&handle);
                             }
                             if let Some(why) = node.supervise(http, url).await {
                                 *st.node_error.lock().unwrap() = Some(why);
@@ -136,6 +157,8 @@ fn main() {
                 });
             }
 
+            set_dock_policy(&handle, false, preferences.get().hide_dock_when_closed);
+
             let watcher = handle.clone();
             let st = state.clone();
             tauri::async_runtime::spawn(async move {
@@ -150,6 +173,9 @@ fn main() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                let app = window.app_handle();
+                let hide_dock = app.state::<Arc<prefs::Store>>().get().hide_dock_when_closed;
+                set_dock_policy(app, false, hide_dock);
             }
         })
         .build(tauri::generate_context!())
@@ -160,6 +186,22 @@ fn main() {
             // purpose: the process must not go away while the node is still
             // tearing down its containers.
             match event {
+                // ⌘Q, or the dock's Quit. The tray's Quit sets QUITTING, so
+                // the one control that exists to end the app always does.
+                tauri::RunEvent::ExitRequested { ref api, .. } => {
+                    let quits = _app.state::<Arc<prefs::Store>>().get().cmd_q_quits;
+                    if !quits && !QUITTING.load(Ordering::SeqCst) {
+                        api.prevent_exit();
+                        if let Some(w) = _app.get_webview_window("main") {
+                            let _ = w.hide();
+                        }
+                        let hide_dock = _app
+                            .state::<Arc<prefs::Store>>()
+                            .get()
+                            .hide_dock_when_closed;
+                        set_dock_policy(_app, false, hide_dock);
+                    }
+                }
                 tauri::RunEvent::Exit => stopper.stop(),
                 // The dock icon and the app switcher both reactivate rather
                 // than launch, and the window they would raise was hidden by
@@ -177,9 +219,34 @@ pub fn show_window(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
+    // Before showing: a window raised while the app is an accessory cannot
+    // take focus, and arrives behind whatever the operator was looking at.
+    set_dock_policy(app, true, true);
     let _ = window.show();
     let _ = window.unminimize();
     let _ = window.set_focus();
+}
+
+/// Whether the app appears in the dock and the app switcher.
+///
+/// A tray app with no window has nothing to switch to, so it leaves both
+/// while the window is closed and comes back when there is something to
+/// show. The way back in is the menu bar icon or the hotkey, which is what
+/// the menu bar icon is for.
+#[allow(unused_variables)]
+pub fn set_dock_policy(app: &tauri::AppHandle, window_visible: bool, hide_when_closed: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let policy = if window_visible || !hide_when_closed {
+            ActivationPolicy::Regular
+        } else {
+            ActivationPolicy::Accessory
+        };
+        if let Err(e) = app.set_activation_policy(policy) {
+            eprintln!("tracon: could not set the activation policy: {e}");
+        }
+    }
 }
 
 /// Show and focus the window, or hide it if it already has focus. For the
