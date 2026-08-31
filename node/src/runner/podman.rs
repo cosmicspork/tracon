@@ -13,6 +13,8 @@ use crate::config::Config;
 /// Everything that puts a harness process inside the boundary.
 #[derive(Debug, Clone)]
 pub struct RunSpec {
+    /// The podman binary, resolved once from config/PATH/known locations.
+    pub podman_bin: String,
     pub image: String,
     pub network: String,
     pub gateway_host: String,
@@ -34,6 +36,7 @@ impl RunSpec {
     pub fn from_config(cfg: &Config, selinux: bool) -> Self {
         let layout = crate::adapter::layout(&cfg.harness.id);
         Self {
+            podman_bin: crate::boundary::podman::resolve_podman_env(cfg),
             image: cfg.boundary.harness_image.clone(),
             network: cfg.boundary.network.clone(),
             gateway_host: cfg.boundary.gateway_container.clone(),
@@ -144,7 +147,7 @@ impl Runner for PodmanRunner {
         };
         let args = self.spec.podman_args(&name, &cmd, false);
         tracing::debug!(?args, "podman run");
-        let child = Command::new("podman")
+        let child = Command::new(&self.spec.podman_bin)
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -165,7 +168,7 @@ impl Runner for PodmanRunner {
             std::process::id()
         );
         let args = self.spec.podman_args(&name, &cmd, false);
-        Command::new("podman")
+        Command::new(&self.spec.podman_bin)
             .args(&args)
             .output()
             .await
@@ -173,7 +176,7 @@ impl Runner for PodmanRunner {
     }
 
     async fn kill(&self, name: &str) -> Result<(), RunnerError> {
-        let _ = Command::new("podman")
+        let _ = Command::new(&self.spec.podman_bin)
             .args(["rm", "-f", "-i", name])
             .output()
             .await?;
