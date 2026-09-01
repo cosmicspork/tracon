@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/cosmicspork/tracon/compare/v0.9.1...v0.10.0) (2026-09-01)
+
+
+### Features
+
+* **wrapper:** add AppImage self-update ([#101](https://github.com/cosmicspork/tracon/issues/101)) ([6ea02d4](https://github.com/cosmicspork/tracon/commit/6ea02d4bf07493d721ddaadba6f1ed91c892e853))
+
 ## [0.9.1](https://github.com/cosmicspork/tracon/compare/v0.9.0...v0.9.1) (2026-09-01)
 
 
