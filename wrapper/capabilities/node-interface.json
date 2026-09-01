@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "node-interface",
+  "description": "Allows the loopback node interface to query and install AppImage updates.",
+  "windows": ["main"],
+  "platforms": ["linux"],
+  "local": false,
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*", "http://localhost:*/*"]
+  },
+  "permissions": [
+    "allow-desktop-update-status",
+    "allow-desktop-check-for-update",
+    "allow-desktop-install-update"
+  ]
+}

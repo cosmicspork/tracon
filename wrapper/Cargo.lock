@@ -4388,9 +4388,13 @@ version = "0.9.1"
 dependencies = [
  "dirs",
  "futures-util",
+ "libc",
+ "parking_lot",
  "reqwest 0.12.28",
+ "semver",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",
