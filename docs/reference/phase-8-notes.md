@@ -75,6 +75,16 @@ enforces the include. Two things worth knowing beyond that:
 - The wrapper's version was frozen at `0.1.0` because release-please only knew
   about the workspace `Cargo.toml`; it now bumps `wrapper/Cargo.toml` and
   `wrapper/tauri.conf.json` too, and the lockfile refresh covers the wrapper.
+- `Env::appimage` exists only on Linux. Reading it unguarded compiled fine on
+  the machine it was written on and broke the 0.10.0 macOS and Windows bundles;
+  nothing in CI built the wrapper on macOS until then. The macos job does now.
+- macOS self-update is unsigned and needs nothing from Apple, because
+  `com.apple.quarantine` is set by whatever *downloads* a file. A bundle the
+  app fetches itself carries none, so Gatekeeper never evaluates it — the
+  right-click → Open is a first-install cost only. What is not optional is the
+  ad-hoc signature every arm64 binary needs to execute at all: it covers the
+  bundle's contents, so an update swaps the whole `.app` by rename and never
+  edits one in place.
 
 ## Release assets, as of 0.6.0
 
@@ -84,4 +94,5 @@ enforces the include. Two things worth knowing beyond that:
 | `tracon-aarch64-apple-darwin` | Apple Silicon |
 | `checksums.txt` and one `.sha256` per binary | what `install.sh` verifies |
 | `tracon_<v>_amd64.AppImage`, `tracon_<v>_amd64.deb`, `tracon_<v>_aarch64.dmg` | the desktop app, node inside |
+| `tracon_<v>_aarch64.app.tar.gz` | what the macOS app self-updates with; the dmg is the first install |
 | `ghcr.io/cosmicspork/tracon-{hub,node,harness,harness-claude}:<v>` | images |

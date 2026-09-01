@@ -117,9 +117,15 @@ fn main() {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            let target = updater::Target::detect(&app.env());
+            if let Some(target) = target.clone() {
+                // Off the runtime: an update leaves a whole bundle behind, and
+                // removing it is the one thing the update itself cannot do.
+                std::thread::spawn(move || updater::sweep_stale(&target));
+            }
             let updater = Arc::new(updater::Updater::new(
                 &app.package_info().version.to_string(),
-                app.env().appimage.clone().map(std::path::PathBuf::from),
+                target,
             ));
             app.manage(updater.clone());
 

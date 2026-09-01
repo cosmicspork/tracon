@@ -71,15 +71,30 @@ jobs:
 
   # The node has a launchd path and a macOS worktree root; a release leg that
   # only compiles it for the first time on the day of the release would fail
-  # then. So it compiles and runs its unit tests on every change.
+  # then. So it compiles and runs its unit tests on every change. The wrapper
+  # is here for the same reason and learned it the hard way: its self-update
+  # reads a Linux-only field, and nothing compiled it on macOS until the
+  # release that failed.
   macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            wrapper
       - run: cargo build --release --bin tracon
       - run: cargo test -p tracon --lib
+      # The SPA is what the window loads; tauri-build wants it present.
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile && bun run build
+        working-directory: spa
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: wrapper
+      - run: cargo test
+        working-directory: wrapper
 
   # The desktop wrapper is its own workspace and needs webkit and gtk headers,
   # so it is built here rather than by the `node` job — which must keep working

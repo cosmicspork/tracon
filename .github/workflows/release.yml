@@ -190,7 +190,7 @@ jobs:
             bundles: appimage,deb
           - os: macos-latest
             target: aarch64-apple-darwin
-            bundles: dmg
+            bundles: app,dmg
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -225,13 +225,23 @@ jobs:
       - name: Bundle
         working-directory: wrapper
         run: bunx @tauri-apps/cli@2 build --bundles ${{ matrix.bundles }} --config '{"bundle":{"externalBin":["binaries/tracon"]}}'
+      # What the app updates itself with. The dmg is the first install — it
+      # is what a browser can hand a person — but a mounted image is a poor
+      # update unit, and the bundle inside it is what actually gets swapped.
+      - name: Archive the bundle for self-update
+        if: runner.os == 'macOS'
+        working-directory: wrapper/target/release/bundle/macos
+        run: |
+          version="${{ needs.release-please.outputs.tag }}"
+          tar --no-xattrs --no-mac-metadata \
+            -czf "tracon_${version#v}_aarch64.app.tar.gz" tracon.app
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -R wrapper/target/release/bundle
           gh release upload "${{ needs.release-please.outputs.tag }}" \
-            $(find wrapper/target/release/bundle -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.dmg' \)) --clobber
+            $(find wrapper/target/release/bundle -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.dmg' -o -name '*.app.tar.gz' \)) --clobber
 
   # One checksums.txt for install.sh, after every binary is attached.
   checksums:
