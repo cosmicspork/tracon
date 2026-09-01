@@ -11,7 +11,7 @@ use tauri::{
     AppHandle, Manager,
 };
 
-use crate::{open_at, prefs, queue, State};
+use crate::{open_at, prefs, queue, updater, State};
 
 const TRAY_ID: &str = "tracon";
 /// The menu bar glyph, rendered from `icons/tray.svg`. A template icon is
@@ -154,6 +154,29 @@ fn build_menu(
         None::<&str>,
     )?)?;
 
+    if let Some(status) = app
+        .try_state::<Arc<updater::Updater>>()
+        .map(|updater| updater.status())
+    {
+        match (status.state, status.available_version.as_deref()) {
+            ("available", Some(version)) => menu.append(&MenuItem::with_id(
+                app,
+                "update:install",
+                format!("Update to v{version} and restart"),
+                true,
+                None::<&str>,
+            )?)?,
+            ("downloading", Some(version)) => menu.append(&MenuItem::with_id(
+                app,
+                "update:install",
+                format!("Installing v{version}…"),
+                false,
+                None::<&str>,
+            )?)?,
+            _ => {}
+        }
+    }
+
     // Three checkboxes, in the tray, because this is the whole of the app's
     // own interface and they do not earn a window.
     let p = app.state::<Arc<prefs::Store>>().get();
@@ -221,6 +244,13 @@ fn on_menu(app: &AppHandle, id: &str) {
         "pref:launch" => set_pref(app, |p| p.open_window_at_launch = !p.open_window_at_launch),
         "pref:cmdq" => set_pref(app, |p| p.cmd_q_quits = !p.cmd_q_quits),
         "pref:dock" => set_pref(app, |p| p.hide_dock_when_closed = !p.hide_dock_when_closed),
+        "update:install" => {
+            let updater = app.state::<Arc<updater::Updater>>().inner().clone();
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                updater.install(&handle).await;
+            });
+        }
         other => {
             if let Some(path) = other.strip_prefix("open:") {
                 open_at(app, path);

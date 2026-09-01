@@ -43,12 +43,10 @@ to Deferred or Never.
 2. **Hub-side rollups.** The hub's replica can already index shared channels;
    nothing yet summarizes a day's work across nodes into one digest. The nightly
    batch is the natural place.
-3. **A signed desktop app, and then self-update.** The wrapper ships unsigned;
-   macOS wants a right-click → Open and Windows is not a target. Signing is
-   distribution work, not code. Self-update waits behind it: an unsigned app that
-   replaces itself is a worse experience than one you replace by hand, and the
-   bundle carries the node as a sidecar, so an updater has to move both or leave
-   the tray and the node at different versions.
+3. **A signed desktop app.** The wrapper ships unsigned; macOS wants a right-click
+   → Open and Windows is not a target. The Linux AppImage already self-updates from
+   GitHub Releases after matching GitHub's SHA-256 digest; package-managed `.deb` and
+   macOS installs deliberately do not. Signing remains distribution work, not code.
 4. **Forge listing beyond the first page.** The repository browse reads one page
    (100 repositories, most recently active first). Enough until someone's forge is
    not; pagination is additive to the same endpoint.

@@ -5,10 +5,18 @@
   // point the node at a harness and its limits, give it credentials, and
   // decide who may reach it. What rewrites node.toml or the trust root is
   // done at the node itself — shown here with the reason, never hidden.
+  import { onMount } from 'svelte'
   import { api } from '../lib/api'
+  import {
+    check as checkDesktopUpdate,
+    desktopUpdateAction,
+    install as installDesktopUpdate,
+    status as desktopUpdateStatus,
+  } from '../lib/desktop-update'
   import { remedy } from '../lib/refusal'
   import { changedSubset, hashToken, loginUrl, mintToken } from '../lib/settings'
   import { store } from '../lib/store.svelte'
+  import type { UpdateStatus } from '../lib/desktop-update'
   import type { BoundaryCheck, EnrollStatus, NodeConfig } from '../lib/types'
 
   const local = $derived(store.node?.loopback ?? false)
@@ -146,6 +154,63 @@
         }
       }, 2000)
     })
+  }
+
+  // The node interface normally lives at a loopback origin. Its remote Tauri
+  // capability is intentionally unavailable to an ordinary browser or a node
+  // reached elsewhere, so a null result means there is no desktop UI to show.
+  let desktopUpdate = $state<UpdateStatus | null>(null)
+  let desktopUpdateError = $state('')
+  const desktopAction = $derived(
+    desktopUpdate ? desktopUpdateAction(desktopUpdate) : null,
+  )
+
+  onMount(() => {
+    let disposed = false
+    let timer: ReturnType<typeof setInterval> | undefined
+    const readUpdate = async () => {
+      try {
+        const next = await desktopUpdateStatus()
+        if (disposed || !next) return
+        desktopUpdate = next
+        desktopUpdateError = ''
+        if (!['checking', 'downloading'].includes(next.state) && timer) {
+          clearInterval(timer)
+          timer = undefined
+        } else if (['checking', 'downloading'].includes(next.state) && !timer) {
+          timer = setInterval(() => void readUpdate(), 500)
+        }
+      } catch (e) {
+        if (!disposed) desktopUpdateError = e instanceof Error ? e.message : String(e)
+      }
+    }
+    void readUpdate()
+    return () => {
+      disposed = true
+      if (timer) clearInterval(timer)
+    }
+  })
+
+  async function runDesktopUpdate() {
+    if (!desktopUpdate || !desktopAction?.command) return
+    const prior = desktopUpdate
+    desktopUpdate =
+      desktopAction.command === 'check'
+        ? { ...prior, state: 'checking', available_version: undefined, message: undefined }
+        : { ...prior, state: 'downloading', message: undefined }
+    try {
+      desktopUpdate =
+        desktopAction.command === 'check'
+          ? await checkDesktopUpdate()
+          : await installDesktopUpdate()
+    } catch (e) {
+      desktopUpdate = {
+        ...prior,
+        state: 'failed',
+        available_version: undefined,
+        message: e instanceof Error ? e.message : String(e),
+      }
+    }
   }
 </script>
 
@@ -313,6 +378,41 @@
   {/if}
   <small>Running the node under the platform's supervisor stays a shell job: <code>tracon service install</code> has to outlive the node it manages.</small>
 </section>
+
+{#if desktopUpdate}
+  <section>
+    <div class="h5">Desktop app</div>
+    <small>
+      Running v{desktopUpdate.current_version} ·
+      {#if desktopUpdate.state === 'current'}
+        Up to date
+      {:else if desktopUpdate.state === 'available'}
+        v{desktopUpdate.available_version} is ready to install
+      {:else if desktopUpdate.state === 'failed'}
+        {desktopUpdate.message || desktopUpdateError}
+      {:else if desktopUpdate.state === 'unsupported'}
+        This install is managed by its package; self-update is available in the AppImage.
+      {:else if desktopUpdate.state === 'checking'}
+        Checking the latest release…
+      {:else if desktopUpdate.state === 'downloading'}
+        Downloading and verifying the AppImage…
+      {:else}
+        Check GitHub for a newer AppImage.
+      {/if}
+    </small>
+    {#if desktopAction}
+      <div class="acts">
+        <button
+          class="btn p"
+          onclick={runDesktopUpdate}
+          disabled={desktopAction.disabled}
+        >
+          {desktopAction.label}
+        </button>
+      </div>
+    {/if}
+  </section>
+{/if}
 
 <style>
   section {

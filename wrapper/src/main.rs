@@ -21,6 +21,7 @@ mod node;
 mod prefs;
 mod queue;
 mod tray;
+mod updater;
 
 use std::sync::{Arc, Mutex};
 
@@ -52,7 +53,33 @@ pub fn quit(app: &tauri::AppHandle) {
     app.exit(0);
 }
 
+#[tauri::command]
+fn desktop_update_status(
+    updater: tauri::State<'_, Arc<updater::Updater>>,
+) -> updater::UpdateStatus {
+    updater.status()
+}
+
+#[tauri::command]
+async fn desktop_check_for_update(
+    app: tauri::AppHandle,
+    updater: tauri::State<'_, Arc<updater::Updater>>,
+) -> Result<updater::UpdateStatus, String> {
+    Ok(updater.check(&app).await)
+}
+
+#[tauri::command]
+async fn desktop_install_update(
+    app: tauri::AppHandle,
+    updater: tauri::State<'_, Arc<updater::Updater>>,
+) -> Result<updater::UpdateStatus, String> {
+    Ok(updater.install(&app).await)
+}
+
 fn main() {
+    if updater::run_restart_helper() {
+        return;
+    }
     let state = Arc::new(State::default());
     let supervisor = Arc::new(node::Node::default());
     let stopper = supervisor.clone();
@@ -83,8 +110,19 @@ fn main() {
         .manage(state.clone())
         .manage(supervisor.clone())
         .manage(preferences.clone())
+        .invoke_handler(tauri::generate_handler![
+            desktop_update_status,
+            desktop_check_for_update,
+            desktop_install_update,
+        ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            let updater = Arc::new(updater::Updater::new(
+                &app.package_info().version.to_string(),
+                app.env().appimage.clone().map(std::path::PathBuf::from),
+            ));
+            app.manage(updater.clone());
+
             tray::install(&handle)?;
 
             // Start the node before anything tries to read from it, then point
@@ -174,6 +212,15 @@ fn main() {
             let st = state.clone();
             tauri::async_runtime::spawn(async move {
                 queue::watch(watcher, st).await;
+            });
+            let update_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let status = updater.check(&update_handle).await;
+                if status.state == "failed" {
+                    if let Some(message) = status.message {
+                        eprintln!("tracon: update check failed: {message}");
+                    }
+                }
             });
             Ok(())
         })
