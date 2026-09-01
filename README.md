@@ -60,10 +60,12 @@ the agent never held.
 
 The **desktop app** (same release page: `.AppImage`/`.deb` on Linux, `.dmg` on macOS)
 is a tray client that also runs the node for you — on a laptop it is the whole
-install. It is unsigned; macOS wants a right-click → Open the first time. The Linux
-AppImage checks GitHub Releases at launch and can download, verify GitHub's SHA-256
-digest, replace itself, and restart from Settings or the tray. `.deb` and macOS
-installs stay under their package manager's update path.
+install. It is unsigned; macOS wants a right-click → Open the first time, and only
+that first time. The AppImage and the macOS app check GitHub Releases at launch and
+can download, verify GitHub's SHA-256 digest, replace themselves, and restart from
+Settings or the tray — an update the app fetches itself is never quarantined, so
+macOS does not ask again. `.deb` installs stay under their package manager's update
+path.
 
 A node that fails `check-boundary` refuses to run harnesses and says which check
 failed. That refusal is the design working, not a bug to route around.

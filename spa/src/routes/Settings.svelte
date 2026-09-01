@@ -391,13 +391,13 @@
       {:else if desktopUpdate.state === 'failed'}
         {desktopUpdate.message || desktopUpdateError}
       {:else if desktopUpdate.state === 'unsupported'}
-        This install is managed by its package; self-update is available in the AppImage.
+        {desktopUpdate.message}
       {:else if desktopUpdate.state === 'checking'}
         Checking the latest release…
       {:else if desktopUpdate.state === 'downloading'}
-        Downloading and verifying the AppImage…
+        Downloading and verifying the update…
       {:else}
-        Check GitHub for a newer AppImage.
+        Check GitHub for a newer release.
       {/if}
     </small>
     {#if desktopAction}

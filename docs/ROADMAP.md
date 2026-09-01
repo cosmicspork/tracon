@@ -44,9 +44,12 @@ to Deferred or Never.
    nothing yet summarizes a day's work across nodes into one digest. The nightly
    batch is the natural place.
 3. **A signed desktop app.** The wrapper ships unsigned; macOS wants a right-click
-   → Open and Windows is not a target. The Linux AppImage already self-updates from
-   GitHub Releases after matching GitHub's SHA-256 digest; package-managed `.deb` and
-   macOS installs deliberately do not. Signing remains distribution work, not code.
+   → Open on the first install and Windows is not a target. The AppImage and the
+   macOS app already self-update from GitHub Releases after matching GitHub's
+   SHA-256 digest; package-managed `.deb` installs deliberately do not. Signing
+   remains distribution work, not code — what it would buy is provenance the
+   digest cannot give: today a release the repository can publish is a release
+   every install will take.
 4. **Forge listing beyond the first page.** The repository browse reads one page
    (100 repositories, most recently active first). Enough until someone's forge is
    not; pagination is additive to the same endpoint.
