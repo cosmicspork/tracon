@@ -38,6 +38,10 @@ const DIGEST_MISMATCH_MESSAGE: &str =
     "The download did not match GitHub; the current version was not changed.";
 const REPLACE_MESSAGE: &str =
     "Cannot replace this install; its containing directory must be writable.";
+// Only macOS swaps a bundle. The pieces it is made of stay compiled and
+// tested on every platform, so the one that cannot run them says so here
+// rather than by not having them.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const STAGED_MESSAGE: &str =
     "The downloaded app was not what the release describes; nothing was changed.";
 
@@ -110,6 +114,7 @@ fn detect_target(_env: &tauri::Env) -> Option<Target> {
 /// The `.app` an executable is running out of, if it is running out of one.
 /// A bundle renamed aside by an update has no `.app` ancestor, which is what
 /// keeps a stale process from sweeping the tree it is executing.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn app_root_from(exe: &Path) -> Option<PathBuf> {
     exe.ancestors()
         .find(|path| path.extension() == Some(OsStr::new("app")))
@@ -797,6 +802,7 @@ async fn unpack(archive: &Path, into: &Path) -> Result<(), String> {
 }
 
 /// The one `.app` an unpacked archive is expected to contain.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn staged_bundle_in(staging: &Path) -> Result<PathBuf, String> {
     let mut bundles = std::fs::read_dir(staging)
         .map_err(|_| STAGED_MESSAGE.to_string())?
@@ -811,6 +817,7 @@ fn staged_bundle_in(staging: &Path) -> Result<PathBuf, String> {
 
 /// What the archive contained has to be a runnable bundle of exactly the
 /// version the release advertised, checked before anything is moved.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn validate_staged_bundle(staged: &Path, expected: &Version) -> Result<(), String> {
     for executable in ["tracon-wrapper", "tracon"] {
         let path = staged.join("Contents/MacOS").join(executable);
@@ -831,6 +838,7 @@ fn validate_staged_bundle(staged: &Path, expected: &Version) -> Result<(), Strin
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn plist_short_version(plist: &str) -> Option<String> {
     let (_, rest) = plist.split_once("<key>CFBundleShortVersionString</key>")?;
     let (between, value) = rest.split_once("<string>")?;
@@ -845,6 +853,7 @@ fn plist_short_version(plist: &str) -> Option<String> {
 /// Two renames, both metadata operations on one volume. The window where no
 /// bundle is installed is between them; if the second fails the first is
 /// undone and the install is exactly as it was.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn swap_bundles(app_root: &Path, staged: &Path, old: &Path) -> Result<(), String> {
     std::fs::rename(app_root, old).map_err(|_| REPLACE_MESSAGE.to_string())?;
     if std::fs::rename(staged, app_root).is_err() {
