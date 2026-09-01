@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/cosmicspork/tracon/compare/v0.9.0...v0.9.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* **wrapper:** a menu-only tray icon, a ⌘Q that listens, and one instance ([#99](https://github.com/cosmicspork/tracon/issues/99)) ([79da7f6](https://github.com/cosmicspork/tracon/commit/79da7f6930d896ebf2ea53b3de91767059c6b875))
+
 ## [0.9.0](https://github.com/cosmicspork/tracon/compare/v0.8.0...v0.9.0) (2026-08-31)
 
 
