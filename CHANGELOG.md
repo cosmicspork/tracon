@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.0](https://github.com/cosmicspork/tracon/compare/v0.8.0...v0.9.0) (2026-08-31)
+
+
+### Features
+
+* **wrapper:** open the window at launch, and say what ⌘Q and the dock do ([#97](https://github.com/cosmicspork/tracon/issues/97)) ([34e6142](https://github.com/cosmicspork/tracon/commit/34e61427a2ba51fc928e328b0976aaa3361b6952))
+
+
+### Bug Fixes
+
+* **spa:** keep the rail's footer at the bottom of the rail ([#96](https://github.com/cosmicspork/tracon/issues/96)) ([3d0c047](https://github.com/cosmicspork/tracon/commit/3d0c047161fe30a69df79d26c48a460f5befa673))
+
 ## [0.8.0](https://github.com/cosmicspork/tracon/compare/v0.7.0...v0.8.0) (2026-08-31)
 
 
