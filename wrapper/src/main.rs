@@ -117,9 +117,15 @@ fn main() {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            // `Env::appimage` exists only on Linux; every other platform is
+            // the updater's unsupported case.
+            #[cfg(target_os = "linux")]
+            let appimage = app.env().appimage.clone().map(std::path::PathBuf::from);
+            #[cfg(not(target_os = "linux"))]
+            let appimage: Option<std::path::PathBuf> = None;
             let updater = Arc::new(updater::Updater::new(
                 &app.package_info().version.to_string(),
-                app.env().appimage.clone().map(std::path::PathBuf::from),
+                appimage,
             ));
             app.manage(updater.clone());
 
