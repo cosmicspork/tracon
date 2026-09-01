@@ -22,7 +22,6 @@ mod prefs;
 mod queue;
 mod tray;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::{Manager, WindowEvent};
@@ -47,13 +46,9 @@ pub struct State {
     pub node_error: Mutex<Option<String>>,
 }
 
-/// Set when the tray's Quit runs, so the ⌘Q preference does not veto the one
-/// control whose entire job is to end the app.
-static QUITTING: AtomicBool = AtomicBool::new(false);
-
-/// End the app for real, whatever ⌘Q is set to do.
+/// End the app, whatever ⌘Q is set to do. The tray's Quit and the menu's
+/// Quit both land here; only the latter consults the preference first.
 pub fn quit(app: &tauri::AppHandle) {
-    QUITTING.store(true, Ordering::SeqCst);
     app.exit(0);
 }
 
@@ -64,6 +59,15 @@ fn main() {
     let preferences = Arc::new(prefs::Store::new());
 
     tauri::Builder::default()
+        // First, before anything else can take a lock or a port: a second
+        // launch hands its argv to the first and exits. Without it, opening
+        // the app while it sits in the menu bar with no window starts a
+        // second one — two tray icons, two supervisors, one node, because
+        // the node at least knows to adopt the one already running.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // What the second launch meant: show me the window.
+            show_window(app);
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -159,6 +163,13 @@ fn main() {
 
             set_dock_policy(&handle, false, preferences.get().hide_dock_when_closed);
 
+            #[cfg(target_os = "macos")]
+            if let Err(e) = install_app_menu(&handle) {
+                // Without it ⌘Q is the system's and always quits; that is the
+                // old behaviour, not a reason to refuse to start.
+                eprintln!("tracon: could not install the application menu: {e}");
+            }
+
             let watcher = handle.clone();
             let st = state.clone();
             tauri::async_runtime::spawn(async move {
@@ -186,22 +197,6 @@ fn main() {
             // purpose: the process must not go away while the node is still
             // tearing down its containers.
             match event {
-                // ⌘Q, or the dock's Quit. The tray's Quit sets QUITTING, so
-                // the one control that exists to end the app always does.
-                tauri::RunEvent::ExitRequested { ref api, .. } => {
-                    let quits = _app.state::<Arc<prefs::Store>>().get().cmd_q_quits;
-                    if !quits && !QUITTING.load(Ordering::SeqCst) {
-                        api.prevent_exit();
-                        if let Some(w) = _app.get_webview_window("main") {
-                            let _ = w.hide();
-                        }
-                        let hide_dock = _app
-                            .state::<Arc<prefs::Store>>()
-                            .get()
-                            .hide_dock_when_closed;
-                        set_dock_policy(_app, false, hide_dock);
-                    }
-                }
                 tauri::RunEvent::Exit => stopper.stop(),
                 // The dock icon and the app switcher both reactivate rather
                 // than launch, and the window they would raise was hidden by
@@ -212,6 +207,89 @@ fn main() {
                 _ => {}
             }
         });
+}
+
+/// The macOS application menu, with our own Quit in it.
+///
+/// The predefined Quit sends `terminate:`, which ends the process before any
+/// Tauri event fires — `RunEvent::ExitRequested` is documented as not
+/// arriving on macOS at all (tauri-apps/tauri#9198), which is why preventing
+/// the exit there did nothing. A custom item carrying the same ⌘Q shortcut is
+/// an ordinary menu event, and an ordinary menu event can decide.
+///
+/// The rest of the menu is rebuilt as macOS expects it, because replacing the
+/// application submenu replaces all of it.
+#[cfg(target_os = "macos")]
+fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+    let quit = MenuItem::with_id(app, "app:quit", "Quit tracon", true, Some("CmdOrCtrl+Q"))?;
+    let app_menu = Submenu::with_items(
+        app,
+        "tracon",
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, Some(AboutMetadata::default()))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::show_all(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
+    // Without these two, copy and paste stop working in the webview: the
+    // shortcuts are menu items on macOS, not window behaviour.
+    let edit = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    let window = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::fullscreen(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, Some("Close Window"))?,
+        ],
+    )?;
+    let menu = Menu::with_items(app, &[&app_menu, &edit, &window])?;
+    app.set_menu(menu)?;
+    app.on_menu_event(|app, event| {
+        if event.id().as_ref() == "app:quit" {
+            on_cmd_q(app);
+        }
+    });
+    Ok(())
+}
+
+/// ⌘Q, or Quit from the application menu.
+#[cfg(target_os = "macos")]
+fn on_cmd_q(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if app.state::<Arc<prefs::Store>>().get().cmd_q_quits {
+        quit(app);
+        return;
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
+    let hide_dock = app.state::<Arc<prefs::Store>>().get().hide_dock_when_closed;
+    set_dock_policy(app, false, hide_dock);
 }
 
 /// Raise the window: the one thing every path back to it wants.
@@ -259,20 +337,6 @@ pub fn toggle_window(app: &tauri::AppHandle) {
     let focused = window.is_focused().unwrap_or(false);
     let visible = window.is_visible().unwrap_or(false);
     if visible && focused {
-        let _ = window.hide();
-    } else {
-        show_window(app);
-    }
-}
-
-/// The tray's toggle, on visibility alone. Clicking the menu bar deactivates
-/// the app first, so a focus test there reports "not focused" for a window
-/// that is plainly on screen and the window flashes instead of hiding.
-pub fn tray_toggle_window(app: &tauri::AppHandle) {
-    let Some(window) = app.get_webview_window("main") else {
-        return;
-    };
-    if window.is_visible().unwrap_or(false) {
         let _ = window.hide();
     } else {
         show_window(app);

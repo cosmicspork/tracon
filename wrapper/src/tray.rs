@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
-    tray::{TrayIcon, TrayIconBuilder, TrayIconEvent},
+    tray::{TrayIcon, TrayIconBuilder},
     AppHandle, Manager,
 };
 
-use crate::{open_at, prefs, queue, tray_toggle_window, State};
+use crate::{open_at, prefs, queue, State};
 
 const TRAY_ID: &str = "tracon";
 /// The menu bar glyph, rendered from `icons/tray.svg`. A template icon is
@@ -31,16 +31,12 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .icon_as_template(true)
         .tooltip("tracon")
         .menu(&menu)
-        .show_menu_on_left_click(false)
-        .on_tray_icon_event(|tray, event| {
-            // A left click is the fast path back to the window; the menu is on
-            // the right click, where a menu belongs.
-            if let TrayIconEvent::Click { button, .. } = event {
-                if button == tauri::tray::MouseButton::Left {
-                    tray_toggle_window(tray.app_handle());
-                }
-            }
-        })
+        // Either click opens the menu, and nothing else. A left click that
+        // toggled the window fought the app activation the click itself
+        // causes, which is what the flashing was; and a menu bar icon whose
+        // two buttons do different things is a menu bar icon you have to
+        // remember. "Open tracon" is in the menu.
+        .show_menu_on_left_click(true)
         .on_menu_event(|app, event| on_menu(app, event.id().as_ref()))
         .build(app)?;
     Ok(())
