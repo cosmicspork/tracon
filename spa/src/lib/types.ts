@@ -256,10 +256,23 @@ export interface PushDevice {
   mine: boolean
 }
 
+export interface PhaseBinding {
+  model?: string
+  budget_tokens?: number
+  requires_plan?: boolean
+}
+
+/** Free-form on the wire; these are the keys the node and the interface read. */
+export interface ChannelBindings {
+  phases?: Record<string, PhaseBinding>
+  ceiling_tokens_per_day?: number
+  [key: string]: unknown
+}
+
 export interface ChannelInfo {
   name: string
   nodes: string[]
-  bindings: Record<string, unknown>
+  bindings: ChannelBindings
   ceiling: CeilingInfo
 }
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   import RepoPicker from '../components/RepoPicker.svelte'
   import { api } from '../lib/api'
+  import { phaseDefaults } from '../lib/bindings'
   import { eligibleNodes } from '../lib/nodes'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
@@ -55,28 +56,27 @@
       .then((d) => (ready_items = d.items))
       .catch(() => (ready_items = []))
   })
-  // The last model used is the likely next one: preselect it when the chosen
-  // node offers it. The choice stays explicit — the field is still required,
-  // nothing is preselected on a node that never ran that model, and the
-  // server still refuses a session without one.
-  let preselected = false
+  // What the channel binds to this phase decides both fields; the last model
+  // used stands in when nothing is bound. The choice stays explicit — the
+  // field is still required and nothing is preselected on a node that never
+  // ran that model — but an operator who bound a model once is not asked again.
+  const bound = $derived(phaseDefaults(channelInfo?.bindings, phase))
+  let touched = $state(false)
   $effect(() => {
-    if (preselected || model !== '') return
+    if (touched) return
     const models = node?.models ?? []
-    if (models.length === 0) return
+    if (bound.model && models.some((m) => m.value === bound.model)) {
+      model = bound.model
+      return
+    }
+    if (model !== '' || models.length === 0) return
     const last = [...store.sessions.values()]
       .sort((a, b) => b.created_ms - a.created_ms)
       .find((s) => models.some((m) => m.value === s.model))
-    if (last) {
-      model = last.model
-      preselected = true
-    }
+    if (last) model = last.model
   })
-  // The budget default is the channel's binding for the phase, then the node's.
   $effect(() => {
-    const phases = channelInfo?.bindings?.phases as Record<string, { budget_tokens?: number }> | undefined
-    const b = phases?.[phase]?.budget_tokens
-    if (b) budget = String(b)
+    if (bound.budget_tokens) budget = String(bound.budget_tokens)
   })
 
   async function start(e: SubmitEvent) {
@@ -159,7 +159,7 @@
   </div>
   <label>
     <span>Model <em class="req">required · no default</em></span>
-    <select bind:value={model}>
+    <select bind:value={model} onchange={() => (touched = true)}>
       <option value="" disabled selected>Choose a model</option>
       {#each node?.models ?? [] as m (m.value)}
         <option value={m.value}>{m.name}</option>

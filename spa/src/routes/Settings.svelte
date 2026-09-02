@@ -14,6 +14,7 @@
     status as desktopUpdateStatus,
   } from '../lib/desktop-update'
   import { remedy } from '../lib/refusal'
+  import { modelPatch, phaseDefaults } from '../lib/bindings'
   import { changedSubset, hashToken, loginUrl, mintToken } from '../lib/settings'
   import { store } from '../lib/store.svelte'
   import type { UpdateStatus } from '../lib/desktop-update'
@@ -107,6 +108,26 @@
       channelNote = res.created ? `created ${res.name}` : `${res.name} was already here`
       if (res.note) channelNote += ` · ${res.note}`
       channelName = ''
+    })
+  }
+
+  // --- phase models -----------------------------------------------------
+  // A channel decides which model plans and which one builds, so the operator
+  // names them once instead of at every start. The node reads the same keys.
+  const models = $derived.by(() => {
+    const seen = new Map<string, string>()
+    for (const n of store.nodes) for (const m of n.models) seen.set(m.value, m.name)
+    return [...seen].map(([value, name]) => ({ value, name }))
+  })
+  let savedChannel = $state('')
+  function bindModel(channel: string, phase: 'plan' | 'execute', model: string) {
+    return act('binding', async () => {
+      // A standalone node lists channels it has no row for; the create is
+      // idempotent and gives the bindings somewhere to live.
+      await api.createChannel(channel)
+      await api.putChannelBindings(channel, modelPatch(phase, model))
+      await store.refetch()
+      savedChannel = channel
     })
   }
 
@@ -323,7 +344,52 @@
   </div>
 </section>
 
-<!-- 4. Who may reach it, and which mesh it belongs to. -->
+<!-- 4. What each channel runs, per phase. -->
+<section>
+  <div class="h5">
+    Models by phase <b>a channel decides once; a session may still name its own</b>
+  </div>
+  {#if store.channels.length === 0}
+    <div class="empty">No channels yet. Create one below.</div>
+  {:else if models.length === 0}
+    <div class="empty">No node offers a model yet. <a href="/nodes">Connect a provider.</a></div>
+  {:else}
+    <div class="phases">
+      {#each store.channels as c (c.name)}
+        {@const plan = phaseDefaults(c.bindings, 'plan')}
+        {@const execute = phaseDefaults(c.bindings, 'execute')}
+        <div class="ch">
+          <span class="nm">{c.name}</span>
+          <label>
+            <span>Plan</span>
+            <select
+              value={plan.model ?? ''}
+              disabled={busy !== ''}
+              onchange={(e) => bindModel(c.name, 'plan', e.currentTarget.value)}
+            >
+              <option value="">none · the session names one</option>
+              {#each models as m (m.value)}<option value={m.value}>{m.name}</option>{/each}
+            </select>
+          </label>
+          <label>
+            <span>Execute</span>
+            <select
+              value={execute.model ?? ''}
+              disabled={busy !== ''}
+              onchange={(e) => bindModel(c.name, 'execute', e.currentTarget.value)}
+            >
+              <option value="">none · the session names one</option>
+              {#each models as m (m.value)}<option value={m.value}>{m.name}</option>{/each}
+            </select>
+          </label>
+          <small>{savedChannel === c.name ? 'saved · handed to every node on this channel' : ''}</small>
+        </div>
+      {/each}
+    </div>
+  {/if}
+</section>
+
+<!-- 5. Who may reach it, and which mesh it belongs to. -->
 <section>
   <div class="h5">Channels and access</div>
   <div class="grid">
@@ -537,5 +603,41 @@
   }
   .chip.r {
     margin-left: auto;
+  }
+  .phases {
+    display: grid;
+    gap: 6px;
+  }
+  .ch {
+    display: grid;
+    grid-template-columns: minmax(90px, 140px) minmax(0, 1fr) minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: end;
+    background: var(--s1);
+    border-radius: 4px;
+    padding: 10px 12px;
+  }
+  .ch .nm {
+    font: 500 13.5px var(--sans);
+    color: var(--ink);
+    align-self: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ch label {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+  }
+  .ch small {
+    align-self: center;
+    color: var(--ok);
+    font: 11.5px var(--mono);
+  }
+  @media (max-width: 700px) {
+    .ch {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 8px;
+    }
   }
 </style>
