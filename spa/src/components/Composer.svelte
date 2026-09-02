@@ -31,7 +31,8 @@
   let savedItem = $state<string | null>(null)
   let touched = $state(false)
 
-  const channelNames = $derived(store.channels.map((c) => c.name))
+  // An archived channel takes no new sessions, so it is not offered.
+  const channelNames = $derived(store.channels.filter((c) => !c.archived).map((c) => c.name))
   const memberships = $derived(Object.fromEntries(store.channels.map((c) => [c.name, c.nodes])))
   const eligible = $derived(eligibleNodes(store.nodes, memberships, channel))
   const node = $derived(

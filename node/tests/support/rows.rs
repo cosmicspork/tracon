@@ -60,5 +60,6 @@ pub fn session_row(id: &str, node: &str, channel: &str) -> SessionRow {
         started_mono_ms: None,
         ended_mono_ms: None,
         updated_ms: now_ms(),
+        archived_ms: None,
     }
 }

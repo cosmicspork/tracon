@@ -35,7 +35,11 @@
   }
   function connect() {
     return act(async () => {
-      const d = await api.nodeConnectProvider(nodeId, p.name, store.channels.map((c) => c.name))
+      const d = await api.nodeConnectProvider(
+        nodeId,
+        p.name,
+        store.channels.filter((c) => !c.archived).map((c) => c.name),
+      )
       justUrl = d.url
     })
   }

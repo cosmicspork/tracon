@@ -240,6 +240,9 @@ impl Store {
         Ok(rows)
     }
 
+    /// Every session, or every session in one state. Archived rows are
+    /// included: this is the whole history, and the screens that want the
+    /// short list ask [`Store::queue_sessions`] instead.
     pub fn list_sessions(&self, state: Option<&str>) -> Result<Vec<SessionRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(match state {
@@ -254,6 +257,71 @@ impl Store {
                 .query_map([], SessionRow::from_row)?
                 .collect::<std::result::Result<_, _>>()?,
         };
+        Ok(rows)
+    }
+
+    /// What the home shows: sessions still going, and the last few that ended
+    /// and have not been put away. Both bounds are the database's, so a node
+    /// with ten thousand ended sessions reads the same number of rows as a new
+    /// one. The terminal states are `SessionState::is_terminal`, spelled out
+    /// here because SQL cannot ask it.
+    pub fn queue_sessions(&self, ended_limit: usize) -> Result<(Vec<SessionRow>, Vec<SessionRow>)> {
+        const TERMINAL: &str = "('closed','killed_budget','failed')";
+        let conn = self.conn.lock().unwrap();
+        let mut running = conn.prepare(&format!(
+            "SELECT * FROM session WHERE state NOT IN {TERMINAL} ORDER BY created_ms DESC"
+        ))?;
+        let running: Vec<SessionRow> = running
+            .query_map([], SessionRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut ended = conn.prepare(&format!(
+            "SELECT * FROM session WHERE state IN {TERMINAL} AND archived_ms IS NULL \
+             ORDER BY created_ms DESC LIMIT ?1"
+        ))?;
+        let ended: Vec<SessionRow> = ended
+            .query_map([ended_limit as i64], SessionRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok((running, ended))
+    }
+
+    /// Put one session away, or bring it back. Returns the row as it now is,
+    /// so the caller can publish it.
+    pub fn set_session_archived(&self, id: &str, ms: Option<i64>) -> Result<Option<SessionRow>> {
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE session SET archived_ms=?2 WHERE id=?1",
+                rusqlite::params![id, ms],
+            )?;
+        }
+        self.get_session(id)
+    }
+
+    /// Put away everything that has ended. A running session is left alone:
+    /// archiving is for what is over.
+    pub fn archive_ended_sessions(&self, ms: i64) -> Result<Vec<SessionRow>> {
+        let ids: Vec<String> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT id FROM session WHERE state IN ('closed','killed_budget','failed') \
+                 AND archived_ms IS NULL",
+            )?;
+            let ids = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            conn.execute(
+                "UPDATE session SET archived_ms=?1 WHERE state IN ('closed','killed_budget','failed') \
+                 AND archived_ms IS NULL",
+                [ms],
+            )?;
+            ids
+        };
+        let mut rows = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(r) = self.get_session(&id)? {
+                rows.push(r);
+            }
+        }
         Ok(rows)
     }
 
@@ -1270,6 +1338,11 @@ mod records {
         pub started_mono_ms: Option<i64>,
         pub ended_mono_ms: Option<i64>,
         pub updated_ms: i64,
+        /// When the operator put this session away. Presentation only: the
+        /// state and the phase are untouched, and nothing about the session's
+        /// history changes. NULL means it is still on the home.
+        #[serde(default)]
+        pub archived_ms: Option<i64>,
     }
 
     fn default_phase() -> String {
@@ -1310,6 +1383,7 @@ mod records {
                 started_mono_ms: r.get("started_mono_ms")?,
                 ended_mono_ms: r.get("ended_mono_ms")?,
                 updated_ms: r.get("updated_ms")?,
+                archived_ms: r.get("archived_ms")?,
             })
         }
     }
@@ -2089,6 +2163,7 @@ mod tests {
                 started_mono_ms: Some(0),
                 ended_mono_ms: None,
                 updated_ms: now_ms(),
+                archived_ms: None,
             })
             .unwrap();
     }

@@ -16,7 +16,7 @@
   let busy = $state(false)
   let showClosed = $state(false)
 
-  const channels = $derived(store.channels.map((c) => c.name))
+  const channels = $derived(store.channels.filter((c) => !c.archived).map((c) => c.name))
   $effect(() => {
     if (!channel && channels.length) channel = channels.includes('personal') ? 'personal' : channels[0]
   })
