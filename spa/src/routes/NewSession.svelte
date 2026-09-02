@@ -8,7 +8,9 @@
   import { formatTokens } from '../lib/format'
   import { short } from '../lib/work'
 
-  let channel = $state('personal')
+  // The node names its channels; a node that never had `personal` must not be
+  // asked for work on it.
+  let channel = $state('')
   let repo = $state('')
   let branch = $state('')
   const params = new URLSearchParams(location.search)
@@ -40,6 +42,11 @@
     !blocked && !atCeiling && !needsPlan && repo.trim() !== '' && workItem.trim() !== '' && model !== '' && !busy,
   )
 
+  $effect(() => {
+    if (!channel && channelNames.length) {
+      channel = channelNames.includes('personal') ? 'personal' : channelNames[0]
+    }
+  })
   $effect(() => {
     void store.workVersion
     if (!channel) return

@@ -3,6 +3,7 @@
   import PermissionCard from '../components/PermissionCard.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
+  import { humanizeError } from '../lib/errors'
   import { formatAge, formatBudget, formatTokens } from '../lib/format'
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
   import { isTerminal } from '../lib/types'
@@ -162,7 +163,7 @@
       >
     </div>
   {:else if session.state === 'failed'}
-    <div class="banner crit">failed <b>· {session.last_error ?? 'harness error'}</b></div>
+    <div class="banner crit">failed <b>· {humanizeError(session.last_error) ?? 'the harness stopped without saying why'}</b></div>
   {:else if session.state === 'waiting_on_check'}
     <div class="banner dim">running <code>{checkCommand ?? 'checks'}</code> <b>· {checkElapsed} · input disabled until it finishes</b></div>
   {:else if session.end_reason === 'item_close'}
