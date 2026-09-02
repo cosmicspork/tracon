@@ -275,6 +275,14 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE node ADD COLUMN providers_json TEXT;
     "#,
+    // 13: when a session was put away. Ended sessions accumulate forever and
+    // the home is not their museum; archiving hides one from what landed
+    // recently without touching its state, which metrics and the phase
+    // machinery both key on. NULL is "still on the home".
+    r#"
+    ALTER TABLE session ADD COLUMN archived_ms INTEGER;
+    CREATE INDEX session_archived ON session(archived_ms, created_ms);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

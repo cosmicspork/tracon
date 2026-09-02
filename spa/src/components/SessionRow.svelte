@@ -6,7 +6,10 @@
   import { store } from '../lib/store.svelte'
   import type { Session } from '../lib/types'
 
-  let { session }: { session: Session } = $props()
+  let {
+    session,
+    onarchive = null,
+  }: { session: Session; onarchive?: ((s: Session) => void) | null } = $props()
 
   const failure = $derived(humanizeError(session.last_error))
 
@@ -51,6 +54,7 @@
   const when = $derived(new Date(session.updated_ms).toLocaleString())
 </script>
 
+<div class="line">
 <a class="row {tone}" class:stale href="/sessions/{session.id}">
   <span class="bar"></span>
   <span class="chip" class:self={owner?.is_self} class:off={stale}>{chipLabel(store.nodes, session.node_id)}</span>
@@ -70,8 +74,41 @@
   </span>
   <span class="mono">{formatBudget(session.tokens_used, session.budget_tokens)}</span>
 </a>
+{#if onarchive}
+  <button
+    class="arch"
+    type="button"
+    title={session.archived_ms ? 'Put this session back on the home' : 'Put this session away'}
+    onclick={() => onarchive(session)}>{session.archived_ms ? 'unarchive' : 'archive'}</button
+  >
+{/if}
+</div>
 
 <style>
+  .line {
+    display: flex;
+    align-items: stretch;
+    gap: 4px;
+    min-width: 0;
+  }
+  .line > a {
+    flex: 1;
+    min-width: 0;
+  }
+  .arch {
+    flex: none;
+    background: var(--s1);
+    border: 0;
+    border-radius: 4px;
+    color: var(--dim);
+    font: 12.5px var(--sans);
+    padding: 0 12px;
+    cursor: pointer;
+  }
+  .arch:hover {
+    color: var(--ink);
+    background: var(--s2);
+  }
   .row {
     display: grid;
     grid-template-columns: 3px 84px 68px minmax(0, 1fr) 84px;

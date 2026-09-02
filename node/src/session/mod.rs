@@ -89,6 +89,8 @@ pub enum SessionError {
     NotFound,
     #[error("channel {0} is not one this node holds keys for; create or enroll it first")]
     UnknownChannel(String),
+    #[error("channel {0} is archived: bring it back to start work on it again")]
+    ChannelArchived(String),
     #[error("a work item is required: pick one from the ready list")]
     WorkItemRequired,
     #[error("work item is not ready: {0}")]
@@ -337,6 +339,10 @@ impl Manager {
             return Ok(row);
         }
         let bindings = self.bindings(&spec.channel);
+        // An archived channel keeps everything it has and takes nothing new.
+        if !bindings["archived"].is_null() {
+            return Err(SessionError::ChannelArchived(spec.channel.clone()));
+        }
         let phase_bindings = &bindings["phases"][spec.phase.as_str()];
         // A channel binds a model to each phase — plan reads and thinks,
         // execute builds — so the operator names one once rather than at every
@@ -496,6 +502,7 @@ impl Manager {
             started_mono_ms: Some(0),
             ended_mono_ms: None,
             updated_ms: now_ms(),
+            archived_ms: None,
         };
         self.store.insert_session(&row)?;
         self.bus.publish(Frame::Session(Box::new(row.clone())));

@@ -120,6 +120,14 @@
     return [...seen].map(([value, name]) => ({ value, name }))
   })
   let savedChannel = $state('')
+  const open_channels = $derived(store.channels.filter((c) => !c.archived))
+  const archived_channels = $derived(store.channels.filter((c) => c.archived))
+  function archiveChannel(name: string, away: boolean) {
+    return act('channel-archive', async () => {
+      await (away ? api.archiveChannel(name) : api.unarchiveChannel(name))
+      await store.refetch()
+    })
+  }
   function bindModel(channel: string, phase: 'plan' | 'execute', model: string) {
     return act('binding', async () => {
       // A standalone node lists channels it has no row for; the create is
@@ -344,10 +352,10 @@
   </div>
 </section>
 
-<!-- 4. What each channel runs, per phase. -->
+<!-- 4. The channels, what each runs, and which are still in use. -->
 <section>
   <div class="h5">
-    Models by phase <b>a channel decides once; a session may still name its own</b>
+    Channels <b>which model each phase runs, and what is still in use</b>
   </div>
   {#if store.channels.length === 0}
     <div class="empty">No channels yet. Create one below.</div>
@@ -355,37 +363,53 @@
     <div class="empty">No node offers a model yet. <a href="/nodes">Connect a provider.</a></div>
   {:else}
     <div class="phases">
-      {#each store.channels as c (c.name)}
+      {#each open_channels as c (c.name)}
         {@const plan = phaseDefaults(c.bindings, 'plan')}
         {@const execute = phaseDefaults(c.bindings, 'execute')}
         <div class="ch">
           <span class="nm">{c.name}</span>
-          <label>
-            <span>Plan</span>
-            <select
-              value={plan.model ?? ''}
-              disabled={busy !== ''}
-              onchange={(e) => bindModel(c.name, 'plan', e.currentTarget.value)}
-            >
-              <option value="">none · the session names one</option>
-              {#each models as m (m.value)}<option value={m.value}>{m.name}</option>{/each}
-            </select>
-          </label>
-          <label>
-            <span>Execute</span>
-            <select
-              value={execute.model ?? ''}
-              disabled={busy !== ''}
-              onchange={(e) => bindModel(c.name, 'execute', e.currentTarget.value)}
-            >
-              <option value="">none · the session names one</option>
-              {#each models as m (m.value)}<option value={m.value}>{m.name}</option>{/each}
-            </select>
-          </label>
-          <small>{savedChannel === c.name ? 'saved · handed to every node on this channel' : ''}</small>
+          {#each [['plan', plan], ['execute', execute]] as const as [ph, b] (ph)}
+            <label>
+              <span>{ph === 'plan' ? 'Plan' : 'Execute'}</span>
+              <select
+                value={b.model ?? ''}
+                disabled={busy !== ''}
+                onchange={(e) => bindModel(c.name, ph, e.currentTarget.value)}
+              >
+                <option value="">none · the session names one</option>
+                {#each models as m (m.value)}<option value={m.value}>{m.name}</option>{/each}
+                <!-- A model bound when a provider was connected, and not on
+                     offer now. Shown as it is rather than as an empty select,
+                     which would read as no binding at all. -->
+                {#if b.model && !models.some((m) => m.value === b.model)}
+                  <option value={b.model}>{b.model} · not offered here now</option>
+                {/if}
+              </select>
+            </label>
+          {/each}
+          <div class="end">
+            {#if savedChannel === c.name}<small>saved · handed to every node</small>{/if}
+            <button class="lnk" disabled={busy !== ''} onclick={() => archiveChannel(c.name, true)}>archive</button>
+          </div>
         </div>
       {/each}
     </div>
+    {#if archived_channels.length}
+      <div class="h5 sub">
+        Archived <b>{archived_channels.length} · their work is kept; no new session starts on them</b>
+      </div>
+      <div class="phases">
+        {#each archived_channels as c (c.name)}
+          <div class="ch off">
+            <span class="nm">{c.name}</span>
+            <span class="note">archived · {c.nodes.length} node{c.nodes.length === 1 ? '' : 's'} still hold its key</span>
+            <div class="end">
+              <button class="lnk" disabled={busy !== ''} onclick={() => archiveChannel(c.name, false)}>bring back</button>
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
   {/if}
 </section>
 
@@ -629,10 +653,31 @@
     gap: 4px;
     min-width: 0;
   }
-  .ch small {
+  .ch .end {
     align-self: center;
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    justify-content: flex-end;
+  }
+  .ch .end small {
     color: var(--ok);
     font: 11.5px var(--mono);
+  }
+  .ch .end .lnk {
+    font-size: 12.5px;
+  }
+  .ch.off {
+    grid-template-columns: minmax(90px, 140px) minmax(0, 1fr) auto;
+    color: var(--dim);
+  }
+  .ch .note {
+    align-self: center;
+    font: 11.5px var(--mono);
+    color: var(--dim);
+  }
+  .h5.sub {
+    margin-top: 14px;
   }
   @media (max-width: 700px) {
     .ch {

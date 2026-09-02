@@ -13,7 +13,7 @@
   import { setupSteps } from '../lib/firstrun'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
-  import type { WorkView } from '../lib/types'
+  import type { Session, WorkView } from '../lib/types'
 
   const waiting = $derived(store.queue.waiting)
   const reviews = $derived(store.queue.reviews)
@@ -24,10 +24,27 @@
   const ready = $derived(
     setupSteps({
       anyProviderConnected: store.providers.some((p) => p.state === 'connected'),
-      anyChannel: store.channels.length > 0,
+      anyChannel: store.channels.some((c) => !c.archived),
       hubPaired: store.mesh?.hub.state === 'connected',
     }) === null,
   )
+
+  // Putting a session away leaves it whole; the stream carries the change
+  // back, so nothing here has to guess what the list looks like afterwards.
+  let busy = $state(false)
+  function archive(s: Session) {
+    void api.archiveSession(s.id).catch(() => store.refetch())
+  }
+  async function archiveAll() {
+    busy = true
+    try {
+      await api.archiveEnded()
+    } catch {
+      await store.refetch()
+    } finally {
+      busy = false
+    }
+  }
 
   // Addressed with an item: the work screen sending a phase here to start.
   const params = $derived(new URLSearchParams(router.search))
@@ -86,11 +103,14 @@
 {#if landed.length}
   <div class="h4">
     Landed recently <b>{landed.length}</b>
-    <a class="r" href="/sessions">all sessions</a>
+    <span class="r">
+      <button class="lnk" onclick={archiveAll} disabled={busy}>{busy ? 'Archiving…' : 'archive all'}</button>
+      <a href="/sessions">all sessions</a>
+    </span>
   </div>
   <div class="rows">
     {#each landed as s (s.id)}
-      <SessionRow session={s} />
+      <SessionRow session={s} onarchive={archive} />
     {/each}
   </div>
 {/if}
@@ -103,8 +123,14 @@
   }
   .h4 .r {
     margin-left: auto;
+    display: flex;
+    gap: 14px;
+    align-items: baseline;
     font: 12.5px var(--sans);
     letter-spacing: 0;
     text-transform: none;
+  }
+  .h4 .r .lnk {
+    font-size: 12.5px;
   }
 </style>

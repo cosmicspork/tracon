@@ -139,6 +139,13 @@ export const api = {
     budget_tokens?: number
     node_id?: string
   }) => call<{ work: WorkView; session: Session }>('POST', '/api/compose', c),
+  /** Put an ended session away, or bring it back. Nothing is deleted. */
+  archiveSession: (id: string) => call<Session>('POST', `/api/sessions/${id}/archive`),
+  unarchiveSession: (id: string) => call<Session>('POST', `/api/sessions/${id}/unarchive`),
+  archiveEnded: () => call<{ archived: number }>('POST', '/api/sessions/archive-ended'),
+  /** A channel keeps its work and takes no new sessions. */
+  archiveChannel: (name: string) => api.putChannelBindings(name, { archived: Date.now() }),
+  unarchiveChannel: (name: string) => api.putChannelBindings(name, { archived: null }),
   prompt: (id: string, text: string) => call<void>('POST', `/api/sessions/${id}/prompt`, { text }),
   kill: (id: string) => call<void>('POST', `/api/sessions/${id}/kill`),
   saveDraft: (id: string, text: string) => call<void>('PUT', `/api/sessions/${id}/draft`, { text }),

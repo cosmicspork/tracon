@@ -41,6 +41,7 @@ fn session_at(id: &str, repo: &str, created_ms: i64) -> SessionRow {
         started_mono_ms: None,
         ended_mono_ms: None,
         updated_ms: created_ms,
+        archived_ms: None,
     }
 }
 

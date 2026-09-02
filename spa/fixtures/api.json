@@ -6,17 +6,42 @@
     "state": "ready",
     "failed_check": null,
     "failed_detail": null,
-    "harness": { "id": "claude", "pinned": "2.5.0", "found": "2.5.0", "mismatch": false },
+    "harness": {
+      "id": "claude",
+      "pinned": "2.5.0",
+      "found": "2.5.0",
+      "mismatch": false
+    },
     "models": [
-      { "value": "sonnet", "name": "Sonnet" },
-      { "value": "opus", "name": "Opus" }
+      {
+        "value": "sonnet",
+        "name": "Sonnet"
+      },
+      {
+        "value": "opus",
+        "name": "Opus"
+      }
     ],
     "checked_at_ms": -420000,
     "is_self": true,
     "reachable": true,
     "last_seen_ms": null,
     "providers": [
-      { "name": "anthropic", "state": "connected", "kind": "oauth", "can_login": true, "url": null, "error": null, "identity": "op@example.com", "expires_ms": 5400000, "channels": ["personal", "work"], "updated_ms": -3600000 }
+      {
+        "name": "anthropic",
+        "state": "connected",
+        "kind": "oauth",
+        "can_login": true,
+        "url": null,
+        "error": null,
+        "identity": "op@example.com",
+        "expires_ms": 5400000,
+        "channels": [
+          "personal",
+          "work"
+        ],
+        "updated_ms": -3600000
+      }
     ]
   },
   "/api/nodes": [
@@ -26,18 +51,54 @@
       "state": "ready",
       "failed_check": null,
       "failed_detail": null,
-      "harness": { "id": "claude", "pinned": "2.5.0", "found": "2.5.0", "mismatch": false },
+      "harness": {
+        "id": "claude",
+        "pinned": "2.5.0",
+        "found": "2.5.0",
+        "mismatch": false
+      },
       "models": [
-        { "value": "sonnet", "name": "Sonnet" },
-        { "value": "opus", "name": "Opus" }
+        {
+          "value": "sonnet",
+          "name": "Sonnet"
+        },
+        {
+          "value": "opus",
+          "name": "Opus"
+        }
       ],
       "checked_at_ms": -420000,
       "is_self": true,
       "reachable": true,
       "last_seen_ms": null,
       "providers": [
-        { "name": "anthropic", "state": "connected", "kind": "oauth", "can_login": true, "url": null, "error": null, "identity": "op@example.com", "expires_ms": 5400000, "channels": ["personal", "work"], "updated_ms": -3600000 },
-        { "name": "openai", "state": "disconnected", "kind": null, "can_login": false, "url": null, "error": null, "identity": null, "expires_ms": null, "channels": [], "updated_ms": null }
+        {
+          "name": "anthropic",
+          "state": "connected",
+          "kind": "oauth",
+          "can_login": true,
+          "url": null,
+          "error": null,
+          "identity": "op@example.com",
+          "expires_ms": 5400000,
+          "channels": [
+            "personal",
+            "work"
+          ],
+          "updated_ms": -3600000
+        },
+        {
+          "name": "openai",
+          "state": "disconnected",
+          "kind": null,
+          "can_login": false,
+          "url": null,
+          "error": null,
+          "identity": null,
+          "expires_ms": null,
+          "channels": [],
+          "updated_ms": null
+        }
       ]
     },
     {
@@ -46,51 +107,166 @@
       "state": "ready",
       "failed_check": null,
       "failed_detail": null,
-      "harness": { "id": "claude", "pinned": "2.5.0", "found": "2.5.0", "mismatch": false },
+      "harness": {
+        "id": "claude",
+        "pinned": "2.5.0",
+        "found": "2.5.0",
+        "mismatch": false
+      },
       "models": [
-        { "value": "sonnet", "name": "Sonnet" },
-        { "value": "opus", "name": "Opus" }
+        {
+          "value": "sonnet",
+          "name": "Sonnet"
+        },
+        {
+          "value": "opus",
+          "name": "Opus"
+        }
       ],
       "checked_at_ms": -60000,
       "is_self": false,
       "reachable": true,
       "last_seen_ms": -22000,
       "providers": [
-        { "name": "anthropic", "state": "connected", "kind": "oauth", "can_login": true, "url": null, "error": null, "identity": "op@example.com", "expires_ms": 4100000, "channels": ["work"], "updated_ms": -86400000 }
+        {
+          "name": "anthropic",
+          "state": "connected",
+          "kind": "oauth",
+          "can_login": true,
+          "url": null,
+          "error": null,
+          "identity": "op@example.com",
+          "expires_ms": 4100000,
+          "channels": [
+            "work"
+          ],
+          "updated_ms": -86400000
+        }
       ]
     }
   ],
   "/api/mesh": {
-    "hub": { "state": "connected" },
+    "hub": {
+      "state": "connected"
+    },
     "hub_url": "https://hub.example.net",
     "node_id": "9f31c6a870d24b5e8c1f0a6d3e7b2905a4c8d1e6f0b3a7c2d5e8f1a4b7c0d3e6"
   },
   "/api/channels": [
     {
       "name": "personal",
-      "nodes": ["9f31c6a870d24b5e8c1f0a6d3e7b2905a4c8d1e6f0b3a7c2d5e8f1a4b7c0d3e6", "4b8e2d90c1f6a35720e9d4b8a1c5f3e7d0b6a2c8e4f1d7b3a9c5e0f2d8b4a6c1"],
-      "bindings": {},
-      "ceiling": { "usage_today": 412000, "ceiling": 4000000, "state": "under" }
+      "nodes": [
+        "9f31c6a870d24b5e8c1f0a6d3e7b2905a4c8d1e6f0b3a7c2d5e8f1a4b7c0d3e6",
+        "4b8e2d90c1f6a35720e9d4b8a1c5f3e7d0b6a2c8e4f1d7b3a9c5e0f2d8b4a6c1"
+      ],
+      "bindings": {
+        "phases": {
+          "plan": {
+            "model": "sonnet"
+          },
+          "execute": {
+            "model": "opus"
+          }
+        }
+      },
+      "ceiling": {
+        "usage_today": 412000,
+        "ceiling": 4000000,
+        "state": "under"
+      },
+      "archived": null
     },
     {
       "name": "work",
-      "nodes": ["4b8e2d90c1f6a35720e9d4b8a1c5f3e7d0b6a2c8e4f1d7b3a9c5e0f2d8b4a6c1"],
-      "bindings": { "phases": { "review": { "model": "opus" } } },
-      "ceiling": { "usage_today": 1660000, "ceiling": 2000000, "state": "near" }
+      "nodes": [
+        "4b8e2d90c1f6a35720e9d4b8a1c5f3e7d0b6a2c8e4f1d7b3a9c5e0f2d8b4a6c1"
+      ],
+      "bindings": {
+        "phases": {
+          "review": {
+            "model": "opus"
+          }
+        }
+      },
+      "ceiling": {
+        "usage_today": 1660000,
+        "ceiling": 2000000,
+        "state": "near"
+      },
+      "archived": null
     }
   ],
   "/api/providers": [
-    { "name": "anthropic", "state": "connected", "kind": "oauth", "can_login": true, "url": null, "error": null, "identity": "op@example.com", "expires_ms": 5400000, "channels": ["personal", "work"], "updated_ms": -3600000 },
-    { "name": "openai", "state": "disconnected", "kind": null, "can_login": false, "url": null, "error": null, "identity": null, "expires_ms": null, "channels": [], "updated_ms": null }
+    {
+      "name": "anthropic",
+      "state": "connected",
+      "kind": "oauth",
+      "can_login": true,
+      "url": null,
+      "error": null,
+      "identity": "op@example.com",
+      "expires_ms": 5400000,
+      "channels": [
+        "personal",
+        "work"
+      ],
+      "updated_ms": -3600000
+    },
+    {
+      "name": "openai",
+      "state": "disconnected",
+      "kind": null,
+      "can_login": false,
+      "url": null,
+      "error": null,
+      "identity": null,
+      "expires_ms": null,
+      "channels": [],
+      "updated_ms": null
+    }
   ],
   "/api/credentials": {
     "credentials": [
-      { "name": "gh", "kind": "env", "provider": null, "channels": ["personal"], "nodes": [], "identity": null, "expires_ms": null, "env_keys": ["GH_TOKEN"] },
-      { "name": "jira", "kind": "env", "provider": null, "channels": ["work"], "nodes": ["4b8e2d90c1f6a35720e9d4b8a1c5f3e7d0b6a2c8e4f1d7b3a9c5e0f2d8b4a6c1"], "identity": null, "expires_ms": null, "env_keys": ["JIRA_URL", "JIRA_EMAIL", "JIRA_TOKEN"] }
+      {
+        "name": "gh",
+        "kind": "env",
+        "provider": null,
+        "channels": [
+          "personal"
+        ],
+        "nodes": [],
+        "identity": null,
+        "expires_ms": null,
+        "env_keys": [
+          "GH_TOKEN"
+        ]
+      },
+      {
+        "name": "jira",
+        "kind": "env",
+        "provider": null,
+        "channels": [
+          "work"
+        ],
+        "nodes": [
+          "4b8e2d90c1f6a35720e9d4b8a1c5f3e7d0b6a2c8e4f1d7b3a9c5e0f2d8b4a6c1"
+        ],
+        "identity": null,
+        "expires_ms": null,
+        "env_keys": [
+          "JIRA_URL",
+          "JIRA_EMAIL",
+          "JIRA_TOKEN"
+        ]
+      }
     ]
   },
-  "/api/push/key": { "key": "BPExampleFixtureKeyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
-  "/api/push/subscriptions": { "devices": [] },
+  "/api/push/key": {
+    "key": "BPExampleFixtureKeyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  },
+  "/api/push/subscriptions": {
+    "devices": []
+  },
   "/api/queue": {
     "waiting": [
       {
@@ -162,7 +338,8 @@
         "turn_active": 0,
         "draft": null,
         "created_ms": -2700000,
-        "updated_ms": -140000
+        "updated_ms": -140000,
+        "archived_ms": null
       }
     ],
     "ended": [
@@ -191,7 +368,8 @@
         "turn_active": 0,
         "draft": null,
         "created_ms": -10800000,
-        "updated_ms": -1560000
+        "updated_ms": -1560000,
+        "archived_ms": null
       },
       {
         "id": "s-old",
@@ -218,14 +396,96 @@
         "turn_active": 0,
         "draft": null,
         "created_ms": -93600000,
-        "updated_ms": -90000000
+        "updated_ms": -90000000,
+        "archived_ms": null
       }
     ]
   },
   "/api/sessions": [
-    { "id": "s-run", "node_id": "9f31c6a870d24b5e8c1f0a6d3e7b2905a4c8d1e6f0b3a7c2d5e8f1a4b7c0d3e6", "channel": "personal", "work_item_id": "wi-2", "repo_path": "/home/op/src/orbit", "worktree_path": "/tmp/orbit-rate", "branch": "feat/rate-limits", "harness_id": "claude", "harness_version": "2.5.0", "model": "sonnet", "phase": "execute", "policy_version": 4, "review_id": null, "budget_tokens": 2000000, "tokens_used": 412000, "cost_usd": 2.87, "context_used": 84000, "context_size": 200000, "state": "waiting_on_you", "end_reason": null, "last_error": null, "turn_active": 0, "draft": null, "created_ms": -2700000, "updated_ms": -140000 },
-    { "id": "s-plan", "node_id": "4b8e2d90c1f6a35720e9d4b8a1c5f3e7d0b6a2c8e4f1d7b3a9c5e0f2d8b4a6c1", "channel": "work", "work_item_id": "wi-6", "repo_path": "/srv/repos/platform/orbit", "worktree_path": "/tmp/orbit-metrics", "branch": "feat/queue-metrics", "harness_id": "claude", "harness_version": "2.5.0", "model": "sonnet", "phase": "execute", "policy_version": 4, "review_id": "rev-1", "budget_tokens": 2000000, "tokens_used": 918000, "cost_usd": 6.4, "context_used": null, "context_size": null, "state": "ended", "end_reason": "phase_done", "last_error": null, "turn_active": 0, "draft": null, "created_ms": -10800000, "updated_ms": -1560000 },
-    { "id": "s-old", "node_id": "9f31c6a870d24b5e8c1f0a6d3e7b2905a4c8d1e6f0b3a7c2d5e8f1a4b7c0d3e6", "channel": "personal", "work_item_id": "wi-1", "repo_path": "/home/op/src/orbit", "worktree_path": "/tmp/orbit-auth", "branch": "feat/session-cookies", "harness_id": "claude", "harness_version": "2.5.0", "model": "sonnet", "phase": "execute", "policy_version": 4, "review_id": null, "budget_tokens": 2000000, "tokens_used": 1240000, "cost_usd": 8.9, "context_used": null, "context_size": null, "state": "ended", "end_reason": "item_close", "last_error": null, "turn_active": 0, "draft": null, "created_ms": -93600000, "updated_ms": -90000000 }
+    {
+      "id": "s-run",
+      "node_id": "9f31c6a870d24b5e8c1f0a6d3e7b2905a4c8d1e6f0b3a7c2d5e8f1a4b7c0d3e6",
+      "channel": "personal",
+      "work_item_id": "wi-2",
+      "repo_path": "/home/op/src/orbit",
+      "worktree_path": "/tmp/orbit-rate",
+      "branch": "feat/rate-limits",
+      "harness_id": "claude",
+      "harness_version": "2.5.0",
+      "model": "sonnet",
+      "phase": "execute",
+      "policy_version": 4,
+      "review_id": null,
+      "budget_tokens": 2000000,
+      "tokens_used": 412000,
+      "cost_usd": 2.87,
+      "context_used": 84000,
+      "context_size": 200000,
+      "state": "waiting_on_you",
+      "end_reason": null,
+      "last_error": null,
+      "turn_active": 0,
+      "draft": null,
+      "created_ms": -2700000,
+      "updated_ms": -140000,
+      "archived_ms": null
+    },
+    {
+      "id": "s-plan",
+      "node_id": "4b8e2d90c1f6a35720e9d4b8a1c5f3e7d0b6a2c8e4f1d7b3a9c5e0f2d8b4a6c1",
+      "channel": "work",
+      "work_item_id": "wi-6",
+      "repo_path": "/srv/repos/platform/orbit",
+      "worktree_path": "/tmp/orbit-metrics",
+      "branch": "feat/queue-metrics",
+      "harness_id": "claude",
+      "harness_version": "2.5.0",
+      "model": "sonnet",
+      "phase": "execute",
+      "policy_version": 4,
+      "review_id": "rev-1",
+      "budget_tokens": 2000000,
+      "tokens_used": 918000,
+      "cost_usd": 6.4,
+      "context_used": null,
+      "context_size": null,
+      "state": "ended",
+      "end_reason": "phase_done",
+      "last_error": null,
+      "turn_active": 0,
+      "draft": null,
+      "created_ms": -10800000,
+      "updated_ms": -1560000,
+      "archived_ms": null
+    },
+    {
+      "id": "s-old",
+      "node_id": "9f31c6a870d24b5e8c1f0a6d3e7b2905a4c8d1e6f0b3a7c2d5e8f1a4b7c0d3e6",
+      "channel": "personal",
+      "work_item_id": "wi-1",
+      "repo_path": "/home/op/src/orbit",
+      "worktree_path": "/tmp/orbit-auth",
+      "branch": "feat/session-cookies",
+      "harness_id": "claude",
+      "harness_version": "2.5.0",
+      "model": "sonnet",
+      "phase": "execute",
+      "policy_version": 4,
+      "review_id": null,
+      "budget_tokens": 2000000,
+      "tokens_used": 1240000,
+      "cost_usd": 8.9,
+      "context_used": null,
+      "context_size": null,
+      "state": "ended",
+      "end_reason": "item_close",
+      "last_error": null,
+      "turn_active": 0,
+      "draft": null,
+      "created_ms": -93600000,
+      "updated_ms": -90000000,
+      "archived_ms": null
+    }
   ],
   "/api/sessions/*": {
     "session": {
@@ -251,46 +511,318 @@
       "end_reason": null,
       "last_error": null,
       "turn_active": 0,
-      "draft": "Also cap the retry queue — the same window, not a new table.",
+      "draft": "Also cap the retry queue \u2014 the same window, not a new table.",
       "created_ms": -2700000,
       "updated_ms": -140000
     },
     "waiting": []
   },
   "/api/sessions/*/events": [
-    { "seq": 1, "node_id": "9f31c6", "session_id": "s-run", "kind": "session_started", "ref_id": null, "payload": { "model": "sonnet", "phase": "execute", "policy_version": 4 }, "at_ms": -2700000, "mono_ms": 0 },
-    { "seq": 2, "node_id": "9f31c6", "session_id": "s-run", "kind": "orientation", "ref_id": null, "payload": { "chars": 1832, "trimmed": false, "text": "You are executing work item wi-2 on channel personal. The plan is plan-rate-limits. Directives: worktree only, review before publish, no merge." }, "at_ms": -2700000, "mono_ms": 10 },
-    { "seq": 3, "node_id": "9f31c6", "session_id": "s-run", "kind": "worktree", "ref_id": null, "payload": { "path": "/tmp/orbit-rate", "branch": "feat/rate-limits", "base": "origin/main", "main_checkout_dirty": false }, "at_ms": -2700000, "mono_ms": 900 },
-    { "seq": 4, "node_id": "9f31c6", "session_id": "s-run", "kind": "user_prompt", "ref_id": null, "payload": { "text": "Add per-channel rate limits to the gateway. The plan is in plan-rate-limits; the review binding stays untouched." }, "at_ms": -2640000, "mono_ms": 60000 },
-    { "seq": 5, "node_id": "9f31c6", "session_id": "s-run", "kind": "thought", "ref_id": null, "payload": { "text": "The ceiling check in metrics.rs already counts tokens per channel per day. A limiter can reuse that window instead of keeping its own." }, "at_ms": -2620000, "mono_ms": 80000 },
-    { "seq": 6, "node_id": "9f31c6", "session_id": "s-run", "kind": "message", "ref_id": null, "payload": { "text": "Reading the gateway's request path first. The per-channel window in metrics.rs already has the counters this needs, so the limiter reuses it — no new table. Two files will change: the gateway's request path and the window's read side." }, "at_ms": -2600000, "mono_ms": 100000 },
-    { "seq": 7, "node_id": "9f31c6", "session_id": "s-run", "kind": "turn_end", "ref_id": null, "payload": { "usage": { "total_tokens": 84213 } }, "at_ms": -2500000, "mono_ms": 200000 },
-    { "seq": 8, "node_id": "9f31c6", "session_id": "s-run", "kind": "user_prompt", "ref_id": null, "payload": { "text": "Good. Keep the refusal message in the same voice as the ceiling's." }, "at_ms": -900000, "mono_ms": 1800000 },
-    { "seq": 9, "node_id": "9f31c6", "session_id": "s-run", "kind": "message", "ref_id": null, "payload": { "text": "Done — refusals now read like the ceiling's (\"work is at its daily ceiling: model calls resume tomorrow\"). Running the checks before submitting; I need permission for `just test`." }, "at_ms": -160000, "mono_ms": 2540000 },
-    { "seq": 10, "node_id": "9f31c6", "session_id": "s-run", "kind": "permission_request", "ref_id": "perm-1", "payload": { "title": "Bash: just test" }, "at_ms": -140000, "mono_ms": 2560000 }
+    {
+      "seq": 1,
+      "node_id": "9f31c6",
+      "session_id": "s-run",
+      "kind": "session_started",
+      "ref_id": null,
+      "payload": {
+        "model": "sonnet",
+        "phase": "execute",
+        "policy_version": 4
+      },
+      "at_ms": -2700000,
+      "mono_ms": 0
+    },
+    {
+      "seq": 2,
+      "node_id": "9f31c6",
+      "session_id": "s-run",
+      "kind": "orientation",
+      "ref_id": null,
+      "payload": {
+        "chars": 1832,
+        "trimmed": false,
+        "text": "You are executing work item wi-2 on channel personal. The plan is plan-rate-limits. Directives: worktree only, review before publish, no merge."
+      },
+      "at_ms": -2700000,
+      "mono_ms": 10
+    },
+    {
+      "seq": 3,
+      "node_id": "9f31c6",
+      "session_id": "s-run",
+      "kind": "worktree",
+      "ref_id": null,
+      "payload": {
+        "path": "/tmp/orbit-rate",
+        "branch": "feat/rate-limits",
+        "base": "origin/main",
+        "main_checkout_dirty": false
+      },
+      "at_ms": -2700000,
+      "mono_ms": 900
+    },
+    {
+      "seq": 4,
+      "node_id": "9f31c6",
+      "session_id": "s-run",
+      "kind": "user_prompt",
+      "ref_id": null,
+      "payload": {
+        "text": "Add per-channel rate limits to the gateway. The plan is in plan-rate-limits; the review binding stays untouched."
+      },
+      "at_ms": -2640000,
+      "mono_ms": 60000
+    },
+    {
+      "seq": 5,
+      "node_id": "9f31c6",
+      "session_id": "s-run",
+      "kind": "thought",
+      "ref_id": null,
+      "payload": {
+        "text": "The ceiling check in metrics.rs already counts tokens per channel per day. A limiter can reuse that window instead of keeping its own."
+      },
+      "at_ms": -2620000,
+      "mono_ms": 80000
+    },
+    {
+      "seq": 6,
+      "node_id": "9f31c6",
+      "session_id": "s-run",
+      "kind": "message",
+      "ref_id": null,
+      "payload": {
+        "text": "Reading the gateway's request path first. The per-channel window in metrics.rs already has the counters this needs, so the limiter reuses it \u2014 no new table. Two files will change: the gateway's request path and the window's read side."
+      },
+      "at_ms": -2600000,
+      "mono_ms": 100000
+    },
+    {
+      "seq": 7,
+      "node_id": "9f31c6",
+      "session_id": "s-run",
+      "kind": "turn_end",
+      "ref_id": null,
+      "payload": {
+        "usage": {
+          "total_tokens": 84213
+        }
+      },
+      "at_ms": -2500000,
+      "mono_ms": 200000
+    },
+    {
+      "seq": 8,
+      "node_id": "9f31c6",
+      "session_id": "s-run",
+      "kind": "user_prompt",
+      "ref_id": null,
+      "payload": {
+        "text": "Good. Keep the refusal message in the same voice as the ceiling's."
+      },
+      "at_ms": -900000,
+      "mono_ms": 1800000
+    },
+    {
+      "seq": 9,
+      "node_id": "9f31c6",
+      "session_id": "s-run",
+      "kind": "message",
+      "ref_id": null,
+      "payload": {
+        "text": "Done \u2014 refusals now read like the ceiling's (\"work is at its daily ceiling: model calls resume tomorrow\"). Running the checks before submitting; I need permission for `just test`."
+      },
+      "at_ms": -160000,
+      "mono_ms": 2540000
+    },
+    {
+      "seq": 10,
+      "node_id": "9f31c6",
+      "session_id": "s-run",
+      "kind": "permission_request",
+      "ref_id": "perm-1",
+      "payload": {
+        "title": "Bash: just test"
+      },
+      "at_ms": -140000,
+      "mono_ms": 2560000
+    }
   ],
   "/api/work": {
     "items": [
-      { "id": "wi-2", "channel": "personal", "project_id": "orbit", "title": "Add per-channel rate limits", "body": "The gateway refuses over-ceiling calls but nothing smooths bursts.", "state": "open", "priority": 2, "deps": [], "discovered_from": null, "discovered_by_session": null, "phase_plan_slug": "plan-rate-limits", "closed_by_session": null, "created_ms": -180000000, "updated_ms": -2700000, "readiness": { "state": "ready" }, "session_id": "s-run" },
-      { "id": "wi-3", "channel": "personal", "project_id": "orbit", "title": "Retry queue for failed pushes", "body": "A push that fails while the phone is offline should retry with backoff.", "state": "open", "priority": 1, "deps": [], "discovered_from": null, "discovered_by_session": null, "phase_plan_slug": "plan-retry-queue", "closed_by_session": null, "created_ms": -260000000, "updated_ms": -86400000, "readiness": { "state": "ready" }, "session_id": null },
-      { "id": "wi-5", "channel": "personal", "project_id": "orbit", "title": "Nightly export to object storage", "body": "", "state": "open", "priority": 0, "deps": [], "discovered_from": "wi-2", "discovered_by_session": "s-run", "phase_plan_slug": null, "closed_by_session": null, "created_ms": -2000000, "updated_ms": -2000000, "readiness": { "state": "ready" }, "session_id": null },
-      { "id": "wi-4", "channel": "personal", "project_id": "orbit", "title": "Alert when the retry queue stalls", "body": "", "state": "open", "priority": 0, "deps": ["wi-3"], "discovered_from": null, "discovered_by_session": null, "phase_plan_slug": null, "closed_by_session": null, "created_ms": -172800000, "updated_ms": -172800000, "readiness": { "state": "blocked", "by": [{ "kind": "open", "id": "wi-3" }] }, "session_id": null },
-      { "id": "wi-1", "channel": "personal", "project_id": "orbit", "title": "Session cookies over remember-me tokens", "body": "", "state": "closed", "priority": 1, "deps": [], "discovered_from": null, "discovered_by_session": null, "phase_plan_slug": "plan-session-cookies", "closed_by_session": "s-old", "created_ms": -350000000, "updated_ms": -90000000, "readiness": { "state": "closed" }, "session_id": null }
+      {
+        "id": "wi-2",
+        "channel": "personal",
+        "project_id": "orbit",
+        "title": "Add per-channel rate limits",
+        "body": "The gateway refuses over-ceiling calls but nothing smooths bursts.",
+        "state": "open",
+        "priority": 2,
+        "deps": [],
+        "discovered_from": null,
+        "discovered_by_session": null,
+        "phase_plan_slug": "plan-rate-limits",
+        "closed_by_session": null,
+        "created_ms": -180000000,
+        "updated_ms": -2700000,
+        "readiness": {
+          "state": "ready"
+        },
+        "session_id": "s-run"
+      },
+      {
+        "id": "wi-3",
+        "channel": "personal",
+        "project_id": "orbit",
+        "title": "Retry queue for failed pushes",
+        "body": "A push that fails while the phone is offline should retry with backoff.",
+        "state": "open",
+        "priority": 1,
+        "deps": [],
+        "discovered_from": null,
+        "discovered_by_session": null,
+        "phase_plan_slug": "plan-retry-queue",
+        "closed_by_session": null,
+        "created_ms": -260000000,
+        "updated_ms": -86400000,
+        "readiness": {
+          "state": "ready"
+        },
+        "session_id": null
+      },
+      {
+        "id": "wi-5",
+        "channel": "personal",
+        "project_id": "orbit",
+        "title": "Nightly export to object storage",
+        "body": "",
+        "state": "open",
+        "priority": 0,
+        "deps": [],
+        "discovered_from": "wi-2",
+        "discovered_by_session": "s-run",
+        "phase_plan_slug": null,
+        "closed_by_session": null,
+        "created_ms": -2000000,
+        "updated_ms": -2000000,
+        "readiness": {
+          "state": "ready"
+        },
+        "session_id": null
+      },
+      {
+        "id": "wi-4",
+        "channel": "personal",
+        "project_id": "orbit",
+        "title": "Alert when the retry queue stalls",
+        "body": "",
+        "state": "open",
+        "priority": 0,
+        "deps": [
+          "wi-3"
+        ],
+        "discovered_from": null,
+        "discovered_by_session": null,
+        "phase_plan_slug": null,
+        "closed_by_session": null,
+        "created_ms": -172800000,
+        "updated_ms": -172800000,
+        "readiness": {
+          "state": "blocked",
+          "by": [
+            {
+              "kind": "open",
+              "id": "wi-3"
+            }
+          ]
+        },
+        "session_id": null
+      },
+      {
+        "id": "wi-1",
+        "channel": "personal",
+        "project_id": "orbit",
+        "title": "Session cookies over remember-me tokens",
+        "body": "",
+        "state": "closed",
+        "priority": 1,
+        "deps": [],
+        "discovered_from": null,
+        "discovered_by_session": null,
+        "phase_plan_slug": "plan-session-cookies",
+        "closed_by_session": "s-old",
+        "created_ms": -350000000,
+        "updated_ms": -90000000,
+        "readiness": {
+          "state": "closed"
+        },
+        "session_id": null
+      }
     ]
   },
   "/api/work/ready": {
     "items": [
-      { "id": "wi-3", "channel": "personal", "project_id": "orbit", "title": "Retry queue for failed pushes", "body": "", "state": "open", "priority": 1, "deps": [], "discovered_from": null, "discovered_by_session": null, "phase_plan_slug": "plan-retry-queue", "closed_by_session": null, "created_ms": -260000000, "updated_ms": -86400000, "readiness": { "state": "ready" }, "session_id": null },
-      { "id": "wi-5", "channel": "personal", "project_id": "orbit", "title": "Nightly export to object storage", "body": "", "state": "open", "priority": 0, "deps": [], "discovered_from": "wi-2", "discovered_by_session": "s-run", "phase_plan_slug": null, "closed_by_session": null, "created_ms": -2000000, "updated_ms": -2000000, "readiness": { "state": "ready" }, "session_id": null }
+      {
+        "id": "wi-3",
+        "channel": "personal",
+        "project_id": "orbit",
+        "title": "Retry queue for failed pushes",
+        "body": "",
+        "state": "open",
+        "priority": 1,
+        "deps": [],
+        "discovered_from": null,
+        "discovered_by_session": null,
+        "phase_plan_slug": "plan-retry-queue",
+        "closed_by_session": null,
+        "created_ms": -260000000,
+        "updated_ms": -86400000,
+        "readiness": {
+          "state": "ready"
+        },
+        "session_id": null
+      },
+      {
+        "id": "wi-5",
+        "channel": "personal",
+        "project_id": "orbit",
+        "title": "Nightly export to object storage",
+        "body": "",
+        "state": "open",
+        "priority": 0,
+        "deps": [],
+        "discovered_from": "wi-2",
+        "discovered_by_session": "s-run",
+        "phase_plan_slug": null,
+        "closed_by_session": null,
+        "created_ms": -2000000,
+        "updated_ms": -2000000,
+        "readiness": {
+          "state": "ready"
+        },
+        "session_id": null
+      }
     ]
   },
   "/api/repos/recent": {
     "repos": [
-      { "repo_path": "/home/op/src/orbit", "last_used_ms": -2700000, "sessions": 14 },
-      { "repo_path": "/home/op/src/consulta", "last_used_ms": -259200000, "sessions": 3 }
+      {
+        "repo_path": "/home/op/src/orbit",
+        "last_used_ms": -2700000,
+        "sessions": 14
+      },
+      {
+        "repo_path": "/home/op/src/consulta",
+        "last_used_ms": -259200000,
+        "sessions": 3
+      }
     ],
     "managed": [
-      { "repo_path": "/var/lib/tracon/repos/github.com/op/infra", "full_name": "op/infra", "host": "github.com" }
+      {
+        "repo_path": "/var/lib/tracon/repos/github.com/op/infra",
+        "full_name": "op/infra",
+        "host": "github.com"
+      }
     ]
   },
   "/api/forge/repos": {
@@ -298,8 +830,24 @@
       {
         "forge": "github",
         "repos": [
-          { "host": "github.com", "owner": "op", "name": "orbit", "full_name": "op/orbit", "private": true, "default_branch": "main", "pushed_at": null },
-          { "host": "github.com", "owner": "op", "name": "infra", "full_name": "op/infra", "private": true, "default_branch": "main", "pushed_at": null }
+          {
+            "host": "github.com",
+            "owner": "op",
+            "name": "orbit",
+            "full_name": "op/orbit",
+            "private": true,
+            "default_branch": "main",
+            "pushed_at": null
+          },
+          {
+            "host": "github.com",
+            "owner": "op",
+            "name": "infra",
+            "full_name": "op/infra",
+            "private": true,
+            "default_branch": "main",
+            "pushed_at": null
+          }
         ]
       }
     ]

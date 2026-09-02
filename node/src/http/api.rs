@@ -70,6 +70,7 @@ impl From<SessionError> for ApiError {
             | SessionError::InSession(_)
             | SessionError::PlanRequired(_) => StatusCode::UNPROCESSABLE_ENTITY,
             SessionError::Ceiling(_) => StatusCode::TOO_MANY_REQUESTS,
+            SessionError::ChannelArchived(_) => StatusCode::CONFLICT,
             SessionError::NotFound => StatusCode::NOT_FOUND,
             SessionError::PeerUnreachable(_) => StatusCode::GATEWAY_TIMEOUT,
             SessionError::Remote(..) | SessionError::NoMesh => StatusCode::CONFLICT,
@@ -151,6 +152,9 @@ pub async fn list_channels(State(s): State<AppState>) -> ApiResult<Json<serde_js
         let ceiling = crate::metrics::ceiling(s.store(), &bindings, &c.name);
         out.push(json!({
             "name": c.name, "nodes": s.store().nodes_in_channel(&c.name)?,
+            // Lifted out of the bindings it lives in, so a screen deciding
+            // what to offer does not have to dig for it.
+            "archived": bindings.get("archived").cloned(),
             "bindings": bindings, "ceiling": ceiling,
         }));
     }
@@ -560,6 +564,45 @@ pub async fn kill(State(s): State<AppState>, Path(id): Path<String>) -> ApiResul
     Ok(StatusCode::OK)
 }
 
+/// Put an ended session away, or bring it back. Presentation only: nothing
+/// about the session changes but whether the home still lists it.
+pub async fn archive_session(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    set_archived(&s, &id, Some(crate::store::now_ms()))
+}
+
+pub async fn unarchive_session(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    set_archived(&s, &id, None)
+}
+
+fn set_archived(s: &AppState, id: &str, ms: Option<i64>) -> ApiResult<Json<serde_json::Value>> {
+    let row = s
+        .store()
+        .set_session_archived(id, ms)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such session".into()))?;
+    s.manager
+        .bus()
+        .publish_untapped(crate::stream::Frame::Session(Box::new(row.clone())));
+    Ok(Json(json!(row)))
+}
+
+/// Put away everything that has ended, in one gesture. Running sessions are
+/// left alone.
+pub async fn archive_ended(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let rows = s.store().archive_ended_sessions(crate::store::now_ms())?;
+    for row in &rows {
+        s.manager
+            .bus()
+            .publish_untapped(crate::stream::Frame::Session(Box::new(row.clone())));
+    }
+    Ok(Json(json!({ "archived": rows.len() })))
+}
+
 #[derive(Deserialize)]
 pub struct DraftBody {
     text: String,
@@ -923,18 +966,9 @@ pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Valu
     let waiting = s.store().open_permissions()?;
     // Permission requests before reviews: requests expire, reviews do not.
     let reviews = s.store().open_reviews()?;
-    let sessions = s.store().list_sessions(None)?;
-    let running: Vec<_> = sessions
-        .iter()
-        .filter(|s| !crate::session::state::SessionState::from_stored(&s.state).is_terminal())
-        .cloned()
-        .collect();
-    let ended: Vec<_> = sessions
-        .iter()
-        .filter(|s| crate::session::state::SessionState::from_stored(&s.state).is_terminal())
-        .take(20)
-        .cloned()
-        .collect();
+    // Bounded and filtered in SQL: the home shows what landed lately, not
+    // every session the node has ever run.
+    let (running, ended) = s.store().queue_sessions(20)?;
     let promotions = s.store().open_promotions()?;
     Ok(Json(json!({
         "waiting": waiting, "reviews": reviews, "promotions": promotions, "running": running, "ended": ended

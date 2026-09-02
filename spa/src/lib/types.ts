@@ -121,6 +121,8 @@ export interface Session {
   draft: string | null
   created_ms: number
   updated_ms: number
+  /** Put away: kept in full, just not listed on the home. */
+  archived_ms?: number | null
 }
 
 export interface Event {
@@ -274,6 +276,8 @@ export interface ChannelInfo {
   nodes: string[]
   bindings: ChannelBindings
   ceiling: CeilingInfo
+  /** Set when the channel is archived: it keeps its work and takes no new sessions. */
+  archived?: number | null
 }
 
 export interface ChannelMetrics {

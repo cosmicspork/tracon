@@ -67,6 +67,7 @@ fn session_row(id: &str, item: Option<&str>) -> SessionRow {
         started_mono_ms: Some(0),
         ended_mono_ms: None,
         updated_ms: now_ms(),
+        archived_ms: None,
     }
 }
 

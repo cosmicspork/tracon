@@ -6,6 +6,7 @@ import * as push from './push'
 import { router } from './router.svelte'
 import { api, ApiError } from './api'
 import { upsertNode } from './nodes'
+import { applySessionFrame } from './queue'
 import type {
   ChannelInfo,
   Event,
@@ -280,15 +281,7 @@ class Store {
   }
 
   private syncQueueSession(s: Session) {
-    const strip = (list: Session[]) => list.filter((x) => x.id !== s.id)
-    const terminal = ['closed', 'killed_budget', 'failed'].includes(s.state)
-    this.queue = {
-      waiting: this.queue.waiting,
-      reviews: this.queue.reviews,
-      promotions: this.queue.promotions,
-      running: terminal ? strip(this.queue.running) : upsert(this.queue.running, s),
-      ended: terminal ? upsert(this.queue.ended, s) : strip(this.queue.ended),
-    }
+    this.queue = applySessionFrame(this.queue, s)
   }
 
   waitingFor(sessionId: string): Permission[] {
@@ -298,14 +291,6 @@ class Store {
   reviewsFor(sessionId: string): Review[] {
     return this.queue.reviews.filter((r) => r.session_id === sessionId)
   }
-}
-
-function upsert(list: Session[], s: Session): Session[] {
-  const i = list.findIndex((x) => x.id === s.id)
-  if (i === -1) return [s, ...list]
-  const next = [...list]
-  next[i] = s
-  return next
 }
 
 export const store = new Store()
