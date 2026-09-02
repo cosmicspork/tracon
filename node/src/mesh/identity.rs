@@ -71,16 +71,32 @@ fn read_seed(path: &Path) -> Result<Option<[u8; SEED_LEN]>, IdentityError> {
     Ok(Some(seed))
 }
 
+/// Written through a temporary file in the same directory and renamed into
+/// place: a reader racing the write sees either no seed or a whole one, never
+/// the empty file a truncating write leaves behind for an instant.
 fn write_seed(path: &Path, seed: &[u8; SEED_LEN]) -> Result<(), IdentityError> {
-    fs::write(path, hex::encode(seed)).map_err(|source| IdentityError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    let io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| IdentityError::Io { path, source }
+    };
+    let tmp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&tmp, hex::encode(seed)).map_err(io(&tmp))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
     }
+    fs::rename(&tmp, path).map_err(|source| {
+        let _ = fs::remove_file(&tmp);
+        io(path)(source)
+    })?;
     Ok(())
 }
 
@@ -111,6 +127,28 @@ mod tests {
             load_or_generate_at(&path),
             Err(IdentityError::Malformed(_))
         ));
+        let _ = fs::remove_dir_all(&dir);
+    }
+    /// One state directory is shared by every test in a binary, and they run at
+    /// once, so two can reach the seed together. Whoever loses the race must
+    /// still read a whole seed, not the empty file a truncating write leaves
+    /// behind for an instant.
+    #[test]
+    fn a_racing_reader_never_sees_half_a_seed() {
+        let dir = std::env::temp_dir().join(format!("tracon-id-race-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SEED_FILE);
+        for _ in 0..300 {
+            let _ = fs::remove_file(&path);
+            std::thread::scope(|s| {
+                for _ in 0..8 {
+                    s.spawn(|| {
+                        load_or_generate_at(&path).unwrap();
+                    });
+                }
+            });
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }
