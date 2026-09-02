@@ -15,7 +15,7 @@ use serde_json::json;
 use crate::{
     adapter::HarnessAdapter,
     config::Config,
-    session::{Manager, NewSession, SessionError},
+    session::{Manager, NewSession, Phase, SessionError},
     store::Store,
 };
 
@@ -406,6 +406,92 @@ pub async fn create_session(
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
     let row = s.manager.create(spec, s.adapter.clone()).await?;
     Ok((StatusCode::CREATED, Json(json!(row))))
+}
+
+/// One prompt: the work item and the session that starts on it.
+#[derive(serde::Deserialize)]
+pub struct ComposeBody {
+    pub channel: String,
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub priority: i64,
+    pub repo_path: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default = "plan_phase")]
+    pub phase: Phase,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub budget_tokens: Option<i64>,
+    #[serde(default)]
+    pub node_id: Option<String>,
+}
+
+fn plan_phase() -> Phase {
+    Phase::Plan
+}
+
+/// Start work from a prompt: the item is written first, then the session on
+/// it. A session refused after the item exists keeps the item — the operator
+/// typed it, and it is the only copy — and the refusal carries the item's id
+/// so the interface can say where the words went.
+pub async fn compose(State(s): State<AppState>, Json(c): Json<ComposeBody>) -> Response {
+    match compose_inner(s, c).await {
+        Ok(r) => r,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
+    let item = crate::corpus::work::create(
+        s.store(),
+        s.manager.bus(),
+        &s.node_id,
+        crate::corpus::work::NewWork {
+            channel: c.channel.clone(),
+            project_id: None,
+            title: c.title,
+            body: c.body,
+            deps: vec![],
+            priority: c.priority,
+            discovered_from: None,
+            discovered_by_session: None,
+        },
+    )
+    .map_err(work_err)?;
+    let spec = NewSession {
+        channel: c.channel,
+        repo_path: c.repo_path,
+        branch: c.branch,
+        work_item_id: Some(item.id.clone()),
+        model: c.model,
+        budget_tokens: c.budget_tokens,
+        node_id: c.node_id,
+        phase: c.phase,
+        review_id: None,
+        base_sha: None,
+    };
+    match s.manager.create(spec, s.adapter.clone()).await {
+        Ok(row) => Ok((
+            StatusCode::CREATED,
+            Json(json!({ "work": item, "session": row })),
+        )
+            .into_response()),
+        Err(e) => {
+            let ApiError(code, message) = ApiError::from(e);
+            Ok((
+                code,
+                Json(json!({
+                    "error": { "code": code.as_u16(), "message": message },
+                    "work_item_id": item.id,
+                })),
+            )
+                .into_response())
+        }
+    }
 }
 
 pub async fn get_session(

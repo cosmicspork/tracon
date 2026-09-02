@@ -116,6 +116,8 @@ pub fn router(state: AppState) -> Router {
             "/api/sessions",
             get(api::list_sessions).post(api::create_session),
         )
+        // One prompt: the item and the session that starts on it.
+        .route("/api/compose", post(api::compose))
         .route("/api/sessions/{id}", get(api::get_session))
         .route("/api/sessions/{id}/events", get(api::session_events))
         .route("/api/sessions/{id}/prompt", post(api::prompt))

@@ -1,53 +1,48 @@
 <script lang="ts">
-  // The on-ramp: shown in place of the queue's empty state until the first
-  // session exists, then never again. Each step links where it is done.
-  import { api } from '../lib/api'
-  import { firstRunSteps } from '../lib/firstrun'
+  // The on-ramp, in the composer's place: shown whenever the node cannot start
+  // a session, and gone the moment it can. Each step links where it is done.
+  import { setupSteps } from '../lib/firstrun'
   import { store } from '../lib/store.svelte'
 
-  let anyReady = $state(false)
-  $effect(() => {
-    void store.workVersion
-    Promise.all(
-      store.channels.map((c) =>
-        api
-          .workReady(c.name)
-          .then((d) => d.items.length > 0)
-          .catch(() => false),
-      ),
-    ).then((flags) => (anyReady = flags.some(Boolean)))
-  })
-
   const steps = $derived(
-    firstRunSteps({
+    setupSteps({
       anyProviderConnected: store.providers.some((p) => p.state === 'connected'),
-      anyReadyWork: anyReady,
-      anySession: store.sessions.size > 0,
+      anyChannel: store.channels.length > 0,
+      hubPaired: store.mesh?.hub.state === 'connected',
     }),
   )
+  const left = $derived(steps?.filter((s) => !s.done && !s.optional).length ?? 0)
 </script>
 
 {#if steps}
-  <div class="firstrun">
-    <p>Nothing is waiting on you yet. Three steps stand between this node and its first session:</p>
+  <div class="setup">
+    <p>
+      {store.node?.state === 'refused'
+        ? 'The boundary is refusing, and it is the first thing to fix.'
+        : 'The boundary holds.'}
+      {left === 1 ? 'One step stands' : `${left} steps stand`} between this node and a session it can start:
+    </p>
     {#each steps as s, i (s.href)}
       <a href={s.href} class:done={s.done}>
         <i>{s.done ? '✓' : i + 1}</i>
-        <span>{s.title} <small>{s.detail}</small></span>
+        <span
+          >{s.title}{#if s.optional}<em>optional</em>{/if}
+          <small>{s.detail}</small></span
+        >
       </a>
     {/each}
   </div>
 {/if}
 
 <style>
-  .firstrun {
+  .setup {
     display: flex;
     flex-direction: column;
     gap: 4px;
     background: var(--s1);
-    border-radius: 4px;
+    border-radius: 6px;
     padding: 14px 16px;
-    max-width: 520px;
+    max-width: 560px;
   }
   p {
     margin: 0 0 6px;
@@ -80,6 +75,12 @@
     height: 20px;
     line-height: 18px;
     box-sizing: border-box;
+  }
+  a em {
+    font: 11px var(--mono);
+    font-style: normal;
+    color: var(--dim);
+    margin-left: 8px;
   }
   a.done {
     color: var(--dim);

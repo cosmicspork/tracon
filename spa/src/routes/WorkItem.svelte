@@ -158,9 +158,9 @@
       </div>
       <div class="actions">
         {#if ws === 'ready'}
-          <a class="btn" class:p={!item.phase_plan_slug} href="/new?item={item.id}&phase=plan">{item.phase_plan_slug ? 'Plan again' : 'Plan'}</a>
+          <a class="btn" class:p={!item.phase_plan_slug} href="/?item={item.id}&phase=plan">{item.phase_plan_slug ? 'Plan again' : 'Plan'}</a>
           {#if item.phase_plan_slug}
-            <a class="btn p" href="/new?item={item.id}&phase=execute">Execute</a>
+            <a class="btn p" href="/?item={item.id}&phase=execute">Execute</a>
           {:else}
             <span class="btn" aria-disabled="true" title="needs a plan">Execute · needs a plan</span>
           {/if}

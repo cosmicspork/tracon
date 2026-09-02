@@ -3,9 +3,15 @@
 
 class Router {
   path = $state(location.pathname)
+  /** The query, kept reactive: a screen addressed by `?item=` is navigated to
+      in-app as often as it is loaded cold. */
+  search = $state(location.search)
 
   start() {
-    window.addEventListener('popstate', () => (this.path = location.pathname))
+    window.addEventListener('popstate', () => {
+      this.path = location.pathname
+      this.search = location.search
+    })
     document.addEventListener('click', (e) => {
       // Leave modified clicks, downloads, and already-handled events to the
       // browser: shift/alt/meta/ctrl open new windows or save, and hijacking
@@ -22,6 +28,7 @@ class Router {
     if (path === this.path + location.search + location.hash) return
     history.pushState(null, '', path)
     this.path = location.pathname
+    this.search = location.search
   }
 }
 

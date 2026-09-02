@@ -38,7 +38,7 @@ to Deferred or Never.
    replicate; a session's worktree and harness do not, and never will — a "move" is
    ending the session here and starting the item's next phase there. What is missing
    is the affordance: a one-tap "continue on <node>" that ends the session cleanly
-   and prefills the new-session form on the chosen node, and a session header that
+   and prefills the composer on the chosen node, and a session header that
    says when the item's history spans nodes.
 2. **Hub-side rollups.** The hub's replica can already index shared channels;
    nothing yet summarizes a day's work across nodes into one digest. The nightly
