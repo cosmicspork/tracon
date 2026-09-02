@@ -154,11 +154,12 @@ impl Harness {
 async fn an_archived_session_leaves_the_home_and_can_come_back() {
     state::isolate();
     let h = Harness::new().await;
+    let t = now_ms();
     h.store
-        .insert_session(&session_row("s1", "closed", now_ms()))
+        .insert_session(&session_row("s1", "closed", t))
         .unwrap();
     h.store
-        .insert_session(&session_row("s2", "failed", now_ms() - 1))
+        .insert_session(&session_row("s2", "failed", t - 1))
         .unwrap();
     assert_eq!(h.ended_ids().await, vec!["s1", "s2"]);
 
@@ -210,9 +211,10 @@ async fn archiving_everything_ended_leaves_what_is_running() {
 async fn the_home_is_bounded_however_much_has_ended() {
     state::isolate();
     let h = Harness::new().await;
+    let t = now_ms();
     for i in 0..25 {
         h.store
-            .insert_session(&session_row(&format!("s{i:02}"), "closed", now_ms() - i))
+            .insert_session(&session_row(&format!("s{i:02}"), "closed", t - i))
             .unwrap();
     }
     let (_, q) = h.call("GET", "/api/queue").await;
