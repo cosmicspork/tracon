@@ -4384,7 +4384,7 @@ dependencies = [
 
 [[package]]
 name = "tracon-wrapper"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "dirs",
  "futures-util",
