@@ -1,10 +1,11 @@
 <script lang="ts">
   // Standing a node up, without a shell on it.
   //
-  // Four sections in the order an install meets them: prove the boundary,
-  // point the node at a harness and its limits, give it credentials, and
-  // decide who may reach it. What rewrites node.toml or the trust root is
-  // done at the node itself — shown here with the reason, never hidden.
+  // Sections in the order an install meets them: prove the boundary, point the
+  // node at a harness and its limits, give it credentials, say what each
+  // channel runs, decide who may reach it, and pair a hub. What rewrites
+  // node.toml or the trust root is done at the node itself — shown here with
+  // the reason, never hidden.
   import { onMount } from 'svelte'
   import { api } from '../lib/api'
   import {
@@ -154,6 +155,13 @@
   }
 
   // --- mesh -------------------------------------------------------------
+  const hubState = $derived(
+    store.mesh?.hub.state === 'connected'
+      ? 'paired'
+      : store.mesh?.hub.state === 'unreachable'
+        ? 'paired · unreachable right now'
+        : 'not paired',
+  )
   let hubUrl = $state('')
   let meshNote = $state('')
   function initMesh() {
@@ -193,6 +201,28 @@
   const desktopAction = $derived(
     desktopUpdate ? desktopUpdateAction(desktopUpdate) : null,
   )
+
+  // Arriving from the rail's "pair a hub", or the setup card's third step.
+  // The sections above this one fill in from their own fetches and change the
+  // page's height as they land, so scrolling once on mount aims at where the
+  // section was, not where it ends up. Keep aiming until it stops moving.
+  onMount(() => {
+    if (location.hash !== '#mesh') return
+    let last = -1
+    let tries = 0
+    const settle = () => {
+      const el = document.getElementById('mesh')
+      if (!el) return
+      const top = el.getBoundingClientRect().top + window.scrollY
+      if (top !== last) {
+        last = top
+        el.scrollIntoView({ block: 'start' })
+      }
+      if (++tries < 12) timer = setTimeout(settle, 100)
+    }
+    let timer = setTimeout(settle, 0)
+    return () => clearTimeout(timer)
+  })
 
   onMount(() => {
     let disposed = false
@@ -442,17 +472,31 @@
     </div>
   {/if}
 
+  <small>Running the node under the platform's supervisor stays a shell job: <code>tracon service install</code> has to outlive the node it manages.</small>
+</section>
+
+<!-- 6. The hub: how this node and your others reach each other. -->
+<section id="mesh">
+  <div class="h5">
+    Pair a hub <b>{hubState}</b>
+  </div>
+  <p class="lede">
+    A hub is a small always-on relay your nodes dial out to. It carries frames
+    they cannot read — everything is sealed under the channel's key — so a phone
+    anywhere can see and drive work on a laptop at home. A node runs perfectly
+    well without one; it is then reachable only where it is.
+  </p>
   {#if local}
     <div class="grid">
       <label>
-        <span>Hub (the first node)</span>
+        <span>Start a mesh here</span>
         <input bind:value={hubUrl} placeholder="https://hub.example.com" spellcheck="false" />
-        <small>{meshNote || 'Mints the mesh channel here and points this node at a hub.'}</small>
+        <small>{meshNote || 'Mints the mesh channel on this node and points it at your hub. Do this on the first node.'}</small>
       </label>
       <label>
-        <span>Join a mesh</span>
+        <span>Join one that exists</span>
         <input bind:value={invitation} placeholder="an invitation URL" spellcheck="false" />
-        <small>From <code>tracon mesh invite</code>, or the Nodes screen of an enrolled node.</small>
+        <small>From <code>tracon mesh invite</code>, or the Nodes screen of a node already on the mesh.</small>
       </label>
     </div>
     <div class="acts">
@@ -465,8 +509,9 @@
         {#if enroll.error}<li class="bad">{enroll.error}</li>{/if}
       </ul>
     {/if}
+  {:else}
+    <small>Which hub a node belongs to is decided at the node itself.</small>
   {/if}
-  <small>Running the node under the platform's supervisor stays a shell job: <code>tracon service install</code> has to outlive the node it manages.</small>
 </section>
 
 {#if desktopUpdate}
@@ -569,6 +614,12 @@
     gap: 8px;
     align-items: center;
     flex-wrap: wrap;
+  }
+  .lede {
+    margin: 0 0 4px;
+    color: var(--ink2);
+    font-size: 13.5px;
+    max-width: 64ch;
   }
   .why {
     margin: 0;

@@ -76,6 +76,8 @@
               : 'home',
   )
   const hubDown = $derived(store.mesh?.hub.state === 'unreachable')
+  /** No hub is a thing to do something about, so it links to doing it. */
+  const noHub = $derived(!store.mesh?.hub || store.mesh.hub.state === 'disabled')
   const hubLabel = $derived.by(() => {
     const hub = store.mesh?.hub
     if (!hub || hub.state === 'disabled') return 'no hub'
@@ -125,7 +127,10 @@
     </a>
     <div class="foot lbl" title="{store.node?.name ?? 'this node'} · {store.connected ? 'connected' : 'offline'} · {hubLabel}">
       <span>{store.node?.name ?? '…'}</span>
-      <span>{store.connected ? 'connected' : 'offline'} · {hubLabel}</span>
+      <span
+        >{store.connected ? 'connected' : 'offline'} ·
+        {#if noHub}<a href="/settings#mesh">pair a hub</a>{:else}{hubLabel}{/if}</span
+      >
     </div>
     <button class="collapse" type="button" onclick={toggleRail} title="Collapse">
       <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" /></svg>
@@ -224,6 +229,8 @@
      it grows; this must not. */
   .foot { padding: 8px 16px; font: 11.5px var(--mono); color: var(--dim); display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: none; }
   .foot span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .foot a { color: var(--acc); text-decoration: none; }
+  .foot a:hover { text-decoration: underline; }
   .rail button { color: var(--dim); }
   .rail button:hover { color: var(--ink); }
   .narrow .lbl { display: none; }
