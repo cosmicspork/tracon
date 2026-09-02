@@ -113,7 +113,7 @@ impl Harness {
 }
 
 #[tokio::test]
-async fn a_session_without_a_model_is_refused() {
+async fn a_session_without_a_model_or_a_binding_is_refused() {
     state::isolate();
     let h = Harness::new(1000).await;
     let (status, body) = h
@@ -127,7 +127,77 @@ async fn a_session_without_a_model_is_refused() {
     assert!(body["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("model is required"));
+        .contains("no model"));
+    // Omitting the field entirely reads the same as naming nothing.
+    let (status, _) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(json!({ "channel": "personal", "repo_path": "/nonexistent/repo" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// A channel binds a model per phase, so the operator names one once. The
+/// session gets past the model check on the binding alone; it is refused later
+/// for want of a work item, which is how we know the model resolved.
+#[tokio::test]
+async fn a_channel_binds_a_model_to_each_phase() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    h.store
+        .channel_put(
+            "personal",
+            b"k",
+            r#"{"phases":{"plan":{"model":"m/plan"},"execute":{"model":"m/build"}}}"#,
+        )
+        .unwrap();
+    let bus = Bus::new();
+    // A session holds its item, so each start below needs its own.
+    let mk = |title: &str| {
+        tracon::corpus::work::create(
+            &h.store,
+            &bus,
+            "n1",
+            tracon::corpus::work::NewWork {
+                channel: "personal".into(),
+                project_id: None,
+                title: title.into(),
+                body: String::new(),
+                deps: vec![],
+                priority: 0,
+                discovered_from: None,
+                discovered_by_session: None,
+            },
+        )
+        .unwrap()
+    };
+    let start = |item: String, model: Value| {
+        let h = &h;
+        async move {
+            h.call(
+                "POST",
+                "/api/sessions",
+                Some(json!({
+                    "channel": "personal",
+                    "repo_path": "/nonexistent/repo",
+                    "work_item_id": item,
+                    "phase": "plan",
+                    "model": model,
+                })),
+            )
+            .await
+        }
+    };
+    // Empty model: the phase's binding supplies it.
+    let (st, body) = start(mk("bound").id, json!("")).await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    assert_eq!(body["model"], "m/plan");
+    // An explicit model still wins over the binding.
+    let (st, body) = start(mk("named").id, json!("m/a")).await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    assert_eq!(body["model"], "m/a");
 }
 
 #[tokio::test]

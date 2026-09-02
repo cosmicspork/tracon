@@ -32,8 +32,10 @@ pub struct NewSession {
     pub branch: Option<String>,
     #[serde(default)]
     pub work_item_id: Option<String>,
-    /// Required, with no default: a session without an explicit model is a
-    /// validation failure rather than a silent choice.
+    /// Empty means "whatever this channel binds to the phase"
+    /// (`phases.<phase>.model`). A session with neither is a validation
+    /// failure rather than a silent choice.
+    #[serde(default)]
     pub model: String,
     #[serde(default)]
     pub budget_tokens: Option<i64>,
@@ -75,7 +77,7 @@ impl Phase {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
-    #[error("model is required")]
+    #[error("no model: name one, or bind phases.<phase>.model on the channel")]
     ModelRequired,
     #[error("budget must be greater than zero")]
     BadBudget,
@@ -309,12 +311,9 @@ impl Manager {
     /// that is still starting.
     pub async fn create(
         &self,
-        spec: NewSession,
+        mut spec: NewSession,
         adapter: Arc<dyn HarnessAdapter>,
     ) -> Result<SessionRow, SessionError> {
-        if spec.model.trim().is_empty() {
-            return Err(SessionError::ModelRequired);
-        }
         // Asked to run elsewhere: the owner validates and starts it; its row
         // arrives back both in the ack and, shortly, as a mirrored session.
         if let Some(node) = spec.node_id.as_deref().filter(|n| *n != self.node_id) {
@@ -339,6 +338,17 @@ impl Manager {
         }
         let bindings = self.bindings(&spec.channel);
         let phase_bindings = &bindings["phases"][spec.phase.as_str()];
+        // A channel binds a model to each phase — plan reads and thinks,
+        // execute builds — so the operator names one once rather than at every
+        // start. Resolved here rather than before the forward above, so a
+        // session bound for another node is answered by that node's own
+        // bindings, not by this one's possibly stale copy.
+        if spec.model.trim().is_empty() {
+            match phase_bindings["model"].as_str() {
+                Some(m) if !m.trim().is_empty() => spec.model = m.to_string(),
+                _ => return Err(SessionError::ModelRequired),
+            }
+        }
         let budget = spec
             .budget_tokens
             .or_else(|| phase_bindings["budget_tokens"].as_i64())
