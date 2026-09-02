@@ -5,6 +5,7 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatDuration } from '../lib/format'
+  import { store } from '../lib/store.svelte'
   import type { ProviderInfo } from '../lib/types'
 
   let { p, nodeId }: { p: ProviderInfo; nodeId: string } = $props()
@@ -34,7 +35,7 @@
   }
   function connect() {
     return act(async () => {
-      const d = await api.nodeConnectProvider(nodeId, p.name, ['personal'])
+      const d = await api.nodeConnectProvider(nodeId, p.name, store.channels.map((c) => c.name))
       justUrl = d.url
     })
   }

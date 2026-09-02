@@ -1,11 +1,14 @@
 <script lang="ts">
   import { clock } from '../lib/clock.svelte'
+  import { humanizeError } from '../lib/errors'
   import { formatAge, formatBudget, formatDuration } from '../lib/format'
   import { chipLabel, nodeById } from '../lib/nodes'
   import { store } from '../lib/store.svelte'
   import type { Session } from '../lib/types'
 
   let { session }: { session: Session } = $props()
+
+  const failure = $derived(humanizeError(session.last_error))
 
   const tone = $derived(
     session.state === 'waiting_on_you'
@@ -60,8 +63,8 @@
     <em>{kind}</em>
     {session.branch}
     <small
-      >{stale && owner?.last_seen_ms ? `last seen ${formatAge(owner.last_seen_ms, clock.now)} · ` : ''}{repo} · {session.phase} · {session.model.split('/').at(-1)} · {session.channel}{session.last_error
-        ? ` · ${session.last_error}`
+      >{stale && owner?.last_seen_ms ? `last seen ${formatAge(owner.last_seen_ms, clock.now)} · ` : ''}{repo} · {session.phase} · {session.model.split('/').at(-1)} · {session.channel}{failure
+        ? ` · ${failure}`
         : ''}</small
     >
   </span>

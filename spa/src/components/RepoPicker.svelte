@@ -5,6 +5,7 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
+  import { repoLabel } from '../lib/repo'
   import type { ForgeList, ManagedRepo, RecentRepo } from '../lib/types'
 
   let { value = $bindable(''), channel = '' }: { value?: string; channel?: string } = $props()
@@ -65,10 +66,6 @@
     }
   }
 
-  function basename(p: string): string {
-    const parts = p.split('/').filter(Boolean)
-    return parts[parts.length - 1] ?? p
-  }
 </script>
 
 {#if recents.length > 0 || managed.length > 0}
@@ -76,14 +73,14 @@
     {#each recents as r (r.repo_path)}
       <button type="button" class:on={value === r.repo_path} onclick={() => (value = r.repo_path)}>
         <i></i>
-        <span>{basename(r.repo_path)} <small>{r.repo_path}</small></span>
+        <span>{repoLabel(r.repo_path)} <small>{r.repo_path}</small></span>
         <small>{r.sessions} session{r.sessions === 1 ? '' : 's'} · {formatAge(r.last_used_ms, clock.now)}</small>
       </button>
     {/each}
     {#each managed as m (m.repo_path)}
       <button type="button" class:on={value === m.repo_path} onclick={() => (value = m.repo_path)}>
         <i></i>
-        <span>{m.full_name} <small>{m.repo_path}</small></span>
+        <span>{repoLabel(m.repo_path, m.full_name)} <small>{m.repo_path}</small></span>
         <small>cloned · {m.host}</small>
       </button>
     {/each}
