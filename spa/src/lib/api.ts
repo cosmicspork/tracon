@@ -42,6 +42,9 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    /** A compose that wrote the item but could not start the session names it
+        here, so the interface can say where the operator's words went. */
+    public workItemId?: string,
   ) {
     super(message)
   }
@@ -55,7 +58,7 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   })
   const text = await res.text()
   // Not every failure body is JSON: axum's extractors reject with plain text.
-  let json: { error?: { message?: string } } | null = null
+  let json: { error?: { message?: string }; work_item_id?: string } | null = null
   try {
     json = text ? JSON.parse(text) : null
   } catch {
@@ -63,7 +66,7 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   }
   if (!res.ok) {
     const message = json?.error?.message ?? (text || `${res.status} ${res.statusText}`)
-    throw new ApiError(res.status, message)
+    throw new ApiError(res.status, message, json?.work_item_id)
   }
   return json as T
 }
@@ -124,6 +127,18 @@ export const api = {
     node_id?: string
     phase?: 'plan' | 'execute'
   }) => call<Session>('POST', '/api/sessions', spec),
+  /** One prompt: the work item and the session that starts on it. */
+  compose: (c: {
+    channel: string
+    title: string
+    body?: string
+    repo_path: string
+    branch?: string
+    phase?: 'plan' | 'execute'
+    model?: string
+    budget_tokens?: number
+    node_id?: string
+  }) => call<{ work: WorkView; session: Session }>('POST', '/api/compose', c),
   prompt: (id: string, text: string) => call<void>('POST', `/api/sessions/${id}/prompt`, { text }),
   kill: (id: string) => call<void>('POST', `/api/sessions/${id}/kill`),
   saveDraft: (id: string, text: string) => call<void>('PUT', `/api/sessions/${id}/draft`, { text }),

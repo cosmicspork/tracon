@@ -1,20 +1,24 @@
-// The three steps between a fresh node and its first session, derived from
-// state the interface already holds. Gone for good once any session exists —
-// the checklist is an on-ramp, not a status panel.
+// What stands between this node and a session it can start, derived from
+// state the interface already holds. Not a history: the card comes back if a
+// provider is disconnected later, because the node cannot start a session then
+// either. A node with a hundred sessions and no credential needs this more
+// than a fresh one does.
 
-export interface FirstRunStep {
+export interface SetupStep {
   href: string
   title: string
   detail: string
   done: boolean
+  /** Offered, not required: the node runs without it. */
+  optional?: boolean
 }
 
-export function firstRunSteps(s: {
+export function setupSteps(s: {
   anyProviderConnected: boolean
-  anyReadyWork: boolean
-  anySession: boolean
-}): FirstRunStep[] | null {
-  if (s.anySession) return null
+  anyChannel: boolean
+  hubPaired: boolean
+}): SetupStep[] | null {
+  if (s.anyProviderConnected && s.anyChannel) return null
   return [
     {
       href: '/nodes',
@@ -23,21 +27,22 @@ export function firstRunSteps(s: {
       done: s.anyProviderConnected,
     },
     {
-      href: '/work',
-      title: 'Add a work item',
-      detail: 'A session is a phase of one item from the ready list.',
-      done: s.anyReadyWork,
+      href: '/settings',
+      title: 'Name a channel',
+      detail: 'Work, credentials, and ceilings are scoped to it. One is plenty to start.',
+      done: s.anyChannel,
     },
     {
-      href: '/new',
-      title: 'Start a plan session',
-      detail: 'It reads, thinks, and ends by writing the plan document.',
-      done: false,
+      href: '/settings#mesh',
+      title: 'Pair a hub',
+      detail: 'Phones and other nodes reach this one through it. Skippable today, one tap later.',
+      done: s.hubPaired,
+      optional: true,
     },
   ]
 }
 
 /** The first step still to do, for pointing the operator at one thing. */
-export function nextStep(steps: FirstRunStep[]): FirstRunStep {
-  return steps.find((s) => !s.done) ?? steps[steps.length - 1]
+export function nextStep(steps: SetupStep[]): SetupStep {
+  return steps.find((s) => !s.done && !s.optional) ?? steps[steps.length - 1]
 }

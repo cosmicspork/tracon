@@ -18,11 +18,11 @@ const out = fileURLToPath(new URL('../../docs/media/', import.meta.url))
 mkdirSync(out, { recursive: true })
 
 const shots = [
-  { path: '/', name: 'queue' },
+  { path: '/', name: 'home' },
   { path: '/sessions/s-run', name: 'session' },
   { path: '/work', name: 'work' },
   { path: '/nodes', name: 'nodes' },
-  { path: '/new', name: 'new-session' },
+  { path: '/settings', name: 'settings' },
 ]
 const sizes = [
   { name: 'desktop', width: 1280, height: 800 },
@@ -31,7 +31,9 @@ const sizes = [
 
 const vite = spawn(
   'bun',
-  ['run', 'dev', '--', '--port', String(port), '--strictPort'],
+  // Bound explicitly: vite otherwise picks the host's default, which on some
+  // machines is IPv6-only, and the wait below dials 127.0.0.1.
+  ['run', 'dev', '--', '--port', String(port), '--strictPort', '--host', '127.0.0.1'],
   {
     cwd: fileURLToPath(new URL('..', import.meta.url)),
     env: { ...process.env, TRACON_FIXTURES: '1' },

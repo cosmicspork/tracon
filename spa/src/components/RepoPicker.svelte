@@ -1,7 +1,9 @@
 <script lang="ts">
-  // Where the session runs: repositories this node already knows (recent, and
-  // managed clones), a browse-and-clone over the channel's forges, and the
-  // typed path kept as the escape hatch for a repo the node has not seen.
+  // Where the session runs. The forge is asked first and its answer is the
+  // list: a session works a checkout the node made and owns, which is also why
+  // picking one there is picking a fresh clone. What this node has worked in
+  // before sits under it as a shortcut, and a typed path stays as the escape
+  // hatch for a repo no forge knows.
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
@@ -32,11 +34,12 @@
   let forges = $state<ForgeList[] | null>(null)
   let cloning = $state<string | null>(null)
   let error = $state<string | null>(null)
+  let showRecents = $state(false)
   $effect(() => {
-    // A channel change re-scopes what the forges answer.
+    // A channel change re-scopes what the forges answer, so ask again.
     void channel
-    browsing = false
     forges = null
+    if (channel) void browse()
   })
 
   async function browse() {
@@ -46,9 +49,12 @@
       forges = (await api.forgeRepos(channel)).forges
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
+      forges = []
+    } finally {
       browsing = false
     }
   }
+  const known = $derived([...recents, ...managed])
 
   async function clone(forge: string, r: { host: string; owner: string; name: string; full_name: string }) {
     if (cloning) return
@@ -68,35 +74,14 @@
 
 </script>
 
-{#if recents.length > 0 || managed.length > 0}
-  <div class="picker" role="radiogroup">
-    {#each recents as r (r.repo_path)}
-      <button type="button" class:on={value === r.repo_path} onclick={() => (value = r.repo_path)}>
-        <i></i>
-        <span>{repoLabel(r.repo_path)} <small>{r.repo_path}</small></span>
-        <small>{r.sessions} session{r.sessions === 1 ? '' : 's'} · {formatAge(r.last_used_ms, clock.now)}</small>
-      </button>
-    {/each}
-    {#each managed as m (m.repo_path)}
-      <button type="button" class:on={value === m.repo_path} onclick={() => (value = m.repo_path)}>
-        <i></i>
-        <span>{repoLabel(m.repo_path, m.full_name)} <small>{m.repo_path}</small></span>
-        <small>cloned · {m.host}</small>
-      </button>
-    {/each}
-  </div>
-{/if}
-
-{#if !browsing}
-  <span><button type="button" class="lnk" onclick={browse}>Clone from a forge…</button></span>
-{:else if forges === null}
+{#if browsing && forges === null}
   <small>Asking the forges…</small>
-{:else if forges.length === 0}
+{:else if forges !== null && forges.length === 0}
   <small>
     No forge credential is bound to {channel || 'this channel'}: import a gh or glab
-    credential and bind it, or type a path below.
+    credential and bind it, or pick one this node already has below.
   </small>
-{:else}
+{:else if forges !== null}
   <div class="picker forge">
     {#each forges as f (f.forge)}
       {#if f.error}
@@ -112,6 +97,33 @@
       {/if}
     {/each}
   </div>
+  <small>Picking one clones it fresh; the node owns the checkout.</small>
+{/if}
+
+{#if known.length > 0}
+  <span
+    ><button type="button" class="lnk" onclick={() => (showRecents = !showRecents)}
+      >{showRecents ? 'Hide' : `Recently used on this node (${known.length})`}</button
+    ></span
+  >
+  {#if showRecents}
+    <div class="picker" role="radiogroup">
+      {#each recents as r (r.repo_path)}
+        <button type="button" class:on={value === r.repo_path} onclick={() => (value = r.repo_path)}>
+          <i></i>
+          <span>{repoLabel(r.repo_path)} <small>{r.repo_path}</small></span>
+          <small>{r.sessions} session{r.sessions === 1 ? '' : 's'} · {formatAge(r.last_used_ms, clock.now)}</small>
+        </button>
+      {/each}
+      {#each managed as m (m.repo_path)}
+        <button type="button" class:on={value === m.repo_path} onclick={() => (value = m.repo_path)}>
+          <i></i>
+          <span>{repoLabel(m.repo_path, m.full_name)} <small>{m.repo_path}</small></span>
+          <small>cloned · {m.host}</small>
+        </button>
+      {/each}
+    </div>
+  {/if}
 {/if}
 {#if error}
   <small class="crit">{error}</small>
@@ -119,7 +131,7 @@
 
 <input
   bind:value
-  placeholder={recents.length > 0 || managed.length > 0 ? 'or type a path on the node' : '/Users/you/src/project'}
+  placeholder={known.length > 0 ? 'or type a path on the node' : '/Users/you/src/project'}
   spellcheck="false"
 />
 

@@ -22,7 +22,7 @@ listed with it.
    node that has refused to run harnesses says so wherever it would otherwise offer
    work. No screen implies a session is gated when the node could not gate it.
    *Decides:* the node chip is part of every card; a refused node shows its failed
-   check on the Nodes screen and in the new-session form.
+   check on the Nodes screen and in the composer.
 
 3. **Degraded is a state, not an error.** Hub unreachable is expected, and the
    interface says what still works. No error toasts for an expected condition.

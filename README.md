@@ -11,7 +11,7 @@ things you decided should never happen — merge, deploy, publish-without-review
 a reason the agent can read. It is named for terminal radar approach control: the
 facility sequences traffic and issues clearances, and it never flies anything.
 
-![The queue: what is waiting on you, what is running, what ended](docs/media/queue-desktop.png)
+![The home: a place to start work, then what is waiting on you, running, and landed](docs/media/home-desktop.png)
 
 **What it is.** A single static Rust binary. Each node supervises local agent
 harnesses, enforces policy, brokers credentials, and serves the interface above.
@@ -48,12 +48,17 @@ full path. The interface says so too, in the refusal it shows.
 
 Open `http://127.0.0.1:7420`. **Settings** covers the rest of the install from
 the interface: prove the boundary, run setup, choose the harness, import a
-credential, create a channel, and issue the token a phone logs in with. What
-rewrites `node.toml` or picks the hub is done at the node itself and says so
-when you are somewhere else. The queue walks you through the work: **connect a
-provider** (the harness's own sign-in runs on the node; you open the link and paste
-the code back — an API key works too, `tracon credential import creds.toml`), **add a
-work item**, and **start a plan session**. A session is always a phase of one work
+credential, create a channel, bind a model to each phase, and issue the token a
+phone logs in with. What rewrites `node.toml` or picks the hub is done at the node
+itself and says so when you are somewhere else.
+
+![Settings: the boundary, the harness, credentials, and the model each phase runs](docs/media/settings-desktop.png)
+
+Until the node can start a session, the home says what is missing in its place —
+**connect a provider** (the harness's own sign-in runs on the node; you open the
+link and paste the code back — an API key works too, `tracon credential import
+creds.toml`) and **name a channel**. It comes back whenever that stops being true,
+however many sessions have run. A session is always a phase of one work
 item: a *plan* session reads and ends by writing the plan; an *execute* session does
 the work and submits a diff for your review; approving publishes it with a credential
 the agent never held.
@@ -97,7 +102,7 @@ loopback-only.
 
 ### Start on the phone, pick it up on the laptop
 
-<img src="docs/media/queue-phone.png" align="right" width="230" alt="The queue on a phone">
+<img src="docs/media/home-phone.png" align="right" width="230" alt="The home on a phone">
 
 The phone is a full seat, not a viewer. From it you can add a work item, start a
 plan or execute session, answer the agent's permission requests, read the diff and
@@ -119,12 +124,11 @@ box:
 
 ## Starting work
 
-![The new-session form: pick a channel, a repository, an item, a model](docs/media/new-session-desktop.png)
-
-The form offers what the node already knows: repositories from past sessions and
-managed clones, the ready work items (execute is refused until the item has a plan),
-the models the connected provider serves (the last one used is preselected), and the
-budget from the channel's policy. The session is killed at its budget, checked at
+Work starts by typing what needs doing. The prompt becomes a work item — its first
+line the title, the rest what done looks like — and a plan session starts on it. The
+channel supplies the rest: which model plans, which one builds, and the budget.
+**Adjust** opens those as fields when a session needs something other than the
+usual: a different repository, the execute phase, another node. The session is killed at its budget, checked at
 each turn's end; a channel at its daily ceiling starts no session at all.
 
 **Repositories can come from a forge.** Give the broker a `gh` or `glab` credential
@@ -215,7 +219,7 @@ tracon channel bind work notify.enabled=false   # the desktop tray is enough for
 | **broker** | The sealed credential store. Agents get tools that use credentials, never the credentials. |
 | **work item / ledger** | The replicated to-do list. Every session is one phase of one item. |
 | **phase** | `plan` (ends by writing the plan), `execute` (does the work, submits), `review` (a fresh session reads the diff). |
-| **queue** | The home screen: everything waiting on you, across all nodes. |
+| **queue** | What is waiting on you, across all nodes: the first thing the home shows under the composer. |
 | **promotion** | A lesson an agent retained, waiting for your nightly yes/no before it enters memory. |
 | **corpus** | Documents and memories, replicated, plain-text exportable, meant to outlive the tooling. |
 | **policy** | The signed bundle deciding what runs unasked, what is refused with a reason, and what reaches the queue. |

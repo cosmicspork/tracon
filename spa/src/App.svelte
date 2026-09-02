@@ -6,9 +6,9 @@
   import Work from './routes/Work.svelte'
   import WorkItem from './routes/WorkItem.svelte'
   import Promotion from './routes/Promotion.svelte'
-  import NewSession from './routes/NewSession.svelte'
+  import Home from './routes/Home.svelte'
   import Nodes from './routes/Nodes.svelte'
-  import Queue from './routes/Queue.svelte'
+  import Sessions from './routes/Sessions.svelte'
   import Settings from './routes/Settings.svelte'
   import Session from './routes/Session.svelte'
   import Enroll from './routes/Enroll.svelte'
@@ -63,21 +63,17 @@
   const docEdit = $derived(Boolean(docRef?.[3]))
   const workId = $derived(router.path.match(/^\/work\/([^/]+)/)?.[1] ?? null)
   const nav = $derived(
-    sessionId || router.path === '/sessions'
-      ? 'sessions'
-      : settings
-        ? 'settings'
-        : router.path === '/nodes' || enroll
-          ? 'nodes'
-        : router.path === '/new'
-          ? 'new'
-          : router.path.startsWith('/docs')
-            ? 'docs'
-            : router.path.startsWith('/work')
-              ? 'work'
-              : router.path === '/metrics'
-                ? 'nodes'
-                : 'queue',
+    settings
+      ? 'settings'
+      : router.path === '/nodes' || enroll || router.path === '/metrics'
+        ? 'nodes'
+        : router.path.startsWith('/docs')
+          ? 'docs'
+          : router.path.startsWith('/work')
+            ? 'work'
+            : router.path === '/sessions'
+              ? 'sessions'
+              : 'home',
   )
   const hubDown = $derived(store.mesh?.hub.state === 'unreachable')
   const hubLabel = $derived.by(() => {
@@ -105,18 +101,10 @@
         <span class="lbl">tracon</span>
       </div>
     {/if}
-    <a href="/" class:on={nav === 'queue'}>
+    <a href="/" class:on={nav === 'home'}>
       <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
-      <span class="lbl">Queue</span>
+      <span class="lbl">Home</span>
       {#if waiting > 0}<span class="n">{waiting}</span>{/if}
-    </a>
-    <a href="/sessions" class:on={nav === 'sessions'}>
-      <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z" /><path d="M8 10l3 2-3 2M13 14h4" /></svg>
-      <span class="lbl">Sessions</span>
-    </a>
-    <a href="/nodes" class:on={nav === 'nodes'}>
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14.5v2.5" /></svg>
-      <span class="lbl">Nodes</span>
     </a>
     <a href="/work" class:on={nav === 'work'}>
       <svg viewBox="0 0 24 24"><path d="M5 7h3M5 12h3M5 17h3" /><path d="M11 7h8M11 12h8M11 17h5" /></svg>
@@ -126,9 +114,9 @@
       <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
       <span class="lbl">Documents</span>
     </a>
-    <a href="/new" class:on={nav === 'new'}>
-      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
-      <span class="lbl">New session</span>
+    <a href="/nodes" class:on={nav === 'nodes'}>
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14.5v2.5" /></svg>
+      <span class="lbl">Nodes</span>
     </a>
     <span class="sp"></span>
     <a href="/settings" class:on={nav === 'settings'}>
@@ -168,7 +156,7 @@
     {:else if sessionId}
       <Session id={sessionId} />
     {:else if nav === 'sessions'}
-      <Queue only="sessions" />
+      <Sessions />
     {:else if enroll}
       <Enroll />
     {:else if router.path === '/metrics'}
@@ -185,28 +173,18 @@
       <Docs />
     {:else if settings}
       <Settings />
-    {:else if nav === 'new'}
-      <NewSession />
     {:else}
-      <Queue />
+      <Home />
     {/if}
   </main>
 
   <!-- The phone navigates from the bottom, where a thumb is. Capability is
-       gated by surface, not by width: this is the same six destinations. -->
+       gated by surface, not by width: this is the same five destinations. -->
   <nav class="tabs">
-    <a href="/" class:on={nav === 'queue'}>
+    <a href="/" class:on={nav === 'home'}>
       <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
-      <span>Queue</span>
+      <span>Home</span>
       {#if waiting > 0}<i class="dot"></i>{/if}
-    </a>
-    <a href="/sessions" class:on={nav === 'sessions'}>
-      <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z" /><path d="M8 10l3 2-3 2M13 14h4" /></svg>
-      <span>Sessions</span>
-    </a>
-    <a href="/nodes" class:on={nav === 'nodes'}>
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14.5v2.5" /></svg>
-      <span>Nodes</span>
     </a>
     <a href="/work" class:on={nav === 'work'}>
       <svg viewBox="0 0 24 24"><path d="M5 7h3M5 12h3M5 17h3" /><path d="M11 7h8M11 12h8M11 17h5" /></svg>
@@ -216,9 +194,9 @@
       <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
       <span>Docs</span>
     </a>
-    <a href="/new" class:on={nav === 'new'}>
-      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
-      <span>New</span>
+    <a href="/nodes" class:on={nav === 'nodes'}>
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14.5v2.5" /></svg>
+      <span>Nodes</span>
     </a>
     <a href="/settings" class:on={nav === 'settings'}>
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" /></svg>
@@ -262,7 +240,7 @@
     main { padding: 14px 12px calc(72px + env(safe-area-inset-bottom)); }
     .tabs {
       display: grid;
-      grid-template-columns: repeat(7, 1fr);
+      grid-template-columns: repeat(5, 1fr);
       position: fixed;
       inset: auto 0 0 0;
       background: var(--s1);
