@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.11.0](https://github.com/cosmicspork/tracon/compare/v0.10.0...v0.11.0) (2026-09-02)
+
+
+### Features
+
+* a channel binds a model to each phase ([#106](https://github.com/cosmicspork/tracon/issues/106)) ([c3fe562](https://github.com/cosmicspork/tracon/commit/c3fe562c99746749598a39bb147f65a0dc46e73b))
+* one home, and work starts by typing what needs doing ([#107](https://github.com/cosmicspork/tracon/issues/107)) ([a9af969](https://github.com/cosmicspork/tracon/commit/a9af9695d5cd0b08eaace14c3887e13447d35b00))
+* put sessions and channels away without losing them ([#108](https://github.com/cosmicspork/tracon/issues/108)) ([7c92da6](https://github.com/cosmicspork/tracon/commit/7c92da657a99abf42813c830326a96ab63d39db9))
+* **spa:** a hub you can pair, from the words that said you had none ([#109](https://github.com/cosmicspork/tracon/issues/109)) ([2c3e3a4](https://github.com/cosmicspork/tracon/commit/2c3e3a4a9443606773ffa7aef21e9121149d723d))
+* **wrapper:** add macOS self-update ([#103](https://github.com/cosmicspork/tracon/issues/103)) ([b2b0931](https://github.com/cosmicspork/tracon/commit/b2b09317f3d21d134eb9a32a84430579bbdb7b40))
+
+
+### Bug Fixes
+
+* **node:** write the identity seed atomically ([#111](https://github.com/cosmicspork/tracon/issues/111)) ([1843a6c](https://github.com/cosmicspork/tracon/commit/1843a6c8c325176c38b65cbe34558a9b1dda9463))
+* **spa:** the channel a node actually has, repos by name, errors in words ([#105](https://github.com/cosmicspork/tracon/issues/105)) ([3205d41](https://github.com/cosmicspork/tracon/commit/3205d418ac48d2c0b5a525c7a15a16618480578d))
+
 ## [0.10.0](https://github.com/cosmicspork/tracon/compare/v0.9.1...v0.10.0) (2026-09-01)
 
 
