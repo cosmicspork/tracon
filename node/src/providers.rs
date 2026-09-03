@@ -806,7 +806,7 @@ impl Providers {
     }
 
     pub async fn refresh(&self, name: &str) -> Result<(), ProviderError> {
-        let login = self.login_id(name)?;
+        let login = self.login_id(name, true)?.0;
         let runner = self
             .runner_for(name)
             .map_err(|error| ProviderError::Failed(error.to_string()))?;
