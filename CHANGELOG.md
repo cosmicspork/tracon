@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.1](https://github.com/cosmicspork/tracon/compare/v0.12.0...v0.12.1) (2026-09-03)
+
+
+### Bug Fixes
+
+* **spa:** preserve provider popup navigation in PWAs ([f568a12](https://github.com/cosmicspork/tracon/commit/f568a126ca91371e674f1ad644cd63bc30560609))
+* **spa:** preserve provider popup navigation in PWAs ([e446a2c](https://github.com/cosmicspork/tracon/commit/e446a2c30ad1e78b0598c295dad02deacbd23129))
+
 ## [0.12.0](https://github.com/cosmicspork/tracon/compare/v0.11.0...v0.12.0) (2026-09-03)
 
 
