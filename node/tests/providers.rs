@@ -243,6 +243,30 @@ async fn invalid_provider_and_manual_completion_are_refused() {
 }
 
 #[tokio::test]
+async fn remote_codex_uses_device_authorization() {
+    state::isolate();
+    let fake = Arc::new(LoginFake::default());
+    let (p, _broker, _bus) = providers("device_login", fake);
+
+    let result = p
+        .connect(
+            "openai-codex",
+            vec![],
+            LoginOwner::Peer("phone".into()),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.completion, LoginCompletion::DeviceCode);
+    assert_eq!(result.url, "https://login.example/openai-codex-device");
+    assert_eq!(result.device_code.as_deref(), Some("ABCD-1234"));
+
+    p.disconnect("openai-codex", &LoginOwner::Peer("phone".into()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn a_cancelled_startup_cannot_remove_the_next_login_generation() {
     state::isolate();
     let fake = Arc::new(LoginFake::default());
