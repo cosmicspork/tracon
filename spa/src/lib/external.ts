@@ -24,7 +24,6 @@ export function prepareExternalOpen(): ReservedWindow | null {
   if (typeof window === 'undefined' || isTauri()) return null
   const reserved = window.open('about:blank', '_blank')
   if (!reserved) throw new Error('The browser blocked the sign-in window. Allow pop-ups and try again.')
-  reserved.opener = null
   return reserved
 }
 
@@ -37,8 +36,15 @@ export async function openExternal(value: string, reserved?: ReservedWindow | nu
     }
     const target = reserved ?? prepareExternalOpen()
     if (!target) throw new Error('A browser window could not be opened for sign-in.')
-    target.opener = null
     target.location.href = url
+    // Safari's standalone PWA can reject an opener write before the reserved
+    // window has left about:blank. Navigation must win; losing opener isolation
+    // here is preferable to stranding an OAuth sign-in in a blank window.
+    try {
+      target.opener = null
+    } catch {
+      // The URL is already open. Some mobile webviews expose a read-only opener.
+    }
   } catch (error) {
     reserved?.close()
     throw error

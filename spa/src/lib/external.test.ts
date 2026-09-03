@@ -31,3 +31,24 @@ describe('external provider URLs', () => {
     expect(reserved.location.href).toBe('about:blank')
   })
 })
+
+test('navigates a reserved window when its opener is read-only', async () => {
+  let closed = false
+  const reserved = {
+    get opener(): unknown {
+      return null
+    },
+    set opener(_value: unknown) {
+      throw new Error('read-only')
+    },
+    location: { href: 'about:blank' },
+    close: () => {
+      closed = true
+    },
+  } satisfies ReservedWindow
+
+  await openExternal('https://login.example/path', reserved)
+
+  expect(reserved.location.href).toBe('https://login.example/path')
+  expect(closed).toBe(false)
+})
