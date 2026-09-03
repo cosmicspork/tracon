@@ -52,27 +52,13 @@
   }
 
   function connect() {
-    let reserved
-    try {
-      reserved = prepareExternalOpen()
-    } catch (caught) {
-      error = caught instanceof Error ? caught.message : String(caught)
-      return
-    }
     return act(async () => {
-      try {
-        const result = await api.nodeConnectProvider(
-          nodeId,
-          p.name,
-          store.channels.filter((channel) => !channel.archived).map((channel) => channel.name),
-          managedLocal || sameHostBrowser,
-        )
-        justResult = result
-        await openExternal(result.url, reserved)
-      } catch (caught) {
-        reserved?.close()
-        throw caught
-      }
+      justResult = await api.nodeConnectProvider(
+        nodeId,
+        p.name,
+        store.channels.filter((channel) => !channel.archived).map((channel) => channel.name),
+        managedLocal || sameHostBrowser,
+      )
     })
   }
 
@@ -135,7 +121,7 @@
         <span class="l warn"><span class="chip warn">connect</span> · {completionInstruction(completion)}</span>
         {#if completionNote}<span class="l off">{completionNote}</span>{/if}
         <span class="actions">
-          <button class="lnk" onclick={openAgain} disabled={busy}>Open sign-in again</button>
+          <button class="lnk" onclick={openAgain} disabled={busy}>Open sign-in</button>
           <button class="lnk d" onclick={disconnect} disabled={busy}>Cancel</button>
         </span>
         {#if completion === 'local_callback'}
