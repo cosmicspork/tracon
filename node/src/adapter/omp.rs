@@ -211,7 +211,7 @@ impl HarnessAdapter for OmpAdapter {
                         .filter(|code| !code.is_empty())
                         .map(str::to_owned);
                 }
-                if (!device_login || device_code.is_some()) {
+                if !device_login || device_code.is_some() {
                     if let Some(url) = url.clone() {
                         return Some((url, device_code));
                     }
