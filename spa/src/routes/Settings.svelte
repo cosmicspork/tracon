@@ -7,6 +7,7 @@
   // node.toml or the trust root is done at the node itself — shown here with
   // the reason, never hidden.
   import { onMount } from 'svelte'
+  import CredentialSettings from '../components/CredentialSettings.svelte'
   import { api } from '../lib/api'
   import {
     check as checkDesktopUpdate,
@@ -17,6 +18,7 @@
   import { remedy } from '../lib/refusal'
   import { modelPatch, phaseDefaults } from '../lib/bindings'
   import { changedSubset, hashToken, loginUrl, mintToken } from '../lib/settings'
+  import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { UpdateStatus } from '../lib/desktop-update'
   import type { BoundaryCheck, EnrollStatus, NodeConfig } from '../lib/types'
@@ -90,15 +92,6 @@
     })
   }
 
-  // --- credentials ------------------------------------------------------
-  let toml = $state('')
-  let imported = $state<string[]>([])
-  function importCreds() {
-    return act('creds', async () => {
-      imported = (await api.importCredentials(toml)).imported
-      toml = ''
-    })
-  }
 
   // --- channels ---------------------------------------------------------
   let channelName = $state('')
@@ -108,6 +101,7 @@
       const res = await api.createChannel(channelName.trim())
       channelNote = res.created ? `created ${res.name}` : `${res.name} was already here`
       if (res.note) channelNote += ` · ${res.note}`
+      await store.refetch()
       channelName = ''
     })
   }
@@ -163,33 +157,62 @@
         : 'not paired',
   )
   let hubUrl = $state('')
-  let meshNote = $state('')
+  let meshInit = $state<Awaited<ReturnType<typeof api.meshInit>> | null>(null)
+  let admitCopied = $state(false)
+  let admitCopyError = $state('')
   function initMesh() {
     return act('mesh', async () => {
-      const res = await api.meshInit(hubUrl.trim())
-      meshNote = `${res.hub_url} · admit this node on the hub with ${res.admit_with}`
+      meshInit = await api.meshInit(hubUrl.trim())
+      admitCopied = false
+      admitCopyError = ''
       restartOwed = true
     })
+  }
+  async function copyAdmit() {
+    if (!meshInit) return
+    admitCopyError = ''
+    try {
+      await navigator.clipboard.writeText(meshInit.admit_with)
+      admitCopied = true
+    } catch (e) {
+      admitCopyError = e instanceof Error ? e.message : String(e)
+    }
   }
 
   let invitation = $state('')
   let enroll = $state<EnrollStatus | null>(null)
+  let enrollPollError = $state('')
   let poll: ReturnType<typeof setInterval> | undefined
+  function stopEnrollPoll() {
+    if (poll) clearInterval(poll)
+    poll = undefined
+  }
+  async function readEnroll(): Promise<boolean> {
+    try {
+      const next = await api.enrollStatus()
+      enroll = next
+      enrollPollError = ''
+      if (next.done) {
+        stopEnrollPoll()
+        if (next.restart_required) restartOwed = true
+        await store.refetch()
+      }
+      return next.done
+    } catch (e) {
+      stopEnrollPoll()
+      enrollPollError = e instanceof Error ? e.message : String(e)
+      return true
+    }
+  }
   function startEnroll() {
     return act('enroll', async () => {
+      stopEnrollPoll()
+      enroll = null
+      enrollPollError = ''
       await api.startEnroll(invitation.trim())
       invitation = ''
-      poll = setInterval(async () => {
-        try {
-          enroll = await api.enrollStatus()
-          if (enroll.done) {
-            clearInterval(poll)
-            if (enroll.restart_required) restartOwed = true
-          }
-        } catch {
-          clearInterval(poll)
-        }
-      }, 2000)
+      const done = await readEnroll()
+      if (!done) poll = setInterval(() => void readEnroll(), 2000)
     })
   }
 
@@ -202,14 +225,17 @@
     desktopUpdate ? desktopUpdateAction(desktopUpdate) : null,
   )
 
-  // Arriving from the rail's "pair a hub", or the setup card's third step.
-  // The sections above this one fill in from their own fetches and change the
-  // page's height as they land, so scrolling once on mount aims at where the
-  // section was, not where it ends up. Keep aiming until it stops moving.
-  onMount(() => {
-    if (location.hash !== '#mesh') return
+  // Hash navigation is keyed by the router revision rather than mount alone:
+  // clicking the same in-app destination must focus it again after async
+  // sections above it have changed height.
+  $effect(() => {
+    const revision = router.revision
+    const hash = router.hash
+    void revision
+    if (hash !== '#mesh') return
     let last = -1
     let tries = 0
+    let timer: ReturnType<typeof setTimeout>
     const settle = () => {
       const el = document.getElementById('mesh')
       if (!el) return
@@ -220,9 +246,10 @@
       }
       if (++tries < 12) timer = setTimeout(settle, 100)
     }
-    let timer = setTimeout(settle, 0)
+    timer = setTimeout(settle, 0)
     return () => clearTimeout(timer)
   })
+  onMount(() => stopEnrollPoll)
 
   onMount(() => {
     let disposed = false
@@ -362,36 +389,30 @@
 </section>
 
 <!-- 3. What it may use, and on whose behalf. -->
-<section>
-  <div class="h5">Credentials <b>connect a model provider on <a href="/nodes">Nodes</a></b></div>
-  <label>
-    <span>Import credentials</span>
-    <textarea
-      bind:value={toml}
-      rows="6"
-      spellcheck="false"
-      placeholder={'[credentials.gh]\nchannels = ["personal"]\n[credentials.gh.env]\nGH_TOKEN = "…"'}
-    ></textarea>
-    <small>Sealed on arrival under this node's identity. Bind it to a peer with <code>nodes = [...]</code> and share it from Nodes.</small>
-  </label>
-  <div class="acts">
-    <button class="btn p" onclick={importCreds} disabled={!toml.trim() || busy !== ''}>
-      {busy === 'creds' ? 'Sealing…' : 'Import'}
-    </button>
-    {#if imported.length}<small>sealed {imported.join(', ')}</small>{/if}
-  </div>
+<section id="credentials">
+  <div class="h5">Credentials <b>provider and forge access held by this node</b></div>
+  <CredentialSettings />
 </section>
 
 <!-- 4. The channels, what each runs, and which are still in use. -->
 <section>
   <div class="h5">
-    Channels <b>which model each phase runs, and what is still in use</b>
+    Channels <b>create channels, choose Plan and Execute defaults, and archive or restore them</b>
+  </div>
+  <label class="new-channel">
+    <span>New channel</span>
+    <input bind:value={channelName} placeholder="work" spellcheck="false" />
+    <small>{channelNote || 'A channel is a key. Work on it is unreadable to a node that was never handed one.'}</small>
+  </label>
+  <div class="acts">
+    <button class="btn" onclick={addChannel} disabled={!channelName.trim() || busy !== ''}>Create channel</button>
   </div>
   {#if store.channels.length === 0}
-    <div class="empty">No channels yet. Create one below.</div>
-  {:else if models.length === 0}
-    <div class="empty">No node offers a model yet. <a href="/nodes">Connect a provider.</a></div>
+    <div class="empty">No channels yet.</div>
   {:else}
+    {#if models.length === 0}
+      <div class="empty">No node offers a model yet. Channel lifecycle is still available; <a href="/nodes">connect a provider</a> to choose defaults.</div>
+    {/if}
     <div class="phases">
       {#each open_channels as c (c.name)}
         {@const plan = phaseDefaults(c.bindings, 'plan')}
@@ -443,23 +464,15 @@
   {/if}
 </section>
 
-<!-- 5. Who may reach it, and which mesh it belongs to. -->
+<!-- 5. Who may reach it. -->
 <section>
-  <div class="h5">Channels and access</div>
-  <div class="grid">
-    <label>
-      <span>New channel</span>
-      <input bind:value={channelName} placeholder="work" spellcheck="false" />
-      <small>{channelNote || 'A channel is a key. Work on it is unreadable to a node that was never handed one.'}</small>
-    </label>
-    <div class="field">
-      <span>Reach this node from a phone</span>
-      <input bind:value={publicUrl} placeholder="https://node.tailnet.ts.net" spellcheck="false" />
-      <small>Issuing rotates the token and logs every client out, including this one.</small>
-    </div>
+  <div class="h5">Access</div>
+  <div class="field access-field">
+    <span>Reach this node from a phone</span>
+    <input bind:value={publicUrl} placeholder="https://node.tailnet.ts.net" spellcheck="false" />
+    <small>Issuing rotates the token and logs every client out, including this one.</small>
   </div>
   <div class="acts">
-    <button class="btn" onclick={addChannel} disabled={!channelName.trim() || busy !== ''}>Create channel</button>
     <button class="btn" onclick={issueToken} disabled={busy !== ''}>
       {busy === 'token' ? 'Issuing…' : 'Issue an operator token'}
     </button>
@@ -471,8 +484,6 @@
       <code>{issued.token}</code>
     </div>
   {/if}
-
-  <small>Running the node under the platform's supervisor stays a shell job: <code>tracon service install</code> has to outlive the node it manages.</small>
 </section>
 
 <!-- 6. The hub: how this node and your others reach each other. -->
@@ -487,28 +498,65 @@
     well without one; it is then reachable only where it is.
   </p>
   {#if local}
-    <div class="grid">
+    <div class="pairing">
       <label>
-        <span>Start a mesh here</span>
-        <input bind:value={hubUrl} placeholder="https://hub.example.com" spellcheck="false" />
-        <small>{meshNote || 'Mints the mesh channel on this node and points it at your hub. Do this on the first node.'}</small>
+        <span>Join an existing hub</span>
+        <input bind:value={invitation} placeholder="full invitation URL" spellcheck="false" />
+        <small>Paste the URL from <code>tracon mesh invite</code>, or from the Nodes screen of a node already on the mesh.</small>
       </label>
-      <label>
-        <span>Join one that exists</span>
-        <input bind:value={invitation} placeholder="an invitation URL" spellcheck="false" />
-        <small>From <code>tracon mesh invite</code>, or the Nodes screen of a node already on the mesh.</small>
-      </label>
+      <div class="acts">
+        <button class="btn" onclick={startEnroll} disabled={!invitation.trim() || busy !== ''}>
+          {busy === 'enroll' ? 'Joining…' : 'Join hub'}
+        </button>
+      </div>
+      {#if enroll}
+        <ul class="log">
+          {#each enroll.lines as line, i (i)}<li>{line}</li>{/each}
+          {#if enroll.error}<li class="bad">{enroll.error}</li>{/if}
+        </ul>
+        {#if enroll.done && enroll.channels.length}
+          <small>Channels received: {enroll.channels.join(', ')}.</small>
+        {/if}
+        {#if enroll.done && enroll.restart_required}
+          <small class="good">Joined. Restart this node to connect it to the hub.</small>
+        {/if}
+      {/if}
+      {#if enrollPollError}<small class="bad">{enrollPollError}</small>{/if}
+
+      <details class="first-node">
+        <summary>Set up the first node</summary>
+        <div class="first-node-body">
+          <label>
+            <span>Hub URL</span>
+            <input bind:value={hubUrl} placeholder="https://hub.example.com" spellcheck="false" />
+            <small>Creates the mesh channel here and saves the hub this node will trust.</small>
+          </label>
+          <div class="acts">
+            <button class="btn" onclick={initMesh} disabled={!hubUrl.trim() || busy !== ''}>
+              {busy === 'mesh' ? 'Preparing…' : 'Prepare first node'}
+            </button>
+          </div>
+          {#if meshInit}
+            <div class="mesh-result">
+              <b>Node prepared</b>
+              <small>Hub URL: {meshInit.hub_url}</small>
+              <label>
+                <span>Hub admission value</span>
+                <input value={meshInit.admit_with} readonly />
+              </label>
+              <div class="copy-value">
+                <button class="lnk" onclick={copyAdmit}>{admitCopied ? 'Copied' : 'Copy'}</button>
+                {#if admitCopyError}<small class="bad">{admitCopyError}</small>{/if}
+              </div>
+              <ol>
+                <li>Configure and start the hub with that exact value.</li>
+                <li>Restart tracon on this node so it dials the hub.</li>
+              </ol>
+            </div>
+          {/if}
+        </div>
+      </details>
     </div>
-    <div class="acts">
-      <button class="btn" onclick={initMesh} disabled={!hubUrl.trim() || busy !== ''}>Point at hub</button>
-      <button class="btn" onclick={startEnroll} disabled={!invitation.trim() || busy !== ''}>Enrol this node</button>
-    </div>
-    {#if enroll}
-      <ul class="log">
-        {#each enroll.lines as line, i (i)}<li>{line}</li>{/each}
-        {#if enroll.error}<li class="bad">{enroll.error}</li>{/if}
-      </ul>
-    {/if}
   {:else}
     <small>Which hub a node belongs to is decided at the node itself.</small>
   {/if}
@@ -586,8 +634,7 @@
     color: var(--ink2);
   }
   input,
-  select,
-  textarea {
+  select {
     background: var(--s2);
     border: 0;
     border-radius: 4px;
@@ -596,13 +643,8 @@
     font: 13.5px var(--sans);
     min-width: 0;
   }
-  textarea {
-    font: 12.5px var(--mono);
-    resize: vertical;
-  }
   input:disabled,
-  select:disabled,
-  textarea:disabled {
+  select:disabled {
     opacity: 0.5;
   }
   small {
@@ -729,6 +771,51 @@
   }
   .h5.sub {
     margin-top: 14px;
+  }
+  .pairing,
+  .first-node-body,
+  .mesh-result {
+    display: grid;
+    gap: 8px;
+  }
+  .first-node {
+    border-top: 1px solid var(--s3);
+    padding-top: 10px;
+    margin-top: 4px;
+  }
+  .first-node summary {
+    cursor: pointer;
+    color: var(--ink2);
+    font: 500 12.5px var(--mono);
+  }
+  .first-node-body {
+    margin-top: 10px;
+  }
+  .mesh-result {
+    background: var(--s2);
+    border-radius: 4px;
+    padding: 10px;
+    color: var(--ink2);
+    font-size: 12.5px;
+  }
+  .mesh-result b {
+    color: var(--ok);
+    font-weight: 500;
+  }
+  .mesh-result ol {
+    margin: 0;
+    padding-left: 20px;
+  }
+  .copy-value {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+  }
+  small.good {
+    color: var(--ok);
+  }
+  small.bad {
+    color: var(--crit);
   }
   @media (max-width: 700px) {
     .ch {

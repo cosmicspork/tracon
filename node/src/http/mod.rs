@@ -78,6 +78,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/credentials", get(api::list_credentials))
         .route("/api/credentials/{name}/share", post(api::share_credential))
+        .route(
+            "/api/credentials/forge/{forge}",
+            put(api::put_forge_credential).delete(api::delete_forge_credential),
+        )
         .route("/api/providers", get(api::list_providers))
         .route("/api/providers/{name}/connect", post(api::connect_provider))
         .route("/api/providers/{name}/code", post(api::provider_code))
@@ -382,7 +386,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                 }
             }
         };
-        carry(providers.list()); // seed the row before the first hello
+        carry(providers.list_public()); // seed the row before the first hello
         providers.set_on_publish(Box::new(carry));
         state.manager.set_providers(providers.clone());
         tokio::spawn(providers.refresh_loop());

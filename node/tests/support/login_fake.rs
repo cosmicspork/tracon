@@ -5,7 +5,10 @@
 #![allow(dead_code)]
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 use async_trait::async_trait;
 use tokio::io::AsyncBufReadExt;
@@ -23,6 +26,9 @@ use tracon::{
 pub struct LoginFake {
     pub stored: Arc<Mutex<Option<String>>>,
     pub refreshed: Arc<Mutex<u32>>,
+    pub account_id: Arc<Mutex<Option<String>>>,
+    pub login_delay_ms: AtomicU64,
+    pub login_calls: AtomicUsize,
 }
 
 #[async_trait]
@@ -59,6 +65,11 @@ impl HarnessAdapter for LoginFake {
         provider: &str,
         _name: &str,
     ) -> Result<LoginFlow, AdapterError> {
+        self.login_calls.fetch_add(1, Ordering::SeqCst);
+        let delay = self.login_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
         let (client, server) = tokio::io::duplex(1024);
         let stored = self.stored.clone();
         let provider = provider.to_string();
@@ -105,6 +116,7 @@ impl HarnessAdapter for LoginFake {
             refresh: Some("rt".into()),
             expires_ms: Some(tracon::store::now_ms() + 2 * 3600 * 1000),
             identity: Some("op@example".into()),
+            account_id: self.account_id.lock().unwrap().clone(),
         })
     }
 }

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -1449,8 +1449,9 @@ fn provider_err(e: crate::providers::ProviderError) -> ApiError {
     use crate::providers::ProviderError::*;
     let status = match &e {
         Unknown(_) => StatusCode::NOT_FOUND,
-        NoLogin(_) | NotPending(_) => StatusCode::CONFLICT,
-        Busy(_) => StatusCode::CONFLICT,
+        NoLogin(_) | NotPending(_) | Busy(_) | WrongOwner | RemoteDisconnect => {
+            StatusCode::CONFLICT
+        }
         Failed(_) => StatusCode::BAD_GATEWAY,
     };
     ApiError(status, e.to_string())
@@ -1462,6 +1463,138 @@ fn provider_err(e: crate::providers::ProviderError) -> ApiError {
 pub async fn list_credentials(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let b = s.tools.broker.read().unwrap();
     Ok(Json(json!({ "credentials": b.summaries() })))
+}
+
+struct ForgeCredential {
+    name: &'static str,
+    token_key: &'static str,
+    alias_key: &'static str,
+}
+
+fn forge_credential(forge: &str) -> ApiResult<ForgeCredential> {
+    match forge {
+        "github" => Ok(ForgeCredential {
+            name: "gh",
+            token_key: "GH_TOKEN",
+            alias_key: "GITHUB_TOKEN",
+        }),
+        "gitlab" => Ok(ForgeCredential {
+            name: "glab",
+            token_key: "GITLAB_TOKEN",
+            alias_key: "GLAB_TOKEN",
+        }),
+        _ => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no forge credential route for {forge}"),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForgeCredentialBody {
+    token: String,
+    channels: Vec<String>,
+}
+
+pub async fn put_forge_credential(
+    State(s): State<AppState>,
+    Path(forge): Path<String>,
+    Json(body): Json<ForgeCredentialBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let forge = forge_credential(&forge)?;
+    let token = body.token.trim();
+    if token.is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "token must not be empty".into(),
+        ));
+    }
+    let mut channels = body.channels;
+    channels.sort();
+    channels.dedup();
+    if channels.is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "choose at least one channel".into(),
+        ));
+    }
+    let existing_channels = s
+        .store()
+        .channel_list()?
+        .into_iter()
+        .map(|channel| channel.name)
+        .filter(|name| !name.starts_with('@'))
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(missing) = channels
+        .iter()
+        .find(|channel| !existing_channels.contains(*channel))
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("no visible channel named {missing}"),
+        ));
+    }
+
+    let key = crate::mesh::identity::load_or_generate()
+        .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .0
+        .credential_store_key();
+    let mut broker = s.tools.broker.write().unwrap();
+    let mut staged = broker.clone();
+    let mut credential = if let Some(existing) = staged.get(forge.name).cloned() {
+        if existing.kind != crate::broker::KIND_ENV {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!(
+                    "credential {} is not an environment credential and cannot be replaced here",
+                    forge.name
+                ),
+            ));
+        }
+        existing
+    } else {
+        crate::broker::Credential::default()
+    };
+    credential.kind = crate::broker::KIND_ENV.into();
+    credential.channels = channels;
+    credential.provider = None;
+    credential.expires_ms = None;
+    credential.identity = None;
+    credential.env.remove(forge.alias_key);
+    credential
+        .env
+        .insert(forge.token_key.into(), token.to_string());
+    staged.put(forge.name, credential);
+    staged
+        .save(&key)
+        .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    *broker = staged;
+    Ok(Json(json!({ "saved": forge.name })))
+}
+
+pub async fn delete_forge_credential(
+    State(s): State<AppState>,
+    Path(forge): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let forge = forge_credential(&forge)?;
+    let key = crate::mesh::identity::load_or_generate()
+        .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .0
+        .credential_store_key();
+    let mut broker = s.tools.broker.write().unwrap();
+    let mut staged = broker.clone();
+    if !staged.remove(forge.name) {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no credential named {}", forge.name),
+        ));
+    }
+    staged
+        .save(&key)
+        .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    *broker = staged;
+    Ok(Json(json!({ "removed": forge.name })))
 }
 
 #[derive(Deserialize)]
@@ -1533,8 +1666,29 @@ pub async fn share_credential(
 
 pub async fn list_providers(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     match s.manager.providers() {
-        Some(p) => Ok(Json(json!(p.list()))),
+        Some(p) => Ok(Json(json!(p.list_private()))),
         None => Ok(Json(json!(providers_json(&s)))),
+    }
+}
+
+pub struct ObservedPeer(Option<std::net::SocketAddr>);
+
+impl<S> axum::extract::FromRequestParts<S> for ObservedPeer
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<std::net::SocketAddr>>()
+                .map(|ConnectInfo(address)| *address),
+        ))
     }
 }
 
@@ -1542,29 +1696,51 @@ pub async fn list_providers(State(s): State<AppState>) -> ApiResult<Json<serde_j
 pub struct ConnectBody {
     #[serde(default)]
     pub channels: Vec<String>,
+    #[serde(default)]
+    pub local_callback: bool,
 }
 
 /// Start the harness's login for a provider; the response carries the URL to
 /// open. The card then takes the paste-back.
 pub async fn connect_provider(
     State(s): State<AppState>,
+    ObservedPeer(peer): ObservedPeer,
     Path(name): Path<String>,
     body: Option<Json<ConnectBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let channels = body.map(|Json(b)| b.channels).unwrap_or_default();
-    connect_local(&s, &name, channels).await.map(Json)
+    let body = body.map(|Json(body)| body).unwrap_or_default();
+    let local_callback = callback_allowed(&s, peer, body.local_callback);
+    connect_local(&s, &name, body.channels, local_callback)
+        .await
+        .map(Json)
+}
+fn callback_allowed(s: &AppState, peer: Option<std::net::SocketAddr>, requested: bool) -> bool {
+    requested
+        && peer.is_some_and(|address| address.ip().is_loopback())
+        && s.cfg.runtime.kind == crate::config::RuntimeKind::Podman
 }
 
 async fn connect_local(
     s: &AppState,
     name: &str,
     channels: Vec<String>,
+    local_callback: bool,
 ) -> ApiResult<serde_json::Value> {
-    let url = providers_of(s)?
-        .connect(name, channels)
+    let result = providers_of(s)?
+        .connect(
+            name,
+            channels,
+            crate::providers::LoginOwner::Local,
+            local_callback,
+        )
         .await
         .map_err(provider_err)?;
-    Ok(json!({ "name": name, "url": url }))
+    serde_json::to_value(result).map_err(|error| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("provider response: {error}"),
+        )
+    })
 }
 
 #[derive(Deserialize)]
@@ -1582,7 +1758,7 @@ pub async fn provider_code(
 
 async fn code_local(s: &AppState, name: &str, code: &str) -> ApiResult<serde_json::Value> {
     providers_of(s)?
-        .code(name, code)
+        .code(name, code, &crate::providers::LoginOwner::Local)
         .await
         .map_err(provider_err)?;
     Ok(json!({ "ok": true }))
@@ -1597,7 +1773,7 @@ pub async fn disconnect_provider(
 
 async fn disconnect_local(s: &AppState, name: &str) -> ApiResult<serde_json::Value> {
     providers_of(s)?
-        .disconnect(name)
+        .disconnect(name, &crate::providers::LoginOwner::Local)
         .await
         .map_err(provider_err)?;
     Ok(json!({ "ok": true }))
@@ -1637,17 +1813,24 @@ async fn peer_command(
 
 pub async fn node_connect_provider(
     State(s): State<AppState>,
+    ObservedPeer(peer): ObservedPeer,
     Path((node_id, name)): Path<(String, String)>,
     body: Option<Json<ConnectBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let channels = body.map(|Json(b)| b.channels).unwrap_or_default();
+    let body = body.map(|Json(body)| body).unwrap_or_default();
     if node_id == s.node_id {
-        return connect_local(&s, &name, channels).await.map(Json);
+        let local_callback = callback_allowed(&s, peer, body.local_callback);
+        return connect_local(&s, &name, body.channels, local_callback)
+            .await
+            .map(Json);
     }
     peer_command(
         &s,
         &node_id,
-        proto::frame::Command::ProviderConnect { name, channels },
+        proto::frame::Command::ProviderConnect {
+            name,
+            channels: body.channels,
+        },
         PROVIDER_CONNECT_TIMEOUT,
     )
     .await
@@ -1951,7 +2134,11 @@ pub async fn cancel_invite(
 /// Commands other nodes forward to this one run exactly as local requests do.
 #[async_trait::async_trait]
 impl crate::mesh::forward::CommandExecutor for AppState {
-    async fn execute(&self, command: proto::frame::Command) -> Result<serde_json::Value, String> {
+    async fn execute(
+        &self,
+        sender: &str,
+        command: proto::frame::Command,
+    ) -> Result<serde_json::Value, String> {
         use proto::frame::Command as C;
         let r: Result<serde_json::Value, ApiError> = match command {
             C::Create { spec } => {
@@ -2008,28 +2195,44 @@ impl crate::mesh::forward::CommandExecutor for AppState {
             // the login subprocess, its stdin, and the lifted credential all
             // stay on this node. Only the URL and the ack travel.
             C::ProviderConnect { name, channels } => match providers_of(self) {
-                Ok(p) => p
-                    .connect(&name, channels)
+                Ok(providers) => providers
+                    .connect(
+                        &name,
+                        channels,
+                        crate::providers::LoginOwner::Peer(sender.to_string()),
+                        false,
+                    )
                     .await
-                    .map(|url| json!({ "name": name, "url": url }))
+                    .and_then(|result| {
+                        serde_json::to_value(result).map_err(|error| {
+                            crate::providers::ProviderError::Failed(error.to_string())
+                        })
+                    })
                     .map_err(provider_err),
-                Err(e) => Err(e),
+                Err(error) => Err(error),
             },
             C::ProviderCode { name, code } => match providers_of(self) {
-                Ok(p) => p
-                    .code(&name, &code)
+                Ok(providers) => providers
+                    .code(
+                        &name,
+                        &code,
+                        &crate::providers::LoginOwner::Peer(sender.to_string()),
+                    )
                     .await
                     .map(|_| json!({ "ok": true }))
                     .map_err(provider_err),
-                Err(e) => Err(e),
+                Err(error) => Err(error),
             },
             C::ProviderDisconnect { name } => match providers_of(self) {
-                Ok(p) => p
-                    .disconnect(&name)
+                Ok(providers) => providers
+                    .disconnect(
+                        &name,
+                        &crate::providers::LoginOwner::Peer(sender.to_string()),
+                    )
                     .await
                     .map(|_| json!({ "ok": true }))
                     .map_err(provider_err),
-                Err(e) => Err(e),
+                Err(error) => Err(error),
             },
         };
         r.map_err(|e| e.1)
@@ -2205,6 +2408,45 @@ pub struct HubBody {
     pub hub_url: String,
 }
 
+fn validate_hub_base(value: &str) -> ApiResult<String> {
+    let trimmed = value.trim();
+    let url = reqwest::Url::parse(trimmed).map_err(|_| {
+        ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "hub URL must be a valid HTTPS URL".into(),
+        )
+    })?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.host_str().is_none()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "hub URL must have a host and no userinfo, query, or fragment".into(),
+        ));
+    }
+    let literal_loopback = trimmed
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split('/').next())
+        .is_some_and(|authority| {
+            ["localhost", "127.0.0.1", "[::1]"].iter().any(|host| {
+                authority == *host
+                    || authority
+                        .strip_prefix(host)
+                        .is_some_and(|suffix| suffix.starts_with(':'))
+            })
+        });
+    if url.scheme() != "https" && !(url.scheme() == "http" && literal_loopback) {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "hub URL must use HTTPS; HTTP is allowed only on loopback".into(),
+        ));
+    }
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
 /// The first node: mint the mesh channel here and point this node at a hub.
 /// Loopback only — this decides which hub the node trusts.
 pub async fn mesh_init(
@@ -2212,13 +2454,7 @@ pub async fn mesh_init(
     State(s): State<AppState>,
     Json(body): Json<HubBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let hub = body.hub_url.trim().trim_end_matches('/').to_string();
-    if !hub.starts_with("https://") && !hub.starts_with("http://") {
-        return Err(ApiError(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "a hub is an http(s) URL".into(),
-        ));
-    }
+    let hub = validate_hub_base(&body.hub_url)?;
     let identity = crate::mesh::identity::load_or_generate()
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .0;
@@ -2307,6 +2543,7 @@ pub async fn start_enroll(
         StatusCode::UNPROCESSABLE_ENTITY,
         "paste the full invitation URL: a bare code does not say which hub".into(),
     ))?;
+    let hub = validate_hub_base(&hub)?;
     {
         let job = s.enroll.lock().unwrap();
         if !job.lines.is_empty() && !job.done {
@@ -2349,7 +2586,7 @@ pub async fn start_enroll(
                 // worse than no config at all.
                 match Config::try_load() {
                     Ok(mut cfg) => {
-                        cfg.mesh.hub_url = Some(hub.trim_end_matches('/').to_string());
+                        cfg.mesh.hub_url = Some(hub.clone());
                         if let Err(e) = cfg.save() {
                             job.error =
                                 Some(format!("enrolled, but node.toml was not written: {e}"));
@@ -2383,4 +2620,39 @@ pub async fn enroll_status(
         "channels": job.channels,
         "restart_required": job.done && job.error.is_none(),
     })))
+}
+
+#[cfg(test)]
+mod hub_url_tests {
+    use super::validate_hub_base;
+
+    #[test]
+    fn allows_https_and_literal_http_loopback_with_base_paths() {
+        for (input, normalized) in [
+            (
+                "https://hub.example.com/team/",
+                "https://hub.example.com/team",
+            ),
+            ("http://localhost:7443/team/", "http://localhost:7443/team"),
+            ("http://127.0.0.1:7443", "http://127.0.0.1:7443"),
+            ("http://[::1]:7443/team", "http://[::1]:7443/team"),
+        ] {
+            let Ok(actual) = validate_hub_base(input) else {
+                panic!("rejected {input}");
+            };
+            assert_eq!(actual, normalized);
+        }
+    }
+
+    #[test]
+    fn rejects_nonliteral_or_nonloopback_http_hosts() {
+        for input in [
+            "http://hub.example.com",
+            "http://2130706433",
+            "http://127.1",
+            "http://LOCALHOST",
+        ] {
+            assert!(validate_hub_base(input).is_err(), "accepted {input}");
+        }
+    }
 }

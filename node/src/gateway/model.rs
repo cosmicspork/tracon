@@ -26,7 +26,7 @@ use crate::session::state::event_kind as ek;
 
 use crate::{
     broker::Injection,
-    config::{Config, Provider, SHAPE_ANTHROPIC, SHAPE_OPENAI},
+    config::{Config, Provider, SHAPE_ANTHROPIC, SHAPE_OPENAI, SHAPE_OPENAI_CODEX},
     http::api::AppState,
     store::{now_ms, UsageRow},
 };
@@ -56,12 +56,16 @@ pub fn base_url(host: &str, port: u16, provider: &str) -> String {
 pub fn harness_wiring(cfg: &Config, host: &str, token: &str) -> Wiring {
     let mut env = Vec::new();
     let mut providers = serde_json::Map::new();
-    for (name, p) in &cfg.providers {
+    for (name, provider) in &cfg.providers {
         let base = base_url(host, cfg.gateway.forward_port, name);
-        match p.shape.as_str() {
+        match provider.shape.as_str() {
             SHAPE_ANTHROPIC => {
                 env.push(("ANTHROPIC_BASE_URL".to_string(), base));
                 env.push(("ANTHROPIC_API_KEY".to_string(), token.to_string()));
+            }
+            SHAPE_OPENAI_CODEX => {
+                env.push(("PI_CODEX_WEBSOCKET".to_string(), "false".to_string()));
+                providers.insert(name.clone(), json!({ "baseUrl": base, "apiKey": token }));
             }
             _ => {
                 providers.insert(
@@ -205,7 +209,8 @@ pub async fn handle(
         if matches!(
             k.as_str(),
             "host" | "authorization" | "x-api-key" | "content-length" | "connection"
-        ) || (injection.oauth_beta && k == "anthropic-beta")
+        ) || (p.shape == SHAPE_OPENAI_CODEX && k == "chatgpt-account-id")
+            || (injection.oauth_beta && k == "anthropic-beta")
         {
             continue;
         }
@@ -299,6 +304,9 @@ impl Injection {
         if let Some(k) = &self.x_api_key {
             req = req.header("x-api-key", k);
         }
+        if let Some(account_id) = &self.chatgpt_account_id {
+            req = req.header("chatgpt-account-id", account_id);
+        }
         if self.oauth_beta {
             // Merge rather than replace: the harness's own beta flags are part
             // of the request shape the token was issued for.
@@ -372,7 +380,7 @@ impl UsageScanner {
         } else {
             return;
         };
-        let (i, o) = if self.shape == SHAPE_OPENAI {
+        let (i, o) = if matches!(self.shape.as_str(), SHAPE_OPENAI | SHAPE_OPENAI_CODEX) {
             (
                 usage["input_tokens"]
                     .as_i64()
@@ -470,6 +478,14 @@ mod tests {
         );
         assert_eq!(v["providers"]["openai"]["apiKey"], "tok");
         assert!(v["providers"]["anthropic"].is_null());
+        assert_eq!(
+            v["providers"]["openai-codex"]["baseUrl"],
+            "http://tracon-gw:7421/model/openai-codex"
+        );
+        assert_eq!(v["providers"]["openai-codex"]["apiKey"], "tok");
+        assert!(w
+            .env
+            .contains(&("PI_CODEX_WEBSOCKET".into(), "false".into())));
     }
 
     #[test]
@@ -488,5 +504,9 @@ mod tests {
         s.feed(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":5}}}\n");
         s.finish();
         assert_eq!((s.input, s.output), (12, 5));
+        let mut s = UsageScanner::new(SHAPE_OPENAI_CODEX);
+        s.feed(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":2}}}\n");
+        s.finish();
+        assert_eq!((s.input, s.output), (9, 2));
     }
 }

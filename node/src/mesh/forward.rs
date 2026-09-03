@@ -19,7 +19,7 @@ use crate::stream::Frame;
 /// state, which has everything a local request would.
 #[async_trait::async_trait]
 pub trait CommandExecutor: Send + Sync {
-    async fn execute(&self, command: Command) -> Result<Value, String>;
+    async fn execute(&self, sender: &str, command: Command) -> Result<Value, String>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -88,7 +88,7 @@ impl MeshClient {
         };
         tokio::spawn(async move {
             let result = match this.executor.get() {
-                Some(ex) => ex.execute(command).await,
+                Some(executor) => executor.execute(&sender, command).await,
                 None => Err("this node is not ready to run commands".into()),
             };
             let (ok, err) = match result {

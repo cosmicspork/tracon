@@ -351,6 +351,7 @@ impl Default for Memory {
 /// Request shapes the model gateway knows how to inject a credential into.
 pub const SHAPE_ANTHROPIC: &str = "anthropic";
 pub const SHAPE_OPENAI: &str = "openai";
+pub const SHAPE_OPENAI_CODEX: &str = "openai-codex";
 
 /// One model provider the gateway fronts. The harness reaches it at
 /// `/model/<name>/…`; the node injects `credential` and forwards to
@@ -361,7 +362,7 @@ pub struct Provider {
     /// The broker credential injected for it (kind `api_key` or `oauth`).
     pub credential: String,
     pub upstream: String,
-    /// `anthropic` or `openai`: which headers the credential becomes.
+    /// `anthropic`, `openai`, or `openai-codex`: which headers and paths the credential becomes.
     pub shape: String,
     /// The harness's own provider id for a subscription login
     /// (`omp auth-broker login <id>`); none means API key only.
@@ -419,6 +420,16 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 upstream: "https://api.openai.com".into(),
                 shape: SHAPE_OPENAI.into(),
                 login: None,
+                price: None,
+            },
+        ),
+        (
+            "openai-codex",
+            Provider {
+                credential: "openai-codex".into(),
+                upstream: "https://chatgpt.com/backend-api".into(),
+                shape: SHAPE_OPENAI_CODEX.into(),
+                login: Some("openai-codex".into()),
                 price: None,
             },
         ),
@@ -702,7 +713,14 @@ impl Config {
 
     pub fn try_load_from(path: &Path) -> Result<Self, String> {
         match std::fs::read_to_string(path) {
-            Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
+            Ok(text) => {
+                let mut config: Self = toml::from_str(&text)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                for (name, provider) in default_providers() {
+                    config.providers.entry(name).or_insert(provider);
+                }
+                Ok(config)
+            }
             Err(_) => Ok(Self::default()),
         }
     }
@@ -820,5 +838,40 @@ mod tests {
         assert_eq!(back.mesh.heartbeat_secs, 60);
         assert!(Config::try_load_from(&dir.join("missing.toml")).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loading_an_old_provider_table_adds_codex_without_overwriting_it() {
+        let dir = std::env::temp_dir().join(format!("tracon-cfg-providers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node.toml");
+        std::fs::write(
+            &path,
+            r#"
+[providers.anthropic]
+credential = "custom-anthropic"
+upstream = "https://anthropic.internal"
+shape = "anthropic"
+login = "anthropic"
+
+[providers.openai]
+credential = "openai"
+upstream = "https://openai.internal"
+shape = "openai"
+"#,
+        )
+        .unwrap();
+        let config = Config::try_load_from(&path).unwrap();
+        assert_eq!(config.providers["anthropic"].credential, "custom-anthropic");
+        assert_eq!(
+            config.providers["openai"].upstream,
+            "https://openai.internal"
+        );
+        let codex = &config.providers["openai-codex"];
+        assert_eq!(codex.credential, "openai-codex");
+        assert_eq!(codex.upstream, "https://chatgpt.com/backend-api");
+        assert_eq!(codex.shape, SHAPE_OPENAI_CODEX);
+        assert_eq!(codex.login.as_deref(), Some("openai-codex"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

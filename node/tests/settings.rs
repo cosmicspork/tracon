@@ -34,6 +34,7 @@ const REMOTE: &str = "203.0.113.7:5000";
 
 struct Node {
     app: axum::Router,
+    store: Arc<Store>,
 }
 
 /// The router with the guard layered on, as `serve` builds it.
@@ -73,7 +74,7 @@ fn node() -> Node {
     };
     let app = tracon::http::router(state.clone())
         .layer(axum::middleware::from_fn_with_state(state, auth::guard));
-    Node { app }
+    Node { app, store }
 }
 
 /// One request, with a peer address the guard and the extractor can read.
@@ -198,6 +199,158 @@ GH_TOKEN = "sh-not-a-real-token"
 }
 
 #[tokio::test]
+async fn forge_tokens_are_write_only_replaceable_and_removable() {
+    let n = node();
+    let (status, value) = call(
+        &n,
+        "POST",
+        "/api/channels",
+        Some(LOCAL),
+        Some(json!({ "name": "work" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+
+    let legacy = r#"
+[credentials.gh]
+kind = "env"
+channels = ["work"]
+nodes = ["n1", "n2"]
+[credentials.gh.env]
+GITHUB_TOKEN = "legacy-secret"
+GH_HOST = "github.example"
+"#;
+    let (status, value) = call(
+        &n,
+        "POST",
+        "/api/credentials/import",
+        Some(LOCAL),
+        Some(json!({ "toml": legacy })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+
+    for (forge, name, canonical, alias, token) in [
+        ("github", "gh", "GH_TOKEN", "GITHUB_TOKEN", "github-secret"),
+        (
+            "gitlab",
+            "glab",
+            "GITLAB_TOKEN",
+            "GLAB_TOKEN",
+            "gitlab-secret",
+        ),
+    ] {
+        let (status, value) = call(
+            &n,
+            "PUT",
+            &format!("/api/credentials/forge/{forge}"),
+            Some(LOCAL),
+            Some(json!({ "token": format!("  {token}  "), "channels": ["work", "work"] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert_eq!(value["saved"], name);
+        assert!(!value.to_string().contains(token));
+
+        let (status, listed) = call(&n, "GET", "/api/credentials", Some(LOCAL), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let summary = listed["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|credential| credential["name"] == name)
+            .unwrap();
+        assert_eq!(summary["channels"], json!(["work"]));
+        assert!(summary["env_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key == canonical));
+        assert!(!summary["env_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key == alias));
+        assert!(!listed.to_string().contains(token));
+        if forge == "github" {
+            assert_eq!(summary["nodes"], json!(["n1", "n2"]));
+            assert!(summary["env_keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|key| key == "GH_HOST"));
+        }
+
+        let (status, removed) = call(
+            &n,
+            "DELETE",
+            &format!("/api/credentials/forge/{forge}"),
+            Some(LOCAL),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{removed}");
+        assert_eq!(removed["removed"], name);
+        let (status, value) = call(
+            &n,
+            "DELETE",
+            &format!("/api/credentials/forge/{forge}"),
+            Some(LOCAL),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{value}");
+    }
+
+    let (_, channels) = call(&n, "GET", "/api/channels", Some(LOCAL), None).await;
+    assert!(channels
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|channel| channel["name"] == "work"));
+}
+
+#[tokio::test]
+async fn forge_token_routes_reject_aliases_unknown_fields_and_invalid_channels() {
+    let n = node();
+    for forge in ["gh", "glab", "bitbucket"] {
+        let (status, _) = call(
+            &n,
+            "PUT",
+            &format!("/api/credentials/forge/{forge}"),
+            Some(LOCAL),
+            Some(json!({ "token": "secret", "channels": ["work"] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    let (status, _) = call(
+        &n,
+        "PUT",
+        "/api/credentials/forge/github",
+        Some(LOCAL),
+        Some(json!({ "token": "secret", "channels": ["work"], "extra": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    for body in [
+        json!({ "token": "  ", "channels": ["work"] }),
+        json!({ "token": "secret", "channels": [] }),
+        json!({ "token": "secret", "channels": ["@mesh"] }),
+        json!({ "token": "secret", "channels": ["missing"] }),
+    ] {
+        let (status, _) = call(
+            &n,
+            "PUT",
+            "/api/credentials/forge/github",
+            Some(LOCAL),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+#[tokio::test]
 async fn nonsense_toml_is_refused_rather_than_stored() {
     let n = node();
     let (s, _) = call(
@@ -282,6 +435,64 @@ async fn mesh_init_and_enroll_are_loopback_only_too() {
     ] {
         let (s, v) = call(&n, method, uri, Some(REMOTE), body).await;
         assert_eq!(s, StatusCode::FORBIDDEN, "{method} {uri} answered {s}: {v}");
+    }
+}
+
+#[tokio::test]
+async fn mesh_urls_are_validated_before_configuration_changes() {
+    let n = node();
+    for hub_url in [
+        "http://hub.example.com",
+        "http://2130706433",
+        "http://127.1",
+        "ftp://hub.example.com",
+        "https://user@hub.example.com",
+        "https://hub.example.com/path?token=secret",
+        "https://hub.example.com/#fragment",
+    ] {
+        let (status, body) = call(
+            &n,
+            "POST",
+            "/api/mesh/init",
+            Some(LOCAL),
+            Some(json!({ "hub_url": hub_url })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{hub_url}: {body}"
+        );
+        assert!(n
+            .store
+            .channel_get(proto::frame::MESH_CHANNEL)
+            .unwrap()
+            .is_none());
+    }
+
+    for invitation in [
+        "http://hub.example.com/#enroll=7KQ4M2XA",
+        "https://user@hub.example.com/#enroll=7KQ4M2XA",
+        "https://hub.example.com/path?token=secret/#enroll=7KQ4M2XA",
+    ] {
+        let (status, body) = call(
+            &n,
+            "POST",
+            "/api/mesh/enroll",
+            Some(LOCAL),
+            Some(json!({ "invitation": invitation })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{invitation}: {body}"
+        );
+        assert!(n
+            .store
+            .channel_get(proto::frame::MESH_CHANNEL)
+            .unwrap()
+            .is_none());
     }
 }
 

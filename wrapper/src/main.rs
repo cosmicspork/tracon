@@ -34,6 +34,11 @@ pub fn node_url() -> String {
     std::env::var("TRACON_URL").unwrap_or_else(|_| "http://127.0.0.1:7420".into())
 }
 
+#[tauri::command]
+fn desktop_managed_local() -> bool {
+    std::env::var_os("TRACON_URL").is_none()
+}
+
 /// Everything the tray needs to render, kept in one place so the menu and the
 /// notifier agree about what is waiting.
 #[derive(Default)]
@@ -96,6 +101,7 @@ fn main() {
             show_window(app);
         }))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -111,6 +117,7 @@ fn main() {
         .manage(supervisor.clone())
         .manage(preferences.clone())
         .invoke_handler(tauri::generate_handler![
+            desktop_managed_local,
             desktop_update_status,
             desktop_check_for_update,
             desktop_install_update,

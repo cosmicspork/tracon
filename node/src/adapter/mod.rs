@@ -177,12 +177,29 @@ pub struct LoginFlow {
 }
 
 /// What a login left in the harness's store, as the broker keeps it.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct LiftedToken {
     pub access: String,
     pub refresh: Option<String>,
     pub expires_ms: Option<i64>,
     pub identity: Option<String>,
+    pub account_id: Option<String>,
+}
+
+impl std::fmt::Debug for LiftedToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LiftedToken")
+            .field("access", &"<redacted>")
+            .field("refresh", &self.refresh.as_ref().map(|_| "<redacted>"))
+            .field("expires_ms", &self.expires_ms)
+            .field("identity", &self.identity)
+            .field(
+                "account_id",
+                &self.account_id.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 #[async_trait]
@@ -282,5 +299,19 @@ mod tests {
         };
         assert!(err.contains("opencode"), "{err}");
         assert!(err.contains("omp"), "{err}");
+    }
+
+    #[test]
+    fn lifted_token_debug_redacts_secrets() {
+        let token = LiftedToken {
+            access: "access-secret".into(),
+            refresh: Some("refresh-secret".into()),
+            account_id: Some("account-secret".into()),
+            ..Default::default()
+        };
+        let debug = format!("{token:?}");
+        for secret in ["access-secret", "refresh-secret", "account-secret"] {
+            assert!(!debug.contains(secret), "{debug}");
+        }
     }
 }

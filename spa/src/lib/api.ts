@@ -17,6 +17,7 @@ import type {
   NodeInfo,
   Promotion,
   PromotionItem,
+  ProviderConnectResult,
   ProviderInfo,
   PushDevice,
   Queue,
@@ -217,6 +218,10 @@ export const api = {
   credentials: () => call<{ credentials: CredentialSummary[] }>('GET', '/api/credentials'),
   importCredentials: (toml: string) =>
     call<{ imported: string[] }>('POST', '/api/credentials/import', { toml }),
+  putForgeCredential: (forge: 'github' | 'gitlab', token: string, channels: string[]) =>
+    call<{ saved: string }>('PUT', `/api/credentials/forge/${forge}`, { token, channels }),
+  deleteForgeCredential: (forge: 'github' | 'gitlab') =>
+    call<{ removed: string }>('DELETE', `/api/credentials/forge/${forge}`),
   createChannel: (name: string) =>
     call<{ name: string; created: boolean; note: string | null }>('POST', '/api/channels', { name }),
   checkBoundary: () => call<BoundaryResult>('POST', '/api/boundary/check'),
@@ -237,16 +242,26 @@ export const api = {
   shareCredential: (name: string, to: string) =>
     call<{ shared: string; to: string }>('POST', `/api/credentials/${name}/share`, { to }),
   providers: () => call<ProviderInfo[]>('GET', '/api/providers'),
-  connectProvider: (name: string, channels: string[]) =>
-    call<{ name: string; url: string }>('POST', `/api/providers/${name}/connect`, { channels }),
+  connectProvider: (name: string, channels: string[], localCallback = false) =>
+    call<ProviderConnectResult>('POST', `/api/providers/${name}/connect`, {
+      channels,
+      local_callback: localCallback,
+    }),
   providerCode: (name: string, code: string) =>
     call<void>('POST', `/api/providers/${name}/code`, { code }),
   disconnectProvider: (name: string) => call<void>('POST', `/api/providers/${name}/disconnect`),
   // Node-scoped provider actions: the serving node runs them itself or seals
-  // the command to the owner. Works for every node, this one included.
-  nodeConnectProvider: (nodeId: string, name: string, channels: string[]) =>
-    call<{ name: string; url: string }>(`POST`, `/api/nodes/${nodeId}/providers/${name}/connect`, {
+  // the command to the owner. Automatic callback capture is accepted only
+  // when this is the serving node and the request itself arrived on loopback.
+  nodeConnectProvider: (
+    nodeId: string,
+    name: string,
+    channels: string[],
+    localCallback = false,
+  ) =>
+    call<ProviderConnectResult>(`POST`, `/api/nodes/${nodeId}/providers/${name}/connect`, {
       channels,
+      local_callback: localCallback,
     }),
   nodeProviderCode: (nodeId: string, name: string, code: string) =>
     call<{ ok: boolean }>('POST', `/api/nodes/${nodeId}/providers/${name}/code`, { code }),

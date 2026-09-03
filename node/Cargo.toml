@@ -53,6 +53,7 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 regex = "1"
+parking_lot = "0.12"
 futures-util = { version = "0.3", default-features = false }
 base64.workspace = true
 rusqlite.workspace = true
@@ -70,6 +71,8 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+url = "2"
+socket2 = "0.6"
 
 [dev-dependencies]
 tracon-hub = { path = "../hub" }
