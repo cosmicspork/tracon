@@ -31,12 +31,13 @@ export interface ModelOption {
   name: string
 }
 
-export type LoginCompletion = 'local_callback' | 'paste'
+export type LoginCompletion = 'local_callback' | 'paste' | 'device_code'
 
 export interface ProviderConnectResult {
   url: string
   completion: LoginCompletion
   completion_note: string | null
+  device_code?: string | null
 }
 
 /** One model provider on the serving node, from `/api/providers` and the `providers` stream event. */
@@ -50,6 +51,7 @@ export interface ProviderInfo {
   url?: string | null
   completion?: LoginCompletion | null
   completion_note?: string | null
+  device_code?: string | null
   error?: string | null
   identity: string | null
   expires_ms: number | null

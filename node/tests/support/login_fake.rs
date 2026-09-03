@@ -87,6 +87,7 @@ impl HarnessAdapter for LoginFake {
         });
         Ok(LoginFlow {
             url,
+            device_code: None,
             stdin: Box::new(client),
             done,
             output,

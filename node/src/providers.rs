@@ -49,6 +49,7 @@ pub enum LoginOwner {
 pub enum LoginCompletion {
     LocalCallback,
     Paste,
+    DeviceCode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -56,6 +57,8 @@ pub struct ConnectResult {
     pub url: String,
     pub completion: LoginCompletion,
     pub completion_note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_code: Option<String>,
 }
 
 struct Inflight {
@@ -120,6 +123,8 @@ pub enum ProviderError {
     Unknown(String),
     #[error("provider {0} has no login flow; import an API key with `tracon credential import`")]
     NoLogin(String),
+    #[error("provider {0} needs a local callback; connect it on a local node, then share the credential")]
+    RequiresLocalCallback(String),
     #[error("a login for {0} is already in progress")]
     Busy(String),
     #[error("no login in progress for {0}")]
@@ -263,7 +268,15 @@ impl Providers {
                     object.insert(
                         "completion_note".into(),
                         result
-                            .and_then(|value| value.completion_note)
+                            .as_ref()
+                            .and_then(|value| value.completion_note.clone())
+                            .map(Value::String)
+                            .unwrap_or(Value::Null),
+                    );
+                    object.insert(
+                        "device_code".into(),
+                        result
+                            .and_then(|value| value.device_code)
                             .map(Value::String)
                             .unwrap_or(Value::Null),
                     );
@@ -297,13 +310,24 @@ impl Providers {
         );
     }
 
-    fn login_id(&self, name: &str) -> Result<String, ProviderError> {
-        self.cfg
+    fn login_id(&self, name: &str, local_callback: bool) -> Result<(String, bool), ProviderError> {
+        let provider = self
+            .cfg
             .providers
             .get(name)
-            .ok_or_else(|| ProviderError::Unknown(name.to_string()))?
+            .ok_or_else(|| ProviderError::Unknown(name.to_string()))?;
+        if !local_callback {
+            if let Some(login) = &provider.device_login {
+                return Ok((login.clone(), true));
+            }
+            if provider.requires_local_callback {
+                return Err(ProviderError::RequiresLocalCallback(name.to_string()));
+            }
+        }
+        provider
             .login
             .clone()
+            .map(|login| (login, false))
             .ok_or_else(|| ProviderError::NoLogin(name.to_string()))
     }
 
@@ -329,7 +353,7 @@ impl Providers {
         owner: LoginOwner,
         local_callback: bool,
     ) -> Result<ConnectResult, ProviderError> {
-        let login = self.login_id(name)?;
+        let (login, device_login) = self.login_id(name, local_callback)?;
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         {
             let mut inflight = self.inflight.lock();
@@ -373,11 +397,15 @@ impl Providers {
             }
         };
 
-        let mut completion = LoginCompletion::Paste;
+        let mut completion = if device_login {
+            LoginCompletion::DeviceCode
+        } else {
+            LoginCompletion::Paste
+        };
         let mut completion_note = None;
         let mut capture = None;
         let mut capture_events = None;
-        if local_callback {
+        if local_callback && !device_login {
             match CallbackTarget::parse(&flow.url) {
                 Ok(target) => {
                     let port = target.port();
@@ -410,10 +438,25 @@ impl Providers {
                 }
             }
         }
+        let device_code = if device_login {
+            match flow.device_code.clone() {
+                Some(code) => Some(code),
+                None => {
+                    self.remove_generation(name, generation);
+                    self.kill_login(name, generation).await;
+                    return Err(ProviderError::Failed(
+                        "device sign-in did not provide a code; connect again.".into(),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
         let result = ConnectResult {
             url: flow.url.clone(),
             completion,
             completion_note,
+            device_code,
         };
         let stdin = Arc::new(tokio::sync::Mutex::new(flow.stdin));
         let installed = {

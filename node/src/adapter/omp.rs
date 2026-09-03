@@ -187,32 +187,40 @@ impl HarnessAdapter for OmpAdapter {
             .await?;
         let output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let mut lines = tokio::io::BufReader::new(spawned.stdout).lines();
-        let url = tokio::time::timeout(std::time::Duration::from_secs(60), async {
-            while let Ok(Some(line)) = lines.next_line().await {
-                output.lock().unwrap().push_str(&line);
-                output.lock().unwrap().push('\n');
-                // The URL may share its line with a label; the local
-                // shortcut is for a browser on the same machine, which the
-                // boundary is not.
-                if let Some(u) = line.split_whitespace().find(|t| {
-                    (t.starts_with("https://") || t.starts_with("http://"))
-                        && !t.starts_with("http://localhost")
-                        && !t.starts_with("http://127.0.0.1")
-                }) {
-                    return Some(u.trim_end_matches(['.', ',']).to_string());
+        let device_login = provider == "openai-codex-device";
+        let (url, device_code) =
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                let mut url = None;
+                let mut device_code = None;
+                while let Ok(Some(line)) = lines.next_line().await {
+                    output.lock().unwrap().push_str(&line);
+                    output.lock().unwrap().push('\n');
+                    if url.is_none() {
+                        url = line.split_whitespace().find(|t| {
+                            (t.starts_with("https://") || t.starts_with("http://"))
+                                && !t.starts_with("http://localhost")
+                                && !t.starts_with("http://127.0.0.1")
+                        }).map(|url| url.trim_end_matches(['.', ',']).to_string());
+                    }
+                    if device_login && device_code.is_none() {
+                        device_code = line
+                            .strip_prefix("Enter code:")
+                            .map(str::trim)
+                            .filter(|code| !code.is_empty())
+                            .map(str::to_owned);
+                    }
+                    if let Some(url) = url.clone()
+                        && (!device_login || device_code.is_some())
+                    {
+                        return Some((url, device_code));
+                    }
                 }
-            }
-            None
-        })
-        .await
-        .ok()
-        .flatten()
-        .ok_or_else(|| {
-            AdapterError::Protocol(format!(
-                "login printed no URL: {}",
-                output.lock().unwrap().lines().last().unwrap_or("")
-            ))
-        })?;
+                None
+            })
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| AdapterError::Protocol("login printed no usable authorization URL".into()))?;
         // Keep draining so the login never blocks on a full pipe, and keep
         // what it says for the failure reason.
         let drain = output.clone();
@@ -229,6 +237,7 @@ impl HarnessAdapter for OmpAdapter {
         });
         Ok(LoginFlow {
             url,
+            device_code,
             stdin: spawned.stdin,
             done: spawned.done,
             output,
