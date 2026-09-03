@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/cosmicspork/tracon/compare/v0.11.0...v0.12.0) (2026-09-03)
+
+
+### Features
+
+* make connection setup work from the GUI ([#112](https://github.com/cosmicspork/tracon/issues/112)) ([65253f3](https://github.com/cosmicspork/tracon/commit/65253f33eb95329e4137ed191dacd905cbfc140e))
+
 ## [0.11.0](https://github.com/cosmicspork/tracon/compare/v0.10.0...v0.11.0) (2026-09-02)
 
 
