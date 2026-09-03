@@ -264,8 +264,8 @@ async fn a_peers_providers_are_driven_from_here() {
     let (a, b) = pair().await;
     let bi = b.id.node_id();
 
-    // Connect B's provider from A's operator API: the command crosses the
-    // hub, B starts its login, and the sign-in URL comes back in the ack.
+    // A remote node cannot receive the browser's localhost callback. Anthropic
+    // offers no device flow, so reject this before starting an unfinishable login.
     let (st, v) = call(
         &a.app,
         "POST",
@@ -273,56 +273,23 @@ async fn a_peers_providers_are_driven_from_here() {
         Some(json!({ "channels": ["personal"] })),
     )
     .await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["url"], "https://login.example/anthropic");
-
-    // Paste the code back from A; B lifts the credential into its broker.
-    // A's broker never sees it.
-    let (st, v) = call(
-        &a.app,
-        "POST",
-        &format!("/api/nodes/{bi}/providers/anthropic/code"),
-        Some(json!({ "code": "the-code" })),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    wait_for("B to lift the credential", || {
-        b.broker.read().unwrap().get("anthropic").is_some()
-    })
-    .await;
-    assert!(a.broker.read().unwrap().get("anthropic").is_none());
-
-    // The connected state rides B's hello into A's view of the mesh.
-    b.client.hello().await.unwrap();
-    wait_for("A to see B's provider connected", || {
-        a.store
-            .get_node(&bi)
-            .ok()
-            .flatten()
-            .and_then(|n| n.providers_json)
-            .is_some_and(|p| p.contains("\"connected\""))
-    })
-    .await;
-    let (_, nodes) = call(&a.app, "GET", "/api/nodes", None).await;
-    let beta = nodes
-        .as_array()
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(v["error"]["message"]
+        .as_str()
         .unwrap()
-        .iter()
-        .find(|n| n["id"] == bi)
-        .unwrap();
-    assert_eq!(beta["providers"][0]["name"], "anthropic");
-
-    // Self-addressed goes local: A driving its own provider by node id.
+        .contains("local callback"));
+    // The node-addressed route is intentionally treated as remote even when
+    // the target id is this node; only the direct provider route can capture
+    // its browser callback.
     let ai = a.id.node_id();
     let (st, v) = call(
         &a.app,
         "POST",
         &format!("/api/nodes/{ai}/providers/anthropic/connect"),
-        None,
+        Some(json!({ "local_callback": true })),
     )
     .await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["url"], "https://login.example/anthropic");
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
 
     // An unreachable owner is refused up front, not timed out.
     a.store.set_reachable(&bi, false).unwrap();

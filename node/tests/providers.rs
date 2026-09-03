@@ -64,7 +64,7 @@ async fn connect_paste_back_lifts_the_token_into_the_broker() {
     let mut frames = bus.subscribe();
 
     let result = p
-        .connect("anthropic", vec!["work".into()], LoginOwner::Local, false)
+        .connect("anthropic", vec!["work".into()], LoginOwner::Local, true)
         .await
         .unwrap();
     assert_eq!(result.url, "https://login.example/anthropic");
@@ -77,12 +77,12 @@ async fn connect_paste_back_lifts_the_token_into_the_broker() {
     assert_eq!(pending["state"], "pending");
     assert_eq!(pending["url"], result.url);
     let resumed = p
-        .connect("anthropic", vec![], LoginOwner::Local, false)
+        .connect("anthropic", vec![], LoginOwner::Local, true)
         .await
         .unwrap();
     assert_eq!(resumed, result);
     assert!(matches!(
-        p.connect("anthropic", vec![], LoginOwner::Peer("n2".into()), false,)
+        p.connect("anthropic", vec![], LoginOwner::Peer("n2".into()), true,)
             .await
             .unwrap_err(),
         tracon::providers::ProviderError::Busy(_)
@@ -217,7 +217,13 @@ async fn invalid_provider_and_manual_completion_are_refused() {
         tracon::providers::ProviderError::NotPending(_)
     ));
 
-    p.connect("anthropic", vec![], LoginOwner::Local, false)
+    assert!(matches!(
+        p.connect("anthropic", vec![], LoginOwner::Local, false)
+            .await
+            .unwrap_err(),
+        tracon::providers::ProviderError::RequiresLocalCallback(_)
+    ));
+    p.connect("anthropic", vec![], LoginOwner::Local, true)
         .await
         .unwrap();
     assert!(matches!(
@@ -237,6 +243,30 @@ async fn invalid_provider_and_manual_completion_are_refused() {
 }
 
 #[tokio::test]
+async fn remote_codex_uses_device_authorization() {
+    state::isolate();
+    let fake = Arc::new(LoginFake::default());
+    let (p, _broker, _bus) = providers("device_login", fake);
+
+    let result = p
+        .connect(
+            "openai-codex",
+            vec![],
+            LoginOwner::Peer("phone".into()),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.completion, LoginCompletion::DeviceCode);
+    assert_eq!(result.url, "https://login.example/openai-codex-device");
+    assert_eq!(result.device_code.as_deref(), Some("ABCD-1234"));
+
+    p.disconnect("openai-codex", &LoginOwner::Peer("phone".into()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn a_cancelled_startup_cannot_remove_the_next_login_generation() {
     state::isolate();
     let fake = Arc::new(LoginFake::default());
@@ -246,7 +276,7 @@ async fn a_cancelled_startup_cannot_remove_the_next_login_generation() {
     let first = {
         let p = p.clone();
         tokio::spawn(async move {
-            p.connect("anthropic", vec!["old".into()], LoginOwner::Local, false)
+            p.connect("anthropic", vec!["old".into()], LoginOwner::Local, true)
                 .await
         })
     };
@@ -259,7 +289,7 @@ async fn a_cancelled_startup_cannot_remove_the_next_login_generation() {
     .unwrap();
 
     assert!(matches!(
-        p.connect("anthropic", vec![], LoginOwner::Peer("peer".into()), false,)
+        p.connect("anthropic", vec![], LoginOwner::Peer("peer".into()), true,)
             .await
             .unwrap_err(),
         tracon::providers::ProviderError::Busy(_)
@@ -267,7 +297,7 @@ async fn a_cancelled_startup_cannot_remove_the_next_login_generation() {
     p.disconnect("anthropic", &LoginOwner::Local).await.unwrap();
 
     let second = p
-        .connect("anthropic", vec!["new".into()], LoginOwner::Local, false)
+        .connect("anthropic", vec!["new".into()], LoginOwner::Local, true)
         .await
         .unwrap();
     assert!(first.await.unwrap().is_err());

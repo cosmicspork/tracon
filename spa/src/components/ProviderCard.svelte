@@ -28,6 +28,7 @@
   const shownUrl = $derived(p.url ?? justResult?.url ?? null)
   const completion = $derived(p.completion ?? justResult?.completion ?? null)
   const completionNote = $derived(p.completion_note ?? justResult?.completion_note ?? null)
+  const deviceCode = $derived(p.device_code ?? justResult?.device_code ?? null)
 
   $effect(() => {
     if (p.state === 'connected' || p.state === 'failed') justResult = null
@@ -120,6 +121,9 @@
       {#if shownUrl}
         <span class="l warn"><span class="chip warn">connect</span> · {completionInstruction(completion)}</span>
         {#if completionNote}<span class="l off">{completionNote}</span>{/if}
+        {#if completion === 'device_code' && deviceCode}
+          <span class="l">Enter code <code>{deviceCode}</code> at the provider page.</span>
+        {/if}
         <span class="actions">
           <button class="lnk" onclick={openAgain} disabled={busy}>Open sign-in</button>
           <button class="lnk d" onclick={disconnect} disabled={busy}>Cancel</button>

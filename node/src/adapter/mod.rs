@@ -170,6 +170,8 @@ pub enum AdapterError {
 /// subprocess's stdin for the paste-back, and its exit.
 pub struct LoginFlow {
     pub url: String,
+    /// Device authorization code, when the provider uses a browser-independent flow.
+    pub device_code: Option<String>,
     pub stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
     pub done: futures_core::future::BoxFuture<'static, Result<i32, crate::runner::RunnerError>>,
     /// Everything the login printed, for the reason when it fails.

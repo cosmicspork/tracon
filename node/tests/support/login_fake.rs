@@ -74,6 +74,7 @@ impl HarnessAdapter for LoginFake {
         let stored = self.stored.clone();
         let provider = provider.to_string();
         let url = format!("https://login.example/{provider}");
+        let device_code = (provider == "openai-codex-device").then(|| "ABCD-1234".to_string());
         let output = Arc::new(Mutex::new(String::new()));
         let done = Box::pin(async move {
             let mut lines = tokio::io::BufReader::new(server).lines();
@@ -87,6 +88,7 @@ impl HarnessAdapter for LoginFake {
         });
         Ok(LoginFlow {
             url,
+            device_code,
             stdin: Box::new(client),
             done,
             output,

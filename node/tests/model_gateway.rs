@@ -92,6 +92,8 @@ async fn harness(broker_toml: &str, allow: &[&str]) -> Harness {
             upstream: format!("http://127.0.0.1:{port}"),
             shape: SHAPE_ANTHROPIC.into(),
             login: None,
+            device_login: None,
+            requires_local_callback: false,
             price: None,
         },
     );
@@ -102,6 +104,8 @@ async fn harness(broker_toml: &str, allow: &[&str]) -> Harness {
             upstream: "https://example.com".into(),
             shape: SHAPE_ANTHROPIC.into(),
             login: None,
+            device_login: None,
+            requires_local_callback: false,
             price: None,
         },
     );

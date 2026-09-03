@@ -8,7 +8,11 @@ export function providerLabel(name: string): string {
 }
 
 export function completionInstruction(completion: LoginCompletion | null): string {
-  return completion === 'local_callback'
-    ? 'Complete sign-in in your browser; this page will update automatically.'
-    : 'Complete sign-in, then paste the redirect URL or code.'
+  if (completion === 'local_callback') {
+    return 'Complete sign-in in your browser; this page will update automatically.'
+  }
+  if (completion === 'device_code') {
+    return 'Open the provider page and enter the code below.'
+  }
+  return 'Complete sign-in, then paste the redirect URL or code.'
 }

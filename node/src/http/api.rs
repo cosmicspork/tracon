@@ -1449,9 +1449,12 @@ fn provider_err(e: crate::providers::ProviderError) -> ApiError {
     use crate::providers::ProviderError::*;
     let status = match &e {
         Unknown(_) => StatusCode::NOT_FOUND,
-        NoLogin(_) | NotPending(_) | Busy(_) | WrongOwner | RemoteDisconnect => {
-            StatusCode::CONFLICT
-        }
+        NoLogin(_)
+        | RequiresLocalCallback(_)
+        | NotPending(_)
+        | Busy(_)
+        | WrongOwner
+        | RemoteDisconnect => StatusCode::CONFLICT,
         Failed(_) => StatusCode::BAD_GATEWAY,
     };
     ApiError(status, e.to_string())

@@ -368,6 +368,12 @@ pub struct Provider {
     /// (`omp auth-broker login <id>`); none means API key only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login: Option<String>,
+    /// Device-code provider id used when this node cannot receive localhost callbacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_login: Option<String>,
+    /// Subscription OAuth cannot run remotely unless a device login is configured.
+    #[serde(default)]
+    pub requires_local_callback: bool,
     /// What a token costs through this provider, when the credential is
     /// metered. Absent means a subscription: tokens are counted, dollars are
     /// not derived.
@@ -396,6 +402,8 @@ impl Default for Provider {
             upstream: String::new(),
             shape: SHAPE_OPENAI.into(),
             login: None,
+            device_login: None,
+            requires_local_callback: false,
             price: None,
         }
     }
@@ -410,6 +418,8 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 upstream: "https://api.anthropic.com".into(),
                 shape: SHAPE_ANTHROPIC.into(),
                 login: Some("anthropic".into()),
+                device_login: None,
+                requires_local_callback: true,
                 price: None,
             },
         ),
@@ -420,6 +430,8 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 upstream: "https://api.openai.com".into(),
                 shape: SHAPE_OPENAI.into(),
                 login: None,
+                device_login: None,
+                requires_local_callback: false,
                 price: None,
             },
         ),
@@ -430,6 +442,8 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 upstream: "https://chatgpt.com/backend-api".into(),
                 shape: SHAPE_OPENAI_CODEX.into(),
                 login: Some("openai-codex".into()),
+                device_login: Some("openai-codex-device".into()),
+                requires_local_callback: false,
                 price: None,
             },
         ),
