@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.12.2](https://github.com/cosmicspork/tracon/compare/v0.12.1...v0.12.2) (2026-09-03)
+
+
+### Bug Fixes
+
+* **node:** compile remote device login ([d2bbfde](https://github.com/cosmicspork/tracon/commit/d2bbfde163854aa31985c6b5ce2d5b22d4ba51af))
+* **node:** use device login remotely ([9fd9da4](https://github.com/cosmicspork/tracon/commit/9fd9da42b2ad27df8a694135210986be9ef35db9))
+* **node:** use device login remotely ([15c5ad2](https://github.com/cosmicspork/tracon/commit/15c5ad2b09c3bd225f7cab0dc2b5df5d7b96bab7))
+* **spa:** defer provider sign-in window ([9c31a05](https://github.com/cosmicspork/tracon/commit/9c31a0563de87dfd2f5625345da1fa0d06e4deac))
+* **spa:** defer provider sign-in window ([960ce0d](https://github.com/cosmicspork/tracon/commit/960ce0d16cfdee7558300c811eb68b18faaae313))
+
 ## [0.12.1](https://github.com/cosmicspork/tracon/compare/v0.12.0...v0.12.1) (2026-09-03)
 
 
