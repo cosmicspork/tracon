@@ -31,15 +31,26 @@ export interface ModelOption {
   name: string
 }
 
+export type LoginCompletion = 'local_callback' | 'paste'
+
+export interface ProviderConnectResult {
+  url: string
+  completion: LoginCompletion
+  completion_note: string | null
+}
+
 /** One model provider on the serving node, from `/api/providers` and the `providers` stream event. */
 export interface ProviderInfo {
   name: string
   state: 'connected' | 'pending' | 'failed' | 'disconnected'
   kind: 'api_key' | 'oauth' | null
-  /** Whether the harness has a login flow for it; otherwise an API key is imported by CLI. */
+  /** Whether the harness has a login flow for it; otherwise an API key is imported in Settings. */
   can_login: boolean
-  url: string | null
-  error: string | null
+  /** Private to the serving node; peer summaries deliberately omit completion details. */
+  url?: string | null
+  completion?: LoginCompletion | null
+  completion_note?: string | null
+  error?: string | null
   identity: string | null
   expires_ms: number | null
   channels: string[]

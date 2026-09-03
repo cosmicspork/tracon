@@ -78,8 +78,9 @@
   <small>Asking the forges…</small>
 {:else if forges !== null && forges.length === 0}
   <small>
-    No forge credential is bound to {channel || 'this channel'}: import a gh or glab
-    credential and bind it, or pick one this node already has below.
+    No forge credential is bound to {channel || 'this channel'}.
+    <a href="/settings#credentials">Add a GitHub or GitLab token in Settings.</a>
+    You can also pick a checkout this node already has below.
   </small>
 {:else if forges !== null}
   <div class="picker forge">

@@ -6,11 +6,15 @@ class Router {
   /** The query, kept reactive: a screen addressed by `?item=` is navigated to
       in-app as often as it is loaded cold. */
   search = $state(location.search)
+  hash = $state(location.hash)
+  revision = $state(0)
 
   start() {
     window.addEventListener('popstate', () => {
       this.path = location.pathname
       this.search = location.search
+      this.hash = location.hash
+      this.revision += 1
     })
     document.addEventListener('click', (e) => {
       // Leave modified clicks, downloads, and already-handled events to the
@@ -25,10 +29,12 @@ class Router {
   }
 
   go(path: string) {
-    if (path === this.path + location.search + location.hash) return
-    history.pushState(null, '', path)
+    const current = this.path + this.search + this.hash
+    if (path !== current) history.pushState(null, '', path)
     this.path = location.pathname
     this.search = location.search
+    this.hash = location.hash
+    this.revision += 1
   }
 }
 

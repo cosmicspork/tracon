@@ -28,11 +28,13 @@
     if (!target || busy) return
     busy = c.name
     errors = { ...errors, [c.name]: '' }
+    const updating = c.nodes.includes(target)
     try {
       await api.shareCredential(c.name, target)
+      const node = store.nodes.find((candidate) => candidate.id === target)?.name ?? target
       shared = {
         ...shared,
-        [c.name]: store.nodes.find((n) => n.id === target)?.name ?? target,
+        [c.name]: updating ? `updated copy on ${node}` : `handed to ${node}`,
       }
       version += 1
     } catch (e) {
@@ -65,15 +67,15 @@
               <select bind:value={to[c.name]}>
                 <option value="" disabled selected>Share to…</option>
                 {#each peers as p (p.id)}
-                  <option value={p.id} disabled={c.nodes.includes(p.id)}
-                    >{p.name}{c.nodes.includes(p.id) ? ' · has it' : ''}</option
-                  >
+                  <option value={p.id}>{p.name}{c.nodes.includes(p.id) ? ' · has a copy' : ''}</option>
                 {/each}
               </select>
               <button class="lnk" onclick={() => share(c)} disabled={busy === c.name || !to[c.name]}
-                >{busy === c.name ? 'Sharing…' : 'Share'}</button
+                >{busy === c.name
+                  ? c.nodes.includes(to[c.name]) ? 'Updating…' : 'Sharing…'
+                  : c.nodes.includes(to[c.name]) ? 'Update copy' : 'Share'}</button
               >
-              {#if shared[c.name]}<small class="ok">handed to {shared[c.name]}</small>{/if}
+              {#if shared[c.name]}<small class="ok">{shared[c.name]}</small>{/if}
             </span>
           {/if}
           {#if errors[c.name]}<span class="err">{errors[c.name]}</span>{/if}

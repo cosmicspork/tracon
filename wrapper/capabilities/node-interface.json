@@ -9,8 +9,13 @@
     "urls": ["http://127.0.0.1:*/*", "http://localhost:*/*"]
   },
   "permissions": [
+    "allow-desktop-managed-local",
     "allow-desktop-update-status",
     "allow-desktop-check-for-update",
-    "allow-desktop-install-update"
+    "allow-desktop-install-update",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://*" }]
+    }
   ]
 }

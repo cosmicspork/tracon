@@ -128,7 +128,7 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
             }
         }
     };
-    carry(providers.list());
+    carry(providers.list_public());
     providers.set_on_publish(Box::new(carry));
     state.manager.set_providers(providers);
     Node {

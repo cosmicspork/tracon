@@ -62,7 +62,7 @@ pub const KIND_OAUTH: &str = "oauth";
 
 /// One credential and the channels allowed to use it. `--profile` in consulta
 /// becomes a channel binding here: which channel may use which connection.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Credential {
     /// Environment the sidecar needs, injected at spawn and never logged.
     #[serde(default)]
@@ -91,6 +91,21 @@ pub struct Credential {
     /// Shown, never used for anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Credential")
+            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
+            .field("channels", &self.channels)
+            .field("nodes", &self.nodes)
+            .field("kind", &self.kind)
+            .field("provider", &self.provider)
+            .field("expires_ms", &self.expires_ms)
+            .field("identity", &self.identity)
+            .finish()
+    }
 }
 
 fn default_kind() -> String {
@@ -130,20 +145,48 @@ impl Credential {
 /// Headers the model gateway writes in place of the harness's placeholder.
 /// Built inside the broker so the secret leaves it only as a header bound for
 /// the provider, never as a value a response could carry.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Injection {
     pub authorization: Option<String>,
     pub x_api_key: Option<String>,
     /// An Anthropic subscription token: the gateway merges the OAuth beta flag.
     pub oauth_beta: bool,
+    pub chatgpt_account_id: Option<String>,
+}
+
+impl std::fmt::Debug for Injection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Injection")
+            .field(
+                "authorization",
+                &self.authorization.as_ref().map(|_| "<redacted>"),
+            )
+            .field("x_api_key", &self.x_api_key.as_ref().map(|_| "<redacted>"))
+            .field("oauth_beta", &self.oauth_beta)
+            .field(
+                "chatgpt_account_id",
+                &self.chatgpt_account_id.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Loaded at startup from a store only the node can open, and written back
 /// whenever a login, an import, or a handoff changes it.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Broker {
     #[serde(default)]
     credentials: BTreeMap<String, Credential>,
+}
+
+impl std::fmt::Debug for Broker {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Broker")
+            .field("credentials", &self.credentials.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl Broker {
@@ -231,7 +274,7 @@ impl Broker {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("sealed.tmp");
+        let tmp = path.with_extension(format!("sealed.{}.tmp", uuid::Uuid::now_v7()));
         {
             let mut opts = std::fs::OpenOptions::new();
             opts.write(true).create(true).truncate(true);
@@ -243,7 +286,10 @@ impl Broker {
             use std::io::Write;
             opts.open(&tmp)?.write_all(&bytes)?;
         }
-        std::fs::rename(&tmp, path)?;
+        if let Err(error) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error.into());
+        }
         Ok(())
     }
 
@@ -434,13 +480,27 @@ impl Broker {
                 })
             }
             KIND_OAUTH => {
-                let tok = cred
+                let token = cred
                     .env
                     .get("ACCESS_TOKEN")
                     .ok_or_else(|| missing("ACCESS_TOKEN"))?;
+                let chatgpt_account_id = if shape == "openai-codex" {
+                    let account = cred
+                        .env
+                        .get("CHATGPT_ACCOUNT_ID")
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or_else(|| missing("CHATGPT_ACCOUNT_ID"))?;
+                    axum::http::HeaderValue::from_str(account).map_err(|_| {
+                        BrokerError::Parse("credential has an invalid CHATGPT_ACCOUNT_ID".into())
+                    })?;
+                    Some(account.clone())
+                } else {
+                    None
+                };
                 Ok(Injection {
-                    authorization: Some(format!("Bearer {tok}")),
+                    authorization: Some(format!("Bearer {token}")),
                     oauth_beta: shape == "anthropic",
+                    chatgpt_account_id,
                     ..Default::default()
                 })
             }
@@ -611,11 +671,19 @@ mod tests {
             ..Default::default()
         };
         oauth.env.insert("ACCESS_TOKEN".into(), "at".into());
+        oauth
+            .env
+            .insert("CHATGPT_ACCOUNT_ID".into(), "acct-123".into());
         let mut b = Broker::default();
         b.put("max", oauth);
         let i = b.inject_for("max", "work", "node-a", "anthropic").unwrap();
         assert_eq!(i.authorization.as_deref(), Some("Bearer at"));
         assert!(i.oauth_beta);
+        let codex = b
+            .inject_for("max", "work", "node-a", "openai-codex")
+            .unwrap();
+        assert_eq!(codex.authorization.as_deref(), Some("Bearer at"));
+        assert_eq!(codex.chatgpt_account_id.as_deref(), Some("acct-123"));
         assert!(b.inject_for_probe("max", "node-a", "anthropic").is_ok());
         assert!(b.model_credential_for("anthropic", "node-a").is_some());
         assert!(b.model_credential_for("openai", "node-a").is_none());
@@ -726,5 +794,32 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(Broker::refuse_if_too_open(&path).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn secret_bearing_debug_output_is_redacted() {
+        let mut credential = Credential::default();
+        credential
+            .env
+            .insert("TOKEN".into(), "credential-secret".into());
+        let injection = Injection {
+            authorization: Some("Bearer authorization-secret".into()),
+            x_api_key: Some("api-secret".into()),
+            chatgpt_account_id: Some("account-secret".into()),
+            ..Default::default()
+        };
+        let mut broker = Broker::default();
+        broker.put("forge", credential.clone());
+        let debug = format!("{credential:?} {injection:?} {broker:?}");
+        for secret in [
+            "credential-secret",
+            "authorization-secret",
+            "api-secret",
+            "account-secret",
+        ] {
+            assert!(!debug.contains(secret), "{debug}");
+        }
+        assert!(debug.contains("TOKEN"));
+        assert!(debug.contains("forge"));
     }
 }

@@ -306,6 +306,7 @@ fn lift_from_agent_db(db: &Path, provider: &str) -> Result<LiftedToken, AdapterE
         refresh: v["refresh"].as_str().map(str::to_string),
         expires_ms: v["expires"].as_i64(),
         identity: v["email"].as_str().map(str::to_string),
+        account_id: v["accountId"].as_str().map(str::to_string),
     })
 }
 

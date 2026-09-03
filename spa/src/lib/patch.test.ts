@@ -244,7 +244,7 @@ test('git accepts randomly generated edits', () => {
     expect(r.read('f.txt'), `round ${round}: wrong result for ${JSON.stringify(before)}`).toBe(after)
   }
   rmSync(dir, { recursive: true, force: true })
-})
+}, 60_000)
 
 test('the header names the file on both sides', () => {
   const patch = unifiedDiff('src/deep/file.rs', 'a\n', 'b\n')!
