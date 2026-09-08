@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.13.1](https://github.com/cosmicspork/tracon/compare/v0.13.0...v0.13.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **node:** an attached harness's card reaches an interface already open ([#125](https://github.com/cosmicspork/tracon/issues/125)) ([83e1598](https://github.com/cosmicspork/tracon/commit/83e159815ad72e7e60e51258f1588260cca54985))
+* **wrapper:** a check that never answers must not disable the update button ([#124](https://github.com/cosmicspork/tracon/issues/124)) ([625ce90](https://github.com/cosmicspork/tracon/commit/625ce90fd03d496e18dbcf1372bd79f5cc857ed1))
+
 ## [0.13.0](https://github.com/cosmicspork/tracon/compare/v0.12.2...v0.13.0) (2026-09-08)
 
 
