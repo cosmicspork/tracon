@@ -22,14 +22,19 @@
           ? 'ok'
           : 'run',
   )
+  // A harness the operator runs themselves has no turn, no budget, and no
+  // repository; saying "Running · main" of it would be three lies.
+  const external = $derived(session.harness_id === 'external')
   const kind = $derived(
     {
       starting: 'Starting',
-      running: session.turn_active ? 'Working' : 'Running',
+      running: external ? 'Attached' : session.turn_active ? 'Working' : 'Running',
       waiting_on_you: 'Waiting on you',
       waiting_on_check: 'Waiting on a check',
       closed:
-        session.end_reason === 'killed_user'
+        session.end_reason === 'detached'
+          ? 'Detached'
+          : session.end_reason === 'killed_user'
           ? 'Killed'
           : session.end_reason === 'item_close'
             ? 'Ended · item closed'
@@ -67,12 +72,14 @@
     <em>{kind}</em>
     {session.branch}
     <small
-      >{stale && owner?.last_seen_ms ? `last seen ${formatAge(owner.last_seen_ms, clock.now)} · ` : ''}{repo} · {session.phase} · {session.model.split('/').at(-1)} · {session.channel}{failure
+      >{stale && owner?.last_seen_ms ? `last seen ${formatAge(owner.last_seen_ms, clock.now)} · ` : ''}{external
+        ? `your own harness · ${session.channel}`
+        : `${repo} · ${session.phase} · ${session.model.split('/').at(-1)} · ${session.channel}`}{failure
         ? ` · ${failure}`
         : ''}</small
     >
   </span>
-  <span class="mono">{formatBudget(session.tokens_used, session.budget_tokens)}</span>
+  <span class="mono">{external ? '' : formatBudget(session.tokens_used, session.budget_tokens)}</span>
 </a>
 {#if onarchive}
   <button

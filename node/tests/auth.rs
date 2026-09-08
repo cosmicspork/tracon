@@ -601,3 +601,70 @@ async fn the_harness_router_carries_no_operator_api() {
         "no operator API on the harness listener"
     );
 }
+
+/// The door for a harness the operator runs themselves is on the operator
+/// router, so it is guarded exactly like the rest of it: loopback is the
+/// operator, and anything else presents the token.
+#[tokio::test]
+async fn the_external_door_is_guarded_like_the_operator_api() {
+    state::isolate();
+    let n = node();
+    let body = Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }));
+
+    // Off by default, and the refusal comes from the handler rather than the
+    // guard: loopback got through.
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/mcp/external/work",
+        LOCAL,
+        "127.0.0.1:7420",
+        &[],
+        body.clone(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[external]"),
+        "{v}"
+    );
+
+    set_token(&n, "trc1.secret").await;
+
+    // From elsewhere, without the token, the guard answers first.
+    let (s, _, _) = call(
+        &n,
+        "POST",
+        "/mcp/external/work",
+        REMOTE,
+        "tracon.example",
+        &[],
+        body.clone(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // With it, the request reaches the handler, which refuses for its own
+    // reason. Either way nothing runs; the point is which gate answered.
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/mcp/external/work",
+        REMOTE,
+        "tracon.example",
+        &[("authorization", "Bearer trc1.secret")],
+        body,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[external]"),
+        "{v}"
+    );
+}

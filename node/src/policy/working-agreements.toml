@@ -6,7 +6,7 @@
 # Anything not matched here is asked, so adding a rule can only ever reduce the
 # number of interruptions, never widen what an agent may do unattended.
 
-version = 4
+version = 5
 
 # --- 1. Worktree, not the main checkout -------------------------------------
 # Structurally true already: the harness only ever sees its own worktree at
@@ -113,14 +113,12 @@ reason = "A read-only query, a data-dictionary lookup, or a review submission ch
 kinds = ["tool"]
 matches = ["query", "describe", "submit_review", "review_status", "review_verdict", "mr_status", "issue"]
 
-# Comments are visible, attributable, and reversible; they are what the agent
-# does instead of transitioning a ticket or merging a change.
-[[rule]]
-id = "brokered-comments"
-verdict = "allow"
-reason = "A comment is the agent's voice on the forge and the tracker; it moves nothing."
-kinds = ["tool"]
-matches = ["mr_comment", "issue_comment"]
+# Writing to the forge or the tracker — a comment, an edited field, a new
+# issue — is named nowhere here, so every one of them is asked. A comment is
+# visible, attributable and reversible, which is why it is what the agent does
+# instead of transitioning a ticket; it is still the agent speaking in the
+# operator's name where colleagues will read it, and one look before it lands
+# costs less than the retraction.
 
 # Memory and documents are the node's own corpus. Reading it is free; what
 # the agent retains is bounded by kind (a lesson waits for the nightly batch)

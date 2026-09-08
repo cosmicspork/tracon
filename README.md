@@ -158,6 +158,36 @@ approval is refused and the changed files are named. `tracon provenance <sha>`
 answers, later, which model, which prompts, which approval and which policy shipped
 a commit.
 
+## Using the tools from your own harness
+
+Everything above is about harnesses the node starts. A harness you start
+yourself — a terminal on this machine — can use the same tools, without ever
+holding a credential. Turn it on, then register the node once per channel:
+
+```toml
+[external]
+enabled = true
+```
+
+```sh
+tracon external show     # prints the line below, for each channel
+claude mcp add --transport http tracon-work http://127.0.0.1:7420/mcp/external/work
+```
+
+It gets the channel's tools: the database, the forge and the tracker, the
+node's documents and memory, and the ledger. Not the review tools — those need
+a worktree the node made and a diff it captured, so publishing still goes
+through a session the node starts. A verb the policy does not name reaches
+your home as a card, exactly as it would from inside the boundary, and the
+call waits for you.
+
+What it does not get is the boundary. That harness runs as you, on your
+machine: the promise here is that it never needs the credential and that every
+call it makes is decided by policy and written to a session log, not that it
+could not have read the credential by other means. `docs/reference/external-harness-notes.md`
+says what that changes; a node holding production credentials should leave
+`[external]` off.
+
 ## More nodes
 
 ![Nodes: this machine, its peers, their providers and credentials](docs/media/nodes-desktop.png)
@@ -234,6 +264,7 @@ tracon channel bind work notify.enabled=false   # the desktop tray is enough for
 | `tracon setup [--rebuild]`, `check-boundary [--deep]` | the boundary (also on the Settings screen) |
 | `tracon service install\|uninstall\|status` | the platform supervisor |
 | `tracon auth issue [--url]\|revoke\|sessions` | off-machine access; `--url` prints the login QR |
+| `tracon external show\|detach <channel>` | a harness you run yourself, using this node's tools |
 | `tracon push ls\|rm <id>\|test` | the phones this node pushes to |
 | `tracon mesh id\|init\|invite\|members\|remove\|admit`, `enroll` | the mesh |
 | `tracon channel create\|list\|bind\|share` | channels and their bindings |
@@ -323,6 +354,10 @@ max_files = 40
 
 [notify]
 # contact = "mailto:you@example.com"    # what a push service may write to about this sender
+
+[external]                          # a harness you run yourself, using this node's tools; off unless enabled
+enabled = false
+idle_timeout_secs = 3600            # an attachment with no call for this long is closed
 
 [embed]                             # semantic search; off unless enabled
 enabled = false

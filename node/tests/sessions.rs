@@ -1183,7 +1183,7 @@ async fn a_session_starts_with_its_orientation_recorded() {
         ..
     } = orientation("recorded").await;
     assert_eq!(row.phase, "plan");
-    assert_eq!(row.policy_version, Some(4));
+    assert_eq!(row.policy_version, Some(5));
     // Bank identity from the remote, not the path.
     let canonical = tracon::corpus::project::canonical_remote(&origin_url).unwrap();
     assert_eq!(

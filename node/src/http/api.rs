@@ -19,6 +19,10 @@ use crate::{
     store::Store,
 };
 
+/// The channels a standalone node offers before any has been created. The
+/// form shows these, so anything keyed on a channel accepts them too.
+pub const DEFAULT_CHANNELS: &[&str] = &["personal", "work"];
+
 #[derive(Clone)]
 pub struct AppState {
     pub manager: Manager,
@@ -136,7 +140,7 @@ pub async fn list_channels(State(s): State<AppState>) -> ApiResult<Json<serde_js
     let mut out = Vec::new();
     let rows = s.store().channel_list()?;
     if rows.is_empty() {
-        for name in ["personal", "work"] {
+        for name in DEFAULT_CHANNELS.iter().copied() {
             let ceiling = crate::metrics::ceiling(s.store(), &json!({}), name);
             out.push(
                 json!({ "name": name, "nodes": [s.node_id], "bindings": {}, "ceiling": ceiling }),
@@ -958,6 +962,38 @@ pub(crate) async fn decide_local(
             format!("{other:?} is not a verdict"),
         )),
     }
+}
+
+/// Whether this node answers harnesses outside the boundary, which channels
+/// one could attach to, and what is attached now. The CLI prints the line to
+/// register with; the interface shows the same.
+pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let rows = s.store().channel_list()?;
+    let channels: Vec<String> = if rows.is_empty() {
+        DEFAULT_CHANNELS.iter().map(|c| c.to_string()).collect()
+    } else {
+        rows.into_iter()
+            .filter(|c| !c.name.starts_with('@'))
+            .filter(|c| {
+                serde_json::from_str::<serde_json::Value>(&c.bindings_json)
+                    .map(|b| b["archived"].is_null())
+                    .unwrap_or(true)
+            })
+            .map(|c| c.name)
+            .collect()
+    };
+    let attached: Vec<serde_json::Value> = s
+        .manager
+        .external_attachments()
+        .await
+        .into_iter()
+        .map(|(channel, session_id)| json!({ "channel": channel, "session_id": session_id }))
+        .collect();
+    Ok(Json(json!({
+        "enabled": s.cfg.external.enabled,
+        "channels": channels,
+        "attachments": attached,
+    })))
 }
 
 /// The queue, ordered on the node: waiting-on-you first, oldest first within

@@ -15,13 +15,17 @@ use tracon::mcp::{CallContext, Tools};
 #[derive(Clone, Default)]
 struct Seen(Arc<Mutex<Vec<(String, String, String)>>>);
 
+/// What the stub was sent, for the writes: method, path, body.
+#[derive(Clone, Default)]
+struct Bodies(Arc<Mutex<Vec<(String, String, Value)>>>);
+
 async fn stub(
-    State(seen): State<Seen>,
+    State((seen, bodies)): State<(Seen, Bodies)>,
     method: axum::http::Method,
     uri: axum::http::Uri,
     headers: HeaderMap,
     body: String,
-) -> Json<Value> {
+) -> (axum::http::StatusCode, Json<Value>) {
     let auth = headers
         .get("private-token")
         .or_else(|| headers.get("authorization"))
@@ -33,34 +37,64 @@ async fn stub(
         .unwrap()
         .push((method.to_string(), uri.path().to_string(), auth));
     let path = uri.path();
-    Json(if path.ends_with("/approvals") {
-        json!({ "approved": true, "approved_by": [{ "user": { "username": "reviewer" } }] })
-    } else if path.contains("/merge_requests/7") && method == "GET" {
-        json!({ "iid": 7, "title": "Add thing", "state": "opened", "draft": false,
+    bodies.0.lock().unwrap().push((
+        method.to_string(),
+        path.to_string(),
+        serde_json::from_str(&body).unwrap_or(Value::Null),
+    ));
+    // An edit answers 204 with no body; a rejected one carries `errors`.
+    if path == "/rest/api/2/issue/WRK-1" && method == "PUT" {
+        return (axum::http::StatusCode::NO_CONTENT, Json(Value::Null));
+    }
+    if path == "/rest/api/2/issue/WRK-9" && method == "PUT" {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "errorMessages": [], "errors": { "priority": "Specify a valid value" } })),
+        );
+    }
+    if path == "/rest/api/2/issue" && method == "POST" {
+        return (
+            axum::http::StatusCode::CREATED,
+            Json(json!({ "id": "1042", "key": "WRK-9" })),
+        );
+    }
+    (
+        axum::http::StatusCode::OK,
+        Json(if path.ends_with("/approvals") {
+            json!({ "approved": true, "approved_by": [{ "user": { "username": "reviewer" } }] })
+        } else if path.contains("/merge_requests/7") && method == "GET" {
+            json!({ "iid": 7, "title": "Add thing", "state": "opened", "draft": false,
                 "source_branch": "feat/thing", "target_branch": "main",
                 "detailed_merge_status": "mergeable", "has_conflicts": false,
                 "head_pipeline": { "status": "success" }, "user_notes_count": 2,
                 "web_url": "https://gitlab.example/g/p/-/merge_requests/7" })
-    } else if path.ends_with("/notes") && method == "POST" {
-        let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-        json!({ "id": 99, "created_at": "now", "body": v["body"] })
-    } else if path.ends_with("/issue/WRK-1") {
-        json!({ "key": "WRK-1", "fields": { "summary": "Do the thing", "status": { "name": "In Progress" },
+        } else if path.ends_with("/notes") && method == "POST" {
+            let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+            json!({ "id": 99, "created_at": "now", "body": v["body"] })
+        } else if path.ends_with("/issue/WRK-1") {
+            json!({ "key": "WRK-1", "fields": { "summary": "Do the thing", "status": { "name": "In Progress" },
                 "assignee": { "displayName": "J" }, "description": "…", "issuetype": { "name": "Task" },
                 "priority": { "name": "Medium" },
                 "comment": { "comments": [{ "author": { "displayName": "A" }, "created": "t", "body": "hi" }] } } })
-    } else if path.ends_with("/issue/WRK-1/comment") && method == "POST" {
-        json!({ "id": "5", "created": "now" })
-    } else {
-        json!({ "message": "unexpected" })
-    })
+        } else if path.ends_with("/issue/WRK-1/comment") && method == "POST" {
+            json!({ "id": "5", "created": "now" })
+        } else {
+            json!({ "message": "unexpected" })
+        }),
+    )
 }
 
 async fn rig() -> (Tools, Seen, String) {
+    let (t, seen, _, base) = rig_with_bodies().await;
+    (t, seen, base)
+}
+
+async fn rig_with_bodies() -> (Tools, Seen, Bodies, String) {
     let seen = Seen::default();
+    let bodies = Bodies::default();
     let app = Router::new()
         .route("/{*path}", any(stub))
-        .with_state(seen.clone());
+        .with_state((seen.clone(), bodies.clone()));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move {
@@ -90,7 +124,28 @@ async fn rig() -> (Tools, Seen, String) {
         http: reqwest::Client::new(),
         session: Default::default(),
     };
-    (tools, seen, base)
+    (tools, seen, bodies, base)
+}
+
+/// The shipped bundle asks for every write, and these tests have no session to
+/// ask on. They are about what reaches Jira, so they run under a policy that
+/// allows the verbs outright; that comments and edits *do* ask is asserted
+/// separately, below.
+fn allowing(names: &str) -> std::sync::Arc<std::sync::RwLock<tracon::policy::Policy>> {
+    std::sync::Arc::new(std::sync::RwLock::new(
+        toml::from_str(&format!(
+            r#"
+            version = 9
+            [[rule]]
+            id = "test-allow"
+            verdict = "allow"
+            reason = "Under test."
+            kinds = ["tool"]
+            matches = [{names}]
+            "#
+        ))
+        .unwrap(),
+    ))
 }
 
 fn ctx(channel: &str, node: &str) -> CallContext {
@@ -144,7 +199,8 @@ async fn the_forge_and_tracker_tools_are_offered_to_the_bound_channel_and_node()
 #[tokio::test]
 async fn the_token_reaches_only_the_stub_and_only_on_the_read_and_comment_endpoints() {
     state::isolate();
-    let (t, seen, _) = rig().await;
+    let (mut t, seen, _) = rig().await;
+    t.policy = allowing(r#""mr_status", "mr_comment", "issue", "issue_comment""#);
     let c = ctx("work", "n1");
     let (err, v) = call(&t, &c, "mr_status", json!({"project": "g/p", "iid": 7})).await;
     assert!(!err, "{v}");
@@ -212,4 +268,156 @@ async fn an_unbound_channel_or_node_is_refused_before_any_request() {
     assert!(err);
     assert!(v.as_str().unwrap().contains("this node"), "{v}");
     assert!(seen.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_write_to_the_tracker_waits_on_the_operator() {
+    state::isolate();
+    // The shipped bundle names the reads and nothing else, so a comment, an
+    // edit, and a new issue all reach the queue. With no session to ask on,
+    // that shows up as the call refusing to run unattended.
+    let (t, seen, _) = rig().await;
+    let c = ctx("work", "n1");
+    for (name, args) in [
+        ("issue_comment", json!({"key": "WRK-1", "body": "on it"})),
+        ("issue_update", json!({"key": "WRK-1", "summary": "New"})),
+        (
+            "issue_create",
+            json!({"project": "WRK", "type": "Task", "summary": "New"}),
+        ),
+    ] {
+        let (err, v) = call(&t, &c, name, args).await;
+        assert!(err, "{name} should have asked: {v}");
+        assert!(
+            v.as_str().unwrap_or_default().contains("approval"),
+            "{name}: {v}"
+        );
+    }
+    assert!(seen.0.lock().unwrap().is_empty(), "nothing reached Jira");
+}
+
+#[tokio::test]
+async fn an_edit_sends_only_the_fields_it_names_and_never_a_transition() {
+    state::isolate();
+    let (mut t, seen, bodies, _) = rig_with_bodies().await;
+    t.policy = allowing(r#""issue_update""#);
+    let (err, v) = call(
+        &t,
+        &ctx("work", "n1"),
+        "issue_update",
+        json!({
+            "key": "WRK-1",
+            "summary": "Rewritten",
+            "priority": "High",
+            "labels": ["needs-review", "exchange"],
+            "parent": "WRK-100",
+        }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["key"], "WRK-1");
+
+    let bodies = bodies.0.lock().unwrap().clone();
+    let (method, path, body) = bodies.last().unwrap();
+    assert_eq!(method, "PUT");
+    assert_eq!(path, "/rest/api/2/issue/WRK-1");
+    let f = &body["fields"];
+    assert_eq!(f["summary"], "Rewritten");
+    assert_eq!(f["priority"], json!({ "name": "High" }));
+    assert_eq!(f["parent"], json!({ "key": "WRK-100" }));
+    assert_eq!(f["labels"], json!(["needs-review", "exchange"]));
+    assert!(f.get("status").is_none());
+    assert!(f.get("key").is_none());
+
+    let paths: Vec<String> = seen
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(m, p, _)| format!("{m} {p}"))
+        .collect();
+    assert!(
+        !paths.iter().any(|p| p.contains("/transitions")),
+        "{paths:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_edit_refuses_a_field_it_does_not_write_before_anything_is_sent() {
+    state::isolate();
+    let (mut t, seen, _) = rig().await;
+    t.policy = allowing(r#""issue_update""#);
+    let c = ctx("work", "n1");
+
+    let (err, v) = call(
+        &t,
+        &c,
+        "issue_update",
+        json!({"key": "WRK-1", "status": "Done"}),
+    )
+    .await;
+    assert!(err);
+    let text = v.as_str().unwrap();
+    assert!(text.contains("status"), "{text}");
+    assert!(text.contains("issue_comment"), "{text}");
+
+    let (err, v) = call(
+        &t,
+        &c,
+        "issue_update",
+        json!({"key": "WRK-1", "labels": ["needs review"]}),
+    )
+    .await;
+    assert!(err);
+    assert!(v.as_str().unwrap().contains("whitespace"), "{v}");
+
+    let (err, v) = call(&t, &c, "issue_update", json!({"key": "WRK-1"})).await;
+    assert!(err);
+    assert!(v.as_str().unwrap().contains("at least one"), "{v}");
+
+    assert!(seen.0.lock().unwrap().is_empty(), "nothing reached Jira");
+}
+
+#[tokio::test]
+async fn a_new_issue_carries_its_project_and_type_and_comes_back_with_a_link() {
+    state::isolate();
+    let (mut t, _, bodies, base) = rig_with_bodies().await;
+    t.policy = allowing(r#""issue_create""#);
+    let (err, v) = call(
+        &t,
+        &ctx("work", "n1"),
+        "issue_create",
+        json!({"project": "WRK", "type": "Task", "summary": "Do the thing"}),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["key"], "WRK-9");
+    assert_eq!(v["url"], json!(format!("{base}/browse/WRK-9")));
+
+    let bodies = bodies.0.lock().unwrap().clone();
+    let (method, path, body) = bodies.last().unwrap();
+    assert_eq!(method, "POST");
+    assert_eq!(path, "/rest/api/2/issue");
+    assert_eq!(body["fields"]["project"], json!({ "key": "WRK" }));
+    assert_eq!(body["fields"]["issuetype"], json!({ "name": "Task" }));
+}
+
+#[tokio::test]
+async fn a_refusal_from_jira_carries_the_field_it_names() {
+    state::isolate();
+    let (mut t, _, _) = rig().await;
+    t.policy = allowing(r#""issue_update""#);
+    // WRK-9's stub rejects the edit with a per-field message, which is where
+    // Jira puts a bad priority or a parent it will not accept.
+    let (err, v) = call(
+        &t,
+        &ctx("work", "n1"),
+        "issue_update",
+        json!({"key": "WRK-9", "priority": "Nope"}),
+    )
+    .await;
+    assert!(err);
+    let text = v.as_str().unwrap();
+    assert!(text.contains("priority"), "{text}");
+    assert!(text.contains("Specify a valid value"), "{text}");
 }

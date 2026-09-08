@@ -390,6 +390,7 @@ async fn the_config_is_readable_and_carries_no_secrets() {
         keys,
         [
             "boundary",
+            "external",
             "gateway",
             "harness",
             "node_name",

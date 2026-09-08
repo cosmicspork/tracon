@@ -331,7 +331,10 @@ impl Store {
     pub fn recent_repos(&self, limit: usize) -> Result<Vec<RecentRepo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
+            // An externally attached harness ran against no repository, so
+            // its row must not offer an empty path in the picker.
             "SELECT repo_path, MAX(created_ms), COUNT(*) FROM session \
+             WHERE harness_id <> 'external' \
              GROUP BY repo_path ORDER BY 2 DESC LIMIT ?1",
         )?;
         let rows = stmt

@@ -466,6 +466,7 @@ export interface NodeConfig {
   gateway: { allow_hosts: string[] }
   publish: { gh: string; glab: string; git: string }
   boundary: { podman: string }
+  external: { enabled: boolean; idle_timeout_secs: number }
   readonly: { hub_url: string | null; runtime: string; config_path: string }
   running: { harness_id: string; harness_version: string; node_name: string }
 }
