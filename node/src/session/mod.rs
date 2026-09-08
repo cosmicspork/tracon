@@ -2,6 +2,7 @@
 //! inside the boundary, and hand it to a supervisor.
 
 pub mod chunks;
+pub mod external;
 pub mod materialize;
 pub mod state;
 pub mod supervisor;
@@ -131,6 +132,11 @@ pub struct Manager {
     /// starts and dropped when it ends, so it authorises exactly one session
     /// for exactly as long as that session runs.
     tokens: Arc<Mutex<HashMap<String, (String, String)>>>,
+    /// Channel → the session an externally attached harness acts as. One per
+    /// channel: a second terminal on the same channel joins the attachment
+    /// rather than opening a second one, so the home shows what is connected
+    /// and not how many windows are open.
+    external: Arc<Mutex<HashMap<String, external::Attachment>>>,
     /// The node's own model probe presents this to the gateway; it may only
     /// read, and it names no channel.
     probe_token: String,
@@ -165,6 +171,7 @@ impl Manager {
             node_id,
             live: Arc::new(Mutex::new(HashMap::new())),
             tokens: Arc::new(Mutex::new(HashMap::new())),
+            external: Arc::new(Mutex::new(HashMap::new())),
             probe_token: mint_token(),
             mesh: Arc::new(std::sync::OnceLock::new()),
             providers: Arc::new(std::sync::OnceLock::new()),
@@ -811,6 +818,160 @@ impl Manager {
             tokens.lock().await.remove(&sid);
             materialize::remove(&sid);
         });
+        Ok(())
+    }
+
+    /// The session an external harness on `channel` acts as: the live one, or
+    /// a new row and the loop that answers for it.
+    ///
+    /// No tool token is minted. The door for these is the operator API, which
+    /// the operator's own guard already answers; a token here would be a
+    /// second capability for the same trust, and `session_for_token` must
+    /// never resolve one of these for the model gateway.
+    pub async fn attach_external(&self, channel: &str) -> Result<String, SessionError> {
+        self.channel_usable(channel)?;
+        let mut attached = self.external.lock().await;
+        if let Some(a) = attached.get(channel) {
+            if self.live.lock().await.contains_key(&a.session_id) {
+                if let Ok(mut t) = a.last_seen.lock() {
+                    *t = Instant::now();
+                }
+                return Ok(a.session_id.clone());
+            }
+        }
+
+        let id = uuid::Uuid::now_v7().to_string();
+        let row = SessionRow {
+            id: id.clone(),
+            node_id: self.node_id.clone(),
+            channel: channel.to_string(),
+            work_item_id: None,
+            repo_path: String::new(),
+            worktree_path: None,
+            branch: String::new(),
+            harness_id: external::HARNESS_ID.into(),
+            harness_version: String::new(),
+            harness_session_id: None,
+            container_name: None,
+            model: String::new(),
+            project_id: None,
+            phase: Phase::Execute.as_str().into(),
+            policy_version: Some(self.policy.read().unwrap().version as i64),
+            review_id: None,
+            // Recorded, never enforced: this node brokers no model call for an
+            // external harness, so there is nothing here to count.
+            budget_tokens: self.cfg.session.budget_tokens,
+            tokens_used: 0,
+            cost_usd: None,
+            context_used: None,
+            context_size: None,
+            state: SessionState::Running.as_str().into(),
+            end_reason: None,
+            last_error: None,
+            turn_active: 0,
+            draft: None,
+            draft_updated_ms: None,
+            created_ms: now_ms(),
+            started_mono_ms: Some(0),
+            ended_mono_ms: None,
+            updated_ms: now_ms(),
+            archived_ms: None,
+        };
+        self.store.insert_session(&row)?;
+        self.bus.publish(Frame::Session(Box::new(row.clone())));
+        self.record(NewEvent {
+            session_id: id.clone(),
+            work_item_id: None,
+            kind: ek::SESSION_STARTED.into(),
+            ref_id: None,
+            payload: json!({
+                "harness": external::HARNESS_ID,
+                "channel": channel,
+                "policy_version": self.policy.read().unwrap().version,
+            }),
+            at_ms: now_ms(),
+            mono_ms: 0,
+        });
+
+        let last_seen = Arc::new(std::sync::Mutex::new(Instant::now()));
+        let (cmd_tx, cmd_rx) = mpsc::channel(16);
+        self.live.lock().await.insert(id.clone(), cmd_tx);
+        attached.insert(
+            channel.to_string(),
+            external::Attachment {
+                session_id: id.clone(),
+                last_seen: last_seen.clone(),
+            },
+        );
+        drop(attached);
+
+        let looper = external::Loop {
+            session_id: id.clone(),
+            node_id: self.node_id.clone(),
+            store: self.store.clone(),
+            bus: self.bus.clone(),
+            permission_timeout: Duration::from_secs(self.cfg.session.permission_timeout_secs),
+            idle_timeout: Duration::from_secs(self.cfg.external.idle_timeout_secs.max(60)),
+            last_seen,
+        };
+        let live = self.live.clone();
+        let external = self.external.clone();
+        let sid = id.clone();
+        let ch = channel.to_string();
+        tokio::spawn(async move {
+            looper.run(cmd_rx).await;
+            live.lock().await.remove(&sid);
+            let mut attached = external.lock().await;
+            // Only if it is still this attachment: a reattach may have
+            // replaced it while this one was closing.
+            if attached.get(&ch).is_some_and(|a| a.session_id == sid) {
+                attached.remove(&ch);
+            }
+        });
+        Ok(id)
+    }
+
+    /// Live external attachments as `(channel, session_id)`, for the CLI and
+    /// the interface.
+    pub async fn external_attachments(&self) -> Vec<(String, String)> {
+        let attached = self.external.lock().await;
+        let live = self.live.lock().await;
+        attached
+            .iter()
+            .filter(|(_, a)| live.contains_key(&a.session_id))
+            .map(|(c, a)| (c.clone(), a.session_id.clone()))
+            .collect()
+    }
+
+    /// End the attachment on a channel, if there is one.
+    pub async fn detach_external(&self, channel: &str) -> Result<(), SessionError> {
+        let id = self
+            .external
+            .lock()
+            .await
+            .get(channel)
+            .map(|a| a.session_id.clone())
+            .ok_or(SessionError::NotFound)?;
+        self.kill(&id).await
+    }
+
+    /// A channel a session may run on: one this node holds, or one of the two
+    /// labels a standalone node offers before any channel is created.
+    fn channel_usable(&self, channel: &str) -> Result<(), SessionError> {
+        let known = match self.store.channel_list() {
+            Ok(rows) if rows.iter().any(|c| !c.name.starts_with('@')) => rows
+                .iter()
+                .any(|c| c.name == channel && !c.name.starts_with('@')),
+            // No channels yet: the interface offers these two, so they work.
+            Ok(_) => crate::http::api::DEFAULT_CHANNELS.contains(&channel),
+            Err(e) => return Err(e.into()),
+        };
+        if !known {
+            return Err(SessionError::UnknownChannel(channel.to_string()));
+        }
+        if !self.bindings(channel)["archived"].is_null() {
+            return Err(SessionError::ChannelArchived(channel.to_string()));
+        }
         Ok(())
     }
 

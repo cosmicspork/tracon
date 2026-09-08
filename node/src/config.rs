@@ -23,6 +23,36 @@ pub struct Config {
     pub review: ReviewLimits,
     pub notify: Notify,
     pub embed: Embed,
+    pub external: External,
+}
+
+/// A harness the operator runs themselves, outside the boundary, reaching the
+/// node's tools through the operator door (`POST /mcp/external/{channel}`).
+///
+/// Off by default. Turning it on is an explicit statement that a process on
+/// the operator's own machine may ask this node to act on a channel's
+/// credentials. What it gets is the boundary's tool surface minus review
+/// (there is no worktree to capture a diff from), decided by the same policy
+/// and logged on a session of its own. What it does not get is the boundary's
+/// guarantee: a harness sharing the operator's UID could read what the node
+/// holds, so the claim here is "never needs to", not "cannot".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct External {
+    pub enabled: bool,
+    /// An attached session with no call for this long is closed. Reattaching
+    /// is one call away, so short is fine; it keeps the home honest about
+    /// what is actually connected.
+    pub idle_timeout_secs: u64,
+}
+
+impl Default for External {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            idle_timeout_secs: 3600,
+        }
+    }
 }
 
 /// The embedding endpoint this node uses to build its own vector index.
@@ -477,6 +507,7 @@ impl Default for Config {
             review: ReviewLimits::default(),
             notify: Notify::default(),
             embed: Embed::default(),
+            external: External::default(),
             harness: Harness {
                 id: "omp".into(),
                 version: "18.0.4".into(),

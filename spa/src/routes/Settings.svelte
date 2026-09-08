@@ -24,6 +24,10 @@
   import type { BoundaryCheck, EnrollStatus, NodeConfig } from '../lib/types'
 
   const local = $derived(store.node?.loopback ?? false)
+  const origin = typeof location === 'undefined' ? '' : location.origin
+  const externalChannels = $derived(
+    store.channels.filter((c) => !c.archived).map((c) => c.name),
+  )
   const refused = $derived(store.node?.state === 'refused')
 
   let busy = $state('')
@@ -483,6 +487,33 @@
       <div class="qr">{@html issued.svg}</div>
       <code>{issued.token}</code>
     </div>
+  {/if}
+
+  <div class="h5 sub">
+    Your own harness <b>a terminal you run, using this node's tools</b>
+  </div>
+  <p class="lede">
+    A harness you start yourself can ask this node to read a ticket, query a
+    database, or comment on a change, without ever holding the credential. It
+    is not the boundary: it runs as you, so what it gets is the tools and the
+    queue, not the guarantee that it could not have taken the credential
+    anyway. Reviews stay with sessions the node starts.
+  </p>
+  {#if !cfg}
+    <small>Loading…</small>
+  {:else if !cfg.external.enabled}
+    <small>Off. Set <code>[external] enabled = true</code> in node.toml and restart.</small>
+  {:else if externalChannels.length === 0}
+    <small>Create a channel first.</small>
+  {:else}
+    <div class="mcp">
+      {#each externalChannels as name (name)}
+        <code>claude mcp add --transport http tracon-{name} {origin}/mcp/external/{name}</code>
+      {/each}
+    </div>
+    {#if !local}
+      <small>From another machine, add <code>--header "Authorization: Bearer &lt;operator token&gt;"</code>.</small>
+    {/if}
   {/if}
 </section>
 

@@ -1,9 +1,11 @@
 //! The tools the node exposes to a harness, over MCP.
 //!
 //! The transport is the gateway's forward: the harness can reach the node and
-//! nothing else, and it carries a token minted per session. A tool is the only
-//! shape a credential ever reaches the harness in — as something it may ask the
-//! node to do, never as something it holds.
+//! nothing else, and it carries a token minted per session. With `[external]`
+//! set, a harness the operator runs themselves reaches the same tools through
+//! the operator door instead, on a session it attaches to a channel. Either
+//! way a tool is the only shape a credential ever reaches the harness in — as
+//! something it may ask the node to do, never as something it holds.
 
 pub mod consulta;
 pub mod docs;
@@ -75,6 +77,17 @@ impl Tools {
         review::VERDICT,
     ];
 
+    /// What an attached external harness is not offered. Review needs a
+    /// worktree the node made and a diff it captured, and closing a work item
+    /// ends the session holding it — an attachment holds none. Both would
+    /// fail; not offering them says why before they are tried.
+    pub const NOT_EXTERNAL: &'static [&'static str] = &[
+        review::SUBMIT,
+        review::STATUS,
+        review::VERDICT,
+        work::WORK_CLOSE,
+    ];
+
     /// Tool definitions for a channel, narrowed by phase: a review session
     /// sees only [`Self::REVIEW_TOOLS`].
     pub fn list_for(
@@ -137,6 +150,19 @@ impl Tools {
                 review::VERDICT
             ));
         }
+        if Self::NOT_EXTERNAL.contains(&name) && self.is_external_session(ctx) {
+            return Err(if name == work::WORK_CLOSE {
+                format!(
+                    "{name} ends the session that holds the item, and this harness holds none; \
+                     close it with `tracon work close <id>` or from the Work screen"
+                )
+            } else {
+                format!(
+                    "{name} needs a worktree this node made and a diff it captured; \
+                     start a session from the interface to put a change up for review"
+                )
+            });
+        }
         if !plan_write {
             self.gate(ctx, name, args).await?;
         }
@@ -147,7 +173,7 @@ impl Tools {
             gitlab::MR_STATUS | gitlab::MR_COMMENT => {
                 gitlab::call(&self.broker, &self.http, ctx, name, args).await
             }
-            jira::ISSUE | jira::ISSUE_COMMENT => {
+            jira::ISSUE | jira::ISSUE_COMMENT | jira::ISSUE_UPDATE | jira::ISSUE_CREATE => {
                 jira::call(&self.broker, &self.http, ctx, name, args).await
             }
             review::SUBMIT | review::STATUS | review::VERDICT => {
@@ -180,6 +206,29 @@ impl Tools {
             }
             other => Err(format!("no tool named {other}")),
         }
+    }
+
+    /// The definitions this caller is offered: the channel's tools, less what
+    /// an attachment cannot use.
+    pub fn list_offered(&self, ctx: &CallContext) -> Vec<Value> {
+        let all = self.list(&ctx.channel, &ctx.node_id);
+        if !self.is_external_session(ctx) {
+            return all;
+        }
+        all.into_iter()
+            .filter(|t| {
+                !t["name"]
+                    .as_str()
+                    .is_some_and(|n| Self::NOT_EXTERNAL.contains(&n))
+            })
+            .collect()
+    }
+
+    fn is_external_session(&self, ctx: &CallContext) -> bool {
+        self.session
+            .get()
+            .and_then(|a| a.store.get_session(&ctx.session_id).ok().flatten())
+            .is_some_and(|s| s.harness_id == crate::session::external::HARNESS_ID)
     }
 
     fn is_review_session(&self, ctx: &CallContext) -> bool {
@@ -276,7 +325,7 @@ impl Tools {
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "tracon", "version": env!("CARGO_PKG_VERSION") },
             })),
-            "tools/list" => Ok(json!({ "tools": self.list(&ctx.channel, &ctx.node_id) })),
+            "tools/list" => Ok(json!({ "tools": self.list_offered(ctx) })),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));

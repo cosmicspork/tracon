@@ -400,27 +400,14 @@ impl Supervisor {
             crate::policy::Verdict::Ask => {}
         }
 
-        let id = uuid::Uuid::now_v7().to_string();
-        let row = PermissionRow {
-            id: id.clone(),
-            session_id: self.session_id.clone(),
-            node_id: self.node_id.clone(),
-            rpc_id: 0,
-            tool_call_id: request.tool_call_id.clone(),
-            title: request.title.clone(),
-            kind: request.kind.clone(),
-            raw_input: request
-                .raw_input
-                .as_ref()
-                .map(|v| serde_json::to_string(v).unwrap_or_default()),
-            options: serde_json::to_string(&request.options).unwrap_or_else(|_| "[]".into()),
-            state: "new".into(),
-            answer_option_id: None,
-            created_ms: now_ms(),
-            created_mono_ms: self.mono_ms(),
-            resolved_mono_ms: None,
-            expires_ms: now_ms() + self.permission_timeout.as_millis() as i64,
-        };
+        let row = permission_row(
+            &self.session_id,
+            &self.node_id,
+            self.mono_ms(),
+            self.permission_timeout,
+            &request,
+        );
+        let id = row.id.clone();
         if let Err(e) = self.store.insert_permission(&row) {
             tracing::error!(error = %e, "failed to record permission request");
             let _ = reply.send(PermissionReply::Selected(
@@ -442,18 +429,13 @@ impl Supervisor {
     }
 
     async fn on_answer(&mut self, permission_id: &str, option_id: &str) -> Result<(), String> {
-        let sender = self.open.lock().await.remove(permission_id);
-        let Some(sender) = sender else {
-            return Err("no open permission request with that id".into());
-        };
-        if !self
-            .store
-            .resolve_permission(permission_id, "answered", Some(option_id), self.mono_ms())
-            .map_err(|e| e.to_string())?
-        {
-            return Err("permission request is no longer open".into());
-        }
-        let _ = sender.send(PermissionReply::Selected(option_id.to_string()));
+        on_answer_row(
+            &self.store,
+            &mut *self.open.lock().await,
+            permission_id,
+            option_id,
+            self.mono_ms(),
+        )?;
         self.record(
             ek::PERMISSION_ANSWER,
             Some(permission_id.to_string()),
@@ -696,6 +678,59 @@ fn truncate(v: Option<&serde_json::Value>) -> (Option<String>, bool) {
     } else {
         (Some(s), false)
     }
+}
+
+/// The row a request becomes on the queue. Shared with the external
+/// attachment loop, which asks the same way without a harness behind it.
+pub(super) fn permission_row(
+    session_id: &str,
+    node_id: &str,
+    mono_ms: i64,
+    timeout: Duration,
+    request: &PermissionRequest,
+) -> PermissionRow {
+    PermissionRow {
+        id: uuid::Uuid::now_v7().to_string(),
+        session_id: session_id.to_string(),
+        node_id: node_id.to_string(),
+        rpc_id: 0,
+        tool_call_id: request.tool_call_id.clone(),
+        title: request.title.clone(),
+        kind: request.kind.clone(),
+        raw_input: request
+            .raw_input
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default()),
+        options: serde_json::to_string(&request.options).unwrap_or_else(|_| "[]".into()),
+        state: "new".into(),
+        answer_option_id: None,
+        created_ms: now_ms(),
+        created_mono_ms: mono_ms,
+        resolved_mono_ms: None,
+        expires_ms: now_ms() + timeout.as_millis() as i64,
+    }
+}
+
+/// Resolve an open request with the operator's answer and hand it to whoever
+/// is waiting. The caller records the event and republishes the session.
+pub(super) fn on_answer_row(
+    store: &Store,
+    open: &mut HashMap<String, oneshot::Sender<PermissionReply>>,
+    permission_id: &str,
+    option_id: &str,
+    mono_ms: i64,
+) -> Result<(), String> {
+    let Some(sender) = open.remove(permission_id) else {
+        return Err("no open permission request with that id".into());
+    };
+    if !store
+        .resolve_permission(permission_id, "answered", Some(option_id), mono_ms)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("permission request is no longer open".into());
+    }
+    let _ = sender.send(PermissionReply::Selected(option_id.to_string()));
+    Ok(())
 }
 
 #[cfg(test)]

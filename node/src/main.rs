@@ -66,6 +66,9 @@ enum Command {
     /// Who may reach this node's API from off this machine.
     #[command(subcommand)]
     Auth(AuthCommand),
+    /// A harness you run yourself, outside the boundary, using this node's tools.
+    #[command(subcommand)]
+    External(ExternalCommand),
     /// The phones this node pushes to.
     #[command(subcommand)]
     Push(PushCommand),
@@ -332,6 +335,15 @@ enum ChannelCommand {
 }
 
 #[derive(Subcommand)]
+enum ExternalCommand {
+    /// How to point your own harness at this node, and what is attached now.
+    Show,
+    /// End the attachment on a channel. The next call from that harness
+    /// attaches a new one.
+    Detach { channel: String },
+}
+
+#[derive(Subcommand)]
 enum PolicyCommand {
     /// Generate a signing key. The private half stays on this machine and never
     /// reaches the hub, so a compromised hub can serve stale policy but not new.
@@ -374,6 +386,7 @@ async fn main() -> Result<()> {
         Command::Memory(cmd) => memory_command(cmd).await,
         Command::Work(cmd) => work_command(cmd).await,
         Command::Auth(cmd) => auth_command(cmd).await,
+        Command::External(cmd) => external_command(cmd).await,
         Command::Push(cmd) => push_command(cmd).await,
         Command::Service(cmd) => match cmd {
             ServiceCommand::Install => tracon::service::install(),
@@ -867,6 +880,69 @@ async fn node_call(
         anyhow::bail!("{status}: {msg}");
     }
     Ok(v)
+}
+
+async fn external_command(cmd: ExternalCommand) -> Result<()> {
+    use reqwest::Method;
+    let v = node_call(Method::GET, "/api/external", None, None).await?;
+    match cmd {
+        ExternalCommand::Show => {
+            if v["enabled"] != true {
+                println!(
+                    "This node does not answer harnesses outside the boundary.\n\
+                     Set [external] enabled = true in node.toml and restart it."
+                );
+                return Ok(());
+            }
+            let base = node_url();
+            // The variable, never its value: a token is shown once, where it
+            // is issued, and this line is meant to be pasted and shared.
+            let header = std::env::var("TRACON_TOKEN")
+                .ok()
+                .filter(|t| !t.is_empty())
+                .map(|_| " --header \"Authorization: Bearer $TRACON_TOKEN\"".to_string())
+                .unwrap_or_default();
+            println!("Register this node with your harness, once per channel:\n");
+            for c in v["channels"].as_array().unwrap_or(&vec![]) {
+                let Some(name) = c.as_str() else { continue };
+                println!("  claude mcp add --transport http tracon-{name} {base}/mcp/external/{name}{header}");
+            }
+            let attached = v["attachments"].as_array().cloned().unwrap_or_default();
+            if attached.is_empty() {
+                println!("\nNothing attached.");
+            } else {
+                println!("\nAttached now:");
+                for a in attached {
+                    println!(
+                        "  {} · session {}",
+                        a["channel"].as_str().unwrap_or(""),
+                        a["session_id"].as_str().unwrap_or("")
+                    );
+                }
+            }
+            Ok(())
+        }
+        ExternalCommand::Detach { channel } => {
+            let id = v["attachments"]
+                .as_array()
+                .and_then(|a| {
+                    a.iter()
+                        .find(|a| a["channel"] == serde_json::json!(channel))
+                        .and_then(|a| a["session_id"].as_str())
+                        .map(str::to_string)
+                })
+                .ok_or_else(|| anyhow::anyhow!("nothing is attached to {channel}"))?;
+            node_call(
+                Method::POST,
+                &format!("/api/sessions/{id}/kill"),
+                None,
+                None,
+            )
+            .await?;
+            println!("detached {channel}");
+            Ok(())
+        }
+    }
 }
 
 async fn auth_command(cmd: AuthCommand) -> Result<()> {

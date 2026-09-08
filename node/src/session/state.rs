@@ -50,6 +50,9 @@ pub enum EndReason {
     /// The phase's artifact landed (a plan was written, a review verdict
     /// given); the session has nothing more to do.
     PhaseDone,
+    /// An externally attached harness went quiet for the idle timeout, or the
+    /// operator detached it. Nothing failed; nothing is running.
+    Detached,
     Error,
 }
 
@@ -61,6 +64,7 @@ impl EndReason {
             Self::HarnessExit => "harness_exit",
             Self::ItemClose => "item_close",
             Self::PhaseDone => "phase_done",
+            Self::Detached => "detached",
             Self::Error => "error",
         }
     }

@@ -32,6 +32,15 @@ use api::AppState;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        // The tools, for a harness the operator runs outside the boundary.
+        // Guarded like the rest of this router; see `mcp::handle_external`.
+        .route(
+            "/mcp/external/{channel}",
+            post(mcp::handle_external)
+                .get(mcp::external_get)
+                .delete(mcp::external_delete),
+        )
+        .route("/api/external", get(api::external))
         .route("/api/health", get(api::health))
         .route("/api/node", get(api::get_node))
         .route("/api/node/refresh-models", post(api::refresh_models))

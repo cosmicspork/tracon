@@ -99,6 +99,8 @@
 
   const inputReason = $derived.by(() => {
     if (!session) return 'loading'
+    // The operator is already talking to this one, in its own terminal.
+    if (session.harness_id === 'external') return 'a harness you run yourself'
     if (isTerminal(session.state)) return `session ${session.state.replace('_', ' ')}`
     if (session.state === 'starting') return 'starting'
     if (session.state === 'waiting_on_check') return `running ${checkCommand ?? 'the checks'}`

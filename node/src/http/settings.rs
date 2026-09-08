@@ -32,6 +32,10 @@ pub fn config_view(cfg: &Config) -> Value {
         "gateway": { "allow_hosts": cfg.gateway.allow_hosts },
         "publish": { "gh": cfg.publish.gh, "glab": cfg.publish.glab, "git": cfg.publish.git },
         "boundary": { "podman": cfg.boundary.podman },
+        "external": {
+            "enabled": cfg.external.enabled,
+            "idle_timeout_secs": cfg.external.idle_timeout_secs,
+        },
         // Read-only: shown so the pane can say what this node is, set by
         // enrolling or by the runtime it was started under.
         "readonly": {
@@ -152,10 +156,45 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
                     }
                 }
             }
+            "external" => {
+                for (k, v) in object(value, "external")? {
+                    match k.as_str() {
+                        "enabled" => set_bool(
+                            &mut cfg.external.enabled,
+                            v,
+                            "external.enabled",
+                            &mut changed,
+                        )?,
+                        "idle_timeout_secs" => set_u64(
+                            &mut cfg.external.idle_timeout_secs,
+                            v,
+                            "external.idle_timeout_secs",
+                            &mut changed,
+                        )?,
+                        other => return Err(unknown(&format!("external.{other}"))),
+                    }
+                }
+            }
             other => return Err(unknown(other)),
         }
     }
     Ok(changed)
+}
+
+fn set_bool(
+    slot: &mut bool,
+    v: &Value,
+    key: &str,
+    changed: &mut Vec<String>,
+) -> Result<(), String> {
+    let next = v
+        .as_bool()
+        .ok_or_else(|| format!("`{key}` expects true or false"))?;
+    if *slot != next {
+        *slot = next;
+        changed.push(key.to_string());
+    }
+    Ok(())
 }
 
 fn unknown(key: &str) -> String {
@@ -255,6 +294,7 @@ mod tests {
             keys,
             [
                 "boundary",
+                "external",
                 "gateway",
                 "harness",
                 "node_name",
