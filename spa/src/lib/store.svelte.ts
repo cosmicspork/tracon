@@ -7,6 +7,7 @@ import { router } from './router.svelte'
 import { api, ApiError } from './api'
 import { upsertNode } from './nodes'
 import { applySessionFrame } from './queue'
+import { allAnswered, kept, wantsLogin } from './snapshot'
 import type {
   ChannelInfo,
   Event,
@@ -109,31 +110,40 @@ class Store {
   }
 
   async refetch() {
-    try {
-      const [nodes, mesh, channels, queue, sessions, providers] = await Promise.all([
-        api.nodes(),
-        api.mesh(),
-        api.channels(),
-        api.queue(),
-        api.sessions(),
-        api.providers().catch(() => [] as ProviderInfo[]),
-      ])
-      this.nodes = nodes.reduce(upsertNode, [] as NodeInfo[])
-      this.mesh = mesh
-      this.channels = channels
-      this.providers = providers
-      this.queue = queue
-      this.sessions = new Map(sessions.map((s) => [s.id, s]))
-      if (this.openSession) await this.loadEvents(this.openSession)
-      this.authRequired = false
-      // The cookie may be new; the device follows it.
-      void push.resync()
-    } catch (e) {
-      // A node asking for a login is not a node that is down, and the two want
-      // different screens.
-      if (e instanceof ApiError && e.status === 401) this.authRequired = true
-      // Otherwise the node is unreachable; the stream's error handler shows it.
+    // Settled, not all-or-nothing: these are six independent snapshots, and
+    // one of them failing used to discard the other five. `mesh` left null
+    // that way reads on the Nodes screen as "no hub configured" — a claim the
+    // SPA has not heard — and nothing refetches until the stream reconnects.
+    const results = await Promise.allSettled([
+      api.nodes(),
+      api.mesh(),
+      api.channels(),
+      api.queue(),
+      api.sessions(),
+      api.providers(),
+    ])
+    const [nodes, mesh, channels, queue, sessions, providers] = results
+    this.nodes = kept(nodes, [] as NodeInfo[]).reduce(upsertNode, [] as NodeInfo[])
+    this.mesh = kept(mesh, this.mesh)
+    this.channels = kept(channels, this.channels)
+    this.providers = kept(providers, this.providers)
+    this.queue = kept(queue, this.queue)
+    this.sessions = kept(
+      sessions,
+      [...this.sessions.values()],
+    ).reduce((m, s) => m.set(s.id, s), new Map<string, Session>())
+    // Providers are allowed to fail on their own: a node that serves none
+    // still has a usable interface.
+    const load = results.filter((r) => r !== providers)
+    if (wantsLogin(load)) {
+      this.authRequired = true
+      return
     }
+    if (!allAnswered(load)) return
+    if (this.openSession) await this.loadEvents(this.openSession).catch(() => {})
+    this.authRequired = false
+    // The cookie may be new; the device follows it.
+    void push.resync()
   }
 
   /** Distinguish "log in" from "unreachable" after the stream drops. */
