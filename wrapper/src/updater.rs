@@ -28,6 +28,19 @@ use crate::{tray, State};
 const RELEASE_URL: &str = "https://api.github.com/repos/cosmicspork/tracon/releases/latest";
 const RELEASE_ACCEPT: &str = "application/vnd.github+json";
 const RELEASE_API_VERSION: &str = "2022-11-28";
+/// Bounds the release check. The same client streams the download, which is
+/// far larger and has no business being bounded by total elapsed time, so this
+/// is applied per request rather than on the client.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Time between bytes, not total: a download may legitimately take minutes, but
+/// a stream that has stopped delivering them is not a download.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// A check still unanswered after this is treated as wedged rather than in
+/// flight. Without it one request that never returns leaves the status at
+/// `checking`, which disables the button for the life of the process — the
+/// only cure being a restart.
+const CHECK_STALE_AFTER: Duration = Duration::from_secs(60);
 #[cfg(target_os = "macos")]
 const UNSUPPORTED_MESSAGE: &str =
     "Self-update needs tracon.app in a folder you can write, such as Applications.";
@@ -364,6 +377,8 @@ struct Inner {
     status: UpdateStatus,
     asset: Option<Asset>,
     announced: bool,
+    /// When the in-flight check began, so a wedged one can be superseded.
+    checking_since: Option<Instant>,
 }
 
 pub struct Updater {
@@ -390,11 +405,16 @@ impl Updater {
         Self {
             current_version,
             target,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .read_timeout(READ_TIMEOUT)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             inner: Mutex::new(Inner {
                 status,
                 asset: None,
                 announced: false,
+                checking_since: None,
             }),
         }
     }
@@ -409,7 +429,10 @@ impl Updater {
         let checking = self.status_with("checking", None, None);
         {
             let mut inner = self.inner.lock();
-            if matches!(inner.status.state, "checking" | "downloading") {
+            // A download is left alone however long it takes; a check is not,
+            // because one that never answers would otherwise hold the button
+            // disabled until the app is restarted.
+            if busy_with_check(inner.status.state, inner.checking_since) {
                 return inner.status.clone();
             }
             if self.target.is_none() {
@@ -417,6 +440,7 @@ impl Updater {
             }
             inner.status = checking;
             inner.asset = None;
+            inner.checking_since = Some(Instant::now());
         }
         self.refresh(app);
 
@@ -442,6 +466,7 @@ impl Updater {
             }
             inner.status = next.0.clone();
             inner.asset = next.1;
+            inner.checking_since = None;
             notify
         };
         self.refresh(app);
@@ -529,6 +554,7 @@ impl Updater {
             let mut inner = self.inner.lock();
             inner.status = self.status_with("failed", None, Some(message));
             inner.asset = None;
+            inner.checking_since = None;
         }
         self.refresh(app);
         self.status()
@@ -561,6 +587,7 @@ impl Updater {
                 reqwest::header::USER_AGENT,
                 format!("tracon/{}", self.current_version),
             )
+            .timeout(CHECK_TIMEOUT)
             .send()
             .await
             .map_err(|error| format!("Could not check GitHub releases: {error}"))?
@@ -584,6 +611,19 @@ impl Updater {
         if let Some(state) = app.try_state::<std::sync::Arc<State>>() {
             tray::refresh(app, &state);
         }
+    }
+}
+
+/// Whether a check should defer to one already under way. A download is left
+/// alone however long it takes; a check that has not answered within
+/// `CHECK_STALE_AFTER` is treated as wedged, because a request that never
+/// returns would otherwise hold the status at `checking` — which the interface
+/// renders as a disabled button — until the app is restarted.
+fn busy_with_check(state: &str, checking_since: Option<Instant>) -> bool {
+    match state {
+        "downloading" => true,
+        "checking" => checking_since.is_some_and(|since| since.elapsed() < CHECK_STALE_AFTER),
+        _ => false,
     }
 }
 
@@ -871,6 +911,38 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
+
+    #[test]
+    fn a_check_defers_to_one_that_is_genuinely_under_way() {
+        assert!(busy_with_check("checking", Some(Instant::now())));
+        assert!(busy_with_check("downloading", None));
+    }
+
+    #[test]
+    fn a_check_that_never_answered_does_not_disable_the_button_forever() {
+        // The regression: the release request has no total timeout by default,
+        // so one that never returned left the status at `checking`, and every
+        // later check returned early. The button stayed disabled until restart.
+        let wedged = Instant::now() - CHECK_STALE_AFTER - Duration::from_secs(1);
+        assert!(!busy_with_check("checking", Some(wedged)));
+        // Defensive: a `checking` with no start time is not evidence of one.
+        assert!(!busy_with_check("checking", None));
+    }
+
+    #[test]
+    fn a_settled_check_never_defers() {
+        for state in ["idle", "current", "available", "failed", "unsupported"] {
+            assert!(!busy_with_check(state, Some(Instant::now())), "{state}");
+        }
+    }
+
+    #[test]
+    fn a_slow_download_is_left_alone() {
+        // Downloads are minutes of work and bounded by read timeout, not by
+        // total elapsed time, so staleness must not apply to them.
+        let long = Instant::now() - CHECK_STALE_AFTER - Duration::from_secs(600);
+        assert!(busy_with_check("downloading", Some(long)));
+    }
 
     fn release(tag_name: &str, assets: Vec<ReleaseAsset>) -> Release {
         Release {
