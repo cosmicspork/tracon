@@ -17,6 +17,7 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 use tracon::config::Config;
+use tracon::stream::Frame;
 
 fn enabled() -> Config {
     let mut cfg = Config::default();
@@ -456,4 +457,45 @@ async fn an_unbound_channel_is_offered_no_brokered_tools() {
     }
     // The node's own corpus needs no credential, so it is still there.
     assert!(names.contains(&"recall".to_string()), "{names:?}");
+}
+
+/// The regression this file exists for: an interface that is already open
+/// learns about a card only from the stream. Publishing the session without
+/// the queue leaves it showing a session that is waiting on you and nothing
+/// to answer, which is exactly what it looked like in the wild.
+#[tokio::test]
+async fn a_card_reaches_an_interface_that_is_already_open() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let mut frames = h.bus.subscribe();
+
+    let app = h.operator.clone();
+    tokio::spawn(async move {
+        mcp(
+            &app,
+            "work",
+            tool_call("doc_write", json!({ "slug": "note-x", "body": "hello" })),
+        )
+        .await
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut saw_session = false;
+    let queued = loop {
+        let frame = tokio::time::timeout_at(deadline, frames.recv())
+            .await
+            .expect("the queue frame never arrived")
+            .expect("the bus closed");
+        match frame {
+            Frame::Session(_) => saw_session = true,
+            Frame::Queue { waiting } if !waiting.is_empty() => break waiting,
+            _ => {}
+        }
+    };
+    assert!(saw_session, "the session frame is published too");
+    assert!(
+        queued[0].title.starts_with("doc_write"),
+        "{}",
+        queued[0].title
+    );
 }

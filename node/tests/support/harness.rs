@@ -17,6 +17,9 @@ pub struct Harness {
     pub operator: axum::Router,
     pub store: Arc<Store>,
     pub manager: Manager,
+    /// What the interface would be watching: tests that care about a live
+    /// client, rather than a fresh page load, assert on these.
+    pub bus: Bus,
 }
 
 pub async fn harness() -> Harness {
@@ -35,9 +38,10 @@ pub async fn harness_with(cfg: Config) -> Harness {
         http: reqwest::Client::new(),
         session: Default::default(),
     });
+    let bus = Bus::new();
     let manager = Manager::new(
         store.clone(),
-        Bus::new(),
+        bus.clone(),
         cfg.clone(),
         "n1".into(),
         tools.clone(),
@@ -66,5 +70,6 @@ pub async fn harness_with(cfg: Config) -> Harness {
         operator: tracon::http::router(state),
         store,
         manager,
+        bus,
     }
 }
