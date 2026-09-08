@@ -642,6 +642,17 @@ pub async fn accept(
                 if got.iter().any(|c| c == MESH_CHANNEL) {
                     return Ok(got);
                 }
+                // A full page means the backlog is still ahead of the cursor,
+                // so read the next one now. This starts at seq 0 and @mesh
+                // carries every node's traffic, which puts tens of thousands
+                // of frames between here and a handoff that is always at the
+                // head; at one page per poll interval a months-old mesh
+                // spends the whole deadline crawling to it. Seeking to the
+                // head instead would race the handoff, which is posted
+                // before the first poll this node is a member for.
+                if page["next"].is_u64() {
+                    continue;
+                }
             }
             Err(EnrollError::Transport(e)) => {
                 progress.say(&format!("hub unreachable, retrying: {e}"))

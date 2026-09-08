@@ -191,3 +191,82 @@ async fn key_handoff_merges_epochs() {
     assert_eq!(merged.entries().len(), 2);
     assert!(!merged.newest().is_genesis());
 }
+
+/// A mesh that has been running for a while has a long `@mesh` history, and a
+/// fresh node starts reading it at seq 0 while the handoff it is waiting for
+/// sits at the head. Catching up must not cost a poll interval per page, or
+/// the backlog alone spends the enrolment deadline.
+#[tokio::test]
+async fn a_long_mesh_backlog_does_not_delay_the_handoff() {
+    state::isolate();
+    let a = Identity::from_seed(&[1u8; 32]);
+    let b = Identity::from_seed(&[2u8; 32]);
+    // Four pages' worth at the reader's limit of 200.
+    let hub = support::mesh::start_hub_with_backlog(
+        &[(&a, &[MESH_CHANNEL, "personal"][..]), (&b, &[][..])],
+        600,
+    )
+    .await;
+
+    let a_store = Store::open_in_memory().unwrap();
+    for c in [MESH_CHANNEL, "personal"] {
+        let ring = Keyring::genesis(&a.x25519_public(), &DataKey::generate());
+        a_store.channel_put(c, &ring.to_bytes(), "{}").unwrap();
+    }
+
+    let inv = enroll::open_invite(&a, &hub, &["personal".into()], Some(60))
+        .await
+        .unwrap();
+
+    let b_store = Arc::new(Store::open_in_memory().unwrap());
+    let (hub2, code2, store2) = (hub.clone(), inv.code.clone(), b_store.clone());
+    let accept = tokio::spawn(async move {
+        let b = Identity::from_seed(&[2u8; 32]);
+        enroll::accept(
+            store2,
+            &b,
+            &hub2,
+            &code2,
+            "laptop",
+            "x86_64",
+            Duration::from_secs(30),
+            &Quiet,
+        )
+        .await
+    });
+
+    let req = tokio::time::timeout(support::mesh::WAIT, async {
+        loop {
+            if let Some(r) = enroll::poll_invite(&a, &hub, &inv.code).await.unwrap() {
+                break r;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("B's enrollment request reached the hub");
+
+    let admitted_at = tokio::time::Instant::now();
+    enroll::admit(
+        &a_store,
+        &a,
+        &hub,
+        &req.node_id,
+        &req.x25519_pub,
+        &req.name,
+        &inv.channels,
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let got = accept.await.unwrap().unwrap();
+    assert!(got.contains(&MESH_CHANNEL.to_string()));
+    // One poll interval covers the wait for admission; the three further
+    // pages of backlog must not each cost another.
+    let took = admitted_at.elapsed();
+    assert!(
+        took < Duration::from_secs(5),
+        "the handoff took {took:?}; the backlog was walked a poll interval at a time"
+    );
+}

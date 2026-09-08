@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hub::store::{Member, MemberStore, MemoryFrames, MemoryMembers};
+use hub::store::{FrameStore, Member, MemberStore, MemoryFrames, MemoryMembers};
 use hub::HubConfig;
 use proto::envelope::DataKey;
 use proto::frame::MESH_CHANNEL;
@@ -24,6 +24,13 @@ pub fn identity(seed: u8) -> Identity {
 
 /// A hub with these members already admitted, on an ephemeral port.
 pub async fn start_hub(admitted: &[(&Identity, &[&str])]) -> String {
+    start_hub_with_backlog(admitted, 0).await
+}
+
+/// As `start_hub`, with `backlog` frames already on `@mesh`. They are not
+/// valid envelopes — a reader skips them — but they occupy sequence numbers,
+/// which is what a node catching up from seq 0 has to walk.
+pub async fn start_hub_with_backlog(admitted: &[(&Identity, &[&str])], backlog: usize) -> String {
     let members = Arc::new(MemoryMembers::new());
     for (id, channels) in admitted {
         members
@@ -38,7 +45,11 @@ pub async fn start_hub(admitted: &[(&Identity, &[&str])]) -> String {
             })
             .unwrap();
     }
-    let app = hub::app(Arc::new(MemoryFrames::new()), members, HubConfig::default());
+    let frames = Arc::new(MemoryFrames::new());
+    for _ in 0..backlog {
+        frames.append(MESH_CHANNEL, "{}", 0).unwrap();
+    }
+    let app = hub::app(frames, members, HubConfig::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
