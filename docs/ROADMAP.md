@@ -55,6 +55,14 @@ to Deferred or Never.
 4. **Forge listing beyond the first page.** The repository browse reads one page
    (100 repositories, most recently active first). Enough until someone's forge is
    not; pagination is additive to the same endpoint.
+5. **Policy from the interface.** Every other administrative area answers on the
+   node's own API — boundary and setup, mesh and enrolment, channels, credentials,
+   auth, and `node.toml` itself — while the policy bundle has no route at all, so
+   changing the rules the node enforces still means a shell. "A full editor" below
+   already commits to node administration belonging in the interface; this is what
+   is missing from it. Handing the signed bundle to members and showing what it
+   decides need no key and are ordinary routes; signing and generating the key are
+   done at the node itself, which is what the `Loopback` extractor already means.
 
 ## Deferred
 
@@ -90,7 +98,10 @@ Out of scope by decision, recorded so it is not rediscovered as a good idea.
   per-project editor preferences appear, this has become a second project.
   Configuring the *node* — its boundary, harness, credentials, channels and
   access — is not that, and belongs in the interface: an operator should never
-  need a shell to stand a node up.
+  need a shell to stand a node up. Installing the service and starting the node
+  are the deliberate exceptions — process management on the machine itself — as
+  is anything that reads or writes a directory of files, like importing a docs
+  corpus.
 - **Business domain in tracon.** Clients, invoicing, and time billing stay
   elsewhere.
 
