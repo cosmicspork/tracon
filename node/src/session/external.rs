@@ -280,10 +280,15 @@ impl Loop {
         }
     }
 
+    /// The session and the queue together, as the supervisor does it. A card
+    /// created here changes both, and an interface already open learns about
+    /// the queue only from the frame: without it the session says it is
+    /// waiting on you while the thing to answer never appears.
     fn publish_session(&self) {
         if let Ok(Some(row)) = self.store.get_session(&self.session_id) {
             self.bus.publish(Frame::Session(Box::new(row)));
         }
+        self.publish_queue();
     }
 
     fn publish_queue(&self) {
