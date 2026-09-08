@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.13.0](https://github.com/cosmicspork/tracon/compare/v0.12.2...v0.13.0) (2026-09-08)
+
+
+### Features
+
+* **node:** a harness you run yourself, using this node's tools ([a5728c3](https://github.com/cosmicspork/tracon/commit/a5728c33dddae1d6c58719efea25246606aa41bc))
+
+
+### Bug Fixes
+
+* **mesh:** read the enrolment backlog without a poll interval per page ([#121](https://github.com/cosmicspork/tracon/issues/121)) ([e744f65](https://github.com/cosmicspork/tracon/commit/e744f6520801baeddbc2b3837d120d8501a40c7a))
+* **spa:** keep the snapshots that answered when one endpoint fails ([#122](https://github.com/cosmicspork/tracon/issues/122)) ([a8872f8](https://github.com/cosmicspork/tracon/commit/a8872f892883129ededeedfab4a629ae8363f24f))
+
 ## [0.12.2](https://github.com/cosmicspork/tracon/compare/v0.12.1...v0.12.2) (2026-09-03)
 
 
