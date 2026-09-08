@@ -11,6 +11,9 @@
   const nodes = $derived(store.nodes)
   const providers = $derived(store.providers)
   const reachable = $derived(nodes.filter((n) => n.is_self || n.reachable).length)
+  // Three states, not two: null is "the node has not told us yet", which is
+  // not the same as "no hub", and must not be rendered as one.
+  const known = $derived(store.mesh !== null)
   const meshed = $derived(store.mesh !== null && store.mesh.hub.state !== 'disabled')
 
   function running(id: string): number {
@@ -24,7 +27,7 @@
 <div class="h4">
   Nodes
   <b
-    >{#if meshed}{nodes.length} enrolled · {reachable} reachable{:else}this machine · no hub configured{/if}</b
+    >{#if meshed}{nodes.length} enrolled · {reachable} reachable{:else if known}this machine · no hub configured{:else}this machine{/if}</b
   >
   {#if meshed}
     <a class="lnk r" href="/nodes/enroll">Enroll a new node</a>
