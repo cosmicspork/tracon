@@ -24,6 +24,7 @@ pub fn config_view(cfg: &Config) -> Value {
         "session": {
             "budget_tokens": cfg.session.budget_tokens,
             "permission_timeout_secs": cfg.session.permission_timeout_secs,
+            "default_channel": cfg.session.default_channel,
         },
         "review": {
             "max_diff_lines": cfg.review.max_diff_lines,
@@ -92,6 +93,12 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
                             &mut cfg.session.permission_timeout_secs,
                             v,
                             "session.permission_timeout_secs",
+                            &mut changed,
+                        )?,
+                        "default_channel" => set_string(
+                            &mut cfg.session.default_channel,
+                            v,
+                            "session.default_channel",
                             &mut changed,
                         )?,
                         other => return Err(unknown(&format!("session.{other}"))),
@@ -325,6 +332,23 @@ mod tests {
         // say honestly whether a restart is owed.
         let again = apply(&mut cfg, &json!({ "harness": { "id": "claude" } })).unwrap();
         assert!(again.is_empty());
+    }
+
+    #[test]
+    fn the_default_channel_is_a_session_setting() {
+        let mut cfg = Config::default();
+        assert_eq!(config_view(&cfg)["session"]["default_channel"], "");
+        let changed = apply(
+            &mut cfg,
+            &json!({ "session": { "default_channel": "work" } }),
+        )
+        .unwrap();
+        assert_eq!(changed, vec!["session.default_channel"]);
+        assert_eq!(cfg.session.default_channel, "work");
+        assert_eq!(config_view(&cfg)["session"]["default_channel"], "work");
+        // Clearing it is a change too.
+        let changed = apply(&mut cfg, &json!({ "session": { "default_channel": "" } })).unwrap();
+        assert_eq!(changed, vec!["session.default_channel"]);
     }
 
     #[test]

@@ -125,6 +125,7 @@ pub async fn list_nodes(
             // interface keeps its node in, so the answer has to live here too.
             if r.is_self == 1 {
                 v["loopback"] = json!(local);
+                v["default_channel"] = json!(s.cfg.session.default_channel);
             }
             v
         })
@@ -358,6 +359,7 @@ pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
     };
     let mut v = node_row_json(&n);
     v["providers"] = json!(providers_json(s));
+    v["default_channel"] = json!(s.cfg.session.default_channel);
     Ok(v)
 }
 

@@ -488,6 +488,9 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
 pub struct SessionDefaults {
     pub budget_tokens: i64,
     pub permission_timeout_secs: u64,
+    /// The channel the composer starts on when the client has not chosen one
+    /// itself. Empty means no preference.
+    pub default_channel: String,
     /// How long a claim survives a client that stopped talking. A dropped socket
     /// should not zero the attention count; a closed laptop should.
     pub claim_grace_secs: u64,
@@ -559,6 +562,7 @@ impl Default for Config {
             session: SessionDefaults {
                 budget_tokens: 2_000_000,
                 permission_timeout_secs: 900,
+                default_channel: String::new(),
                 claim_grace_secs: 60,
                 worktree_root: default_worktree_root(),
             },
