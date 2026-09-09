@@ -241,6 +241,8 @@ export const api = {
   startEnroll: (invitation: string) =>
     call<{ started: boolean }>('POST', '/api/mesh/enroll', { invitation }),
   enrollStatus: () => call<EnrollStatus>('GET', '/api/mesh/enroll'),
+  /** Forget the hub; takes effect on restart. The mesh channel stays for the next join. */
+  meshUnpair: () => call<{ unpaired: string | null; restart_required: boolean }>('POST', '/api/mesh/unpair'),
   shareCredential: (name: string, to: string) =>
     call<{ shared: string; to: string }>('POST', `/api/credentials/${name}/share`, { to }),
   providers: () => call<ProviderInfo[]>('GET', '/api/providers'),
