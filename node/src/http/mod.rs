@@ -61,6 +61,10 @@ pub fn router(state: AppState) -> Router {
             "/api/channels/{name}/bindings",
             put(api::put_channel_bindings),
         )
+        .route(
+            "/api/channels/{name}",
+            axum::routing::delete(api::delete_channel),
+        )
         .route("/api/promotions/batch", post(api::batch_promotions))
         .route("/api/promotions/{id}", get(api::get_promotion))
         .route("/api/promotions/{id}/verdict", post(api::decide_promotion))
