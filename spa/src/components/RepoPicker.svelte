@@ -6,13 +6,14 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
-  import { repoLabel } from '../lib/repo'
+  import { isManagedPath, repoLabel, repoMatches } from '../lib/repo'
   import type { ForgeList, ManagedRepo, RecentRepo } from '../lib/types'
 
   let { value = $bindable(''), channel = '' }: { value?: string; channel?: string } = $props()
 
   let recents = $state<RecentRepo[]>([])
   let managed = $state<ManagedRepo[]>([])
+  let allManaged = $state<ManagedRepo[]>([])
   let version = $state(0)
   $effect(() => {
     void version
@@ -20,6 +21,7 @@
       .recentRepos()
       .then((d) => {
         recents = d.repos
+        allManaged = d.managed
         // A managed clone that has run a session is already in the recents.
         managed = d.managed.filter((m) => !d.repos.some((r) => r.repo_path === m.repo_path))
       })
@@ -34,6 +36,15 @@
   let cloning = $state<string | null>(null)
   let error = $state<string | null>(null)
   let showRecents = $state(false)
+  let query = $state('')
+  // Long enough to need a search box; a short list is scanned faster than typed at.
+  const forgeCount = $derived((forges ?? []).reduce((n, f) => n + f.repos.length, 0))
+  const searchable = $derived(forgeCount > 6)
+  const shownForges = $derived(
+    (forges ?? []).map((f) => ({ ...f, repos: f.repos.filter((r) => repoMatches(query, r.full_name, r.host)) })),
+  )
+  const shownRecents = $derived(recents.filter((r) => repoMatches(query, repoLabel(r.repo_path), r.repo_path)))
+  const shownManaged = $derived(managed.filter((m) => repoMatches(query, m.full_name, m.host)))
   $effect(() => {
     // A channel change re-scopes what the forges answer, so ask again.
     void channel
@@ -54,6 +65,7 @@
     }
   }
   const known = $derived([...recents, ...managed])
+  const chosenManaged = $derived(allManaged.find((m) => m.repo_path === value) ?? null)
 
   async function clone(forge: string, r: { host: string; owner: string; name: string; full_name: string }) {
     if (cloning) return
@@ -82,8 +94,11 @@
     You can also pick a checkout this node already has below.
   </small>
 {:else if forges !== null}
+  {#if searchable}
+    <input class="search" bind:value={query} placeholder="Search repositories" spellcheck="false" />
+  {/if}
   <div class="picker forge">
-    {#each forges as f (f.forge)}
+    {#each shownForges as f (f.forge)}
       {#if f.error}
         <small class="crit">{f.forge}: {f.error}</small>
       {:else}
@@ -96,6 +111,9 @@
         {/each}
       {/if}
     {/each}
+    {#if query && shownForges.every((f) => f.repos.length === 0)}
+      <small>No repository matches</small>
+    {/if}
   </div>
 {/if}
 
@@ -107,18 +125,20 @@
   >
   {#if showRecents}
     <div class="picker" role="radiogroup">
-      {#each recents as r (r.repo_path)}
+      <!-- A path the node chose for its own clone is not worth reading; one
+           the operator typed is theirs, and is the only way to tell two apart. -->
+      {#each shownRecents as r (r.repo_path)}
         <button type="button" class:on={value === r.repo_path} onclick={() => (value = r.repo_path)}>
           <i></i>
-          <span>{repoLabel(r.repo_path)} <small>{r.repo_path}</small></span>
+          <span>{repoLabel(r.repo_path)}{#if !isManagedPath(r.repo_path, allManaged)} <small>{r.repo_path}</small>{/if}</span>
           <small>{r.sessions} session{r.sessions === 1 ? '' : 's'} · {formatAge(r.last_used_ms, clock.now)}</small>
         </button>
       {/each}
-      {#each managed as m (m.repo_path)}
+      {#each shownManaged as m (m.repo_path)}
         <button type="button" class:on={value === m.repo_path} onclick={() => (value = m.repo_path)}>
           <i></i>
-          <span>{repoLabel(m.repo_path, m.full_name)} <small>{m.repo_path}</small></span>
-          <small>cloned · {m.host}</small>
+          <span>{m.full_name} <small>{m.host}</small></span>
+          <small>cloned</small>
         </button>
       {/each}
     </div>
@@ -128,11 +148,18 @@
   <small class="crit">{error}</small>
 {/if}
 
-<input
-  bind:value
-  placeholder={known.length > 0 ? 'or type a path on the node' : '/Users/you/src/project'}
-  spellcheck="false"
-/>
+{#if chosenManaged}
+  <div class="chosen">
+    <span>{chosenManaged.full_name} <small>{chosenManaged.host} · cloned on this node</small></span>
+    <button type="button" class="lnk" onclick={() => (value = '')}>change</button>
+  </div>
+{:else}
+  <input
+    bind:value
+    placeholder={known.length > 0 ? 'or type a path on the node' : '/Users/you/src/project'}
+    spellcheck="false"
+  />
+{/if}
 
 <style>
   .picker {
@@ -212,5 +239,25 @@
     font: 13.5px var(--sans);
     width: 100%;
     box-sizing: border-box;
+  }
+  input.search {
+    margin-bottom: 4px;
+  }
+  .chosen {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    background: var(--s1);
+    border-radius: 4px;
+    padding: 8px 10px;
+    font: 13.5px var(--sans);
+    color: var(--ink);
+  }
+  .chosen span {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { formatAge, formatBudget, formatDuration, formatExpiry, formatTokens } from './format'
+import { digits, formatAge, formatBudget, formatDuration, formatExpiry, formatGrouped, formatTokens } from './format'
 
 test('tokens are shown with a k or M suffix once they earn one', () => {
   expect(formatTokens(512)).toBe('512')
@@ -61,4 +61,13 @@ test('an expiry counts down and then says so', () => {
   expect(formatExpiry(now + 240_000, now)).toBe('expires 4m')
   expect(formatExpiry(now + 30_000, now)).toBe('expires 30s')
   expect(formatExpiry(now - 1, now)).toBe('expired')
+})
+
+test('a typed number is shown grouped and read back as digits', () => {
+  expect(formatGrouped(2_000_000)).toBe('2,000,000')
+  expect(formatGrouped(999)).toBe('999')
+  expect(formatGrouped(0)).toBe('0')
+  expect(digits('2,000,000')).toBe(2_000_000)
+  expect(digits('1 500k')).toBe(1500)
+  expect(digits('')).toBe(0)
 })

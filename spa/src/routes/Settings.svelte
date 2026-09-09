@@ -8,6 +8,7 @@
   // the reason, never hidden.
   import { onMount } from 'svelte'
   import CredentialSettings from '../components/CredentialSettings.svelte'
+  import ModelPicker from '../components/ModelPicker.svelte'
   import { api } from '../lib/api'
   import {
     check as checkDesktopUpdate,
@@ -17,6 +18,7 @@
   } from '../lib/desktop-update'
   import { remedy } from '../lib/refusal'
   import { modelPatch, phaseDefaults } from '../lib/bindings'
+  import { recentModelValues } from '../lib/models'
   import { changedSubset, hashToken, loginUrl, mintToken } from '../lib/settings'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
@@ -118,6 +120,7 @@
     for (const n of store.nodes) for (const m of n.models) seen.set(m.value, m.name)
     return [...seen].map(([value, name]) => ({ value, name }))
   })
+  const recentModels = $derived(recentModelValues(store.sessions.values()))
   let savedChannel = $state('')
   const open_channels = $derived(store.channels.filter((c) => !c.archived))
   const archived_channels = $derived(store.channels.filter((c) => c.archived))
@@ -436,20 +439,14 @@
           {#each [['plan', plan], ['execute', execute]] as const as [ph, b] (ph)}
             <label>
               <span>{ph === 'plan' ? 'Plan' : 'Execute'}</span>
-              <select
+              <ModelPicker
                 value={b.model ?? ''}
+                {models}
+                recent={recentModels}
+                none="none · the session names one"
                 disabled={busy !== ''}
-                onchange={(e) => bindModel(c.name, ph, e.currentTarget.value)}
-              >
-                <option value="">none · the session names one</option>
-                {#each models as m (m.value)}<option value={m.value}>{m.name}</option>{/each}
-                <!-- A model bound when a provider was connected, and not on
-                     offer now. Shown as it is rather than as an empty select,
-                     which would read as no binding at all. -->
-                {#if b.model && !models.some((m) => m.value === b.model)}
-                  <option value={b.model}>{b.model} · not offered here now</option>
-                {/if}
-              </select>
+                onchange={(v) => bindModel(c.name, ph, v)}
+              />
             </label>
           {/each}
           <div class="end">

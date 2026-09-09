@@ -5,10 +5,12 @@
   //
   // Two modes. Given an item, it starts a session on that item and the prompt
   // is replaced by the item's title. Given none, the prompt writes the item.
+  import ModelPicker from './ModelPicker.svelte'
   import RepoPicker from './RepoPicker.svelte'
   import { api, ApiError } from '../lib/api'
   import { modelLabel, phaseDefaults } from '../lib/bindings'
-  import { formatTokens } from '../lib/format'
+  import { digits, formatGrouped, formatTokens } from '../lib/format'
+  import { recentModelValues } from '../lib/models'
   import { eligibleNodes } from '../lib/nodes'
   import { repoLabel } from '../lib/repo'
   import { router } from '../lib/router.svelte'
@@ -43,6 +45,7 @@
   const blocked = $derived(!node || node.state === 'refused' || node.harness.mismatch === true || !node.reachable)
   const bound = $derived(phaseDefaults(channelInfo?.bindings, phase))
   const models = $derived(node?.models ?? [])
+  const recentModels = $derived(recentModelValues(store.sessions.values()))
   // What the context line promises: the model each phase will use.
   const planLabel = $derived(modelLabel(phaseDefaults(channelInfo?.bindings, 'plan').model, models))
   const execLabel = $derived(modelLabel(phaseDefaults(channelInfo?.bindings, 'execute').model, models))
@@ -203,18 +206,20 @@
       </div>
       <label>
         <span>Model <em>{bound.model ? `${channel} binds one to ${phase}` : 'this session only'}</em></span>
-        <select bind:value={model} onchange={() => (touched = true)}>
-          <option value="" disabled>Choose a model</option>
-          {#each models as m (m.value)}<option value={m.value}>{m.name}</option>{/each}
-        </select>
+        <ModelPicker bind:value={model} {models} recent={recentModels} onchange={() => (touched = true)} />
         {#if models.length === 0}
           <small class="crit">The node offered no models; connect a provider on the Nodes screen.</small>
         {/if}
       </label>
       <label>
-        <span>Budget <em>tokens</em></span>
-        <input bind:value={budget} inputmode="numeric" pattern="[0-9]*" />
-        <small>The session is killed at this number, checked at each turn's end.</small>
+        <span>Budget <em>tokens{Number(budget) ? ` · ${formatTokens(Number(budget))}` : ''}</em></span>
+        <input
+          value={formatGrouped(Number(budget) || 0)}
+          inputmode="numeric"
+          spellcheck="false"
+          oninput={(e) => (budget = String(digits((e.currentTarget as HTMLInputElement).value)))}
+        />
+        <small>Input, output and cached-read tokens, summed each turn. The session is killed when it passes this.</small>
       </label>
       <div class="field">
         <span>Runs on</span>
