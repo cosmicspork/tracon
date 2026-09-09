@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.14.0](https://github.com/cosmicspork/tracon/compare/v0.13.1...v0.14.0) (2026-09-09)
+
+
+### Features
+
+* **channels:** a default channel, per node and per browser ([169f8dc](https://github.com/cosmicspork/tracon/commit/169f8dcb9bf51ad88bb2294ba4ed365fbed0c0cf))
+* **channels:** a default channel, per node and per browser ([61416d6](https://github.com/cosmicspork/tracon/commit/61416d667650ef9a1d18a0428e7130e0e131e3f0))
+* **channels:** delete an archived channel from this node ([7a4a0f4](https://github.com/cosmicspork/tracon/commit/7a4a0f45bd5b4a09398d550055c34cb9f6c6d8c7))
+* **channels:** delete an archived channel from this node ([c6bc1ca](https://github.com/cosmicspork/tracon/commit/c6bc1ca532271f22b9927c2f4995aba614282b0d))
+* **mesh:** the hub as a card, and a way to unpair ([14a5b4c](https://github.com/cosmicspork/tracon/commit/14a5b4c2fadbbd40d759dab9e9234da1870aed4f))
+* **mesh:** the hub as a card, and a way to unpair ([6fd8e8c](https://github.com/cosmicspork/tracon/commit/6fd8e8c77a4e866fc9bc81ab383f806cdf200fd4))
+* **spa:** search boxes for repositories and models, a budget that reads ([710b9d0](https://github.com/cosmicspork/tracon/commit/710b9d02ee72ba93d7367b49c7681251bff7747d))
+* **spa:** search boxes for repositories and models, a budget that reads ([a8a599d](https://github.com/cosmicspork/tracon/commit/a8a599d12e83cc45972880cffe182a15ead85a52))
+* **wrapper:** keep the node running through an app update ([12f8272](https://github.com/cosmicspork/tracon/commit/12f82726ed6cc9d8ebe01bd6c4df0086077a0410))
+* **wrapper:** keep the node running through an app update ([5e8e52d](https://github.com/cosmicspork/tracon/commit/5e8e52d27cdffe13c46c824101998d00ee859466))
+
+
+### Bug Fixes
+
+* **forge:** clone GitLab projects under their group path, say when a token is rejected ([d30c560](https://github.com/cosmicspork/tracon/commit/d30c56081ef80ed6dd340c9773df2ba0eec99773))
+* **forge:** clone GitLab projects under their group path, say when a token is rejected ([602b34c](https://github.com/cosmicspork/tracon/commit/602b34ccf9f4e6e1de5a1a9e4a861b793c9bbac9))
+* **spa:** keep the loopback flag across node frames, fold node cards, trim the text ([06655dd](https://github.com/cosmicspork/tracon/commit/06655dd492ed2782b4ecfc97becd0ebb0aa717c4))
+* **spa:** keep the loopback flag across node frames, fold node cards, trim the text ([f836827](https://github.com/cosmicspork/tracon/commit/f8368274586510f65f7a71e2b3edd2776107e6fc))
+
 ## [0.13.1](https://github.com/cosmicspork/tracon/compare/v0.13.0...v0.13.1) (2026-09-08)
 
 
