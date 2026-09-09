@@ -244,6 +244,12 @@ async fn get(http: &reqwest::Client, url: &str, headers: &[(&str, &str)]) -> Res
     let res = req.send().await.map_err(|e| format!("forge: {e}"))?;
     let status = res.status();
     let v: Value = res.json().await.unwrap_or(Value::Null);
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(
+            "forge answered 401 Unauthorized: the token was rejected; replace it under Settings → Credentials"
+                .into(),
+        );
+    }
     if !status.is_success() {
         return Err(format!("forge answered {status}: {}", v["message"]));
     }
@@ -256,19 +262,32 @@ pub fn managed_root(state_dir: &Path) -> PathBuf {
 }
 
 /// `<root>/<host>/<owner>/<name>`, with every component checked: a path is
-/// built from forge-supplied strings, so nothing may traverse or hide.
+/// built from forge-supplied strings, so nothing may traverse or hide. The
+/// owner may be a GitLab group path (`group/sub/team`); each of its segments
+/// is checked on its own.
 pub fn clone_dest(root: &Path, host: &str, owner: &str, name: &str) -> Result<PathBuf, String> {
-    for part in [host, owner, name] {
-        let ok = !part.is_empty()
-            && !part.starts_with('.')
-            && part
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-        if !ok {
-            return Err(format!("refusing path component {part:?}"));
-        }
+    let mut dest = root.join(host);
+    check_component(host)?;
+    for part in owner.split('/') {
+        check_component(part)?;
+        dest.push(part);
     }
-    Ok(root.join(host).join(owner).join(name))
+    check_component(name)?;
+    dest.push(name);
+    Ok(dest)
+}
+
+fn check_component(part: &str) -> Result<(), String> {
+    let ok = !part.is_empty()
+        && !part.starts_with('.')
+        && part
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("refusing path component {part:?}"))
+    }
 }
 
 /// The environment that lets node-side git authenticate to a forge without
@@ -359,7 +378,14 @@ pub async fn clone(
     Ok(())
 }
 
-/// The managed clones already on disk, for the picker.
+/// How deep under a host a clone may sit: an owner, or a GitLab group path
+/// of a few levels, then the repository. Nothing legitimate goes deeper, and
+/// the walk must not follow a clone into its own tree.
+const MAX_CLONE_DEPTH: usize = 8;
+
+/// The managed clones already on disk, for the picker. A clone is any
+/// directory under a host that holds a `.git`; the segments between the two
+/// are its owner, which for a GitLab group is more than one.
 pub fn managed_repos(state_dir: &Path) -> Vec<Repo> {
     let root = managed_root(state_dir);
     let mut out = Vec::new();
@@ -367,36 +393,50 @@ pub fn managed_repos(state_dir: &Path) -> Vec<Repo> {
         return out;
     };
     for host in hosts.flatten() {
-        let Ok(owners) = std::fs::read_dir(host.path()) else {
-            continue;
-        };
-        for owner in owners.flatten() {
-            let Ok(names) = std::fs::read_dir(owner.path()) else {
-                continue;
-            };
-            for name in names.flatten() {
-                if !name.path().join(".git").exists() {
-                    continue;
-                }
-                let (h, o, n) = (
-                    host.file_name().to_string_lossy().to_string(),
-                    owner.file_name().to_string_lossy().to_string(),
-                    name.file_name().to_string_lossy().to_string(),
-                );
-                out.push(Repo {
-                    full_name: format!("{o}/{n}"),
-                    host: h,
-                    owner: o,
-                    name: n,
-                    private: false,
-                    default_branch: None,
-                    pushed_at: None,
-                });
-            }
-        }
+        let h = host.file_name().to_string_lossy().to_string();
+        let mut segments = Vec::new();
+        walk_clones(&host.path(), &h, &mut segments, &mut out);
     }
     out.sort_by(|a, b| a.full_name.cmp(&b.full_name));
     out
+}
+
+fn walk_clones(dir: &Path, host: &str, segments: &mut Vec<String>, out: &mut Vec<Repo>) {
+    if segments.len() >= MAX_CLONE_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.join(".git").exists() {
+            if segments.is_empty() {
+                continue;
+            }
+            let owner = segments.join("/");
+            out.push(Repo {
+                full_name: format!("{owner}/{name}"),
+                host: host.to_string(),
+                owner,
+                name,
+                private: false,
+                default_branch: None,
+                pushed_at: None,
+            });
+            continue;
+        }
+        segments.push(name);
+        walk_clones(&path, host, segments, out);
+        segments.pop();
+    }
 }
 
 #[cfg(test)]
@@ -452,12 +492,55 @@ mod tests {
     fn hostile_path_components_are_refused() {
         let root = Path::new("/state/repos");
         assert!(clone_dest(root, "github.com", "me", "proj").is_ok());
-        for bad in ["..", "", "a/b", ".hidden", "a b"] {
+        for bad in ["..", "", ".hidden", "a b", "a/../b", "a//b", "a/.x"] {
             assert!(
                 clone_dest(root, "github.com", bad, "proj").is_err(),
                 "{bad}"
             );
         }
+        // The name is one segment; a slash there is not a group path.
+        assert!(clone_dest(root, "github.com", "me", "a/b").is_err());
+    }
+
+    /// A GitLab project lives under a group path, each level its own directory.
+    #[test]
+    fn a_group_path_nests_under_the_host() {
+        let root = Path::new("/state/repos");
+        let dest = clone_dest(root, "gitlab.example", "group/sub/team", "proj").unwrap();
+        assert_eq!(
+            dest,
+            Path::new("/state/repos/gitlab.example/group/sub/team/proj")
+        );
+    }
+
+    #[test]
+    fn managed_repos_finds_clones_at_any_group_depth() {
+        let dir = std::env::temp_dir().join(format!("tracon-forge-managed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = managed_root(&dir);
+        std::fs::create_dir_all(root.join("github.com/me/proj/.git")).unwrap();
+        std::fs::create_dir_all(root.join("gitlab.example/group/sub/team/tool/.git")).unwrap();
+        // A directory inside a clone is never a second clone.
+        std::fs::create_dir_all(root.join("github.com/me/proj/vendor/.git")).unwrap();
+        // A host with nothing cloned yet, and a stray file, are skipped.
+        std::fs::create_dir_all(root.join("codeberg.org/empty")).unwrap();
+        std::fs::write(root.join("README"), "").unwrap();
+        let found: Vec<(String, String, String)> = managed_repos(&dir)
+            .into_iter()
+            .map(|r| (r.host, r.owner, r.full_name))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                (
+                    "gitlab.example".into(),
+                    "group/sub/team".into(),
+                    "group/sub/team/tool".into()
+                ),
+                ("github.com".into(), "me".into(), "me/proj".into()),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
