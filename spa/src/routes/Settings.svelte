@@ -315,7 +315,7 @@
 {#if error}<div class="banner crit">{error}</div>{/if}
 {#if !local}
   <div class="banner dim">
-    reached from elsewhere <b>· running this node is a full seat from here; changing what it <em>is</em> — its configuration, its hub — is done at the node itself</b>
+    reached from elsewhere <b>· configuration and hub pairing are changed at the node itself</b>
   </div>
 {/if}
 
@@ -329,15 +329,26 @@
     </p>
   {/if}
   <div class="acts">
-    <button class="btn" onclick={recheck} disabled={busy !== ''}>
+    <button class="btn" onclick={recheck} disabled={busy !== ''} title="Run the boundary checks again">
       {busy === 'check' ? 'Checking…' : 'Re-check'}
     </button>
-    <button class="btn p" onclick={() => setup(false)} disabled={busy !== ''}>
+    <button
+      class="btn p"
+      onclick={() => setup(false)}
+      disabled={busy !== ''}
+      title="Create the network, gateway and images the boundary needs. Builds images, so it takes minutes"
+    >
       {busy === 'setup' ? 'Running setup…' : 'Run setup'}
     </button>
-    <button class="btn" onclick={() => setup(true)} disabled={busy !== ''}>Rebuild images</button>
+    <button
+      class="btn"
+      onclick={() => setup(true)}
+      disabled={busy !== ''}
+      title="Rebuild the gateway and harness images from scratch"
+    >
+      Rebuild images
+    </button>
   </div>
-  <small>Setup creates the network, gateway and images this node's boundary needs. It builds images, so it takes minutes.</small>
   {#if checks}
     <ul class="checks">
       {#each checks as c (c.id)}
@@ -384,7 +395,6 @@
       </button>
       {#if changed.length}<small>wrote {changed.join(', ')}</small>{/if}
     </div>
-    <small>Written to <code>{cfg.readonly.config_path}</code>, which is re-serialised: comments in that file are not preserved.</small>
   {:else if configError}
     <p class="why"><b>node.toml could not be read</b><i>{configError}</i></p>
   {:else}
@@ -472,9 +482,12 @@
 <section>
   <div class="h5">Access</div>
   <div class="field access-field">
-    <span>Reach this node from a phone</span>
+    <span>Reach this node from another device</span>
     <input bind:value={publicUrl} placeholder="https://node.tailnet.ts.net" spellcheck="false" />
-    <small>Issuing rotates the token and logs every client out, including this one.</small>
+    <small>
+      Scan the code from a phone, or paste the token into a browser. On iOS add the page to the Home
+      Screen so push can reach it. Issuing rotates the token and logs every client out, including this one.
+    </small>
   </div>
   <div class="acts">
     <button class="btn" onclick={issueToken} disabled={busy !== ''}>
@@ -493,11 +506,8 @@
     Your own harness <b>a terminal you run, using this node's tools</b>
   </div>
   <p class="lede">
-    A harness you start yourself can ask this node to read a ticket, query a
-    database, or comment on a change, without ever holding the credential. It
-    is not the boundary: it runs as you, so what it gets is the tools and the
-    queue, not the guarantee that it could not have taken the credential
-    anyway. Reviews stay with sessions the node starts.
+    A terminal you run can use this node's tools without ever holding a credential. It runs
+    as you, outside the boundary; reviews still go through sessions the node starts.
   </p>
   {#if !cfg}
     <small>Loading…</small>
@@ -687,6 +697,18 @@
     gap: 8px;
     align-items: center;
     flex-wrap: wrap;
+  }
+  .mcp {
+    display: grid;
+    gap: 6px;
+  }
+  .mcp code {
+    font: 12px var(--mono);
+    color: var(--ink);
+    background: var(--s2);
+    padding: 6px 8px;
+    border-radius: 4px;
+    word-break: break-all;
   }
   .lede {
     margin: 0 0 4px;

@@ -3,10 +3,16 @@
 
 import type { MeshState, NodeInfo } from './types'
 
-/** Upsert a node into the list, self first, then by name. */
+/**
+ * Upsert a node into the list, self first, then by name. `loopback` is a fact
+ * about how this client reached the node, answered only by the request that
+ * asked; a `node` frame from the stream does not carry it, so the value
+ * already held is kept rather than dropped.
+ */
 export function upsertNode(nodes: NodeInfo[], node: NodeInfo): NodeInfo[] {
+  const prev = nodes.find((n) => n.id === node.id)
   const next = nodes.filter((n) => n.id !== node.id)
-  next.push(node)
+  next.push(node.loopback === undefined && prev?.loopback !== undefined ? { ...node, loopback: prev.loopback } : node)
   return next.sort((a, b) => {
     if (a.is_self !== b.is_self) return a.is_self ? -1 : 1
     return a.name.localeCompare(b.name)
