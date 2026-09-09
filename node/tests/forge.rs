@@ -233,5 +233,81 @@ async fn an_existing_managed_clone_answers_with_its_path() {
     assert_eq!(body["repo_path"].as_str().unwrap(), dest.to_str().unwrap());
     // And the recents endpoint offers it before any session ran.
     let (_, body) = call(&app, "GET", "/api/repos/recent", None).await;
-    assert_eq!(body["managed"][0]["full_name"], "me/proj");
+    assert!(
+        body["managed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["full_name"] == "me/proj"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_gitlab_group_path_clones_under_its_host() {
+    let broker = Broker::default().shared();
+    broker.write().unwrap().put(
+        "glab",
+        cred(&[("GITLAB_TOKEN", "fake-token-for-tests")], &["work"]),
+    );
+    let app = node_with(broker);
+    let dest = tracon::forge::managed_root(&Config::state_dir())
+        .join("gitlab.example")
+        .join("group")
+        .join("sub")
+        .join("tool");
+    std::fs::create_dir_all(dest.join(".git")).unwrap();
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/repos/clone",
+        Some(json!({
+            "channel": "work", "forge": "gitlab",
+            "host": "gitlab.example", "owner": "group/sub", "name": "tool"
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["repo_path"].as_str().unwrap(), dest.to_str().unwrap());
+    // The recents list is shared with the other clone tests in this process.
+    let (_, body) = call(&app, "GET", "/api/repos/recent", None).await;
+    let managed = body["managed"].as_array().unwrap();
+    let row = managed
+        .iter()
+        .find(|m| m["full_name"] == "group/sub/tool")
+        .unwrap_or_else(|| panic!("nested clone not listed: {body}"));
+    assert_eq!(row["repo_path"].as_str().unwrap(), dest.to_str().unwrap());
+    assert_eq!(row["host"], "gitlab.example");
+}
+
+#[tokio::test]
+async fn a_rejected_token_says_to_replace_it() {
+    let app = axum::Router::new().route(
+        "/user/repos",
+        axum::routing::get(|| async {
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                axum::Json(json!({ "message": "Bad credentials" })),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let broker = Broker::default().shared();
+    broker.write().unwrap().put(
+        "gh",
+        cred(
+            &[
+                ("GH_TOKEN", "fake-token-for-tests"),
+                ("GITHUB_API", &format!("http://{addr}")),
+            ],
+            &["personal"],
+        ),
+    );
+    let app = node_with(broker);
+    let (_, body) = call(&app, "GET", "/api/forge/repos?channel=personal", None).await;
+    let error = body["forges"][0]["error"].as_str().unwrap();
+    assert!(error.contains("401"), "{error}");
+    assert!(error.contains("Settings"), "{error}");
 }
