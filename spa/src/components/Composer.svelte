@@ -9,6 +9,7 @@
   import RepoPicker from './RepoPicker.svelte'
   import { api, ApiError } from '../lib/api'
   import { modelLabel, phaseDefaults } from '../lib/bindings'
+  import { defaultChannel, rememberChannel, rememberedChannel } from '../lib/channel'
   import { digits, formatGrouped, formatTokens } from '../lib/format'
   import { recentModelValues } from '../lib/models'
   import { eligibleNodes } from '../lib/nodes'
@@ -68,7 +69,12 @@
       return
     }
     if (!channel && channelNames.length) {
-      channel = channelNames.includes('personal') ? 'personal' : channelNames[0]
+      channel = defaultChannel({
+        names: channelNames,
+        remembered: rememberedChannel(),
+        nodeDefault: store.node?.default_channel,
+        sessions: [...store.sessions.values()].filter((s) => s.node_id === store.node?.id),
+      })
     }
   })
   // The repository this channel worked in last, so the common case needs no pick.
@@ -117,6 +123,7 @@
         ? await api.createSession({ ...common, work_item_id: item.id })
         : (await api.compose({ ...common, title: lines[0], body: lines.slice(1).join('\n').trim() })).session
       prompt = ''
+      if (!item) rememberChannel(channel)
       await store.refetch()
       router.go(`/sessions/${session.id}`)
     } catch (e) {

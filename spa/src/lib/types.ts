@@ -24,6 +24,8 @@ export interface NodeInfo {
    * serving node's own row, by the request that asked.
    */
   loopback?: boolean
+  /** The channel this node prefers the composer to start on; only on the serving node's row. */
+  default_channel?: string | null
 }
 
 export interface ModelOption {
@@ -461,7 +463,7 @@ export interface BoundaryResult {
 export interface NodeConfig {
   node_name: string
   harness: { id: string; version: string; tools: string[] }
-  session: { budget_tokens: number; permission_timeout_secs: number }
+  session: { budget_tokens: number; permission_timeout_secs: number; default_channel: string }
   review: { max_diff_lines: number; max_files: number }
   gateway: { allow_hosts: string[] }
   publish: { gh: string; glab: string; git: string }

@@ -415,6 +415,14 @@
         <input type="number" bind:value={form.session.budget_tokens} disabled={!local} />
       </label>
       <label>
+        <span>Default channel</span>
+        <select bind:value={form.session.default_channel} disabled={!local}>
+          <option value="">none</option>
+          {#each open_channels as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+        </select>
+        <small>What the composer starts on, until a browser picks another and keeps it.</small>
+      </label>
+      <label>
         <span>Podman binary</span>
         <input bind:value={form.boundary.podman} disabled={!local} placeholder="found on PATH" spellcheck="false" />
         <small>Empty resolves from PATH, then the usual install locations.</small>
