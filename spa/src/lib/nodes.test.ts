@@ -67,3 +67,13 @@ test('eligible nodes respect bindings, readiness, and reach', () => {
   expect(hubBanner({ ...connected, hub: { state: 'unreachable', since_ms: 1 } })).toBe('hub unreachable')
   expect(hubBanner(null)).toBeNull()
 })
+
+test('a node frame without loopback keeps the flag the request answered with', () => {
+  let list = upsertNode([], node({ id: 'me', name: 'mine', is_self: true, loopback: true }))
+  list = upsertNode(list, node({ id: 'me', name: 'mine', is_self: true, models: [{ value: 'm', name: 'm' }] }))
+  expect(list[0].loopback).toBe(true)
+  expect(list[0].models.length).toBe(1)
+  // An answer that says otherwise is still believed.
+  list = upsertNode(list, node({ id: 'me', name: 'mine', is_self: true, loopback: false }))
+  expect(list[0].loopback).toBe(false)
+})

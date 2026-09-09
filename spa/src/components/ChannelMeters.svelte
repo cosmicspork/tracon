@@ -2,7 +2,10 @@
   import { formatTokens } from '../lib/format'
   import { store } from '../lib/store.svelte'
 
-  const channels = $derived(store.channels.filter((c) => !c.name.startsWith('@')))
+  // An archived channel with nothing spent today is history, not a meter.
+  const channels = $derived(
+    store.channels.filter((c) => !c.name.startsWith('@') && (!c.archived || c.ceiling.usage_today > 0)),
+  )
   function width(c: (typeof channels)[number]): number {
     if (!c.ceiling.ceiling) return 0
     return Math.min(100, Math.round((c.ceiling.usage_today / c.ceiling.ceiling) * 100))

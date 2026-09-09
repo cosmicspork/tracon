@@ -3,6 +3,7 @@
   // Lives on the self-node card: a subscription is a this-node, this-browser
   // fact, and the phone is exactly where the toggle matters.
   import { onMount } from 'svelte'
+  import { isTauri } from '@tauri-apps/api/core'
   import { api } from '../lib/api'
   import { formatAge } from '../lib/format'
   import { clock } from '../lib/clock.svelte'
@@ -16,7 +17,10 @@
   let note = $state('')
   const supported = push.supported()
   const needsInstall = push.needsInstall()
-  const channels = $derived(store.channels.filter((c) => c.nodes.includes(store.node?.id ?? '')))
+  const desktop = isTauri()
+  const channels = $derived(
+    store.channels.filter((c) => !c.archived && c.nodes.includes(store.node?.id ?? '')),
+  )
 
   function notifies(bindings: Record<string, unknown>): boolean {
     const n = (bindings.notify ?? {}) as Record<string, unknown>
@@ -74,7 +78,9 @@
   <div class="row">
     <span class="k">Notifications</span>
     <span class="v">
-      {#if !supported}
+      {#if desktop}
+        <span class="dim">The desktop app notifies you from its tray.</span>
+      {:else if !supported}
         <span class="dim">Not available in this browser.{#if needsInstall} Add tracon to the Home Screen first.{/if}</span>
       {:else}
         <label class="tgl">
@@ -103,7 +109,6 @@
             {c.name}
           </label>
         {/each}
-        <span class="dim">Every node pushes to its own devices; a channel switched off is quiet everywhere.</span>
       </span>
     </div>
   {/if}

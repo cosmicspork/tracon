@@ -46,7 +46,7 @@
 </script>
 
 {#if creds.length > 0}
-  <div class="h4">Credentials <b>{creds.length} sealed · names and bindings only, never values</b></div>
+  <div class="h4">Credentials <b>{creds.length} sealed</b></div>
   <div class="rows">
     {#each creds as c (c.name)}
       <div class="cred">

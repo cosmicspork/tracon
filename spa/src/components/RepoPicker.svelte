@@ -1,9 +1,8 @@
 <script lang="ts">
   // Where the session runs. The forge is asked first and its answer is the
-  // list: a session works a checkout the node made and owns, which is also why
-  // picking one there is picking a fresh clone. What this node has worked in
-  // before sits under it as a shortcut, and a typed path stays as the escape
-  // hatch for a repo no forge knows.
+  // list: picking one there clones it into a checkout the node owns. What
+  // this node has worked in before sits under it as a shortcut, and a typed
+  // path stays as the escape hatch for a repo no forge knows.
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
@@ -98,7 +97,6 @@
       {/if}
     {/each}
   </div>
-  <small>Picking one clones it fresh; the node owns the checkout.</small>
 {/if}
 
 {#if known.length > 0}

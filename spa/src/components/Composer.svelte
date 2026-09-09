@@ -187,7 +187,6 @@
       <label>
         <span>Branch</span>
         <input bind:value={branch} placeholder="feat/…  (a name is generated if empty)" spellcheck="false" />
-        <small>The worktree is created from origin's default branch, outside the repo.</small>
       </label>
       <div class="field">
         <span>Phase</span>
@@ -249,7 +248,7 @@
           <small class="crit">Unreachable. Start when it returns.</small>
         {:else if node}
           <span class="chip">{node.name}</span>
-          <small>{node.harness.id} {node.harness.found ?? node.harness.pinned} · boundary check passed</small>
+          <small>{node.harness.id} {node.harness.found ?? node.harness.pinned}</small>
         {/if}
       </div>
     </div>
