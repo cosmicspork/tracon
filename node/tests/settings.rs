@@ -433,6 +433,7 @@ async fn mesh_init_and_enroll_are_loopback_only_too() {
             Some(json!({ "invitation": "https://hub.example.com/enroll#abc" })),
         ),
         ("GET", "/api/mesh/enroll", None),
+        ("POST", "/api/mesh/unpair", None),
     ] {
         let (s, v) = call(&n, method, uri, Some(REMOTE), body).await;
         assert_eq!(s, StatusCode::FORBIDDEN, "{method} {uri} answered {s}: {v}");
@@ -630,4 +631,43 @@ async fn an_archived_channel_can_be_deleted_and_a_live_one_cannot() {
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _) = call(&n, "DELETE", "/api/channels/@mesh", Some(LOCAL), None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// Unpairing forgets the hub URL and nothing else: the mesh channel stays so
+/// the next join is a join, and a node with no hub answers that too.
+#[tokio::test]
+async fn unpairing_clears_the_hub_and_keeps_the_mesh_channel() {
+    let n = node();
+    let (s, _) = call(&n, "POST", "/api/mesh/unpair", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK);
+
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/mesh/init",
+        Some(LOCAL),
+        Some(json!({ "hub_url": "https://hub.example.com" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(
+        Config::try_load().unwrap().mesh.hub_url.as_deref(),
+        Some("https://hub.example.com")
+    );
+
+    let (s, v) = call(&n, "POST", "/api/mesh/unpair", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["unpaired"], "https://hub.example.com");
+    assert_eq!(v["restart_required"], true);
+    assert!(Config::try_load().unwrap().mesh.hub_url.is_none());
+    assert!(n
+        .store
+        .channel_get(proto::frame::MESH_CHANNEL)
+        .unwrap()
+        .is_some());
+
+    // Already unpaired: nothing to do, and no restart owed for it.
+    let (s, v) = call(&n, "POST", "/api/mesh/unpair", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["restart_required"], false);
 }

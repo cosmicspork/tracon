@@ -49,6 +49,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/config", get(api::get_config).put(api::put_config))
         .route("/api/auth/qr", post(api::qr))
         .route("/api/mesh/init", post(api::mesh_init))
+        .route("/api/mesh/unpair", post(api::mesh_unpair))
         .route(
             "/api/mesh/enroll",
             get(api::enroll_status).post(api::start_enroll),

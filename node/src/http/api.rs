@@ -2564,6 +2564,31 @@ pub async fn mesh_init(
     })))
 }
 
+/// `POST /api/mesh/unpair`: forget the hub. The mesh channel and this node's
+/// keys stay, so pairing again is the join it was the first time; the hub
+/// still lists this node until `tracon mesh remove` is run there. Takes
+/// effect on restart, like every `node.toml` change.
+pub async fn mesh_unpair(
+    _: super::auth::Loopback,
+    State(_): State<AppState>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let mut cfg = Config::try_load().map_err(|e| {
+        ApiError(
+            StatusCode::CONFLICT,
+            format!("node.toml does not parse, so it will not be rewritten: {e}"),
+        )
+    })?;
+    let was = cfg.mesh.hub_url.take();
+    if was.is_some() {
+        cfg.save()
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    Ok(Json(json!({
+        "unpaired": was,
+        "restart_required": was.is_some(),
+    })))
+}
+
 #[derive(Deserialize)]
 pub struct QrBody {
     pub text: String,

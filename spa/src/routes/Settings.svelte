@@ -16,6 +16,8 @@
     install as installDesktopUpdate,
     status as desktopUpdateStatus,
   } from '../lib/desktop-update'
+  import { clock } from '../lib/clock.svelte'
+  import { formatAge } from '../lib/format'
   import { remedy } from '../lib/refusal'
   import { modelPatch, phaseDefaults } from '../lib/bindings'
   import { recentModelValues } from '../lib/models'
@@ -164,13 +166,35 @@
   }
 
   // --- mesh -------------------------------------------------------------
+  const paired = $derived(store.mesh !== null && store.mesh.hub.state !== 'disabled')
+  let unpairing = $state(false)
+  let unpaired = $state(false)
   const hubState = $derived(
-    store.mesh?.hub.state === 'connected'
-      ? 'paired'
-      : store.mesh?.hub.state === 'unreachable'
-        ? 'paired · unreachable right now'
-        : 'not paired',
+    unpaired
+      ? 'unpaired · restart to disconnect'
+      : store.mesh?.hub.state === 'connected'
+        ? 'connected'
+        : store.mesh?.hub.state === 'unreachable'
+          ? 'unreachable'
+          : 'not paired',
   )
+  const hubHost = $derived.by(() => {
+    const url = store.mesh?.hub_url
+    if (!url) return ''
+    try {
+      return new URL(url).host
+    } catch {
+      return url
+    }
+  })
+  function unpair() {
+    return act('unpair', async () => {
+      const res = await api.meshUnpair()
+      unpairing = false
+      unpaired = true
+      if (res.restart_required) restartOwed = true
+    })
+  }
   let hubUrl = $state('')
   let meshInit = $state<Awaited<ReturnType<typeof api.meshInit>> | null>(null)
   let admitCopied = $state(false)
@@ -548,15 +572,52 @@
 <!-- 6. The hub: how this node and your others reach each other. -->
 <section id="mesh">
   <div class="h5">
-    Pair a hub <b>{hubState}</b>
+    Hub <b>{hubState}</b>
   </div>
-  <p class="lede">
-    A hub is a small always-on relay your nodes dial out to. It carries frames
-    they cannot read — everything is sealed under the channel's key — so a phone
-    anywhere can see and drive work on a laptop at home. A node runs perfectly
-    well without one; it is then reachable only where it is.
-  </p>
-  {#if local}
+  {#if paired && store.mesh}
+    {@const m = store.mesh}
+    {@const down = m.hub.state === 'unreachable'}
+    <div class="hub" class:off={down || unpaired}>
+      <span class="bar"></span>
+      <span class="nm">
+        {hubHost}
+        <small>{m.hub_url}</small>
+      </span>
+      <span class="st">
+        <span class="l" class:off={down}>
+          <span class="chip" class:off={down}>{down ? 'unreachable' : 'connected'}</span>
+          {#if down && m.hub.state === 'unreachable'}
+            · since {formatAge(m.hub.since_ms, clock.now)} ago
+          {:else if m.last_ok_ms}
+            · heard {formatAge(m.last_ok_ms, clock.now)} ago
+          {/if}
+        </span>
+        <span>
+          {m.queued} queued · {m.delivered_since_reconnect} delivered since reconnect{m.undecryptable
+            ? ` · ${m.undecryptable} unreadable`
+            : ''}
+        </span>
+        {#if m.last_error}<span class="l bad">{m.last_error}</span>{/if}
+        {#if m.last_refusal}<span class="l bad">refused: {m.last_refusal}</span>{/if}
+      </span>
+      <div class="end">
+        {#if !local}
+          <small>changed at the node</small>
+        {:else if unpaired}
+          <small>restart to disconnect</small>
+        {:else if unpairing}
+          <span class="note crit">Forgets the hub on restart. Channels and keys stay; joining again is one invitation.</span>
+          <button class="lnk d" disabled={busy !== ''} onclick={unpair}>{busy === 'unpair' ? 'Unpairing…' : 'unpair'}</button>
+          <button class="lnk" disabled={busy !== ''} onclick={() => (unpairing = false)}>keep</button>
+        {:else}
+          <button class="lnk d" disabled={busy !== ''} onclick={() => (unpairing = true)}>unpair</button>
+        {/if}
+      </div>
+    </div>
+  {:else}
+    <small>A hub is a small always-on relay your nodes dial out to. Without one this node is reachable only where it is.</small>
+  {/if}
+  {#if local && !paired}
     <div class="pairing">
       <label>
         <span>Join an existing hub</span>
@@ -616,7 +677,7 @@
         </div>
       </details>
     </div>
-  {:else}
+  {:else if !local && !paired}
     <small>Which hub a node belongs to is decided at the node itself.</small>
   {/if}
 </section>
@@ -842,6 +903,87 @@
   }
   .ch .note.crit {
     color: var(--crit);
+  }
+  /* The hub, drawn like a node card: a bar for state, a name, a status column. */
+  .hub {
+    display: grid;
+    grid-template-columns: 3px minmax(120px, 170px) minmax(0, 1fr) auto;
+    gap: 0 14px;
+    background: var(--s2);
+    border-radius: 4px;
+    padding: 11px 14px 11px 0;
+    overflow: hidden;
+  }
+  .hub .bar {
+    align-self: stretch;
+    border-radius: 2px 0 0 2px;
+    background: var(--ok);
+  }
+  .hub.off .bar {
+    background: var(--dim);
+  }
+  .hub .nm {
+    font-weight: 600;
+    min-width: 0;
+  }
+  .hub .nm small {
+    display: block;
+    font: 11.5px var(--mono);
+    color: var(--dim);
+    font-weight: 400;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .hub .st {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font: 12.5px var(--mono);
+    color: var(--ink2);
+    min-width: 0;
+  }
+  .hub .st span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .hub .st .l.off {
+    color: var(--dim);
+  }
+  .hub .st .l.bad {
+    color: var(--crit);
+    white-space: normal;
+  }
+  .hub .end {
+    align-self: center;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    align-items: flex-end;
+    text-align: right;
+    max-width: 260px;
+  }
+  .hub .end .lnk {
+    font-size: 12.5px;
+  }
+  .hub .end .note {
+    font: 11.5px var(--mono);
+  }
+  .hub .end .note.crit {
+    color: var(--crit);
+  }
+  @media (max-width: 700px) {
+    .hub {
+      grid-template-columns: 3px minmax(0, 1fr);
+      gap: 4px 12px;
+    }
+    .hub .st,
+    .hub .end {
+      grid-column: 2;
+      align-items: flex-start;
+      text-align: left;
+    }
   }
   .h5.sub {
     margin-top: 14px;
