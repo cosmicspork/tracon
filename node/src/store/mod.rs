@@ -663,6 +663,30 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Forget a channel on this node: its key and every node's membership
+    /// row. Sessions, work and documents keep their channel column, so what
+    /// ran on it is still history.
+    pub fn channel_delete(&self, name: &str) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM node_channel WHERE channel=?1", [name])?;
+        tx.execute("DELETE FROM channel WHERE name=?1", [name])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Sessions on a channel that have not ended.
+    pub fn open_sessions_on_channel(&self, channel: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM session
+             WHERE channel = ?1 AND state NOT IN ('closed', 'killed_budget', 'failed')",
+            [channel],
+            |r| r.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     pub fn channel_list(&self) -> Result<Vec<ChannelRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT * FROM channel ORDER BY name")?;

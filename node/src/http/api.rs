@@ -207,6 +207,52 @@ pub async fn put_channel_bindings(
     ))
 }
 
+/// `DELETE /api/channels/{name}`: forget an archived channel on this node.
+/// Its key and membership rows go; sessions, work and documents keep their
+/// channel column as history. Archiving first is required, so a channel
+/// still taking sessions cannot vanish on a misclick, and a session that has
+/// not ended keeps it here. The hub's member record still names the channel
+/// (its admit call merges and never removes), which only matters if the same
+/// name is created again.
+pub async fn delete_channel(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if name.starts_with('@') {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no channel {name} on this node"),
+        ));
+    }
+    let row = s.store().channel_get(&name)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        format!("no channel {name} on this node"),
+    ))?;
+    let bindings: serde_json::Value = serde_json::from_str(&row.bindings_json).unwrap_or(json!({}));
+    if bindings
+        .get("archived")
+        .is_none_or(serde_json::Value::is_null)
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("archive {name} before deleting it"),
+        ));
+    }
+    let open = s.store().open_sessions_on_channel(&name)?;
+    if open > 0 {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "{open} session{} on {name} {} not ended",
+                if open == 1 { "" } else { "s" },
+                if open == 1 { "has" } else { "have" }
+            ),
+        ));
+    }
+    s.store().channel_delete(&name)?;
+    Ok(Json(json!({ "deleted": name })))
+}
+
 /// `a.b.c = v` into nested objects; a null removes the key.
 fn merge_path(root: &mut serde_json::Value, path: &str, value: serde_json::Value) {
     let mut cur = root;

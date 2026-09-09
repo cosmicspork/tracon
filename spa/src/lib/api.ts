@@ -147,6 +147,8 @@ export const api = {
   /** A channel keeps its work and takes no new sessions. */
   archiveChannel: (name: string) => api.putChannelBindings(name, { archived: Date.now() }),
   unarchiveChannel: (name: string) => api.putChannelBindings(name, { archived: null }),
+  /** Forget an archived channel on this node; its sessions and work stay in history. */
+  deleteChannel: (name: string) => call<{ deleted: string }>('DELETE', `/api/channels/${encodeURIComponent(name)}`),
   prompt: (id: string, text: string) => call<void>('POST', `/api/sessions/${id}/prompt`, { text }),
   kill: (id: string) => call<void>('POST', `/api/sessions/${id}/kill`),
   saveDraft: (id: string, text: string) => call<void>('PUT', `/api/sessions/${id}/draft`, { text }),

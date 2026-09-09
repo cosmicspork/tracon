@@ -522,3 +522,112 @@ async fn the_node_payload_says_whether_this_client_may_configure_it() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["loopback"], json!(true));
 }
+
+fn session_on(id: &str, channel: &str, state: &str) -> tracon::store::SessionRow {
+    tracon::store::SessionRow {
+        id: id.into(),
+        node_id: "n1".into(),
+        channel: channel.into(),
+        work_item_id: None,
+        repo_path: "/src/p".into(),
+        worktree_path: None,
+        branch: format!("feat/{id}"),
+        harness_id: "fake".into(),
+        harness_version: "1.0.0".into(),
+        harness_session_id: None,
+        container_name: None,
+        model: "m/a".into(),
+        project_id: None,
+        phase: "execute".into(),
+        policy_version: None,
+        review_id: None,
+        budget_tokens: 1000,
+        tokens_used: 0,
+        cost_usd: None,
+        context_used: None,
+        context_size: None,
+        state: state.into(),
+        end_reason: None,
+        last_error: None,
+        turn_active: 0,
+        draft: None,
+        draft_updated_ms: None,
+        created_ms: 1,
+        started_mono_ms: None,
+        ended_mono_ms: None,
+        updated_ms: 1,
+        archived_ms: None,
+    }
+}
+
+/// Deleting a channel is forgetting it here: only once archived, only once
+/// nothing is still running on it, and what ran stays in history.
+#[tokio::test]
+async fn an_archived_channel_can_be_deleted_and_a_live_one_cannot() {
+    let n = node();
+    for name in ["old", "busy"] {
+        let (s, v) = call(
+            &n,
+            "POST",
+            "/api/channels",
+            Some(LOCAL),
+            Some(json!({ "name": name })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+    }
+
+    // Not archived: refused, and told what to do first.
+    let (s, v) = call(&n, "DELETE", "/api/channels/old", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("archive"));
+
+    for name in ["old", "busy"] {
+        let (s, _) = call(
+            &n,
+            "PUT",
+            &format!("/api/channels/{name}/bindings"),
+            Some(LOCAL),
+            Some(json!({ "archived": 1 })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+    }
+    n.store.ensure_peer_node("n1").unwrap();
+    n.store
+        .insert_session(&session_on("s-done", "old", "closed"))
+        .unwrap();
+    n.store
+        .insert_session(&session_on("s-live", "busy", "waiting_on_you"))
+        .unwrap();
+
+    // A session that has not ended keeps its channel.
+    let (s, v) = call(&n, "DELETE", "/api/channels/busy", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not ended"));
+
+    // An ended one does not.
+    let (s, v) = call(&n, "DELETE", "/api/channels/old", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["deleted"], "old");
+    let (_, channels) = call(&n, "GET", "/api/channels", Some(LOCAL), None).await;
+    let names: Vec<&str> = channels
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert!(!names.contains(&"old"), "{channels}");
+    assert!(names.contains(&"busy"), "{channels}");
+    // The session that ran on it is still there to read.
+    assert!(n.store.get_session("s-done").unwrap().is_some());
+
+    // Gone is gone; the mesh channel was never deletable.
+    let (s, _) = call(&n, "DELETE", "/api/channels/old", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = call(&n, "DELETE", "/api/channels/@mesh", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}

@@ -130,6 +130,14 @@
       await store.refetch()
     })
   }
+  let deleting = $state('')
+  function deleteChannel(name: string) {
+    return act('channel-delete', async () => {
+      await api.deleteChannel(name)
+      deleting = ''
+      await store.refetch()
+    })
+  }
   function bindModel(channel: string, phase: 'plan' | 'execute', model: string) {
     return act('binding', async () => {
       // A standalone node lists channels it has no row for; the create is
@@ -464,10 +472,23 @@
         {#each archived_channels as c (c.name)}
           <div class="ch off">
             <span class="nm">{c.name}</span>
-            <span class="note">archived · {c.nodes.length} node{c.nodes.length === 1 ? '' : 's'} still hold its key</span>
-            <div class="end">
-              <button class="lnk" disabled={busy !== ''} onclick={() => archiveChannel(c.name, false)}>bring back</button>
-            </div>
+            {#if deleting === c.name}
+              <span class="note crit">
+                Deletes the channel and its key from this node. Its sessions and work stay in history.
+              </span>
+              <div class="end">
+                <button class="lnk d" disabled={busy !== ''} onclick={() => deleteChannel(c.name)}>
+                  {busy === 'channel-delete' ? 'Deleting…' : 'delete'}
+                </button>
+                <button class="lnk" disabled={busy !== ''} onclick={() => (deleting = '')}>keep</button>
+              </div>
+            {:else}
+              <span class="note">archived · {c.nodes.length} node{c.nodes.length === 1 ? '' : 's'} still hold its key</span>
+              <div class="end">
+                <button class="lnk" disabled={busy !== ''} onclick={() => archiveChannel(c.name, false)}>bring back</button>
+                <button class="lnk d" disabled={busy !== ''} onclick={() => (deleting = c.name)}>delete</button>
+              </div>
+            {/if}
           </div>
         {/each}
       </div>
@@ -818,6 +839,9 @@
     align-self: center;
     font: 11.5px var(--mono);
     color: var(--dim);
+  }
+  .ch .note.crit {
+    color: var(--crit);
   }
   .h5.sub {
     margin-top: 14px;
