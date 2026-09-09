@@ -45,3 +45,13 @@ export function formatExpiry(expiresMs: number, now = Date.now()): string {
   if (s < 60) return `expires ${s}s`
   return `expires ${Math.ceil(s / 60)}m`
 }
+
+/** "2,000,000" — a whole number with thousands separated, for a field a person types into. */
+export function formatGrouped(n: number): string {
+  return String(Math.max(0, Math.trunc(n))).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+}
+
+/** The number in a typed field, ignoring separators and anything else that is not a digit. */
+export function digits(s: string): number {
+  return Number(s.replace(/\D/g, '') || 0)
+}
