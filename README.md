@@ -70,7 +70,9 @@ that first time. The AppImage and the macOS app check GitHub Releases at launch 
 can download, verify GitHub's SHA-256 digest, replace themselves, and restart from
 Settings or the tray — an update the app fetches itself is never quarantined, so
 macOS does not ask again. `.deb` installs stay under their package manager's update
-path.
+path. The node it runs stays up through the app's own restart; if the node binary
+changed too, the node is restarted on the new one once no session is running, and
+the tray says so while it waits.
 
 A node that fails `check-boundary` refuses to run harnesses and says which check
 failed. That refusal is the design working, not a bug to route around.

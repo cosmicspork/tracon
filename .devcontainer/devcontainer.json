@@ -1,0 +1,12 @@
+{
+  "name": "tracon",
+  "build": { "dockerfile": "Containerfile" },
+  "workspaceFolder": "/workspaces/tracon",
+  "remoteUser": "dev",
+  "onCreateCommand": "cd spa && bun install --frozen-lockfile && bun run build",
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer", "svelte.svelte-vscode"]
+    }
+  }
+}

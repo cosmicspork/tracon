@@ -64,7 +64,14 @@ pub fn refresh(app: &AppHandle, state: &Arc<State>) {
         format!("tracon · {waiting} waiting on you")
     }));
 
-    let Ok(menu) = build_menu(app, &queue, connected, failed.as_deref()) else {
+    let pending_update = state.node_update.lock().unwrap().clone();
+    let Ok(menu) = build_menu(
+        app,
+        &queue,
+        connected,
+        failed.as_deref(),
+        pending_update.as_deref(),
+    ) else {
         return;
     };
     let _ = tray.set_menu(Some(menu));
@@ -75,8 +82,21 @@ fn build_menu(
     q: &queue::Queue,
     connected: bool,
     failed: Option<&str>,
+    pending_update: Option<&str>,
 ) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
+
+    // A node restart the app is holding back until sessions end, said where
+    // the operator will look when the tray icon changes.
+    if let Some(line) = pending_update {
+        menu.append(&MenuItem::with_id(
+            app,
+            "noop-update",
+            truncate(line),
+            false,
+            None::<&str>,
+        )?)?;
+    }
 
     // A node this app started and could not keep running is a different
     // situation from one it cannot reach, and saying which saves a hunt
