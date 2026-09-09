@@ -507,6 +507,11 @@ impl Updater {
         if let Err(message) = schedule_restart(&restart.helper, &restart.relaunch) {
             return self.failed(app, message);
         }
+        // The node stays up across the restart; the next run claims it and
+        // restarts it only if the node binary itself changed, once idle.
+        if let Some(node) = app.try_state::<std::sync::Arc<crate::node::Node>>() {
+            node.hand_off();
+        }
         app.exit(0);
         self.status()
     }

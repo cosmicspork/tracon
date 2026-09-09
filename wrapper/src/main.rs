@@ -50,12 +50,78 @@ pub struct State {
     pub connected: Mutex<bool>,
     /// Why the node is not running, when this app was the one running it.
     pub node_error: Mutex<Option<String>>,
+    /// A node restart this app owes and is waiting to make: the node binary
+    /// changed under an update, and the running one is left to finish its
+    /// sessions first.
+    pub node_update: Mutex<Option<String>>,
 }
 
 /// End the app, whatever ⌘Q is set to do. The tray's Quit and the menu's
 /// Quit both land here; only the latter consults the preference first.
 pub fn quit(app: &tauri::AppHandle) {
     app.exit(0);
+}
+
+/// A node claimed back from the run before this one kept its sessions
+/// through the app's update. If the node binary changed with it, the node
+/// is restarted on the new one — but only once nothing is running, so an
+/// update never ends a session mid-flight.
+async fn refresh_claimed_node(
+    app: tauri::AppHandle,
+    state: Arc<State>,
+    node: Arc<node::Node>,
+    http: reqwest::Client,
+    url: String,
+) {
+    use tauri_plugin_notification::NotificationExt;
+    let running = node::running_version(&http, &url).await;
+    let sidecar = node::binary_version();
+    if !node::needs_restart(running.as_deref(), sidecar.as_deref()) {
+        return;
+    }
+    let target = sidecar.unwrap_or_default();
+    let mut announced = false;
+    loop {
+        let busy = node::running_sessions(&http, &url).await.unwrap_or(1);
+        if busy == 0 {
+            break;
+        }
+        let line = format!(
+            "Node restarts to v{target} when {busy} running session{} end{}",
+            if busy == 1 { "" } else { "s" },
+            if busy == 1 { "s" } else { "" }
+        );
+        *state.node_update.lock().unwrap() = Some(line.clone());
+        tray::refresh(&app, &state);
+        if !announced {
+            announced = true;
+            let _ = app
+                .notification()
+                .builder()
+                .title("tracon updated")
+                .body(line)
+                .show();
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+    *state.node_update.lock().unwrap() = Some(format!("Restarting the node to v{target}…"));
+    tray::refresh(&app, &state);
+    let outcome = node.restart(&http, &url).await;
+    *state.node_update.lock().unwrap() = None;
+    match outcome {
+        Ok(()) => {
+            let _ = app
+                .notification()
+                .builder()
+                .title("tracon updated")
+                .body(format!("The node is running v{target}."))
+                .show();
+        }
+        Err(why) => {
+            *state.node_error.lock().unwrap() = Some(why);
+        }
+    }
+    tray::refresh(&app, &state);
 }
 
 #[tauri::command]
@@ -152,7 +218,7 @@ fn main() {
                     let http = reqwest::Client::new();
                     let url = node_url();
                     match node.ensure(&http, &url).await {
-                        Ok(()) => {
+                        Ok(found) => {
                             if let Some(window) = handle.get_webview_window("main") {
                                 if let Ok(parsed) = url.parse() {
                                     let _ = window.navigate(parsed);
@@ -163,6 +229,15 @@ fn main() {
                             // is merely still starting.
                             if launch_visible {
                                 show_window(&handle);
+                            }
+                            if found == node::Ensured::Claimed {
+                                tauri::async_runtime::spawn(refresh_claimed_node(
+                                    handle.clone(),
+                                    st.clone(),
+                                    node.clone(),
+                                    http.clone(),
+                                    url.clone(),
+                                ));
                             }
                             if let Some(why) = node.supervise(http, url).await {
                                 *st.node_error.lock().unwrap() = Some(why);

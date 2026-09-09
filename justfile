@@ -81,8 +81,17 @@ gui: spa
 #   distrobox create --name tracon-build --image registry.fedoraproject.org/fedora:44 --yes
 #   distrobox enter tracon-build -- sudo dnf install -y \
 #     webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel rust cargo clippy rustfmt
+# Without distrobox, `.devcontainer/` carries the same toolchain for the Dev
+# Container CLI: `devcontainer up --workspace-folder .` once, then
+# `devcontainer exec --workspace-folder . just wrapper-check`.
 wrapper:
     distrobox enter tracon-build -- bash -c 'cd {{justfile_directory()}}/wrapper && cargo build --release'
 
 wrapper-check:
-    distrobox enter tracon-build -- bash -c 'cd {{justfile_directory()}}/wrapper && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test'
+    #!/usr/bin/env sh
+    set -e
+    cd {{justfile_directory()}}/wrapper
+    if command -v distrobox >/dev/null 2>&1; then
+        exec distrobox enter tracon-build -- bash -c 'cd {{justfile_directory()}}/wrapper && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test'
+    fi
+    cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test

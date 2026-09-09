@@ -1,0 +1,20 @@
+# Everything the whole repository builds with, including the desktop wrapper,
+# which needs webkit and gtk headers the node and hub deliberately do not.
+# The same package list the justfile's distrobox recipes assume, in an image
+# the Dev Container CLI (or VS Code) can stand up on any host with a
+# container engine.
+FROM registry.fedoraproject.org/fedora:44
+
+RUN dnf install -y \
+        webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel librsvg2-devel \
+        rust cargo clippy rustfmt \
+        gcc make pkgconf-pkg-config openssl-devel \
+        git just nodejs npm unzip fuse \
+    && dnf clean all
+
+# bun builds the interface; there is no Fedora package for it.
+RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
+
+RUN useradd -m -s /bin/bash dev
+USER dev
+WORKDIR /workspaces/tracon
