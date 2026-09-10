@@ -216,6 +216,116 @@ pub async fn answering(http: &reqwest::Client, url: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// How many sessions the node has running, if it answers. None when it does
+/// not: a node that cannot be asked is not idle.
+pub async fn running_sessions(http: &reqwest::Client, url: &str) -> Option<usize> {
+    let v: serde_json::Value = http
+        .get(format!("{url}/api/queue"))
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    Some(
+        v["running"]
+            .as_array()
+            .map(|a| a.iter().filter(|s| s["state"] != "closed").count())
+            .unwrap_or(0),
+    )
+}
+
+/// Whether the node refuses to run harnesses because its boundary images are
+/// missing or were built from other definitions — the one refusal a `tracon
+/// setup` fixes on its own. Asks the node to re-check, so the answer is now's.
+pub async fn images_stale(http: &reqwest::Client, url: &str) -> bool {
+    let refused = async {
+        let v: serde_json::Value = http
+            .get(format!("{url}/api/node"))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        Some(v["state"] == "refused")
+    };
+    if refused.await != Some(true) {
+        return false;
+    }
+    let checked: Option<serde_json::Value> = async {
+        http.post(format!("{url}/api/boundary/check"))
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()
+    }
+    .await;
+    checked
+        .and_then(|v| v["checks"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .any(|c| {
+            let detail = c["detail"].as_str().unwrap_or_default();
+            c["ok"] == false
+                && (detail.contains("other definitions") || detail.contains("run `tracon setup`"))
+        })
+}
+
+/// Build what the boundary needs, as `tracon setup` does, through the node.
+pub async fn run_setup(http: &reqwest::Client, url: &str) -> Result<(), String> {
+    let res = http
+        .post(format!("{url}/api/boundary/setup"))
+        .json(&serde_json::json!({ "rebuild": false }))
+        .timeout(Duration::from_secs(660))
+        .send()
+        .await
+        .map_err(|e| format!("setting up the boundary: {e}"))?;
+    if res.status().is_success() {
+        Ok(())
+    } else {
+        let body = res.text().await.unwrap_or_default();
+        Err(format!("setting up the boundary failed: {body}"))
+    }
+}
+
+/// What an app that just updated owes the machine, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Put the node binary this app carries where the CLI and the unit are.
+    InstallCli,
+    /// Restart the service onto it, once nothing is running.
+    RestartService,
+}
+
+/// Before the service is installed the setup page owns all of this. After, a
+/// CLI that is not the one the app carries is replaced, and a running node on
+/// another version is restarted onto it. A node that is not answering is a
+/// different problem, and restarting it is not the fix.
+pub fn plan(
+    running: Option<&str>,
+    carried: &str,
+    installed: Option<&str>,
+    service_installed: bool,
+) -> Vec<Step> {
+    let mut steps = Vec::new();
+    if !service_installed {
+        return steps;
+    }
+    if installed != Some(carried) {
+        steps.push(Step::InstallCli);
+    }
+    if running.is_some_and(|r| r != carried) {
+        steps.push(Step::RestartService);
+    }
+    steps
+}
+
 /// Wait for a node the service is starting to answer.
 pub async fn wait_ready(http: &reqwest::Client, url: &str) -> bool {
     let deadline = Instant::now() + READY_TIMEOUT;
@@ -336,6 +446,23 @@ mod tests {
         assert!(on_path("/usr/bin:/home/op/.local/bin", dir));
         assert!(!on_path("/usr/bin:/home/op/.local/bin/extra", dir));
         assert!(!on_path("", dir));
+    }
+
+    #[test]
+    fn an_update_moves_the_cli_then_the_service_and_nothing_before_setup() {
+        use Step::*;
+        // Before the service exists, the setup page is in charge.
+        assert!(plan(Some("0.14.0"), "0.15.0", Some("0.14.0"), false).is_empty());
+        // Both behind: the CLI first, because the unit names it.
+        assert_eq!(
+            plan(Some("0.14.0"), "0.15.0", Some("0.14.0"), true),
+            vec![InstallCli, RestartService]
+        );
+        // A CLI someone removed comes back; the node is already current.
+        assert_eq!(plan(Some("0.15.0"), "0.15.0", None, true), vec![InstallCli]);
+        assert!(plan(Some("0.15.0"), "0.15.0", Some("0.15.0"), true).is_empty());
+        // A node that does not answer is not restarted by an update.
+        assert_eq!(plan(None, "0.15.0", Some("0.14.0"), true), vec![InstallCli]);
     }
 
     #[test]

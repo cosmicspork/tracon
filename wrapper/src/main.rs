@@ -61,6 +61,100 @@ pub fn quit(app: &tauri::AppHandle) {
     app.exit(0);
 }
 
+/// After an app update the app carries a new node, while the terminal and
+/// the service still run the old one. Move the CLI, then the service once no
+/// session is running (an update never ends a session mid-flight), then
+/// rebuild the boundary images if the new node finds them stale.
+async fn move_to_carried_node(
+    app: tauri::AppHandle,
+    state: Arc<State>,
+    http: reqwest::Client,
+    url: String,
+) {
+    use tauri_plugin_notification::NotificationExt;
+    let Some(carried) = node::sidecar_path().and_then(|p| node::version_of(&p)) else {
+        return;
+    };
+    let installed = node::installed_path().and_then(|p| node::version_of(&p));
+    let running = node::running_version(&http, &url).await;
+    let steps = node::plan(
+        running.as_deref(),
+        &carried,
+        installed.as_deref(),
+        service::installed(),
+    );
+    let say = |line: Option<String>| {
+        *state.node_update.lock().unwrap() = line;
+        tray::refresh(&app, &state);
+    };
+    let fail = |why: String| {
+        eprintln!("tracon: {why}");
+        *state.node_update.lock().unwrap() = None;
+        *state.node_error.lock().unwrap() = Some(why);
+        tray::refresh(&app, &state);
+    };
+
+    if steps.contains(&node::Step::InstallCli) {
+        match tauri::async_runtime::spawn_blocking(node::install_cli).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(why)) => return fail(why),
+            Err(e) => return fail(e.to_string()),
+        }
+    }
+    if steps.contains(&node::Step::RestartService) {
+        let mut announced = false;
+        loop {
+            let busy = node::running_sessions(&http, &url).await.unwrap_or(1);
+            if busy == 0 {
+                break;
+            }
+            let line = format!(
+                "Node restarts to v{carried} when {busy} running session{} end{}",
+                if busy == 1 { "" } else { "s" },
+                if busy == 1 { "s" } else { "" }
+            );
+            say(Some(line.clone()));
+            if !announced {
+                announced = true;
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("tracon updated")
+                    .body(line)
+                    .show();
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+        say(Some(format!("Restarting the node to v{carried}…")));
+        let Some(cli) = node::installed_path() else {
+            return fail("HOME is not set".into());
+        };
+        match tauri::async_runtime::spawn_blocking(move || service::restart(&cli)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(why)) => return fail(why),
+            Err(e) => return fail(e.to_string()),
+        }
+        if !node::wait_ready(&http, &url).await {
+            return fail(format!(
+                "The node did not answer after restarting to v{carried}"
+            ));
+        }
+        let _ = app
+            .notification()
+            .builder()
+            .title("tracon updated")
+            .body(format!("The node is running v{carried}."))
+            .show();
+    }
+    if node::images_stale(&http, &url).await {
+        say(Some("Rebuilding the boundary images…".into()));
+        if let Err(why) = node::run_setup(&http, &url).await {
+            return fail(why);
+        }
+    }
+    say(None);
+}
+
 #[tauri::command]
 fn desktop_update_status(
     updater: tauri::State<'_, Arc<updater::Updater>>,
@@ -187,6 +281,9 @@ fn main() {
                         || (local && service::installed() && node::wait_ready(&http, &url).await);
                     if ready && !migrated {
                         open_at_if(&handle, "/", launch_visible);
+                        if local {
+                            move_to_carried_node(handle.clone(), st.clone(), http, url).await;
+                        }
                         return;
                     }
                     if !ready && service::installed() {
