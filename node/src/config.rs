@@ -24,6 +24,30 @@ pub struct Config {
     pub notify: Notify,
     pub embed: Embed,
     pub external: External,
+    pub docs: Docs,
+}
+
+/// The corpus written back out as files, on a timer, so a directory kept under
+/// version control, or read by other tools, follows the documents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Docs {
+    /// Where to write; unset is off. A leading `~` is the operator's home.
+    pub export_dir: Option<PathBuf>,
+    /// Whose documents. Empty: `[session] default_channel`.
+    pub export_channel: String,
+    /// How often, in seconds (at least 60). The first export is at startup.
+    pub export_every_secs: u64,
+}
+
+impl Default for Docs {
+    fn default() -> Self {
+        Self {
+            export_dir: None,
+            export_channel: String::new(),
+            export_every_secs: 1800,
+        }
+    }
 }
 
 /// A harness the operator runs themselves, outside the boundary, reaching the
@@ -528,6 +552,7 @@ impl Default for Config {
             notify: Notify::default(),
             embed: Embed::default(),
             external: External::default(),
+            docs: Docs::default(),
             harness: Harness {
                 id: "omp".into(),
                 version: "18.0.4".into(),

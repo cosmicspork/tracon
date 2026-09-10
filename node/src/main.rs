@@ -121,8 +121,9 @@ enum DocCommand {
         #[arg(long, default_value = "personal")]
         channel: String,
     },
-    /// Write every document on a channel to a directory as `<slug>.md`,
-    /// archived ones under `archive/`.
+    /// Mirror every document on a channel into a directory as `<slug>.md`,
+    /// archived ones under `archive/`. A deleted or archived document's old
+    /// file is removed; files that are not documents are left alone.
     Export {
         dir: std::path::PathBuf,
         #[arg(long, default_value = "personal")]
@@ -1181,7 +1182,6 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
             Ok(())
         }
         DocCommand::Export { dir, channel } => {
-            std::fs::create_dir_all(&dir)?;
             let v = node_call(
                 Method::GET,
                 &format!("/api/docs?channel={channel}&archived=true"),
@@ -1189,16 +1189,9 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
                 None,
             )
             .await?;
-            let mut n = 0;
+            let mut docs = Vec::new();
             for d in v["docs"].as_array().cloned().unwrap_or_default() {
                 let slug = d["slug"].as_str().unwrap_or("").to_string();
-                let into = if d["archived"].as_i64() == Some(1) {
-                    let archive = dir.join("archive");
-                    std::fs::create_dir_all(&archive)?;
-                    archive
-                } else {
-                    dir.clone()
-                };
                 let full = node_call(
                     Method::GET,
                     &format!("/api/docs/{channel}/{slug}"),
@@ -1206,16 +1199,20 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
                     None,
                 )
                 .await?;
-                std::fs::write(
-                    into.join(format!("{slug}.md")),
-                    full["body"].as_str().unwrap_or(""),
-                )?;
-                n += 1;
+                docs.push(tracon::corpus::export::ExportDoc {
+                    slug,
+                    body: full["body"].as_str().unwrap_or("").to_string(),
+                    archived: d["archived"].as_i64() == Some(1),
+                });
             }
+            let r = tracon::corpus::export::sync_dir(&dir, &docs)?;
             println!(
-                "{n} document{} written to {}",
-                if n == 1 { "" } else { "s" },
-                dir.display()
+                "{} documents in {}: {} written, {} unchanged, {} removed",
+                docs.len(),
+                dir.display(),
+                r.written,
+                r.unchanged,
+                r.removed
             );
             Ok(())
         }
