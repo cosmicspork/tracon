@@ -67,6 +67,10 @@ pub struct Target {
     pub project: String,
     pub base: String,
     pub branch: String,
+    /// The operator's worktree, for a review a harness they run submitted.
+    /// A session the node started reviews its own, recorded on the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -127,10 +131,12 @@ pub async fn publish(
     // new branch is created, a fast-forward updates, and a diverged remote
     // branch is rejected rather than clobbered.
     let refspec = format!("{head_sha}:refs/heads/{}", target.branch);
+    let operator_checkout = target.worktree.is_some();
     run(
         cfg.publish.git.clone(),
         worktree,
         &env,
+        operator_checkout,
         &[
             "-c",
             "core.hooksPath=/dev/null",
@@ -177,7 +183,14 @@ pub async fn publish(
         ],
     };
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    run(provider.command(cfg), worktree, &env, &argv).await
+    run(
+        provider.command(cfg),
+        worktree,
+        &env,
+        operator_checkout,
+        &argv,
+    )
+    .await
 }
 
 /// The worktree's current HEAD, via the configured git, with hooks and
@@ -213,16 +226,26 @@ async fn run(
     cli: String,
     dir: &str,
     env: &BTreeMap<String, String>,
+    operator_checkout: bool,
     args: &[&str],
 ) -> Result<String, PublishError> {
-    let out = Command::new(&cli)
-        .args(args)
+    let mut cmd = Command::new(&cli);
+    cmd.args(args)
         .current_dir(dir)
         // A clean environment so nothing else on the node leaks into the CLI,
         // and so the credential is the only one it can use.
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", std::env::var("HOME").unwrap_or_default())
+        .env("HOME", std::env::var("HOME").unwrap_or_default());
+    // The operator's own checkout pushes to its remote the way the operator
+    // does, often through an ssh agent. The brokered token is still the only
+    // forge credential the CLI is handed.
+    if operator_checkout {
+        if let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") {
+            cmd.env("SSH_AUTH_SOCK", sock);
+        }
+    }
+    let out = cmd
         .envs(env)
         .output()
         .await
@@ -272,6 +295,7 @@ mod tests {
             project: "custom-development/integrations".into(),
             base: "main".into(),
             branch: "feat/x".into(),
+            worktree: None,
         };
         let err = publish(
             &broker,
@@ -296,6 +320,7 @@ mod tests {
             project: "x/y".into(),
             base: "main".into(),
             branch: "feat/x".into(),
+            worktree: None,
         };
         let err = publish(
             &crate::broker::Broker::default().shared(),

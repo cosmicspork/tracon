@@ -722,13 +722,25 @@ pub async fn get_review(
     Ok(Json(json!({ "review": r, "stale": stale })))
 }
 
+/// Where a review's diff was captured: the operator's worktree for a harness
+/// they run themselves, else the submitting session's own.
+fn worktree_of(s: &AppState, r: &crate::store::ReviewRow) -> Option<String> {
+    serde_json::from_str::<crate::review::publish::Target>(&r.target)
+        .ok()
+        .and_then(|t| t.worktree)
+        .or_else(|| {
+            s.store()
+                .get_session(&r.session_id)
+                .ok()
+                .flatten()
+                .and_then(|session| session.worktree_path)
+        })
+}
+
 /// What changed in the worktree since submit. An empty list means the diff
 /// still describes the branch.
 async fn staleness_of(s: &AppState, r: &crate::store::ReviewRow) -> Vec<String> {
-    let Ok(Some(session)) = s.store().get_session(&r.session_id) else {
-        return vec!["the session is gone".into()];
-    };
-    let Some(worktree) = session.worktree_path else {
+    let Some(worktree) = worktree_of(s, r) else {
         return vec!["the worktree is gone".into()];
     };
     let files: Vec<crate::review::FileAtSubmit> =
@@ -761,11 +773,7 @@ pub async fn review_file(
             "this review belongs to another node; editing happens where the worktree is".into(),
         ));
     }
-    let session = s
-        .store()
-        .get_session(&r.session_id)?
-        .ok_or(ApiError(StatusCode::CONFLICT, "the session is gone".into()))?;
-    let worktree = session.worktree_path.ok_or(ApiError(
+    let worktree = worktree_of(&s, &r).ok_or(ApiError(
         StatusCode::CONFLICT,
         "the worktree is gone".into(),
     ))?;
@@ -925,11 +933,7 @@ pub(crate) async fn decide_local(
                     format!("changed since submit: {}", stale.join(", ")),
                 ));
             }
-            let session = s
-                .store()
-                .get_session(&r.session_id)?
-                .ok_or(ApiError(StatusCode::CONFLICT, "the session is gone".into()))?;
-            let worktree = session.worktree_path.ok_or(ApiError(
+            let worktree = worktree_of(&s, &r).ok_or(ApiError(
                 StatusCode::CONFLICT,
                 "the worktree is gone".into(),
             ))?;

@@ -150,37 +150,226 @@ async fn a_channel_gets_one_attachment_however_many_calls_arrive() {
 }
 
 #[tokio::test]
-async fn an_attachment_is_offered_the_channels_tools_but_not_the_ones_needing_a_worktree() {
+async fn an_attachment_is_offered_the_channels_tools_but_not_a_review_sessions_verdict() {
     state::isolate();
     let h = harness_with(enabled()).await;
     let names = list(&h.operator, "work").await;
-    for wanted in ["recall", "doc_read", "work_ready", "work_discover"] {
+    for wanted in [
+        "recall",
+        "doc_read",
+        "work_ready",
+        "work_discover",
+        "work_close",
+        "submit_review",
+        "review_status",
+    ] {
         assert!(
             names.contains(&wanted.to_string()),
             "{wanted} not in {names:?}"
         );
     }
-    for unwanted in [
-        "submit_review",
-        "review_status",
-        "review_verdict",
-        "work_close",
-    ] {
-        assert!(
-            !names.contains(&unwanted.to_string()),
-            "{unwanted} in {names:?}"
-        );
-    }
+    assert!(!names.contains(&"review_verdict".to_string()), "{names:?}");
 
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call(
+            "review_verdict",
+            json!({ "verdict": "approve", "summary": "x" }),
+        ),
+    )
+    .await;
+    assert_eq!(v["result"]["isError"], json!(true));
+    let text = v["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("review session"), "{text}");
+
+    // A submission without a worktree says which argument it needs.
     let (_, v) = mcp(
         &h.operator,
         "work",
         tool_call("submit_review", json!({ "title": "x" })),
     )
     .await;
-    assert_eq!(v["result"]["isError"], json!(true));
     let text = v["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("worktree"), "{text}");
+    assert!(text.contains("worktree is required"), "{text}");
+}
+
+fn sh(dir: &std::path::Path, script: &str) {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{script}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A repository under `<scratch>/root` with a bare origin, and a linked
+/// worktree outside that root, on a branch one commit beyond main.
+fn repo_with_worktree(name: &str) -> (std::path::PathBuf, String) {
+    let dir = state::scratch(&format!("external-{name}"));
+    std::fs::create_dir_all(dir.join("root")).unwrap();
+    sh(&dir, "git init -q --bare -b main origin.git");
+    sh(
+        &dir,
+        "git clone -q origin.git root/repo && cd root/repo && git checkout -qB main \
+         && git config user.email t@e && git config user.name t \
+         && echo base > a.txt && git add -A && git commit -qm base && git push -q origin main \
+         && git worktree add -b feat/x ../../wt 2>/dev/null \
+         && cd ../../wt && echo change >> a.txt && git add -A && git commit -qm work",
+    );
+    (
+        dir.join("root"),
+        dir.join("wt").to_string_lossy().into_owned(),
+    )
+}
+
+fn with_roots(root: &std::path::Path) -> Config {
+    let mut cfg = enabled();
+    cfg.external.repo_roots = vec![root.to_path_buf()];
+    cfg
+}
+
+fn submit_args(worktree: &str) -> Value {
+    json!({
+        "title": "feat: x", "body": "why", "provider": "github",
+        "project": "owner/name", "base": "main", "worktree": worktree
+    })
+}
+
+/// A tool result: whether it is an error, and what it said.
+fn outcome(v: &Value) -> (bool, Value) {
+    let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
+    (
+        v["result"]["isError"] == json!(true),
+        serde_json::from_str(text).unwrap_or(json!(text)),
+    )
+}
+
+#[tokio::test]
+async fn an_external_harness_puts_its_own_worktree_up_for_review() {
+    state::isolate();
+    let (root, wt) = repo_with_worktree("submit");
+    let h = harness_with(with_roots(&root)).await;
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("submit_review", submit_args(&wt)),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    let r = h
+        .store
+        .get_review(out["review_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(r.diff.contains("a.txt"), "{}", r.diff);
+    let target: Value = serde_json::from_str(&r.target).unwrap();
+    assert_eq!(target["branch"], "feat/x");
+    let canonical = std::fs::canonicalize(&wt).unwrap();
+    assert_eq!(target["worktree"], json!(canonical.to_string_lossy()));
+    // The operator's toolchain is where its checks run, not a container.
+    assert!(r.checks_json.is_none());
+}
+
+#[tokio::test]
+async fn a_worktree_whose_repository_is_outside_the_roots_is_refused() {
+    state::isolate();
+    let (root, wt) = repo_with_worktree("outside");
+    let elsewhere = root.parent().unwrap().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let h = harness_with(with_roots(&elsewhere)).await;
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("submit_review", submit_args(&wt)),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(err);
+    assert!(out.to_string().contains("repo_roots"), "{out}");
+    let (_, queue) = call(&h.operator, "GET", "/api/queue", None).await;
+    assert!(queue["reviews"].as_array().unwrap().is_empty(), "{queue}");
+}
+
+#[tokio::test]
+async fn a_review_outlives_the_attachment_that_submitted_it() {
+    state::isolate();
+    let (root, wt) = repo_with_worktree("outlives");
+    let h = harness_with(with_roots(&root)).await;
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("submit_review", submit_args(&wt)),
+    )
+    .await;
+    let (_, out) = outcome(&v);
+    let review = out["review_id"].as_str().unwrap().to_string();
+
+    let first = attached(&h).unwrap().id;
+    let (_, _) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/sessions/{first}/kill"),
+        None,
+    )
+    .await;
+    for _ in 0..100 {
+        if h.store.get_session(&first).unwrap().unwrap().state == "closed" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call(
+            "review_status",
+            json!({ "review_id": review, "wait_secs": 0 }),
+        ),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    assert_eq!(out["state"], "new");
+    assert_ne!(attached(&h).unwrap().id, first, "a new attachment asked");
+}
+
+#[tokio::test]
+async fn an_attachment_closes_an_item_by_id_and_stays_attached() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let (status, _) = call(
+        &h.operator,
+        "POST",
+        "/api/work",
+        Some(json!({ "title": "finish it", "channel": "work" })),
+    )
+    .await;
+    assert!(status.is_success(), "{status}");
+    let item = h.store.work_ready("work", None).unwrap()[0].item.id.clone();
+
+    let (_, v) = mcp(&h.operator, "work", tool_call("work_close", json!({}))).await;
+    let (err, out) = outcome(&v);
+    assert!(err);
+    assert!(out.to_string().contains("id"), "{out}");
+
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("work_close", json!({ "id": item, "summary": "done" })),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    assert_eq!(out["state"], "closed");
+    assert_eq!(attached(&h).unwrap().state, "running");
 }
 
 /// The inverse of the unit test that pinned the old dead end: with no session
