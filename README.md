@@ -46,7 +46,8 @@ If `tracon setup` cannot find podman — a node started from a desktop launcher
 inherits a minimal PATH — set `podman` under `[boundary]` in `node.toml` to its
 full path. The interface says so too, in the refusal it shows. On macOS the node
 starts the podman machine itself when it finds it stopped; create one once with
-`podman machine init`.
+`podman machine init`. After an upgrade, `tracon setup` rebuilds any image whose
+definitions changed, and the boundary check refuses until it has.
 
 Open `http://127.0.0.1:7420`. **Settings** covers the rest of the install from
 the interface: prove the boundary, run setup, choose the harness, import a
