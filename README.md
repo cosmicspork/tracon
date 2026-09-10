@@ -350,7 +350,7 @@ shape = "anthropic"                 # or "openai", "openai-codex"
 # one credential per database: `consulta` is the default, `consulta-<profile>` any other;
 # a channel holding more than the default offers the tools a `profile` argument
 command = "uv"
-args = ["run", "--project", "<home>/src/consulta", "consulta"]   # paths here are literal: only repo_roots expands ~
+args = ["run", "--project", "<home>/src/consulta", "consulta"]   # paths here are literal: only repo_roots and export_dir expand ~
 timeout_secs = 60
 
 [publish]                           # the binaries the node runs to publish an approved review
@@ -382,6 +382,11 @@ max_files = 40
 enabled = false
 idle_timeout_secs = 3600            # an attachment with no call for this long is closed (at least 60)
 repo_roots = ["~/src"]              # a worktree put up for review must belong to a repository under one of these
+
+[docs]                              # the documents mirrored into a directory; off unless export_dir is set
+# export_dir = "~/src/docs"         # <slug>.md, archived ones under archive/; files that are not documents are left alone
+export_channel = ""                 # empty: [session] default_channel
+export_every_secs = 1800            # at startup, then this often (at least 60)
 
 [embed]                             # semantic search; off unless enabled
 enabled = false
