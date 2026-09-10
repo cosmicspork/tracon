@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "setup-page",
+  "description": "Allows the app's own setup page to inspect this machine and install the node's service and CLI.",
+  "windows": ["main"],
+  "platforms": ["linux", "macOS"],
+  "local": true,
+  "permissions": [
+    "allow-desktop-setup-status",
+    "allow-desktop-install-service",
+    "allow-desktop-install-cli",
+    "allow-desktop-open-node"
+  ]
+}

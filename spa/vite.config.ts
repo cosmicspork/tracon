@@ -55,7 +55,19 @@ const fixtureMode = Boolean(process.env.TRACON_FIXTURES)
 
 export default defineConfig({
   plugins: [svelte(), fixtureMode ? fixtures() : undefined].filter(Boolean) as PluginOption[],
-  build: { outDir: 'dist', emptyOutDir: true, sourcemap: false },
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
+    sourcemap: false,
+    // setup.html is what the desktop app opens on from its own bundle, before
+    // a node exists to serve the interface.
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        setup: fileURLToPath(new URL('./setup.html', import.meta.url)),
+      },
+    },
+  },
   server: fixtureMode
     ? {}
     : {

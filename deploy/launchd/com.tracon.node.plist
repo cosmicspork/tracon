@@ -16,6 +16,8 @@
   <dict>
     <key>RUST_LOG</key>
     <string>tracon=info</string>
+    <key>PATH</key>
+    <string>__PATH__</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

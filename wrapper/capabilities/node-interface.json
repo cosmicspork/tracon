@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "node-interface",
-  "description": "Allows the loopback node interface to query and install desktop updates.",
+  "description": "Allows the loopback node interface to install desktop updates and manage the node's CLI and service.",
   "windows": ["main"],
   "platforms": ["linux", "macOS"],
   "local": false,
@@ -13,6 +13,9 @@
     "allow-desktop-update-status",
     "allow-desktop-check-for-update",
     "allow-desktop-install-update",
+    "allow-desktop-setup-status",
+    "allow-desktop-install-cli",
+    "allow-desktop-restart-node",
     {
       "identifier": "opener:allow-open-url",
       "allow": [{ "url": "https://*" }]

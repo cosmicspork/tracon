@@ -10,6 +10,7 @@
     "windows": [
       {
         "title": "tracon",
+        "url": "setup.html",
         "width": 1100,
         "height": 840,
         "resizable": true,
