@@ -58,6 +58,68 @@ async fn stub(
             Json(json!({ "id": "1042", "key": "WRK-9" })),
         );
     }
+    // Cloud's search; a query marked `legacy` plays a Data Center that lacks it.
+    if path == "/rest/api/3/search/jql" && uri.query().unwrap_or("").contains("legacy") {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(json!({ "errorMessages": ["not here"] })),
+        );
+    }
+    if path == "/rest/api/3/search/jql" || path == "/rest/api/2/search" {
+        return (
+            axum::http::StatusCode::OK,
+            Json(json!({ "issues": [{ "key": "WRK-1", "fields": {
+                "summary": "Do the thing", "status": { "name": "In Progress" },
+                "priority": { "name": "Medium" }, "issuetype": { "name": "Task" },
+                "assignee": { "displayName": "J" }, "parent": { "key": "WRK-100" } } }] })),
+        );
+    }
+    if path.contains("/repository/tags/") {
+        return if path.ends_with("/v1.0") {
+            (axum::http::StatusCode::OK, Json(json!({ "name": "v1.0" })))
+        } else {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(json!({ "message": "404 Tag Not Found" })),
+            )
+        };
+    }
+    if path.ends_with("/jobs/901/trace") {
+        let log: String = (1..=200).map(|n| format!("line {n}\n")).collect();
+        return (axum::http::StatusCode::OK, Json(json!(log)));
+    }
+    if path.ends_with("/pipeline") && method == "POST" {
+        return (
+            axum::http::StatusCode::CREATED,
+            Json(
+                json!({ "id": 56, "status": "created", "web_url": "https://gitlab.example/g/p/-/pipelines/56" }),
+            ),
+        );
+    }
+    if path.ends_with("/pipelines") && method == "GET" {
+        return (
+            axum::http::StatusCode::OK,
+            Json(json!([{ "id": 55, "ref": "main", "status": "running" }])),
+        );
+    }
+    if path.ends_with("/pipelines/55/jobs") {
+        return (
+            axum::http::StatusCode::OK,
+            Json(json!([
+                { "id": 901, "name": "test", "stage": "test", "status": "success" },
+                { "id": 902, "name": "deploy", "stage": "deploy", "status": "running" }
+            ])),
+        );
+    }
+    if path.ends_with("/pipelines/55") {
+        return (
+            axum::http::StatusCode::OK,
+            Json(
+                json!({ "id": 55, "ref": "main", "sha": "abc123", "status": "running",
+                "source": "web", "web_url": "https://gitlab.example/g/p/-/pipelines/55" }),
+            ),
+        );
+    }
     (
         axum::http::StatusCode::OK,
         Json(if path.ends_with("/approvals") {
@@ -186,7 +248,16 @@ async fn the_forge_and_tracker_tools_are_offered_to_the_bound_channel_and_node()
             .collect()
     };
     let work = names("work", "n1");
-    for n in ["mr_status", "mr_comment", "issue", "issue_comment"] {
+    for n in [
+        "mr_status",
+        "mr_comment",
+        "pipeline_status",
+        "job_trace",
+        "pipeline_run",
+        "issue",
+        "issue_search",
+        "issue_comment",
+    ] {
         assert!(work.contains(&n.to_string()), "{n} missing from {work:?}");
     }
     // jira is pinned to n1; glab is not.
@@ -400,6 +471,157 @@ async fn a_new_issue_carries_its_project_and_type_and_comes_back_with_a_link() {
     assert_eq!(path, "/rest/api/2/issue");
     assert_eq!(body["fields"]["project"], json!({ "key": "WRK" }));
     assert_eq!(body["fields"]["issuetype"], json!({ "name": "Task" }));
+}
+
+fn paths(seen: &Seen) -> Vec<String> {
+    seen.0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(m, p, _)| format!("{m} {p}"))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_search_returns_one_compact_row_per_issue() {
+    state::isolate();
+    let (mut t, seen, _) = rig().await;
+    t.policy = allowing(r#""issue_search""#);
+    let c = ctx("work", "n1");
+    let (err, v) = call(
+        &t,
+        &c,
+        "issue_search",
+        json!({ "jql": "project = WRK AND statusCategory != Done" }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(
+        v["issues"][0],
+        json!({ "key": "WRK-1", "type": "Task", "summary": "Do the thing",
+                "status": "In Progress", "priority": "Medium", "assignee": "J",
+                "parent": "WRK-100" })
+    );
+    assert_eq!(paths(&seen), vec!["GET /rest/api/3/search/jql"]);
+
+    // A Data Center without the newer endpoint gets the older one.
+    let (err, v) = call(&t, &c, "issue_search", json!({ "jql": "legacy" })).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["issues"][0]["key"], "WRK-1");
+    assert_eq!(
+        paths(&seen)[1..],
+        ["GET /rest/api/3/search/jql", "GET /rest/api/2/search"]
+    );
+}
+
+#[tokio::test]
+async fn pipeline_status_reads_the_latest_run_for_a_ref_with_its_jobs() {
+    state::isolate();
+    let (mut t, seen, _) = rig().await;
+    t.policy = allowing(r#""pipeline_status""#);
+    let (err, v) = call(
+        &t,
+        &ctx("work", "n1"),
+        "pipeline_status",
+        json!({ "project": "g/p", "ref": "main" }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["id"], 55);
+    assert_eq!(v["status"], "running");
+    assert_eq!(v["jobs"][1]["name"], "deploy");
+    assert_eq!(
+        paths(&seen),
+        vec![
+            "GET /api/v4/projects/g%2Fp/pipelines",
+            "GET /api/v4/projects/g%2Fp/pipelines/55",
+            "GET /api/v4/projects/g%2Fp/pipelines/55/jobs",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_job_trace_returns_the_end_of_the_log() {
+    state::isolate();
+    let (mut t, _, _) = rig().await;
+    t.policy = allowing(r#""job_trace""#);
+    let (err, v) = call(
+        &t,
+        &ctx("work", "n1"),
+        "job_trace",
+        json!({ "project": "g/p", "job_id": 901, "kib": 1 }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["truncated"], true);
+    let log = v["log"].as_str().unwrap();
+    assert!(log.contains("line 200"), "{log}");
+    assert!(!log.contains("line 1\\n"), "{log}");
+}
+
+#[tokio::test]
+async fn running_a_pipeline_refuses_a_tag_and_a_production_variable_before_posting() {
+    state::isolate();
+    let (mut t, seen, bodies, _) = rig_with_bodies().await;
+    t.policy = allowing(r#""pipeline_run""#);
+    let c = ctx("work", "n1");
+
+    let (err, v) = call(
+        &t,
+        &c,
+        "pipeline_run",
+        json!({ "project": "g/p", "ref": "v1.0" }),
+    )
+    .await;
+    assert!(err);
+    assert!(v.as_str().unwrap().contains("tag"), "{v}");
+    let (err, v) = call(
+        &t,
+        &c,
+        "pipeline_run",
+        json!({ "project": "g/p", "ref": "main", "variables": { "environment": "production" } }),
+    )
+    .await;
+    assert!(err);
+    assert!(v.as_str().unwrap().contains("production"), "{v}");
+    assert!(
+        !paths(&seen).iter().any(|p| p.starts_with("POST")),
+        "nothing was run"
+    );
+
+    let (err, v) = call(
+        &t,
+        &c,
+        "pipeline_run",
+        json!({ "project": "g/p", "ref": "main", "variables": { "DEPLOY": "staging" } }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["id"], 56);
+    let bodies = bodies.0.lock().unwrap().clone();
+    let (method, path, body) = bodies.last().unwrap();
+    assert_eq!(method, "POST");
+    assert_eq!(path, "/api/v4/projects/g%2Fp/pipeline");
+    assert_eq!(
+        body,
+        &json!({ "ref": "main", "variables": [{ "key": "DEPLOY", "value": "staging" }] })
+    );
+}
+
+#[tokio::test]
+async fn running_a_pipeline_waits_on_the_operator() {
+    state::isolate();
+    let (t, seen, _) = rig().await;
+    let (err, v) = call(
+        &t,
+        &ctx("work", "n1"),
+        "pipeline_run",
+        json!({ "project": "g/p", "ref": "main" }),
+    )
+    .await;
+    assert!(err);
+    assert!(v.as_str().unwrap_or_default().contains("approval"), "{v}");
+    assert!(seen.0.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

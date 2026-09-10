@@ -1,5 +1,5 @@
-//! Jira, as four narrow tools: read an issue, comment on it, edit its fields,
-//! and create one. Transitions are not among them: moving a ticket's status
+//! Jira, as five narrow tools: search, read an issue, comment on it, edit its
+//! fields, and create one. Transitions are not among them: moving a ticket's status
 //! desyncs what the operator is actually working on, so the verb does not
 //! exist here, and the fields the writes touch are named rather than passed
 //! through. The API token never leaves the node.
@@ -13,6 +13,10 @@ pub const ISSUE: &str = "issue";
 pub const ISSUE_COMMENT: &str = "issue_comment";
 pub const ISSUE_UPDATE: &str = "issue_update";
 pub const ISSUE_CREATE: &str = "issue_create";
+pub const ISSUE_SEARCH: &str = "issue_search";
+
+/// What a search row carries: enough to pick an issue, not to read it.
+const SEARCH_FIELDS: &str = "summary,status,assignee,priority,issuetype,parent";
 
 /// The fields either write may set. Status is deliberately absent; so is
 /// everything else Jira would accept, because a field this list does not name
@@ -21,6 +25,19 @@ const EDITABLE: &[&str] = &["summary", "description", "priority", "labels", "par
 
 pub fn definitions() -> Vec<Value> {
     vec![
+        json!({
+            "name": ISSUE_SEARCH,
+            "description": "Search issues with JQL. One row per issue: key, type, summary, status, \
+                            priority, assignee, parent. Read one in full with issue.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "jql": { "type": "string", "description": "e.g. project = WRK AND statusCategory != Done ORDER BY updated DESC" },
+                    "limit": { "type": "integer", "description": "At most 50; 20 unless you say." },
+                },
+                "required": ["jql"],
+            },
+        }),
         json!({
             "name": ISSUE,
             "description": "A Jira issue: summary, status, assignee, description, and its most \
@@ -33,8 +50,9 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": ISSUE_COMMENT,
-            "description": "Post one comment on a Jira issue. Status changes are the operator's; \
-                            say what you would transition and why instead.",
+            "description": "Post one comment on a Jira issue. The body is Jira wiki markup \
+                            (*bold*, {{code}}, * bullets), not Markdown. Status changes are the \
+                            operator's; say what you would transition and why instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -106,6 +124,66 @@ pub async fn call(
         .get("JIRA_TOKEN")
         .ok_or("credential jira has no JIRA_TOKEN")?;
     match name {
+        ISSUE_SEARCH => {
+            let jql = args
+                .get("jql")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|j| !j.is_empty())
+                .ok_or("jql is required")?;
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(20)
+                .clamp(1, 50)
+                .to_string();
+            let query = [
+                ("jql", jql),
+                ("fields", SEARCH_FIELDS),
+                ("maxResults", limit.as_str()),
+            ];
+            let search = |path: &str| {
+                http.get(format!("{url}{path}"))
+                    .query(&query)
+                    .basic_auth(email, Some(token))
+                    .send()
+            };
+            // Cloud answers only the newer endpoint; Data Center only the
+            // older one. Both return the same rows.
+            let mut res = search("/rest/api/3/search/jql")
+                .await
+                .map_err(|e| format!("jira: {e}"))?;
+            if res.status() == reqwest::StatusCode::NOT_FOUND {
+                res = search("/rest/api/2/search")
+                    .await
+                    .map_err(|e| format!("jira: {e}"))?;
+            }
+            let status = res.status();
+            let v: Value = res.json().await.unwrap_or(Value::Null);
+            if !status.is_success() {
+                return Err(refusal("jira refused the search", status, &v));
+            }
+            let issues: Vec<Value> = v["issues"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|i| {
+                            let f = &i["fields"];
+                            json!({
+                                "key": i["key"],
+                                "type": f["issuetype"]["name"],
+                                "summary": f["summary"],
+                                "status": f["status"]["name"],
+                                "priority": f["priority"]["name"],
+                                "assignee": f["assignee"]["displayName"],
+                                "parent": f["parent"]["key"],
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(json!({ "issues": issues }))
+        }
         ISSUE => {
             let key = issue_key(args.get("key"), "key")?;
             let res = http
