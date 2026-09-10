@@ -80,12 +80,19 @@ boundaried session the run of every channel. On the operator router,
 `auth::guard` already answers exactly the question this mode asks: loopback is
 the operator, anything else presents the token.
 
-**Review is absent by surface, not by refusal.** `submit_review` needs a
-worktree the node made and a diff it captured; `work_close` ends the session
-holding an item, and an attachment holds none. Both are left out of
-`tools/list` and refused by name with what to do instead, which is the same
-move the design makes everywhere: the absence of a verb is the enforcement, and
-where the absence would be confusing, say why.
+**Review was absent by surface; now it names its worktree.** The first cut left
+`submit_review` and `work_close` out, on the reasoning that review needs a
+worktree the node made and closing ends the session holding the item. The first
+was narrower than it read: the gate was only that an attachment's row carries no
+worktree. So the harness names one, and the node accepts it when the
+repository (the worktree's common git directory, not the worktree's own path)
+is under `[external] repo_roots`; the target records it, and staleness, the
+diff editor, and publishing read it from there. Checks are skipped, because the
+operator's toolchain is where the operator runs them. Ownership is by channel
+rather than by session, since an attachment that idles out comes back as a new
+session. `work_close` takes an id, and refuses an item a running session holds,
+since closing it would end that session. What stays absent is `review_verdict`,
+which belongs to a review session the node starts.
 
 ## The policy change that came with it
 

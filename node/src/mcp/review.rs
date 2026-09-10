@@ -27,10 +27,14 @@ pub fn definitions() -> Vec<Value> {
             "description": "Submit the current branch for human review. The node captures the diff \
                             from the worktree, so commit your work first. Nothing is published \
                             until a human approves; call review_status to wait for the verdict. \
-                            Resubmit with the same review_id after making changes.",
+                            Resubmit with the same review_id after making changes. A harness you \
+                            run yourself passes `worktree`: the absolute path of a worktree whose \
+                            repository is under the node's [external] repo_roots; its branch is \
+                            what gets pushed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "worktree": { "type": "string", "description": "Absolute path of the worktree to review. Only for a harness you run yourself." },
                     "title": { "type": "string", "description": "The change's title, as it should appear." },
                     "body": { "type": "string", "description": "What is not obvious from the diff: intent, trade-offs, follow-ups." },
                     "provider": { "type": "string", "enum": ["github", "gitlab"] },
@@ -44,13 +48,15 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": STATUS,
             "description": "Wait for a review's verdict and return it. Blocks until the review is \
-                            decided or the wait elapses. On approval the node publishes the \
-                            approved text itself and returns where it landed.",
+                            decided or the wait elapses (60 seconds unless you say otherwise; a \
+                            human often takes longer, so call it again while it says it is still \
+                            waiting). On approval the node publishes the approved text itself and \
+                            returns where it landed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "review_id": { "type": "string" },
-                    "wait_secs": { "type": "integer", "description": "How long to block. 0 returns the current state." },
+                    "wait_secs": { "type": "integer", "description": "How long to block, up to 600. 0 returns the current state." },
                 },
                 "required": ["review_id"],
             },
@@ -106,14 +112,48 @@ async fn submit(
     ctx: &CallContext,
     args: &Value,
 ) -> Result<Value, String> {
-    let session = store
+    let mut session = store
         .get_session(&ctx.session_id)
         .map_err(|e| e.to_string())?
         .ok_or("this session is gone")?;
-    let worktree = session
-        .worktree_path
-        .clone()
-        .ok_or("this session has no worktree to review")?;
+    let external = session.harness_id == crate::session::external::HARNESS_ID;
+    let named = args.get("worktree").and_then(Value::as_str);
+    let (worktree, branch) = match (external, named) {
+        (true, Some(path)) => {
+            let roots: Vec<_> = manager
+                .cfg()
+                .external
+                .repo_roots
+                .iter()
+                .map(|r| crate::config::expand_home(r))
+                .collect();
+            let at = review::locate_worktree(path, &roots)
+                .await
+                .map_err(|e| e.to_string())?;
+            // A review session reads the diff in its own worktree of the same
+            // repository.
+            session.repo_path = at.repo;
+            (at.worktree, at.branch)
+        }
+        (true, None) => {
+            return Err(
+                "worktree is required: the absolute path of the worktree to put up for review"
+                    .into(),
+            )
+        }
+        (false, Some(_)) => {
+            return Err(
+                "worktree is for a harness you run yourself; this session reviews its own".into(),
+            )
+        }
+        (false, None) => (
+            session
+                .worktree_path
+                .clone()
+                .ok_or("this session has no worktree to review")?,
+            session.branch.clone(),
+        ),
+    };
 
     let title = str_arg(args, "title")?;
     let body = str_arg(args, "body")?;
@@ -135,7 +175,7 @@ async fn submit(
     // Diff against the remote-tracking ref, so the review shows exactly what the
     // change introduces over what it will merge into.
     let range_base = format!("origin/{base}");
-    let capture = review::capture(&worktree, &range_base, &session.branch)
+    let capture = review::capture(&worktree, &range_base, &branch)
         .await
         .map_err(|e| e.to_string())?;
     let files = serde_json::to_string(&capture.files).unwrap_or_else(|_| "[]".into());
@@ -161,45 +201,14 @@ async fn submit(
     }
 
     // Deterministic checks, in a throwaway container, before any human or
-    // model reads the diff. A failure is the reason the submit is refused.
-    let commands = review::checks::commands_for(manager.cfg(), std::path::Path::new(&worktree));
-    let slug = ctx.session_id.rsplit('-').next().unwrap_or("s").to_string();
-    manager.set_checking(&ctx.session_id, true);
-    manager.record_event(
-        &ctx.session_id,
-        ek::CHECK_STARTED,
-        json!({ "commands": commands }),
-    );
-    let results = review::checks::run(
-        manager.backend().as_ref(),
-        manager.cfg(),
-        std::path::Path::new(&worktree),
-        &slug,
-        &commands,
-    )
-    .await;
-    for r in &results {
-        manager.record_event(&ctx.session_id, ek::CHECK_RESULT, json!(r));
-    }
-    manager.set_checking(&ctx.session_id, false);
-    if let Some(failed) = results.iter().find(|r| !r.ok) {
-        let reason = format!(
-            "check failed: `{}` (exit {}). Fix it and submit again.\n\n{}",
-            failed.command,
-            failed
-                .exit
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "none".into()),
-            failed.tail
-        );
-        manager.record_event(
-            &ctx.session_id,
-            ek::REVIEW_REJECTED,
-            json!({ "reason": format!("check failed: {}", failed.command), "command": failed.command }),
-        );
-        return Err(reason);
-    }
-    let checks_json = serde_json::to_string(&results).ok();
+    // model reads the diff. A failure is the reason the submit is refused. A
+    // harness the operator runs has the operator's environment to run them
+    // in, which the container does not.
+    let checks_json = if external {
+        None
+    } else {
+        run_checks(manager, ctx, &worktree).await?
+    };
 
     // A resubmission keeps the same card and the same thread.
     if let Some(id) = args.get("review_id").and_then(Value::as_str) {
@@ -207,8 +216,17 @@ async fn submit(
             .get_review(id)
             .map_err(|e| e.to_string())?
             .ok_or("no review with that id")?;
-        if existing.session_id != ctx.session_id {
+        if !owns(store, ctx, &existing) {
             return Err("that review belongs to another session".into());
+        }
+        let was = serde_json::from_str::<Target>(&existing.target)
+            .ok()
+            .and_then(|t| t.worktree);
+        if external && was.as_deref() != Some(worktree.as_str()) {
+            return Err(format!(
+                "resubmit from the worktree the review was made from ({})",
+                was.unwrap_or_default()
+            ));
         }
         store
             .revise_review(
@@ -236,7 +254,8 @@ async fn submit(
         provider: provider.clone(),
         project: project.clone(),
         base: base.clone(),
-        branch: session.branch.clone(),
+        branch,
+        worktree: external.then(|| worktree.clone()),
     };
     let id = uuid::Uuid::now_v7().to_string();
     let row = ReviewRow {
@@ -287,6 +306,70 @@ async fn submit(
         "uncommitted": capture.uncommitted,
         "review_session": reviewer,
     }))
+}
+
+/// Whose review this is. An attachment ends when it goes idle and the next
+/// call attaches a new one, so a review a harness the operator runs submitted
+/// belongs to the channel's attachments rather than to one of them.
+fn owns(store: &Store, ctx: &CallContext, r: &ReviewRow) -> bool {
+    if r.session_id == ctx.session_id {
+        return true;
+    }
+    let external = |id: &str| {
+        store
+            .get_session(id)
+            .ok()
+            .flatten()
+            .is_some_and(|s| s.harness_id == crate::session::external::HARNESS_ID)
+    };
+    r.channel == ctx.channel && external(&ctx.session_id) && external(&r.session_id)
+}
+
+/// The project's checks against the worktree, recorded on the session; the
+/// results as JSON, or the first failure as the reason the submit is refused.
+async fn run_checks(
+    manager: &Manager,
+    ctx: &CallContext,
+    worktree: &str,
+) -> Result<Option<String>, String> {
+    let commands = review::checks::commands_for(manager.cfg(), std::path::Path::new(&worktree));
+    let slug = ctx.session_id.rsplit('-').next().unwrap_or("s").to_string();
+    manager.set_checking(&ctx.session_id, true);
+    manager.record_event(
+        &ctx.session_id,
+        ek::CHECK_STARTED,
+        json!({ "commands": commands }),
+    );
+    let results = review::checks::run(
+        manager.backend().as_ref(),
+        manager.cfg(),
+        std::path::Path::new(&worktree),
+        &slug,
+        &commands,
+    )
+    .await;
+    for r in &results {
+        manager.record_event(&ctx.session_id, ek::CHECK_RESULT, json!(r));
+    }
+    manager.set_checking(&ctx.session_id, false);
+    if let Some(failed) = results.iter().find(|r| !r.ok) {
+        let reason = format!(
+            "check failed: `{}` (exit {}). Fix it and submit again.\n\n{}",
+            failed.command,
+            failed
+                .exit
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "none".into()),
+            failed.tail
+        );
+        manager.record_event(
+            &ctx.session_id,
+            ek::REVIEW_REJECTED,
+            json!({ "reason": format!("check failed: {}", failed.command), "command": failed.command }),
+        );
+        return Err(reason);
+    }
+    Ok(serde_json::to_string(&results).ok())
 }
 
 /// A fresh session that reads only the requirements and the diff, when the
@@ -384,10 +467,13 @@ async fn verdict(
 
 async fn status(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, String> {
     let id = str_arg(args, "review_id")?;
+    // Short by default: an MCP client gives up on a call long before a human
+    // gets to a review, and a call that comes back saying "still waiting" is
+    // one the agent knows to repeat.
     let wait = args
         .get("wait_secs")
         .and_then(Value::as_u64)
-        .unwrap_or(300)
+        .unwrap_or(60)
         .min(600);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
 
@@ -396,7 +482,7 @@ async fn status(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<V
             .get_review(&id)
             .map_err(|e| e.to_string())?
             .ok_or("no review with that id")?;
-        if r.session_id != ctx.session_id {
+        if !owns(store, ctx, &r) {
             return Err("that review belongs to another session".into());
         }
         match r.state.as_str() {

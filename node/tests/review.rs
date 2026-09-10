@@ -231,6 +231,17 @@ impl Fixture {
     }
 
     async fn submit(&self) -> String {
+        self.submit_as(
+            "s1",
+            json!({
+                "provider": "github", "project": "owner/name",
+                "base": "main", "branch": "feat/x"
+            }),
+        )
+        .await
+    }
+
+    async fn submit_as(&self, session: &str, target: Value) -> String {
         let capture = tracon::review::capture(&self.worktree, "main", "feat/x")
             .await
             .unwrap();
@@ -238,7 +249,7 @@ impl Fixture {
         self.store
             .insert_review(&ReviewRow {
                 id: id.clone(),
-                session_id: "s1".into(),
+                session_id: session.into(),
                 node_id: "n1".into(),
                 channel: "work".into(),
                 kind: "pr".into(),
@@ -247,11 +258,7 @@ impl Fixture {
                 edited_title: None,
                 edited_body: None,
                 provider: "github".into(),
-                target: json!({
-                    "provider": "github", "project": "owner/name",
-                    "base": "main", "branch": "feat/x"
-                })
-                .to_string(),
+                target: target.to_string(),
                 diff: capture.diff,
                 files: serde_json::to_string(&capture.files).unwrap(),
                 head_sha: capture.head_sha,
@@ -344,6 +351,54 @@ async fn a_review_waits_in_the_queue_until_it_is_decided() {
         .unwrap()
         .claimed_ms
         .is_some());
+}
+
+/// A harness the operator runs has no worktree on its session; the review
+/// names the operator's, and everything after submit reads it from there.
+#[tokio::test]
+async fn an_external_review_publishes_from_the_worktree_it_names() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    f.store
+        .insert_session(&{
+            let mut r = support::rows::session_row("ext", "n1", "work");
+            r.harness_id = "external".into();
+            r.repo_path = String::new();
+            r.worktree_path = None;
+            r.branch = String::new();
+            r.started_mono_ms = Some(0);
+            r
+        })
+        .unwrap();
+    let id = f
+        .submit_as(
+            "ext",
+            json!({
+                "provider": "github", "project": "owner/name",
+                "base": "main", "branch": "feat/x", "worktree": f.worktree
+            }),
+        )
+        .await;
+
+    let (status, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["stale"].as_array().unwrap().is_empty(), "{body}");
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "approved");
+    let log = f.gh_log();
+    assert!(log.contains("ARGS: pr create"), "{log}");
+    assert!(
+        log.contains("GH_TOKEN=brokered-token-not-the-operators"),
+        "{log}"
+    );
 }
 
 #[tokio::test]
@@ -647,6 +702,7 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
         project: "owner/name".into(),
         base: "main".into(),
         branch: "feat/x".into(),
+        worktree: None,
     };
     // A head_sha that is not the worktree's HEAD stands in for a branch that
     // moved between approval and publish.

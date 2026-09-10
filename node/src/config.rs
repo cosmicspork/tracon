@@ -31,11 +31,11 @@ pub struct Config {
 ///
 /// Off by default. Turning it on is an explicit statement that a process on
 /// the operator's own machine may ask this node to act on a channel's
-/// credentials. What it gets is the boundary's tool surface minus review
-/// (there is no worktree to capture a diff from), decided by the same policy
-/// and logged on a session of its own. What it does not get is the boundary's
-/// guarantee: a harness sharing the operator's UID could read what the node
-/// holds, so the claim here is "never needs to", not "cannot".
+/// credentials. What it gets is the boundary's tool surface, review included
+/// for a worktree whose repository is under `repo_roots`, decided by the same
+/// policy and logged on a session of its own. What it does not get is the
+/// boundary's guarantee: a harness sharing the operator's UID could read what
+/// the node holds, so the claim here is "never needs to", not "cannot".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct External {
@@ -44,6 +44,9 @@ pub struct External {
     /// is one call away, so short is fine; it keeps the home honest about
     /// what is actually connected.
     pub idle_timeout_secs: u64,
+    /// Where a worktree submitted for review may come from: its repository
+    /// must live under one of these. A leading `~/` is the operator's home.
+    pub repo_roots: Vec<PathBuf>,
 }
 
 impl Default for External {
@@ -51,7 +54,17 @@ impl Default for External {
         Self {
             enabled: false,
             idle_timeout_secs: 3600,
+            repo_roots: vec![PathBuf::from("~/src")],
         }
+    }
+}
+
+/// A leading `~` is the operator's home. Nothing else in a configured path is
+/// expanded: there is no shell here to do it.
+pub fn expand_home(path: &Path) -> PathBuf {
+    match (path.strip_prefix("~"), std::env::var_os("HOME")) {
+        (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => path.to_path_buf(),
     }
 }
 

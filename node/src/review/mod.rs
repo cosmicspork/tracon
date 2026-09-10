@@ -22,6 +22,70 @@ pub enum ReviewError {
     Empty { branch: String, base: String },
     #[error("{0}")]
     Rejected(String),
+    #[error("{repo} is not under any of [external] repo_roots")]
+    OutsideRoots { repo: String },
+}
+
+/// A worktree the operator made, found for a harness they run themselves.
+#[derive(Debug, Clone)]
+pub struct Located {
+    pub worktree: String,
+    pub branch: String,
+    pub repo: String,
+}
+
+/// Accept a worktree only at its top level, on a branch, and for a repository
+/// under one of `roots`. The repository is what is checked, not the worktree's
+/// own path, so a linked worktree in a scratch directory is accepted for a
+/// repository that lives under a root.
+pub async fn locate_worktree(
+    path: &str,
+    roots: &[std::path::PathBuf],
+) -> Result<Located, ReviewError> {
+    let given = std::fs::canonicalize(path)
+        .map_err(|_| ReviewError::Rejected(format!("{path} does not exist")))?;
+    let dir = given.to_string_lossy().into_owned();
+    let top = git(&dir, "rev-parse", &["rev-parse", "--show-toplevel"])
+        .await
+        .map_err(|_| ReviewError::Rejected(format!("{path} is not a git worktree")))?;
+    if std::fs::canonicalize(&top).ok().as_ref() != Some(&given) {
+        return Err(ReviewError::Rejected(format!(
+            "{path} is inside a worktree; pass its top level, {top}"
+        )));
+    }
+    let common = git(
+        &dir,
+        "rev-parse",
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .await?;
+    let common = std::fs::canonicalize(&common)?;
+    // The common directory is the repository's `.git`, or the repository
+    // itself when it is bare.
+    let repo = match common.file_name() {
+        Some(name) if name == ".git" => common.parent().unwrap_or(&common).to_path_buf(),
+        _ => common.clone(),
+    };
+    let inside = roots
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .any(|r| repo.starts_with(&r));
+    if !inside {
+        return Err(ReviewError::OutsideRoots {
+            repo: repo.display().to_string(),
+        });
+    }
+    let branch = git(&dir, "rev-parse", &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+    if branch == "HEAD" {
+        return Err(ReviewError::Rejected(
+            "the worktree is on a detached HEAD; check out the branch to publish".into(),
+        ));
+    }
+    Ok(Located {
+        worktree: dir,
+        branch,
+        repo: repo.display().to_string(),
+    })
 }
 
 /// One file as it stood when the review was submitted. The blob is git's own

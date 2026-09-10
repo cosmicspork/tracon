@@ -77,16 +77,9 @@ impl Tools {
         review::VERDICT,
     ];
 
-    /// What an attached external harness is not offered. Review needs a
-    /// worktree the node made and a diff it captured, and closing a work item
-    /// ends the session holding it — an attachment holds none. Both would
-    /// fail; not offering them says why before they are tried.
-    pub const NOT_EXTERNAL: &'static [&'static str] = &[
-        review::SUBMIT,
-        review::STATUS,
-        review::VERDICT,
-        work::WORK_CLOSE,
-    ];
+    /// What an attached external harness is not offered: a verdict is what a
+    /// review session the node started gives on someone else's change.
+    pub const NOT_EXTERNAL: &'static [&'static str] = &[review::VERDICT];
 
     /// Tool definitions for a channel, narrowed by phase: a review session
     /// sees only [`Self::REVIEW_TOOLS`].
@@ -151,17 +144,10 @@ impl Tools {
             ));
         }
         if Self::NOT_EXTERNAL.contains(&name) && self.is_external_session(ctx) {
-            return Err(if name == work::WORK_CLOSE {
-                format!(
-                    "{name} ends the session that holds the item, and this harness holds none; \
-                     close it with `tracon work close <id>` or from the Work screen"
-                )
-            } else {
-                format!(
-                    "{name} needs a worktree this node made and a diff it captured; \
-                     start a session from the interface to put a change up for review"
-                )
-            });
+            return Err(format!(
+                "{name} is for a review session the node starts; put your own change up with {}",
+                review::SUBMIT
+            ));
         }
         let edited = if plan_write {
             None

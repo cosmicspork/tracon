@@ -179,11 +179,15 @@ claude mcp add --transport http tracon-work http://127.0.0.1:7420/mcp/external/w
 ```
 
 It gets the channel's tools: the database, the forge and the tracker, the
-node's documents and memory, and the ledger. Not the review tools — those need
-a worktree the node made and a diff it captured, so publishing still goes
-through a session the node starts. A verb the policy does not name reaches
-your home as a card, exactly as it would from inside the boundary, and the
-call waits for you.
+node's documents and memory, the ledger, and review. `submit_review` takes the
+path of your worktree; its repository must live under `[external] repo_roots`
+(`~/src` unless you say otherwise), so a linked worktree in a scratch directory
+is fine. The node captures the diff from it, skips the container checks (you
+ran them where your toolchain is), and on approval pushes that branch and opens
+the change with the brokered credential, exactly as for a session it started.
+`work_close` takes the item's id, and refuses one a running session holds. A
+verb the policy does not name reaches your home as a card, exactly as it would
+from inside the boundary, and the call waits for you.
 
 What it does not get is the boundary. That harness runs as you, on your
 machine: the promise here is that it never needs the credential and that every
@@ -362,7 +366,8 @@ max_files = 40
 
 [external]                          # a harness you run yourself, using this node's tools; off unless enabled
 enabled = false
-idle_timeout_secs = 3600            # an attachment with no call for this long is closed
+idle_timeout_secs = 3600            # an attachment with no call for this long is closed (at least 60)
+repo_roots = ["~/src"]              # a worktree put up for review must belong to a repository under one of these
 
 [embed]                             # semantic search; off unless enabled
 enabled = false
