@@ -40,6 +40,7 @@ pub const TABLES: &[(&str, &[&str])] = &[
             "title",
             "body",
             "hash",
+            "archived",
             "created_ms",
             "updated_ms",
         ],

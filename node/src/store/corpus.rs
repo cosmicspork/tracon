@@ -36,6 +36,9 @@ pub struct DocumentRow {
     pub site: String,
     pub hlc_ms: i64,
     pub deleted: i64,
+    /// Kept and readable by slug, but out of listings and search unless asked.
+    #[serde(default)]
+    pub archived: i64,
     pub created_ms: i64,
     pub updated_ms: i64,
 }
@@ -165,6 +168,7 @@ impl DocumentRow {
             site: r.get("site")?,
             hlc_ms: r.get("hlc_ms")?,
             deleted: r.get("deleted")?,
+            archived: r.get("archived")?,
             created_ms: r.get("created_ms")?,
             updated_ms: r.get("updated_ms")?,
         })
@@ -174,7 +178,8 @@ impl DocumentRow {
     pub fn to_change_row(&self) -> Value {
         json!({
             "channel": self.channel, "slug": self.slug, "kind": self.kind, "title": self.title,
-            "body": self.body, "hash": self.hash, "created_ms": self.created_ms, "updated_ms": self.updated_ms,
+            "body": self.body, "hash": self.hash, "archived": self.archived,
+            "created_ms": self.created_ms, "updated_ms": self.updated_ms,
         })
     }
 }
@@ -428,7 +433,8 @@ impl Store {
     }
 
     /// Check a document edit precondition and write its replicated change
-    /// while holding the store's single writer transaction.
+    /// while holding the store's single writer transaction. `archived` of
+    /// `None` keeps whatever the document already was.
     #[allow(clippy::too_many_arguments)]
     pub fn write_document_change(
         &self,
@@ -442,6 +448,7 @@ impl Store {
         if_hash: Option<&str>,
         create_only: bool,
         new_id: &str,
+        archived: Option<bool>,
     ) -> Result<DocumentWrite> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -475,6 +482,10 @@ impl Store {
             site: site.to_string(),
             hlc_ms: 0,
             deleted: 0,
+            archived: archived
+                .map(i64::from)
+                .or(existing.as_ref().map(|d| d.archived))
+                .unwrap_or(0),
             created_ms: existing.as_ref().map(|d| d.created_ms).unwrap_or(now),
             updated_ms: now,
         };
@@ -562,10 +573,11 @@ impl Store {
     }
 
     /// Every live document, optionally on one channel, without bodies.
+    /// Archived ones are included, flagged; the caller decides what to show.
     pub fn doc_list(&self, channel: Option<&str>) -> Result<Vec<DocumentRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, channel, slug, kind, title, '' AS body, hash, site, hlc_ms, deleted, created_ms, updated_ms
+            "SELECT id, channel, slug, kind, title, '' AS body, hash, site, hlc_ms, deleted, archived, created_ms, updated_ms
              FROM document WHERE deleted = 0 AND (?1 IS NULL OR channel = ?1)
              ORDER BY channel, kind, slug",
         )?;
@@ -650,7 +662,7 @@ impl Store {
             let mut stmt = conn.prepare(
                 "SELECT d.id, d.slug, d.title, snippet(document_fts, 1, '', '', '…', 14) AS snip, bm25(document_fts) AS score
                  FROM document_fts JOIN document d ON d.rowid = document_fts.rowid
-                 WHERE document_fts MATCH ?1 AND d.deleted = 0
+                 WHERE document_fts MATCH ?1 AND d.deleted = 0 AND d.archived = 0
                    AND (?2 IS NULL OR d.channel = ?2) AND (?3 IS NULL OR d.kind = ?3)
                  ORDER BY score LIMIT ?4",
             )?;
@@ -696,6 +708,7 @@ impl Store {
                 continue;
             };
             if row.deleted != 0
+                || row.archived != 0
                 || channel.is_some_and(|c| c != row.channel)
                 || kind.is_some_and(|k| k != row.kind)
             {

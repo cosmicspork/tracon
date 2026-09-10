@@ -90,7 +90,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum DocCommand {
-    /// Import a docs directory: flat `<kind>-<slug>.md` files.
+    /// Import a docs directory: flat `<kind>-<slug>.md` files, and those
+    /// under `archive/` as archived.
     Import {
         dir: std::path::PathBuf,
         #[arg(long, default_value = "personal")]
@@ -120,7 +121,8 @@ enum DocCommand {
         #[arg(long, default_value = "personal")]
         channel: String,
     },
-    /// Write every document on a channel to a directory as `<slug>.md`.
+    /// Write every document on a channel to a directory as `<slug>.md`,
+    /// archived ones under `archive/`.
     Export {
         dir: std::path::PathBuf,
         #[arg(long, default_value = "personal")]
@@ -1102,11 +1104,16 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
                 node_call(
                     Method::PUT,
                     &format!("/api/docs/{channel}/{}", d.slug),
-                    Some(serde_json::json!({ "body": d.body })),
+                    Some(serde_json::json!({ "body": d.body, "archived": d.archived })),
                     None,
                 )
                 .await?;
-                println!("{:<14} {}", d.kind, d.slug);
+                println!(
+                    "{:<14} {}{}",
+                    d.kind,
+                    d.slug,
+                    if d.archived { " (archived)" } else { "" }
+                );
                 n += 1;
             }
             println!(
@@ -1177,7 +1184,7 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
             std::fs::create_dir_all(&dir)?;
             let v = node_call(
                 Method::GET,
-                &format!("/api/docs?channel={channel}"),
+                &format!("/api/docs?channel={channel}&archived=true"),
                 None,
                 None,
             )
@@ -1185,6 +1192,13 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
             let mut n = 0;
             for d in v["docs"].as_array().cloned().unwrap_or_default() {
                 let slug = d["slug"].as_str().unwrap_or("").to_string();
+                let into = if d["archived"].as_i64() == Some(1) {
+                    let archive = dir.join("archive");
+                    std::fs::create_dir_all(&archive)?;
+                    archive
+                } else {
+                    dir.clone()
+                };
                 let full = node_call(
                     Method::GET,
                     &format!("/api/docs/{channel}/{slug}"),
@@ -1193,7 +1207,7 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
                 )
                 .await?;
                 std::fs::write(
-                    dir.join(format!("{slug}.md")),
+                    into.join(format!("{slug}.md")),
                     full["body"].as_str().unwrap_or(""),
                 )?;
                 n += 1;

@@ -115,7 +115,7 @@ fn config(base_url: &str) -> Arc<Config> {
 fn doc(store: &Store, _id: &str, channel: &str, slug: &str, title: &str, body: &str) -> String {
     match store
         .write_document_change(
-            "n1", channel, slug, "guide", title, body, "h", None, false, slug,
+            "n1", channel, slug, "guide", title, body, "h", None, false, slug, None,
         )
         .unwrap()
     {

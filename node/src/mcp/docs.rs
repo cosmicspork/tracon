@@ -141,9 +141,10 @@ pub async fn call(
                 .doc_get(&ctx.channel, slug)
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("no document {slug} on channel {}", ctx.channel))?;
-            Ok(
-                json!({ "slug": doc.slug, "kind": doc.kind, "title": doc.title, "hash": doc.hash, "body": doc.body }),
-            )
+            Ok(json!({
+                "slug": doc.slug, "kind": doc.kind, "title": doc.title, "hash": doc.hash,
+                "archived": doc.archived != 0, "body": doc.body,
+            }))
         }
         DOC_WRITE => {
             let slug = args["slug"].as_str().unwrap_or("").trim();
@@ -158,6 +159,7 @@ pub async fn call(
                 body,
                 args["if_hash"].as_str(),
                 false,
+                None,
             )
             .map_err(|e| e.to_string())?;
             // The plan artifact: record it on the item and end the plan
@@ -196,7 +198,8 @@ pub enum WriteError {
 
 /// Create or replace a document at a slug, on this node, as a sync write.
 /// `if_hash` is the edit's precondition: the hash the caller last read.
-/// `create_only` is the HTTP `If-None-Match: *` precondition.
+/// `create_only` is the HTTP `If-None-Match: *` precondition. `archived` of
+/// `None` leaves the document as archived or live as it was.
 #[allow(clippy::too_many_arguments)]
 pub fn write_document(
     store: &crate::store::Store,
@@ -207,6 +210,7 @@ pub fn write_document(
     body: &str,
     if_hash: Option<&str>,
     create_only: bool,
+    archived: Option<bool>,
 ) -> Result<DocumentRow, WriteError> {
     if !valid_slug(slug) {
         return Err(WriteError::Slug(slug.to_string()));
@@ -223,6 +227,7 @@ pub fn write_document(
         if_hash,
         create_only,
         &corpus::new_id(),
+        archived,
     )? {
         DocumentWrite::Written { row, change } => {
             let row = *row;
@@ -292,6 +297,7 @@ mod tests {
             "# Original",
             None,
             true,
+            None,
         )
         .unwrap();
         assert!(matches!(
@@ -304,6 +310,7 @@ mod tests {
                 "# Blind overwrite",
                 None,
                 true,
+                None,
             ),
             Err(WriteError::Conflict { .. })
         ));
@@ -325,6 +332,7 @@ mod tests {
                     body,
                     Some(&hash),
                     false,
+                    None,
                 )
             }));
         }

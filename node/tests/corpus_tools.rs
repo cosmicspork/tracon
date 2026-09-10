@@ -295,3 +295,106 @@ async fn documents_are_written_by_the_operator_read_by_the_agent_and_edits_confl
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn an_archived_document_is_kept_but_out_of_the_list_and_search_until_asked_for() {
+    state::isolate();
+    let h = harness().await;
+    let token = h
+        .manager
+        .register_tool_token_for_test("s1", "personal")
+        .await;
+    let (st, _) = call_with(
+        &h.operator,
+        "PUT",
+        "/api/docs/personal/guide-live",
+        Some(json!({"body": "# Live\n\nthe current way"})),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, v) = call_with(
+        &h.operator,
+        "PUT",
+        "/api/docs/personal/plan-old",
+        Some(json!({"body": "# Old\n\nthe current way, once", "archived": true})),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["archived"], 1);
+
+    let slugs = |list: &Value| -> Vec<String> {
+        list["docs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["slug"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (_, list) = call_with(&h.operator, "GET", "/api/docs?channel=personal", None, &[]).await;
+    assert_eq!(slugs(&list), ["guide-live"]);
+    let (_, list) = call_with(
+        &h.operator,
+        "GET",
+        "/api/docs?channel=personal&archived=true",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(slugs(&list).len(), 2);
+
+    // Search leaves it out; reading it by slug does not.
+    let v = mcp(
+        &h.harness,
+        "s1",
+        &token,
+        tool_call(1, "doc_search", json!({"query": "current way"})),
+    )
+    .await;
+    let hits = serde_json::from_str::<Value>(&text(&v)).unwrap();
+    let found: Vec<&str> = hits["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["slug"].as_str().unwrap())
+        .collect();
+    assert_eq!(found, ["guide-live"]);
+    let v = mcp(
+        &h.harness,
+        "s1",
+        &token,
+        tool_call(2, "doc_read", json!({"slug": "plan-old"})),
+    )
+    .await;
+    let doc = serde_json::from_str::<Value>(&text(&v)).unwrap();
+    assert_eq!(doc["archived"], true);
+
+    // An edit that says nothing about it keeps it archived; saying so restores it.
+    call_with(
+        &h.operator,
+        "PUT",
+        "/api/docs/personal/plan-old",
+        Some(json!({"body": "# Old\n\nedited"})),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        h.store
+            .doc_get("personal", "plan-old")
+            .unwrap()
+            .unwrap()
+            .archived,
+        1
+    );
+    call_with(
+        &h.operator,
+        "PUT",
+        "/api/docs/personal/plan-old",
+        Some(json!({"body": "# Old\n\nedited", "archived": false})),
+        &[],
+    )
+    .await;
+    let (_, list) = call_with(&h.operator, "GET", "/api/docs?channel=personal", None, &[]).await;
+    assert_eq!(slugs(&list).len(), 2);
+}

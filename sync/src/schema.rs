@@ -139,6 +139,13 @@ const STEPS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS work_item_channel ON work_item(channel, state);
     "#,
+    // Step 3: an archived document is kept, and read by slug, but left out of
+    // listings and search unless asked for. It replicates like any column: a
+    // peer that predates it ignores the field, and a row from one leaves this
+    // flag as it was.
+    r#"
+    ALTER TABLE document ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 /// Install or upgrade the replicated schema. Safe to call on every open.
@@ -196,5 +203,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hits, 0, "the update trigger replaced the indexed text");
+        let archived: i64 = conn
+            .query_row("SELECT archived FROM document WHERE id = 'd'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(archived, 0, "a document is live until archived");
     }
 }
