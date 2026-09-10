@@ -34,7 +34,7 @@ record of what was asked for. It is not the boundary, and the interface, the
 README and the config comment all say so rather than letting the word "brokered"
 imply more than it means.
 
-Two consequences follow, and neither is mitigated in code:
+Three consequences follow, and none is mitigated in code:
 
 - **Loopback self-approval.** The door is the operator API, and so is the
   answer: a process on this machine that can call `POST /mcp/external/{channel}`
@@ -47,6 +47,11 @@ Two consequences follow, and neither is mitigated in code:
 - **Credential reach follows the channel.** A credential bound to a channel you
   never attach to stays out of reach, and that is the whole of the containment
   here. Keep production credentials on a channel this mode does not touch.
+- **The node itself is within reach.** Its service, its unit and `node.toml`
+  belong to the operator, so a harness running as the operator can restart, stop
+  or reconfigure the node. That a session cannot restart the node gating it holds
+  inside the boundary, where only the CLI and the desktop app reach
+  `service.rs`.
 
 ## Shapes that were not obvious
 

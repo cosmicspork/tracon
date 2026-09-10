@@ -10,10 +10,10 @@ implementation learned.
 Validation work completed on 2026-08-24. The ACP, restricted-harness, and Linux
 boundary assumptions passed. The assumed work Coder boundary failed: the current
 single-container template cannot enforce the gate. Evidence remains in the
-[`ACP capture`](reference/acp-omp-18.0.4-session.jsonl),
-[`restricted-session capture`](reference/acp-omp-restricted-session.jsonl),
-[`restricted-session driver`](reference/acp-drive-restricted.py), and
-[`gateway configuration`](reference/gateway-tinyproxy.conf).
+[`ACP capture`](acp-omp-18.0.4-session.jsonl),
+[`restricted-session capture`](acp-omp-restricted-session.jsonl),
+[`restricted-session driver`](acp-drive-restricted.py), and
+[`gateway configuration`](gateway-tinyproxy.conf).
 
 - [x] **Read a real ACP session end to end.** `omp acp` 18.0.4 uses newline-delimited
       JSON-RPC. The capture establishes session configuration, tool and permission
@@ -185,7 +185,7 @@ From here on, tracon is built through tracon.
       the release checksum; the container definitions ship inside the binary so
       `tracon setup` builds the images. Stood up on the Linux host: the Linux
       gateway forward is a Unix socket, and two SELinux constraints were found by
-      running it ([`phase-2-notes`](reference/phase-2-notes.md)).
+      running it ([`phase-2-notes`](phase-2-notes.md)).
 - [x] Harness state directory as a node-owned volume (the `OMP_STATE_DIR` pattern).
       The volume is the only credential store the harness sees; the operator's
       `~/.omp` is never mounted again. `tracon harness import-credentials` copies a
@@ -229,7 +229,7 @@ it with a boundary the node can verify.
       unprivileged harness runner topology. Built as a second boundary backend
       (`[runtime] kind = "kubernetes"`): the node is an unprivileged pod that creates
       one harness pod per session, and two NetworkPolicies make it the harness's only
-      route. Proven on the cluster ([`phase-3-notes`](reference/phase-3-notes.md)); the Coder template that carries
+      route. Proven on the cluster ([`phase-3-notes`](phase-3-notes.md)); the Coder template that carries
       it to the work cluster is written on a host that can reach that environment,
       against [`deploy/coder/README.md`](../deploy/coder/README.md).
 - [x] Node outside the harness container, with a node-owned exec pipe. `pods/attach`
@@ -274,7 +274,7 @@ database, except through the node, and `review` and `consulta` can be archived.
       sign-in link and the paste-back. `agent.db`, `harness import-credentials`, and
       `harness shell` are gone. The spike behind it and what could not be verified (a
       live Anthropic subscription token: the operator's had expired) are in
-      [`phase-4-notes`](reference/phase-4-notes.md).
+      [`phase-4-notes`](phase-4-notes.md).
 - [x] Hub-and-spoke sync: site ID, monotonic sequence, hub-assigned ordering, cursor
       pull, HLC plus LWW. The `sync` crate: `change_log` keyed on `(site, site_seq)`, a
       persisted HLC, row-level last-writer-wins on `(hlc_ms, hlc_ctr, site)`, tombstones;

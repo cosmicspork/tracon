@@ -318,7 +318,7 @@ pub struct Consulta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Harness {
-    /// Harness id. Only `omp` has an adapter.
+    /// Harness id: `omp` or `claude`. An unknown id refuses to start.
     pub id: String,
     /// The tools a session may use at all, by the harness's own names. Empty
     /// means the harness's default set, which is the default here.

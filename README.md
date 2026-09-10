@@ -26,15 +26,32 @@ no editor, no terminal.
 
 ## Five minutes to a running node
 
-Prebuilt binaries ship for Linux x86_64 (static, any distribution) and macOS on Apple
-Silicon. One line fetches, verifies, and installs:
+**On a laptop, the desktop app is the whole install.** Take the `.dmg` (macOS on
+Apple Silicon) or the `.AppImage` (Linux x86_64) from the
+[latest release](https://github.com/cosmicspork/tracon/releases/latest). It is
+unsigned; macOS wants a right-click → Open the first time, and only that first
+time. The app opens on a setup page that looks for rootless Podman — the boundary
+the agent runs inside; on a Mac that is `brew install podman`, then
+`podman machine init` once — and then, with one button, installs the `tracon`
+command in `~/.local/bin` and a user service (launchd, or systemd --user) that runs
+the node whether or not the app is open. From then on the window is the node's own
+interface.
+
+The app keeps itself and the node current. It checks GitHub Releases at launch,
+verifies GitHub's SHA-256 digest, and replaces itself from Settings or the tray; an
+update it fetches itself is never quarantined, so macOS does not ask again. On the
+next launch it moves the CLI and the service onto the node it now carries —
+restarting the node only once no session is running, and saying so in the tray
+while it waits — and rebuilds the boundary images if their definitions changed.
+
+**On a server or a VM,** one line fetches, verifies, and installs the binary (static
+Linux x86_64, or macOS on Apple Silicon):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | sh
 ```
 
-Then, on the same machine (rootless Podman is the one prerequisite — it is the
-boundary the agent runs inside):
+Then, with rootless Podman on the machine:
 
 ```sh
 tracon setup                   # build the harness network and gateway (definitions ship in the binary)
@@ -65,16 +82,6 @@ however many sessions have run. A session is always a phase of one work
 item: a *plan* session reads and ends by writing the plan; an *execute* session does
 the work and submits a diff for your review; approving publishes it with a credential
 the agent never held.
-
-The **desktop app** (same release page: `.AppImage` on Linux, `.dmg` on macOS)
-is a tray client that also runs the node for you — on a laptop it is the whole
-install. It is unsigned; macOS wants a right-click → Open the first time, and only
-that first time. The AppImage and the macOS app check GitHub Releases at launch and
-can download, verify GitHub's SHA-256 digest, replace themselves, and restart from
-Settings or the tray — an update the app fetches itself is never quarantined, so
-macOS does not ask again. The node it runs stays up through the app's own restart; if the node binary
-changed too, the node is restarted on the new one once no session is running, and
-the tray says so while it waits.
 
 A node that fails `check-boundary` refuses to run harnesses and says which check
 failed. That refusal is the design working, not a bug to route around.
@@ -270,7 +277,7 @@ tracon channel bind work notify.enabled=false   # the desktop tray is enough for
 |---|---|
 | `tracon serve [--listen]` | run the node |
 | `tracon setup [--rebuild]`, `check-boundary [--deep]` | the boundary (also on the Settings screen) |
-| `tracon service install\|uninstall\|status` | the platform supervisor |
+| `tracon service install\|uninstall\|status\|restart` | the platform supervisor (the desktop app runs these for you) |
 | `tracon auth issue [--url]\|revoke\|sessions` | off-machine access; `--url` prints the login QR |
 | `tracon external show\|detach <channel>` | a harness you run yourself, using this node's tools |
 | `tracon push ls\|rm <id>\|test` | the phones this node pushes to |
@@ -283,8 +290,11 @@ tracon channel bind work notify.enabled=false   # the desktop tray is enough for
 | `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |
 | `tracon metrics [--channel] [--days]`, `provenance <sha>` | what happened |
 
-Every command talks to the running node over its API; `TRACON_URL` and
-`TRACON_TOKEN` point the CLI at a remote node. `--help` on any of them says more.
+Most commands talk to the running node over its API, and `TRACON_URL` and
+`TRACON_TOKEN` point them at a remote node. The ones that act on this machine itself
+ignore both: `setup`, `check-boundary`, `service`, `enroll`, `mesh id`,
+`credential import|ls|rm`, and `policy keygen|init|sign|show`. `--help` on any of
+them says more.
 
 ### Configuration
 
@@ -296,7 +306,8 @@ node_name = "<hostname>"            # how this node is named in the mesh
 [harness]
 id = "omp"                          # "omp" or "claude"; an unknown id refuses to start
 version = "18.0.4"                  # pinned; checked against the image and the host
-tools = []                          # extra tool names to offer; empty is everything the harness has
+tools = []                          # the only tools a session may use; empty is the harness's own set
+                                    # (a list without omp's shell leaves nothing to commit, so nothing to review)
 
 [boundary]                          # the rootless-Podman boundary a laptop establishes
 podman = ""                         # empty: found on PATH, then the usual install locations
@@ -305,7 +316,7 @@ subnet = "10.89.0.0/24"
 gateway_ip = "10.89.0.2"
 gateway_container = "tracon-gw"
 gateway_image = "localhost/tracon-gateway"
-harness_image = "localhost/tracon-harness"
+harness_image = "localhost/tracon-harness"  # "localhost/tracon-harness-claude" with [harness] id = "claude"
 start_machine = true                # macOS: start the podman machine when it is stopped
 # selinux_label_disable = true      # only if the boundary check says the labels fight you
 
@@ -318,17 +329,18 @@ forward_port = 7421
 [session]
 budget_tokens = 2000000             # per session
 permission_timeout_secs = 900       # an unanswered ask is a deny
+# default_channel = "work"          # the channel the composer starts on; empty is no preference
 claim_grace_secs = 60               # a review claim lapses this long after the client vanishes
-# worktree_root = "/tmp"            # /private/tmp on macOS
+# worktree_root = "/private/tmp"    # on macOS; the system temp directory elsewhere
 
 [runtime]
 kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # [runtime.kubernetes]              # namespace, harness_image, state_claim, state_mount, harness_home, uid, gateway_host
 
-[providers.anthropic]               # anthropic and openai are built in; add others the same way
+[providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
 credential = "anthropic"
 upstream = "https://api.anthropic.com"
-shape = "anthropic"                 # or "openai"
+shape = "anthropic"                 # or "openai", "openai-codex"
 # login = "…"                       # the harness's login flow, if it has one
 # [providers.anthropic.price]
 # input_per_mtok = 3.0
@@ -338,7 +350,7 @@ shape = "anthropic"                 # or "openai"
 # one credential per database: `consulta` is the default, `consulta-<profile>` any other;
 # a channel holding more than the default offers the tools a `profile` argument
 command = "uv"
-args = ["run", "--project", "~/src/consulta", "consulta"]
+args = ["run", "--project", "<home>/src/consulta", "consulta"]   # paths here are literal: only repo_roots expands ~
 timeout_secs = 60
 
 [publish]                           # the binaries the node runs to publish an approved review
@@ -376,7 +388,7 @@ enabled = false
 base_url = "http://127.0.0.1:8080"  # an OpenAI-shaped /v1/embeddings
 model = "bge-m3"
 dim = 1024                          # must match the model; changing it rebuilds the index
-# api_key_file = "~/.config/llama-server.key"
+# api_key_file = "<home>/.config/llama-server.key"
 # provider = "anthropic"            # instead of base_url: through the gateway, so the channel ceiling applies
 batch = 16
 timeout_secs = 60
@@ -393,6 +405,8 @@ against. Without an endpoint, search is text-only and the Documents screen says 
 | `node.toml` | `~/Library/Application Support/tracon/` | `~/.config/tracon/` |
 | database, credentials, identity, harness volume, managed repos, scratch | `~/Library/Application Support/tracon/` | `~/.local/state/tracon/` |
 | harness socket | (TCP `127.0.0.1:7421` through the VM) | `$XDG_RUNTIME_DIR/tracon/harness.sock` |
+| the CLI, and the binary the service runs | `~/.local/bin/tracon` | `~/.local/bin/tracon` |
+| the service | `~/Library/LaunchAgents/com.tracon.node.plist`, logs in `~/Library/Logs/tracon.log` | `~/.config/systemd/user/tracon.service` |
 
 `TRACON_STATE_DIR` overrides the state directory outright — how a scratch node runs
 beside a real one. `TRACON_LISTEN` or `serve --listen` moves the API off
@@ -407,12 +421,12 @@ configured by environment:
 |---|---|---|
 | `TRACON_HUB_ADDR` | `127.0.0.1:8080` | listen address (the image sets `0.0.0.0:8080`) |
 | `TRACON_HUB_DATA_DIR` | in memory, with a warning | durable frames, members and the replica |
-| `TRACON_HUB_ADMIT` | — | the first node's id, so something can connect |
+| `TRACON_HUB_ADMIT` | — | node ids, comma-separated, admitted at startup so something can connect |
 | `TRACON_HUB_RETAIN_DAYS` | 14 | how long frames are kept |
-| `TRACON_HUB_MAX_SKEW_SECS`, `TRACON_HUB_MAX_CHANNEL_BYTES`, `TRACON_HUB_ENROLL_TTL_SECS`, `TRACON_HUB_ENROLL_RATE_PER_MIN` | 300, 256 MiB, 600, — | limits |
+| `TRACON_HUB_MAX_SKEW_SECS`, `TRACON_HUB_MAX_CHANNEL_BYTES`, `TRACON_HUB_ENROLL_TTL_SECS`, `TRACON_HUB_ENROLL_RATE_PER_MIN` | 300, 256 MiB, 600, 10 | limits |
 | `TRACON_HUB_REPLICA` | on when there is a data dir | the hub's own replica of what it can open |
 | `TRACON_HUB_PROMOTE_AT` | `03:00` | the hub-side promotion batch |
-| `TRACON_HUB_SNAPSHOT_ENDPOINT`, `_BUCKET`, `_ACCESS_KEY`, `_SECRET_KEY`, `_PREFIX`, `_EVERY_HOURS`, `_KEEP`, `_PUBKEY` | — | encrypted snapshots to S3-compatible storage; `tracon-hub snapshot-key` makes the key |
+| `TRACON_HUB_SNAPSHOT_ENDPOINT`, `_BUCKET`, `_ACCESS_KEY`, `_SECRET_KEY`, `_PREFIX`, `_EVERY_HOURS`, `_KEEP`, `_PUBKEY` | off; when on, every 24 hours, 14 kept | encrypted snapshots to S3-compatible storage; `tracon-hub snapshot-key` makes the key |
 | `TRACON_HUB_RESTORE_SEED` | — | for `tracon-hub restore` |
 
 ### As a Kubernetes pod
