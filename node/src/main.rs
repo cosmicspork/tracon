@@ -136,6 +136,8 @@ enum ServiceCommand {
     Uninstall,
     /// What the supervisor says about it.
     Status,
+    /// Restart the node under its supervisor, onto the binary the unit names.
+    Restart,
 }
 
 #[derive(Subcommand)]
@@ -392,6 +394,7 @@ async fn main() -> Result<()> {
             ServiceCommand::Install => tracon::service::install(),
             ServiceCommand::Uninstall => tracon::service::uninstall(),
             ServiceCommand::Status => tracon::service::status(),
+            ServiceCommand::Restart => tracon::service::restart(),
         },
         Command::Metrics { channel, days } => {
             use reqwest::Method;

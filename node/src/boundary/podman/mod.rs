@@ -8,6 +8,7 @@ pub mod setup;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -155,6 +156,86 @@ pub(crate) async fn podman_json(args: &[&str]) -> Result<serde_json::Value, Boun
     Ok(serde_json::from_str(&text)?)
 }
 
+/// Where the podman machine stands. On macOS rootless podman runs inside a VM
+/// the node is outside of, and nothing starts that VM at login.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MachineState {
+    Missing,
+    Starting(String),
+    Stopped(String),
+    Running,
+}
+
+/// Read `podman machine list --format json`: the default machine, else the
+/// first one listed.
+pub fn machine_state_from(list: &serde_json::Value) -> MachineState {
+    let machines = list.as_array().map(Vec::as_slice).unwrap_or_default();
+    let Some(m) = machines
+        .iter()
+        .find(|m| m["Default"].as_bool() == Some(true))
+        .or_else(|| machines.first())
+    else {
+        return MachineState::Missing;
+    };
+    let name = m["Name"].as_str().unwrap_or("").to_string();
+    if m["Running"].as_bool() == Some(true) {
+        MachineState::Running
+    } else if m["Starting"].as_bool() == Some(true) {
+        MachineState::Starting(name)
+    } else {
+        MachineState::Stopped(name)
+    }
+}
+
+const MACHINE_START_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Serializes starts: startup verification and a re-check from the interface
+/// can arrive together, and a second `podman machine start` fails on the first.
+static MACHINE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Make sure the podman machine is up, starting it when `start_machine` allows.
+/// Off macOS podman runs on the host and there is nothing to do.
+pub async fn ensure_machine(cfg: &Config) -> Result<(), BoundaryError> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    let _one = MACHINE.lock().await;
+    let deadline = tokio::time::Instant::now() + MACHINE_START_TIMEOUT;
+    loop {
+        match machine_state_from(&podman_json(&["machine", "list", "--format", "json"]).await?) {
+            MachineState::Running => return Ok(()),
+            MachineState::Missing => {
+                return Err(BoundaryError::Other(
+                    "there is no podman machine; create one with `podman machine init`".into(),
+                ))
+            }
+            MachineState::Stopped(name) if cfg.boundary.start_machine => {
+                tokio::time::timeout(MACHINE_START_TIMEOUT, podman(&["machine", "start", &name]))
+                    .await
+                    .map_err(|_| {
+                        BoundaryError::Other(format!(
+                            "podman machine {name} did not start within two minutes"
+                        ))
+                    })??;
+                return Ok(());
+            }
+            MachineState::Stopped(name) => {
+                return Err(BoundaryError::Other(format!(
+                    "podman machine {name} is not running; start it with `podman machine start`"
+                )))
+            }
+            MachineState::Starting(name) => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(BoundaryError::Other(format!(
+                        "podman machine {name} did not finish starting within two minutes"
+                    )));
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+}
+
 /// Whether the container host enforces SELinux (Podman needs `label=disable`
 /// for bind mounts when it does).
 pub async fn selinux_enabled() -> bool {
@@ -166,8 +247,34 @@ pub async fn selinux_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_podman;
+    use super::{machine_state_from, resolve_podman, MachineState};
+    use serde_json::json;
     use std::path::Path;
+
+    #[test]
+    fn machine_state_reads_the_list_json() {
+        let one = |running: bool, starting: bool| json!([{"Name": "podman-machine-default", "Default": true, "Running": running, "Starting": starting}]);
+        let name = || "podman-machine-default".to_string();
+        assert_eq!(machine_state_from(&one(true, false)), MachineState::Running);
+        assert_eq!(
+            machine_state_from(&one(false, true)),
+            MachineState::Starting(name())
+        );
+        assert_eq!(
+            machine_state_from(&one(false, false)),
+            MachineState::Stopped(name())
+        );
+        assert_eq!(machine_state_from(&json!([])), MachineState::Missing);
+        // The default machine is the one podman talks to, wherever it is listed.
+        let two = json!([
+            {"Name": "other", "Default": false, "Running": true, "Starting": false},
+            {"Name": "main", "Default": true, "Running": false, "Starting": false}
+        ]);
+        assert_eq!(
+            machine_state_from(&two),
+            MachineState::Stopped("main".into())
+        );
+    }
 
     fn touch(dir: &Path, name: &str) -> std::path::PathBuf {
         let p = dir.join(name);
