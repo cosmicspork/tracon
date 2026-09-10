@@ -266,7 +266,7 @@ impl Tools {
         args: &Value,
     ) -> Result<Option<Value>, String> {
         let summary = summarize(name, args);
-        let decision = self.decide(ctx, name, &summary);
+        let decision = self.decide(ctx, name, &summary, args);
         match decision.verdict {
             Verdict::Allow => Ok(None),
             Verdict::Deny => Err(refusal(decision)),
@@ -306,7 +306,8 @@ impl Tools {
                         option_id,
                         arguments,
                     } if option_id == OPTION_ALLOW_ONCE => {
-                        let edited = self.decide(ctx, name, &summarize(name, &arguments));
+                        let edited =
+                            self.decide(ctx, name, &summarize(name, &arguments), &arguments);
                         if edited.verdict == Verdict::Deny {
                             return Err(refusal(edited));
                         }
@@ -318,12 +319,13 @@ impl Tools {
         }
     }
 
-    fn decide(&self, ctx: &CallContext, name: &str, summary: &str) -> Decision {
+    fn decide(&self, ctx: &CallContext, name: &str, summary: &str, args: &Value) -> Decision {
         self.policy.read().unwrap().decide(&Request {
             channel: &ctx.channel,
             kind: Some(TOOL_KIND),
             title: name,
             command: Some(summary),
+            arguments: Some(args),
         })
     }
 

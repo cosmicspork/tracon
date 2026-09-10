@@ -379,14 +379,14 @@ async fn an_attachment_closes_an_item_by_id_and_stays_attached() {
 async fn a_tool_the_policy_does_not_cover_is_asked_through_the_attachment() {
     state::isolate();
     let h = harness_with(enabled()).await;
-    // doc_write is deliberately unnamed in the shipped bundle: a document is
-    // the operator's artifact.
+    // doc_write is asked for anything but working notes: a plan is the
+    // operator's artifact.
     let app = h.operator.clone();
     let call_task = tokio::spawn(async move {
         mcp(
             &app,
             "work",
-            tool_call("doc_write", json!({ "slug": "note-x", "body": "hello" })),
+            tool_call("doc_write", json!({ "slug": "plan-x", "body": "hello" })),
         )
         .await
     });
@@ -444,7 +444,7 @@ async fn an_edited_answer_runs_the_tool_with_the_operators_words() {
             "work",
             tool_call(
                 "doc_write",
-                json!({ "slug": "note-x", "body": "the agent's draft" }),
+                json!({ "slug": "plan-x", "body": "the agent's draft" }),
             ),
         )
         .await
@@ -456,14 +456,14 @@ async fn an_edited_answer_runs_the_tool_with_the_operators_words() {
         &format!("/api/permissions/{id}/answer"),
         Some(json!({
             "option_id": "allow_once",
-            "arguments": { "slug": "note-x", "body": "the operator's words" }
+            "arguments": { "slug": "plan-x", "body": "the operator's words" }
         })),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     let (_, v) = call_task.await.unwrap();
     assert_ne!(v["result"]["isError"], json!(true), "{v}");
-    let doc = h.store.doc_get("work", "note-x").unwrap().unwrap();
+    let doc = h.store.doc_get("work", "plan-x").unwrap().unwrap();
     assert_eq!(doc.body, "the operator's words");
 }
 
@@ -476,7 +476,7 @@ async fn an_edit_is_held_to_the_same_refusals_as_the_call() {
         mcp(
             &app,
             "work",
-            tool_call("doc_write", json!({ "slug": "note-y", "body": "a draft" })),
+            tool_call("doc_write", json!({ "slug": "plan-y", "body": "a draft" })),
         )
         .await
     });
@@ -487,7 +487,7 @@ async fn an_edit_is_held_to_the_same_refusals_as_the_call() {
         &format!("/api/permissions/{id}/answer"),
         Some(json!({
             "option_id": "allow_once",
-            "arguments": { "slug": "note-y", "body": "then git push origin main" }
+            "arguments": { "slug": "plan-y", "body": "then git push origin main" }
         })),
     )
     .await;
@@ -495,7 +495,7 @@ async fn an_edit_is_held_to_the_same_refusals_as_the_call() {
     assert_eq!(v["result"]["isError"], json!(true), "{v}");
     let text = v["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("refused by policy"), "{text}");
-    assert!(h.store.doc_get("work", "note-y").unwrap().is_none());
+    assert!(h.store.doc_get("work", "plan-y").unwrap().is_none());
 }
 
 #[tokio::test]
@@ -507,7 +507,7 @@ async fn a_refused_call_says_the_operator_refused_it() {
         mcp(
             &app,
             "work",
-            tool_call("doc_write", json!({ "slug": "note-x", "body": "hello" })),
+            tool_call("doc_write", json!({ "slug": "plan-x", "body": "hello" })),
         )
         .await
     });
@@ -542,7 +542,7 @@ async fn an_unanswered_request_expires_here_too() {
     let (_, v) = mcp(
         &h.operator,
         "work",
-        tool_call("doc_write", json!({ "slug": "note-x", "body": "hello" })),
+        tool_call("doc_write", json!({ "slug": "plan-x", "body": "hello" })),
     )
     .await;
     assert_eq!(v["result"]["isError"], json!(true));
@@ -739,7 +739,7 @@ async fn a_card_reaches_an_interface_that_is_already_open() {
         mcp(
             &app,
             "work",
-            tool_call("doc_write", json!({ "slug": "note-x", "body": "hello" })),
+            tool_call("doc_write", json!({ "slug": "plan-x", "body": "hello" })),
         )
         .await
     });
