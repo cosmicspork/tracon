@@ -1039,7 +1039,12 @@ impl Manager {
         }
     }
 
-    pub async fn answer(&self, id: &str, option_id: String) -> Result<(), SessionError> {
+    pub async fn answer(
+        &self,
+        id: &str,
+        option_id: String,
+        arguments: Option<serde_json::Value>,
+    ) -> Result<(), SessionError> {
         let perm = self
             .store
             .get_permission(id)?
@@ -1051,6 +1056,7 @@ impl Manager {
                 Command::Answer {
                     permission_id: id.to_string(),
                     option_id: option_id.clone(),
+                    arguments: arguments.clone(),
                     ack,
                 },
             )
@@ -1066,6 +1072,7 @@ impl Manager {
                     proto::frame::Command::Answer {
                         permission_id: id.to_string(),
                         option_id,
+                        arguments,
                     },
                     false,
                 )

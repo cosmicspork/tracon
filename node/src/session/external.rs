@@ -65,19 +65,20 @@ impl Loop {
                     Some(Command::Permission { request, reply }) => {
                         self.on_permission(&mut open, started, request, reply);
                     }
-                    Some(Command::Answer { permission_id, option_id, ack }) => {
+                    Some(Command::Answer { permission_id, option_id, arguments, ack }) => {
                         let done = on_answer_row(
                             &self.store,
                             &mut open,
                             &permission_id,
                             &option_id,
+                            arguments.clone(),
                             started.elapsed().as_millis() as i64,
                         );
                         if done.is_ok() {
                             self.record(
                                 ek::PERMISSION_ANSWER,
                                 Some(permission_id.clone()),
-                                json!({ "permission_id": permission_id, "option_id": option_id }),
+                                json!({ "permission_id": permission_id, "option_id": option_id, "arguments": arguments }),
                                 started,
                             );
                             self.back_to_running(&open);

@@ -426,7 +426,8 @@ fn control_response(id: &str, decision: PermissionReply) -> Value {
         PermissionReply::Selected(opt) if opt == types::OPTION_ALLOW_ONCE => {
             json!({ "behavior": "allow" })
         }
-        PermissionReply::Selected(_) => json!({
+        // Edits are refused before they could reach a harness's own request.
+        PermissionReply::Selected(_) | PermissionReply::Edited { .. } => json!({
             "behavior": "deny",
             "message": "the operator declined this",
         }),

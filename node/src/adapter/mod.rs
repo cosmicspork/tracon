@@ -96,6 +96,12 @@ pub struct PermissionRequest {
 #[derive(Debug)]
 pub enum PermissionReply {
     Selected(String),
+    /// Allowed, with the arguments the operator rewrote on the card. Only a
+    /// brokered tool call is answered this way; a harness's own request never is.
+    Edited {
+        option_id: String,
+        arguments: Value,
+    },
     Cancelled,
 }
 

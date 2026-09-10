@@ -24,7 +24,7 @@ use crate::{
     adapter::{PermissionReply, PermissionRequest},
     broker::SharedBroker,
     config::Config,
-    policy::{Policy, Request, Verdict},
+    policy::{Decision, Policy, Request, Verdict},
 };
 
 /// The policy kind a brokered tool call is evaluated under. Rules with
@@ -163,9 +163,12 @@ impl Tools {
                 )
             });
         }
-        if !plan_write {
-            self.gate(ctx, name, args).await?;
-        }
+        let edited = if plan_write {
+            None
+        } else {
+            self.gate(ctx, name, args).await?
+        };
+        let args = edited.as_ref().unwrap_or(args);
         match name {
             consulta::QUERY | consulta::DESCRIBE => {
                 consulta::call(&self.broker, &self.cfg, ctx, name, args).await
@@ -256,25 +259,19 @@ impl Tools {
     /// queue as a permission request on the calling session and waits for the
     /// operator (or the same expiry every unanswered request gets); Allow
     /// proceeds. A tool the policy does not mention is therefore asked, not
-    /// run — adding a tool never widens what runs unattended.
-    async fn gate(&self, ctx: &CallContext, name: &str, args: &Value) -> Result<(), String> {
+    /// run — adding a tool never widens what runs unattended. Returns the
+    /// arguments the operator rewrote on the card, when they did.
+    async fn gate(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+    ) -> Result<Option<Value>, String> {
         let summary = summarize(name, args);
-        let decision = self.policy.read().unwrap().decide(&Request {
-            channel: &ctx.channel,
-            kind: Some(TOOL_KIND),
-            title: name,
-            command: Some(&summary),
-        });
+        let decision = self.decide(ctx, name, &summary);
         match decision.verdict {
-            Verdict::Allow => Ok(()),
-            Verdict::Deny => Err(format!(
-                "refused by policy{}: {}",
-                decision
-                    .rule_id
-                    .map(|r| format!(" ({r})"))
-                    .unwrap_or_default(),
-                decision.reason.unwrap_or_default()
-            )),
+            Verdict::Allow => Ok(None),
+            Verdict::Deny => Err(refusal(decision)),
             Verdict::Ask => {
                 let access = self
                     .session
@@ -304,11 +301,32 @@ impl Tools {
                     .await
                     .map_err(|e| e.to_string())?
                 {
-                    PermissionReply::Selected(o) if o == OPTION_ALLOW_ONCE => Ok(()),
+                    PermissionReply::Selected(o) if o == OPTION_ALLOW_ONCE => Ok(None),
+                    // What runs is the operator's rewrite, and a refusal is
+                    // final whoever wrote the words.
+                    PermissionReply::Edited {
+                        option_id,
+                        arguments,
+                    } if option_id == OPTION_ALLOW_ONCE => {
+                        let edited = self.decide(ctx, name, &summarize(name, &arguments));
+                        if edited.verdict == Verdict::Deny {
+                            return Err(refusal(edited));
+                        }
+                        Ok(Some(arguments))
+                    }
                     _ => Err("the operator did not allow this call".into()),
                 }
             }
         }
+    }
+
+    fn decide(&self, ctx: &CallContext, name: &str, summary: &str) -> Decision {
+        self.policy.read().unwrap().decide(&Request {
+            channel: &ctx.channel,
+            kind: Some(TOOL_KIND),
+            title: name,
+            command: Some(summary),
+        })
     }
 
     /// Handle one MCP JSON-RPC message. Returns `None` for notifications, which
@@ -347,6 +365,17 @@ impl Tools {
             }
         })
     }
+}
+
+fn refusal(decision: Decision) -> String {
+    format!(
+        "refused by policy{}: {}",
+        decision
+            .rule_id
+            .map(|r| format!(" ({r})"))
+            .unwrap_or_default(),
+        decision.reason.unwrap_or_default()
+    )
 }
 
 /// `name` plus its arguments on one line, bounded, for the policy haystack

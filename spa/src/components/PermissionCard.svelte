@@ -3,6 +3,7 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
+  import { editableFields, editedArguments } from '../lib/permission'
   import { permissionOptions, type Permission } from '../lib/types'
   import { store } from '../lib/store.svelte'
 
@@ -10,8 +11,10 @@
 
   let busy = $state(false)
   let error = $state<string | null>(null)
+  let drafts = $state<Record<string, string>>({})
 
   const options = $derived(permissionOptions(permission))
+  const fields = $derived(editableFields(permission))
   const owner = $derived(nodeById(store.nodes, permission.node_id))
   const held = $derived(unreachableReason(store.nodes, store.mesh, permission.node_id))
   const request = $derived.by(() => {
@@ -35,7 +38,8 @@
     busy = true
     error = null
     try {
-      await api.answer(permission.id, optionId)
+      const edited = optionId === 'allow_once' ? editedArguments(permission, drafts) : undefined
+      await api.answer(permission.id, optionId, edited)
       await store.refetch()
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
@@ -82,6 +86,21 @@
       {/each}
     {/if}
   </span>
+  {#if fields.length && held === null}
+    <div class="fields">
+      {#each fields as f (f.key)}
+        <label>
+          <span>{f.key}</span>
+          <textarea
+            value={f.value}
+            disabled={busy}
+            spellcheck="true"
+            oninput={(e) => (drafts[f.key] = e.currentTarget.value)}
+          ></textarea>
+        </label>
+      {/each}
+    </div>
+  {/if}
   {#if request}
     <details class="request">
       <summary>Full request</summary>
@@ -113,6 +132,40 @@
   }
   .inline .request {
     grid-column: 2 / -1;
+  }
+  .fields {
+    grid-column: 3 / -1;
+    display: grid;
+    gap: 8px;
+    margin-top: 8px;
+    min-width: 0;
+  }
+  .inline .fields {
+    grid-column: 2 / -1;
+  }
+  .fields label {
+    display: grid;
+    gap: 3px;
+  }
+  .fields span {
+    font: 11px var(--mono);
+    color: var(--dim);
+  }
+  .fields textarea {
+    width: 100%;
+    min-height: 5.5em;
+    resize: vertical;
+    box-sizing: border-box;
+    font: 12.5px/1.45 var(--mono);
+    color: var(--ink);
+    background: var(--s0);
+    border: 1px solid transparent;
+    border-radius: 3px;
+    padding: 8px;
+  }
+  .fields textarea:focus {
+    outline: none;
+    border-color: var(--wait);
   }
   .request summary {
     cursor: pointer;

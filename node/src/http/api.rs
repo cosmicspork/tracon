@@ -675,6 +675,8 @@ pub async fn put_draft(
 #[derive(Deserialize)]
 pub struct AnswerBody {
     option_id: String,
+    #[serde(default)]
+    arguments: Option<serde_json::Value>,
 }
 
 pub async fn answer_permission(
@@ -682,7 +684,7 @@ pub async fn answer_permission(
     Path(id): Path<String>,
     Json(b): Json<AnswerBody>,
 ) -> ApiResult<StatusCode> {
-    s.manager.answer(&id, b.option_id).await?;
+    s.manager.answer(&id, b.option_id, b.arguments).await?;
     Ok(StatusCode::OK)
 }
 
@@ -2245,9 +2247,10 @@ impl crate::mesh::forward::CommandExecutor for AppState {
             C::Answer {
                 permission_id,
                 option_id,
+                arguments,
             } => self
                 .manager
-                .answer(&permission_id, option_id)
+                .answer(&permission_id, option_id, arguments)
                 .await
                 .map(|_| json!({ "answered": true }))
                 .map_err(Into::into),
