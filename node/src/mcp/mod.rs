@@ -9,6 +9,7 @@
 
 pub mod consulta;
 pub mod docs;
+pub mod github;
 pub mod gitlab;
 pub mod jira;
 pub mod memory;
@@ -116,6 +117,9 @@ impl Tools {
         if available.contains(&gitlab::CREDENTIAL) {
             out.extend(gitlab::definitions());
         }
+        if available.contains(&github::CREDENTIAL) {
+            out.extend(github::definitions());
+        }
         if available.contains(&jira::CREDENTIAL) {
             out.extend(jira::definitions());
         }
@@ -193,6 +197,9 @@ impl Tools {
                     .get()
                     .ok_or("documents are not available on this node")?;
                 docs::call(self, access, ctx, name, args).await
+            }
+            github::PR_STATUS | github::PR_COMMENT | github::RUN_STATUS => {
+                github::call(&self.broker, &self.http, ctx, name, args).await
             }
             other => Err(format!("no tool named {other}")),
         }
