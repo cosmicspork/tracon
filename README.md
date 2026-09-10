@@ -384,7 +384,7 @@ idle_timeout_secs = 3600            # an attachment with no call for this long i
 repo_roots = ["~/src"]              # a worktree put up for review must belong to a repository under one of these
 
 [docs]                              # the documents mirrored into a directory; off unless export_dir is set
-# export_dir = "~/src/docs"         # <slug>.md, archived ones under archive/; files that are not documents are left alone
+# export_dir = "~/notes"            # <slug>.md, archived ones under archive/; files that are not documents are left alone
 export_channel = ""                 # empty: [session] default_channel
 export_every_secs = 1800            # at startup, then this often (at least 60)
 
