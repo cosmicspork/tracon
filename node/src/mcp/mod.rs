@@ -173,12 +173,16 @@ impl Tools {
             consulta::QUERY | consulta::DESCRIBE => {
                 consulta::call(&self.broker, &self.cfg, ctx, name, args).await
             }
-            gitlab::MR_STATUS | gitlab::MR_COMMENT => {
-                gitlab::call(&self.broker, &self.http, ctx, name, args).await
-            }
-            jira::ISSUE | jira::ISSUE_COMMENT | jira::ISSUE_UPDATE | jira::ISSUE_CREATE => {
-                jira::call(&self.broker, &self.http, ctx, name, args).await
-            }
+            gitlab::MR_STATUS
+            | gitlab::MR_COMMENT
+            | gitlab::PIPELINE_STATUS
+            | gitlab::JOB_TRACE
+            | gitlab::PIPELINE_RUN => gitlab::call(&self.broker, &self.http, ctx, name, args).await,
+            jira::ISSUE
+            | jira::ISSUE_SEARCH
+            | jira::ISSUE_COMMENT
+            | jira::ISSUE_UPDATE
+            | jira::ISSUE_CREATE => jira::call(&self.broker, &self.http, ctx, name, args).await,
             review::SUBMIT | review::STATUS | review::VERDICT => {
                 let access = self
                     .session

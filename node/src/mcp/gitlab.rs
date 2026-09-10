@@ -1,7 +1,9 @@
-//! GitLab, as two narrow tools: read a merge request's state and comment on
-//! it. Opening one is the review path (`review::publish`); merging, marking
-//! ready, and triggering pipelines are not tools at all — "no merge" is the
-//! absence of a verb, not a rule about one. The token never leaves the node.
+//! GitLab, as narrow tools: read a merge request's state and comment on it,
+//! read a pipeline and a job's log, and run a pipeline on a branch. Opening a
+//! merge request is the review path (`review::publish`); merging and marking
+//! ready are not tools at all — "no merge" is the absence of a verb, not a
+//! rule about one. A pipeline on a tag, which is how a production deploy
+//! runs, is refused by the tool itself. The token never leaves the node.
 
 use serde_json::{json, Value};
 
@@ -10,6 +12,13 @@ use crate::{broker::SharedBroker, mcp::CallContext};
 pub const CREDENTIAL: &str = "glab";
 pub const MR_STATUS: &str = "mr_status";
 pub const MR_COMMENT: &str = "mr_comment";
+pub const PIPELINE_STATUS: &str = "pipeline_status";
+pub const JOB_TRACE: &str = "job_trace";
+pub const PIPELINE_RUN: &str = "pipeline_run";
+
+/// How much of a job's log `job_trace` returns, in KiB, unless asked.
+const TRACE_KIB: u64 = 16;
+const TRACE_KIB_MAX: u64 = 64;
 
 pub fn definitions() -> Vec<Value> {
     vec![
@@ -37,6 +46,47 @@ pub fn definitions() -> Vec<Value> {
                     "body": { "type": "string" },
                 },
                 "required": ["project", "iid", "body"],
+            },
+        }),
+        json!({
+            "name": PIPELINE_STATUS,
+            "description": "A pipeline's status and its jobs: by id, or the latest one for a ref.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "group/project path or numeric id." },
+                    "pipeline_id": { "type": "integer" },
+                    "ref": { "type": "string", "description": "A branch or tag; the latest pipeline for it." },
+                },
+                "required": ["project"],
+            },
+        }),
+        json!({
+            "name": JOB_TRACE,
+            "description": "The end of a job's log, for reading why it failed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" },
+                    "job_id": { "type": "integer" },
+                    "kib": { "type": "integer", "description": "How much of the end, in KiB (16 unless you say, at most 64)." },
+                },
+                "required": ["project", "job_id"],
+            },
+        }),
+        json!({
+            "name": PIPELINE_RUN,
+            "description": "Run a pipeline on a branch, as the web UI's Run pipeline does. Never a \
+                            tag, and never with a variable naming production: those deploys are \
+                            run by hand. The operator is asked before this runs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" },
+                    "ref": { "type": "string", "description": "The branch." },
+                    "variables": { "type": "object", "description": "Pipeline variables, name to value." },
+                },
+                "required": ["project", "ref"],
             },
         }),
     ]
@@ -71,48 +121,109 @@ pub async fn call(
         .and_then(Value::as_str)
         .filter(|p| !p.is_empty())
         .ok_or("project is required")?;
-    let iid = args
-        .get("iid")
-        .and_then(Value::as_i64)
-        .ok_or("iid is required")?;
-    let base = format!(
-        "{host}/api/v4/projects/{}/merge_requests/{iid}",
-        urlencode(project)
-    );
+    let project_url = format!("{host}/api/v4/projects/{}", urlencode(project));
     match name {
-        MR_STATUS => {
-            let mr = get(http, token, &base).await?;
-            let approvals = get(http, token, &format!("{base}/approvals"))
-                .await
-                .unwrap_or(Value::Null);
+        MR_STATUS | MR_COMMENT => {
+            let iid = args
+                .get("iid")
+                .and_then(Value::as_i64)
+                .ok_or("iid is required")?;
+            merge_request(http, token, &project_url, iid, name, args).await
+        }
+        PIPELINE_STATUS => {
+            let id = match (
+                args.get("pipeline_id").and_then(Value::as_i64),
+                args.get("ref").and_then(Value::as_str),
+            ) {
+                (Some(id), _) => id,
+                (None, Some(r)) => {
+                    let latest = get(
+                        http,
+                        token,
+                        &format!("{project_url}/pipelines?ref={}&per_page=1", urlencode(r)),
+                    )
+                    .await?;
+                    latest[0]["id"]
+                        .as_i64()
+                        .ok_or_else(|| format!("no pipeline has run for {r}"))?
+                }
+                (None, None) => return Err("pipeline_id or ref is required".into()),
+            };
+            let p = get(http, token, &format!("{project_url}/pipelines/{id}")).await?;
+            let jobs = get(
+                http,
+                token,
+                &format!("{project_url}/pipelines/{id}/jobs?per_page=100"),
+            )
+            .await
+            .unwrap_or(Value::Null);
+            let jobs: Vec<Value> = jobs
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|j| {
+                            json!({ "id": j["id"], "name": j["name"], "stage": j["stage"], "status": j["status"] })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             Ok(json!({
-                "iid": mr["iid"],
-                "title": mr["title"],
-                "state": mr["state"],
-                "draft": mr["draft"],
-                "source_branch": mr["source_branch"],
-                "target_branch": mr["target_branch"],
-                "merge_status": mr["detailed_merge_status"],
-                "has_conflicts": mr["has_conflicts"],
-                "pipeline": mr["head_pipeline"]["status"],
-                "notes": mr["user_notes_count"],
-                "approved": approvals["approved"],
-                "approved_by": approvals["approved_by"]
-                    .as_array()
-                    .map(|a| a.iter().map(|x| x["user"]["username"].clone()).collect::<Vec<_>>()),
-                "web_url": mr["web_url"],
+                "id": p["id"],
+                "ref": p["ref"],
+                "sha": p["sha"],
+                "status": p["status"],
+                "source": p["source"],
+                "web_url": p["web_url"],
+                "jobs": jobs,
             }))
         }
-        MR_COMMENT => {
-            let body = args
-                .get("body")
-                .and_then(Value::as_str)
-                .filter(|b| !b.trim().is_empty())
-                .ok_or("body is required")?;
+        JOB_TRACE => {
+            let job = args
+                .get("job_id")
+                .and_then(Value::as_i64)
+                .ok_or("job_id is required")?;
+            let kib = args
+                .get("kib")
+                .and_then(Value::as_u64)
+                .unwrap_or(TRACE_KIB)
+                .clamp(1, TRACE_KIB_MAX);
             let res = http
-                .post(format!("{base}/notes"))
+                .get(format!("{project_url}/jobs/{job}/trace"))
                 .header("PRIVATE-TOKEN", token)
-                .json(&json!({ "body": body }))
+                .send()
+                .await
+                .map_err(|e| format!("gitlab: {e}"))?;
+            let status = res.status();
+            let log = res.text().await.unwrap_or_default();
+            if !status.is_success() {
+                return Err(format!("gitlab answered {status} for job {job}'s log"));
+            }
+            let (tail, truncated) = tail(&log, (kib * 1024) as usize);
+            Ok(json!({ "job_id": job, "truncated": truncated, "log": tail }))
+        }
+        PIPELINE_RUN => {
+            let r = args
+                .get("ref")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .ok_or("ref is required (a branch)")?;
+            let variables = pipeline_variables(args.get("variables"))?;
+            let tag = http
+                .get(format!("{project_url}/repository/tags/{}", urlencode(r)))
+                .header("PRIVATE-TOKEN", token)
+                .send()
+                .await
+                .map_err(|e| format!("gitlab: {e}"))?;
+            if tag.status().is_success() {
+                return Err(format!(
+                    "{r} is a tag; a pipeline on a tag is a release, and that is run by hand"
+                ));
+            }
+            let res = http
+                .post(format!("{project_url}/pipeline"))
+                .header("PRIVATE-TOKEN", token)
+                .json(&json!({ "ref": r, "variables": variables }))
                 .send()
                 .await
                 .map_err(|e| format!("gitlab: {e}"))?;
@@ -120,14 +231,107 @@ pub async fn call(
             let v: Value = res.json().await.unwrap_or(Value::Null);
             if !status.is_success() {
                 return Err(format!(
-                    "gitlab refused the note ({status}): {}",
+                    "gitlab refused the pipeline ({status}): {}",
                     v["message"]
                 ));
             }
-            Ok(json!({ "id": v["id"], "created_at": v["created_at"] }))
+            Ok(json!({ "id": v["id"], "status": v["status"], "web_url": v["web_url"] }))
         }
         other => Err(format!("no gitlab tool named {other}")),
     }
+}
+
+async fn merge_request(
+    http: &reqwest::Client,
+    token: &str,
+    project_url: &str,
+    iid: i64,
+    name: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    let base = format!("{project_url}/merge_requests/{iid}");
+    if name == MR_STATUS {
+        let mr = get(http, token, &base).await?;
+        let approvals = get(http, token, &format!("{base}/approvals"))
+            .await
+            .unwrap_or(Value::Null);
+        return Ok(json!({
+            "iid": mr["iid"],
+            "title": mr["title"],
+            "state": mr["state"],
+            "draft": mr["draft"],
+            "source_branch": mr["source_branch"],
+            "target_branch": mr["target_branch"],
+            "merge_status": mr["detailed_merge_status"],
+            "has_conflicts": mr["has_conflicts"],
+            "pipeline": mr["head_pipeline"]["status"],
+            "notes": mr["user_notes_count"],
+            "approved": approvals["approved"],
+            "approved_by": approvals["approved_by"]
+                .as_array()
+                .map(|a| a.iter().map(|x| x["user"]["username"].clone()).collect::<Vec<_>>()),
+            "web_url": mr["web_url"],
+        }));
+    }
+    let body = args
+        .get("body")
+        .and_then(Value::as_str)
+        .filter(|b| !b.trim().is_empty())
+        .ok_or("body is required")?;
+    let res = http
+        .post(format!("{base}/notes"))
+        .header("PRIVATE-TOKEN", token)
+        .json(&json!({ "body": body }))
+        .send()
+        .await
+        .map_err(|e| format!("gitlab: {e}"))?;
+    let status = res.status();
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        return Err(format!(
+            "gitlab refused the note ({status}): {}",
+            v["message"]
+        ));
+    }
+    Ok(json!({ "id": v["id"], "created_at": v["created_at"] }))
+}
+
+/// Pipeline variables as GitLab takes them. A value naming production is
+/// refused here, before anything is sent: that is the deploy that is run by
+/// hand, whatever the ref.
+fn pipeline_variables(v: Option<&Value>) -> Result<Vec<Value>, String> {
+    let Some(v) = v.filter(|v| !v.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let map = v
+        .as_object()
+        .ok_or("variables is an object of name to value")?;
+    map.iter()
+        .map(|(k, v)| {
+            let value = match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            if value.to_ascii_lowercase().contains("production") {
+                return Err(format!(
+                    "variable {k} names production; a production deploy is run by hand"
+                ));
+            }
+            Ok(json!({ "key": k, "value": value }))
+        })
+        .collect()
+}
+
+/// The last `max` bytes of a log, cut on a character boundary.
+fn tail(log: &str, max: usize) -> (&str, bool) {
+    if log.len() <= max {
+        return (log, false);
+    }
+    let mut start = log.len() - max;
+    while !log.is_char_boundary(start) {
+        start += 1;
+    }
+    (&log[start..], true)
 }
 
 async fn get(http: &reqwest::Client, token: &str, url: &str) -> Result<Value, String> {
@@ -159,12 +363,28 @@ fn urlencode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn project_paths_are_one_segment() {
-        assert_eq!(
-            super::urlencode("group/sub/project"),
-            "group%2Fsub%2Fproject"
-        );
-        assert_eq!(super::urlencode("1234"), "1234");
+        assert_eq!(urlencode("group/sub/project"), "group%2Fsub%2Fproject");
+        assert_eq!(urlencode("1234"), "1234");
+    }
+
+    #[test]
+    fn a_log_tail_is_cut_on_a_character_boundary() {
+        assert_eq!(tail("short", 100), ("short", false));
+        let (t, cut) = tail("aaaé", 2);
+        assert!(cut);
+        assert_eq!(t, "é");
+    }
+
+    #[test]
+    fn a_production_variable_is_refused_by_name() {
+        let e = pipeline_variables(Some(&json!({ "ENVIRONMENT": "Production" }))).unwrap_err();
+        assert!(e.contains("ENVIRONMENT"), "{e}");
+        let ok = pipeline_variables(Some(&json!({ "DEPLOY": "staging", "N": 2 }))).unwrap();
+        assert_eq!(ok.len(), 2);
+        assert!(pipeline_variables(None).unwrap().is_empty());
     }
 }
