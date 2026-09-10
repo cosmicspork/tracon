@@ -7,9 +7,11 @@
 //! because the node's state, credentials, and harness socket belong to the
 //! logged-in operator, and rootless podman needs their session.
 //!
-//! This is a host-side recipe and stays one: it is reachable from the CLI and
-//! never as a tool, so a session that breaks the build cannot restart, stop,
-//! or reconfigure the node that gates it.
+//! This is a host-side recipe and stays one: the CLI and the desktop app reach
+//! it, never a tool and never the node's HTTP API, so a session inside the
+//! boundary that breaks the build cannot restart, stop, or reconfigure the node
+//! that gates it. A harness outside the boundary runs as the operator and can
+//! do all three; `docs/reference/external-harness-notes.md` says so.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

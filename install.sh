@@ -8,7 +8,8 @@
 #
 # Environment:
 #   TRACON_VERSION   a tag like v0.2.0 (default: latest release)
-#   TRACON_BIN_DIR   where to put the binary (default: ~/.local/bin)
+#   TRACON_BIN_DIR   where to put the binary (default: ~/.local/bin); the
+#                    service runs it from wherever it was installed
 #   TRACON_ENROLL    an invitation URL: after installing, enroll in the mesh,
 #                    then set up the boundary and the service. One line from
 #                    a cloud console's user-data to a serving node.
@@ -94,9 +95,9 @@ fi
 
 cat <<EOF
 
-the desktop app (tray, notifications, and it runs the node for you) is a
-separate download from the same release: the .AppImage on Linux, the .dmg on
-macOS. It carries its own copy of this binary.
+on a laptop, the desktop app does all of this for you: it installs this CLI
+and the service, and keeps both current. It is a separate download from the
+same release: the .AppImage on Linux, the .dmg on macOS.
 
 next, on this machine:
   tracon enroll <invitation url>        join the mesh (run \`tracon mesh invite\` on an enrolled node)

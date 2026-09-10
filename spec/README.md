@@ -13,7 +13,7 @@ vendored, not depended on, so this contract moves on its own cadence.
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `CONTRACT_VERSION` | 2 | Wire version, reported at `GET /v0/info`. Additive; moving it rotates nothing. Every node and the hub move together: a frame or enrollment of another version is refused. |
+| `CONTRACT_VERSION` | 3 | Wire version, reported at `GET /v0/info`. Additive; moving it rotates nothing. Every node and the hub move together: a frame or enrollment of another version is refused. |
 | `CONTRACT_MAJOR` | 0 | Cryptographic era, embedded in every label below. Bumps only on a key-rotating break. |
 
 Labels are `tracon/v{MAJOR}/{operation}`.
