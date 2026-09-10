@@ -116,8 +116,9 @@ impl Tools {
         let mut out = Vec::new();
         let broker = self.broker.read().unwrap();
         let available = broker.available_to(channel, node_id);
-        if available.contains(&consulta::CREDENTIAL) {
-            out.extend(consulta::definitions());
+        let profiles = consulta::profiles(&available);
+        if !profiles.is_empty() {
+            out.extend(consulta::definitions(&profiles));
         }
         if available.contains(&gitlab::CREDENTIAL) {
             out.extend(gitlab::definitions());
@@ -380,9 +381,13 @@ fn refusal(decision: Decision) -> String {
 
 /// `name` plus its arguments on one line, bounded, for the policy haystack
 /// and the queue card. Secrets never appear here: arguments are the
-/// harness's own words.
+/// harness's own words. A profile is spelled out as `profile=<name>` ahead of
+/// the JSON, so a deny rule can name one.
 pub fn summarize(name: &str, args: &Value) -> String {
-    let mut s = format!("{name} {}", args);
+    let mut s = match args.get("profile").and_then(Value::as_str) {
+        Some(p) => format!("{name} profile={p} {args}"),
+        None => format!("{name} {args}"),
+    };
     if s.len() > 400 {
         let mut cut = 400;
         while !s.is_char_boundary(cut) {
@@ -438,6 +443,88 @@ mod tests {
         let t = tools(STORE);
         assert_eq!(t.list("work", "n1").len(), 2);
         assert!(t.list("personal", "n1").is_empty());
+    }
+
+    const PROFILES: &str = r#"
+        [credentials.consulta-qa]
+        channels = ["work"]
+        [credentials.consulta-qa.env]
+        DB_BACKEND = "sqlite"
+        [credentials.consulta-prd]
+        channels = ["work"]
+        [credentials.consulta-prd.env]
+        DB_BACKEND = "sqlite"
+    "#;
+
+    #[tokio::test]
+    async fn a_channels_profiles_are_offered_from_the_credentials_it_holds() {
+        let t = tools(PROFILES);
+        let list = t.list("work", "n1");
+        assert_eq!(list.len(), 2);
+        let schema = &list[0]["inputSchema"];
+        assert_eq!(
+            schema["properties"]["profile"]["enum"],
+            json!(["prd", "qa"])
+        );
+        // Two and no default: the call has to say which.
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("profile")));
+        assert!(t.list("personal", "n1").is_empty());
+        // Only the default: nothing to choose, so nothing is asked.
+        let plain = tools(STORE).list("work", "n1");
+        assert!(plain[0]["inputSchema"]["properties"]["profile"].is_null());
+    }
+
+    #[test]
+    fn a_profile_resolves_to_its_credential() {
+        let both = vec!["default".to_string(), "qa".into()];
+        assert_eq!(consulta::credential_for(None, &both).unwrap(), "consulta");
+        assert_eq!(
+            consulta::credential_for(Some("qa"), &both).unwrap(),
+            "consulta-qa"
+        );
+        let err = consulta::credential_for(Some("prd"), &both).unwrap_err();
+        assert!(err.contains("qa"), "{err}");
+        let two = vec!["prd".to_string(), "qa".into()];
+        assert!(consulta::credential_for(None, &two).is_err());
+        let one = vec!["qa".to_string()];
+        assert_eq!(consulta::credential_for(None, &one).unwrap(), "consulta-qa");
+        assert_eq!(
+            consulta::profiles(&["consulta", "consulta-tst", "gh", "consulta-"]),
+            vec!["default".to_string(), "tst".into()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deny_rule_can_name_a_profile() {
+        let mut t = tools(PROFILES);
+        t.policy = Arc::new(std::sync::RwLock::new(
+            toml::from_str(
+                r#"
+                version = 9
+                [[rule]]
+                id = "no-production"
+                verdict = "deny"
+                reason = "Production is read by hand."
+                kinds = ["tool"]
+                matches = ["profile=prd"]
+                "#,
+            )
+            .unwrap(),
+        ));
+        let res = t
+            .handle(
+                &ctx("work"),
+                &json!({"jsonrpc":"2.0","id":7,"method":"tools/call",
+                        "params":{"name":"query","arguments":{"sql":"SELECT 1","profile":"prd"}}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["result"]["isError"], true);
+        let text = res["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("no-production"), "{text}");
     }
 
     #[tokio::test]
