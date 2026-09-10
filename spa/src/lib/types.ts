@@ -363,6 +363,8 @@ export interface Document {
   site: string
   hlc_ms: number
   deleted: number
+  /** 1 when archived: kept and readable, but out of listings and search. */
+  archived?: number
   created_ms: number
   updated_ms: number
 }

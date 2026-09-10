@@ -16,6 +16,7 @@
   let error = $state<string | null>(null)
   let creating = $state(false)
   let newSlug = $state('')
+  let showArchived = $state(false)
 
   const channels = $derived(store.channels.map((c) => c.name))
 
@@ -27,7 +28,7 @@
     void store.docsVersion
     void channel
     api
-      .docs(channel || undefined)
+      .docs(channel || undefined, undefined, showArchived)
       .then((d) => (docs = d.docs))
       .catch((e) => (error = e instanceof Error ? e.message : String(e)))
   })
@@ -56,10 +57,13 @@
     }, 150)
   })
 
+  const live = $derived(docs.filter((d) => !d.archived))
+  const archived = $derived(docs.filter((d) => d.archived))
   const grouped = $derived.by(() => {
     const m = new Map<string, Document[]>()
-    for (const d of docs) m.set(d.kind, [...(m.get(d.kind) ?? []), d])
-    return KINDS.filter((k) => m.has(k)).map((k) => [k, m.get(k)!] as const)
+    for (const d of live) m.set(d.kind, [...(m.get(d.kind) ?? []), d])
+    const groups = KINDS.filter((k) => m.has(k)).map((k) => [k, m.get(k)!] as const)
+    return archived.length ? [...groups, ['archived', archived] as const] : groups
   })
 
   function create() {
@@ -72,7 +76,7 @@
 <div class="h4">
   Documents
   <b
-    >{docs.length} on {channel || '…'}{store.mesh?.hub.state === 'unreachable'
+    >{live.length} on {channel || '…'}{store.mesh?.hub.state === 'unreachable'
       ? ' · hub down · search is local'
       : ''}{textOnly ? ' · text only · no semantic search' : ''}</b
   >
@@ -88,6 +92,7 @@
     </select>
   {/if}
   <input placeholder="Search by content" bind:value={query} />
+  <label class="toggle"><input type="checkbox" bind:checked={showArchived} /> Show archived</label>
 </div>
 
 {#if creating}
@@ -174,6 +179,17 @@
   .bar input {
     flex: 1;
     min-width: 0;
+  }
+  .bar .toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font: 12px var(--mono);
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  .bar .toggle input {
+    flex: none;
   }
   .new {
     display: flex;

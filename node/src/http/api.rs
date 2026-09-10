@@ -1125,9 +1125,13 @@ pub struct DocQuery {
     pub channel: Option<String>,
     pub q: Option<String>,
     pub kind: Option<String>,
+    /// Include archived documents in the list. Search leaves them out.
+    #[serde(default)]
+    pub archived: bool,
 }
 
-/// `GET /api/docs?channel=&q=&kind=`: the list (no bodies), or search hits.
+/// `GET /api/docs?channel=&q=&kind=&archived=`: the list (no bodies), or
+/// search hits.
 pub async fn list_docs(
     State(s): State<AppState>,
     Query(q): Query<DocQuery>,
@@ -1156,6 +1160,7 @@ pub async fn list_docs(
     let docs: Vec<_> = docs
         .into_iter()
         .filter(|d| q.kind.as_deref().is_none_or(|k| k == d.kind))
+        .filter(|d| q.archived || d.archived == 0)
         .collect();
     Ok(Json(json!({ "docs": docs })))
 }
@@ -1174,6 +1179,9 @@ pub async fn get_doc(
 #[derive(Deserialize)]
 pub struct PutDoc {
     pub body: String,
+    /// Archive or restore it with this write; absent keeps it as it was.
+    #[serde(default)]
+    pub archived: Option<bool>,
 }
 
 /// `PUT /api/docs/{channel}/{slug}` with `If-Match: <hash>` to refuse
@@ -1210,6 +1218,7 @@ pub async fn put_doc(
         &body.body,
         if_match.as_deref(),
         create_only,
+        body.archived,
     ) {
         Ok(doc) => Json(json!(doc)).into_response(),
         Err(crate::mcp::docs::WriteError::Conflict { hash, body }) => (

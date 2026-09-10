@@ -110,6 +110,21 @@
     changedElsewhere = false
   }
 
+  async function setArchived(archived: boolean) {
+    if (!doc) return
+    busy = true
+    error = null
+    try {
+      const d = await api.putDoc(channel, slug, doc.body, doc.hash, archived)
+      doc = d
+      hash = d.hash
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e)
+    } finally {
+      busy = false
+    }
+  }
+
   async function remove() {
     if (!doc) return
     busy = true
@@ -131,11 +146,16 @@
     <a class="lnk" href="/docs">Documents</a>
     <span class="sep">/</span>
     {slug}
-    <b>{channel}{doc ? ` · ${formatAge(doc.updated_ms, clock.now)}` : ' · new'}{doc ? ` · ${doc.hash.slice(0, 8)}` : ''}</b>
+    <b>{channel}{doc ? ` · ${formatAge(doc.updated_ms, clock.now)}` : ' · new'}{doc ? ` · ${doc.hash.slice(0, 8)}` : ''}{doc?.archived ? ' · archived' : ''}{error && !editing ? ` · ${error}` : ''}</b>
     {#if !surface.phone && !editing && !loadError}
       <span class="r">
         <button class="lnk" onclick={() => (editing = true)}>{doc ? 'Edit' : 'Write it'}</button>
-        {#if doc}<button class="lnk d" onclick={remove} disabled={busy}>Delete</button>{/if}
+        {#if doc}
+          <button class="lnk" onclick={() => setArchived(!doc?.archived)} disabled={busy}>
+            {doc.archived ? 'Unarchive' : 'Archive'}
+          </button>
+          <button class="lnk d" onclick={remove} disabled={busy}>Delete</button>
+        {/if}
       </span>
     {/if}
   </div>
