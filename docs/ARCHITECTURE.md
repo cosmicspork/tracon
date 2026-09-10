@@ -73,9 +73,10 @@ tools, and persists everything to local SQLite. Explicitly not its responsibilit
 model inference, an agent loop, prompt construction beyond assembling injected
 context, and any business domain.
 
-Build rules: static musl, `x86_64` and `aarch64`, SPA embedded so every node serves
-the identical bundle, log to stdout, no self-daemonizing, clean SIGTERM, idempotent
-restart. Supervision is external — the platform's, or the desktop wrapper's. Static
+Build rules: static musl on Linux `x86_64`, and Apple Silicon macOS, SPA embedded
+so every node serves the identical bundle, log to stdout, no self-daemonizing, clean
+SIGTERM, idempotent restart. Supervision is external — the platform's service
+manager, which `tracon service install` or the desktop app sets up. Static
 musl is also why consulta stays a Python sidecar: every Rust Oracle crate wraps a
 dynamically linked glibc blob, and `oracledb` thin mode is a pure-Python wire
 implementation. Recorded so the rewrite is not re-decided.
@@ -383,9 +384,11 @@ Every node serves the same embedded SPA; a client is a matter of shell.
   tag. Pushes are hints; the queue is the truth.
 - The service worker caches the shell and never `/api`: a cached queue you cannot
   act on is worse than an honest "cannot reach the node".
-- The desktop wrapper is a tray client and nothing more — it holds no session state,
-  supervises nothing but the node process it optionally runs, and adopts a node
-  already answering rather than starting a second over the same state.
+- The desktop app is a tray client and an installer — it holds no session state and
+  runs no node itself. It puts the node under the user's service manager, installs
+  the CLI the unit runs, and after an update moves both onto the version it carries
+  once no session is running. A node an earlier version spawned as its child is
+  stopped once, before the service takes the port.
 - The interface talks only to the node that served it; that node mirrors peers and
   forwards commands to owners. A verdict executes on the owner, because staleness
   and publishing need the owner's worktree and broker.
@@ -417,7 +420,10 @@ Three surfaces, three answers, and the differences are the point.
 - **No business domain.** Clients, invoicing, and time billing live elsewhere.
 - **Bootstrap.** The node is developed by agents running inside it, so a documented
   path to running a harness outside the system is maintained, and rebuilding or
-  restarting the node is a host-side recipe, never something a session performs.
+  restarting the node is a host-side recipe — the CLI's or the desktop app's, never
+  a tool and never the node's HTTP API — so no session inside the boundary performs
+  it. A harness outside the boundary runs as the operator and could; see
+  `reference/external-harness-notes.md`.
 
 ## Data lifecycle
 
