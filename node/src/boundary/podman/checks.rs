@@ -70,6 +70,9 @@ pub async fn check_all(cfg: &Config, selinux: bool, deep: bool) -> BoundaryRepor
 }
 
 async fn check_runtime(cfg: &Config) -> CheckResult {
+    if let Err(e) = super::ensure_machine(cfg).await {
+        return CheckResult::fail(CheckId::Runtime, e.to_string());
+    }
     let info = match podman_json(&["info", "--format", "json"]).await {
         Ok(v) => v,
         Err(e) => return CheckResult::fail(CheckId::Runtime, format!("podman info: {e}")),

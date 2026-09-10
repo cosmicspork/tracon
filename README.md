@@ -39,12 +39,14 @@ boundary the agent runs inside):
 ```sh
 tracon setup                   # build the harness network and gateway (definitions ship in the binary)
 tracon check-boundary --deep   # prove the boundary, including an egress probe from inside it
-tracon service install         # run the node under systemd or launchd
+tracon service install         # run this binary as the node under systemd or launchd
 ```
 
 If `tracon setup` cannot find podman — a node started from a desktop launcher
 inherits a minimal PATH — set `podman` under `[boundary]` in `node.toml` to its
-full path. The interface says so too, in the refusal it shows.
+full path. The interface says so too, in the refusal it shows. On macOS the node
+starts the podman machine itself when it finds it stopped; create one once with
+`podman machine init`.
 
 Open `http://127.0.0.1:7420`. **Settings** covers the rest of the install from
 the interface: prove the boundary, run setup, choose the harness, import a
@@ -300,6 +302,7 @@ gateway_ip = "10.89.0.2"
 gateway_container = "tracon-gw"
 gateway_image = "localhost/tracon-gateway"
 harness_image = "localhost/tracon-harness"
+start_machine = true                # macOS: start the podman machine when it is stopped
 # selinux_label_disable = true      # only if the boundary check says the labels fight you
 
 [gateway]

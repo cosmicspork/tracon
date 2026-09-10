@@ -15,6 +15,7 @@ use crate::boundary::BoundaryError;
 struct Containers;
 
 pub async fn setup(cfg: &Config, rebuild: bool) -> Result<(), BoundaryError> {
+    super::ensure_machine(cfg).await?;
     ensure_images(cfg, rebuild).await?;
     ensure_network(cfg).await?;
     write_allowlist(cfg)?;

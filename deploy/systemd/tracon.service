@@ -1,6 +1,7 @@
 # The node runs as a user service, not a system one: its state, config, and
 # harness socket all live under the operator's XDG directories, and rootless
-# podman needs the user session. `tracon service install` writes this file.
+# podman needs the user session. `tracon service install` writes this file,
+# naming the binary it was run from.
 [Unit]
 Description=tracon node
 Documentation=https://github.com/cosmicspork/tracon
@@ -8,7 +9,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=%h/.local/bin/tracon serve
+ExecStart="__BIN__" serve
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=tracon=info

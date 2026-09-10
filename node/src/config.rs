@@ -342,6 +342,10 @@ pub struct Boundary {
     pub harness_image: String,
     /// Podman needs `label=disable` for bind mounts on SELinux hosts.
     pub selinux_label_disable: Option<bool>,
+    /// macOS: start the podman machine when the boundary finds it stopped.
+    /// Nothing else starts it at login, and a node run by the service is up
+    /// before any terminal is.
+    pub start_machine: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -528,6 +532,7 @@ impl Default for Config {
                 gateway_image: "localhost/tracon-gateway".into(),
                 harness_image: "localhost/tracon-harness".into(),
                 selinux_label_disable: None,
+                start_machine: true,
             },
             gateway: Gateway {
                 allow_hosts: vec![

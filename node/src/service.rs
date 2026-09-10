@@ -11,7 +11,7 @@
 //! never as a tool, so a session that breaks the build cannot restart, stop,
 //! or reconfigure the node that gates it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -44,7 +44,9 @@ fn unit_path() -> Result<PathBuf> {
     }
 }
 
-/// The unit text, with anything the platform cannot express as `%h` filled in.
+/// The unit text, naming the binary that runs this command rather than a fixed
+/// install location, so `install.sh`'s `TRACON_BIN_DIR` and the copy the
+/// desktop app places are both what the service runs.
 fn unit_text() -> Result<String> {
     let name = if cfg!(target_os = "macos") {
         "launchd/com.tracon.node.plist"
@@ -53,17 +55,29 @@ fn unit_text() -> Result<String> {
     };
     let file = Units::get(name).with_context(|| format!("{name} is not embedded"))?;
     let text = String::from_utf8(file.data.to_vec()).context("unit file is not text")?;
+    let bin = std::env::current_exe().context("finding this binary")?;
+    stable_binary(&bin)?;
+    let logs = home()?.join("Library/Logs");
     if cfg!(target_os = "macos") {
-        let home = home()?;
-        let bin = home.join(".local/bin/tracon");
-        let logs = home.join("Library/Logs");
         std::fs::create_dir_all(&logs).ok();
-        Ok(text
-            .replace("__BIN__", &bin.to_string_lossy())
-            .replace("__LOGS__", &logs.to_string_lossy()))
-    } else {
-        Ok(text)
     }
+    Ok(text
+        .replace("__BIN__", &bin.to_string_lossy())
+        .replace("__LOGS__", &logs.to_string_lossy()))
+}
+
+/// A unit may only name a binary that outlives this process. An AppImage runs
+/// from a mount that disappears when it exits, and a translocated app from a
+/// copy macOS throws away.
+fn stable_binary(path: &Path) -> Result<()> {
+    let s = path.to_string_lossy();
+    if s.contains("/.mount_") || s.contains("/AppTranslocation/") {
+        bail!(
+            "{} is a temporary copy; install the CLI (the desktop app does this) and run `tracon service install` from it",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 /// The current user id, for launchd's `gui/<uid>` domain. Shelling out beats
@@ -103,9 +117,10 @@ pub fn install() -> Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let existing = std::fs::read_to_string(&path).ok();
-    std::fs::write(&path, unit_text()?).with_context(|| format!("writing {}", path.display()))?;
+    let text = unit_text()?;
+    std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
     match existing {
-        Some(prev) if prev != unit_text()? => {
+        Some(prev) if prev != text => {
             println!("replaced the unit at {}", path.display())
         }
         Some(_) => println!("unit at {} is unchanged", path.display()),
@@ -154,6 +169,27 @@ fn lingering() -> bool {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).contains("Linger=yes"))
         .unwrap_or(false)
+}
+
+/// Restart the node under its supervisor, onto whatever binary the unit names.
+pub fn restart() -> Result<()> {
+    let path = unit_path()?;
+    if !path.exists() {
+        bail!(
+            "not installed (no unit at {}); run `tracon service install`",
+            path.display()
+        );
+    }
+    if cfg!(target_os = "macos") {
+        run(
+            "launchctl",
+            &["kickstart", "-k", &format!("gui/{}/{MAC_LABEL}", uid()?)],
+        )?;
+    } else {
+        run("systemctl", &["--user", "restart", LINUX_UNIT])?;
+    }
+    println!("restarted the node");
+    Ok(())
 }
 
 /// Stop the service and remove the unit. The node's state is left alone.
@@ -230,11 +266,11 @@ mod tests {
     fn the_unit_for_this_platform_is_embedded_and_complete() {
         let text = unit_text().unwrap();
         assert!(!text.is_empty());
+        // Placeholders are the one thing that must not survive: launchd
+        // expands nothing, and systemd would run a file named `__BIN__`.
+        assert!(!text.contains("__BIN__"), "{text}");
         if cfg!(target_os = "macos") {
             assert!(text.contains("com.tracon.node"));
-            // Placeholders are the one thing that must not survive: launchd
-            // does not expand anything.
-            assert!(!text.contains("__BIN__"), "{text}");
             assert!(!text.contains("__LOGS__"), "{text}");
         } else {
             assert!(text.contains("ExecStart="));
@@ -242,6 +278,23 @@ mod tests {
             assert!(text.contains("KillSignal=SIGTERM"));
             assert!(text.contains("TimeoutStopSec="));
         }
+    }
+
+    #[test]
+    fn the_unit_names_the_binary_that_installed_it() {
+        let exe = std::env::current_exe().unwrap();
+        let text = unit_text().unwrap();
+        assert!(text.contains(&*exe.to_string_lossy()), "{text}");
+    }
+
+    #[test]
+    fn a_temporary_copy_cannot_be_named_by_a_unit() {
+        assert!(stable_binary(Path::new("/tmp/.mount_traconAb12/usr/bin/tracon")).is_err());
+        assert!(stable_binary(Path::new(
+            "/private/var/folders/x/T/AppTranslocation/1A/d/tracon.app/Contents/MacOS/tracon"
+        ))
+        .is_err());
+        assert!(stable_binary(Path::new("/home/op/.local/bin/tracon")).is_ok());
     }
 
     #[test]
