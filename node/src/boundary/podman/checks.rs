@@ -90,12 +90,24 @@ async fn check_runtime(cfg: &Config) -> CheckResult {
             format!("podman {version} is rootful; the harness must not share a root domain with the node"),
         );
     }
-    for image in [&cfg.boundary.harness_image, &cfg.boundary.gateway_image] {
+    for (image, dir) in super::setup::images(cfg) {
         if podman(&["image", "exists", image]).await.is_err() {
             return CheckResult::fail(
                 CheckId::Runtime,
                 format!("image {image} is missing; run `tracon setup`"),
             );
+        }
+        // An image without the label predates it or was built by hand, and
+        // cannot be judged; the next `tracon setup` rebuilds and labels it.
+        if let Some(built) = super::setup::image_digest(image).await {
+            if built != super::setup::definitions_digest(dir) {
+                return CheckResult::fail(
+                    CheckId::Runtime,
+                    format!(
+                        "image {image} was built from other definitions than this binary's; run `tracon setup`"
+                    ),
+                );
+            }
         }
     }
     CheckResult::ok(
