@@ -45,8 +45,7 @@ const CHECK_STALE_AFTER: Duration = Duration::from_secs(60);
 const UNSUPPORTED_MESSAGE: &str =
     "Self-update needs tracon.app in a folder you can write, such as Applications.";
 #[cfg(not(target_os = "macos"))]
-const UNSUPPORTED_MESSAGE: &str =
-    "This install is managed by its package; self-update is available in the AppImage.";
+const UNSUPPORTED_MESSAGE: &str = "Self-update needs the AppImage; this install is not one.";
 const DIGEST_MISMATCH_MESSAGE: &str =
     "The download did not match GitHub; the current version was not changed.";
 const REPLACE_MESSAGE: &str =
