@@ -498,6 +498,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         state.manager.probe_token().to_string(),
     ));
 
+    // The documents written back out as files, when `[docs] export_dir` says where.
+    tokio::spawn(crate::corpus::export::run(store.clone(), cfg.clone()));
+
     tracing::info!(%listen, "serving");
     let manager = state.manager.clone();
     let bus = manager.bus().clone();
