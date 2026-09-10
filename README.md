@@ -335,6 +335,8 @@ shape = "anthropic"                 # or "openai"
 # output_per_mtok = 15.0
 
 [consulta]                          # the database MCP tools, run as a sidecar
+# one credential per database: `consulta` is the default, `consulta-<profile>` any other;
+# a channel holding more than the default offers the tools a `profile` argument
 command = "uv"
 args = ["run", "--project", "~/src/consulta", "consulta"]
 timeout_secs = 60

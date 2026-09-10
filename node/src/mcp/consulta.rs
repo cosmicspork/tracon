@@ -23,8 +23,51 @@ pub const CREDENTIAL: &str = "consulta";
 pub const QUERY: &str = "query";
 pub const DESCRIBE: &str = "describe";
 
-pub fn definitions() -> Vec<Value> {
-    vec![
+/// A channel's consulta credentials name its profiles, one database
+/// connection each: `consulta` is the default profile, `consulta-<name>` any
+/// other.
+pub fn profiles(available: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = available
+        .iter()
+        .filter_map(|n| {
+            if *n == CREDENTIAL {
+                Some("default".to_string())
+            } else {
+                n.strip_prefix("consulta-")
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+            }
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The credential a call uses. Naming no profile means the default one, or
+/// the only one the channel holds; with several and no default, the call has
+/// to say which.
+pub fn credential_for(profile: Option<&str>, profiles: &[String]) -> Result<String, String> {
+    let credential = |p: &str| {
+        if p == "default" {
+            CREDENTIAL.to_string()
+        } else {
+            format!("{CREDENTIAL}-{p}")
+        }
+    };
+    match profile {
+        Some(p) if profiles.iter().any(|x| x == p) => Ok(credential(p)),
+        Some(p) => Err(format!(
+            "no profile {p:?} on this channel; it has {}",
+            profiles.join(", ")
+        )),
+        None if profiles.iter().any(|x| x == "default") => Ok(CREDENTIAL.to_string()),
+        None if profiles.len() == 1 => Ok(credential(&profiles[0])),
+        None => Err(format!("say which profile: {}", profiles.join(", "))),
+    }
+}
+
+pub fn definitions(profiles: &[String]) -> Vec<Value> {
+    let mut defs = vec![
         json!({
             "name": QUERY,
             "description": "Run a read-only SQL query. Only a single SELECT or WITH statement is \
@@ -49,7 +92,29 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["table"],
             },
         }),
-    ]
+    ];
+    if profiles.iter().any(|p| p != "default") {
+        let required = !profiles.iter().any(|p| p == "default") && profiles.len() > 1;
+        for d in &mut defs {
+            d["inputSchema"]["properties"]["profile"] = json!({
+                "type": "string",
+                "enum": profiles,
+                "description": "Which database connection to use.",
+            });
+            if required {
+                if let Some(r) = d["inputSchema"]["required"].as_array_mut() {
+                    r.push(json!("profile"));
+                }
+            }
+            let description = format!(
+                "{} Profiles on this channel: {}.",
+                d["description"].as_str().unwrap_or_default(),
+                profiles.join(", ")
+            );
+            d["description"] = json!(description);
+        }
+    }
+    defs
 }
 
 pub async fn call(
@@ -59,12 +124,21 @@ pub async fn call(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    // Channel binding first: which channel may use which connection.
-    let env = broker
-        .read()
-        .unwrap()
-        .env_for(CREDENTIAL, &ctx.channel, &ctx.node_id)
-        .map_err(|e| e.to_string())?;
+    // Channel binding first: which channel may use which connection. A
+    // channel holding none still asks for the default, so the refusal is the
+    // broker's own.
+    let env = {
+        let broker = broker.read().unwrap();
+        let profiles = profiles(&broker.available_to(&ctx.channel, &ctx.node_id));
+        let credential = if profiles.is_empty() {
+            CREDENTIAL.to_string()
+        } else {
+            credential_for(args.get("profile").and_then(Value::as_str), &profiles)?
+        };
+        broker
+            .env_for(&credential, &ctx.channel, &ctx.node_id)
+            .map_err(|e| e.to_string())?
+    };
 
     let mut argv: Vec<String> = Vec::new();
     if name == DESCRIBE {
