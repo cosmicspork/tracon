@@ -173,10 +173,11 @@ export const api = {
   answer: (permissionId: string, optionId: string, args?: Record<string, unknown>) =>
     call<void>('POST', `/api/permissions/${permissionId}/answer`, { option_id: optionId, arguments: args }),
   // Documents: read by slug, search by content, edit with the hash last read.
-  docs: (channel?: string, kind?: string) => {
+  docs: (channel?: string, kind?: string, archived = false) => {
     const q = new URLSearchParams()
     if (channel) q.set('channel', channel)
     if (kind) q.set('kind', kind)
+    if (archived) q.set('archived', 'true')
     const s = q.toString()
     return call<{ docs: Document[] }>('GET', `/api/docs${s ? `?${s}` : ''}`)
   },
@@ -186,14 +187,20 @@ export const api = {
     return call<{ hits: RecallHit[]; text_only?: boolean }>('GET', `/api/docs?${q}`)
   },
   doc: (channel: string, slug: string) => call<Document>('GET', `/api/docs/${channel}/${slug}`),
-  putDoc: async (channel: string, slug: string, body: string, ifMatch?: string): Promise<Document> => {
+  putDoc: async (
+    channel: string,
+    slug: string,
+    body: string,
+    ifMatch?: string,
+    archived?: boolean,
+  ): Promise<Document> => {
     const res = await fetch(`/api/docs/${channel}/${slug}`, {
       method: 'PUT',
       headers: {
         'content-type': 'application/json',
         ...(ifMatch ? { 'if-match': ifMatch } : { 'if-none-match': '*' }),
       },
-      body: JSON.stringify({ body }),
+      body: JSON.stringify(archived === undefined ? { body } : { body, archived }),
     })
     const text = await res.text()
     let json: { error?: { message?: string }; hash?: string; body?: string } | null = null

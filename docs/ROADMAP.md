@@ -97,10 +97,11 @@ Out of scope by decision, recorded so it is not rediscovered as a good idea.
   per-project editor preferences appear, this has become a second project.
   Configuring the *node* — its boundary, harness, credentials, channels and
   access — is not that, and belongs in the interface: an operator should never
-  need a shell to stand a node up. Installing the service and starting the node
-  are the deliberate exceptions — process management on the machine itself — as
-  is anything that reads or writes a directory of files, like importing a docs
-  corpus.
+  need a shell to stand a node up. Installing the service and the CLI and
+  restarting the node are the deliberate exceptions — process management on the
+  machine itself, done by the desktop app or the CLI and never through the node's
+  API — as is anything that reads or writes a directory of files, like importing a
+  docs corpus.
 - **Business domain in tracon.** Clients, invoicing, and time billing stay
   elsewhere.
 

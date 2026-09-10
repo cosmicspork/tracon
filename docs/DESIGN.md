@@ -74,14 +74,14 @@ cannot act.
 | Add a work item | yes | no | yes |
 | Send a prompt into a running session | yes | no | yes |
 | Read session output as it streams | yes | no | yes |
-| Kill a session | yes | confirm | confirm |
+| Kill a session | yes | yes, one submenu down | confirm |
 | Connect / disconnect a provider, any node's | yes | no | yes |
 | See and share broker credentials | yes | no | yes |
 | Enroll a new node (invite + fingerprint confirm) | yes | no | yes |
 | Review the nightly memory batch | yes | no | yes |
 | Browse work; follow `discovered-from` | yes | no | yes |
 | Read and edit documents | yes | no | read |
-| See cost per channel against the ceiling | yes | yes | yes |
+| See cost per channel against the ceiling | yes | no | yes |
 
 The tray is the queue plus a kill switch, one level down because it is destructive.
 It does not stream output.
@@ -178,8 +178,8 @@ operator's information, not the model's.
    answers exist anywhere in the interface.
 4. **Queue order.** Waiting-on-you first; permission requests before reviews
    (requests expire, reviews do not); then oldest first.
-5. **Kill confirmation.** Confirm on phone and tray, where a stray tap is likely;
-   immediate in the browser.
+5. **Kill confirmation.** Confirm on the phone, where a stray tap is likely; the
+   tray keeps kill one submenu down instead; immediate in the browser.
 6. **Login over plain http off the machine is refused in words** — the Secure
    cookie would silently vanish and loop the login screen, so the screen explains
    the HTTPS requirement instead.
