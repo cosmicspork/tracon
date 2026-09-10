@@ -41,6 +41,12 @@ pub struct Rule {
     /// audits.
     #[serde(default)]
     pub matches: Vec<String>,
+    /// Allow rules for tools only: every named argument must match one of its
+    /// globs (`*` is the only wildcard), so a rule can allow `doc_write` for
+    /// working notes without allowing it for every document. Deny rules have no
+    /// need of it; their substrings already see the arguments.
+    #[serde(default)]
+    pub args: std::collections::BTreeMap<String, Vec<String>>,
     /// Channels this applies to. Empty means every channel.
     #[serde(default)]
     pub channels: Vec<String>,
@@ -54,7 +60,7 @@ impl Rule {
         if !self.kinds.is_empty() && !self.kinds.iter().any(|k| Some(k.as_str()) == req.kind) {
             return false;
         }
-        if self.matches.is_empty() {
+        if self.matches.is_empty() && self.args.is_empty() {
             return true;
         }
         match self.verdict {
@@ -85,10 +91,18 @@ impl Rule {
         // guard that matters for a tool is the tool's own (the SQL guard, the
         // review capture), which runs after policy says yes.
         if req.kind == Some(crate::mcp::TOOL_KIND) {
-            return self
-                .matches
-                .iter()
-                .any(|pat| pat.trim().eq_ignore_ascii_case(req.title.trim()));
+            let named = self.matches.is_empty()
+                || self
+                    .matches
+                    .iter()
+                    .any(|pat| pat.trim().eq_ignore_ascii_case(req.title.trim()));
+            return named
+                && self.args.iter().all(|(key, globs)| {
+                    req.arguments
+                        .and_then(|a| a.get(key))
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|v| globs.iter().any(|g| glob(g, v)))
+                });
         }
         let cmd = req.command.unwrap_or(req.title).trim().to_ascii_lowercase();
         // A shell metacharacter means the line does more than its leading token
@@ -103,6 +117,25 @@ impl Rule {
     }
 }
 
+/// `*` matches any run of characters; nothing else is special.
+fn glob(pattern: &str, value: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let [first, .., last] = parts.as_slice() else {
+        return pattern == value;
+    };
+    if !value.starts_with(first) || !value[first.len()..].ends_with(last) {
+        return false;
+    }
+    let mut rest = &value[first.len()..value.len() - last.len()];
+    for middle in &parts[1..parts.len() - 1] {
+        match rest.find(middle) {
+            Some(i) => rest = &rest[i + middle.len()..],
+            None => return false,
+        }
+    }
+    true
+}
+
 /// What is being asked for.
 pub struct Request<'a> {
     pub channel: &'a str,
@@ -110,6 +143,8 @@ pub struct Request<'a> {
     pub title: &'a str,
     /// The command, when the tool has one.
     pub command: Option<&'a str>,
+    /// A brokered tool call's arguments, for allow rules scoped by them.
+    pub arguments: Option<&'a serde_json::Value>,
 }
 
 impl Request<'_> {
@@ -209,6 +244,17 @@ mod tests {
             kind: Some("execute"),
             title: command,
             command: Some(command),
+            arguments: None,
+        }
+    }
+
+    fn tool<'a>(name: &'a str, args: &'a serde_json::Value, summary: &'a str) -> Request<'a> {
+        Request {
+            channel: "work",
+            kind: Some(crate::mcp::TOOL_KIND),
+            title: name,
+            command: Some(summary),
+            arguments: Some(args),
         }
     }
 
@@ -216,7 +262,75 @@ mod tests {
     fn the_shipped_bundle_parses_and_has_rules() {
         let p = policy();
         assert!(!p.is_empty());
-        assert_eq!(policy().version, 5);
+        assert_eq!(policy().version, 6);
+    }
+
+    #[test]
+    fn globs_match_only_what_they_say() {
+        assert!(glob("note-*", "note-personal"));
+        assert!(!glob("note-*", "notes-personal"));
+        assert!(glob("*-draft", "plan-draft"));
+        assert!(glob("a*b*c", "aXbYc"));
+        assert!(!glob("a*b*c", "aXc"));
+        assert!(glob("exact", "exact"));
+        assert!(!glob("exact", "exactly"));
+    }
+
+    #[test]
+    fn working_notes_are_written_unattended_and_other_documents_are_asked() {
+        let p = policy();
+        for slug in [
+            "note-personal",
+            "repo-integrations",
+            "meeting-weekly",
+            "inbox-idea",
+        ] {
+            let args = serde_json::json!({ "slug": slug, "body": "x" });
+            let d = p.decide(&tool("doc_write", &args, "doc_write"));
+            assert_eq!(d.verdict, Verdict::Allow, "{slug}");
+        }
+        for args in [
+            serde_json::json!({ "slug": "plan-migration", "body": "x" }),
+            serde_json::json!({ "slug": "guide-deploy", "body": "x" }),
+            serde_json::json!({ "body": "no slug" }),
+        ] {
+            let d = p.decide(&tool("doc_write", &args, "doc_write"));
+            assert_eq!(d.verdict, Verdict::Ask, "{args}");
+        }
+    }
+
+    #[test]
+    fn an_argument_scoped_allow_is_still_beaten_by_a_deny() {
+        let args = serde_json::json!({ "slug": "note-x", "body": "then git push origin main" });
+        let summary = format!("doc_write {args}");
+        let d = policy().decide(&tool("doc_write", &args, &summary));
+        assert_eq!(d.verdict, Verdict::Deny);
+    }
+
+    #[test]
+    fn the_new_reads_run_unattended_and_every_write_is_asked() {
+        let none = serde_json::json!({});
+        for name in [
+            "issue_search",
+            "pipeline_status",
+            "job_trace",
+            "pr_status",
+            "run_status",
+        ] {
+            let d = policy().decide(&tool(name, &none, name));
+            assert_eq!(d.verdict, Verdict::Allow, "{name}");
+        }
+        for name in [
+            "pipeline_run",
+            "pr_comment",
+            "mr_comment",
+            "issue_comment",
+            "issue_update",
+            "issue_create",
+        ] {
+            let d = policy().decide(&tool(name, &none, name));
+            assert_eq!(d.verdict, Verdict::Ask, "{name}");
+        }
     }
 
     #[test]
@@ -383,12 +497,14 @@ mod tests {
             kind: Some("read"),
             title: "x",
             command: None,
+            arguments: None,
         };
         let exec = Request {
             channel: "work",
             kind: Some("execute"),
             title: "x",
             command: None,
+            arguments: None,
         };
         assert_eq!(p.decide(&read).verdict, Verdict::Allow);
         assert_eq!(p.decide(&exec).verdict, Verdict::Ask);

@@ -398,6 +398,36 @@ For `[embed]`, a local `llama-server --embedding -m <model>.gguf` is enough; BGE
 and Qwen3-Embedding-0.6B (which wants `pooling = last`) are the models it was built
 against. Without an endpoint, search is text-only and the Documents screen says so.
 
+### Policy
+
+What runs unasked, what is refused with a reason, and what reaches your queue is a
+signed bundle, `policy.toml`, beside the node's state. `tracon policy init` writes
+the shipped one (`node/src/policy/working-agreements.toml`) and signs it, replacing
+whatever was there; to keep rules of your own, edit the file and run
+`tracon policy sign` instead. The node reads it at startup, so restart it
+(`tracon service restart`) after either, and `tracon policy push` hands it to the
+rest of the mesh. A bundle that is missing, unsigned or malformed has no rules, and
+no rules means everything is asked.
+
+A rule allows, denies, or is left to ask. Deny wins over allow whatever the order,
+and anything no rule names is asked. For a brokered tool an allow names the tool
+exactly and can narrow it by argument, with `*` as the only wildcard:
+
+```toml
+[[rule]]
+id = "unattended-notes"
+verdict = "allow"
+reason = "Keeping working notes current changes nothing the operator has not agreed to."
+kinds = ["tool"]
+matches = ["doc_write"]
+args = { slug = ["note-*", "repo-*", "meeting-*", "inbox-*"] }
+```
+
+The shipped bundle runs the reads unattended — queries, lookups, searches,
+pipeline and check status, job logs, documents, memory, the ledger — and asks
+before every write that others see: a comment, an edited or new ticket, a
+pipeline run, a document other than working notes.
+
 ### Where things live
 
 | | macOS | Linux |

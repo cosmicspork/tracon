@@ -6,7 +6,7 @@
 # Anything not matched here is asked, so adding a rule can only ever reduce the
 # number of interruptions, never widen what an agent may do unattended.
 
-version = 5
+version = 6
 
 # --- 1. Worktree, not the main checkout -------------------------------------
 # Structurally true already: the harness only ever sees its own worktree at
@@ -109,12 +109,25 @@ kinds = ["read", "think"]
 [[rule]]
 id = "brokered-reads"
 verdict = "allow"
-reason = "A read-only query, a data-dictionary lookup, or a review submission changes nothing the operator has not agreed to."
+reason = "A read-only query or lookup, a search, a pipeline or check read, or a review submission changes nothing the operator has not agreed to."
 kinds = ["tool"]
-matches = ["query", "describe", "submit_review", "review_status", "review_verdict", "mr_status", "issue"]
+matches = [
+    "query",
+    "describe",
+    "submit_review",
+    "review_status",
+    "review_verdict",
+    "mr_status",
+    "pipeline_status",
+    "job_trace",
+    "pr_status",
+    "run_status",
+    "issue",
+    "issue_search",
+]
 
 # Writing to the forge or the tracker — a comment, an edited field, a new
-# issue — is named nowhere here, so every one of them is asked. A comment is
+# issue, a pipeline run — is named nowhere here, so every one of them is asked. A comment is
 # visible, attributable and reversible, which is why it is what the agent does
 # instead of transitioning a ticket; it is still the agent speaking in the
 # operator's name where colleagues will read it, and one look before it lands
@@ -122,11 +135,22 @@ matches = ["query", "describe", "submit_review", "review_status", "review_verdic
 
 # Memory and documents are the node's own corpus. Reading it is free; what
 # the agent retains is bounded by kind (a lesson waits for the nightly batch)
-# rather than by asking every time. Writing a document is not named here, so
-# it is asked: a document is the operator's artifact.
+# rather than by asking every time. Writing a document is asked — a document
+# is the operator's artifact — except the working notes below.
 [[rule]]
 id = "corpus-and-ledger"
 verdict = "allow"
 reason = "Recalling what is known, reading a document, retaining a fact, or recording and closing work changes nothing the operator has not agreed to."
 kinds = ["tool"]
 matches = ["recall", "retain", "doc_read", "doc_search", "work_ready", "work_discover", "work_close"]
+
+# Working notes are the agent's to keep current. A plan, a guide, a proposal or
+# a reference is not, and stays asked. A document's kind is its slug's prefix,
+# so the allow is scoped by that.
+[[rule]]
+id = "unattended-notes"
+verdict = "allow"
+reason = "Keeping working notes current changes nothing the operator has not agreed to; plans, guides and references are asked."
+kinds = ["tool"]
+matches = ["doc_write"]
+args = { slug = ["note-*", "repo-*", "meeting-*", "inbox-*"] }

@@ -232,6 +232,7 @@ mod tests {
             kind: Some("execute"),
             title: "gh pr merge 12",
             command: Some("gh pr merge 12"),
+            arguments: None,
         });
         assert_eq!(d.verdict, Verdict::Deny);
     }

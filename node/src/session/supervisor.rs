@@ -373,6 +373,7 @@ impl Supervisor {
             kind: request.kind.as_deref(),
             title: &request.title,
             command: command.as_deref(),
+            arguments: None,
         });
         match decision.verdict {
             crate::policy::Verdict::Allow | crate::policy::Verdict::Deny => {
