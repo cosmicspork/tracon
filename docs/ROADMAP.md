@@ -48,8 +48,7 @@ to Deferred or Never.
 3. **A signed desktop app.** The wrapper ships unsigned; macOS wants a right-click
    → Open on the first install and Windows is not a target. The AppImage and the
    macOS app already self-update from GitHub Releases after matching GitHub's
-   SHA-256 digest; package-managed `.deb` installs deliberately do not. Signing
-   remains distribution work, not code — what it would buy is provenance the
+   SHA-256 digest. Signing remains distribution work, not code — what it would buy is provenance the
    digest cannot give: today a release the repository can publish is a release
    every install will take.
 4. **Forge listing beyond the first page.** The repository browse reads one page

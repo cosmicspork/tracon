@@ -190,7 +190,7 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            bundles: appimage,deb
+            bundles: appimage
           - os: macos-latest
             target: aarch64-apple-darwin
             bundles: app,dmg
@@ -245,7 +245,7 @@ jobs:
         run: |
           ls -R wrapper/target/release/bundle
           gh release upload "${{ needs.release-please.outputs.tag }}" \
-            $(find wrapper/target/release/bundle -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.dmg' -o -name '*.app.tar.gz' \)) --clobber
+            $(find wrapper/target/release/bundle -type f \( -name '*.AppImage' -o -name '*.dmg' -o -name '*.app.tar.gz' \)) --clobber
 
   # One checksums.txt for install.sh, after every binary is attached.
   checksums:

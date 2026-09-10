@@ -67,14 +67,14 @@ musl: spa
     cargo build --release --target x86_64-unknown-linux-musl --bin tracon --bin tracon-hub
     @file target/x86_64-unknown-linux-musl/release/tracon
 
-# The desktop bundle (AppImage and .deb here, .dmg on a Mac) with the node
+# The desktop bundle (the AppImage here, the .dmg on a Mac) with the node
 # carried inside it as a sidecar, built in the same container as `wrapper`
 # (plus `nodejs npm librsvg2-devel fuse` there). Builds the node first.
 gui: spa
     cargo build --release --bin tracon
     mkdir -p wrapper/binaries
     cp target/release/tracon wrapper/binaries/tracon-$(rustc -vV | sed -n 's/^host: //p')
-    distrobox enter tracon-build -- bash -c 'cd {{justfile_directory()}}/wrapper && APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=true npx --yes @tauri-apps/cli@2 build --bundles appimage,deb --config "{\"bundle\":{\"externalBin\":[\"binaries/tracon\"]}}"'
+    distrobox enter tracon-build -- bash -c 'cd {{justfile_directory()}}/wrapper && APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=true npx --yes @tauri-apps/cli@2 build --bundles appimage --config "{\"bundle\":{\"externalBin\":[\"binaries/tracon\"]}}"'
 
 # The desktop wrapper: its own workspace, and it needs webkit and gtk headers.
 # On an immutable host, build it in a container that has them:

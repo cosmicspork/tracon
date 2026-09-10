@@ -95,8 +95,8 @@ fi
 cat <<EOF
 
 the desktop app (tray, notifications, and it runs the node for you) is a
-separate download from the same release: the .AppImage or .deb on Linux, the
-.dmg on macOS. It carries its own copy of this binary.
+separate download from the same release: the .AppImage on Linux, the .dmg on
+macOS. It carries its own copy of this binary.
 
 next, on this machine:
   tracon enroll <invitation url>        join the mesh (run \`tracon mesh invite\` on an enrolled node)
