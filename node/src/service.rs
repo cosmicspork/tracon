@@ -58,12 +58,43 @@ fn unit_text() -> Result<String> {
     let bin = std::env::current_exe().context("finding this binary")?;
     stable_binary(&bin)?;
     let logs = home()?.join("Library/Logs");
-    if cfg!(target_os = "macos") {
+    let path = service_path(home().ok());
+    let path = if cfg!(target_os = "macos") {
         std::fs::create_dir_all(&logs).ok();
-    }
+        path.replace('&', "&amp;").replace('<', "&lt;")
+    } else {
+        path.replace('%', "%%")
+    };
     Ok(text
         .replace("__BIN__", &bin.to_string_lossy())
-        .replace("__LOGS__", &logs.to_string_lossy()))
+        .replace("__LOGS__", &logs.to_string_lossy())
+        .replace("__PATH__", &path))
+}
+
+/// The PATH the node runs with. A service manager hands its services a
+/// minimal one without podman, gh, glab or uv, so the unit carries the PATH
+/// of whoever installed it, then the usual install locations.
+fn service_path(home: Option<PathBuf>) -> String {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let usual = [
+        home.map(|h| h.join(".local/bin")),
+        Some("/opt/homebrew/bin".into()),
+        Some("/usr/local/bin".into()),
+        Some("/usr/bin".into()),
+        Some("/bin".into()),
+        Some("/usr/sbin".into()),
+        Some("/sbin".into()),
+    ];
+    dirs.extend(usual.into_iter().flatten());
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|d| {
+        d.is_absolute() && !d.to_string_lossy().contains(':') && seen.insert(d.clone())
+    });
+    std::env::join_paths(dirs)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// A unit may only name a binary that outlives this process. An AppImage runs
@@ -269,6 +300,9 @@ mod tests {
         // Placeholders are the one thing that must not survive: launchd
         // expands nothing, and systemd would run a file named `__BIN__`.
         assert!(!text.contains("__BIN__"), "{text}");
+        // A service manager's own PATH has none of the tools the node runs.
+        assert!(!text.contains("__PATH__"), "{text}");
+        assert!(text.contains("/usr/bin"), "{text}");
         if cfg!(target_os = "macos") {
             assert!(text.contains("com.tracon.node"));
             assert!(!text.contains("__LOGS__"), "{text}");

@@ -13,9 +13,16 @@
   import {
     check as checkDesktopUpdate,
     desktopUpdateAction,
+    desktopUpdatesAvailable,
     install as installDesktopUpdate,
     status as desktopUpdateStatus,
   } from '../lib/desktop-update'
+  import {
+    installCli as installDesktopCli,
+    restartNode as restartDesktopNode,
+    setupStatus as desktopSetupStatus,
+    type SetupStatus,
+  } from '../lib/desktop-setup'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { remedy } from '../lib/refusal'
@@ -263,6 +270,29 @@
   const desktopAction = $derived(
     desktopUpdate ? desktopUpdateAction(desktopUpdate) : null,
   )
+  let desktopSetup = $state<SetupStatus | null>(null)
+  let desktopSetupError = $state('')
+  let desktopBusy = $state(false)
+
+  onMount(() => {
+    if (desktopUpdatesAvailable()) {
+      desktopSetupStatus()
+        .then((s) => (desktopSetup = s))
+        .catch(() => {})
+    }
+  })
+
+  async function runDesktop(f: () => Promise<SetupStatus>) {
+    desktopBusy = true
+    desktopSetupError = ''
+    try {
+      desktopSetup = await f()
+    } catch (e) {
+      desktopSetupError = e instanceof Error ? e.message : String(e)
+    } finally {
+      desktopBusy = false
+    }
+  }
 
   // Hash navigation is keyed by the router revision rather than mount alone:
   // clicking the same in-app destination must focus it again after async
@@ -720,6 +750,30 @@
         >
           {desktopAction.label}
         </button>
+      </div>
+    {/if}
+    {#if desktopSetup}
+      <small>
+        Node v{desktopSetup.node_version ?? '?'} ·
+        {desktopSetup.owner === 'service'
+          ? 'runs under the service'
+          : desktopSetup.owner === 'migrated'
+            ? 'runs inside the app; restart the app to move it under the service'
+            : 'started outside the app'}
+        · CLI {desktopSetup.cli_version ? `v${desktopSetup.cli_version}` : 'not installed'}
+        {#if desktopSetupError}· {desktopSetupError}{/if}
+      </small>
+      <div class="acts">
+        {#if desktopSetup.sidecar_version && desktopSetup.cli_version !== desktopSetup.sidecar_version}
+          <button class="btn" disabled={desktopBusy} onclick={() => runDesktop(installDesktopCli)}>
+            Install CLI v{desktopSetup.sidecar_version}
+          </button>
+        {/if}
+        {#if desktopSetup.owner === 'service'}
+          <button class="lnk d" disabled={desktopBusy} onclick={() => runDesktop(restartDesktopNode)}>
+            Restart the node (ends running sessions)
+          </button>
+        {/if}
       </div>
     {/if}
   </section>

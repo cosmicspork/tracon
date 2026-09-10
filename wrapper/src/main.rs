@@ -1,13 +1,10 @@
-//! A tray client for a node, and — on a machine where you want one — the thing
-//! that runs it.
+//! A tray client for a node, and the thing that installs it.
 //!
 //! What is actually wanted from native is tray presence, command-tab, a global
-//! hotkey, and system notifications. This provides those four, and will start
-//! and stop the node itself so a laptop does not need a unit file for
-//! something that is only wanted while you are logged in. It adopts a node
-//! that is already running rather than starting a second one, so
-//! `tracon service install` remains the right answer for a machine that has to
-//! stay reachable.
+//! hotkey, and system notifications. The node itself runs under the user's
+//! service manager, so it is there whether or not this app is open; the app
+//! installs that service and the CLI it runs, opens on a setup page until
+//! they exist, and after that is a window onto the node.
 //!
 //! It holds no session state: the window is the same interface the node serves
 //! over HTTP, so a crash here is a reconnect, never lost work.
@@ -20,6 +17,8 @@
 mod node;
 mod prefs;
 mod queue;
+mod service;
+mod setup;
 mod tray;
 mod updater;
 
@@ -48,7 +47,7 @@ pub struct State {
     /// the same approvals.
     pub announced: Mutex<std::collections::HashSet<String>>,
     pub connected: Mutex<bool>,
-    /// Why the node is not running, when this app was the one running it.
+    /// Why the node is not running, when the service should be running it.
     pub node_error: Mutex<Option<String>>,
     /// A node restart this app owes and is waiting to make: the node binary
     /// changed under an update, and the running one is left to finish its
@@ -60,68 +59,6 @@ pub struct State {
 /// Quit both land here; only the latter consults the preference first.
 pub fn quit(app: &tauri::AppHandle) {
     app.exit(0);
-}
-
-/// A node claimed back from the run before this one kept its sessions
-/// through the app's update. If the node binary changed with it, the node
-/// is restarted on the new one — but only once nothing is running, so an
-/// update never ends a session mid-flight.
-async fn refresh_claimed_node(
-    app: tauri::AppHandle,
-    state: Arc<State>,
-    node: Arc<node::Node>,
-    http: reqwest::Client,
-    url: String,
-) {
-    use tauri_plugin_notification::NotificationExt;
-    let running = node::running_version(&http, &url).await;
-    let sidecar = node::binary_version();
-    if !node::needs_restart(running.as_deref(), sidecar.as_deref()) {
-        return;
-    }
-    let target = sidecar.unwrap_or_default();
-    let mut announced = false;
-    loop {
-        let busy = node::running_sessions(&http, &url).await.unwrap_or(1);
-        if busy == 0 {
-            break;
-        }
-        let line = format!(
-            "Node restarts to v{target} when {busy} running session{} end{}",
-            if busy == 1 { "" } else { "s" },
-            if busy == 1 { "s" } else { "" }
-        );
-        *state.node_update.lock().unwrap() = Some(line.clone());
-        tray::refresh(&app, &state);
-        if !announced {
-            announced = true;
-            let _ = app
-                .notification()
-                .builder()
-                .title("tracon updated")
-                .body(line)
-                .show();
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-    }
-    *state.node_update.lock().unwrap() = Some(format!("Restarting the node to v{target}…"));
-    tray::refresh(&app, &state);
-    let outcome = node.restart(&http, &url).await;
-    *state.node_update.lock().unwrap() = None;
-    match outcome {
-        Ok(()) => {
-            let _ = app
-                .notification()
-                .builder()
-                .title("tracon updated")
-                .body(format!("The node is running v{target}."))
-                .show();
-        }
-        Err(why) => {
-            *state.node_error.lock().unwrap() = Some(why);
-        }
-    }
-    tray::refresh(&app, &state);
 }
 
 #[tauri::command]
@@ -147,13 +84,36 @@ async fn desktop_install_update(
     Ok(updater.install(&app).await)
 }
 
+#[tauri::command]
+async fn desktop_setup_status() -> setup::SetupStatus {
+    setup::status(&reqwest::Client::new(), &node_url()).await
+}
+
+#[tauri::command]
+async fn desktop_install_service() -> Result<setup::SetupStatus, String> {
+    setup::install_service(&reqwest::Client::new(), &node_url()).await
+}
+
+#[tauri::command]
+async fn desktop_install_cli() -> Result<setup::SetupStatus, String> {
+    setup::install_cli(&reqwest::Client::new(), &node_url()).await
+}
+
+#[tauri::command]
+async fn desktop_restart_node() -> Result<setup::SetupStatus, String> {
+    setup::restart_node(&reqwest::Client::new(), &node_url()).await
+}
+
+#[tauri::command]
+fn desktop_open_node(app: tauri::AppHandle) {
+    open_at(&app, "/");
+}
+
 fn main() {
     if updater::run_restart_helper() {
         return;
     }
     let state = Arc::new(State::default());
-    let supervisor = Arc::new(node::Node::default());
-    let stopper = supervisor.clone();
     let preferences = Arc::new(prefs::Store::new());
 
     tauri::Builder::default()
@@ -180,13 +140,17 @@ fn main() {
                 .build(),
         )
         .manage(state.clone())
-        .manage(supervisor.clone())
         .manage(preferences.clone())
         .invoke_handler(tauri::generate_handler![
             desktop_managed_local,
             desktop_update_status,
             desktop_check_for_update,
             desktop_install_update,
+            desktop_setup_status,
+            desktop_install_service,
+            desktop_install_cli,
+            desktop_restart_node,
+            desktop_open_node,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -204,52 +168,35 @@ fn main() {
 
             tray::install(&handle)?;
 
-            // Start the node before anything tries to read from it, then point
-            // the window at the node's own origin. The bundled assets exist
-            // only to satisfy the build: served from `tauri://` their relative
-            // `/api` calls would go nowhere, so the interface has to come from
-            // the node the way a browser gets it.
+            // The window opens on the bundled setup page. Once a node answers
+            // — the service's, or anyone's — it is pointed at the node's own
+            // origin instead: the interface's relative `/api` calls only work
+            // served from there. A node an earlier version of this app still
+            // runs as its child stays on the setup page, which moves it under
+            // the service.
             {
                 let handle = handle.clone();
                 let st = state.clone();
-                let node = supervisor.clone();
                 let launch_visible = preferences.get().open_window_at_launch;
                 tauri::async_runtime::spawn(async move {
                     let http = reqwest::Client::new();
                     let url = node_url();
-                    match node.ensure(&http, &url).await {
-                        Ok(found) => {
-                            if let Some(window) = handle.get_webview_window("main") {
-                                if let Ok(parsed) = url.parse() {
-                                    let _ = window.navigate(parsed);
-                                }
-                            }
-                            // Only now: showing the window before the node
-                            // answers shows the failure page of a node that
-                            // is merely still starting.
-                            if launch_visible {
-                                show_window(&handle);
-                            }
-                            if found == node::Ensured::Claimed {
-                                tauri::async_runtime::spawn(refresh_claimed_node(
-                                    handle.clone(),
-                                    st.clone(),
-                                    node.clone(),
-                                    http.clone(),
-                                    url.clone(),
-                                ));
-                            }
-                            if let Some(why) = node.supervise(http, url).await {
-                                *st.node_error.lock().unwrap() = Some(why);
-                                tray::refresh(&handle, &st);
-                            }
-                        }
-                        Err(why) => {
-                            eprintln!("tracon: {why}");
-                            *st.node_error.lock().unwrap() = Some(why);
-                            tray::refresh(&handle, &st);
-                        }
+                    let local = desktop_managed_local();
+                    let migrated = local && node::migrated_node(&node::state_dir()).is_some();
+                    let ready = node::answering(&http, &url).await
+                        || (local && service::installed() && node::wait_ready(&http, &url).await);
+                    if ready && !migrated {
+                        open_at_if(&handle, "/", launch_visible);
+                        return;
                     }
+                    if !ready && service::installed() {
+                        let why =
+                            "The service is installed but the node is not answering".to_string();
+                        eprintln!("tracon: {why}");
+                        *st.node_error.lock().unwrap() = Some(why);
+                        tray::refresh(&handle, &st);
+                    }
+                    show_window(&handle);
                 });
             }
 
@@ -264,10 +211,9 @@ fn main() {
 
             // A window closed to the tray means the app keeps running, so the
             // only ways out are the tray's Quit and a signal — logout sends
-            // one, and so does anything that kills the app. Routing a signal
-            // through `exit` rather than letting the process die is what stops
-            // a node being orphaned by a logout: the same shutdown runs either
-            // way, and an orphan would outlive the app that owns it.
+            // one. Routing a signal through `exit` runs the same shutdown
+            // either way, which matters for the one node the app still owns:
+            // an earlier version's child, not yet moved under the service.
             #[cfg(unix)]
             {
                 let handle = handle.clone();
@@ -327,12 +273,13 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("building the wrapper")
         .run(move |_app, event| {
-            // Quitting takes the node with it, but only if this app started
-            // it. Exit is the last event, and stopping is synchronous on
-            // purpose: the process must not go away while the node is still
-            // tearing down its containers.
+            // The service's node outlives the app. A child an earlier version
+            // spawned does not, as it never did: quitting stops it, and waits,
+            // so it is not left tearing down its containers alone.
             match event {
-                tauri::RunEvent::Exit => stopper.stop(),
+                tauri::RunEvent::Exit if !service::installed() => {
+                    node::stop_migrated_node(&node::state_dir())
+                }
                 // The dock icon and the app switcher both reactivate rather
                 // than launch, and the window they would raise was hidden by
                 // the close button. Without this the icon is inert. macOS
@@ -480,11 +427,19 @@ pub fn toggle_window(app: &tauri::AppHandle) {
 
 /// Open the window at one of the interface's routes.
 pub fn open_at(app: &tauri::AppHandle, path: &str) {
+    open_at_if(app, path, true);
+}
+
+/// Point the window at one of the interface's routes, raising it only when
+/// asked: at launch the operator may want the app in the tray and no more.
+fn open_at_if(app: &tauri::AppHandle, path: &str, show: bool) {
     if let Some(window) = app.get_webview_window("main") {
         let url = format!("{}{path}", node_url());
         if let Ok(parsed) = url.parse() {
             let _ = window.navigate(parsed);
         }
     }
-    show_window(app);
+    if show {
+        show_window(app);
+    }
 }

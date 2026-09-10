@@ -148,10 +148,14 @@ channel's binding, editable) → node (bindings decide the eligible set; the ope
 picks within it; refused, unreachable, and mismatched nodes are listed with the
 reason and not selectable).
 
-**First run.** Until the first session exists, the queue's empty state is a
-three-step checklist — connect a provider, add a work item, start a plan session —
-each linking where it is done, each marked off as the state it derives from
-appears. Gone for good once any session exists.
+**First run.** On the desktop the app opens on its own setup page until the node
+runs under the user's service manager: podman (and on macOS its machine), the
+background service, and the CLI, each with the button or the command that does
+it. In the node's interface the composer then carries what stands between it and
+a first session — connect a provider, name a channel, and optionally pair a hub —
+each linking where it is done and marked off as the state it derives from
+appears. It comes back whenever one of them stops being true, however many
+sessions have run.
 
 **Enroll.** Invite (channels to hand off, code, QR, the one-line bootstrap, this
 node's fingerprint, expiry) → received (the other node's name and fingerprint;

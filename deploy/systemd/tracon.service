@@ -13,6 +13,7 @@ ExecStart="__BIN__" serve
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=tracon=info
+Environment="PATH=__PATH__"
 # The node ends its sessions and tears down harness containers on SIGTERM;
 # killing it sooner orphans them.
 KillSignal=SIGTERM
