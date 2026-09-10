@@ -66,7 +66,7 @@
       {:else if e.kind === 'permission_request'}
         <div class="mark wait">permission · {e.payload.title}</div>
       {:else if e.kind === 'permission_answer'}
-        <div class="mark">answered: {e.payload.option_id}</div>
+        <div class="mark">answered: {e.payload.option_id}{e.payload.arguments ? ' (edited)' : ''}</div>
       {:else if e.kind === 'permission_expired'}
         <div class="mark crit">{e.payload.reason ?? 'denied: unanswered'}</div>
       {:else if e.kind === 'turn_end'}

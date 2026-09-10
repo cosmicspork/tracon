@@ -170,8 +170,8 @@ export const api = {
     },
   ) => call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/verdict`, verdict),
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),
-  answer: (permissionId: string, optionId: string) =>
-    call<void>('POST', `/api/permissions/${permissionId}/answer`, { option_id: optionId }),
+  answer: (permissionId: string, optionId: string, args?: Record<string, unknown>) =>
+    call<void>('POST', `/api/permissions/${permissionId}/answer`, { option_id: optionId, arguments: args }),
   // Documents: read by slug, search by content, edit with the hash last read.
   docs: (channel?: string, kind?: string) => {
     const q = new URLSearchParams()

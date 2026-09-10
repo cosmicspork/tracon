@@ -233,6 +233,82 @@ async fn a_tool_the_policy_does_not_cover_is_asked_through_the_attachment() {
     );
 }
 
+/// The id of the first card waiting on the operator.
+async fn waiting_card(h: &Harness) -> String {
+    for _ in 0..100 {
+        if let Some(p) = h.store.open_permissions().unwrap().first() {
+            return p.id.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the call should be waiting on the operator");
+}
+
+#[tokio::test]
+async fn an_edited_answer_runs_the_tool_with_the_operators_words() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let app = h.operator.clone();
+    let call_task = tokio::spawn(async move {
+        mcp(
+            &app,
+            "work",
+            tool_call(
+                "doc_write",
+                json!({ "slug": "note-x", "body": "the agent's draft" }),
+            ),
+        )
+        .await
+    });
+    let id = waiting_card(&h).await;
+    let (status, _) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/permissions/{id}/answer"),
+        Some(json!({
+            "option_id": "allow_once",
+            "arguments": { "slug": "note-x", "body": "the operator's words" }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, v) = call_task.await.unwrap();
+    assert_ne!(v["result"]["isError"], json!(true), "{v}");
+    let doc = h.store.doc_get("work", "note-x").unwrap().unwrap();
+    assert_eq!(doc.body, "the operator's words");
+}
+
+#[tokio::test]
+async fn an_edit_is_held_to_the_same_refusals_as_the_call() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let app = h.operator.clone();
+    let call_task = tokio::spawn(async move {
+        mcp(
+            &app,
+            "work",
+            tool_call("doc_write", json!({ "slug": "note-y", "body": "a draft" })),
+        )
+        .await
+    });
+    let id = waiting_card(&h).await;
+    call(
+        &h.operator,
+        "POST",
+        &format!("/api/permissions/{id}/answer"),
+        Some(json!({
+            "option_id": "allow_once",
+            "arguments": { "slug": "note-y", "body": "then git push origin main" }
+        })),
+    )
+    .await;
+    let (_, v) = call_task.await.unwrap();
+    assert_eq!(v["result"]["isError"], json!(true), "{v}");
+    let text = v["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("refused by policy"), "{text}");
+    assert!(h.store.doc_get("work", "note-y").unwrap().is_none());
+}
+
 #[tokio::test]
 async fn a_refused_call_says_the_operator_refused_it() {
     state::isolate();

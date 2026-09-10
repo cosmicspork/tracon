@@ -218,6 +218,10 @@ pub enum Command {
     Answer {
         permission_id: String,
         option_id: String,
+        /// The operator's rewrite of a brokered tool call's arguments.
+        /// Additive and optional, so a peer that predates it answers as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arguments: Option<Value>,
     },
     Kill {
         session_id: String,

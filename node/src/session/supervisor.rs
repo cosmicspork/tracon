@@ -36,6 +36,8 @@ pub enum Command {
     Answer {
         permission_id: String,
         option_id: String,
+        /// The operator's rewrite of a brokered tool call's arguments.
+        arguments: Option<serde_json::Value>,
         ack: oneshot::Sender<Result<(), String>>,
     },
     Kill,
@@ -205,8 +207,8 @@ impl Supervisor {
                     Some(Command::Prompt { text, ack }) => {
                         let _ = ack.send(self.on_prompt(text).await);
                     }
-                    Some(Command::Answer { permission_id, option_id, ack }) => {
-                        let _ = ack.send(self.on_answer(&permission_id, &option_id).await);
+                    Some(Command::Answer { permission_id, option_id, arguments, ack }) => {
+                        let _ = ack.send(self.on_answer(&permission_id, &option_id, arguments).await);
                     }
                     Some(Command::TurnDone { kind, payload, tokens }) => {
                         self.on_turn_done(kind, payload, tokens).await;
@@ -428,18 +430,24 @@ impl Supervisor {
         self.set_state(SessionState::WaitingOnYou, None);
     }
 
-    async fn on_answer(&mut self, permission_id: &str, option_id: &str) -> Result<(), String> {
+    async fn on_answer(
+        &mut self,
+        permission_id: &str,
+        option_id: &str,
+        arguments: Option<serde_json::Value>,
+    ) -> Result<(), String> {
         on_answer_row(
             &self.store,
             &mut *self.open.lock().await,
             permission_id,
             option_id,
+            arguments.clone(),
             self.mono_ms(),
         )?;
         self.record(
             ek::PERMISSION_ANSWER,
             Some(permission_id.to_string()),
-            json!({ "permission_id": permission_id, "option_id": option_id }),
+            json!({ "permission_id": permission_id, "option_id": option_id, "arguments": arguments }),
         );
         self.back_to_running().await;
         Ok(())
@@ -713,13 +721,29 @@ pub(super) fn permission_row(
 
 /// Resolve an open request with the operator's answer and hand it to whoever
 /// is waiting. The caller records the event and republishes the session.
+/// Edited arguments are accepted only on a brokered tool call: the node runs
+/// that call itself, while a harness's own request would carry the edit back
+/// to a harness that never asked for it.
 pub(super) fn on_answer_row(
     store: &Store,
     open: &mut HashMap<String, oneshot::Sender<PermissionReply>>,
     permission_id: &str,
     option_id: &str,
+    arguments: Option<serde_json::Value>,
     mono_ms: i64,
 ) -> Result<(), String> {
+    if let Some(args) = &arguments {
+        let tool = store
+            .get_permission(permission_id)
+            .map_err(|e| e.to_string())?
+            .is_some_and(|p| p.kind.as_deref() == Some(crate::mcp::TOOL_KIND));
+        if !tool {
+            return Err("only a brokered tool call can be answered with edited arguments".into());
+        }
+        if !args.is_object() {
+            return Err("edited arguments must be an object".into());
+        }
+    }
     let Some(sender) = open.remove(permission_id) else {
         return Err("no open permission request with that id".into());
     };
@@ -729,7 +753,16 @@ pub(super) fn on_answer_row(
     {
         return Err("permission request is no longer open".into());
     }
-    let _ = sender.send(PermissionReply::Selected(option_id.to_string()));
+    let reply = match arguments {
+        Some(arguments) if option_id == crate::acp::types::OPTION_ALLOW_ONCE => {
+            PermissionReply::Edited {
+                option_id: option_id.to_string(),
+                arguments,
+            }
+        }
+        _ => PermissionReply::Selected(option_id.to_string()),
+    };
+    let _ = sender.send(reply);
     Ok(())
 }
 
