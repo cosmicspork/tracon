@@ -525,7 +525,9 @@ const MIGRATIONS: &[&str] = &[
 
     INSERT OR IGNORE INTO review_decision
         (id, review_id, revision_id, decision, source, reason, title, body, patch, decided_ms)
-    SELECT 'legacy:' || id, id, 'legacy:' || id, state, 'legacy_unknown', verdict_reason,
+    SELECT 'legacy:' || id, id, 'legacy:' || id,
+           CASE WHEN state = 'revising' THEN 'revise' ELSE state END,
+           'legacy_unknown', verdict_reason,
            edited_title, edited_body, revision_patch, updated_ms
     FROM review WHERE state IN ('approved', 'rejected', 'revising') AND head_sha <> '';
 

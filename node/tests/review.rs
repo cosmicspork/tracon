@@ -914,7 +914,11 @@ async fn candidate_controlled_check_file_cannot_replace_operator_required_checks
 #[tokio::test]
 async fn prose_only_resubmission_reuses_exact_candidate_evidence() {
     state::isolate();
-    let f = fixture(test_name!(), WITH_GH).await;
+    let f = fixture_with(test_name!(), WITH_GH, |cfg| {
+        cfg.boundary.harness_image =
+            "localhost/tracon-harness@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+    })
+    .await;
     let first = f.tool("s1", "submit_review", f.submit_args()).await;
     let review_id = first["review_id"]
         .as_str()

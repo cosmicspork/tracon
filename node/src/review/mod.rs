@@ -310,6 +310,7 @@ pub struct CandidateSnapshot {
 
 impl Drop for CandidateSnapshot {
     fn drop(&mut self) {
+        make_tree_writable(&self.root);
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
@@ -471,6 +472,21 @@ fn split_once_byte(bytes: &[u8], separator: u8) -> Option<(&[u8], &[u8])> {
     Some((&bytes[..at], &bytes[at + 1..]))
 }
 
+fn make_tree_writable(path: &Path) {
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if child.is_dir() {
+                make_tree_writable(&child);
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+}
 fn safe_candidate_path(path: &str) -> Result<(), ReviewError> {
     if path.is_empty()
         || Path::new(path)
@@ -513,6 +529,10 @@ async fn pinned_context(worktree: &str, head_sha: &str, diff: &str) -> Vec<CodeC
     let mut current = None::<String>;
     let mut requested = Vec::<(String, usize, usize)>::new();
     for line in diff.lines() {
+        if line == "+++ /dev/null" {
+            current = None;
+            continue;
+        }
         if let Some(path) = line.strip_prefix("+++ b/") {
             current = Some(path.to_string());
             continue;

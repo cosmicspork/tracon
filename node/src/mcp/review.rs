@@ -422,7 +422,6 @@ async fn run_checks(
     force_rerun: bool,
 ) -> Result<review::checks::CheckReport, String> {
     let commands = review::checks::required_definitions(manager.cfg());
-    let slug = ctx.session_id.rsplit('-').next().unwrap_or("s").to_string();
     manager.set_checking(&ctx.session_id, true);
     manager.record_event(
         &ctx.session_id,
@@ -440,7 +439,6 @@ async fn run_checks(
         store,
         candidate,
         snapshot,
-        &slug,
         force_rerun,
     )
     .await;
@@ -450,7 +448,16 @@ async fn run_checks(
         manager.record_event(
             &ctx.session_id,
             ek::CHECK_RESULT,
-            json!({ "candidate_id": candidate.id, "result": result }),
+            json!({
+                "candidate_id": candidate.id,
+                "command": result.command,
+                "ok": result.ok,
+                "exit": result.exit,
+                "tail": result.tail,
+                "ms": result.ms,
+                "outcome": result.outcome,
+                "reused_from": result.reused_from,
+            }),
         );
     }
     if report.all_required_passed {

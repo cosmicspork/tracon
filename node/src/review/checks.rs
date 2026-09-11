@@ -68,7 +68,6 @@ pub async fn run_required(
     store: &Store,
     candidate: &CandidateRow,
     snapshot: &Path,
-    session_slug: &str,
     force_rerun: bool,
 ) -> Result<CheckReport, String> {
     let commands = required_definitions(cfg);
@@ -223,11 +222,11 @@ pub async fn run_required(
         }
         let mount = Mount::volume(scratch_volume, "/work", false);
         let started = std::time::Instant::now();
-        let runner_name = format!("tracon-check-{session_slug}-{index}-{run_id}");
+        let runner_name = format!("tracon-c-{index}-{}", &hash(&run_id)[..12]);
         let cmd = RunnerCommand {
             argv: vec!["sh".into(), "-lc".into(), command.clone()],
             env: Vec::new(),
-            mounts: vec![mount.clone()],
+            mounts: vec![mount],
             workdir: Some("/work".into()),
             name: runner_name.clone(),
             image: None,
@@ -355,18 +354,9 @@ pub fn review_required_checks_current(
                 .map_err(|error| error.to_string())?
                 .is_some_and(|run| effective_outcome(&run) == "passed")
         } else {
-            // The latest submission ran this mutable tag directly. It can be
-            // shown honestly, but a later submission will execute again rather
-            // than treating the tag as stable cache identity.
-            store
-                .latest_matching_check(
-                    &candidate.id,
-                    &definition_hash,
-                    Some(&raw_image),
-                    &inputs_json,
-                )
-                .map_err(|error| error.to_string())?
-                .is_some_and(|run| effective_outcome(&run) == "passed")
+            return Err(format!(
+                "required check `{command}` used mutable execution image `{raw_image}`; configure an image digest before approval"
+            ));
         };
         if !valid {
             return Err(format!(

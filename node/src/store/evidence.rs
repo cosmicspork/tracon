@@ -383,6 +383,7 @@ impl Store {
     /// A direct run against the exact current definition and execution
     /// configuration. This is used when an image is mutable: it may support
     /// the submission that just ran, but is never selected as reusable proof.
+    /// The latest terminal direct execution for the exact current inputs.
     pub fn latest_matching_check(
         &self,
         candidate_id: &str,
@@ -397,8 +398,8 @@ impl Store {
         conn.query_row(
             "SELECT * FROM check_run
              WHERE candidate_id=?1 AND definition_hash=?2 AND execution_image IS ?3
-               AND inputs_json=?4 AND outcome='passed'
-             ORDER BY finished_ms DESC LIMIT 1",
+               AND inputs_json=?4 AND outcome <> 'running'
+             ORDER BY finished_ms DESC, id DESC LIMIT 1",
             params![candidate_id, definition_hash, execution_image, inputs_json],
             CheckRunRow::from_row,
         )
@@ -622,10 +623,15 @@ impl Store {
             .iter()
             .map(|revision| revision.review_id.as_str())
             .collect();
+        let revision_ids: BTreeSet<&str> = revisions
+            .iter()
+            .map(|revision| revision.id.as_str())
+            .collect();
         let mut decisions = Vec::new();
         for review_id in review_ids {
             decisions.extend(self.review_decisions(review_id)?);
         }
+        decisions.retain(|decision| revision_ids.contains(decision.revision_id.as_str()));
         decisions.sort_by_key(|decision| decision.decided_ms);
         Ok(CandidateEvidence {
             candidate,
