@@ -74,6 +74,11 @@ struct GatedCall {
     one_shot: bool,
 }
 
+enum ActionRecord {
+    New(String),
+    Replay(Value),
+}
+
 impl Tools {
     /// The tools a review session gets: what it needs to read, and its
     /// verdict. Nothing that writes, publishes, or reaches a forge.
@@ -171,77 +176,62 @@ impl Tools {
             return operator::call(&access.store, &access.manager, &self.cfg, ctx, name, args)
                 .await;
         }
+        if consequential_name(name) && consequential(name, args).is_none() {
+            return Err("consequential calls require a valid operation_id and canonical arguments".into());
+        }
         let gated = if plan_write {
             GatedCall { arguments: None, one_shot: false }
         } else {
             self.gate(ctx, name, args).await?
         };
         let args = gated.arguments.as_ref().unwrap_or(args);
+        if consequential_name(name) && consequential(name, args).is_none() {
+            return Err("consequential calls require a valid operation_id and canonical arguments".into());
+        }
         self.revalidate_consequential(ctx, name, args, gated.one_shot)?;
         let action_record = self.begin_consequential(ctx, name, args, gated.one_shot)?;
+        if let Some(ActionRecord::Replay(outcome)) = &action_record {
+            return Ok(outcome.clone());
+        }
         let result = match name {
-            consulta::QUERY | consulta::DESCRIBE => {
-                consulta::call(&self.broker, &self.cfg, ctx, name, args).await
-            }
-            gitlab::MR_STATUS
-            | gitlab::MR_COMMENT
-            | gitlab::MR_MERGE
-            | gitlab::PIPELINE_STATUS
-            | gitlab::JOB_TRACE
-            | gitlab::PIPELINE_RUN
-            | gitlab::DEPLOY => gitlab::call(&self.broker, &self.http, ctx, name, args).await,
-            jira::ISSUE
-            | jira::ISSUE_SEARCH
-            | jira::ISSUE_COMMENT
-            | jira::ISSUE_UPDATE
-            | jira::ISSUE_CREATE
-            | jira::ISSUE_TRANSITION => jira::call(&self.broker, &self.http, ctx, name, args).await,
+            consulta::QUERY | consulta::DESCRIBE => consulta::call(&self.broker, &self.cfg, ctx, name, args).await,
+            gitlab::MR_STATUS | gitlab::MR_COMMENT | gitlab::MR_MERGE | gitlab::PIPELINE_STATUS
+            | gitlab::JOB_TRACE | gitlab::PIPELINE_RUN | gitlab::DEPLOY =>
+                gitlab::call(&self.broker, &self.http, ctx, name, args).await,
+            jira::ISSUE | jira::ISSUE_SEARCH | jira::ISSUE_COMMENT | jira::ISSUE_UPDATE
+            | jira::ISSUE_CREATE | jira::ISSUE_TRANSITION =>
+                jira::call(&self.broker, &self.http, ctx, name, args).await,
             review::SUBMIT | review::STATUS | review::VERDICT => {
-                let access = self
-                    .session
-                    .get()
-                    .ok_or("review tools are not available on this node")?;
+                let access = self.session.get().ok_or("review tools are not available on this node")?;
                 review::call(&access.store, &access.manager, ctx, name, args).await
             }
             memory::RECALL | memory::RETAIN => {
-                let access = self
-                    .session
-                    .get()
-                    .ok_or("memory is not available on this node")?;
+                let access = self.session.get().ok_or("memory is not available on this node")?;
                 memory::call(self, access, ctx, name, args).await
             }
             work::WORK_READY | work::WORK_DISCOVER | work::WORK_CLOSE => {
-                let access = self
-                    .session
-                    .get()
-                    .ok_or_else(|| "node not ready".to_string())?;
+                let access = self.session.get().ok_or_else(|| "node not ready".to_string())?;
                 work::call(access, ctx, name, args).await
             }
             docs::DOC_READ | docs::DOC_SEARCH | docs::DOC_WRITE => {
-                let access = self
-                    .session
-                    .get()
-                    .ok_or("documents are not available on this node")?;
+                let access = self.session.get().ok_or("documents are not available on this node")?;
                 docs::call(self, access, ctx, name, args).await
             }
-            github::PR_STATUS | github::PR_COMMENT | github::RUN_STATUS | github::PR_MERGE => {
-                github::call(&self.broker, &self.http, ctx, name, args).await
-            }
+            github::PR_STATUS | github::PR_COMMENT | github::RUN_STATUS | github::PR_MERGE =>
+                github::call(&self.broker, &self.http, ctx, name, args).await,
             other => Err(format!("no tool named {other}")),
         };
         let result = match (name, result) {
             (review::SUBMIT, Ok(submitted)) => self.auto_publish_review(ctx, args, submitted).await,
             (_, result) => result,
         };
-        if let Some(id) = action_record {
+        if let Some(ActionRecord::New(id)) = action_record {
             let (state, outcome) = match &result {
                 Ok(value) => ("succeeded", value.to_string()),
+                Err(error) if remote_outcome_unknown(error) => ("uncertain", error.clone()),
                 Err(error) => ("failed", error.clone()),
             };
-            self.session
-                .get()
-                .expect("authority record requires session")
-                .store
+            self.session.get().expect("authority record requires session").store
                 .authority_action_finish(&id, state, &outcome)
                 .map_err(|e| e.to_string())?;
         }
@@ -290,7 +280,7 @@ impl Tools {
         let action_id = uuid::Uuid::now_v7().to_string();
         access.store.authority_action_begin(
             &action_id, decision.rule_id.as_deref(), crate::authority::PUBLISH, &canonical,
-            &ctx.channel, &ctx.session_id, Some(&review.head_sha),
+            &ctx.channel, &ctx.session_id, Some(&review.head_sha), None,
             &serde_json::json!({ "review_id": review.id, "candidate": review.head_sha, "prose": prose }).to_string(),
         ).map_err(|e| e.to_string())?;
         let recheck = || {
@@ -317,8 +307,11 @@ impl Tools {
             Err(error) => {
                 access.store.authority_action_finish(&action_id, "failed", &error)
                     .map_err(|e| e.to_string())?;
+                let state = access.store.get_review(&review.id).map_err(|e| e.to_string())?
+                    .map(|current| current.state)
+                    .unwrap_or_else(|| "missing".into());
                 Ok(serde_json::json!({
-                    "review_id": review.id, "state": "new",
+                    "review_id": review.id, "state": state,
                     "authority": { "mode": "automatic", "outcome": "failed", "reason": error },
                 }))
             }
@@ -471,6 +464,21 @@ impl Tools {
         tool
     }
 
+    fn revalidate_tool_policy(&self, ctx: &CallContext, name: &str, args: &Value) -> Result<(), String> {
+        let summary = summarize(name, args);
+        let decision = self.policy.read().unwrap().decide(&Request {
+            channel: &ctx.channel,
+            kind: Some(TOOL_KIND),
+            title: name,
+            command: Some(&summary),
+            arguments: Some(args),
+        });
+        if decision.verdict == Verdict::Deny {
+            return Err(refusal(decision));
+        }
+        Ok(())
+    }
+
     /// Grants are re-read after every operator wait and immediately before a
     /// consequential request. Revocation and expiry never rely on an earlier
     /// cached decision.
@@ -481,6 +489,7 @@ impl Tools {
         args: &Value,
         one_shot: bool,
     ) -> Result<(), String> {
+        self.revalidate_tool_policy(ctx, name, args)?;
         let Some((action, target, revision)) = consequential(name, args) else {
             return Ok(());
         };
@@ -514,49 +523,71 @@ impl Tools {
         name: &str,
         args: &Value,
         one_shot: bool,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<ActionRecord>, String> {
+        self.revalidate_tool_policy(ctx, name, args)?;
         let Some((action, target, revision)) = consequential(name, args) else {
             return Ok(None);
         };
         let access = self.session.get().ok_or("authority requires a session")?;
         let decision = crate::authority::decide(
-            access.store.as_ref(),
-            &self.policy.read().unwrap(),
-            &ctx.channel,
-            &ctx.session_id,
-            action,
-            &target,
-            revision.as_deref(),
-            args,
+            access.store.as_ref(), &self.policy.read().unwrap(), &ctx.channel, &ctx.session_id,
+            action, &target, revision.as_deref(), args,
         )?;
         if decision.verdict != Verdict::Allow && !(one_shot && decision.verdict == Verdict::Ask) {
             return Err("authority changed before dispatch".into());
         }
+        let evidence = serde_json::json!({
+            "arguments": canonical_consequential_payload(name, args).expect("validated consequential arguments"),
+        }).to_string();
+        let operation_id = args["operation_id"].as_str().expect("validated operation id");
+        let request_hash = crate::corpus::hash_body(&evidence);
+        if let Some((state, outcome, recorded_hash)) = access.store.authority_action_existing(
+            action, &target, &ctx.channel, revision.as_deref(), operation_id,
+        ).map_err(|e| e.to_string())? {
+            if recorded_hash != request_hash {
+                return Err("operation_id was already used for a different request".into());
+            }
+            if state == "succeeded" {
+                let outcome = outcome.unwrap_or_default();
+                return Ok(Some(ActionRecord::Replay(
+                    serde_json::from_str(&outcome).unwrap_or(serde_json::json!(outcome)),
+                )));
+            }
+            return Err(format!(
+                "this operation is {state}; reconcile its recorded external outcome before retrying"
+            ));
+        }
         let id = uuid::Uuid::now_v7().to_string();
-        access.store.authority_action_begin(
-            &id,
-            decision.rule_id.as_deref(),
-            action,
-            &target,
-            &ctx.channel,
-            &ctx.session_id,
-            revision.as_deref(),
-            &serde_json::json!({
-                "arguments": args,
-                "one_shot_operator_approval": one_shot,
-            }).to_string(),
-        ).map_err(|e| e.to_string())?;
-        Ok(Some(id))
+        if let Err(error) = access.store.authority_action_begin(
+            &id, decision.rule_id.as_deref(), action, &target, &ctx.channel, &ctx.session_id,
+            revision.as_deref(), Some(operation_id), &evidence,
+        ) {
+            if let Some((state, outcome, recorded_hash)) = access.store.authority_action_existing(
+                action, &target, &ctx.channel, revision.as_deref(), operation_id,
+            ).map_err(|e| e.to_string())? {
+                if recorded_hash != request_hash {
+                    return Err("operation_id was already used for a different request".into());
+                }
+                if state == "succeeded" {
+                    let outcome = outcome.unwrap_or_default();
+                    return Ok(Some(ActionRecord::Replay(
+                        serde_json::from_str(&outcome).unwrap_or(serde_json::json!(outcome)),
+                    )));
+                }
+                return Err(format!(
+                    "this operation is {state}; reconcile its recorded external outcome before retrying"
+                ));
+            }
+            return Err(error.to_string());
+        }
+        Ok(Some(ActionRecord::New(id)))
     }
 
-    /// Handle one MCP JSON-RPC message. Returns `None` for notifications, which
-    /// take no response.
+    /// Handle one MCP JSON-RPC message. Returns `None` for notifications.
     pub async fn handle(&self, ctx: &CallContext, msg: &Value) -> Option<Value> {
-        // Notifications carry no id and expect nothing back.
         let id = msg.get("id").cloned()?;
         let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
-
         let result = match method {
             "initialize" => Ok(json!({
                 "protocolVersion": PROTOCOL_VERSION,
@@ -567,22 +598,15 @@ impl Tools {
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                match self.call(ctx, name, &args).await {
-                    Ok(v) => Ok(tool_result(&v, false)),
-                    // A refused tool is a result the model can read and act on,
-                    // not a protocol error it cannot see.
-                    Err(e) => Ok(tool_result(&json!(e), true)),
-                }
+                self.call(ctx, name, &args).await.map(|v| tool_result(&v, false))
+                    .or_else(|e| Ok(tool_result(&json!(e), true)))
             }
             "ping" => Ok(json!({})),
             other => Err(format!("unsupported method {other}")),
         };
-
         Some(match result {
             Ok(v) => json!({ "jsonrpc": "2.0", "id": id, "result": v }),
-            Err(e) => {
-                json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": e } })
-            }
+            Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": e } }),
         })
     }
 }
@@ -590,8 +614,22 @@ impl Tools {
 
 /// Consequential verbs carry their scope in arguments. This parser is strict:
 /// malformed input cannot fall through to an unscoped authority decision.
+fn consequential_name(name: &str) -> bool {
+    matches!(
+        name,
+        github::PR_MERGE | gitlab::MR_MERGE | gitlab::DEPLOY | jira::ISSUE_TRANSITION
+    )
+}
+
 fn consequential(name: &str, args: &Value) -> Option<(&'static str, String, Option<String>)> {
     let string = |key| args.get(key).and_then(Value::as_str).filter(|v| !v.trim().is_empty());
+    if matches!(name, github::PR_MERGE | gitlab::MR_MERGE | gitlab::DEPLOY | jira::ISSUE_TRANSITION)
+        && !string("operation_id").is_some_and(|id| {
+            id.len() >= 8 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+    {
+        return None;
+    }
     match name {
         github::PR_MERGE => Some((
             crate::authority::MERGE,
@@ -605,16 +643,63 @@ fn consequential(name: &str, args: &Value) -> Option<(&'static str, String, Opti
         )),
         gitlab::DEPLOY => Some((
             crate::authority::DEPLOY,
-            format!("gitlab:{}:environment:{}", string("project")?, string("environment")?),
+            format!(
+                "gitlab:{}:environment:{}:pipeline:{}:job:{}",
+                string("project")?,
+                string("environment")?,
+                args.get("pipeline_id").and_then(Value::as_i64)?,
+                args.get("job_id").and_then(Value::as_i64)?,
+            ),
             string("source_sha").map(str::to_string),
         )),
-        jira::ISSUE_TRANSITION => Some((
-            crate::authority::TICKET_TRANSITION,
-            format!("jira:issue:{}", string("key")?),
-            None,
-        )),
+        jira::ISSUE_TRANSITION => {
+            let transition = string("transition_id")?;
+            if !transition.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) {
+                return None;
+            }
+            Some((
+                crate::authority::TICKET_TRANSITION,
+                format!("jira:issue:{}:transition:{transition}", string("key")?),
+                None,
+            ))
+        }
         _ => None,
     }
+}
+
+/// Normalize provider defaults and ignore arguments a consequential provider
+/// does not consume before comparing a stable operation id on replay.
+fn canonical_consequential_payload(name: &str, args: &Value) -> Option<Value> {
+    let string = |key| args.get(key).and_then(Value::as_str).filter(|v| !v.trim().is_empty());
+    let operation_id = string("operation_id")?;
+    match name {
+        github::PR_MERGE => Some(serde_json::json!({
+            "repo": string("repo")?, "number": args.get("number")?.as_i64()?,
+            "head_sha": string("head_sha")?, "method": string("method").unwrap_or("squash"),
+            "operation_id": operation_id,
+        })),
+        gitlab::MR_MERGE => Some(serde_json::json!({
+            "project": string("project")?, "iid": args.get("iid")?.as_i64()?,
+            "head_sha": string("head_sha")?, "squash": args.get("squash").and_then(Value::as_bool).unwrap_or(true),
+            "operation_id": operation_id,
+        })),
+        gitlab::DEPLOY => Some(serde_json::json!({
+            "project": string("project")?, "pipeline_id": args.get("pipeline_id")?.as_i64()?,
+            "job_id": args.get("job_id")?.as_i64()?, "environment": string("environment")?,
+            "source_sha": string("source_sha")?, "operation_id": operation_id,
+        })),
+        jira::ISSUE_TRANSITION => Some(serde_json::json!({
+            "key": string("key")?, "transition_id": string("transition_id")?,
+            "operation_id": operation_id,
+        })),
+        _ => None,
+    }
+}
+
+/// Only a failed mutation transport or server error has an unknown remote
+/// outcome. Read-only preflight failures are safe to retry.
+fn remote_outcome_unknown(error: &str) -> bool {
+    error.starts_with("mutation-outcome-unknown:")
 }
 fn refusal(decision: Decision) -> String {
     format!(

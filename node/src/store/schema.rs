@@ -381,6 +381,47 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX authority_action_pending ON authority_action(state, created_ms);
     "#,
+    // 15: a remote result can be lost after the provider performs the action.
+    // Keep that scope blocked rather than guessing an idempotent retry.
+    r#"
+    CREATE UNIQUE INDEX authority_action_unresolved_scope
+        ON authority_action(action, target, channel, session_id, COALESCE(revision, ''))
+        WHERE state IN ('pending', 'uncertain');
+    "#,
+    // 16: distinguish two honest requests to the same target by their final
+    // canonical arguments while still blocking replay of an uncertain one.
+    r#"
+    DROP INDEX authority_action_unresolved_scope;
+    ALTER TABLE authority_action ADD COLUMN request_hash TEXT NOT NULL DEFAULT '';
+    CREATE UNIQUE INDEX authority_action_unresolved_scope
+        ON authority_action(action, target, channel, session_id, COALESCE(revision, ''), request_hash)
+        WHERE state IN ('pending', 'uncertain');
+    "#,
+    // 17: an acknowledged success can lose its MCP response too. The caller's
+    // operation id is part of request_hash, so a replay returns its record
+    // rather than performing the remote side effect again.
+    r#"
+    DROP INDEX authority_action_unresolved_scope;
+    CREATE UNIQUE INDEX authority_action_operation
+        ON authority_action(action, target, channel, session_id, COALESCE(revision, ''), request_hash)
+        WHERE state IN ('pending', 'uncertain', 'succeeded');
+    "#,
+    // 18: operation replay protection survives a session restart.
+    r#"
+    DROP INDEX authority_action_operation;
+    CREATE UNIQUE INDEX authority_action_operation
+        ON authority_action(action, target, channel, COALESCE(revision, ''), request_hash)
+        WHERE state IN ('pending', 'uncertain', 'succeeded');
+    "#,
+    // 19: client operation ids are the stable replay key. Payload hashes stay
+    // recorded so an id cannot be reused for a changed request.
+    r#"
+    ALTER TABLE authority_action ADD COLUMN operation_id TEXT NOT NULL DEFAULT '';
+    DROP INDEX authority_action_operation;
+    CREATE UNIQUE INDEX authority_action_operation
+        ON authority_action(action, target, channel, COALESCE(revision, ''), operation_id)
+        WHERE operation_id <> '' AND state IN ('pending', 'uncertain', 'succeeded');
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

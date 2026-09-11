@@ -65,8 +65,9 @@ pub fn definitions() -> Vec<Value> {
                     "number": { "type": "integer" },
                     "head_sha": { "type": "string", "description": "The reviewed pull request head SHA." },
                     "method": { "type": "string", "enum": ["merge", "squash", "rebase"] },
+                    "operation_id": { "type": "string", "description": "Stable idempotency id for this merge." },
                 },
-                "required": ["repo", "number", "head_sha"],
+                "required": ["repo", "number", "head_sha", "operation_id"],
             },
         }),
     ]
@@ -148,7 +149,7 @@ pub async fn call(
             let v = gh.put(
                 &format!("{base}/pulls/{n}/merge"),
                 &json!({ "sha": head_sha, "merge_method": method }),
-            ).await?;
+            ).await.map_err(mutation_outcome_error)?;
             Ok(json!({ "merged": v["merged"], "sha": v["sha"], "message": v["message"] }))
         }
         RUN_STATUS => {
@@ -291,6 +292,14 @@ async fn read(sent: reqwest::Result<reqwest::Response>) -> Result<Value, String>
         return Err(format!("github answered {status}: {}", v["message"]));
     }
     Ok(v)
+}
+
+fn mutation_outcome_error(error: String) -> String {
+    if error.starts_with("github:") || error.starts_with("github answered 5") {
+        format!("mutation-outcome-unknown: {error}")
+    } else {
+        error
+    }
 }
 
 #[cfg(test)]

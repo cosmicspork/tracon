@@ -45,9 +45,9 @@ impl Store {
             "SELECT * FROM authority_grant WHERE revoked_ms IS NULL ORDER BY created_ms DESC"
         };
         let mut stmt = conn.prepare(sql)?;
-        stmt.query_map([], AuthorityGrantRow::from_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        let rows = stmt.query_map([], AuthorityGrantRow::from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn authority_grant_insert(&self, row: &AuthorityGrantRow) -> Result<()> {
@@ -88,12 +88,12 @@ impl Store {
                AND (expires_ms IS NULL OR expires_ms > ?6)
              ORDER BY created_ms DESC",
         )?;
-        stmt.query_map(
+        let rows = stmt.query_map(
             rusqlite::params![action, target, channel, session_id, revision, at_ms],
             AuthorityGrantRow::from_row,
         )?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn authority_grant(&self, id: &str) -> Result<Option<AuthorityGrantRow>> {
@@ -105,14 +105,36 @@ impl Store {
 
     /// Create an outcome before dispatch. A crash after the remote side effect
     /// remains honestly pending rather than being retried blindly on restart.
-    pub fn authority_action_begin(&self, id: &str, grant_id: Option<&str>, action: &str, target: &str, channel: &str, session_id: &str, revision: Option<&str>, evidence: &str) -> Result<()> {
+    pub fn authority_action_begin(&self, id: &str, grant_id: Option<&str>, action: &str, target: &str, channel: &str, session_id: &str, revision: Option<&str>, operation_id: Option<&str>, evidence: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        let request_hash = crate::corpus::hash_body(evidence);
         conn.execute(
-            "INSERT INTO authority_action (id, grant_id, action, target, channel, session_id, revision, evidence, state, outcome, created_ms, updated_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'pending',NULL,?9,?9)",
-            rusqlite::params![id, grant_id, action, target, channel, session_id, revision, evidence, now_ms()],
+            "INSERT INTO authority_action (id, grant_id, action, target, channel, session_id, revision, operation_id, evidence, state, outcome, created_ms, updated_ms, request_hash)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'pending',NULL,?10,?10,?11)",
+            rusqlite::params![id, grant_id, action, target, channel, session_id, revision, operation_id.unwrap_or(""), evidence, now_ms(), request_hash],
         )?;
         Ok(())
+    }
+
+    pub fn authority_action_existing(
+        &self,
+        action: &str,
+        target: &str,
+        channel: &str,
+        revision: Option<&str>,
+        operation_id: &str,
+    ) -> Result<Option<(String, Option<String>, String)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT state, outcome, request_hash FROM authority_action
+             WHERE action=?1 AND target=?2 AND channel=?3
+               AND revision IS ?4 AND operation_id=?5
+               AND state IN ('pending', 'uncertain', 'succeeded')",
+            rusqlite::params![action, target, channel, revision, operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn authority_action_finish(&self, id: &str, state: &str, outcome: &str) -> Result<()> {

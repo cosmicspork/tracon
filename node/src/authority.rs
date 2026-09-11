@@ -51,16 +51,9 @@ pub fn decide(
     revision: Option<&str>,
     args: &Value,
 ) -> Result<Decision, String> {
-    if !policy.trusted {
-        return Ok(Decision {
-            verdict: Verdict::Ask,
-            rule_id: None,
-            reason: Some("the signed policy bundle is unavailable or invalid".into()),
-        });
-    }
-    let policy = policy_decision(policy, channel, action, target, args);
-    if policy.verdict == Verdict::Deny {
-        return Ok(policy);
+    let policy_decision = policy_decision(policy, channel, action, target, args);
+    if policy.trusted && policy_decision.verdict == Verdict::Deny {
+        return Ok(policy_decision);
     }
     let grants = store
         .authority_grants_for(channel, session_id, action, target, revision, now_ms())
@@ -79,8 +72,15 @@ pub fn decide(
             reason: Some(grant.reason.clone()),
         });
     }
-    if policy.verdict == Verdict::Allow {
-        return Ok(policy);
+    if !policy.trusted {
+        return Ok(Decision {
+            verdict: Verdict::Ask,
+            rule_id: None,
+            reason: Some("the signed policy bundle is unavailable or invalid".into()),
+        });
+    }
+    if policy_decision.verdict == Verdict::Allow {
+        return Ok(policy_decision);
     }
     if let Some(grant) = grants.iter().find(|g| g.verdict == "allow") {
         return Ok(Decision {
@@ -161,8 +161,10 @@ pub async fn publish_review(
     )
     .await {
         Ok(published) => {
-            store.finish_publish(&review.id, title, body, &published)
-                .map_err(|e| e.to_string())?;
+            if !store.finish_publish(&review.id, title, body, &published)
+                .map_err(|e| e.to_string())? {
+                return Err("publish completed externally, but the review claim was lost; reconcile it before retrying".into());
+            }
             manager.publish_queue().await;
             if let Some(item) = store.get_session(&review.session_id).map_err(|e| e.to_string())?
                 .and_then(|session| session.work_item_id)

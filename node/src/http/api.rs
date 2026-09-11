@@ -144,8 +144,20 @@ pub async fn create_authority_grant(
     if b.channel.trim().is_empty() || b.reason.trim().is_empty() {
         return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "channel and reason are required"));
     }
-    if b.expires_ms.is_some_and(|at| at <= crate::store::now_ms()) {
-        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "expiry must be in the future"));
+    if b.verdict == "allow"
+        && matches!(action, crate::authority::MERGE | crate::authority::PUBLISH | crate::authority::DEPLOY)
+        && b.revision.as_deref().is_none_or(|revision| revision.trim().is_empty())
+    {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "merge, publish, and deploy allow grants must bind an immutable revision",
+        ));
+    }
+    if b.expires_ms.is_some_and(|expires_ms| expires_ms <= crate::store::now_ms()) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "expiry must be in the future",
+        ));
     }
     let row = crate::store::AuthorityGrantRow {
         id: uuid::Uuid::now_v7().to_string(),
@@ -1037,7 +1049,7 @@ pub(crate) async fn decide_local(
                 &r,
                 &title,
                 &body,
-                true,
+                false,
                 None,
             )
             .await {

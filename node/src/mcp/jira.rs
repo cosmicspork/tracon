@@ -103,8 +103,9 @@ pub fn definitions() -> Vec<Value> {
             "name": ISSUE_TRANSITION,
             "description": "Transition a Jira issue using a concrete transition id. Requires current scoped authority for that issue.",
             "inputSchema": { "type": "object", "properties": {
-                "key": { "type": "string" }, "transition_id": { "type": "string" }
-            }, "required": ["key", "transition_id"] },
+                "key": { "type": "string" }, "transition_id": { "type": "string" },
+                "operation_id": { "type": "string" }
+            }, "required": ["key", "transition_id", "operation_id"] },
         }),
     ]
 }
@@ -328,11 +329,14 @@ pub async fn call(
                 .post(format!("{url}/rest/api/2/issue/{key}/transitions"))
                 .basic_auth(email, Some(token))
                 .json(&json!({ "transition": { "id": transition } }))
-                .send().await.map_err(|e| format!("jira: {e}"))?;
+                .send().await.map_err(|e| format!("mutation-outcome-unknown: jira: {e}"))?;
             let status = res.status();
             if !status.is_success() {
                 let v: Value = res.json().await.unwrap_or(Value::Null);
-                return Err(refusal("jira refused the transition", status, &v));
+                let error = refusal("jira refused the transition", status, &v);
+                return Err(if status.is_server_error() {
+                    format!("mutation-outcome-unknown: {error}")
+                } else { error });
             }
             Ok(json!({ "key": key, "transition_id": transition }))
         }
