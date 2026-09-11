@@ -275,6 +275,13 @@ pub trait HarnessHandle: Send + Sync {
     fn harness_session_id(&self) -> &str;
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError>;
     async fn cancel(&self) -> Result<(), AdapterError>;
+    /// Establish an adapter-specific ordering barrier after a turn response.
+    /// ACP notifications share a reader with RPC responses; implementations
+    /// that split those queues must drain notifications that preceded the
+    /// response before the supervisor can resume a paused session.
+    async fn quiesce_events(&self) -> Result<(), AdapterError> {
+        Ok(())
+    }
     async fn close(&self) -> Result<(), AdapterError>;
 }
 

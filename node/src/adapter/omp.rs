@@ -174,11 +174,13 @@ impl HarnessAdapter for OmpAdapter {
 
         let sid = session.session_id.clone();
         let peer = session.peer.clone();
+        let (barrier_tx, barrier_rx) = mpsc::channel(8);
         let handle = OmpHandle {
             peer,
             session_id: sid,
+            barrier_tx,
         };
-        tokio::spawn(session.pump(event_tx));
+        tokio::spawn(session.pump(event_tx, barrier_rx));
         Ok((Box::new(handle), event_rx))
     }
 
@@ -490,15 +492,37 @@ impl OmpSession {
     /// Translate inbound notifications and requests into `HarnessEvent`s until
     /// the peer closes. Handshake traffic buffered before the pump existed is
     /// replayed first, in order.
-    async fn pump(mut self, tx: mpsc::Sender<HarnessEvent>) {
+    async fn pump(
+        mut self,
+        tx: mpsc::Sender<HarnessEvent>,
+        mut barriers: mpsc::Receiver<oneshot::Sender<()>>,
+    ) {
         for msg in std::mem::take(&mut self.buffered) {
             if !Self::process(msg, &tx).await {
                 return;
             }
         }
-        while let Some(msg) = self.incoming.recv().await {
-            if !Self::process(msg, &tx).await {
-                return;
+        loop {
+            tokio::select! {
+                msg = self.incoming.recv() => match msg {
+                    Some(msg) => {
+                        if !Self::process(msg, &tx).await {
+                            return;
+                        }
+                    }
+                    None => break,
+                },
+                barrier = barriers.recv() => match barrier {
+                    Some(done) => {
+                        while let Ok(msg) = self.incoming.try_recv() {
+                            if !Self::process(msg, &tx).await {
+                                return;
+                            }
+                        }
+                        let _ = done.send(());
+                    }
+                    None => {}
+                },
             }
         }
         let _ = tx.send(HarnessEvent::Exited { code: None }).await;
@@ -636,6 +660,7 @@ fn chunk_text(content: types::ContentBlock) -> String {
 struct OmpHandle {
     peer: Peer,
     session_id: String,
+    barrier_tx: mpsc::Sender<oneshot::Sender<()>>,
 }
 
 #[async_trait]
@@ -671,6 +696,15 @@ impl HarnessHandle for OmpHandle {
             )
             .await?;
         Ok(())
+    }
+    async fn quiesce_events(&self) -> Result<(), AdapterError> {
+        let (done, wait) = oneshot::channel();
+        self.barrier_tx
+            .send(done)
+            .await
+            .map_err(|_| AdapterError::Protocol("ACP event pump stopped".into()))?;
+        wait.await
+            .map_err(|_| AdapterError::Protocol("ACP event barrier stopped".into()))
     }
 
     async fn close(&self) -> Result<(), AdapterError> {

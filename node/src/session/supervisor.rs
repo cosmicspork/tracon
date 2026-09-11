@@ -286,6 +286,13 @@ impl Supervisor {
                         self.active_turn = None;
                         self.on_turn_done(kind, payload, tokens).await;
                         if paused_completion {
+                            // The adapter's barrier drained its inbound reader
+                            // before it let TurnDone through. Drain the
+                            // supervisor queue too, while still fenced, so a
+                            // stale permission/output cannot cross Resume.
+                            while let Ok(event) = events.try_recv() {
+                                let _ = self.on_harness_event(event).await;
+                            }
                             self.paused_turn = None;
                             continue;
                         }
@@ -759,7 +766,7 @@ impl Supervisor {
         // The supervisor owns the result: a stalled harness cannot leave a
         // permanently active turn, and a late answer carries this turn id.
         tokio::spawn(async move {
-            let (kind, payload, tokens) = match tokio::time::timeout(TURN_TIMEOUT, handle.prompt(text)).await {
+            let (kind, mut payload, tokens) = match tokio::time::timeout(TURN_TIMEOUT, handle.prompt(text)).await {
                 Ok(Ok(turn)) => (
                     ek::TURN_END,
                     json!({
@@ -790,6 +797,11 @@ impl Supervisor {
                     )
                 }
             };
+            match tokio::time::timeout(CANCEL_TIMEOUT, handle.quiesce_events()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => payload["event_barrier_error"] = json!(error.to_string()),
+                Err(_) => payload["event_barrier_error"] = json!("event barrier timed out"),
+            }
             let _ = done
                 .send(Command::TurnDone {
                     turn_id,
