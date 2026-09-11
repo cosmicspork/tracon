@@ -1528,6 +1528,7 @@ impl Manager {
                     ),
                     None => (Vec::new(), json!({})),
                 };
+                bindings["external_stopped"] = json!(true);
                 self.store.channel_put(
                     &row.channel,
                     &keyring,
