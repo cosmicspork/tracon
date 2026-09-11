@@ -155,6 +155,10 @@ impl Mirror {
             Payload::KeyHandoff { .. } => Applied::Unhandled("key_handoff"),
             Payload::PolicyBundle { .. } => Applied::Unhandled("policy_bundle"),
             Payload::CredentialHandoff { .. } => Applied::Unhandled("credential_handoff"),
+            // These are handled before the generic mirror path: a hub stores
+            // rollups separately and a direct transfer only stages a package.
+            Payload::Rollup { .. } => Applied::Unhandled("rollup"),
+            Payload::CandidateTransfer { .. } => Applied::Unhandled("candidate_transfer"),
             Payload::Changes {
                 channel: c,
                 changes,

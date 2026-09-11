@@ -327,6 +327,19 @@ channel notifies your phone is a binding too:
 tracon channel bind work notify.enabled=false   # the desktop tray is enough for work
 ```
 
+**Handing work to another node** does not require the mesh, work items, or moving
+a live harness: from a session screen, export makes a signed package —
+the candidate's exact commit tree, its check/review evidence, and any documents or
+memories you select — bound to that candidate's identity so a receiver cannot be
+handed unrelated bytes under its name. Deliver it as a file or, over the mesh,
+queue it to a specific node; importing it stages files into a fresh runtime-owned
+workspace (never a bind mount) and starts a new session with no relationship to
+the original beyond that immutable snapshot. A repeated import reuses the
+materialized workspace rather than leaking another one, and each package can be
+imported once. The hub can also roll up a channel's session/queue counts for
+nodes it has been explicitly handed that channel's key for — opt-in per channel,
+and revoked the moment the hub loses that key.
+
 ## Glossary
 
 | | |

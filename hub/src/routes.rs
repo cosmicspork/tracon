@@ -189,6 +189,113 @@ pub async fn list_members(
     Ok(Json(s.members.list().map_err(io)?))
 }
 
+// --------------------------------------------------------------- rollups
+
+#[derive(Deserialize)]
+pub struct RollupQuery {
+    channel: String,
+}
+
+/// Aggregate node state for one channel whose members deliberately handed the
+/// hub a channel key. A hub without that key remains a ciphertext relay and
+/// cannot even say whether a channel has summaries.
+pub async fn get_rollups(
+    State(s): State<AppState>,
+    Extension(owner): Extension<Owner>,
+    Query(q): Query<RollupQuery>,
+) -> ApiResult {
+    if !valid_channel(&q.channel) || q.channel == MESH_CHANNEL {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid rollup channel"));
+    }
+    let me = member_of(&s, &owner)?;
+    in_channel(&me, &q.channel)?;
+    let replica = s
+        .replica
+        .as_ref()
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "this hub has no rollup replica"))?;
+    if !replica.reads_channel(&q.channel) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "this channel has not explicitly shared a key with the hub",
+        ));
+    }
+
+    let expected: Vec<String> = s
+        .members
+        .members_of(&q.channel)
+        .map_err(io)?
+        .into_iter()
+        .filter(|member| member.role == crate::store::MemberRole::Node)
+        .map(|member| member.node_id)
+        .collect();
+    let rows = replica.rollups_for(&q.channel);
+    let now = now_ms();
+    // Nodes send these periodically; a longer window avoids a healthy node
+    // flickering stale while a hub reconnects, while still making old state
+    // visibly historical instead of presenting it as current.
+    const STALE_AFTER_MS: i64 = 10 * 60 * 1000;
+    let mut seen = std::collections::HashSet::new();
+    let mut stale = Vec::new();
+    let mut partial = Vec::new();
+    let summaries: Vec<Value> = rows
+        .into_iter()
+        .filter(|row| expected.iter().any(|node| node == &row.node_id))
+        .map(|row| {
+            let is_stale = row.rollup.captured_ms < now.saturating_sub(STALE_AFTER_MS);
+            if is_stale {
+                stale.push(row.node_id.clone());
+            }
+            if !row.rollup.complete {
+                partial.push(row.node_id.clone());
+            }
+            seen.insert(row.node_id.clone());
+            json!({
+                "node_id": row.node_id,
+                "seq": row.rollup.seq,
+                "captured_ms": row.rollup.captured_ms,
+                "received_ms": row.received_ms,
+                "complete": row.rollup.complete,
+                "freshness": if is_stale { "stale" } else { "current" },
+                "session_counts": row.rollup.session_counts,
+                "queued_permissions": row.rollup.queued_permissions,
+                "queued_reviews": row.rollup.queued_reviews,
+                "work_items": row.rollup.work_items,
+                "documents": row.rollup.documents,
+                "memories": row.rollup.memories,
+            })
+        })
+        .collect();
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|node| !seen.contains(*node))
+        .cloned()
+        .collect();
+    let current_complete =
+        !expected.is_empty() && missing.is_empty() && stale.is_empty() && partial.is_empty();
+    let state = if current_complete {
+        "current_complete"
+    } else if !stale.is_empty() {
+        "stale"
+    } else {
+        "partial"
+    };
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "channel": q.channel,
+            "state": state,
+            "summaries": summaries,
+            "coverage": {
+                "expected_nodes": expected,
+                "missing_nodes": missing,
+                "stale_nodes": stale,
+                "partial_nodes": partial,
+                "current_complete": current_complete,
+            },
+        })),
+    ))
+}
+
 // ---------------------------------------------------------------- enrollment
 
 #[derive(Deserialize, Default)]

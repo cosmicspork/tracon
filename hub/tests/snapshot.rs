@@ -49,6 +49,13 @@ fn snapshot_then_restore_reopens_the_same_hub() {
     )
     .unwrap();
     hub::admit_self(members.as_ref(), &replica, 0).unwrap();
+    // The hub only auto-admits itself to `@mesh`; a shared channel's
+    // rollup/read authorization additionally requires the hub's own member
+    // row to list that channel, exactly as `/v0/admit` would record when a
+    // node shares a channel with it.
+    let mut hub_member = members.get(&replica.node_id()).unwrap().unwrap();
+    hub_member.channels.push("personal".into());
+    members.put(&hub_member).unwrap();
     // Hand the replica a keyring directly (as a handoff would) so it can author.
     let ring = Keyring::genesis(&replica_pk(&replica), &DataKey::generate());
     replica.with_db(|c| {

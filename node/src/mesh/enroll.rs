@@ -407,6 +407,12 @@ pub async fn share_with_hub(
         &Payload::KeyHandoff { channels },
     )
     .await?;
+    // Every existing member must learn the changed binding too. Otherwise only
+    // the sharing node emits rollups and the hub correctly reports a channel
+    // as partial forever.
+    for channel in &chans {
+        rehand_channel(store, identity, hub_url, channel).await?;
+    }
     Ok(chans)
 }
 

@@ -2,6 +2,7 @@
   import Log from '../components/Log.svelte'
   import OperatorQuestionCard from '../components/OperatorQuestionCard.svelte'
   import PermissionCard from '../components/PermissionCard.svelte'
+  import TransferExport from '../components/TransferExport.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { humanizeError } from '../lib/errors'
@@ -221,6 +222,7 @@
   {/if}
 
   <Log events={store.events} openChunks={store.openChunks} toolProgress={store.toolProgress} />
+  <TransferExport channel={session.channel} />
 
   {#each questions as question (question.id)}
     <OperatorQuestionCard {question} done={refreshQuestions} />

@@ -7,12 +7,14 @@ import type {
   BoundaryResult,
   ChannelInfo,
   ChannelMetrics,
+  CandidateTransfer,
   CredentialSummary,
   Document,
   EnrollStatus,
   Event,
   ForgeList,
   Invite,
+  HubRollups,
   ManagedRepo,
   MeshState,
   NodeConfig,
@@ -27,12 +29,15 @@ import type {
   Queue,
   RecallHit,
   RecentRepo,
-  Review,
   Session,
   ReviewDetails,
+  TransferImport,
+  TransferInboxItem,
+  TransferStage,
   WorkItem,
   WorkView,
 } from './types'
+
 import type { HtmlBundleSelection } from './html-bundle'
 
 /** A document edit that lost to another: the current state comes back. */
@@ -98,6 +103,9 @@ export const api = {
   nodes: () => call<NodeInfo[]>('GET', '/api/nodes'),
   mesh: () => call<MeshState>('GET', '/api/mesh'),
   channels: () => call<ChannelInfo[]>('GET', '/api/channels'),
+  /** Optional hub aggregate; never substitutes for this node's local metrics. */
+  hubRollups: (channel: string) =>
+    call<HubRollups>('GET', `/api/mesh/rollups?channel=${encodeURIComponent(channel)}`),
   /** Dotted keys nest; `null` removes. Handed to every member of the channel. */
   putChannelBindings: (name: string, patch: Record<string, unknown>) =>
     call<{ name: string; bindings: Record<string, unknown> }>('PUT', `/api/channels/${name}/bindings`, patch),
@@ -108,6 +116,24 @@ export const api = {
     call<AuthorityGrant>('POST', '/api/authority/grants', grant),
   revokeAuthorityGrant: (id: string) =>
     call<{ revoked: string }>('DELETE', `/api/authority/grants/${encodeURIComponent(id)}`),
+  exportTransfer: (body: {
+    candidate_id: string
+    context?: { documents?: string[]; memories?: string[]; note?: string }
+    destination_node?: string
+    delivery?: 'portable' | 'mesh'
+  }) =>
+    call<{ delivery: 'portable' | 'mesh_queued'; transfer: CandidateTransfer; note: string }>(
+      'POST',
+      '/api/transfers',
+      body,
+    ),
+  stageTransfer: (transfer: CandidateTransfer) =>
+    call<TransferStage>('POST', '/api/transfers/stage', { transfer }),
+  transfers: () => call<{ transfers: TransferInboxItem[] }>('GET', '/api/transfers'),
+  importTransfer: (
+    id: string,
+    body: { confirm: true; model?: string; budget_tokens?: number; branch?: string },
+  ) => call<TransferImport>('POST', `/api/transfers/${encodeURIComponent(id)}/import`, body),
   pushKey: () => call<{ key: string }>('GET', '/api/push/key'),
   pushDevices: () => call<{ devices: PushDevice[] }>('GET', '/api/push/subscriptions'),
   putPushSubscription: (sub: unknown) => call<{ id: string }>('POST', '/api/push/subscriptions', sub),

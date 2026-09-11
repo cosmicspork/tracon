@@ -145,8 +145,8 @@ Explain the job and make one-node use complete.
 
 ### Other backlog
 
-- [ ] Continue work on another node using explicit candidate/context transfer and a new session, without mandatory work items/phases or live-harness migration.
-- [ ] Add optional hub-side rollups without making local use depend on them.
+- [x] Continue work on another node using explicit candidate/context transfer and a new session, without mandatory work items/phases or live-harness migration.
+- [x] Add optional hub-side rollups without making local use depend on them.
 - [x] Sign desktop releases and pin mutable build inputs for reproducibility; checksums alone are not independent publisher authentication.
 - [x] Paginate forge repository listings.
 

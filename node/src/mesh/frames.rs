@@ -159,6 +159,38 @@ pub fn snapshots(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
     out
 }
 
+/// Summaries are opt-in twice: the channel binding records that its key was
+/// handed to the hub, and the payload is still channel-sealed. A local node
+/// never asks the hub to summarize an ordinary member channel.
+pub fn rollups(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
+    store
+        .channel_list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|channel| {
+            serde_json::from_str::<Value>(&channel.bindings_json)
+                .ok()
+                .and_then(|bindings| bindings["processing"].as_str().map(str::to_string))
+                .as_deref()
+                == Some("hub")
+        })
+        .filter_map(|channel| {
+            store
+                .next_rollup(self_id, &channel.name)
+                .ok()
+                .map(|rollup| {
+                    (
+                        channel.name.clone(),
+                        Payload::Rollup {
+                            channel: channel.name,
+                            rollup,
+                        },
+                    )
+                })
+        })
+        .collect()
+}
+
 fn channel_of(store: &Store, session_id: &str) -> Option<String> {
     store
         .get_session(session_id)

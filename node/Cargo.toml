@@ -38,6 +38,7 @@ x25519-dalek = "2"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 futures-core = "0.3.34"
 hex.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 mime_guess.workspace = true
 rand = "0.9"

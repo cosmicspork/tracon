@@ -428,6 +428,26 @@ impl MeshClient {
                 self.pull_wake.notify_one();
                 return n > 0;
             }
+            Payload::CandidateTransfer { transfer } if env.is_direct() => {
+                match crate::transfers::receive_mesh(
+                    &self.store,
+                    &self.node_id(),
+                    &sender,
+                    &env.channel,
+                    transfer.clone(),
+                ) {
+                    Ok(id) => {
+                        tracing::info!(from = %sender, transfer = %id, "candidate transfer staged for confirmation");
+                        return true;
+                    }
+                    Err(error) => {
+                        tracing::warn!(from = %sender, error = %error, "candidate transfer refused");
+                        self.note_refusal(format!("candidate transfer from {sender}: {error}"));
+                        return false;
+                    }
+                }
+            }
+
             Payload::CredentialHandoff { credentials } if env.is_direct() => {
                 let Some((broker, path)) = self.broker.get() else {
                     tracing::warn!(from = %sender, "credential handoff before the broker exists; dropped");
@@ -583,6 +603,18 @@ impl MeshClient {
         }
     }
 
+    /// Queue privacy-preserving aggregates only for channels whose members
+    /// explicitly shared their key with the hub replica. Failure is local to
+    /// the optional rollup: documents, work, and local metrics never depend on
+    /// its delivery.
+    pub fn send_rollups(&self) {
+        for (channel, payload) in frames::rollups(&self.store, &self.node_id()) {
+            if let Err(error) = self.enqueue(&channel, None, &payload) {
+                tracing::debug!(channel, error = %error, "hub rollup not queued");
+            }
+        }
+    }
+
     /// Refresh the member list: peers' sealing keys and channel bindings, and
     /// a placeholder node row for any member we have not heard from.
     pub async fn refresh_members(&self) -> Result<usize, HubError> {
@@ -637,6 +669,19 @@ impl MeshClient {
                     reachable: 0,
                     providers_json: None,
                 });
+            }
+        }
+        // A membership response is a snapshot, not an incremental add list.
+        // Clear departed peers' channel grants so authorization never trusts a
+        // stale row after the hub has revoked a node.
+        let current: std::collections::HashSet<&str> = list
+            .iter()
+            .filter_map(|member| member["node_id"].as_str())
+            .collect();
+        for node in self.store.list_nodes().unwrap_or_default() {
+            if node.is_self == 0 && !current.contains(node.id.as_str()) {
+                let _ = self.store.node_channels_set(&node.id, &[]);
+                self.peers.lock().unwrap().remove(&node.id);
             }
         }
         self.set_state_ok();
@@ -766,6 +811,7 @@ impl MeshClient {
             }
             if self.hello().await.is_ok() && n.is_multiple_of(10) {
                 self.send_snapshots();
+                self.send_rollups();
             }
             n += 1;
             tokio::time::sleep(every).await;
@@ -804,6 +850,35 @@ impl MeshClient {
             });
         }
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
+    /// Read the hub's aggregate for one channel. This is deliberately narrower
+    /// than exposing the transport helper: callers cannot turn the node into a
+    /// signed arbitrary-hub proxy.
+    pub async fn rollups(&self, channel: &str) -> Result<Value, HubError> {
+        if !proto::frame::valid_channel(channel) || channel == MESH_CHANNEL {
+            return Err(HubError::Local("invalid rollup channel".into()));
+        }
+        let path = format!("/v0/rollups?channel={channel}");
+        match self.get_json(&path).await {
+            Ok(value) => {
+                self.set_state_ok();
+                Ok(value)
+            }
+            Err(error) => {
+                if matches!(
+                    &error,
+                    HubError::Transport(_)
+                        | HubError::Refused {
+                            status: 500..=599,
+                            ..
+                        }
+                ) {
+                    self.set_state_down(error.to_string());
+                }
+                Err(error)
+            }
+        }
     }
 
     async fn get_json(&self, path: &str) -> Result<Value, HubError> {

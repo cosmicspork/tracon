@@ -17,9 +17,12 @@
 //! associated data, so a frame the hub re-labels onto another channel fails to
 //! open there.
 
+use std::collections::BTreeMap;
+
+use serde_json::Value;
+
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use x25519_dalek::PublicKey;
 
@@ -123,6 +126,14 @@ pub enum Payload {
     Reviews {
         waiting: Vec<Value>,
     },
+    /// A bounded, aggregate view for an opt-in hub replica. It deliberately
+    /// contains no transcript, file path, prompt, credential, or work payload.
+    /// The envelope sender is repeated in `node_id` so a replica can reject a
+    /// frame that tries to write another node's summary.
+    Rollup {
+        channel: String,
+        rollup: Rollup,
+    },
     Node(Value),
     Command {
         cmd_id: String,
@@ -152,6 +163,12 @@ pub enum Payload {
         sig_hex: String,
         pubkey_hex: String,
     },
+    /// Direct only. A signed, bounded candidate/context package; the receiver
+    /// stages it and requires an operator-confirmed import before it can start
+    /// an independent session.
+    CandidateTransfer {
+        transfer: Value,
+    },
     /// Direct only: credentials for the recipient's broker, each
     /// `{ "name": …, "credential": … }` in the broker's own row shape. The
     /// receiver keeps its own bindings check; a credential not bound to it is
@@ -178,6 +195,27 @@ pub enum Payload {
         changes: Vec<Change>,
         done: bool,
     },
+}
+
+/// A node's aggregate state for one channel, for an opted-in hub replica.
+/// `seq` is monotonic per `(node_id, channel)`: replicas keep only newer
+/// frames, which makes delayed out-of-order delivery harmless.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rollup {
+    pub node_id: String,
+    pub seq: u64,
+    pub captured_ms: i64,
+    /// False means the source could only construct a partial view; consumers
+    /// must never present it as a complete channel state.
+    pub complete: bool,
+    /// Terminal and live state counts, not session rows.
+    #[serde(default)]
+    pub session_counts: BTreeMap<String, u64>,
+    pub queued_permissions: u64,
+    pub queued_reviews: u64,
+    pub work_items: u64,
+    pub documents: u64,
+    pub memories: u64,
 }
 
 /// One record-level change, as the sync layer stamps it. `site` is the
@@ -725,6 +763,28 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v["kind"], "changes_batch");
+        let v = serde_json::to_value(Payload::Rollup {
+            channel: "personal".into(),
+            rollup: Rollup {
+                node_id: "node".into(),
+                seq: 1,
+                captured_ms: 1,
+                complete: true,
+                session_counts: Default::default(),
+                queued_permissions: 0,
+                queued_reviews: 0,
+                work_items: 0,
+                documents: 0,
+                memories: 0,
+            },
+        })
+        .unwrap();
+        assert_eq!(v["kind"], "rollup");
+        let v = serde_json::to_value(Payload::CandidateTransfer {
+            transfer: serde_json::json!({"payload": {}}),
+        })
+        .unwrap();
+        assert_eq!(v["kind"], "candidate_transfer");
         let v = serde_json::to_value(Command::Prompt {
             session_id: "s".into(),
             text: "t".into(),
