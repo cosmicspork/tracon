@@ -1085,6 +1085,18 @@ pub async fn answer_operator_question(
         StatusCode::NOT_FOUND,
         "no such operator question".into(),
     ))?;
+    let origin = s.store().get_session(&question.session_id)?.ok_or(ApiError(
+        StatusCode::CONFLICT,
+        "question origin session is unavailable".into(),
+    ))?;
+    if origin.harness_id != crate::session::external::HARNESS_ID
+        && matches!(origin.state.as_str(), "closed" | "killed_budget" | "failed")
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this question's session ended; it remains inspectable but cannot be answered",
+        ));
+    }
     let answer = b.answer.trim();
     if answer.is_empty() || answer.len() > 8 * 1024 {
         return Err(ApiError(StatusCode::BAD_REQUEST, "answer must be 1–8192 bytes".into()));

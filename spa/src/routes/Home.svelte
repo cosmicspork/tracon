@@ -91,7 +91,7 @@
   <SetupCard />
 {/if}
 
-{#if questions.length || waiting.length || reviews.length || promotions.length || issues.some((issue) => issue.state !== 'published') || notifications.length}
+{#if questions.length || waiting.length || reviews.length || promotions.length || issues.some((issue) => issue.state !== 'published')}
   <div class="h4">
     Waiting on you <b>{questions.length + waiting.length + reviews.length + promotions.length + issues.filter((issue) => issue.state !== 'published').length} · questions and requests before reviews · oldest first</b>
   </div>
@@ -108,19 +108,20 @@
     {#each issues.filter((issue) => issue.state !== 'published') as issue (issue.id)}
       <OperatorIssueCard {issue} done={refreshInterventions} />
     {/each}
-  {#if notifications.length}
-    <details class="deliveries">
-      <summary>Notification delivery attempts</summary>
-      <p>Attempt and peer-acknowledgement records only; they do not prove a person saw a notification.</p>
-      {#each notifications as notification (notification.notification_id)}
-        <div class="mono">{notification.notification_id.slice(0, 8)} · {notification.attempts.length ? notification.attempts.map((attempt) => `${attempt.device_id.slice(0, 8)}: ${attempt.outcome}`).join(', ') : 'no matching live device'}</div>
-      {/each}
-    </details>
-  {/if}
     {#each promotions as p (p.id)}
       <PromotionCard promotion={p} />
     {/each}
   </div>
+{/if}
+
+{#if notifications.length}
+  <details class="deliveries">
+    <summary>Notification delivery attempts</summary>
+    <p>Attempt and peer-acknowledgement records only; they do not prove a person saw a notification.</p>
+    {#each notifications as notification (notification.notification_id)}
+      <div class="mono">{notification.notification_id.slice(0, 8)} · {notification.attempts.length ? notification.attempts.map((attempt) => `${attempt.device_id.slice(0, 8)}: ${attempt.outcome}`).join(', ') : 'no matching live device'}</div>
+    {/each}
+  </details>
 {/if}
 
 {#if running.length}

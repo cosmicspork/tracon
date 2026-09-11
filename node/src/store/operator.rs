@@ -72,10 +72,21 @@ pub struct OperatorNotificationRow {
 }
 
 impl Store {
-    pub fn insert_operator_question(&self, row: &OperatorQuestionRow) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("INSERT INTO operator_question (id, session_id, channel, node_id, request_key, prompt, choices_json, state, answer_json, created_ms, answered_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,'unanswered',NULL,?8,NULL)", params![row.id,row.session_id,row.channel,row.node_id,row.request_key,row.prompt,row.choices_json,row.created_ms])?;
-        Ok(())
+    /// Insert a session-scoped retry key or atomically load its first row.
+    pub fn insert_operator_question(&self, row: &OperatorQuestionRow) -> Result<OperatorQuestionRow> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO operator_question (id, session_id, channel, node_id, request_key, prompt, choices_json, state, answer_json, created_ms, answered_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,'unanswered',NULL,?8,NULL)",
+            params![row.id,row.session_id,row.channel,row.node_id,row.request_key,row.prompt,row.choices_json,row.created_ms],
+        )?;
+        let stored = tx.query_row(
+            "SELECT * FROM operator_question WHERE session_id=?1 AND request_key=?2",
+            params![row.session_id, row.request_key],
+            OperatorQuestionRow::from_row,
+        )?;
+        tx.commit()?;
+        Ok(stored)
     }
     pub fn operator_question(&self, id: &str) -> Result<Option<OperatorQuestionRow>> {
         let conn = self.conn.lock().unwrap();
@@ -220,8 +231,10 @@ impl Store {
 
     pub fn operator_notifications(&self) -> Result<Vec<OperatorNotificationRow>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT id, expires_ms FROM operator_notification ORDER BY expires_ms DESC")?;
-        let rows = stmt.query_map([], |r| Ok(OperatorNotificationRow { id: r.get(0)?, expires_ms: r.get(1)? }))?
+        let mut stmt = conn.prepare(
+            "SELECT id, expires_ms FROM operator_notification WHERE expires_ms > ?1 ORDER BY expires_ms DESC",
+        )?;
+        let rows = stmt.query_map([now_ms()], |r| Ok(OperatorNotificationRow { id: r.get(0)?, expires_ms: r.get(1)? }))?
             .collect::<std::result::Result<_, _>>()?;
         Ok(rows)
     }

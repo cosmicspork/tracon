@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use serde_json::{Value, json};
 use tokio::time::{Duration, sleep};
 
@@ -63,7 +64,6 @@ async fn ask(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Valu
                 return Err("request_id is already bound to a different question".into());
             }
             existing
-        }
         None => {
             let row = OperatorQuestionRow {
                 id: uuid::Uuid::now_v7().to_string(), session_id: ctx.session_id.clone(),
@@ -71,8 +71,13 @@ async fn ask(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Valu
                 prompt, choices_json, state: "unanswered".into(),
                 answer_json: None, created_ms: now_ms(), answered_ms: None,
             };
-            store.insert_operator_question(&row).map_err(|e| e.to_string())?;
-            row
+            let stored = store.insert_operator_question(&row).map_err(|e| e.to_string())?;
+            if stored.channel != row.channel || stored.node_id != row.node_id
+                || stored.prompt != row.prompt || stored.choices_json != row.choices_json
+            {
+                return Err("request_id is already bound to a different question".into());
+            }
+            stored
         }
     };
     wait_for_question(store, row.id).await
@@ -119,7 +124,14 @@ async fn notify_operator(
     if channel.as_ref().and_then(|c| serde_json::from_str::<Value>(&c.bindings_json).ok()).is_some_and(|b| !notify::enabled(&b)) {
         return Err("notifications are disabled for this channel".into());
     }
-    let dedup = format!("{}\n{}\n{}\n{}\n{}\n{}", ctx.channel, title, message, path, devices.join(","), nodes.join(","));
+    let mut canonical_devices = devices.clone();
+    canonical_devices.sort();
+    canonical_devices.dedup();
+    let canonical = json!({
+        "channel": ctx.channel.clone(), "title": title.clone(), "message": message.clone(), "path": path,
+        "device_ids": canonical_devices, "node_ids": nodes.clone(),
+    });
+    let dedup = hex::encode(Sha256::digest(serde_json::to_vec(&canonical).unwrap()));
     let id = uuid::Uuid::now_v7().to_string();
     if !store.claim_operator_notification(&dedup, &id, 60_000).map_err(|e| e.to_string())? {
         return Ok(json!({"deduplicated": true, "attempts": []}));
@@ -172,6 +184,9 @@ async fn notify_operator(
 
 fn report(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, String> {
     let title = text(args, "title", true)?;
+    if title.len() > 256 {
+        return Err("title exceeds GitHub's 256-byte limit".into());
+    }
     let expected = text(args, "expected", true)?;
     let actual = text(args, "actual", true)?;
     let sections = [
@@ -195,8 +210,12 @@ fn report(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, 
         }
     }
     let attachments = attachments(args)?;
+    let attachments_json = serde_json::to_string(&attachments).unwrap();
+    if body.len() + attachments_json.len() + 128 > 60_000 {
+        return Err("report exceeds the bounded GitHub issue payload".into());
+    }
     let id = uuid::Uuid::now_v7().to_string();
-    store.insert_issue_draft(&IssueDraftRow { id: id.clone(), session_id: ctx.session_id.clone(), channel: ctx.channel.clone(), title, body, attachments_json: serde_json::to_string(&attachments).unwrap(), state: "draft".into(), published_url: None, publish_error: None, created_ms: now_ms(), approved_ms: None }).map_err(|e| e.to_string())?;
+    store.insert_issue_draft(&IssueDraftRow { id: id.clone(), session_id: ctx.session_id.clone(), channel: ctx.channel.clone(), title, body, attachments_json, state: "draft".into(), published_url: None, publish_error: None, created_ms: now_ms(), approved_ms: None }).map_err(|e| e.to_string())?;
     Ok(json!({"issue_id": id, "state":"draft", "next":"The operator can inspect and explicitly authorize this draft. Reporting does not pause execution."}))
 }
 
