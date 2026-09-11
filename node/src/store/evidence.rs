@@ -117,6 +117,15 @@ pub struct ReviewRevisionRow {
     pub head_sha: String,
     /// Pinned excerpts adjacent to changed lines at submit time.
     pub context_json: String,
+    /// The linked work item's id, title, and body as they stood at submit
+    /// time, plus a hash of the title+body. The review screen must show
+    /// these, not the (mutable) work item read fresh — the item may have
+    /// been re-scoped since this revision was reviewed. `None` when no work
+    /// item was linked or for a legacy backfilled row.
+    pub requirements_work_item_id: Option<String>,
+    pub requirements_title: Option<String>,
+    pub requirements_body: Option<String>,
+    pub requirements_hash: Option<String>,
     pub created_ms: i64,
 }
 
@@ -132,6 +141,10 @@ impl ReviewRevisionRow {
             files: row.get("files")?,
             head_sha: row.get("head_sha")?,
             context_json: row.get("context_json")?,
+            requirements_work_item_id: row.get("requirements_work_item_id")?,
+            requirements_title: row.get("requirements_title")?,
+            requirements_body: row.get("requirements_body")?,
+            requirements_hash: row.get("requirements_hash")?,
             created_ms: row.get("created_ms")?,
         })
     }
@@ -199,18 +212,35 @@ impl DemonstrationRow {
     }
 }
 
+/// A demonstration with its staleness against the document it names,
+/// computed fresh on read rather than stored: staleness is a fact about the
+/// present, not part of the immutable evidence.
+#[derive(Debug, Clone, Serialize)]
+pub struct DemonstrationView {
+    #[serde(flatten)]
+    pub row: DemonstrationRow,
+    /// True when the document has been edited (or deleted) since this
+    /// demonstration was attached, so the review screen must show a mismatch
+    /// rather than silently linking today's bytes as if they were what was
+    /// demonstrated.
+    pub stale: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CandidateEvidence {
     pub candidate: CandidateRow,
     pub checks: Vec<CheckRunRow>,
     pub revisions: Vec<ReviewRevisionRow>,
     pub decisions: Vec<ReviewDecisionRow>,
-    pub demonstrations: Vec<DemonstrationRow>,
+    pub demonstrations: Vec<DemonstrationView>,
 }
 
 impl Store {
     pub fn insert_candidate(&self, candidate: &CandidateRow) -> Result<bool> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
         Ok(conn.execute(
             "INSERT OR IGNORE INTO candidate
                 (id, head_sha, tree_sha, channel, owner_session_id, source_kind, captured_ms, capture_json)
@@ -228,7 +258,11 @@ impl Store {
         )? == 1)
     }
 
-    pub fn insert_candidate_files(&self, candidate_id: &str, files: &[CandidateFile]) -> Result<()> {
+    pub fn insert_candidate_files(
+        &self,
+        candidate_id: &str,
+        files: &[CandidateFile],
+    ) -> Result<()> {
         let mut conn = self
             .conn
             .lock()
@@ -260,15 +294,16 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT path, mode, content FROM candidate_file WHERE candidate_id=?1 ORDER BY path",
         )?;
-        let rows = stmt.query_map([candidate_id], |row| {
-            Ok(CandidateFile {
-                path: row.get(0)?,
-                mode: u32::try_from(row.get::<_, i64>(1)?).unwrap_or_default(),
-                content: row.get(2)?,
-            })
-        })?
-        .collect::<std::result::Result<_, _>>();
-        rows.map_err(Into::into)
+        let rows: Vec<CandidateFile> = stmt
+            .query_map([candidate_id], |row| {
+                Ok(CandidateFile {
+                    path: row.get(0)?,
+                    mode: u32::try_from(row.get::<_, i64>(1)?).unwrap_or_default(),
+                    content: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
     }
 
     pub fn materialize_candidate(
@@ -304,14 +339,28 @@ impl Store {
     }
 
     pub fn candidate(&self, id: &str) -> Result<Option<CandidateRow>> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
-        conn.query_row("SELECT * FROM candidate WHERE id=?1", [id], CandidateRow::from_row)
-            .optional()
-            .map_err(Into::into)
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        conn.query_row(
+            "SELECT * FROM candidate WHERE id=?1",
+            [id],
+            CandidateRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
-    pub fn candidate_by_commit(&self, channel: &str, head_sha: &str) -> Result<Option<CandidateRow>> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+    pub fn candidate_by_commit(
+        &self,
+        channel: &str,
+        head_sha: &str,
+    ) -> Result<Option<CandidateRow>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
         conn.query_row(
             "SELECT * FROM candidate WHERE channel=?1 AND head_sha=?2 ORDER BY captured_ms DESC LIMIT 1",
             params![channel, head_sha],
@@ -322,22 +371,40 @@ impl Store {
     }
 
     pub fn insert_check_run(&self, run: &CheckRunRow) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
         conn.execute(
             "INSERT INTO check_run (id, candidate_id, session_id, definition_json, definition_hash,
                 execution_image, inputs_json, reuse_key, outcome, source_outcome, exit_code, log,
                 duration_ms, started_ms, finished_ms, rerun_of, reused_from_id, metadata_json)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
             params![
-                run.id, run.candidate_id, run.session_id, run.definition_json, run.definition_hash,
-                run.execution_image, run.inputs_json, run.reuse_key, run.outcome, run.source_outcome,
-                run.exit_code, run.log, run.duration_ms, run.started_ms, run.finished_ms, run.rerun_of,
-                run.reused_from_id, run.metadata_json,
+                run.id,
+                run.candidate_id,
+                run.session_id,
+                run.definition_json,
+                run.definition_hash,
+                run.execution_image,
+                run.inputs_json,
+                run.reuse_key,
+                run.outcome,
+                run.source_outcome,
+                run.exit_code,
+                run.log,
+                run.duration_ms,
+                run.started_ms,
+                run.finished_ms,
+                run.rerun_of,
+                run.reused_from_id,
+                run.metadata_json,
             ],
         )?;
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn finish_check_run(
         &self,
         id: &str,
@@ -348,12 +415,24 @@ impl Store {
         duration_ms: Option<i64>,
         metadata: &Value,
     ) -> Result<bool> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
         let changed = conn.execute(
             "UPDATE check_run SET outcome=?2, source_outcome=?3, exit_code=?4, log=?5,
                 duration_ms=?6, finished_ms=?7, metadata_json=?8
              WHERE id=?1 AND outcome='running'",
-            params![id, outcome, source_outcome, exit_code, log, duration_ms, now_ms(), metadata.to_string()],
+            params![
+                id,
+                outcome,
+                source_outcome,
+                exit_code,
+                log,
+                duration_ms,
+                now_ms(),
+                metadata.to_string()
+            ],
         )?;
         Ok(changed == 1)
     }
@@ -367,8 +446,15 @@ impl Store {
 
     /// Only terminal, exactly identified runs can be reused. A reuse key is
     /// absent whenever the executing image was not immutable.
-    pub fn latest_reusable_check(&self, candidate_id: &str, reuse_key: &str) -> Result<Option<CheckRunRow>> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+    pub fn latest_reusable_check(
+        &self,
+        candidate_id: &str,
+        reuse_key: &str,
+    ) -> Result<Option<CheckRunRow>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
         conn.query_row(
             "SELECT * FROM check_run WHERE candidate_id=?1 AND reuse_key=?2
                 AND outcome IN ('passed','failed','reused')
@@ -434,15 +520,18 @@ impl Store {
     }
 
     pub fn check_runs_for_candidate(&self, candidate_id: &str) -> Result<Vec<CheckRunRow>> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
         let mut stmt = conn.prepare(
             "SELECT * FROM check_run WHERE candidate_id=?1 ORDER BY started_ms ASC, id ASC",
         )?;
-        let rows = stmt.query_map([candidate_id], CheckRunRow::from_row)?
-            .collect::<std::result::Result<_, _>>();
-        rows.map_err(Into::into)
+        let rows = stmt
+            .query_map([candidate_id], CheckRunRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
     }
-
 
     /// Make an operator-visible review and its immutable first revision one
     /// transaction. A review that lacks a revision is never emitted by a new
@@ -479,9 +568,12 @@ impl Store {
     }
 
     /// Replace the mutable card projection and append its immutable revision
-    /// atomically after a candidate has passed its checks. Only a review
-    /// currently awaiting a revision accepts one: the same race-safe gate
-    /// `revise_review` enforced, now preserved alongside the revision row.
+    /// atomically after a candidate has passed its checks. Returns `false`,
+    /// changing nothing, when the review is not in a state a resubmission may
+    /// touch — in particular while it is `publishing`, so a resubmission
+    /// racing an approval can never swap the revision an in-flight publish is
+    /// about to record as approved.
+    #[allow(clippy::too_many_arguments)]
     pub fn revise_review_with_revision(
         &self,
         review_id: &str,
@@ -500,14 +592,22 @@ impl Store {
         let changed = tx.execute(
             "UPDATE review SET title=?2, body=?3, diff=?4, files=?5, head_sha=?6, added=?7,
                 removed=?8, checks_json=?9, state='new', verdict_reason=NULL, revision_patch=NULL,
-                claimed_ms=NULL, resolved_mono_ms=NULL, updated_ms=?10 WHERE id=?1 AND state='revising'",
+                claimed_ms=NULL, resolved_mono_ms=NULL, updated_ms=?10
+             WHERE id=?1 AND state IN ('new','claimed','revising')",
             params![
-                review_id, title, body, revision.diff, revision.files, revision.head_sha, added, removed,
-                checks_json, now_ms(),
+                review_id,
+                title,
+                body,
+                revision.diff,
+                revision.files,
+                revision.head_sha,
+                added,
+                removed,
+                checks_json,
+                now_ms(),
             ],
         )?;
         if changed != 1 {
-            tx.rollback()?;
             return Ok(false);
         }
         Self::write_review_revision(&tx, revision)?;
@@ -521,28 +621,39 @@ impl Store {
     ) -> rusqlite::Result<()> {
         tx.execute(
             "INSERT INTO review_revision
-                (id, review_id, candidate_id, title, body, diff, files, head_sha, context_json, created_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                (id, review_id, candidate_id, title, body, diff, files, head_sha, context_json,
+                 requirements_work_item_id, requirements_title, requirements_body, requirements_hash,
+                 created_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 revision.id, revision.review_id, revision.candidate_id, revision.title, revision.body,
-                revision.diff, revision.files, revision.head_sha, revision.context_json, revision.created_ms,
+                revision.diff, revision.files, revision.head_sha, revision.context_json,
+                revision.requirements_work_item_id, revision.requirements_title, revision.requirements_body,
+                revision.requirements_hash, revision.created_ms,
             ],
         )?;
         Ok(())
     }
 
     pub fn review_revisions(&self, review_id: &str) -> Result<Vec<ReviewRevisionRow>> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
         let mut stmt = conn.prepare(
             "SELECT * FROM review_revision WHERE review_id=?1 ORDER BY created_ms ASC, id ASC",
         )?;
-        let rows = stmt.query_map([review_id], ReviewRevisionRow::from_row)?
-            .collect::<std::result::Result<_, _>>();
-        rows.map_err(Into::into)
+        let rows = stmt
+            .query_map([review_id], ReviewRevisionRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
     }
 
     pub fn latest_review_revision(&self, review_id: &str) -> Result<Option<ReviewRevisionRow>> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
         conn.query_row(
             "SELECT * FROM review_revision WHERE review_id=?1 ORDER BY created_ms DESC, id DESC LIMIT 1",
             [review_id],
@@ -577,12 +688,16 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT * FROM review_decision WHERE review_id=?1 ORDER BY decided_ms ASC, id ASC",
         )?;
-        let rows = stmt.query_map([review_id], ReviewDecisionRow::from_row)?
-            .collect::<std::result::Result<_, _>>();
-        rows.map_err(Into::into)
+        let rows = stmt
+            .query_map([review_id], ReviewDecisionRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
     }
     pub fn attach_demonstration(&self, demonstration: &DemonstrationRow) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
         conn.execute(
             "INSERT INTO demonstration
                 (id, candidate_id, channel, document_id, document_slug, document_hash, label, created_ms)
@@ -596,14 +711,35 @@ impl Store {
         Ok(())
     }
 
-    pub fn demonstrations_for_candidate(&self, candidate_id: &str) -> Result<Vec<DemonstrationRow>> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
-        let mut stmt = conn.prepare(
-            "SELECT * FROM demonstration WHERE candidate_id=?1 ORDER BY created_ms ASC, id ASC",
-        )?;
-        let rows = stmt.query_map([candidate_id], DemonstrationRow::from_row)?
-            .collect::<std::result::Result<_, _>>();
-        rows.map_err(Into::into)
+    pub fn demonstrations_for_candidate(
+        &self,
+        candidate_id: &str,
+    ) -> Result<Vec<DemonstrationView>> {
+        let rows: Vec<DemonstrationRow> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+            let mut stmt = conn.prepare(
+                "SELECT * FROM demonstration WHERE candidate_id=?1 ORDER BY created_ms ASC, id ASC",
+            )?;
+            let rows = stmt
+                .query_map([candidate_id], DemonstrationRow::from_row)?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        rows.into_iter()
+            .map(|row| {
+                // Stale when the document has been edited or deleted since
+                // attachment: never silently show today's bytes as if they
+                // were what a human curated.
+                let stale = match self.doc_get(&row.channel, &row.document_slug)? {
+                    Some(doc) => doc.hash != row.document_hash,
+                    None => true,
+                };
+                Ok(DemonstrationView { row, stale })
+            })
+            .collect()
     }
 
     pub fn candidate_evidence(&self, candidate_id: &str) -> Result<CandidateEvidence> {
@@ -611,11 +747,15 @@ impl Store {
             .candidate(candidate_id)?
             .ok_or_else(|| StoreError::Invalid("no such candidate".into()))?;
         let revisions = {
-            let conn = self.conn.lock().map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
             let mut stmt = conn.prepare(
                 "SELECT * FROM review_revision WHERE candidate_id=?1 ORDER BY created_ms ASC, id ASC",
             )?;
-            let rows = stmt.query_map([candidate_id], ReviewRevisionRow::from_row)?
+            let rows = stmt
+                .query_map([candidate_id], ReviewRevisionRow::from_row)?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows
         };
@@ -645,12 +785,16 @@ impl Store {
     /// Legacy check events have no immutable candidate identity. Keep them
     /// discoverable by their session rather than pretending an association.
     pub fn legacy_check_runs_for_session(&self, session_id: &str) -> Result<Vec<CheckRunRow>> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
         let mut stmt = conn.prepare(
             "SELECT * FROM check_run WHERE session_id=?1 AND candidate_id IS NULL ORDER BY started_ms ASC, id ASC",
         )?;
-        let rows = stmt.query_map([session_id], CheckRunRow::from_row)?
-            .collect::<std::result::Result<_, _>>();
-        rows.map_err(Into::into)
+        let rows = stmt
+            .query_map([session_id], CheckRunRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
     }
 }

@@ -471,16 +471,24 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX check_run_reuse ON check_run(candidate_id, reuse_key, finished_ms);
 
     CREATE TABLE review_revision (
-        id           TEXT PRIMARY KEY,
-        review_id    TEXT NOT NULL REFERENCES review(id),
-        candidate_id TEXT NOT NULL REFERENCES candidate(id),
-        title        TEXT NOT NULL,
-        body         TEXT NOT NULL,
-        diff         TEXT NOT NULL,
-        files        TEXT NOT NULL,
-        head_sha     TEXT NOT NULL,
-        context_json TEXT NOT NULL,
-        created_ms   INTEGER NOT NULL
+        id                        TEXT PRIMARY KEY,
+        review_id                 TEXT NOT NULL REFERENCES review(id),
+        candidate_id              TEXT NOT NULL REFERENCES candidate(id),
+        title                     TEXT NOT NULL,
+        body                      TEXT NOT NULL,
+        diff                      TEXT NOT NULL,
+        files                     TEXT NOT NULL,
+        head_sha                  TEXT NOT NULL,
+        context_json              TEXT NOT NULL,
+        -- What the review screen must show as "Requirements": the linked work
+        -- item's title/body as they stood at submit time, plus a hash of them.
+        -- NULL when no work item was linked, or for a legacy backfilled row.
+        -- Never re-read from the (mutable) work item at display time.
+        requirements_work_item_id TEXT,
+        requirements_title        TEXT,
+        requirements_body         TEXT,
+        requirements_hash         TEXT,
+        created_ms                INTEGER NOT NULL
     );
     CREATE INDEX review_revision_review ON review_revision(review_id, created_ms);
     CREATE INDEX review_revision_candidate ON review_revision(candidate_id, created_ms);
@@ -585,9 +593,20 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             conn.pragma_update(None, "user_version", target)?;
         }
     }
-    // A process can die after recording a run but before its runner returns.
-    // Leave the evidence honest on the next open rather than making a stale
-    // `running` row look like a pass or a cancellable live process.
+    // The replicated tables are one schema shared with the hub's replica.
+    tracon_sync::schema::install(conn)?;
+    Ok(())
+}
+
+/// A process can die after recording a run but before its runner returns.
+/// Leave the evidence honest on the next open rather than making a stale
+/// `running` row look like a pass or a cancellable live process.
+///
+/// Deliberately not part of `migrate`: every `Store::open` runs migrations
+/// (CLI subcommands included), and a CLI opening the same database while the
+/// serving node has a check genuinely running must not interrupt it. Call
+/// this once, explicitly, from the serving node's own startup path.
+pub fn reconcile_interrupted_runs(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE check_run
          SET outcome='interrupted', finished_ms=CAST(strftime('%s','now') AS INTEGER) * 1000,
@@ -595,7 +614,5 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          WHERE outcome='running'",
         [],
     )?;
-    // The replicated tables are one schema shared with the hub's replica.
-    tracon_sync::schema::install(conn)?;
     Ok(())
 }

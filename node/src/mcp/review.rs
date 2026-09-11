@@ -266,16 +266,45 @@ async fn submit(
         .candidate(&candidate.id)
         .map_err(|error| error.to_string())?
         .ok_or("candidate disappeared while it was captured")?;
-    let checks = run_checks(
-        store,
-        manager,
-        ctx,
-        &candidate,
-        &snapshot.root,
-        args.get("rerun_checks").and_then(Value::as_bool).unwrap_or(false),
-    )
-    .await?;
-    let checks_json = Some(serde_json::to_string(&checks.results).unwrap_or_else(|_| "[]".into()));
+    // The operator's own toolchain is where an external harness's checks
+    // run, never this node's container: nothing here can execute a command
+    // in a worktree the node does not own.
+    let checks = if external {
+        review::checks::CheckReport {
+            candidate_id: candidate.id.clone(),
+            results: Vec::new(),
+            required_count: 0,
+            all_required_passed: true,
+            reused: false,
+        }
+    } else {
+        run_checks(
+            store,
+            manager,
+            ctx,
+            &candidate,
+            &snapshot.root,
+            args.get("rerun_checks")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )
+        .await?
+    };
+    let checks_json =
+        (!external).then(|| serde_json::to_string(&checks.results).unwrap_or_else(|_| "[]".into()));
+
+    // Requirements shown on the review screen are what this revision was
+    // actually checked against, read once here and pinned to the revision —
+    // never the (mutable) work item re-read at display time.
+    let requirements = session
+        .work_item_id
+        .as_ref()
+        .and_then(|work_item_id| store.work_get(work_item_id).ok().flatten());
+    let requirements_title = requirements.as_ref().map(|w| w.title.clone());
+    let requirements_body = requirements.as_ref().map(|w| w.body.clone());
+    let requirements_hash = requirements
+        .as_ref()
+        .map(|w| crate::corpus::hash_body(&format!("{}\n{}", w.title, w.body)));
 
     // A resubmission keeps the same card and the same thread.
     if let Some(existing) = resubmission {
@@ -290,6 +319,10 @@ async fn submit(
             files: files.clone(),
             head_sha: capture.head_sha.clone(),
             context_json: serde_json::to_string(&capture.contexts).unwrap_or_else(|_| "[]".into()),
+            requirements_work_item_id: session.work_item_id.clone(),
+            requirements_title,
+            requirements_body,
+            requirements_hash,
             created_ms: now_ms(),
         };
         let revised = store
@@ -304,7 +337,10 @@ async fn submit(
             )
             .map_err(|error| error.to_string())?;
         if !revised {
-            return Err("that review is no longer awaiting a revision".into());
+            return Err(format!(
+                "review {id} is currently being published and cannot be resubmitted; call review_status \
+                 to wait for the verdict"
+            ));
         }
         manager.publish_queue().await;
         let reviewer = spawn_review_session(store, manager, ctx, id, &session).await;
@@ -372,6 +408,10 @@ async fn submit(
         files: row.files.clone(),
         head_sha: row.head_sha.clone(),
         context_json: serde_json::to_string(&capture.contexts).unwrap_or_else(|_| "[]".into()),
+        requirements_work_item_id: session.work_item_id.clone(),
+        requirements_title,
+        requirements_body,
+        requirements_hash,
         created_ms: row.created_ms,
     };
     store

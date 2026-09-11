@@ -342,9 +342,8 @@ pub async fn snapshot_candidate(
     };
     let mut total = 0u64;
     for entry in listing.split(|b| *b == 0).filter(|entry| !entry.is_empty()) {
-        let (meta, path) = split_once_byte(entry, b'\t').ok_or_else(|| {
-            ReviewError::Rejected("Git tree entry has no path separator".into())
-        })?;
+        let (meta, path) = split_once_byte(entry, b'\t')
+            .ok_or_else(|| ReviewError::Rejected("Git tree entry has no path separator".into()))?;
         let meta = std::str::from_utf8(meta)
             .map_err(|_| ReviewError::Rejected("Git tree metadata is not UTF-8".into()))?;
         let mut fields = meta.split_whitespace();
@@ -370,7 +369,9 @@ pub async fn snapshot_candidate(
         let size = git(worktree, "cat-file size", &["cat-file", "-s", object])
             .await?
             .parse::<u64>()
-            .map_err(|_| ReviewError::Rejected(format!("candidate blob {object} has invalid size")))?;
+            .map_err(|_| {
+                ReviewError::Rejected(format!("candidate blob {object} has invalid size"))
+            })?;
         total = total
             .checked_add(size)
             .ok_or_else(|| ReviewError::Rejected("candidate snapshot is too large".into()))?;
@@ -417,7 +418,10 @@ pub fn materialize_candidate_files(
                 {
                     use std::os::unix::fs::PermissionsExt;
                     let permissions = if file.mode == 0o100755 { 0o555 } else { 0o444 };
-                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(permissions))?;
+                    std::fs::set_permissions(
+                        &target,
+                        std::fs::Permissions::from_mode(permissions),
+                    )?;
                 }
             }
             0o120000 => {

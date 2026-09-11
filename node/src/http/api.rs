@@ -1107,11 +1107,22 @@ pub async fn get_review(
         Some(revision) => Some(s.store().candidate_evidence(&revision.candidate_id)?),
         None => None,
     };
-    let requirements = s
-        .store()
-        .get_session(&r.session_id)?
-        .and_then(|session| session.work_item_id)
-        .and_then(|work_item_id| s.store().work_get(&work_item_id).ok().flatten());
+    // Pinned on the revision at submit time: what the operator is deciding
+    // on must never silently drift because the work item was re-scoped after
+    // this candidate was reviewed.
+    let requirements = revision.as_ref().and_then(|revision| {
+        revision
+            .requirements_work_item_id
+            .as_ref()
+            .map(|work_item_id| {
+                json!({
+                    "id": work_item_id,
+                    "title": revision.requirements_title.clone().unwrap_or_default(),
+                    "body": revision.requirements_body.clone().unwrap_or_default(),
+                    "hash": revision.requirements_hash.clone().unwrap_or_default(),
+                })
+            })
+    });
     let surrounding_code = revision
         .as_ref()
         .and_then(|revision| serde_json::from_str::<serde_json::Value>(&revision.context_json).ok())
@@ -1198,8 +1209,10 @@ pub async fn review_file(
     Ok(Json(json!({ "path": q.path, "text": text })))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_evidence_decision(
     store: &Store,
+    revision: Option<&crate::store::ReviewRevisionRow>,
     review_id: &str,
     decision: &str,
     reason: Option<&str>,
@@ -1207,7 +1220,7 @@ fn record_evidence_decision(
     body: Option<&str>,
     patch: Option<&str>,
 ) -> Result<Option<i64>, crate::store::StoreError> {
-    let Some(revision) = store.latest_review_revision(review_id)? else {
+    let Some(revision) = revision else {
         // A row directly written by an old node/test fixture has no immutable
         // revision to honestly associate with a new decision.
         return Ok(None);
@@ -1216,7 +1229,7 @@ fn record_evidence_decision(
     store.record_review_decision(&crate::store::ReviewDecisionRow {
         id: uuid::Uuid::now_v7().to_string(),
         review_id: review_id.to_string(),
-        revision_id: revision.id,
+        revision_id: revision.id.clone(),
         source: "operator".into(),
         decision: decision.to_string(),
         reason: reason.map(str::to_string),
@@ -1260,7 +1273,10 @@ pub async fn candidate_by_commit(
     let candidate = s
         .store()
         .candidate_by_commit(&query.channel, &head_sha)?
-        .ok_or(ApiError(StatusCode::NOT_FOUND, "no candidate on that channel for this commit".into()))?;
+        .ok_or(ApiError(
+            StatusCode::NOT_FOUND,
+            "no candidate on that channel for this commit".into(),
+        ))?;
     let evidence = s.store().candidate_evidence(&candidate.id)?;
     Ok(Json(json!({ "evidence": evidence })))
 }
@@ -1405,6 +1421,10 @@ pub(crate) async fn decide_local(
             format!("this review was already {}", r.state),
         ));
     }
+    // Bound once, here: every branch below records its decision against
+    // exactly the revision the operator saw when the verdict was decided,
+    // never a revision a concurrent resubmit created afterward.
+    let revision = s.store().latest_review_revision(&id)?;
 
     match b.verdict.as_str() {
         "revise" => {
@@ -1433,8 +1453,16 @@ pub(crate) async fn decide_local(
                     ),
                 ));
             }
-            let waiting_ms =
-                record_evidence_decision(s.store(), &id, "revise", Some(notes), None, None, patch)?;
+            let waiting_ms = record_evidence_decision(
+                s.store(),
+                revision.as_ref(),
+                &id,
+                "revise",
+                Some(notes),
+                None,
+                None,
+                patch,
+            )?;
             record_operator_decision_event(&s, &r.session_id, &id, "revise", waiting_ms);
             s.manager.publish_queue().await;
             Ok(json!({ "state": "revising" }))
@@ -1465,8 +1493,16 @@ pub(crate) async fn decide_local(
                     ),
                 ));
             }
-            let waiting_ms =
-                record_evidence_decision(s.store(), &id, "rejected", Some(reason), None, None, None)?;
+            let waiting_ms = record_evidence_decision(
+                s.store(),
+                revision.as_ref(),
+                &id,
+                "rejected",
+                Some(reason),
+                None,
+                None,
+                None,
+            )?;
             record_operator_decision_event(&s, &r.session_id, &id, "rejected", waiting_ms);
             s.manager.publish_queue().await;
             Ok(json!({ "state": "rejected" }))
@@ -1495,6 +1531,7 @@ pub(crate) async fn decide_local(
                 Ok(published) => {
                     let waiting_ms = record_evidence_decision(
                         s.store(),
+                        revision.as_ref(),
                         &id,
                         "approved",
                         None,

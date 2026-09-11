@@ -266,10 +266,7 @@ fn string_list(v: &Value, key: &str) -> Result<Vec<String>, String> {
         .collect()
 }
 
-fn string_map(
-    v: &Value,
-    key: &str,
-) -> Result<std::collections::BTreeMap<String, String>, String> {
+fn string_map(v: &Value, key: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
     object(v, key)?
         .iter()
         .map(|(name, value)| {
@@ -425,9 +422,9 @@ mod tests {
             changed,
             vec![
                 "supervision.checks",
-                "supervision.timeout_secs",
                 "supervision.dependency_inputs",
                 "supervision.max_snapshot_bytes",
+                "supervision.timeout_secs",
             ]
         );
         assert_eq!(
