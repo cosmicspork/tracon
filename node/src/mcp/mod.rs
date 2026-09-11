@@ -224,6 +224,10 @@ impl Tools {
             }
             other => Err(format!("no tool named {other}")),
         };
+        let result = match (name, result) {
+            (review::SUBMIT, Ok(submitted)) => self.auto_publish_review(ctx, args, submitted).await,
+            (_, result) => result,
+        };
         if let Some(id) = action_record {
             let (state, outcome) = match &result {
                 Ok(value) => ("succeeded", value.to_string()),
@@ -237,6 +241,74 @@ impl Tools {
                 .map_err(|e| e.to_string())?;
         }
         result
+    }
+
+    async fn auto_publish_review(
+        &self,
+        ctx: &CallContext,
+        _args: &Value,
+        submitted: Value,
+    ) -> Result<Value, String> {
+        let Some(review_id) = submitted.get("review_id").and_then(Value::as_str) else {
+            return Ok(submitted);
+        };
+        let access = self.session.get().ok_or("review tools are not available")?;
+        let review = access.store.get_review(review_id).map_err(|e| e.to_string())?
+            .ok_or("review disappeared after capture")?;
+        let target: crate::review::publish::Target =
+            serde_json::from_str(&review.target).map_err(|e| e.to_string())?;
+        let prose = crate::corpus::hash_body(&format!(
+            "{}\u{1f}{}", review.approved_title(), review.approved_body()
+        ));
+        let canonical = format!(
+            "publish:{}:{}:{}:{}:prose:{}",
+            target.provider, target.project, target.base, target.branch, prose
+        );
+        let authority_args = serde_json::json!({
+            "target": canonical.clone(),
+            "revision": review.head_sha.clone(),
+            "prose_hash": prose.clone(),
+        });
+        let decision = crate::authority::decide(
+            access.store.as_ref(),
+            &self.policy.read().unwrap(),
+            &ctx.channel,
+            &ctx.session_id,
+            crate::authority::PUBLISH,
+            authority_args["target"].as_str().expect("canonical target"),
+            authority_args["revision"].as_str(),
+            &authority_args,
+        )?;
+        if decision.verdict != Verdict::Allow {
+            return Ok(submitted);
+        }
+        let action_id = uuid::Uuid::now_v7().to_string();
+        access.store.authority_action_begin(
+            &action_id, decision.rule_id.as_deref(), crate::authority::PUBLISH, &canonical,
+            &ctx.channel, &ctx.session_id, Some(&review.head_sha),
+            &serde_json::json!({ "review_id": review.id, "candidate": review.head_sha, "prose": prose }).to_string(),
+        ).map_err(|e| e.to_string())?;
+        match crate::authority::publish_review(
+            access.store.as_ref(), &access.manager, &self.broker, &self.cfg,
+            &ctx.node_id, &review, review.approved_title(), review.approved_body(),
+        ).await {
+            Ok(published) => {
+                access.store.authority_action_finish(&action_id, "succeeded", &published)
+                    .map_err(|e| e.to_string())?;
+                Ok(serde_json::json!({
+                    "review_id": review.id, "state": "approved", "published": published,
+                    "authority": { "mode": "automatic", "id": decision.rule_id },
+                }))
+            }
+            Err(error) => {
+                access.store.authority_action_finish(&action_id, "failed", &error)
+                    .map_err(|e| e.to_string())?;
+                Ok(serde_json::json!({
+                    "review_id": review.id, "state": "new",
+                    "authority": { "mode": "automatic", "outcome": "failed", "reason": error },
+                }))
+            }
+        }
     }
 
     /// The definitions this caller is offered: the channel's tools, less what

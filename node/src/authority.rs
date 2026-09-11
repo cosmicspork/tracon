@@ -93,3 +93,75 @@ pub fn grant_visible(row: &AuthorityGrantRow) -> Value {
         "created_ms": row.created_ms,
     })
 }
+
+/// Publish the exact candidate captured by a review. This is shared by the
+/// explicit operator approval and policy-authorized publication so neither can
+/// skip freshness, the atomic claim, or the brokered SHA precondition.
+pub async fn publish_review(
+    store: &Store,
+    manager: &crate::session::Manager,
+    broker: &crate::broker::SharedBroker,
+    cfg: &crate::config::Config,
+    node_id: &str,
+    review: &crate::store::ReviewRow,
+    title: &str,
+    body: &str,
+) -> Result<String, String> {
+    let worktree = serde_json::from_str::<crate::review::publish::Target>(&review.target)
+        .ok()
+        .and_then(|target| target.worktree)
+        .or_else(|| {
+            store.get_session(&review.session_id).ok().flatten()
+                .and_then(|session| session.worktree_path)
+        })
+        .ok_or("the worktree is gone")?;
+    let files: Vec<crate::review::FileAtSubmit> =
+        serde_json::from_str(&review.files).unwrap_or_default();
+    let stale = crate::review::staleness(&worktree, &review.head_sha, &files).await;
+    if !stale.is_empty() {
+        return Err(format!("changed since submit: {}", stale.join(", ")));
+    }
+    crate::review::checks::review_required_checks_current(store, &review.id, cfg)?;
+    if !store.begin_publish(&review.id).map_err(|e| e.to_string())? {
+        return Err("this review is already being decided".into());
+    }
+    let target: crate::review::publish::Target =
+        serde_json::from_str(&review.target).map_err(|e| e.to_string())?;
+    match crate::review::publish::publish(
+        broker,
+        cfg,
+        &review.channel,
+        node_id,
+        &worktree,
+        &target,
+        &review.head_sha,
+        title,
+        body,
+    )
+    .await {
+        Ok(published) => {
+            store.finish_publish(&review.id, title, body, &published)
+                .map_err(|e| e.to_string())?;
+            manager.publish_queue().await;
+            if let Some(item) = store.get_session(&review.session_id).map_err(|e| e.to_string())?
+                .and_then(|session| session.work_item_id)
+            {
+                if crate::corpus::work::close(
+                    store,
+                    manager.bus(),
+                    node_id,
+                    &item,
+                    Some(&review.session_id),
+                ).is_ok() {
+                    manager.item_closed(&review.session_id, &format!("published: {published}")).await;
+                }
+            }
+            Ok(published)
+        }
+        Err(error) => {
+            store.abort_publish(&review.id).map_err(|e| e.to_string())?;
+            manager.publish_queue().await;
+            Err(error.to_string())
+        }
+    }
+}

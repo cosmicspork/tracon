@@ -90,7 +90,7 @@ impl Rule {
         // are not a shell line and carry no chaining to guard against. The
         // guard that matters for a tool is the tool's own (the SQL guard, the
         // review capture), which runs after policy says yes.
-        if req.kind == Some(crate::mcp::TOOL_KIND) {
+        if req.kind == Some(crate::mcp::TOOL_KIND) || req.kind == Some("authority") {
             let named = self.matches.is_empty()
                 || self
                     .matches

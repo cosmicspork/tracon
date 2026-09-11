@@ -1026,91 +1026,21 @@ pub(crate) async fn decide_local(
             Ok(json!({ "state": "rejected" }))
         }
         "approve" => {
-            // Stale means the branch is no longer what was reviewed. Approving
-            // it would publish something nobody read.
-            let stale = staleness_of(&s, &r).await;
-            if !stale.is_empty() {
-                return Err(ApiError(
-                    StatusCode::CONFLICT,
-                    format!("changed since submit: {}", stale.join(", ")),
-                ));
-            }
-            let worktree = worktree_of(&s, &r).ok_or(ApiError(
-                StatusCode::CONFLICT,
-                "the worktree is gone".into(),
-            ))?;
-            let target: crate::review::publish::Target = serde_json::from_str(&r.target)
-                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
             let title = b.title.as_deref().unwrap_or(r.approved_title()).to_string();
             let body = b.body.as_deref().unwrap_or(r.approved_body()).to_string();
-
-            // Claim the publish atomically: only the transition that moves the
-            // row into `publishing` may push. Two concurrent approves cannot both
-            // win this, so the change is opened once, not once per request.
-            if !s.store().begin_publish(&id)? {
-                let now = s.store().get_review(&id)?.map(|r| r.state);
-                return Err(ApiError(
-                    StatusCode::CONFLICT,
-                    format!(
-                        "this review is already being decided ({})",
-                        now.as_deref().unwrap_or("gone")
-                    ),
-                ));
-            }
-
-            // The node publishes, using a credential the harness never had, and
-            // pins the push to the reviewed commit.
-            let result = crate::review::publish::publish(
+            match crate::authority::publish_review(
+                s.store(),
+                &s.manager,
                 &s.tools.broker,
                 &s.cfg,
-                &r.channel,
                 &s.node_id,
-                &worktree,
-                &target,
-                &r.head_sha,
+                &r,
                 &title,
                 &body,
             )
-            .await;
-
-            match result {
-                Ok(published) => {
-                    s.store().finish_publish(&id, &title, &body, &published)?;
-                    s.manager.publish_queue().await;
-                    // Published is done: the item closes and the execute
-                    // session ends with it. Normal path of the whole chain.
-                    if let Some(item) = s
-                        .store()
-                        .get_session(&r.session_id)?
-                        .and_then(|sess| sess.work_item_id)
-                    {
-                        match crate::corpus::work::close(
-                            s.store(),
-                            s.manager.bus(),
-                            &s.node_id,
-                            &item,
-                            Some(&r.session_id),
-                        ) {
-                            Ok(_) => {
-                                s.manager
-                                    .item_closed(&r.session_id, &format!("published: {published}"))
-                                    .await
-                            }
-                            Err(e) => tracing::warn!(error = %e, "item not closed after publish"),
-                        }
-                    }
-                    Ok(json!({ "state": "approved", "published": published }))
-                }
-                Err(e) => {
-                    // The forge refused: undo the publishing claim so the review
-                    // returns to the queue rather than being stuck mid-publish.
-                    // The operator approved, the forge refused, and that is a
-                    // thing to fix rather than a verdict.
-                    s.store().abort_publish(&id)?;
-                    s.manager.publish_queue().await;
-                    Err(ApiError(StatusCode::BAD_GATEWAY, e.to_string()))
-                }
+            .await {
+                Ok(published) => Ok(json!({ "state": "approved", "published": published })),
+                Err(error) => Err(ApiError(StatusCode::BAD_GATEWAY, error)),
             }
         }
         other => Err(ApiError(

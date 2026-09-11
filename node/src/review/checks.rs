@@ -124,6 +124,31 @@ fn tail(text: &str) -> String {
     format!("…{}", &text[at..])
 }
 
+/// The legacy review path records the deterministic check results beside the
+/// captured candidate. Before any publication, require that record to exist
+/// and contain no failed check. Candidate evidence extends this same gate with
+/// input/image freshness; callers use one entry point rather than choosing a
+/// weaker approval path.
+pub fn review_required_checks_current(
+    store: &crate::store::Store,
+    review_id: &str,
+    _cfg: &Config,
+) -> Result<(), String> {
+    let review = store.get_review(review_id).map_err(|e| e.to_string())?
+        .ok_or("review is gone")?;
+    let Some(recorded) = review.checks_json else {
+        // External harness submissions do not run the node's isolated checks;
+        // they remain eligible for explicit review, never automatic publish.
+        return Err("automatic publication requires node-recorded check evidence".into());
+    };
+    let checks: Vec<CheckResult> = serde_json::from_str(&recorded)
+        .map_err(|_| "recorded check evidence is malformed".to_string())?;
+    if let Some(failed) = checks.iter().find(|check| !check.ok) {
+        return Err(format!("required check failed: {}", failed.command));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
