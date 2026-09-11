@@ -269,9 +269,53 @@ impl Manager {
     }
 
     /// Register a tool token directly. Tests drive the MCP route without
-    /// starting a harness; sessions always go through `start`.
+    /// starting a harness; sessions always go through `start`. A token only
+    /// authorizes a live session, so a session the test never created is
+    /// recorded as running here.
     #[doc(hidden)]
     pub async fn register_tool_token_for_test(&self, session_id: &str, channel: &str) -> String {
+        if self.store.get_session(session_id).ok().flatten().is_none() {
+            let now = crate::store::now_ms();
+            self.store
+                .ensure_peer_node(&self.node_id)
+                .expect("test session node row");
+            self.store
+                .insert_session(&SessionRow {
+                    id: session_id.to_string(),
+                    node_id: self.node_id.clone(),
+                    channel: channel.to_string(),
+                    work_item_id: None,
+                    repo_path: String::new(),
+                    worktree_path: None,
+                    branch: String::new(),
+                    harness_id: "fake".into(),
+                    harness_version: String::new(),
+                    harness_session_id: None,
+                    container_name: None,
+                    model: String::new(),
+                    project_id: None,
+                    phase: Phase::Execute.as_str().into(),
+                    policy_version: None,
+                    review_id: None,
+                    budget_tokens: 0,
+                    tokens_used: 0,
+                    cost_usd: None,
+                    context_used: None,
+                    context_size: None,
+                    state: SessionState::Running.as_str().into(),
+                    end_reason: None,
+                    last_error: None,
+                    turn_active: 0,
+                    draft: None,
+                    draft_updated_ms: None,
+                    created_ms: now,
+                    started_mono_ms: Some(0),
+                    ended_mono_ms: None,
+                    updated_ms: now,
+                    archived_ms: None,
+                })
+                .expect("test session row");
+        }
         let token = mint_token();
         self.tokens
             .lock()
