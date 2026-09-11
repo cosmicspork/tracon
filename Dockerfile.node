@@ -20,7 +20,7 @@ RUN cargo build -p tracon --release --bin tracon
 
 # consulta, at a pinned commit, with its environment resolved at build time so
 # the first query does not wait on a download inside the boundary.
-FROM ghcr.io/astral-sh/uv@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS consulta
+FROM ghcr.io/astral-sh/uv:0.9.16-python3.13-bookworm-slim@sha256:ceb1b62148bad35cf9cb899a5da44aa15774a5a74860716f0f14d451122e2051 AS consulta
 ARG CONSULTA_REV=5932f23a7bc33462bae3f1911bd807d0ac1ba28c
 RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' \
@@ -40,7 +40,7 @@ RUN uv sync --frozen --no-dev
 
 # The runtime is the same image consulta's environment was resolved on, so
 # its venv's interpreter link holds; uv runs it offline from here.
-FROM ghcr.io/astral-sh/uv@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+FROM ghcr.io/astral-sh/uv:0.9.16-python3.13-bookworm-slim@sha256:ceb1b62148bad35cf9cb899a5da44aa15774a5a74860716f0f14d451122e2051
 RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' \
       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
