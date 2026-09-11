@@ -422,6 +422,151 @@ const MIGRATIONS: &[&str] = &[
         ON authority_action(action, target, channel, COALESCE(revision, ''), operation_id)
         WHERE operation_id <> '' AND state IN ('pending', 'uncertain', 'succeeded');
     "#,
+    // 23: immutable candidates and the evidence attached to them. Legacy
+    // rows retain only facts the old schema recorded: in particular, no
+    // migration invents an execution image or dependency input identity.
+    r#"
+    CREATE TABLE candidate (
+        id               TEXT PRIMARY KEY,
+        head_sha         TEXT NOT NULL,
+        tree_sha         TEXT,
+        channel          TEXT NOT NULL,
+        owner_session_id TEXT NOT NULL,
+        source_kind      TEXT NOT NULL,
+        captured_ms      INTEGER NOT NULL,
+        capture_json     TEXT NOT NULL
+    );
+    CREATE TABLE candidate_file (
+        candidate_id TEXT NOT NULL REFERENCES candidate(id),
+        path         TEXT NOT NULL,
+        mode         INTEGER NOT NULL,
+        content      BLOB NOT NULL,
+        size_bytes   INTEGER NOT NULL,
+        PRIMARY KEY(candidate_id, path)
+    );
+    CREATE INDEX candidate_file_candidate ON candidate_file(candidate_id, path);
+    CREATE UNIQUE INDEX candidate_commit_channel ON candidate(head_sha, channel);
+
+    CREATE TABLE check_run (
+        id               TEXT PRIMARY KEY,
+        candidate_id     TEXT REFERENCES candidate(id),
+        session_id       TEXT NOT NULL,
+        definition_json  TEXT NOT NULL,
+        definition_hash  TEXT,
+        execution_image  TEXT,
+        inputs_json      TEXT,
+        reuse_key        TEXT,
+        outcome          TEXT NOT NULL,
+        source_outcome   TEXT,
+        exit_code        INTEGER,
+        log              TEXT NOT NULL,
+        duration_ms      INTEGER,
+        started_ms       INTEGER NOT NULL,
+        finished_ms      INTEGER,
+        rerun_of         TEXT REFERENCES check_run(id),
+        reused_from_id   TEXT REFERENCES check_run(id),
+        metadata_json    TEXT NOT NULL
+    );
+    CREATE INDEX check_run_candidate_started ON check_run(candidate_id, started_ms);
+    CREATE INDEX check_run_reuse ON check_run(candidate_id, reuse_key, finished_ms);
+
+    CREATE TABLE review_revision (
+        id                        TEXT PRIMARY KEY,
+        review_id                 TEXT NOT NULL REFERENCES review(id),
+        candidate_id              TEXT NOT NULL REFERENCES candidate(id),
+        title                     TEXT NOT NULL,
+        body                      TEXT NOT NULL,
+        diff                      TEXT NOT NULL,
+        files                     TEXT NOT NULL,
+        head_sha                  TEXT NOT NULL,
+        context_json              TEXT NOT NULL,
+        -- What the review screen must show as "Requirements": the linked work
+        -- item's title/body as they stood at submit time, plus a hash of them.
+        -- NULL when no work item was linked, or for a legacy backfilled row.
+        -- Never re-read from the (mutable) work item at display time.
+        requirements_work_item_id TEXT,
+        requirements_title        TEXT,
+        requirements_body         TEXT,
+        requirements_hash         TEXT,
+        created_ms                INTEGER NOT NULL
+    );
+    CREATE INDEX review_revision_review ON review_revision(review_id, created_ms);
+    CREATE INDEX review_revision_candidate ON review_revision(candidate_id, created_ms);
+
+    CREATE TABLE review_decision (
+        id          TEXT PRIMARY KEY,
+        review_id   TEXT NOT NULL REFERENCES review(id),
+        revision_id TEXT NOT NULL REFERENCES review_revision(id),
+        source      TEXT NOT NULL,
+        decision    TEXT NOT NULL,
+        reason      TEXT,
+        title       TEXT,
+        body        TEXT,
+        patch       TEXT,
+        decided_ms  INTEGER NOT NULL
+    );
+    CREATE INDEX review_decision_review ON review_decision(review_id, decided_ms);
+
+    CREATE TABLE demonstration (
+        id            TEXT PRIMARY KEY,
+        candidate_id  TEXT NOT NULL REFERENCES candidate(id),
+        channel       TEXT NOT NULL,
+        document_id   TEXT NOT NULL,
+        document_slug TEXT NOT NULL,
+        document_hash TEXT NOT NULL,
+        label         TEXT NOT NULL,
+        created_ms    INTEGER NOT NULL
+    );
+    CREATE INDEX demonstration_candidate ON demonstration(candidate_id, created_ms);
+
+    INSERT OR IGNORE INTO candidate
+        (id, head_sha, tree_sha, channel, owner_session_id, source_kind, captured_ms, capture_json)
+    SELECT head_sha || ':' || channel, head_sha, NULL, channel, session_id, 'legacy',
+           created_ms, json_object('legacy_review_id', id, 'provenance', 'not_recorded')
+    FROM review WHERE head_sha <> '';
+
+    INSERT OR IGNORE INTO review_revision
+        (id, review_id, candidate_id, title, body, diff, files, head_sha, context_json, created_ms)
+    SELECT 'legacy:' || id, id, head_sha || ':' || channel, title, body, diff, files, head_sha,
+           '[]', created_ms
+    FROM review WHERE head_sha <> '';
+
+    INSERT OR IGNORE INTO review_decision
+        (id, review_id, revision_id, decision, source, reason, title, body, patch, decided_ms)
+    SELECT 'legacy:' || id, id, 'legacy:' || id,
+           CASE WHEN state = 'revising' THEN 'revise' ELSE state END,
+           'legacy_unknown', verdict_reason,
+           edited_title, edited_body, revision_patch, updated_ms
+    FROM review WHERE state IN ('approved', 'rejected', 'revising') AND head_sha <> '';
+
+    INSERT OR IGNORE INTO check_run
+        (id, candidate_id, session_id, definition_json, definition_hash, execution_image, inputs_json,
+         reuse_key, outcome, source_outcome, exit_code, log, duration_ms, started_ms, finished_ms,
+         rerun_of, reused_from_id, metadata_json)
+    SELECT 'legacy:review:' || r.id || ':' || j.key, r.head_sha || ':' || r.channel, r.session_id,
+           json_object('command', json_extract(j.value, '$.command'), 'legacy', 1),
+           NULL, NULL, NULL, NULL,
+           CASE WHEN json_extract(j.value, '$.ok') THEN 'passed' ELSE 'failed' END,
+           NULL, json_extract(j.value, '$.exit'), COALESCE(json_extract(j.value, '$.tail'), ''),
+           json_extract(j.value, '$.ms'), r.created_ms, r.created_ms, NULL, NULL,
+           json_object('legacy_source', 'review.checks_json', 'provenance', 'not_recorded')
+    FROM review r, json_each(r.checks_json) j
+    WHERE r.head_sha <> '' AND json_valid(r.checks_json) AND json_type(r.checks_json) = 'array';
+
+    INSERT OR IGNORE INTO check_run
+        (id, candidate_id, session_id, definition_json, definition_hash, execution_image, inputs_json,
+         reuse_key, outcome, source_outcome, exit_code, log, duration_ms, started_ms, finished_ms,
+         rerun_of, reused_from_id, metadata_json)
+    SELECT 'legacy:event:' || seq, NULL, session_id,
+           json_object('command', json_extract(payload, '$.command'), 'legacy', 1),
+           NULL, NULL, NULL, NULL,
+           CASE WHEN json_extract(payload, '$.ok') THEN 'passed' ELSE 'failed' END,
+           NULL, json_extract(payload, '$.exit'), COALESCE(json_extract(payload, '$.tail'), ''),
+           json_extract(payload, '$.ms'), at_ms, at_ms, NULL, NULL,
+           json_object('legacy_source', 'event.check_result', 'candidate_provenance', 'unknown')
+    FROM event
+    WHERE kind = 'check_result' AND json_valid(payload);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build
@@ -450,5 +595,24 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     // The replicated tables are one schema shared with the hub's replica.
     tracon_sync::schema::install(conn)?;
+    Ok(())
+}
+
+/// A process can die after recording a run but before its runner returns.
+/// Leave the evidence honest on the next open rather than making a stale
+/// `running` row look like a pass or a cancellable live process.
+///
+/// Deliberately not part of `migrate`: every `Store::open` runs migrations
+/// (CLI subcommands included), and a CLI opening the same database while the
+/// serving node has a check genuinely running must not interrupt it. Call
+/// this once, explicitly, from the serving node's own startup path.
+pub fn reconcile_interrupted_runs(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE check_run
+         SET outcome='interrupted', finished_ms=CAST(strftime('%s','now') AS INTEGER) * 1000,
+             metadata_json=json_set(metadata_json, '$.interrupted_by_restart', true)
+         WHERE outcome='running'",
+        [],
+    )?;
     Ok(())
 }

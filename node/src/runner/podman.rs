@@ -208,6 +208,33 @@ impl Runner for PodmanRunner {
             .await?;
         Ok(())
     }
+
+    /// Ask podman itself for the digest of `spec.image` rather than trusting
+    /// the configured string: podman resolves exactly this reference to
+    /// whatever it has cached locally under that name, and that resolution —
+    /// not the operator's text — is what every `podman run` with this spec
+    /// actually executes. `None` on any failure (image absent, no digest
+    /// recorded, podman unreachable): evidence must never invent a pin.
+    async fn resolved_image(&self) -> Option<String> {
+        let output = Command::new(&self.spec.podman_bin)
+            .args([
+                "inspect",
+                "--format",
+                "{{index .RepoDigests 0}}",
+                &self.spec.image,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let digest = String::from_utf8(output.stdout).ok()?;
+        let digest = digest.trim();
+        (!digest.is_empty() && digest.contains("@sha256:")).then(|| digest.to_string())
+    }
 }
 
 #[cfg(test)]

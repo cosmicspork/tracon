@@ -224,15 +224,29 @@ pub async fn publish_review(
         )));
     }
     if require_evidence {
-        crate::review::checks::review_required_checks_current(ctx.store, &review.id, ctx.cfg)
-            .map_err(PublishError::Conflict)?;
+        crate::review::checks::review_required_checks_current(
+            ctx.store,
+            ctx.manager.backend().as_ref(),
+            &review.id,
+            ctx.cfg,
+        )
+        .await
+        .map_err(PublishError::Conflict)?;
     }
     if let Some(recheck) = recheck_authority {
         recheck().map_err(PublishError::Conflict)?;
     }
+    // Bind the revision this call validated immediately before claiming the
+    // publish, so a resubmit racing in between loses the atomic claim rather
+    // than having its bytes silently attributed to this approval.
+    let revision_id = ctx
+        .store
+        .latest_review_revision(&review.id)
+        .map_err(|e| PublishError::External(e.to_string()))?
+        .map(|revision| revision.id);
     if !ctx
         .store
-        .begin_publish(&review.id)
+        .begin_publish(&review.id, revision_id.as_deref())
         .map_err(|e| PublishError::External(e.to_string()))?
     {
         return Err(PublishError::Conflict(

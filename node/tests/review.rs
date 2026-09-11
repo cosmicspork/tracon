@@ -834,11 +834,11 @@ async fn a_claim_from_a_vanished_client_lapses() {
 }
 
 #[tokio::test]
-async fn submit_runs_the_checks_first_and_a_failure_refuses_the_submission() {
+async fn operator_required_checks_refuse_submission_and_record_each_outcome() {
     state::isolate();
     // Required checks are node policy, not something a candidate's own
-    // `.tracon/checks` can redirect (see `review::checks::commands_for`); a
-    // second command that only passes once the agent has done more work
+    // `.tracon/checks` can redirect (see `review::checks::required_definitions`);
+    // a second command that only passes once the agent has done more work
     // stands in for that policy gate.
     let f = fixture_with(test_name!(), WITH_GH, |c| {
         c.supervision.checks = vec![
@@ -854,9 +854,9 @@ async fn submit_runs_the_checks_first_and_a_failure_refuses_the_submission() {
     assert!(f.store.open_reviews().unwrap().is_empty());
     let kinds = f.event_kinds("s1");
     assert_eq!(
-        kinds.iter().filter(|k| *k == "check_result").count(),
+        kinds.iter().filter(|kind| *kind == "check_result").count(),
         2,
-        "stops at the first failure: {kinds:?}"
+        "all configured checks leave a durable result: {kinds:?}"
     );
     assert!(kinds.contains(&"check_started".to_string()));
     assert!(kinds.contains(&"review_rejected".to_string()));
@@ -867,25 +867,56 @@ async fn submit_runs_the_checks_first_and_a_failure_refuses_the_submission() {
     );
 
     // Fix the check by doing the work in the session's own runtime workspace
-    // (never the host checkout): the submission goes through, with the
-    // checks on the row.
+    // (never the host checkout), committed so the immutable candidate tree
+    // the checks run against actually contains it: an untracked file is
+    // invisible to the same Git-tree snapshot that keeps candidate identity
+    // exact.
     std::fs::create_dir_all(std::path::Path::new(&f.worktree).join(".tracon")).unwrap();
     std::fs::write(
         std::path::Path::new(&f.worktree).join(".tracon/allowed"),
         "",
     )
     .unwrap();
+    sh(
+        std::path::Path::new(&f.worktree),
+        "git add .tracon/allowed && git commit -qm allow-checks",
+    );
     let v = f.tool("s1", "submit_review", f.submit_args()).await;
     let id = v["review_id"]
         .as_str()
         .unwrap_or_else(|| panic!("{v}"))
         .to_string();
-    assert_eq!(v["review_session"]["state"], "none", "{v}");
     let r = f.store.get_review(&id).unwrap().unwrap();
     let checks: Vec<Value> = serde_json::from_str(r.checks_json.as_deref().unwrap()).unwrap();
     assert_eq!(checks.len(), 2);
     assert_eq!(checks[0]["command"], "test -f a.txt");
     assert_eq!(checks[1]["ok"], true);
+}
+
+#[tokio::test]
+async fn candidate_controlled_check_file_cannot_replace_operator_required_checks() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    std::fs::create_dir_all(f.dir.join("wt/.tracon")).unwrap();
+    std::fs::write(f.dir.join("wt/.tracon/checks"), "sh -c 'exit 97'\n").unwrap();
+    sh(
+        &f.dir,
+        "cd wt && git add .tracon/checks && git commit -qm candidate-check-file",
+    );
+
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let r = f.store.get_review(&id).unwrap().unwrap();
+    let checks: Vec<Value> = serde_json::from_str(r.checks_json.as_deref().unwrap()).unwrap();
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0]["command"], "test -f a.txt");
+    assert_eq!(checks[0]["ok"], true);
+    assert!(f
+        .event_kinds("s1")
+        .contains(&"candidate_verified".to_string()));
 }
 
 #[tokio::test]
@@ -1134,5 +1165,133 @@ async fn resubmitting_clears_the_patch() {
             .revision_patch
             .is_none(),
         "a patch must not outlive the diff it described"
+    );
+}
+
+/// Requirements on the review screen come from what the revision was
+/// actually checked against, pinned at submit time — never the live work
+/// item, which a human may re-scope while the review sits in the queue.
+#[tokio::test]
+async fn requirements_shown_on_review_are_pinned_to_the_revision() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let item = tracon::corpus::work::create(
+        &f.store,
+        &Bus::new(),
+        "n1",
+        tracon::corpus::work::NewWork {
+            channel: "work".into(),
+            project_id: None,
+            title: "Original requirement".into(),
+            body: "do the original thing".into(),
+            deps: vec![],
+            priority: 0,
+            discovered_from: None,
+            discovered_by_session: None,
+        },
+    )
+    .unwrap();
+    f.store
+        .conn()
+        .execute(
+            "UPDATE session SET work_item_id = ?1 WHERE id = 's1'",
+            [&item.id],
+        )
+        .unwrap();
+
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+
+    let (status, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["requirements"]["id"], item.id.as_str());
+    assert_eq!(body["requirements"]["title"], "Original requirement");
+    assert_eq!(body["requirements"]["body"], "do the original thing");
+
+    // The work item is re-scoped while the review sits in the queue.
+    tracon::corpus::work::update(
+        &f.store,
+        f.manager.bus(),
+        "n1",
+        &item.id,
+        tracon::corpus::work::Patch {
+            title: Some("Rewritten requirement".into()),
+            body: Some("do something else entirely".into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+
+    let (status, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["requirements"]["title"], "Original requirement",
+        "the pinned revision must not drift with the live work item: {body}"
+    );
+    assert_eq!(body["requirements"]["body"], "do the original thing");
+}
+
+/// A curated demonstration is linked to the document bytes as they stood
+/// when it was attached. If the document changes afterward, the review
+/// screen must say so rather than silently pointing at today's bytes.
+#[tokio::test]
+async fn a_demonstration_reports_when_its_document_has_since_changed() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+
+    let (status, _) = f
+        .call(
+            "PUT",
+            "/api/docs/work/playbook",
+            Some(json!({ "body": "# Playbook\n\noriginal content" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let candidate_id = v["candidate_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/evidence/candidates/{candidate_id}/demonstrations"),
+            Some(json!({ "slug": "playbook", "label": "How this was verified" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let demos = body["evidence"]["demonstrations"].as_array().unwrap();
+    assert_eq!(demos.len(), 1);
+    assert_eq!(demos[0]["stale"], false, "{body}");
+
+    // The document changes after the demonstration was attached.
+    let (status, _) = f
+        .call(
+            "PUT",
+            "/api/docs/work/playbook",
+            Some(json!({ "body": "# Playbook\n\nrewritten content" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let demos = body["evidence"]["demonstrations"].as_array().unwrap();
+    assert_eq!(
+        demos[0]["stale"], true,
+        "the document changed since attachment and must be shown as stale: {body}"
     );
 }

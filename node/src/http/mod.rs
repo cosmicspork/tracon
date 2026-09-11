@@ -229,6 +229,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/reviews/{id}/file", get(api::review_file))
         .route("/api/reviews/{id}/verdict", post(api::decide_review))
         .route("/api/reviews/{id}/release", post(api::release_review))
+        .route(
+            "/api/evidence/candidates/by-commit/{head_sha}",
+            get(api::candidate_by_commit),
+        )
+        .route(
+            "/api/evidence/candidates/{id}",
+            get(api::candidate_evidence),
+        )
+        .route(
+            "/api/evidence/candidates/{id}/demonstrations",
+            post(api::attach_demonstration),
+        )
         .route("/api/queue", get(api::queue))
         .route("/api/login", post(auth::login))
         .route("/api/logout", post(auth::logout))
@@ -328,6 +340,12 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     // `[mesh]` must not quietly run this node unmeshed.
     let cfg = Arc::new(Config::try_load().map_err(|e| anyhow::anyhow!(e))?);
     let store = Arc::new(Store::open(&Config::db_path()).context("open store")?);
+    // Only the serving node's own startup interrupts a stale `running` check;
+    // see `Store::reconcile_interrupted_runs`. A CLI subcommand opening the
+    // same database (mesh join, channel management, ...) must not.
+    store
+        .reconcile_interrupted_runs()
+        .context("reconcile interrupted checks")?;
     let bus = Bus::new();
     let adapter: Arc<dyn HarnessAdapter> = crate::adapter::adapter_for(&cfg)?;
     // The identity comes first: the credential store is sealed under a key

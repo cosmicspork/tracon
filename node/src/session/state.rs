@@ -109,11 +109,17 @@ pub mod event_kind {
     pub const CHECK_STARTED: &str = "check_started";
     /// One check finished (`command`, `ok`, `exit`, `tail`, `ms`).
     pub const CHECK_RESULT: &str = "check_result";
+    /// All nonempty operator-required checks passed (or exact immutable
+    /// evidence was reused) for this candidate.
+    pub const CANDIDATE_VERIFIED: &str = "candidate_verified";
     /// A submission was refused before a review existed: over the cap, or a
     /// check failed (`reason`).
     pub const REVIEW_REJECTED: &str = "review_rejected";
     /// A review session gave its verdict on the review it was spawned for.
     pub const REVIEW_VERDICT: &str = "review_verdict";
+    /// An operator persisted a review decision. Authority-driven transitions
+    /// intentionally do not emit this human-intervention metric.
+    pub const REVIEW_DECISION: &str = "review_decision";
     /// The channel reached its daily token ceiling; the gateway refused a
     /// model call. Recorded once per session.
     pub const CEILING: &str = "ceiling";

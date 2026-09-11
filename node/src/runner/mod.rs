@@ -108,6 +108,15 @@ pub trait Runner: Send + Sync {
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError>;
     /// Force-remove a named process/container.
     async fn kill(&self, name: &str) -> Result<(), RunnerError>;
+    /// The image identity this runner actually used (or will use), confirmed
+    /// against the runtime rather than merely read from configuration.
+    /// `None` means no confirmed identity exists — evidence keyed on it must
+    /// never be treated as reusable. A runner that does not run inside an
+    /// image (`LocalRunner`) may report a stable non-digest identity here;
+    /// it exists for the audit trail, never for pinning.
+    async fn resolved_image(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Runs a command directly on the host, with no boundary. Used by the adapter
@@ -203,6 +212,13 @@ pub mod local {
 
         async fn kill(&self, _name: &str) -> Result<(), RunnerError> {
             Ok(())
+        }
+
+        // Direct host execution has no image at all. The identity is
+        // deliberately not digest-shaped, so `immutable_image_identity`
+        // (review::checks) never mistakes it for a pinned one.
+        async fn resolved_image(&self) -> Option<String> {
+            Some("local:direct-execution".to_string())
         }
     }
 

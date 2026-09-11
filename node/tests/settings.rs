@@ -399,6 +399,7 @@ async fn the_config_is_readable_and_carries_no_secrets() {
             "review",
             "running",
             "session",
+            "supervision",
         ]
     );
 }

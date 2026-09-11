@@ -265,11 +265,19 @@ impl KubeSpec {
 pub struct KubeRunner {
     client: Client,
     spec: KubeSpec,
+    /// The resolved image identity the kubelet reported for the most recent
+    /// `run_capture`, captured before the pod is removed. `resolved_image`
+    /// reads this rather than re-deriving anything from configuration.
+    last_image: tokio::sync::Mutex<Option<String>>,
 }
 
 impl KubeRunner {
     pub fn new(client: Client, spec: KubeSpec) -> Self {
-        Self { client, spec }
+        Self {
+            client,
+            spec,
+            last_image: tokio::sync::Mutex::new(None),
+        }
     }
 
     pub fn spec(&self) -> &KubeSpec {
@@ -455,6 +463,18 @@ impl Runner for KubeRunner {
                     .await
                     .unwrap_or_default();
                 let code = if phase == "Succeeded" { 0 } else { 1 };
+                // Read what the kubelet actually pulled before the pod is
+                // gone: the container's `imageID`, not the reference this
+                // runner asked for.
+                let image_id = pods
+                    .get(&name)
+                    .await
+                    .ok()
+                    .and_then(|pod| pod.status)
+                    .and_then(|status| status.container_statuses)
+                    .and_then(|statuses| statuses.into_iter().next())
+                    .and_then(|status| normalize_image_id(&status.image_id));
+                *self.last_image.lock().await = image_id;
                 Ok(std::process::Output {
                     status: std::process::ExitStatus::from_raw(code << 8),
                     stdout: logs.into_bytes(),
@@ -471,6 +491,24 @@ impl Runner for KubeRunner {
         self.remove(name).await;
         Ok(())
     }
+
+    /// The kubelet's `imageID` for the most recent `run_capture`, when one
+    /// was confirmed against content addressing. `None` before any run, on
+    /// failure, or when the runtime reported no digest — evidence must never
+    /// invent a pin.
+    async fn resolved_image(&self) -> Option<String> {
+        self.last_image.lock().await.clone()
+    }
+}
+
+/// Strip a container-runtime scheme prefix (`docker-pullable://`,
+/// `containerd://`, ...) from an `imageID` and keep only a value that is
+/// actually digest-shaped (`repo@sha256:hex`); a bare `sha256:hex` with no
+/// repository, or anything else, is not something `immutable_image_identity`
+/// can parse and must not be returned as if it were.
+fn normalize_image_id(raw: &str) -> Option<String> {
+    let stripped = raw.split_once("://").map(|(_, rest)| rest).unwrap_or(raw);
+    stripped.contains("@sha256:").then(|| stripped.to_string())
 }
 
 #[cfg(test)]

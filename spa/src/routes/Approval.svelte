@@ -6,13 +6,23 @@
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
-  import { reviewChecks, reviewVerdict, type Review } from '../lib/types'
+  import {
+    reviewChecks,
+    reviewVerdict,
+    type CandidateEvidence,
+    type PinnedRequirements,
+    type Review,
+    type ReviewContext,
+  } from '../lib/types'
   import { baseFromDiff, buildPatch, fileSection } from '../lib/patch'
 
   let { id }: { id: string } = $props()
 
   let review = $state<Review | null>(null)
   let stale = $state<string[]>([])
+  let evidence = $state<CandidateEvidence | null>(null)
+  let requirements = $state<PinnedRequirements | null>(null)
+  let surroundingCode = $state<ReviewContext[]>([])
   let reason = $state('')
   let title = $state('')
   let body = $state('')
@@ -28,6 +38,9 @@
       .then((d) => {
         review = d.review
         stale = d.stale
+        evidence = d.evidence
+        requirements = d.requirements
+        surroundingCode = d.surrounding_code
         title = d.review.edited_title ?? d.review.title
         body = d.review.edited_body ?? d.review.body
         loaded = true
@@ -159,6 +172,16 @@
   const edited = $derived(
     review !== null && (title !== review.title || body !== review.body),
   )
+  const authoritativeChecks = $derived(evidence?.checks ?? [])
+
+  function inputsFor(run: CandidateEvidence['checks'][number]) {
+    if (!run.inputs_json) return 'input identity was not recorded'
+    try {
+      return JSON.stringify(JSON.parse(run.inputs_json))
+    } catch {
+      return run.inputs_json
+    }
+  }
 
   async function decide(verdict: 'approve' | 'reject' | 'revise') {
     if (!review || publishing) return
@@ -220,9 +243,82 @@
     <dd class="m">
       {noun} → {target?.project} · {target?.branch} into {target?.base}
     </dd>
+
     <dt>Session</dt>
     <dd class="m"><a href="/sessions/{review.session_id}">{review.session_id.slice(0, 8)}</a></dd>
   </dl>
+  {#if !evidence}
+    <div class="banner crit">
+      verification evidence missing <b>· this review predates immutable candidate capture</b>
+    </div>
+  {:else}
+    <section class="evidence">
+      <div class="h4">
+        Candidate evidence
+        <b>{evidence.candidate.head_sha.slice(0, 12)} · {evidence.candidate.tree_sha?.slice(0, 12) ?? 'tree not recorded'}</b>
+      </div>
+      <div class="evidence-grid">
+        <div class="evidence-panel">
+          <h3>Requirements</h3>
+          {#if requirements}
+            <b>{requirements.title}</b>
+            <p>{requirements.body || 'No additional requirement detail.'}</p>
+            <a href="/work/{requirements.id}">open work item</a>
+          {:else}
+            <p class="missing">No work item was linked when this review was captured.</p>
+          {/if}
+        </div>
+        <div class="evidence-panel">
+          <h3>Pinned surrounding code</h3>
+          {#if surroundingCode.length}
+            {#each surroundingCode as context, index (index)}
+              <details>
+                <summary>{context.path}:{context.start_line}–{context.end_line}</summary>
+                <pre>{context.text}</pre>
+              </details>
+            {/each}
+          {:else}
+            <p class="missing">No textual hunk context was captured.</p>
+          {/if}
+        </div>
+        <div class="evidence-panel">
+          <h3>Runtime evidence</h3>
+          {#if authoritativeChecks.length}
+            {#each authoritativeChecks as run (run.id)}
+              <div class="run">
+                <span class:ok={run.outcome === 'passed' || run.source_outcome === 'passed'} class:bad={run.outcome === 'failed' || run.outcome === 'interrupted' || run.outcome === 'cancelled'}>
+                  {run.outcome}{run.outcome === 'reused' ? ` · ${run.source_outcome ?? 'unknown source'}` : ''}
+                </span>
+                <code>{run.execution_image ?? 'image identity not recorded'}</code>
+                <small>{inputsFor(run)}</small>
+                {#if run.reused_from_id}<small>reused from {run.reused_from_id.slice(0, 8)}</small>{/if}
+                <details>
+                  <summary>log · {run.duration_ms == null ? 'unfinished' : `${Math.round(run.duration_ms / 1000)}s`}</summary>
+                  <pre>{run.log || '(no retained output)'}</pre>
+                </details>
+              </div>
+            {/each}
+          {:else if target?.worktree}
+            <p class="missing">Submitted from a harness you run yourself: the node ran no checks on this candidate.</p>
+          {:else}
+            <p class="missing">No required checks were configured for this candidate.</p>
+          {/if}
+        </div>
+      </div>
+      {#if evidence.demonstrations.length}
+        <div class="demonstrations">
+          <b>Curated demonstrations</b>
+          {#each evidence.demonstrations as demo (demo.id)}
+            <a href={`/docs/${demo.channel}/${demo.document_slug}`}>{demo.label}</a>
+            {#if demo.stale}
+              <span class="chip warn" title="the document has changed since this was attached">stale</span>
+            {/if}
+          {/each}
+          <small>These linked documents are human-curated context; opening a review never executes them.</small>
+        </div>
+      {/if}
+    </section>
+  {/if}
 
   {#if checks.length}
     <div class="checks">
@@ -430,6 +526,91 @@
     font: 12.5px var(--mono);
     color: var(--ink2);
   }
+  .evidence {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .evidence-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .evidence-panel {
+    min-width: 0;
+    padding: 10px;
+    border-radius: 4px;
+    background: var(--s1);
+    font-size: 12.5px;
+  }
+  .evidence-panel h3 {
+    margin: 0 0 7px;
+    font: 11px var(--mono);
+    color: var(--dim);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .evidence-panel p {
+    margin: 5px 0;
+    white-space: pre-wrap;
+  }
+  .evidence-panel details,
+  .run {
+    border-top: 1px solid var(--rule);
+    padding: 6px 0;
+  }
+  .evidence-panel details:first-of-type,
+  .run:first-of-type {
+    border-top: 0;
+    padding-top: 0;
+  }
+  .evidence-panel summary {
+    cursor: pointer;
+    color: var(--ink2);
+    font: 11.5px var(--mono);
+  }
+  .evidence pre {
+    max-height: 210px;
+    margin: 6px 0 0;
+    overflow: auto;
+    white-space: pre;
+    font: 11px/1.45 var(--mono);
+  }
+  .run {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .run > span {
+    font: 11px var(--mono);
+    color: var(--dim);
+  }
+  .run > span.ok {
+    color: var(--ok);
+  }
+  .run > span.bad {
+    color: var(--crit);
+  }
+  .run code,
+  .run small {
+    overflow-wrap: anywhere;
+    color: var(--ink2);
+  }
+  .run small,
+  .missing,
+  .demonstrations small {
+    color: var(--dim);
+  }
+  .demonstrations {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 12.5px;
+  }
+  .demonstrations a {
+    font: 12px var(--mono);
+  }
   .checks {
     display: flex;
     gap: 8px;
@@ -537,6 +718,9 @@
     text-overflow: ellipsis;
   }
   @media (max-width: 700px) {
+    .evidence-grid {
+      grid-template-columns: 1fr;
+    }
     .findings li {
       grid-template-columns: 64px 1fr;
     }

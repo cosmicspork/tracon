@@ -52,13 +52,13 @@ Run real project workflows on a fresh node without manual environment repair.
 
 Attach evidence to immutable candidates, not mutable worktrees or review submissions.
 
-- [ ] Separate candidates, check runs, review revisions, and decisions in storage.
-- [ ] Run checks against isolated candidate snapshots with operator-controlled required checks.
-- [ ] Key reuse on source revision, check definition, execution image, and relevant configuration/dependency inputs.
-- [ ] Retain successes, failures, input identities, logs, execution metadata, and explicit reruns.
-- [ ] Reuse unchanged code evidence for MR-title/description or Jira-prose revisions.
-- [ ] Show changed inputs and reused evidence; keep prose authorization separate from code checks.
-- [ ] Migrate existing `head_sha`, `checks_json`, and check-result events into the evidence trail.
+- [x] Separate candidates, check runs, review revisions, and decisions in storage.
+- [x] Run checks against isolated candidate snapshots with operator-controlled required checks.
+- [x] Key reuse on source revision, check definition, execution image, and relevant configuration/dependency inputs.
+- [x] Retain successes, failures, input identities, logs, execution metadata, and explicit reruns.
+- [x] Reuse unchanged code evidence for MR-title/description or Jira-prose revisions.
+- [x] Show changed inputs and reused evidence; keep prose authorization separate from code checks.
+- [x] Migrate existing `head_sha`, `checks_json`, and check-result events into the evidence trail.
 
 **Open question:** tree-hash reuse for checks proven independent of commit history; start with commit identity.
 
@@ -66,10 +66,10 @@ Attach evidence to immutable candidates, not mutable worktrees or review submiss
 
 Make evidence understandable without turning tracon into an IDE.
 
-- [ ] Present requirements, relevant surrounding code, check output, and runtime evidence beside the diff.
-- [ ] Support phone review without hiding missing context or stale evidence.
-- [ ] Keep authoritative execution records separate from curated demonstrations.
-- [ ] Evaluate [Showboat](https://github.com/simonw/showboat) for documents combining commands, captured output, and images.
+- [x] Present requirements, relevant surrounding code, check output, and runtime evidence beside the diff.
+- [x] Support phone review without hiding missing context or stale evidence.
+- [x] Keep authoritative execution records separate from curated demonstrations.
+- [x] Evaluate [Showboat](https://github.com/simonw/showboat) for documents combining commands, captured output, and images. Decision: such documents are executable Markdown; a review links and hashes them as demonstrations and never executes them.
 
 ### QA deployment and browser verification
 

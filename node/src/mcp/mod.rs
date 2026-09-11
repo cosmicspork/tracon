@@ -535,6 +535,31 @@ impl Tools {
                     .store
                     .authority_action_finish(&action_id, "succeeded", &published)
                     .map_err(|e| e.to_string())?;
+                // Candidate evidence records who authorized publication even
+                // when no operator ever saw the card: the automatic caller
+                // gets its own decision source, and never the operator's
+                // `review_decision` event (that is a human-waiting metric).
+                if let Some(revision) = access
+                    .store
+                    .latest_review_revision(&review.id)
+                    .map_err(|e| e.to_string())?
+                {
+                    access
+                        .store
+                        .record_review_decision(&crate::store::ReviewDecisionRow {
+                            id: uuid::Uuid::now_v7().to_string(),
+                            review_id: review.id.clone(),
+                            revision_id: revision.id,
+                            source: "authority".into(),
+                            decision: "approved".into(),
+                            reason: None,
+                            title: Some(review.approved_title().to_string()),
+                            body: Some(review.approved_body().to_string()),
+                            patch: None,
+                            decided_ms: crate::store::now_ms(),
+                        })
+                        .map_err(|e| e.to_string())?;
+                }
                 Ok(serde_json::json!({
                     "review_id": review.id, "state": "approved", "published": published,
                     "authority": { "mode": "automatic", "id": decision.rule_id },

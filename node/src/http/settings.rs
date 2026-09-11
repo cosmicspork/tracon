@@ -37,6 +37,12 @@ pub fn config_view(cfg: &Config) -> Value {
             "enabled": cfg.external.enabled,
             "idle_timeout_secs": cfg.external.idle_timeout_secs,
         },
+        "supervision": {
+            "checks": cfg.supervision.checks,
+            "timeout_secs": cfg.supervision.timeout_secs,
+            "dependency_inputs": cfg.supervision.dependency_inputs,
+            "max_snapshot_bytes": cfg.supervision.max_snapshot_bytes,
+        },
         // Read-only: shown so the pane can say what this node is, set by
         // enrolling or by the runtime it was started under.
         "readonly": {
@@ -163,6 +169,39 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
                     }
                 }
             }
+            "supervision" => {
+                for (k, v) in object(value, "supervision")? {
+                    match k.as_str() {
+                        "checks" => {
+                            let checks = string_list(v, "supervision.checks")?;
+                            if cfg.supervision.checks != checks {
+                                cfg.supervision.checks = checks;
+                                changed.push("supervision.checks".into());
+                            }
+                        }
+                        "timeout_secs" => set_u64(
+                            &mut cfg.supervision.timeout_secs,
+                            v,
+                            "supervision.timeout_secs",
+                            &mut changed,
+                        )?,
+                        "dependency_inputs" => {
+                            let inputs = string_map(v, "supervision.dependency_inputs")?;
+                            if cfg.supervision.dependency_inputs != inputs {
+                                cfg.supervision.dependency_inputs = inputs;
+                                changed.push("supervision.dependency_inputs".into());
+                            }
+                        }
+                        "max_snapshot_bytes" => set_u64(
+                            &mut cfg.supervision.max_snapshot_bytes,
+                            v,
+                            "supervision.max_snapshot_bytes",
+                            &mut changed,
+                        )?,
+                        other => return Err(unknown(&format!("supervision.{other}"))),
+                    }
+                }
+            }
             "external" => {
                 for (k, v) in object(value, "external")? {
                     match k.as_str() {
@@ -223,6 +262,18 @@ fn string_list(v: &Value, key: &str) -> Result<Vec<String>, String> {
             i.as_str()
                 .map(str::to_string)
                 .ok_or_else(|| format!("`{key}` expects a list of strings"))
+        })
+        .collect()
+}
+
+fn string_map(v: &Value, key: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
+    object(v, key)?
+        .iter()
+        .map(|(name, value)| {
+            value
+                .as_str()
+                .map(|value| (name.clone(), value.to_string()))
+                .ok_or_else(|| format!("`{key}` expects string values"))
         })
         .collect()
 }
@@ -309,6 +360,7 @@ mod tests {
                 "readonly",
                 "review",
                 "session",
+                "supervision",
             ]
         );
     }
@@ -349,6 +401,40 @@ mod tests {
         // Clearing it is a change too.
         let changed = apply(&mut cfg, &json!({ "session": { "default_channel": "" } })).unwrap();
         assert_eq!(changed, vec!["session.default_channel"]);
+    }
+
+    #[test]
+    fn operator_can_set_candidate_check_identities() {
+        let mut cfg = Config::default();
+        let changed = apply(
+            &mut cfg,
+            &json!({
+                "supervision": {
+                    "checks": ["cargo test --locked"],
+                    "timeout_secs": 120,
+                    "dependency_inputs": { "lockfile": "sha256:abc" },
+                    "max_snapshot_bytes": 1048576,
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            changed,
+            vec![
+                "supervision.checks",
+                "supervision.dependency_inputs",
+                "supervision.max_snapshot_bytes",
+                "supervision.timeout_secs",
+            ]
+        );
+        assert_eq!(
+            cfg.supervision.checks,
+            vec!["cargo test --locked".to_string()]
+        );
+        assert_eq!(
+            cfg.supervision.dependency_inputs.get("lockfile"),
+            Some(&"sha256:abc".to_string())
+        );
     }
 
     #[test]

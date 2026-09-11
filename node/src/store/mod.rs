@@ -21,10 +21,12 @@ use serde_json::Value;
 pub mod authority;
 pub use authority::*;
 pub mod corpus;
+pub mod evidence;
 pub mod metrics;
 pub mod operator;
 pub mod vectors;
 pub use corpus::*;
+pub use evidence::*;
 pub use operator::*;
 pub use records::*;
 
@@ -94,6 +96,18 @@ impl Store {
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+    /// Mark any `running` check as `interrupted`. Only the serving node's own
+    /// startup should call this (see `schema::reconcile_interrupted_runs`); a
+    /// CLI subcommand opening the same database must not interrupt a check the
+    /// serving node is actually running right now.
+    pub fn reconcile_interrupted_runs(&self) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        schema::reconcile_interrupted_runs(&conn)?;
+        Ok(())
     }
 
     // ---- node ----
@@ -2056,11 +2070,25 @@ impl Store {
         Ok(n == 1)
     }
 
-    /// Claim the publish. Moves a review awaiting a verdict into `publishing` and
-    /// returns whether this call won. Only the winner may push, so two
-    /// concurrent approvals open the change once, not once each.
-    pub fn begin_publish(&self, id: &str) -> Result<bool> {
+    /// Claim the publish. Moves a review awaiting a verdict into `publishing`
+    /// and returns whether this call won. Only the winner may push, so two
+    /// concurrent approvals open the change once, not once each. `revision_id`
+    /// is the revision the caller validated and is about to publish; the claim
+    /// only succeeds if it is still the latest one, so a resubmit that lands
+    /// between validation and this call loses the race rather than silently
+    /// having its bytes attributed to this approval.
+    pub fn begin_publish(&self, id: &str, revision_id: Option<&str>) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT id FROM review_revision WHERE review_id=?1 ORDER BY created_ms DESC, id DESC LIMIT 1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if current.as_deref() != revision_id {
+            return Ok(false);
+        }
         let n = conn.execute(
             "UPDATE review SET state='publishing', updated_ms=?2
              WHERE id=?1 AND state IN ('new','claimed')",
@@ -2254,6 +2282,157 @@ mod tests {
         let conn = store.conn.lock().unwrap();
         schema::migrate(&conn).unwrap();
         schema::migrate(&conn).unwrap();
+    }
+
+    /// Re-opening the store (what a CLI subcommand does while the serving
+    /// node has this database open too) must never interrupt a check that is
+    /// genuinely still running. Only the serving node's own explicit
+    /// `reconcile_interrupted_runs` call may do that.
+    #[test]
+    fn reopening_the_store_does_not_interrupt_a_running_check() {
+        let store = Store::open_in_memory().unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO candidate
+                    (id, head_sha, tree_sha, channel, owner_session_id, source_kind, captured_ms, capture_json)
+                 VALUES ('c1','sha','tree','ch','s1','git',0,'{}')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO check_run
+                    (id, candidate_id, session_id, definition_json, outcome, log, started_ms, metadata_json)
+                 VALUES ('r1','c1','s1','{}','running','',0,'{}')",
+                [],
+            )
+            .unwrap();
+        }
+        // What a second `Store::open` on the same file does: migrate again.
+        {
+            let conn = store.conn.lock().unwrap();
+            schema::migrate(&conn).unwrap();
+        }
+        let outcome: String = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row("SELECT outcome FROM check_run WHERE id='r1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(outcome, "running", "a re-migrate must not touch a live run");
+
+        store.reconcile_interrupted_runs().unwrap();
+        let outcome: String = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row("SELECT outcome FROM check_run WHERE id='r1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            outcome, "interrupted",
+            "the explicit reconcile call does interrupt it"
+        );
+    }
+
+    /// A resubmission cannot land once an approval has claimed the publish:
+    /// the revision an in-flight publish is about to record as approved
+    /// cannot be swapped out from under it.
+    #[test]
+    fn a_resubmit_cannot_land_while_publishing() {
+        let store = Store::open_in_memory().unwrap();
+        let nid = node(&store);
+        session(&store, "s1", &nid);
+        let review = ReviewRow {
+            id: "rv1".into(),
+            session_id: "s1".into(),
+            node_id: nid,
+            channel: "ch".into(),
+            kind: "pr".into(),
+            title: "t".into(),
+            body: "b".into(),
+            edited_title: None,
+            edited_body: None,
+            provider: "github".into(),
+            target: "{}".into(),
+            diff: "d".into(),
+            files: "[]".into(),
+            head_sha: "sha1".into(),
+            base_ref: "main".into(),
+            added: 1,
+            removed: 0,
+            state: "new".into(),
+            verdict_reason: None,
+            publish_result: None,
+            claimed_ms: None,
+            created_ms: now_ms(),
+            created_mono_ms: 0,
+            resolved_mono_ms: None,
+            updated_ms: now_ms(),
+            checks_json: None,
+            review_session_id: None,
+            ai_verdict_json: None,
+            revision_patch: None,
+        };
+        let revision_a = crate::store::ReviewRevisionRow {
+            id: "revA".into(),
+            review_id: "rv1".into(),
+            candidate_id: "cand1".into(),
+            title: "t".into(),
+            body: "b".into(),
+            diff: "d".into(),
+            files: "[]".into(),
+            head_sha: "sha1".into(),
+            context_json: "[]".into(),
+            requirements_work_item_id: None,
+            requirements_title: None,
+            requirements_body: None,
+            requirements_hash: None,
+            created_ms: now_ms(),
+        };
+        store
+            .insert_candidate(&crate::store::CandidateRow {
+                id: "cand1".into(),
+                head_sha: "sha1".into(),
+                tree_sha: Some("tree".into()),
+                channel: "ch".into(),
+                owner_session_id: "s1".into(),
+                source_kind: "git".into(),
+                captured_ms: now_ms(),
+                capture_json: "{}".into(),
+            })
+            .unwrap();
+        store
+            .insert_review_with_revision(&review, &revision_a)
+            .unwrap();
+
+        // The approval claims the publish against revision A.
+        assert!(store.begin_publish("rv1", Some("revA")).unwrap());
+
+        // A resubmit racing in now must be refused, not silently accepted.
+        let revision_b = crate::store::ReviewRevisionRow {
+            id: "revB".into(),
+            ..revision_a.clone()
+        };
+        let revised = store
+            .revise_review_with_revision("rv1", "t2", "b2", 2, 0, None, &revision_b)
+            .unwrap();
+        assert!(
+            !revised,
+            "a resubmit must not land while the review is publishing"
+        );
+        assert_eq!(
+            store.latest_review_revision("rv1").unwrap().unwrap().id,
+            "revA",
+            "the pinned revision is still the one the publish claimed"
+        );
+
+        // Once finished, a fresh begin_publish against the (now stale) revision A must fail.
+        assert!(store
+            .finish_publish("rv1", "t", "b", "https://example.com/pr/1")
+            .unwrap());
+        assert!(!store.begin_publish("rv1", Some("revA")).unwrap());
     }
 
     #[test]
