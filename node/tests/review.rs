@@ -354,6 +354,9 @@ impl Fixture {
             .await
             .unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        if let Some(message) = v["error"]["message"].as_str() {
+            return json!({ "error": message });
+        }
         let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
         let is_err = v["result"]["isError"] == true;
         serde_json::from_str(text)
@@ -929,14 +932,11 @@ async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_
     // mutable) checkout.
     assert_eq!(rs.repo_path, format!("workspace://review-{id}"));
     // Its worktree is at the reviewed commit, on its own branch.
-    for _ in 0..300 {
-        if f.store
-            .get_session(&rsid)
-            .unwrap()
-            .unwrap()
-            .worktree_path
-            .is_some()
-        {
+    // Its worktree is at the reviewed commit, on its own branch, and the
+    // session is running before any tool call is made as it.
+    for _ in 0..600 {
+        let rs = f.store.get_session(&rsid).unwrap().unwrap();
+        if rs.worktree_path.is_some() && rs.state == "running" {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
