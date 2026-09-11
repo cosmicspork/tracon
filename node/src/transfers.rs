@@ -450,7 +450,9 @@ pub async fn import_workspace(
 ) -> Result<crate::workspace::Workspace, TransferError> {
     transfer.verify()?;
     let id = format!("transfer-{}", uuid::Uuid::now_v7());
-    let selected = crate::workspace::staging_path(&id);
+    let selected = crate::config::Config::state_dir()
+        .join("transfer-imports")
+        .join(&id);
     fs::create_dir_all(&selected).map_err(|error| TransferError::Workspace(error.to_string()))?;
 
     let result = async {
@@ -492,7 +494,7 @@ pub async fn import_workspace(
         let workspace = crate::workspace::seed_from_files(git, &selected, &id)
             .await
             .map_err(|error| TransferError::Workspace(error.to_string()))?;
-        crate::workspace::import(backend, &workspace)
+        crate::workspace::import(backend, &workspace, &crate::workspace::staging_path(&id))
             .await
             .map_err(|error| TransferError::Workspace(error.to_string()))?;
         Ok(workspace)

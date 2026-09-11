@@ -1513,6 +1513,24 @@ impl Manager {
             .is_ok()
     }
 
+    /// The channel-archived and model-availability checks `create` runs,
+    /// without any of its side effects. A caller that must materialize
+    /// something expensive before `create` (a continuity transfer's
+    /// workspace) checks this first, so a request `create` will reject
+    /// outright never leaks that work.
+    pub fn preflight(&self, spec: &NewSession) -> Result<(), SessionError> {
+        let bindings = self.bindings(&spec.channel);
+        if !bindings["archived"].is_null() {
+            return Err(SessionError::ChannelArchived(spec.channel.clone()));
+        }
+        if spec.model.trim().is_empty() {
+            self.resolve_default_model(&spec.channel, spec.phase, &bindings)?;
+        } else if !self.model_usable(&spec.channel, &spec.model, &bindings) {
+            return Err(SessionError::ModelRequired);
+        }
+        Ok(())
+    }
+
     /// A channel's bindings as JSON (`{}` when unbound or standalone).
     pub fn bindings(&self, channel: &str) -> serde_json::Value {
         self.store

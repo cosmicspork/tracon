@@ -530,16 +530,14 @@ pub async fn get_mesh_rollups(
             crate::mesh::client::HubError::Refused { status: 403, .. } => StatusCode::FORBIDDEN,
             crate::mesh::client::HubError::Refused { status: 404, .. } => StatusCode::NOT_FOUND,
             crate::mesh::client::HubError::Local(_) => StatusCode::BAD_REQUEST,
-            crate::mesh::client::HubError::Refused { .. } | crate::mesh::client::HubError::Transport(_) => {
-                StatusCode::BAD_GATEWAY
-            }
+            crate::mesh::client::HubError::Refused { .. }
+            | crate::mesh::client::HubError::Transport(_) => StatusCode::BAD_GATEWAY,
         };
         ApiError::new(status, format!("hub rollup unavailable: {error}"))
     })
 }
 
 pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
-
     let row = s.store().get_node(&s.node_id)?;
     let Some(n) = row else {
         return Ok(
@@ -551,17 +549,12 @@ pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
     v["default_channel"] = json!(s.cfg.session.default_channel);
     Ok(v)
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TransferDelivery {
+    #[default]
     Portable,
     Mesh,
-}
-
-impl Default for TransferDelivery {
-    fn default() -> Self {
-        Self::Portable
-    }
 }
 /// A local inbox of immutable packages. The package bytes remain behind the
 /// transfer id; the list is enough to choose an explicit import.
@@ -586,7 +579,6 @@ pub async fn list_transfers(State(s): State<AppState>) -> ApiResult<Json<serde_j
     }
     Ok(Json(json!({ "transfers": transfers })))
 }
-
 
 #[derive(Deserialize)]
 pub struct ExportTransferBody {
@@ -647,7 +639,9 @@ pub async fn export_transfer(
                 &transfer.payload.channel,
                 &destination,
                 &proto::frame::Payload::CandidateTransfer {
-                    transfer: serde_json::to_value(&transfer)?,
+                    transfer: serde_json::to_value(&transfer).map_err(|error| {
+                        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+                    })?,
                 },
             )
             .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
@@ -723,13 +717,20 @@ pub async fn import_transfer(
         .store()
         .transfer(&id)?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "transfer not found"))?;
-    let transfer: SignedTransfer = serde_json::from_str(&row.package_json)
-        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "stored transfer is corrupt"))?;
+    let transfer: SignedTransfer = serde_json::from_str(&row.package_json).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stored transfer is corrupt",
+        )
+    })?;
     transfers::authorize_receiver(s.store(), &s.node_id, &transfer)?;
     match s.store().reserve_transfer_import(&id)? {
         crate::store::ImportReservation::Reserved => {}
         crate::store::ImportReservation::Imported => {
-            return Err(ApiError::new(StatusCode::CONFLICT, "this transfer has already been imported"));
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "this transfer has already been imported",
+            ));
         }
         crate::store::ImportReservation::Preparing => {
             return Err(ApiError::new(
@@ -738,30 +739,85 @@ pub async fn import_transfer(
             ));
         }
     }
-    let workspace = match transfers::import_workspace(
-        &transfer,
-        &s.cfg.publish.git,
-        s.manager.backend().as_ref(),
-    )
-    .await
-    {
-        Ok(workspace) => workspace,
-        Err(error) => {
-            let detail = error.to_string();
-            s.store().fail_transfer_import(&id, &detail, None)?;
-            s.store().append_transfer_event(&id, "import_failed", Some(&detail), None)?;
-            return Err(error.into());
-        }
-    };
     let branch = body
         .branch
+        .clone()
         .unwrap_or_else(|| format!("continuation/{}", id.get(..12).unwrap_or(&id)));
+    // Everything `create_local` would reject outright (an archived channel,
+    // no resolvable model) is checked before materializing or reusing a
+    // workspace, so a request doomed to fail never leaks one.
+    let preflight_spec = NewSession {
+        channel: transfer.payload.channel.clone(),
+        repo_path: String::new(),
+        branch: Some(branch.clone()),
+        work_item_id: None,
+        model: body.model.clone(),
+        budget_tokens: body.budget_tokens,
+        initial_prompt: None,
+        node_id: None,
+        phase: Phase::Execute,
+        review_id: None,
+        base_sha: None,
+        workspace_id: None,
+    };
+    if let Err(error) = s.manager.preflight(&preflight_spec) {
+        let detail = error.to_string();
+        s.store().fail_transfer_import(&id, &detail, None)?;
+        s.store()
+            .append_transfer_event(&id, "import_failed", Some(&detail), None)?;
+        return Err(error.into());
+    }
+    // A prior failed attempt may have already materialized and recorded a
+    // workspace (e.g. `create_local` rejected it after import succeeded).
+    // Reuse it rather than importing — and leaking a runtime volume — again
+    // on every retry. `export` is the real existence probe: a volume the
+    // backend can no longer produce a valid tree from is not reusable.
+    let reused = match s
+        .store()
+        .transfer_import(&id)?
+        .and_then(|row| row.workspace_id)
+    {
+        Some(workspace_id) => {
+            let workspace = crate::workspace::Workspace {
+                id: workspace_id.clone(),
+                volume: crate::workspace::volume_name(&workspace_id),
+                snapshot: crate::workspace::snapshot_path(&workspace_id),
+            };
+            crate::workspace::export(s.manager.backend().as_ref(), &workspace)
+                .await
+                .ok()
+                .map(|_| workspace)
+        }
+        None => None,
+    };
+    let workspace = match reused {
+        Some(workspace) => workspace,
+        None => {
+            match transfers::import_workspace(
+                &transfer,
+                &s.cfg.publish.git,
+                s.manager.backend().as_ref(),
+            )
+            .await
+            {
+                Ok(workspace) => workspace,
+                Err(error) => {
+                    let detail = error.to_string();
+                    s.store().fail_transfer_import(&id, &detail, None)?;
+                    s.store()
+                        .append_transfer_event(&id, "import_failed", Some(&detail), None)?;
+                    return Err(error.into());
+                }
+            }
+        }
+    };
     let spec = NewSession {
         channel: transfer.payload.channel.clone(),
         repo_path: String::new(),
         branch: Some(branch),
         work_item_id: None,
         model: body.model,
+        initial_prompt: None,
         budget_tokens: body.budget_tokens,
         node_id: None,
         phase: Phase::Execute,
@@ -775,7 +831,8 @@ pub async fn import_transfer(
             let detail = error.to_string();
             s.store()
                 .fail_transfer_import(&id, &detail, Some(&workspace.id))?;
-            s.store().append_transfer_event(&id, "import_failed", Some(&detail), None)?;
+            s.store()
+                .append_transfer_event(&id, "import_failed", Some(&detail), None)?;
             return Err(error.into());
         }
     };
