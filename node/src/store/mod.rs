@@ -21,10 +21,12 @@ use serde_json::Value;
 pub mod authority;
 pub use authority::*;
 pub mod corpus;
+pub mod evidence;
 pub mod metrics;
 pub mod operator;
 pub mod vectors;
 pub use corpus::*;
+pub use evidence::*;
 pub use operator::*;
 pub use records::*;
 

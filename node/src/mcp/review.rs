@@ -13,7 +13,7 @@ use crate::{
     mcp::CallContext,
     review::{self, publish::Target},
     session::{state::event_kind as ek, Manager},
-    store::{now_ms, ReviewRow, Store},
+    store::{candidate_id, now_ms, CandidateRow, ReviewRevisionRow, ReviewRow, Store},
 };
 
 pub const SUBMIT: &str = "submit_review";
@@ -41,6 +41,7 @@ pub fn definitions() -> Vec<Value> {
                     "project": { "type": "string", "description": "owner/name on GitHub, the project path on GitLab." },
                     "base": { "type": "string", "description": "Branch to merge into. Defaults to the branch the worktree was created from." },
                     "review_id": { "type": "string", "description": "Set to resubmit an existing review after changes were requested." },
+                    "rerun_checks": { "type": "boolean", "description": "Run configured required checks again even when exact immutable evidence exists. This cannot alter which checks are required." },
                 },
                 "required": ["title", "body", "provider", "project"],
             },
@@ -166,6 +167,31 @@ async fn submit(
             "{provider} is not a provider this node publishes to"
         ));
     }
+    // Validate resubmission ownership before capturing or executing anything
+    // from this worktree. A review id cannot be used as a way to make another
+    // session's candidate consume a check runner.
+    let resubmission = match args.get("review_id").and_then(Value::as_str) {
+        Some(id) => {
+            let existing = store
+                .get_review(id)
+                .map_err(|error| error.to_string())?
+                .ok_or("no review with that id")?;
+            if !owns(store, ctx, &existing) {
+                return Err("that review belongs to another session".into());
+            }
+            let was = serde_json::from_str::<Target>(&existing.target)
+                .ok()
+                .and_then(|target| target.worktree);
+            if external && was.as_deref() != Some(worktree.as_str()) {
+                return Err(format!(
+                    "resubmit from the worktree the review was made from ({})",
+                    was.unwrap_or_default()
+                ));
+            }
+            Some(existing)
+        }
+        None => None,
+    };
     // The base defaults to what the worktree was branched from — read from the
     // worktree's `origin/HEAD`, not assumed to be `main`.
     let base = match args.get("base").and_then(Value::as_str) {
@@ -201,49 +227,85 @@ async fn submit(
         );
         return Err(review::ReviewError::Rejected(reason).to_string());
     }
-
-    // Deterministic checks, in a throwaway container, before any human or
-    // model reads the diff. A failure is the reason the submit is refused. A
-    // harness the operator runs has the operator's environment to run them
-    // in, which the container does not.
-    let checks_json = if external {
-        None
-    } else {
-        run_checks(manager, ctx, &worktree).await?
+    // Capture the committed candidate before any check can execute. The
+    // snapshot is a hardened Git tree import, not this mutable worktree.
+    let snapshot = review::snapshot_candidate(
+        &worktree,
+        &capture.head_sha,
+        manager.cfg().supervision.max_snapshot_bytes,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let candidate = CandidateRow {
+        id: candidate_id(&capture.head_sha, &ctx.channel),
+        head_sha: capture.head_sha.clone(),
+        tree_sha: Some(snapshot.tree_sha.clone()),
+        channel: ctx.channel.clone(),
+        owner_session_id: ctx.session_id.clone(),
+        source_kind: "git".into(),
+        captured_ms: now_ms(),
+        capture_json: json!({
+            "method": "hardened_git_tree",
+            "materialized": true,
+            "max_snapshot_bytes": manager.cfg().supervision.max_snapshot_bytes,
+        })
+        .to_string(),
     };
+    let created = store
+        .insert_candidate(&candidate)
+        .map_err(|error| error.to_string())?;
+    if !created {
+        store
+            .record_candidate_snapshot(&candidate.id, &snapshot.tree_sha, &candidate.capture_json)
+            .map_err(|error| error.to_string())?;
+    }
+    store
+        .insert_candidate_files(&candidate.id, &snapshot.files)
+        .map_err(|error| error.to_string())?;
+    let candidate = store
+        .candidate(&candidate.id)
+        .map_err(|error| error.to_string())?
+        .ok_or("candidate disappeared while it was captured")?;
+    let checks = run_checks(
+        store,
+        manager,
+        ctx,
+        &candidate,
+        &snapshot.root,
+        args.get("rerun_checks").and_then(Value::as_bool).unwrap_or(false),
+    )
+    .await?;
+    let checks_json = Some(serde_json::to_string(&checks.results).unwrap_or_else(|_| "[]".into()));
 
     // A resubmission keeps the same card and the same thread.
-    if let Some(id) = args.get("review_id").and_then(Value::as_str) {
-        let existing = store
-            .get_review(id)
-            .map_err(|e| e.to_string())?
-            .ok_or("no review with that id")?;
-        if !owns(store, ctx, &existing) {
-            return Err("that review belongs to another session".into());
-        }
-        let was = serde_json::from_str::<Target>(&existing.target)
-            .ok()
-            .and_then(|t| t.worktree);
-        if external && was.as_deref() != Some(worktree.as_str()) {
-            return Err(format!(
-                "resubmit from the worktree the review was made from ({})",
-                was.unwrap_or_default()
-            ));
-        }
+    if let Some(existing) = resubmission {
+        let id = existing.id.as_str();
+        let revision = ReviewRevisionRow {
+            id: uuid::Uuid::now_v7().to_string(),
+            review_id: id.to_string(),
+            candidate_id: candidate.id.clone(),
+            title: title.clone(),
+            body: body.clone(),
+            diff: capture.diff.clone(),
+            files: files.clone(),
+            head_sha: capture.head_sha.clone(),
+            context_json: serde_json::to_string(&capture.contexts).unwrap_or_else(|_| "[]".into()),
+            created_ms: now_ms(),
+        };
         let revised = store
-            .revise_review(
+            .revise_review_with_revision(
                 id,
-                &capture.diff,
-                &files,
-                &capture.head_sha,
+                &title,
+                &body,
                 capture.added,
                 capture.removed,
+                checks_json.as_deref(),
+                &revision,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| error.to_string())?;
         if !revised {
             return Err("that review is no longer awaiting a revision".into());
         }
-        let _ = store.set_checks(id, checks_json.as_deref());
         manager.publish_queue().await;
         let reviewer = spawn_review_session(store, manager, ctx, id, &session).await;
         return Ok(json!({
@@ -252,6 +314,8 @@ async fn submit(
             "message": "Resubmitted. Call review_status to wait for the verdict.",
             "uncommitted": capture.uncommitted,
             "review_session": reviewer,
+            "candidate_id": candidate.id,
+            "checks_reused": checks.reused,
         }));
     }
 
@@ -298,7 +362,21 @@ async fn submit(
         ai_verdict_json: None,
         revision_patch: None,
     };
-    store.insert_review(&row).map_err(|e| e.to_string())?;
+    let revision = ReviewRevisionRow {
+        id: uuid::Uuid::now_v7().to_string(),
+        review_id: id.clone(),
+        candidate_id: candidate.id.clone(),
+        title: row.title.clone(),
+        body: row.body.clone(),
+        diff: row.diff.clone(),
+        files: row.files.clone(),
+        head_sha: row.head_sha.clone(),
+        context_json: serde_json::to_string(&capture.contexts).unwrap_or_else(|_| "[]".into()),
+        created_ms: row.created_ms,
+    };
+    store
+        .insert_review_with_revision(&row, &revision)
+        .map_err(|error| error.to_string())?;
     manager.publish_queue().await;
     let reviewer = spawn_review_session(store, manager, ctx, &id, &session).await;
 
@@ -310,6 +388,8 @@ async fn submit(
         "files": row.added + row.removed,
         "uncommitted": capture.uncommitted,
         "review_session": reviewer,
+        "candidate_id": candidate.id,
+        "checks_reused": checks.reused,
     }))
 }
 
@@ -330,58 +410,83 @@ fn owns(store: &Store, ctx: &CallContext, r: &ReviewRow) -> bool {
     r.channel == ctx.channel && external(&ctx.session_id) && external(&r.session_id)
 }
 
-/// The project's checks against the worktree, recorded on the session; the
-/// results as JSON, or the first failure as the reason the submit is refused.
+/// Required checks against the immutable candidate snapshot. The candidate
+/// owner receives the verification milestone even if a later prose-only
+/// revision is submitted by another attached session.
 async fn run_checks(
+    store: &Arc<Store>,
     manager: &Manager,
     ctx: &CallContext,
-    worktree: &str,
-) -> Result<Option<String>, String> {
-    let commands = review::checks::commands_for(manager.cfg());
-    let workspace = crate::workspace::from_snapshot(
-        manager.backend().as_ref(),
-        &format!("check-{}", ctx.session_id),
-        std::path::Path::new(worktree),
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    candidate: &CandidateRow,
+    snapshot: &std::path::Path,
+    force_rerun: bool,
+) -> Result<review::checks::CheckReport, String> {
+    let commands = review::checks::required_definitions(manager.cfg());
     let slug = ctx.session_id.rsplit('-').next().unwrap_or("s").to_string();
     manager.set_checking(&ctx.session_id, true);
     manager.record_event(
         &ctx.session_id,
         ek::CHECK_STARTED,
-        json!({ "commands": commands }),
+        json!({
+            "candidate_id": candidate.id,
+            "head_sha": candidate.head_sha,
+            "commands": commands,
+            "rerun": force_rerun,
+        }),
     );
-    let results = review::checks::run(
+    let report = review::checks::run_required(
         manager.backend().as_ref(),
         manager.cfg(),
-        &workspace,
+        store,
+        candidate,
+        snapshot,
         &slug,
-        &commands,
+        force_rerun,
     )
     .await;
-    for r in &results {
-        manager.record_event(&ctx.session_id, ek::CHECK_RESULT, json!(r));
-    }
     manager.set_checking(&ctx.session_id, false);
-    if let Some(failed) = results.iter().find(|r| !r.ok) {
+    let report = report?;
+    for result in &report.results {
+        manager.record_event(
+            &ctx.session_id,
+            ek::CHECK_RESULT,
+            json!({ "candidate_id": candidate.id, "result": result }),
+        );
+    }
+    if report.all_required_passed {
+        manager.record_event(
+            &candidate.owner_session_id,
+            ek::CANDIDATE_VERIFIED,
+            json!({
+                "candidate_id": candidate.id,
+                "head_sha": candidate.head_sha,
+                "reused": report.reused,
+            }),
+        );
+    }
+    if let Some(failed) = report.results.iter().find(|result| !result.ok) {
         let reason = format!(
-            "check failed: `{}` (exit {}). Fix it and submit again.\n\n{}",
+            "check {}: `{}` (exit {}). Fix it and submit again.\n\n{}",
+            failed.outcome,
             failed.command,
             failed
                 .exit
-                .map(|c| c.to_string())
+                .map(|code| code.to_string())
                 .unwrap_or_else(|| "none".into()),
             failed.tail
         );
         manager.record_event(
             &ctx.session_id,
             ek::REVIEW_REJECTED,
-            json!({ "reason": format!("check failed: {}", failed.command), "command": failed.command }),
+            json!({
+                "candidate_id": candidate.id,
+                "reason": format!("check {}: {}", failed.outcome, failed.command),
+                "command": failed.command,
+            }),
         );
         return Err(reason);
     }
-    Ok(serde_json::to_string(&results).ok())
+    Ok(report)
 }
 
 /// A fresh session that reads only the requirements and the diff, when the

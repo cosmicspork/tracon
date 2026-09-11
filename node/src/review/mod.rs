@@ -9,6 +9,8 @@
 pub mod checks;
 pub mod publish;
 
+use std::path::{Component, Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
@@ -105,9 +107,21 @@ pub struct Capture {
     pub base_ref: String,
     pub added: i64,
     pub removed: i64,
+    /// Source excerpts around diff hunks, pinned at `head_sha`.
+    pub contexts: Vec<CodeContext>,
     /// Uncommitted work is not in the diff. The operator is told rather than
     /// left to wonder why the review looks short.
     pub uncommitted: Vec<String>,
+}
+
+/// A small immutable source excerpt around a changed hunk. It is stored with
+/// the review revision, not read back from a mutable worktree while reviewing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeContext {
+    pub path: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub text: String,
 }
 
 /// Global git options that disable every config-driven way a command can run
@@ -117,30 +131,62 @@ pub struct Capture {
 /// overrides are the second, independent line. Diff commands additionally pass
 /// `--no-ext-diff --no-textconv` at the call site.
 const GIT_SAFE: &[&str] = &[
+    "--no-replace-objects",
+    "-c",
+    "core.useReplaceRefs=false",
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
     "core.fsmonitor=",
     "-c",
-    "core.useReplaceRefs=false",
-    "-c",
     "credential.helper=",
+    "-c",
+    "core.attributesfile=/dev/null",
 ];
 
-async fn git(dir: &str, op: &'static str, args: &[&str]) -> Result<String, ReviewError> {
-    let out = Command::new("git")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
+/// Git is pointed at an agent-owned repository, so no local, global, or
+/// system Git configuration may select a program or replacement object. The
+/// remaining commands address objects by hash and never invoke a shell.
+fn hardened_git(dir: &str) -> Command {
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(dir)
         .args(GIT_SAFE)
-        .args(args)
-        .output()
-        .await?;
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("GIT_GRAFT_FILE", "/dev/null")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_EXTERNAL_DIFF")
+        .env_remove("GIT_DIFF_PATH_COUNTER")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+    command
+}
+
+async fn git(dir: &str, op: &'static str, args: &[&str]) -> Result<String, ReviewError> {
+    let out = hardened_git(dir).args(args).output().await?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+    } else {
+        Err(ReviewError::Git {
+            op,
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        })
+    }
+}
+
+async fn git_bytes(dir: &str, op: &'static str, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+    let out = hardened_git(dir).args(args).output().await?;
+    if out.status.success() {
+        Ok(out.stdout)
     } else {
         Err(ReviewError::Git {
             op,
@@ -233,6 +279,7 @@ pub async fn capture(worktree: &str, base_ref: &str, branch: &str) -> Result<Cap
         });
     }
 
+    let contexts = pinned_context(worktree, &head_sha, &diff).await;
     let uncommitted = git(worktree, "status", &["status", "--porcelain"])
         .await
         .unwrap_or_default()
@@ -247,12 +294,281 @@ pub async fn capture(worktree: &str, base_ref: &str, branch: &str) -> Result<Cap
         base_ref: base_ref.to_string(),
         added,
         removed,
+        contexts,
         uncommitted,
     })
 }
 
-/// What changed in the worktree since the review was submitted. Empty means the
-/// diff still describes the branch.
+/// Materialized, read-only source for an isolated check. Its backing directory
+/// is node-owned and removed after the check attempt; `files` is retained in
+/// the evidence store for candidate transfer and later independent execution.
+pub struct CandidateSnapshot {
+    pub root: PathBuf,
+    pub tree_sha: String,
+    pub files: Vec<crate::store::CandidateFile>,
+}
+
+impl Drop for CandidateSnapshot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Copy exactly the Git tree named by `head_sha`, not the mutable worktree.
+/// Tree traversal and blob reads address hashes after disabling replacement,
+/// graft, attribute, hook, and executable configuration paths.
+pub async fn snapshot_candidate(
+    worktree: &str,
+    head_sha: &str,
+    max_bytes: u64,
+) -> Result<CandidateSnapshot, ReviewError> {
+    let tree = format!("{head_sha}^{{tree}}");
+    let tree_sha = git(worktree, "rev-parse tree", &["rev-parse", &tree]).await?;
+    let listing = git_bytes(
+        worktree,
+        "ls-tree",
+        &["ls-tree", "-rz", "-r", "--full-tree", head_sha],
+    )
+    .await?;
+    let root = std::env::temp_dir()
+        .join("tracon-candidates")
+        .join(uuid::Uuid::now_v7().to_string());
+    std::fs::create_dir_all(&root)?;
+    let mut snapshot = CandidateSnapshot {
+        root,
+        tree_sha,
+        files: Vec::new(),
+    };
+    let mut total = 0u64;
+    for entry in listing.split(|b| *b == 0).filter(|entry| !entry.is_empty()) {
+        let (meta, path) = split_once_byte(entry, b'\t').ok_or_else(|| {
+            ReviewError::Rejected("Git tree entry has no path separator".into())
+        })?;
+        let meta = std::str::from_utf8(meta)
+            .map_err(|_| ReviewError::Rejected("Git tree metadata is not UTF-8".into()))?;
+        let mut fields = meta.split_whitespace();
+        let mode = fields
+            .next()
+            .and_then(|mode| u32::from_str_radix(mode, 8).ok())
+            .ok_or_else(|| ReviewError::Rejected("Git tree entry has an invalid mode".into()))?;
+        let kind = fields.next().unwrap_or_default();
+        let object = fields.next().unwrap_or_default();
+        if kind != "blob" || fields.next().is_some() || object.is_empty() {
+            return Err(ReviewError::Rejected(
+                "candidate tree contains a non-file Git entry".into(),
+            ));
+        }
+        let path = std::str::from_utf8(path)
+            .map_err(|_| ReviewError::Rejected("candidate path is not UTF-8".into()))?;
+        safe_candidate_path(path)?;
+        if !matches!(mode, 0o100644 | 0o100755 | 0o120000) {
+            return Err(ReviewError::Rejected(format!(
+                "candidate path {path} has unsupported mode {mode:o}"
+            )));
+        }
+        let size = git(worktree, "cat-file size", &["cat-file", "-s", object])
+            .await?
+            .parse::<u64>()
+            .map_err(|_| ReviewError::Rejected(format!("candidate blob {object} has invalid size")))?;
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| ReviewError::Rejected("candidate snapshot is too large".into()))?;
+        if total > max_bytes {
+            return Err(ReviewError::Rejected(format!(
+                "candidate snapshot is {total} bytes; the operator limit is {max_bytes}"
+            )));
+        }
+        let content = git_bytes(worktree, "cat-file", &["cat-file", "blob", object]).await?;
+        if u64::try_from(content.len()).ok() != Some(size) {
+            return Err(ReviewError::Rejected(format!(
+                "candidate blob {object} changed while it was captured"
+            )));
+        }
+        snapshot.files.push(crate::store::CandidateFile {
+            path: path.to_string(),
+            mode,
+            content,
+        });
+    }
+    materialize_candidate_files(&snapshot.root, &snapshot.files)?;
+    Ok(snapshot)
+}
+
+/// Rebuild an isolated candidate from the file payload retained in the
+/// evidence store. This is for trusted future execution/transfer code; it has
+/// no worktree or Git configuration input.
+pub fn materialize_candidate_files(
+    root: &Path,
+    files: &[crate::store::CandidateFile],
+) -> Result<(), ReviewError> {
+    std::fs::create_dir_all(root)?;
+    for file in files {
+        safe_candidate_path(&file.path)?;
+        let target = root.join(&file.path);
+        let parent = target
+            .parent()
+            .ok_or_else(|| ReviewError::Rejected("candidate file has no parent".into()))?;
+        std::fs::create_dir_all(parent)?;
+        match file.mode {
+            0o100644 | 0o100755 => {
+                std::fs::write(&target, &file.content)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let permissions = if file.mode == 0o100755 { 0o555 } else { 0o444 };
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(permissions))?;
+                }
+            }
+            0o120000 => {
+                let destination = std::str::from_utf8(&file.content).map_err(|_| {
+                    ReviewError::Rejected(format!("candidate symlink {} is not UTF-8", file.path))
+                })?;
+                safe_symlink_target(&file.path, destination)?;
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(destination, &target)?;
+                #[cfg(not(unix))]
+                return Err(ReviewError::Rejected(
+                    "candidate symbolic links are unsupported on this platform".into(),
+                ));
+            }
+            _ => {
+                return Err(ReviewError::Rejected(format!(
+                    "candidate path {} has unsupported mode {:o}",
+                    file.path, file.mode
+                )))
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut directories = vec![root.to_path_buf()];
+        for file in files {
+            let mut path = root.join(&file.path);
+            while let Some(parent) = path.parent() {
+                if parent.starts_with(root) {
+                    directories.push(parent.to_path_buf());
+                }
+                if parent == root {
+                    break;
+                }
+                path = parent.to_path_buf();
+            }
+        }
+        directories.sort();
+        directories.dedup();
+        for directory in directories {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o555))?;
+        }
+    }
+    Ok(())
+}
+
+/// `[u8]::split_once` is not yet stable; this is the byte-slice equivalent
+/// of `str::split_once` for a single-byte separator.
+fn split_once_byte(bytes: &[u8], separator: u8) -> Option<(&[u8], &[u8])> {
+    let at = bytes.iter().position(|byte| *byte == separator)?;
+    Some((&bytes[..at], &bytes[at + 1..]))
+}
+
+fn safe_candidate_path(path: &str) -> Result<(), ReviewError> {
+    if path.is_empty()
+        || Path::new(path)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(ReviewError::Rejected(format!(
+            "candidate path {path:?} escapes its snapshot"
+        )));
+    }
+    Ok(())
+}
+
+fn safe_symlink_target(path: &str, target: &str) -> Result<(), ReviewError> {
+    if target.is_empty() || Path::new(target).is_absolute() {
+        return Err(ReviewError::Rejected(format!(
+            "candidate symlink {path} escapes its snapshot"
+        )));
+    }
+    let mut depth = Path::new(path)
+        .parent()
+        .map(|parent| parent.components().count())
+        .unwrap_or_default();
+    for component in Path::new(target).components() {
+        match component {
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::ParentDir if depth > 0 => depth -= 1,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(ReviewError::Rejected(format!(
+                    "candidate symlink {path} escapes its snapshot"
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn pinned_context(worktree: &str, head_sha: &str, diff: &str) -> Vec<CodeContext> {
+    let mut current = None::<String>;
+    let mut requested = Vec::<(String, usize, usize)>::new();
+    for line in diff.lines() {
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            current = Some(path.to_string());
+            continue;
+        }
+        let Some(path) = current.as_deref() else {
+            continue;
+        };
+        if let Some((start, count)) = changed_hunk(line) {
+            requested.push((path.to_string(), start, count));
+        }
+    }
+    requested.truncate(80);
+    let mut contexts = Vec::new();
+    for (path, start, count) in requested {
+        let object = format!("{head_sha}:{path}");
+        let Ok(bytes) = git_bytes(worktree, "show context", &["show", &object]).await else {
+            continue;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.is_empty() {
+            continue;
+        }
+        let first = start.saturating_sub(3).max(1);
+        let last = start
+            .saturating_add(count.max(1))
+            .saturating_add(2)
+            .min(lines.len());
+        if first > last {
+            continue;
+        }
+        let mut excerpt = lines[first - 1..last].join("\n");
+        if last == lines.len() && text.ends_with('\n') {
+            excerpt.push('\n');
+        }
+        contexts.push(CodeContext {
+            path,
+            start_line: first,
+            end_line: last,
+            text: excerpt,
+        });
+    }
+    contexts
+}
+
+fn changed_hunk(line: &str) -> Option<(usize, usize)> {
+    let changed = line
+        .split_whitespace()
+        .find(|part| part.starts_with('+') && part.len() > 1)?;
+    let changed = changed.strip_prefix('+')?;
+    let (start, count) = changed.split_once(',').unwrap_or((changed, "1"));
+    Some((start.parse().ok()?, count.parse().ok()?))
+}
+
 /// One reviewed file's contents as they were submitted, read by blob hash so
 /// what comes back is what the diff was taken against — not whatever the
 /// worktree holds now. A file the diff created has no blob at the base, and a
@@ -268,14 +584,10 @@ pub async fn file_at_submit(
     if f.blob == "absent" {
         return Ok(None);
     }
-    let out = Command::new("git")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .arg("-C")
-        .arg(worktree)
-        .args(GIT_SAFE)
+    // Not `git`: that trims, and a file's trailing newline is part of the
+    // file. Losing it here would make the editor build a patch that quietly
+    // strips it.
+    let out = hardened_git(worktree)
         .args(["cat-file", "blob", &f.blob])
         .output()
         .await?;

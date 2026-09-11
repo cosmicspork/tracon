@@ -29,6 +29,7 @@ import type {
   RecentRepo,
   Review,
   Session,
+  ReviewDetails,
   WorkItem,
   WorkView,
 } from './types'
@@ -195,7 +196,7 @@ export const api = {
   stop: (id: string) => call<void>('POST', `/api/sessions/${id}/stop`),
   kill: (id: string) => call<void>('POST', `/api/sessions/${id}/kill`),
   saveDraft: (id: string, text: string) => call<void>('PUT', `/api/sessions/${id}/draft`, { text }),
-  review: (id: string) => call<{ review: Review; stale: string[] }>('GET', `/api/reviews/${id}`),
+  review: (id: string) => call<ReviewDetails>('GET', `/api/reviews/${id}`),
   /** One reviewed file as it was submitted, for the diff editor. */
   reviewFile: (id: string, path: string) =>
     call<{ path: string; text: string | null }>(

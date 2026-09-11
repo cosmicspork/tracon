@@ -226,6 +226,92 @@ export interface Review {
   revision_patch?: string | null
 }
 
+export interface ReviewContext {
+  path: string
+  start_line: number
+  end_line: number
+  text: string
+}
+
+/** Immutable review evidence, distinct from the mutable review card. */
+export interface CandidateEvidence {
+  candidate: {
+    id: string
+    head_sha: string
+    tree_sha: string | null
+    channel: string
+    owner_session_id: string
+    source_kind: string
+    captured_ms: number
+    capture_json: string
+  }
+  checks: CandidateCheckRun[]
+  revisions: {
+    id: string
+    review_id: string
+    candidate_id: string
+    title: string
+    body: string
+    diff: string
+    files: string
+    head_sha: string
+    context_json: string
+    created_ms: number
+  }[]
+  decisions: {
+    id: string
+    review_id: string
+    revision_id: string
+    decision: string
+    source: 'operator' | 'authority' | 'legacy_unknown'
+    reason: string | null
+    title: string | null
+    body: string | null
+    patch: string | null
+    decided_ms: number
+  }[]
+  demonstrations: {
+    id: string
+    candidate_id: string
+    channel: string
+    document_id: string
+    document_slug: string
+    document_hash: string
+    label: string
+    created_ms: number
+  }[]
+}
+
+export interface CandidateCheckRun {
+  id: string
+  candidate_id: string | null
+  session_id: string
+  definition_json: string
+  definition_hash: string | null
+  execution_image: string | null
+  inputs_json: string | null
+  reuse_key: string | null
+  outcome: 'running' | 'passed' | 'failed' | 'interrupted' | 'cancelled' | 'reused'
+  source_outcome: string | null
+  exit_code: number | null
+  log: string
+  duration_ms: number | null
+  started_ms: number
+  finished_ms: number | null
+  rerun_of: string | null
+  reused_from_id: string | null
+  metadata_json: string
+}
+
+export interface ReviewDetails {
+  review: Review
+  stale: string[]
+  requirements: WorkItem | null
+  surrounding_code: ReviewContext[]
+  evidence: CandidateEvidence | null
+  legacy_check_events: CandidateCheckRun[]
+}
+
 export interface CheckResult {
   command: string
   ok: boolean

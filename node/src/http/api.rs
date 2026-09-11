@@ -1102,7 +1102,29 @@ pub async fn get_review(
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
     let stale = staleness_of(&s, &r).await;
     s.manager.publish_queue().await;
-    Ok(Json(json!({ "review": r, "stale": stale })))
+    let revision = s.store().latest_review_revision(&id)?;
+    let evidence = match revision.as_ref() {
+        Some(revision) => Some(s.store().candidate_evidence(&revision.candidate_id)?),
+        None => None,
+    };
+    let requirements = s
+        .store()
+        .get_session(&r.session_id)?
+        .and_then(|session| session.work_item_id)
+        .and_then(|work_item_id| s.store().work_get(&work_item_id).ok().flatten());
+    let surrounding_code = revision
+        .as_ref()
+        .and_then(|revision| serde_json::from_str::<serde_json::Value>(&revision.context_json).ok())
+        .unwrap_or_else(|| json!([]));
+    let legacy_check_events = s.store().legacy_check_runs_for_session(&r.session_id)?;
+    Ok(Json(json!({
+        "review": r,
+        "stale": stale,
+        "requirements": requirements,
+        "surrounding_code": surrounding_code,
+        "evidence": evidence,
+        "legacy_check_events": legacy_check_events,
+    })))
 }
 
 /// Where a review's diff was captured: the operator's worktree for a harness
@@ -1174,6 +1196,135 @@ pub async fn review_file(
         .await
         .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
     Ok(Json(json!({ "path": q.path, "text": text })))
+}
+
+fn record_evidence_decision(
+    store: &Store,
+    review_id: &str,
+    decision: &str,
+    reason: Option<&str>,
+    title: Option<&str>,
+    body: Option<&str>,
+    patch: Option<&str>,
+) -> Result<Option<i64>, crate::store::StoreError> {
+    let Some(revision) = store.latest_review_revision(review_id)? else {
+        // A row directly written by an old node/test fixture has no immutable
+        // revision to honestly associate with a new decision.
+        return Ok(None);
+    };
+    let decided_ms = crate::store::now_ms();
+    store.record_review_decision(&crate::store::ReviewDecisionRow {
+        id: uuid::Uuid::now_v7().to_string(),
+        review_id: review_id.to_string(),
+        revision_id: revision.id,
+        source: "operator".into(),
+        decision: decision.to_string(),
+        reason: reason.map(str::to_string),
+        title: title.map(str::to_string),
+        body: body.map(str::to_string),
+        patch: patch.map(str::to_string),
+        decided_ms,
+    })?;
+    Ok(Some((decided_ms - revision.created_ms).max(0)))
+}
+
+fn record_operator_decision_event(
+    s: &AppState,
+    session_id: &str,
+    review_id: &str,
+    decision: &str,
+    waiting_ms: Option<i64>,
+) {
+    if let Some(waiting_ms) = waiting_ms {
+        s.manager.record_event(
+            session_id,
+            crate::session::state::event_kind::REVIEW_DECISION,
+            json!({ "source": "operator", "review_id": review_id, "decision": decision, "waiting_ms": waiting_ms }),
+        );
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CandidateLookup {
+    pub channel: String,
+}
+
+/// Candidate evidence is selected by a persisted immutable id, never by a
+/// worktree path. The channel query makes commit lookup explicit across the
+/// node's isolated channels.
+pub async fn candidate_by_commit(
+    State(s): State<AppState>,
+    Path(head_sha): Path<String>,
+    Query(query): Query<CandidateLookup>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let candidate = s
+        .store()
+        .candidate_by_commit(&query.channel, &head_sha)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no candidate on that channel for this commit".into()))?;
+    let evidence = s.store().candidate_evidence(&candidate.id)?;
+    Ok(Json(json!({ "evidence": evidence })))
+}
+
+pub async fn candidate_evidence(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let evidence = s
+        .store()
+        .candidate_evidence(&id)
+        .map_err(|error| match error {
+            crate::store::StoreError::Invalid(_) => {
+                ApiError(StatusCode::NOT_FOUND, "no such candidate".into())
+            }
+            other => ApiError::from(other),
+        })?;
+    Ok(Json(json!({ "evidence": evidence })))
+}
+
+#[derive(Deserialize)]
+pub struct DemonstrationBody {
+    pub slug: String,
+    pub label: String,
+}
+
+/// Link a curated document snapshot to a candidate. This deliberately does
+/// not execute the document — Showboat-style command blocks remain a human
+/// authored demonstration, not an untrusted command surface in review.
+pub async fn attach_demonstration(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<DemonstrationBody>,
+) -> ApiResult<Json<crate::store::DemonstrationRow>> {
+    let candidate = s
+        .store()
+        .candidate(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such candidate".into()))?;
+    let label = body.label.trim();
+    if label.is_empty() || label.chars().count() > 200 {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "demonstration label must be between 1 and 200 characters".into(),
+        ));
+    }
+    let document = s
+        .store()
+        .doc_get(&candidate.channel, &body.slug)?
+        .ok_or(ApiError(
+            StatusCode::NOT_FOUND,
+            "no current document with that slug on the candidate channel".into(),
+        ))?;
+    let demonstration = crate::store::DemonstrationRow {
+        id: uuid::Uuid::now_v7().to_string(),
+        candidate_id: candidate.id,
+        channel: candidate.channel,
+        document_id: document.id,
+        document_slug: document.slug,
+        document_hash: document.hash,
+        label: label.to_string(),
+        created_ms: crate::store::now_ms(),
+    };
+    s.store().attach_demonstration(&demonstration)?;
+    Ok(Json(demonstration))
 }
 
 /// Called when the operator leaves the review screen. Explicit release is the
@@ -1282,6 +1433,9 @@ pub(crate) async fn decide_local(
                     ),
                 ));
             }
+            let waiting_ms =
+                record_evidence_decision(s.store(), &id, "revise", Some(notes), None, None, patch)?;
+            record_operator_decision_event(&s, &r.session_id, &id, "revise", waiting_ms);
             s.manager.publish_queue().await;
             Ok(json!({ "state": "revising" }))
         }
@@ -1311,6 +1465,9 @@ pub(crate) async fn decide_local(
                     ),
                 ));
             }
+            let waiting_ms =
+                record_evidence_decision(s.store(), &id, "rejected", Some(reason), None, None, None)?;
+            record_operator_decision_event(&s, &r.session_id, &id, "rejected", waiting_ms);
             s.manager.publish_queue().await;
             Ok(json!({ "state": "rejected" }))
         }
@@ -1335,7 +1492,19 @@ pub(crate) async fn decide_local(
             )
             .await
             {
-                Ok(published) => Ok(json!({ "state": "approved", "published": published })),
+                Ok(published) => {
+                    let waiting_ms = record_evidence_decision(
+                        s.store(),
+                        &id,
+                        "approved",
+                        None,
+                        Some(&title),
+                        Some(&body),
+                        None,
+                    )?;
+                    record_operator_decision_event(&s, &r.session_id, &id, "approved", waiting_ms);
+                    Ok(json!({ "state": "approved", "published": published }))
+                }
                 Err(crate::authority::PublishError::Conflict(message)) => {
                     Err(ApiError(StatusCode::CONFLICT, message))
                 }

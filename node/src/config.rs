@@ -205,14 +205,21 @@ impl Notify {
     }
 }
 
-/// Deterministic checks the node runs at submit, in a throwaway harness
-/// container with the worktree mounted and nothing else. A worktree may
-/// carry its own list in `.tracon/checks` (one command per line).
+/// Trusted required checks the node runs for a candidate. These never come
+/// from the candidate tree: an agent cannot make a required check disappear by
+/// committing `.tracon/checks`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Supervision {
+    /// One canonical shell command per required check, in operator-configured
+    /// order. An empty list is explicit and does not count as verification.
     pub checks: Vec<String>,
     pub timeout_secs: u64,
+    /// Operator-declared identities of dependency inputs that influence a
+    /// check. Altering one deliberately invalidates reuse.
+    pub dependency_inputs: std::collections::BTreeMap<String, String>,
+    /// The largest immutable Git snapshot imported for one check run.
+    pub max_snapshot_bytes: u64,
 }
 
 impl Default for Supervision {
@@ -220,6 +227,8 @@ impl Default for Supervision {
         Self {
             checks: vec!["just check".into()],
             timeout_secs: 900,
+            dependency_inputs: Default::default(),
+            max_snapshot_bytes: 512 * 1024 * 1024,
         }
     }
 }
