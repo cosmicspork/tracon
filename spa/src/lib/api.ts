@@ -339,6 +339,10 @@ export const api = {
       'GET',
       `/api/operator/notifications/${id}`,
     ),
+  reconcileOperatorIssue: (id: string) =>
+    call<{ reconciled: boolean; state: string }>('POST', `/api/operator/issues/${id}/reconcile`, {
+      confirmed_absent: true,
+    }),
   operatorNotifications: () =>
     call<{ notifications: { notification_id: string; expires_ms: number; attempts: { device_id: string; outcome: string }[] }[]; receipt: string }>(
       'GET',

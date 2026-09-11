@@ -1124,7 +1124,7 @@ pub async fn operator_notification(
     Ok(Json(json!({
         "notification_id": id,
         "attempts": s.store().notification_attempts(&id)?,
-        "receipt": "delivery attempts are push-service outcomes, not proof a human saw a notification",
+        "receipt": "device push-service attempts and peer acknowledgements only; human receipt is unknown",
     })))
 }
 
@@ -1137,7 +1137,10 @@ pub async fn operator_notifications(State(s): State<AppState>) -> ApiResult<Json
             json!({ "notification_id": notification.id, "expires_ms": notification.expires_ms, "attempts": attempts })
         })
         .collect();
-    Ok(Json(json!({ "notifications": rows, "receipt": "attempts show only push-service outcomes; human receipt is unknown" })))
+    Ok(Json(json!({
+        "notifications": rows,
+        "receipt": "device push-service attempts and peer acknowledgements only; human receipt is unknown",
+    })))
 }
 
 pub async fn operator_issues(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
@@ -1158,6 +1161,27 @@ pub async fn operator_issue(
 /// An issue can leave only through the node-side broker, targeting tracon's
 /// repository. The row is claimed before spawning `gh`, so double-clicks and
 /// concurrent clients cannot publish two copies.
+#[derive(Deserialize)]
+pub struct ReconcileIssueBody {
+    /// The operator has searched cosmicspork/tracon for this draft's marker
+    /// and confirmed no issue was created. This is never inferred.
+    pub confirmed_absent: bool,
+}
+
+pub async fn reconcile_operator_issue(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ReconcileIssueBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !body.confirmed_absent {
+        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, "confirm the draft marker is absent before retrying".into()));
+    }
+    if !s.store().retry_uncertain_issue_publication(&id)? {
+        return Err(ApiError(StatusCode::CONFLICT, "only an uncertain issue draft can be reconciled".into()));
+    }
+    Ok(Json(json!({ "reconciled": true, "state": "draft" })))
+}
+
 pub async fn publish_operator_issue(
     State(s): State<AppState>,
     Path(id): Path<String>,

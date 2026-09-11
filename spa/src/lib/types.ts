@@ -187,6 +187,7 @@ export interface OperatorIssue {
   attachments_json: string
   state: 'draft' | 'publishing' | 'published' | 'uncertain'
   published_url: string | null
+  publish_error: string | null
   created_ms: number
   approved_ms: number | null
 }

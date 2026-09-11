@@ -104,7 +104,7 @@ impl Store {
     ) -> Result<Option<OperatorQuestionRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT * FROM operator_question WHERE channel=?1 AND request_key=?2 ORDER BY created_ms DESC LIMIT 1",
+            "SELECT q.* FROM operator_question q JOIN session s ON s.id=q.session_id WHERE q.channel=?1 AND q.request_key=?2 AND s.harness_id='external' ORDER BY q.created_ms DESC LIMIT 1",
             params![channel, request_key],
             OperatorQuestionRow::from_row,
         )
@@ -197,6 +197,14 @@ impl Store {
             "UPDATE operator_issue SET state='uncertain', publish_error='publication outcome unknown after node restart; reconcile the draft marker before retrying' WHERE state='publishing'",
             [],
         )?)
+    }
+
+    pub fn retry_uncertain_issue_publication(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE operator_issue SET state='draft', publish_error=NULL WHERE id=?1 AND state='uncertain'",
+            [id],
+        )? == 1)
     }
     pub fn fail_issue_publication(&self, id: &str, error: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap(); conn.execute("UPDATE operator_issue SET state='draft', publish_error=?2 WHERE id=?1 AND state='publishing'", params![id,error])?; Ok(())

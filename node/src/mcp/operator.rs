@@ -152,7 +152,11 @@ async fn notify_operator(
         match mesh.command(node, command, std::time::Duration::from_secs(cfg.mesh.command_timeout_secs.max(1))).await {
             Ok(reply) => {
                 let _ = store.record_notification_attempt(&id, &format!("node:{node}"), "peer acknowledged delivery request");
-                for attempt in reply["attempts"].as_array().into_iter().flatten() {
+                let remote = reply["attempts"].as_array().cloned().unwrap_or_default();
+                if remote.is_empty() {
+                    let _ = store.record_notification_attempt(&id, &format!("node:{node}"), "peer reports no matching live device");
+                }
+                for attempt in remote {
                     let device = attempt["device_id"].as_str().unwrap_or("unknown-device");
                     let outcome = attempt["outcome"].as_str().unwrap_or("unknown");
                     let _ = store.record_notification_attempt(&id, &format!("node:{node}/{device}"), outcome);
@@ -163,7 +167,7 @@ async fn notify_operator(
             }
         }
     }
-    Ok(json!({"notification_id": id, "deduplicated": false, "attempts": store.notification_attempts(&id).map_err(|e| e.to_string())?, "receipt": "push-service outcomes only; human receipt is unknown"}))
+    Ok(json!({"notification_id": id, "deduplicated": false, "attempts": store.notification_attempts(&id).map_err(|e| e.to_string())?, "receipt": "device push-service attempts and peer acknowledgements only; human receipt is unknown"}))
 }
 
 fn report(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, String> {
@@ -235,7 +239,7 @@ fn scrub(s: &str) -> String {
             in_pem = true;
         }
         let lowered = trimmed.to_ascii_lowercase();
-        let credential_assignment = ["password=", "password:", "token=", "token:", "secret=", "secret=", "api_key=", "authorization:", "cookie:"]
+        let credential_assignment = ["password=", "password:", "token=", "token:", "secret=", "secret:", "api_key=", "authorization:", "cookie:"]
             .iter()
             .any(|marker| lowered.contains(marker));
         if in_pem

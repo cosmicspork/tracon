@@ -182,6 +182,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/operator/notifications/{id}", get(api::operator_notification))
         .route("/api/operator/issues", get(api::operator_issues))
         .route("/api/operator/issues/{id}", get(api::operator_issue))
+        .route("/api/operator/issues/{id}/reconcile", post(api::reconcile_operator_issue))
         .route("/api/operator/issues/{id}/publish", post(api::publish_operator_issue))
         .route("/api/reviews/{id}", get(api::get_review))
         .route("/api/reviews/{id}/file", get(api::review_file))

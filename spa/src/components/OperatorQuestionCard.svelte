@@ -31,11 +31,15 @@
   {#if choices.length}
     <div class="choices">{#each choices as choice}<button onclick={() => submit(choice)} disabled={busy}>{choice}</button>{/each}</div>
   {/if}
-  <form onsubmit={(e) => { e.preventDefault(); void submit() }}>
-    <input bind:value={answer} placeholder="Free-text answer" disabled={busy} />
-    <button type="submit" disabled={busy || !answer.trim()}>Answer</button>
+  {#if !choices.length}
+    <form onsubmit={(e) => { e.preventDefault(); void submit() }}>
+      <input bind:value={answer} placeholder="Free-text answer" disabled={busy} />
+      <button type="submit" disabled={busy || !answer.trim()}>Answer</button>
+      <button type="button" class="quiet" onclick={cancel} disabled={busy}>Cancel question</button>
+    </form>
+  {:else}
     <button type="button" class="quiet" onclick={cancel} disabled={busy}>Cancel question</button>
-  </form>
+  {/if}
   {#if error}<div class="error">{error}</div>{/if}
 </article>
 
