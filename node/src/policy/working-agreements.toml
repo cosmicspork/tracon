@@ -55,7 +55,7 @@ matches = ["jira workitem transition", "acli jira workitem transition"]
 [[rule]]
 id = "no-production-deploy"
 verdict = "deny"
-reason = "Production pipelines are run by hand."
+reason = "Production pipelines are run by hand. A signed policy change is required before a local grant can authorize one."
 matches = [
     "environment:production",
     "environment=production",

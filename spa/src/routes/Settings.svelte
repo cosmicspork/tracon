@@ -32,7 +32,7 @@
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { UpdateStatus } from '../lib/desktop-update'
-  import type { AuthorityGrant, BoundaryCheck, EnrollStatus, NodeConfig } from '../lib/types'
+  import type { AuthorityGrant, BoundaryCheck, EnrollStatus, NodeConfig, PolicyRule } from '../lib/types'
 
   const local = $derived(store.node?.loopback ?? false)
   const origin = typeof location === 'undefined' ? '' : location.origin
@@ -122,8 +122,7 @@
   }
 
 
-  // --- authority ---------------------------------------------------------
-  let authority = $state<{ policy: { version: number; rules: unknown[] }; grants: AuthorityGrant[] } | null>(null)
+  let authority = $state<{ policy: { version: number; rules: PolicyRule[] }; grants: AuthorityGrant[] } | null>(null)
   let grant = $state({
     action: 'merge' as AuthorityGrant['action'],
     verdict: 'allow' as AuthorityGrant['verdict'],
@@ -522,11 +521,23 @@
   <div class="h5">Authority <b>signed policy is inspectable; local grants are narrow and revocable</b></div>
   {#if authority}
     <p class="why">Policy bundle version {authority.policy.version} has {authority.policy.rules.length} signed rules. This interface cannot change signing keys, trust roots, or policy text.</p>
+    <div class="credentials">
+      {#each authority.policy.rules as rule (rule.id)}
+        <div class="credential">
+          <b>{rule.verdict} · {rule.id}</b>
+          <small>{rule.reason}</small>
+          <span>kinds: {rule.kinds.length ? rule.kinds.join(', ') : 'all'} · channels: {rule.channels.length ? rule.channels.join(', ') : 'all'}</span>
+          {#if rule.matches.length}<span>matches: {rule.matches.join(', ')}</span>{/if}
+          {#if Object.keys(rule.args).length}<span>arguments: {Object.entries(rule.args).map(([key, values]) => `${key}=${values.join('|')}`).join(', ')}</span>{/if}
+        </div>
+      {/each}
+    </div>
     <div class="grid">
       <label><span>Action</span><select bind:value={grant.action} disabled={!local}><option value="merge">merge</option><option value="publish">publish</option><option value="ticket_transition">ticket transition</option><option value="deploy">deploy</option></select></label>
       <label><span>Decision</span><select bind:value={grant.verdict} disabled={!local}><option value="allow">allow</option><option value="ask">ask</option><option value="deny">deny</option></select></label>
       <label><span>Canonical target</span><input bind:value={grant.target} disabled={!local} placeholder="github:owner/repo:pr:42" /></label>
       <label><span>Channel</span><input bind:value={grant.channel} disabled={!local} placeholder={store.node?.default_channel ?? 'personal'} /></label>
+      <label><span>Session (optional)</span><input bind:value={grant.session_id} disabled={!local} placeholder="limit this grant to one session id" /></label>
       <label><span>Immutable revision (optional)</span><input bind:value={grant.revision} disabled={!local} placeholder="commit SHA" /></label>
       <label><span>Expires at (optional)</span><input type="datetime-local" value={grant.expires_ms ? new Date(grant.expires_ms).toISOString().slice(0, 16) : ''} onchange={(e) => grant.expires_ms = e.currentTarget.value ? Date.parse(e.currentTarget.value) : null} disabled={!local} /></label>
       <label><span>Reason</span><input bind:value={grant.reason} disabled={!local} placeholder="why this precise action is permitted" /></label>

@@ -379,8 +379,19 @@ export interface ForgeList {
   error?: string
 }
 
+export interface PolicyRule {
+  id: string
+  verdict: 'allow' | 'ask' | 'deny'
+  reason: string
+  kinds: string[]
+  channels: string[]
+  matches: string[]
+  args: Record<string, string[]>
+}
+
 /** A narrow local authority decision. It never edits the signed policy bundle. */
 export interface AuthorityGrant {
+  id: string
   action: 'merge' | 'publish' | 'ticket_transition' | 'deploy' | 'browser_verify' | 'browser_test_account'
   verdict: 'allow' | 'ask' | 'deny'
   target: string
