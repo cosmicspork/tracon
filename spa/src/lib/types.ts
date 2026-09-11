@@ -369,10 +369,13 @@ export interface ForgeRepo {
   pushed_at: string | null
 }
 
-/** One forge's listing: repositories, or why there are none to show. */
+/** One bounded forge page. `complete` is false while another page remains or
+ * the provider returned malformed pagination metadata. */
 export interface ForgeList {
   forge: string
   repos: ForgeRepo[]
+  next_cursor?: string
+  complete: boolean
   error?: string
 }
 

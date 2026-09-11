@@ -41,6 +41,21 @@ echo "tracon: fetching tracon-$target"
 curl -fsSL -o "$tmp/tracon" "$base/tracon-$target"
 curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt"
 
+# A release checksum proves only that two release assets agree. GitHub's
+# Sigstore-backed provenance attestation binds this exact binary to the fixed
+# publisher repository and release workflow before it is installed or run.
+if ! command -v gh >/dev/null 2>&1; then
+  echo "tracon: GitHub CLI with attestation support is required to verify the publisher" >&2
+  exit 1
+fi
+if ! gh attestation verify "$tmp/tracon" \
+  --repo "$repo" \
+  --signer-workflow "$repo/.github/workflows/release.yml" \
+  --source-ref refs/heads/main >/dev/null; then
+  echo "tracon: release provenance verification failed; refusing to install" >&2
+  exit 1
+fi
+
 # Verify against the release's checksum line for this target only.
 expected="$(grep " tracon-$target\$" "$tmp/checksums.txt" | cut -d' ' -f1)"
 if [ -z "$expected" ]; then

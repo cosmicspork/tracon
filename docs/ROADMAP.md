@@ -147,8 +147,8 @@ Explain the job and make one-node use complete.
 
 - [ ] Continue work on another node using explicit candidate/context transfer and a new session, without mandatory work items/phases or live-harness migration.
 - [ ] Add optional hub-side rollups without making local use depend on them.
-- [ ] Sign desktop releases and pin mutable build inputs for reproducibility; checksums alone are not independent publisher authentication.
-- [ ] Paginate forge repository listings.
+- [x] Sign desktop releases and pin mutable build inputs for reproducibility; checksums alone are not independent publisher authentication.
+- [x] Paginate forge repository listings.
 
 ## Hardening
 

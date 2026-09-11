@@ -20,13 +20,13 @@ jobs:
   # tags the release and sets release_created=true. On a manual re-run the
   # named tag is treated as the release to attach artefacts to.
   release-please:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       release_created: ${{ steps.out.outputs.release_created }}
       version: ${{ steps.out.outputs.version }}
       tag: ${{ steps.out.outputs.tag }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         if: github.event_name == 'push'
         id: rp
         with:
@@ -51,12 +51,12 @@ jobs:
       # so this cannot loop.
       - name: Check out the release PR branch
         if: steps.rp.outputs.prs_created == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ fromJson(steps.rp.outputs.pr).headBranchName }}
       - name: Install Rust
         if: steps.rp.outputs.prs_created == 'true'
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install 1.98.1 --profile minimal
       - name: Refresh the lockfiles
         if: steps.rp.outputs.prs_created == 'true'
         run: |
@@ -79,7 +79,7 @@ jobs:
   image:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -95,16 +95,16 @@ jobs:
           - name: tracon-harness-claude
             file: containers/harness-claude/Containerfile
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.release-please.outputs.tag }}
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ${{ matrix.file }}
@@ -126,19 +126,23 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+            os: ubuntu-24.04
             bins: --bin tracon --bin tracon-hub
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-15
             bins: --bin tracon
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.release-please.outputs.tag }}
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
       - name: Build the SPA
         working-directory: spa
         run: |
@@ -149,10 +153,11 @@ jobs:
           grep -rl dl.google.com /etc/apt/sources.list.d /etc/apt/sources.list 2>/dev/null | xargs -r sudo rm -f
           sudo apt-get update
           sudo apt-get install -y musl-tools
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: 1.98.1
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
       - name: Build
@@ -174,47 +179,93 @@ jobs:
             cp target/${{ matrix.target }}/release/$b $b-${{ matrix.target }}
             shasum -a 256 $b-${{ matrix.target }} > $b-${{ matrix.target }}.sha256
           done
+      - name: Attest release binaries
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            *-${{ matrix.target }}
+            *-${{ matrix.target }}.sha256
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ needs.release-please.outputs.tag }}" *-${{ matrix.target }} *-${{ matrix.target }}.sha256 --clobber
 
   # The desktop app, with the node carried inside it as a sidecar so a single
-  # download is a working install. Unsigned: macOS needs a right-click Open the
-  # first time.
+  # download is a working install. macOS bundles are Developer ID signed and
+  # notarized; every desktop asset also carries GitHub build provenance.
   gui:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     strategy:
+      # Missing Apple credentials must not cancel the independent AppImage.
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             bundles: appimage
-          - os: macos-latest
+          - os: macos-15
             target: aarch64-apple-darwin
             bundles: app,dmg
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.release-please.outputs.tag }}
+      - name: Import Apple Developer ID certificate
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          test -n "${APPLE_CERTIFICATE:-}" || { echo "APPLE_CERTIFICATE is required"; exit 1; }
+          test -n "${APPLE_CERTIFICATE_PASSWORD:-}" || { echo "APPLE_CERTIFICATE_PASSWORD is required"; exit 1; }
+          test -n "${KEYCHAIN_PASSWORD:-}" || { echo "KEYCHAIN_PASSWORD is required"; exit 1; }
+          test -n "${APPLE_API_ISSUER:-}" || { echo "APPLE_API_ISSUER is required"; exit 1; }
+          test -n "${APPLE_API_KEY:-}" || { echo "APPLE_API_KEY is required"; exit 1; }
+          test -n "${APPLE_API_KEY_BASE64:-}" || { echo "APPLE_API_KEY_BASE64 is required"; exit 1; }
+          certificate="$RUNNER_TEMP/tracon-developer-id.p12"
+          keychain="$RUNNER_TEMP/tracon-build.keychain-db"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$certificate"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security default-keychain -s "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -t 3600 -u "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | sed -n '1p')"
+          test -n "$identity" || { echo "Developer ID Application certificate is required"; exit 1; }
+          api_key="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 -D > "$api_key"
+          chmod 600 "$api_key"
+          echo "APPLE_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY_PATH=$api_key" >> "$GITHUB_ENV"
       - if: runner.os == 'Linux'
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d /etc/apt/sources.list 2>/dev/null | xargs -r sudo rm -f
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
             libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
       - name: Build the SPA
         working-directory: spa
         run: |
           bun install --frozen-lockfile
           bun run build
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: |
             .
@@ -226,9 +277,47 @@ jobs:
           cargo build --release --bin tracon
           mkdir -p wrapper/binaries
           cp target/release/tracon wrapper/binaries/tracon-${{ matrix.target }}
-      - name: Bundle
+      # Desktop self-update must not depend on a host-installed CLI. Package
+      # GitHub's verifier as a resource, with its official release digest.
+      - name: Bundle pinned provenance verifier
+        env:
+          GH_VERSION: 2.100.0
+          GH_LINUX_AMD64_SHA256: e4d4bb4498e8d007abe545b6568926793ace1b6447da598294a610018cb164be
+          GH_MACOS_ARM64_SHA256: 45f9a62da2f6e641a7fad57e2ce39656dfd7ef331372d80a2a2aed65abb01642
+        run: |
+          set -eu
+          case "$RUNNER_OS" in
+            Linux) platform=linux_amd64; archive=tar.gz; digest="$GH_LINUX_AMD64_SHA256" ;;
+            macOS) platform=macOS_arm64; archive=zip; digest="$GH_MACOS_ARM64_SHA256" ;;
+            *) echo "unsupported runner $RUNNER_OS" >&2; exit 1 ;;
+          esac
+          download="gh_${GH_VERSION}_${platform}.${archive}"
+          curl -fsSL -o "$RUNNER_TEMP/$download" \
+            "https://github.com/cli/cli/releases/download/v${GH_VERSION}/$download"
+          echo "$digest  $RUNNER_TEMP/$download" | shasum -a 256 -c -
+          case "$archive" in
+            tar.gz) tar -xzf "$RUNNER_TEMP/$download" -C "$RUNNER_TEMP" ;;
+            zip) unzip -q "$RUNNER_TEMP/$download" -d "$RUNNER_TEMP" ;;
+          esac
+          install -m 0755 "$RUNNER_TEMP/gh_${GH_VERSION}_${platform}/bin/gh" wrapper/binaries/gh
+      - name: Bundle signed and notarized macOS app
+        if: runner.os == 'macOS'
         working-directory: wrapper
-        run: bunx @tauri-apps/cli@2 build --bundles ${{ matrix.bundles }} --config '{"bundle":{"externalBin":["binaries/tracon"]}}'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
+        run: bunx @tauri-apps/cli@2.11.4 build --bundles ${{ matrix.bundles }} --config '{"bundle":{"externalBin":["binaries/tracon"],"resources":{"binaries/gh":"verifier/gh"}}}'
+      - name: Bundle Linux desktop app
+        if: runner.os == 'Linux'
+        working-directory: wrapper
+        run: bunx @tauri-apps/cli@2.11.4 build --bundles ${{ matrix.bundles }} --config '{"bundle":{"externalBin":["binaries/tracon"],"resources":{"binaries/gh":"verifier/gh"}}}'
+      - name: Verify macOS publisher authentication
+        if: runner.os == 'macOS'
+        run: |
+          codesign --verify --deep --strict --verbose=2 wrapper/target/release/bundle/macos/tracon.app
+          spctl --assess --type execute --verbose=4 wrapper/target/release/bundle/macos/tracon.app
       # What the app updates itself with. The dmg is the first install — it
       # is what a browser can hand a person — but a mounted image is a poor
       # update unit, and the bundle inside it is what actually gets swapped.
@@ -239,6 +328,38 @@ jobs:
           version="${{ needs.release-please.outputs.tag }}"
           tar --no-xattrs --no-mac-metadata \
             -czf "tracon_${version#v}_aarch64.app.tar.gz" tracon.app
+      - name: Attest Linux desktop asset
+        if: runner.os == 'Linux'
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        id: attest_linux
+        with:
+          subject-path: wrapper/target/release/bundle/**/*.AppImage
+      - name: Attest macOS desktop assets
+        if: runner.os == 'macOS'
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        id: attest_macos
+        with:
+          subject-path: |
+            wrapper/target/release/bundle/**/*.dmg
+            wrapper/target/release/bundle/**/*.app.tar.gz
+      - name: Publish Linux provenance bundle
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ needs.release-please.outputs.tag }}"
+          bundle="tracon_${tag#v}_amd64.AppImage.intoto.jsonl"
+          cp "${{ steps.attest_linux.outputs.bundle-path }}" "$bundle"
+          gh release upload "$tag" "$bundle" --clobber
+      - name: Publish macOS provenance bundle
+        if: runner.os == 'macOS'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ needs.release-please.outputs.tag }}"
+          bundle="tracon_${tag#v}_aarch64.provenance.jsonl"
+          cp "${{ steps.attest_macos.outputs.bundle-path }}" "$bundle"
+          gh release upload "$tag" "$bundle" --clobber
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -251,7 +372,7 @@ jobs:
   checksums:
     needs: [release-please, binaries]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:

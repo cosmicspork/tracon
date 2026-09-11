@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -116,20 +118,57 @@ pub struct Repo {
 pub struct ForgeRepos {
     pub forge: &'static str,
     pub repos: Vec<Repo>,
+    /// The next provider page, opaque to the picker. A page is deliberately
+    /// small; the operator must explicitly ask for another one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// False means this list stopped early because it has another page or its
+    /// provider supplied invalid pagination metadata.
+    pub complete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-/// The listing for every forge whose credential the broker holds, one page
-/// each (100 repositories, most recently active first).
+const REPOS_PER_PAGE: u32 = 50;
+const MAX_REPO_PAGE: u32 = 100;
+
+/// Credential-bearing forge requests never follow redirects, so a provider
+/// cannot send its authorization header to another host.
+static FORGE_LISTING_HTTP: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("could not initialize forge listing client: {error}"))
+});
+
+fn forge_listing_http() -> Result<&'static reqwest::Client, String> {
+    FORGE_LISTING_HTTP.as_ref().map_err(|error| error.clone())
+}
+
+struct RepoPage {
+    repos: Vec<Repo>,
+    next_cursor: Option<String>,
+    complete: bool,
+    error: Option<String>,
+}
+
+/// The listing for every selected forge whose credential the broker holds, one
+/// bounded provider page at a time. `only` is used by the picker when it loads
+/// another page from one forge; no request can exhaust a forge in one call.
 pub async fn list_repos(
-    http: &reqwest::Client,
     broker: &SharedBroker,
     channel: &str,
     node_id: &str,
+    only: Option<Forge>,
+    cursor: Option<&str>,
 ) -> Vec<ForgeRepos> {
+    let http = forge_listing_http();
     let mut out = Vec::new();
     for forge in [Forge::Github, Forge::Gitlab] {
+        if only.is_some_and(|selected| selected != forge) {
+            continue;
+        }
         let env = match broker
             .read()
             .unwrap()
@@ -143,24 +182,33 @@ pub async fn list_repos(
                 out.push(ForgeRepos {
                     forge: forge.name(),
                     repos: Vec::new(),
+                    next_cursor: None,
+                    complete: false,
                     error: Some(e.to_string()),
                 });
                 continue;
             }
         };
-        let entry = match fetch_repos(http, forge, &env).await {
-            Ok(repos) => ForgeRepos {
+        let entry = match &http {
+            Ok(http) => fetch_repos(http, forge, &env, cursor).await,
+            Err(error) => Err(error.clone()),
+        };
+        out.push(match entry {
+            Ok(page) => ForgeRepos {
                 forge: forge.name(),
-                repos,
-                error: None,
+                repos: page.repos,
+                next_cursor: page.next_cursor,
+                complete: page.complete,
+                error: page.error,
             },
-            Err(e) => ForgeRepos {
+            Err(error) => ForgeRepos {
                 forge: forge.name(),
                 repos: Vec::new(),
-                error: Some(e),
+                next_cursor: None,
+                complete: false,
+                error: Some(error),
             },
-        };
-        out.push(entry);
+        });
     }
     out
 }
@@ -169,7 +217,9 @@ async fn fetch_repos(
     http: &reqwest::Client,
     forge: Forge,
     env: &BTreeMap<String, String>,
-) -> Result<Vec<Repo>, String> {
+    cursor: Option<&str>,
+) -> Result<RepoPage, String> {
+    let page = repo_page(cursor)?;
     let token = forge.token(env).ok_or_else(|| {
         format!(
             "credential {} has no token the forge accepts",
@@ -179,9 +229,13 @@ async fn fetch_repos(
     let (api, host) = forge.endpoints(env);
     match forge {
         Forge::Github => {
-            let v = get(
+            let endpoint =
+                format!("{api}/user/repos?per_page={REPOS_PER_PAGE}&sort=pushed&page={page}");
+            let endpoint_url =
+                url::Url::parse(&endpoint).map_err(|_| "configured GitHub API URL is invalid")?;
+            let (v, headers) = get(
                 http,
-                &format!("{api}/user/repos?per_page=100&sort=pushed"),
+                &endpoint,
                 &[
                     ("authorization", &format!("Bearer {token}")),
                     ("user-agent", "tracon"),
@@ -190,59 +244,177 @@ async fn fetch_repos(
                 ],
             )
             .await?;
-            let rows = v.as_array().cloned().unwrap_or_default();
-            Ok(rows
-                .iter()
-                .filter_map(|r| {
-                    let full = r["full_name"].as_str()?;
-                    let (owner, name) = full.split_once('/')?;
-                    Some(Repo {
-                        host: host.clone(),
-                        owner: owner.to_string(),
-                        name: name.to_string(),
-                        full_name: full.to_string(),
-                        private: r["private"].as_bool().unwrap_or(false),
-                        default_branch: r["default_branch"].as_str().map(String::from),
-                        pushed_at: r["pushed_at"].as_str().map(String::from),
-                    })
-                })
-                .collect())
+            let rows = github_repos(&v, &host);
+            let pagination = github_next_page(&headers, &endpoint_url, page);
+            Ok(page_result(rows, pagination))
         }
         Forge::Gitlab => {
-            let v = get(
-                http,
-                &format!("{api}/projects?membership=true&order_by=last_activity_at&per_page=100"),
-                &[("private-token", token.as_str())],
-            )
-            .await?;
-            let rows = v.as_array().cloned().unwrap_or_default();
-            Ok(rows
-                .iter()
-                .filter_map(|r| {
-                    let full = r["path_with_namespace"].as_str()?;
-                    let (owner, name) = full.rsplit_once('/')?;
-                    Some(Repo {
-                        host: host.clone(),
-                        owner: owner.to_string(),
-                        name: name.to_string(),
-                        full_name: full.to_string(),
-                        private: r["visibility"].as_str() != Some("public"),
-                        default_branch: r["default_branch"].as_str().map(String::from),
-                        pushed_at: r["last_activity_at"].as_str().map(String::from),
-                    })
-                })
-                .collect())
+            let endpoint = format!(
+                "{api}/projects?membership=true&order_by=last_activity_at&per_page={REPOS_PER_PAGE}&page={page}"
+            );
+            let (v, headers) = get(http, &endpoint, &[("private-token", token.as_str())]).await?;
+            let rows = gitlab_repos(&v, &host);
+            let pagination = gitlab_next_page(&headers, page);
+            Ok(page_result(rows, pagination))
         }
     }
 }
 
-async fn get(http: &reqwest::Client, url: &str, headers: &[(&str, &str)]) -> Result<Value, String> {
+fn repo_page(cursor: Option<&str>) -> Result<u32, String> {
+    let page = match cursor {
+        None => 1,
+        Some(cursor) => cursor
+            .parse()
+            .map_err(|_| "repository page cursor is invalid".to_string())?,
+    };
+    (1..=MAX_REPO_PAGE)
+        .contains(&page)
+        .then_some(page)
+        .ok_or_else(|| "repository listing is limited to 5,000 repositories".to_string())
+}
+
+fn page_result(repos: Vec<Repo>, pagination: Result<Option<u32>, String>) -> RepoPage {
+    match pagination {
+        Ok(next) => RepoPage {
+            repos,
+            next_cursor: next.map(|page| page.to_string()),
+            complete: next.is_none(),
+            error: None,
+        },
+        Err(error) => RepoPage {
+            repos,
+            next_cursor: None,
+            complete: false,
+            error: Some(error),
+        },
+    }
+}
+
+fn github_repos(v: &Value, host: &str) -> Vec<Repo> {
+    v.as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| {
+            let full = r["full_name"].as_str()?;
+            let (owner, name) = full.split_once('/')?;
+            Some(Repo {
+                host: host.to_string(),
+                owner: owner.to_string(),
+                name: name.to_string(),
+                full_name: full.to_string(),
+                private: r["private"].as_bool().unwrap_or(false),
+                default_branch: r["default_branch"].as_str().map(String::from),
+                pushed_at: r["pushed_at"].as_str().map(String::from),
+            })
+        })
+        .collect()
+}
+
+fn gitlab_repos(v: &Value, host: &str) -> Vec<Repo> {
+    v.as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| {
+            let full = r["path_with_namespace"].as_str()?;
+            let (owner, name) = full.rsplit_once('/')?;
+            Some(Repo {
+                host: host.to_string(),
+                owner: owner.to_string(),
+                name: name.to_string(),
+                full_name: full.to_string(),
+                private: r["visibility"].as_str() != Some("public"),
+                default_branch: r["default_branch"].as_str().map(String::from),
+                pushed_at: r["last_activity_at"].as_str().map(String::from),
+            })
+        })
+        .collect()
+}
+
+fn github_next_page(
+    headers: &reqwest::header::HeaderMap,
+    expected: &url::Url,
+    current_page: u32,
+) -> Result<Option<u32>, String> {
+    let Some(value) = headers.get(reqwest::header::LINK) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| "forge sent an invalid pagination link".to_string())?;
+    let Some(next) = value.split(',').find_map(|part| {
+        let (url, parameters) = part.trim().split_once('>')?;
+        let url = url.strip_prefix('<')?;
+        parameters
+            .split(';')
+            .any(|parameter| matches!(parameter.trim(), r#"rel="next""# | "rel=next"))
+            .then_some(url)
+    }) else {
+        return Ok(None);
+    };
+    let next =
+        url::Url::parse(next).map_err(|_| "forge sent an invalid pagination link".to_string())?;
+    if next.origin() != expected.origin()
+        || !next.username().is_empty()
+        || next.password().is_some()
+        || next.path() != expected.path()
+    {
+        return Err("forge pagination link was not on the configured API host".to_string());
+    }
+    let mut pages = next
+        .query_pairs()
+        .filter(|(key, _)| key == "page")
+        .map(|(_, value)| value.into_owned());
+    let next_page = pages
+        .next()
+        .ok_or_else(|| "forge sent an invalid pagination link".to_string())?
+        .parse()
+        .map_err(|_| "forge sent an invalid pagination link".to_string())?;
+    if pages.next().is_some() {
+        return Err("forge sent an invalid pagination link".to_string());
+    }
+    checked_next_page(next_page, current_page)
+}
+
+fn gitlab_next_page(
+    headers: &reqwest::header::HeaderMap,
+    current_page: u32,
+) -> Result<Option<u32>, String> {
+    let Some(value) = headers.get("x-next-page") else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| "forge sent an invalid pagination cursor".to_string())?;
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let next_page = value
+        .parse()
+        .map_err(|_| "forge sent an invalid pagination cursor".to_string())?;
+    checked_next_page(next_page, current_page)
+}
+
+fn checked_next_page(next_page: u32, current_page: u32) -> Result<Option<u32>, String> {
+    if next_page <= current_page || next_page > MAX_REPO_PAGE {
+        return Err("forge sent an invalid pagination cursor".to_string());
+    }
+    Ok(Some(next_page))
+}
+
+async fn get(
+    http: &reqwest::Client,
+    url: &str,
+    headers: &[(&str, &str)],
+) -> Result<(Value, reqwest::header::HeaderMap), String> {
     let mut req = http.get(url);
     for (k, v) in headers {
         req = req.header(*k, *v);
     }
     let res = req.send().await.map_err(|e| format!("forge: {e}"))?;
     let status = res.status();
+    let headers = res.headers().clone();
     let v: Value = res.json().await.unwrap_or(Value::Null);
     if status == reqwest::StatusCode::UNAUTHORIZED {
         return Err(
@@ -253,7 +425,7 @@ async fn get(http: &reqwest::Client, url: &str, headers: &[(&str, &str)]) -> Res
     if !status.is_success() {
         return Err(format!("forge answered {status}: {}", v["message"]));
     }
-    Ok(v)
+    Ok((v, headers))
 }
 
 /// Where managed clones live, under the node's own state.
@@ -450,6 +622,43 @@ mod tests {
         assert_eq!(Forge::parse("bitbucket"), None);
         assert_eq!(Forge::Github.credential(), "gh");
         assert_eq!(Forge::Gitlab.credential(), "glab");
+    }
+
+    #[test]
+    fn github_pagination_link_must_stay_on_the_authenticated_endpoint() {
+        let expected =
+            url::Url::parse("https://api.github.com/user/repos?per_page=50&sort=pushed&page=1")
+                .unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::LINK,
+            reqwest::header::HeaderValue::from_static(
+                "<https://api.github.com/user/repos?per_page=50&sort=pushed&page=2>; rel=\"next\"",
+            ),
+        );
+        assert_eq!(github_next_page(&headers, &expected, 1).unwrap(), Some(2));
+
+        headers.insert(
+            reqwest::header::LINK,
+            reqwest::header::HeaderValue::from_static(
+                "<https://attacker.example/user/repos?per_page=50&sort=pushed&page=2>; rel=\"next\"",
+            ),
+        );
+        assert_eq!(
+            github_next_page(&headers, &expected, 1).unwrap_err(),
+            "forge pagination link was not on the configured API host"
+        );
+
+        headers.insert(
+            reqwest::header::LINK,
+            reqwest::header::HeaderValue::from_static(
+                "<https://token@api.github.com/user/repos?per_page=50&sort=pushed&page=2>; rel=\"next\"",
+            ),
+        );
+        assert_eq!(
+            github_next_page(&headers, &expected, 1).unwrap_err(),
+            "forge pagination link was not on the configured API host"
+        );
     }
 
     #[test]

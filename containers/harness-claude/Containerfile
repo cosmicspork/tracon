@@ -5,13 +5,37 @@
 # A second image rather than one image with both harnesses: a node runs one
 # harness, the version is pinned per node, and putting two in a layer means
 # every node carries the one it does not use.
-FROM docker.io/library/debian:bookworm-slim
+FROM docker.io/library/debian@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 ARG CLAUDE_VERSION=2.1.247
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl \
+ARG CLAUDE_LINUX_ARM64_SHA256=4ef57315cff1d3cbfb2ef5e28f9e8560bafc76149b6798c227ec431f2e9018ad
+ARG CLAUDE_LINUX_X64_SHA256=148632dc7eb82cc79e634e8decaa041f586f018d6e6e23648231986798737b15
+ARG TARGETARCH
+# CA certificates are needed before apt can reach the HTTPS snapshot below.
+# The base image's default sources are plain HTTP with Release signatures
+# verified against the pre-installed debian-archive-keyring, so bootstrapping
+# them needs no unverified transport.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
+      > /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends git curl \
     && rm -rf /var/lib/apt/lists/*
-# The native installer places a single binary; no Node runtime is involved.
-RUN set -eu; curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}"; \
-    install -m 0755 "$(command -v claude || echo /root/.local/bin/claude)" /usr/local/bin/claude; \
+# The official release archive is checked before its binary is extracted; the
+# mutable convenience installer is never part of this image build.
+RUN set -eu; case "${TARGETARCH}" in \
+      amd64) asset=x64; digest="${CLAUDE_LINUX_X64_SHA256}" ;; \
+      arm64) asset=arm64; digest="${CLAUDE_LINUX_ARM64_SHA256}" ;; \
+      *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/claude.tar.gz "https://github.com/anthropics/claude-code/releases/download/v${CLAUDE_VERSION}/claude-linux-${asset}.tar.gz"; \
+    echo "${digest}  /tmp/claude.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/claude.tar.gz -C /tmp; \
+    install -m 0755 /tmp/claude /usr/local/bin/claude; \
+    rm -f /tmp/claude.tar.gz /tmp/claude; \
     /usr/local/bin/claude --version
 # The node mounts its own state volume under the harness's home and sets
 # CLAUDE_CONFIG_DIR to the same path, so the mount target and the harness's

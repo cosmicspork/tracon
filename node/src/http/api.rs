@@ -401,18 +401,40 @@ pub async fn recent_repos(State(s): State<AppState>) -> ApiResult<Json<serde_jso
 #[derive(Deserialize)]
 pub struct ForgeQuery {
     channel: String,
+    forge: Option<String>,
+    cursor: Option<String>,
 }
 
 /// The operator's repositories on every forge whose credential this channel
 /// may use. A forge with no credential at all is absent; one this channel is
 /// not bound to answers with the refusal, per forge, so one dead forge never
-/// hides another's list.
+/// hides another's list. A cursor is valid only with its named forge, so a
+/// client cannot accidentally advance every configured provider.
 pub async fn forge_repos(
     State(s): State<AppState>,
     Query(q): Query<ForgeQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let out =
-        crate::forge::list_repos(&s.tools.http, &s.tools.broker, &q.channel, &s.node_id).await;
+    if q.cursor.is_some() && q.forge.is_none() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a forge is required with a repository page cursor",
+        ));
+    }
+    let forge = match q.forge.as_deref() {
+        Some(forge) => Some(
+            crate::forge::Forge::parse(forge)
+                .ok_or_else(|| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "no such forge"))?,
+        ),
+        None => None,
+    };
+    let out = crate::forge::list_repos(
+        &s.tools.broker,
+        &q.channel,
+        &s.node_id,
+        forge,
+        q.cursor.as_deref(),
+    )
+    .await;
     Ok(Json(json!({ "forges": out })))
 }
 
