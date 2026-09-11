@@ -5,13 +5,19 @@ ARG OMP_VERSION=18.0.4
 ARG OMP_LINUX_ARM64_SHA256=f2b7c8a019681ede314ac165100c1c5b5cd4900139075948da809c004bec5ce7
 ARG OMP_LINUX_X64_SHA256=94ec42d17d71975a381e20335bb3c005a7fd7eec19b319358df6d22f28e16b37
 ARG TARGETARCH
-RUN rm -f /etc/apt/sources.list.d/debian.sources \
+# CA certificates are needed before apt can reach the HTTPS snapshot below.
+# The base image's default sources are plain HTTP with Release signatures
+# verified against the pre-installed debian-archive-keyring, so bootstrapping
+# them needs no unverified transport.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -f /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' \
       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
       > /etc/apt/sources.list \
     && apt-get -o Acquire::Check-Valid-Until=false update \
-    && apt-get install -y --no-install-recommends git ca-certificates curl \
+    && apt-get install -y --no-install-recommends git curl \
     && rm -rf /var/lib/apt/lists/*
 RUN set -eu; case "${TARGETARCH}" in \
       amd64) asset=x64; digest="${OMP_LINUX_X64_SHA256}" ;; \

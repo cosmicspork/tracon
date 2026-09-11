@@ -19,13 +19,18 @@ COPY . .
 RUN cargo build -p tracon-hub --release
 
 FROM docker.io/library/debian@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
-RUN rm -f /etc/apt/sources.list.d/debian.sources \
+# CA certificates are needed before apt can reach the HTTPS snapshot below.
+# The base image's default sources are plain HTTP with Release signatures
+# verified against the pre-installed debian-archive-keyring, so bootstrapping
+# them needs no unverified transport.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -f /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' \
       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
       > /etc/apt/sources.list \
     && apt-get -o Acquire::Check-Valid-Until=false update \
-    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /build/target/release/tracon-hub /usr/local/bin/tracon-hub
