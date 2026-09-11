@@ -18,16 +18,19 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && apt-get -o Acquire::Check-Valid-Until=false update \
     && apt-get install -y --no-install-recommends git ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
-# The release binary is fetched directly and checked before it is installed;
-# the mutable convenience installer is never part of this image build.
+# The official release archive is checked before its binary is extracted; the
+# mutable convenience installer is never part of this image build.
 RUN set -eu; case "${TARGETARCH}" in \
       amd64) asset=x64; digest="${CLAUDE_LINUX_X64_SHA256}" ;; \
       arm64) asset=arm64; digest="${CLAUDE_LINUX_ARM64_SHA256}" ;; \
       *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL -o /usr/local/bin/claude "https://github.com/anthropics/claude-code/releases/download/v${CLAUDE_VERSION}/claude-linux-${asset}"; \
-    echo "${digest}  /usr/local/bin/claude" | sha256sum -c -; \
-    chmod +x /usr/local/bin/claude; /usr/local/bin/claude --version
+    curl -fsSL -o /tmp/claude.tar.gz "https://github.com/anthropics/claude-code/releases/download/v${CLAUDE_VERSION}/claude-linux-${asset}.tar.gz"; \
+    echo "${digest}  /tmp/claude.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/claude.tar.gz -C /tmp; \
+    install -m 0755 /tmp/claude /usr/local/bin/claude; \
+    rm -f /tmp/claude.tar.gz /tmp/claude; \
+    /usr/local/bin/claude --version
 # The node mounts its own state volume under the harness's home and sets
 # CLAUDE_CONFIG_DIR to the same path, so the mount target and the harness's
 # idea of where its state lives cannot disagree. Under Podman the harness is
