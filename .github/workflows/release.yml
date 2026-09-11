@@ -197,6 +197,8 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     strategy:
+      # Missing Apple credentials must not cancel the independent AppImage.
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
