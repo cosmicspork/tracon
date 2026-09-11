@@ -140,7 +140,10 @@ impl Store {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let row = tx.query_row(
-            "SELECT session_id, created_ms FROM operator_question WHERE id=?1 AND state='unanswered'",
+            "SELECT q.session_id, q.created_ms FROM operator_question q
+             JOIN session s ON s.id=q.session_id
+             WHERE q.id=?1 AND q.state='unanswered'
+               AND (s.harness_id='external' OR s.state NOT IN ('closed', 'killed_budget', 'failed'))",
             [id],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
         ).optional()?;

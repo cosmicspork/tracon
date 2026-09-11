@@ -285,8 +285,9 @@ fn scrub(s: &str) -> String {
         if in_pem
             || credential_assignment
             || lowered.starts_with("bearer ")
-            || lowered.starts_with("ghp_")
-            || lowered.starts_with("sk-")
+            || lowered.contains("ghp_")
+            || lowered.contains("github_pat_")
+            || lowered.contains("sk-")
         {
             out.push("[redacted secret-looking content]".to_string());
         } else {
