@@ -563,6 +563,7 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionDefaults {
+    /// Per-session cap; zero means no token cap.
     pub budget_tokens: i64,
     pub permission_timeout_secs: u64,
     /// The channel the composer starts on when the client has not chosen one
@@ -639,7 +640,7 @@ impl Default for Config {
                 git: "git".into(),
             },
             session: SessionDefaults {
-                budget_tokens: 2_000_000,
+                budget_tokens: 0,
                 permission_timeout_secs: 900,
                 default_channel: String::new(),
                 claim_grace_secs: 60,
@@ -933,7 +934,6 @@ mod tests {
         assert_eq!(parsed.harness.version, d.harness.version);
         assert_eq!(parsed.gateway.allow_hosts, d.gateway.allow_hosts);
         assert_eq!(parsed.gateway.proxy_port, d.gateway.proxy_port);
-        assert_eq!(parsed.session.budget_tokens, d.session.budget_tokens);
         assert_eq!(
             parsed.session.permission_timeout_secs,
             d.session.permission_timeout_secs

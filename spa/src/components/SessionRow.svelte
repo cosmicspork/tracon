@@ -14,7 +14,7 @@
   const failure = $derived(humanizeError(session.last_error))
 
   const tone = $derived(
-    session.state === 'waiting_on_you'
+    session.state === 'waiting_on_you' || session.state === 'paused'
       ? 'wait'
       : session.state === 'failed' || session.state === 'killed_budget'
         ? 'crit'
@@ -29,6 +29,7 @@
     {
       starting: 'Starting',
       running: external ? 'Attached' : session.turn_active ? 'Working' : 'Running',
+      paused: external ? 'Broker access paused' : 'Paused',
       waiting_on_you: 'Waiting on you',
       waiting_on_check: 'Waiting on a check',
       closed:

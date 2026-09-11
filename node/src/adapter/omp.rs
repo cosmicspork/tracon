@@ -16,6 +16,9 @@ use crate::acp::{
 };
 use crate::runner::{Runner, RunnerCommand, Spawned};
 
+const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub struct OmpAdapter {
     pinned: String,
 }
@@ -112,7 +115,13 @@ impl HarnessAdapter for OmpAdapter {
         let child = runner
             .spawn(Self::acp_cmd_with("omp-probe", &[], env))
             .await?;
-        let mut session = OmpSession::start(child).await?;
+        let mut session = match tokio::time::timeout(START_TIMEOUT, OmpSession::start(child)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill("omp-probe")).await;
+                return Err(AdapterError::Protocol("OMP model probe startup timed out".into()));
+            }
+        };
         let models = session.model_options();
         session.close().await.ok();
         Ok(models)
@@ -123,6 +132,7 @@ impl HarnessAdapter for OmpAdapter {
         runner: &dyn Runner,
         spec: LaunchSpec,
     ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError> {
+        let container_name = spec.container_name.clone();
         let child = runner
             .spawn(Self::acp_cmd_full(
                 &spec.container_name,
@@ -131,8 +141,18 @@ impl HarnessAdapter for OmpAdapter {
                 spec.system_prompt_file.as_deref(),
             ))
             .await?;
-        let mut session =
-            OmpSession::start_in(child, &spec.cwd_in_runner, spec.mcp_servers.clone()).await?;
+        let mut session = match tokio::time::timeout(
+            START_TIMEOUT,
+            OmpSession::start_in(child, &spec.cwd_in_runner, spec.mcp_servers.clone()),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container_name)).await;
+                return Err(AdapterError::Protocol("OMP harness startup timed out".into()));
+            }
+        };
 
         // Enforce the pin a second time from the initialize handshake. A missing
         // version is a mismatch, not a pass: this layer is the most likely to

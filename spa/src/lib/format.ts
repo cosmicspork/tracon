@@ -5,9 +5,9 @@ export function formatTokens(n: number): string {
   return `${(n / 1_000_000).toFixed(2).replace(/\.?0+$/, '')}M`
 }
 
-/** "0.4M/2M" — the budget column. */
+/** "0.4M/2M", or "0.4M/∞" when a session has no cap. */
 export function formatBudget(used: number, budget: number): string {
-  return `${formatTokens(used)}/${formatTokens(budget)}`
+  return `${formatTokens(used)}/${budget > 0 ? formatTokens(budget) : '∞'}`
 }
 
 /**

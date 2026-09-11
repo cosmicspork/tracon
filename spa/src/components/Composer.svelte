@@ -1,10 +1,6 @@
 <script lang="ts">
-  // Starting work is typing what needs doing. The channel decides the rest —
-  // which model plans, which builds, what the budget is — so the fields that
-  // used to be a form are a disclosure most starts never open.
-  //
-  // Two modes. Given an item, it starts a session on that item and the prompt
-  // is replaced by the item's title. Given none, the prompt writes the item.
+  // A plain session is the default: its first message is queued after the
+  // harness starts. Creating durable work items and plans is explicit.
   import ModelPicker from './ModelPicker.svelte'
   import RepoPicker from './RepoPicker.svelte'
   import { api, ApiError } from '../lib/api'
@@ -18,7 +14,7 @@
   import { store } from '../lib/store.svelte'
   import type { WorkView } from '../lib/types'
 
-  let { item = null, phase = $bindable('plan') }: { item?: WorkView | null; phase?: 'plan' | 'execute' } =
+  let { item = null, phase = $bindable('execute') }: { item?: WorkView | null; phase?: 'plan' | 'execute' } =
     $props()
 
   let prompt = $state('')
@@ -33,7 +29,10 @@
   let busy = $state(false)
   let error = $state<string | null>(null)
   let savedItem = $state<string | null>(null)
-  let touched = $state(false)
+  let structured = $state(false)
+  $effect(() => {
+    if (item) structured = true
+  })
 
   // An archived channel takes no new sessions, so it is not offered.
   const channelNames = $derived(store.channels.filter((c) => !c.archived).map((c) => c.name))
@@ -45,17 +44,18 @@
   const channelInfo = $derived(store.channels.find((c) => c.name === channel))
   const atCeiling = $derived(channelInfo?.ceiling.state === 'at')
   const blocked = $derived(!node || node.state === 'refused' || node.harness.mismatch === true || !node.reachable)
-  const bound = $derived(phaseDefaults(channelInfo?.bindings, phase))
+  const sessionPhase = $derived(structured ? phase : 'execute')
+  const bound = $derived(phaseDefaults(channelInfo?.bindings, sessionPhase))
   const models = $derived(node?.models ?? [])
   const recentModels = $derived(recentModelValues(store.sessions.values()))
-  // What the context line promises: the model each phase will use.
   const planLabel = $derived(modelLabel(phaseDefaults(channelInfo?.bindings, 'plan').model, models))
   const execLabel = $derived(modelLabel(phaseDefaults(channelInfo?.bindings, 'execute').model, models))
-  const needsPlan = $derived(phase === 'execute' && item !== null && !item.phase_plan_slug)
+  const needsPlan = $derived(structured && phase === 'execute' && item !== null && !item.phase_plan_slug)
   const ready = $derived(
     !blocked &&
       !atCeiling &&
       !needsPlan &&
+      channel !== '' &&
       (repo.trim() !== '' || workspaceId !== null) &&
       (item !== null || prompt.trim() !== '') &&
       !busy,
@@ -85,19 +85,7 @@
     if (last) repo = last.repo_path
   })
   $effect(() => {
-    if (touched) return
-    if (bound.model && models.some((m) => m.value === bound.model)) {
-      model = bound.model
-      return
-    }
-    if (model !== '' || models.length === 0) return
-    const last = [...store.sessions.values()]
-      .sort((a, b) => b.created_ms - a.created_ms)
-      .find((s) => models.some((m) => m.value === s.model))
-    if (last) model = last.model
-  })
-  $effect(() => {
-    budget = bound.budget_tokens ? String(bound.budget_tokens) : budget || '2000000'
+    if (bound.budget_tokens && !budget) budget = String(bound.budget_tokens)
   })
 
   async function start(e: SubmitEvent) {
@@ -112,17 +100,17 @@
         repo_path: workspaceId ? '' : repo.trim(),
         workspace_id: workspaceId ?? undefined,
         branch: branch.trim() || undefined,
-        phase,
-        model,
+        phase: sessionPhase,
+        model: model || undefined,
         budget_tokens: Number(budget) || undefined,
         node_id: node && !node.is_self ? node.id : undefined,
       }
-      // The first line names the item; the rest is what done looks like.
       const lines = prompt.trim().split('\n')
       const session = item
         ? await api.createSession({ ...common, work_item_id: item.id })
-        : (await api.compose({ ...common, title: lines[0], body: lines.slice(1).join('\n').trim() })).session
-      prompt = ''
+        : structured
+          ? (await api.compose({ ...common, phase: 'plan', title: lines[0], body: lines.slice(1).join('\n').trim() })).session
+          : await api.createSession({ ...common, initial_prompt: prompt.trim() })
       if (!item) rememberChannel(channel)
       await store.refetch()
       router.go(`/sessions/${session.id}`)
@@ -156,7 +144,7 @@
       bind:value={prompt}
       {onkeydown}
       rows="2"
-      placeholder="What should get done?"
+      placeholder={structured ? 'What should this plan cover?' : 'What should get done?'}
       spellcheck="false"
       disabled={busy}
     ></textarea>
@@ -172,7 +160,7 @@
       <button type="button" class="lnk" onclick={() => (open = !open)}>{open ? 'close' : 'adjust'}</button>
     </div>
     <button class="btn p" type="submit" disabled={!ready}>
-      {#if busy}Starting…{:else if atCeiling}{channel} is at its ceiling{:else}Start {phase}{/if}
+      {#if busy}Starting…{:else if atCeiling}{channel} is at its ceiling{:else if structured}Start {item ? phase : 'plan'}{:else}Start session{/if}
     </button>
   </div>
 
@@ -198,35 +186,62 @@
         <span>Branch</span>
         <input bind:value={branch} placeholder="feat/…  (a name is generated if empty)" spellcheck="false" />
       </label>
-      <div class="field">
-        <span>Phase</span>
-        <div class="seg" role="radiogroup">
-          <button type="button" class:on={phase === 'plan'} onclick={() => (phase = 'plan')}>Plan</button>
-          <button type="button" class:on={phase === 'execute'} onclick={() => (phase = 'execute')}>Execute</button>
+      {#if !item}
+        <div class="field">
+          <span>Workflow</span>
+          <div class="seg" role="radiogroup">
+            <button
+              type="button"
+              class:on={!structured}
+              onclick={() => {
+                structured = false
+                phase = 'execute'
+              }}>Plain session</button
+            >
+            <button
+              type="button"
+              class:on={structured}
+              onclick={() => {
+                structured = true
+                phase = 'plan'
+              }}>Plan work item</button
+            >
+          </div>
+          <small>{structured ? 'Writes a durable work item, then runs its plan phase.' : 'Starts directly; no work item or plan is created.'}</small>
         </div>
-        <small
-          >{phase === 'plan'
-            ? 'Reads, thinks, and ends by writing the plan document.'
-            : "Does the work from the item's plan, then submits for review."}</small
-        >
-        {#if needsPlan}<small class="crit">This item has no plan yet: run a plan session first.</small>{/if}
-      </div>
+      {/if}
+      {#if item}
+        <div class="field">
+          <span>Phase</span>
+          <div class="seg" role="radiogroup">
+            <button type="button" class:on={phase === 'plan'} onclick={() => (phase = 'plan')}>Plan</button>
+            <button type="button" class:on={phase === 'execute'} onclick={() => (phase = 'execute')}>Execute</button>
+          </div>
+          <small
+            >{phase === 'plan'
+              ? 'Reads, thinks, and ends by writing the plan document.'
+              : "Does the work from the item's plan, then submits for review."}</small
+          >
+          {#if needsPlan}<small class="crit">This item has no plan yet: run a plan session first.</small>{/if}
+        </div>
+      {/if}
       <label>
-        <span>Model <em>{bound.model ? `${channel} binds one to ${phase}` : 'this session only'}</em></span>
-        <ModelPicker bind:value={model} {models} recent={recentModels} onchange={() => (touched = true)} />
+        <span>Model <em>{bound.model ? `${channel} binds one to ${sessionPhase}` : 'automatic by default'}</em></span>
+        <ModelPicker bind:value={model} {models} recent={recentModels} none="Automatic (channel or node default)" />
         {#if models.length === 0}
-          <small class="crit">The node offered no models; connect a provider on the Nodes screen.</small>
+          <small class="crit">The node has not offered a model; bind a channel model or connect a provider.</small>
         {/if}
       </label>
       <label>
-        <span>Budget <em>tokens{Number(budget) ? ` · ${formatTokens(Number(budget))}` : ''}</em></span>
+        <span>Budget <em>{Number(budget) ? `${formatTokens(Number(budget))} tokens` : 'no cap'}</em></span>
         <input
-          value={formatGrouped(Number(budget) || 0)}
+          value={budget ? formatGrouped(Number(budget)) : ''}
+          placeholder="No cap"
           inputmode="numeric"
           spellcheck="false"
           oninput={(e) => (budget = String(digits((e.currentTarget as HTMLInputElement).value)))}
         />
-        <small>Input, output and cached-read tokens, summed each turn. The session is killed when it passes this.</small>
+        <small>Optional cap across input, output, and cached-read tokens. A session is stopped only when a cap is set and reached.</small>
       </label>
       <div class="field">
         <span>Runs on</span>

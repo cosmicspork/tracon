@@ -862,6 +862,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         work_item_id: Some(item.id.clone()),
         model: c.model,
         budget_tokens: c.budget_tokens,
+        initial_prompt: None,
         node_id: c.node_id,
         phase: c.phase,
         review_id: None,
@@ -950,6 +951,49 @@ pub async fn prompt(
     s.manager.prompt(&id, b.text).await?;
     Ok(StatusCode::ACCEPTED)
 }
+#[derive(Deserialize)]
+pub struct SessionControlBody {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+pub async fn pause(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<SessionControlBody>,
+) -> ApiResult<StatusCode> {
+    s.manager
+        .pause(
+            &id,
+            body.reason
+                .filter(|reason| !reason.trim().is_empty())
+                .unwrap_or_else(|| "operator paused the session".into()),
+        )
+        .await?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn resume(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<SessionControlBody>,
+) -> ApiResult<StatusCode> {
+    s.manager
+        .resume(
+            &id,
+            body.reason
+                .filter(|reason| !reason.trim().is_empty())
+                .unwrap_or_else(|| "operator resumed the session".into()),
+        )
+        .await?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn stop(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<StatusCode> {
+    s.manager.stop(&id).await?;
+    Ok(StatusCode::OK)
+}
+
 
 pub async fn kill(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<StatusCode> {
     s.manager.kill(&id).await?;
@@ -3240,9 +3284,21 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 .map_err(Into::into),
             C::Kill { session_id } => self
                 .manager
-                .kill(&session_id)
+                .stop(&session_id)
                 .await
-                .map(|_| json!({ "killed": true }))
+                .map(|_| json!({ "stopped": true }))
+                .map_err(Into::into),
+            C::Pause { session_id, reason } => self
+                .manager
+                .pause(&session_id, reason)
+                .await
+                .map(|_| json!({ "paused": true }))
+                .map_err(Into::into),
+            C::Resume { session_id, reason } => self
+                .manager
+                .resume(&session_id, reason)
+                .await
+                .map(|_| json!({ "resumed": true }))
                 .map_err(Into::into),
             C::Verdict {
                 review_id,

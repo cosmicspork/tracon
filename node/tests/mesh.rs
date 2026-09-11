@@ -376,6 +376,7 @@ async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
         work_item_id: None,
         model: "m".into(),
         budget_tokens: None,
+        initial_prompt: None,
         node_id: None,
         phase: Default::default(),
         review_id: None,

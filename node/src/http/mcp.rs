@@ -41,6 +41,9 @@ pub async fn handle(
         channel,
         node_id: s.node_id.clone(),
     };
+    if let Err(error) = s.manager.ensure_active(&ctx.session_id) {
+        return rpc_error(StatusCode::CONFLICT, &error.to_string());
+    }
     match s.tools.handle(&ctx, &msg).await {
         Some(response) => (StatusCode::OK, Json(response)),
         // A notification: accepted, nothing to say back.
@@ -73,6 +76,18 @@ pub async fn handle_external(
         Ok(id) => id,
         Err(e) => return rpc_error(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
     };
+    if s.manager
+        .store()
+        .get_session(&session_id)
+        .ok()
+        .flatten()
+        .is_some_and(|row| row.state == crate::session::state::SessionState::Paused.as_str())
+    {
+        return rpc_error(
+            StatusCode::CONFLICT,
+            "this external harness is still running; Tracon paused only its broker access and cannot control the host process",
+        );
+    }
     let ctx = CallContext {
         session_id: session_id.clone(),
         channel,
@@ -99,6 +114,9 @@ pub async fn handle_external(
             crate::session::state::event_kind::TOOL_CALL,
             json!({ "title": title, "kind": crate::mcp::TOOL_KIND }),
         );
+    }
+    if let Err(error) = s.manager.ensure_active(&session_id) {
+        return rpc_error(StatusCode::CONFLICT, &error.to_string());
     }
 
     match s.tools.handle(&ctx, &msg).await {

@@ -113,30 +113,25 @@ impl Harness {
 }
 
 #[tokio::test]
-async fn a_session_without_a_model_or_a_binding_is_refused() {
+async fn a_plain_session_uses_the_node_model_default_without_a_work_item() {
     state::isolate();
-    let h = Harness::new(1000).await;
+    let h = Harness::new(0).await;
     let (status, body) = h
         .call(
             "POST",
             "/api/sessions",
-            Some(json!({ "channel": "personal", "repo_path": "/nonexistent/repo", "model": "" })),
+            Some(json!({
+                "channel": "personal",
+                "repo_path": "/nonexistent/repo",
+                "initial_prompt": "inspect this repository",
+            })),
         )
         .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("no model"));
-    // Omitting the field entirely reads the same as naming nothing.
-    let (status, _) = h
-        .call(
-            "POST",
-            "/api/sessions",
-            Some(json!({ "channel": "personal", "repo_path": "/nonexistent/repo" })),
-        )
-        .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["model"], "m/a");
+    assert_eq!(body["phase"], "execute");
+    assert!(body["work_item_id"].is_null());
+    assert_eq!(body["budget_tokens"], 0);
 }
 
 /// A channel binds a model per phase, so the operator names one once. The
@@ -233,13 +228,10 @@ async fn a_session_needs_a_ready_item_and_execute_needs_its_plan() {
         }
         v
     };
-    // No item at all.
+    // Plain execute sessions are unstructured by default.
     let (st, body) = h.call("POST", "/api/sessions", Some(spec(json!({})))).await;
-    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("work item is required"));
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    assert!(body["work_item_id"].is_null());
     // Blocked.
     let (st, body) = h
         .call(
@@ -798,10 +790,85 @@ async fn an_unanswered_request_is_denied_by_default() {
     assert!(rig.await_state("running").await);
     let kinds = rig.kinds();
     assert!(
+
         kinds.contains(&"permission_expired".to_string()),
         "{kinds:?}"
     );
     assert!(rig.store.open_permissions().unwrap().is_empty());
+}
+#[tokio::test]
+async fn pause_fences_prompts_and_pending_permissions_until_resume() {
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    let permission = rig.request_permission().await;
+    assert!(rig.await_state("waiting_on_you").await);
+
+    let (ack, wait) = oneshot::channel();
+    rig.commands
+        .send(Command::Pause {
+            source: tracon::session::supervisor::PauseSource::Operator,
+            reason: "operator review".into(),
+            ack,
+        })
+        .await
+        .unwrap();
+    assert!(wait.await.unwrap().is_ok());
+    assert!(rig.await_state("paused").await);
+    assert!(matches!(permission.await.unwrap(), PermissionReply::Cancelled));
+
+    let (prompt_ack, prompt_wait) = oneshot::channel();
+    rig.commands
+        .send(Command::Prompt {
+            text: "do not start".into(),
+            ack: prompt_ack,
+        })
+        .await
+        .unwrap();
+    assert_eq!(prompt_wait.await.unwrap(), Err("session is paused".into()));
+
+    let (ack, wait) = oneshot::channel();
+    rig.commands
+        .send(Command::Resume {
+            source: tracon::session::supervisor::PauseSource::Operator,
+            reason: "review complete".into(),
+            ack,
+        })
+        .await
+        .unwrap();
+    assert!(wait.await.unwrap().is_ok());
+    assert!(rig.await_state("running").await);
+    let events = rig.store.events_after(&rig.session_id, 0, 100).unwrap();
+    assert!(events.iter().any(|event| {
+        event.kind == "session_paused"
+            && event.payload["source"] == "operator"
+            && event.payload["reason"] == "operator review"
+    }));
+    assert!(events.iter().any(|event| {
+        event.kind == "session_resumed"
+            && event.payload["source"] == "operator"
+            && event.payload["reason"] == "review complete"
+    }));
+}
+
+#[tokio::test]
+async fn repeated_harness_failures_pause_the_session_before_more_work() {
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    for _ in 0..3 {
+        rig.events
+            .send(HarnessEvent::Other(json!({ "type": "system", "subtype": "api_retry" })))
+            .await
+            .unwrap();
+    }
+    assert!(rig.await_state("paused").await);
+    let events = rig.store.events_after(&rig.session_id, 0, 100).unwrap();
+    assert!(events.iter().any(|event| {
+        event.kind == "session_paused"
+            && event.payload["source"] == "watchdog"
+            && event.payload["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("3 consecutive"))
+    }));
 }
 
 #[tokio::test]
@@ -938,6 +1005,25 @@ use tracon::mcp::Tools;
 /// The MCP surface over its real HTTP route, with the token check in place.
 async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
     let store = Arc::new(Store::open_in_memory().unwrap());
+    store
+        .put_node(&NodeRow {
+            id: "n1".into(),
+            name: "test".into(),
+            state: "ready".into(),
+            failed_check: None,
+            failed_detail: None,
+            harness_id: "fake".into(),
+            harness_pinned: "1.0.0".into(),
+            harness_found: Some("1.0.0".into()),
+            models_json: None,
+            checked_at_ms: Some(now_ms()),
+            is_self: 1,
+            x25519_pub: None,
+            last_seen_ms: None,
+            reachable: 1,
+            providers_json: None,
+        })
+        .unwrap();
     let cfg = Arc::new(Config::default());
     let broker: Broker = toml::from_str(store_toml).unwrap();
     let tools = Arc::new(Tools {
@@ -1015,13 +1101,13 @@ async fn a_tool_call_without_a_live_session_is_unauthorized() {
 #[tokio::test]
 async fn a_registered_session_can_list_tools_and_a_wrong_token_cannot() {
     state::isolate();
-    let (app, _store, manager) = mcp_harness(BROKER_STORE).await;
-    let sid = "sess-1";
-    let token = manager.register_tool_token_for_test(sid, "work").await;
+    let (app, store, manager) = mcp_harness(BROKER_STORE).await;
+    let sid = insert_running_session(&store, 0);
+    let token = manager.register_tool_token_for_test(&sid, "work").await;
 
     let (status, body) = mcp_call(
         &app,
-        sid,
+        &sid,
         &token,
         json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
     )
@@ -1041,7 +1127,7 @@ async fn a_registered_session_can_list_tools_and_a_wrong_token_cannot() {
     wrong.push(if last == '0' { '1' } else { '0' });
     let (status, _) = mcp_call(
         &app,
-        sid,
+        &sid,
         &wrong,
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
     )
@@ -1052,12 +1138,12 @@ async fn a_registered_session_can_list_tools_and_a_wrong_token_cannot() {
 #[tokio::test]
 async fn a_write_is_refused_before_the_credential_is_touched() {
     state::isolate();
-    let (app, _store, manager) = mcp_harness(BROKER_STORE).await;
-    let sid = "sess-2";
-    let token = manager.register_tool_token_for_test(sid, "work").await;
+    let (app, store, manager) = mcp_harness(BROKER_STORE).await;
+    let sid = insert_running_session(&store, 0);
+    let token = manager.register_tool_token_for_test(&sid, "work").await;
     let (status, body) = mcp_call(
         &app,
-        sid,
+        &sid,
         &token,
         json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
                "params":{"name":"query","arguments":{"sql":"DELETE FROM people"}}}),
@@ -1072,12 +1158,12 @@ async fn a_write_is_refused_before_the_credential_is_touched() {
 #[tokio::test]
 async fn a_session_on_an_unbound_channel_is_offered_no_tools() {
     state::isolate();
-    let (app, _store, manager) = mcp_harness(BROKER_STORE).await;
-    let sid = "sess-3";
-    let token = manager.register_tool_token_for_test(sid, "personal").await;
+    let (app, store, manager) = mcp_harness(BROKER_STORE).await;
+    let sid = insert_running_session(&store, 0);
+    let token = manager.register_tool_token_for_test(&sid, "personal").await;
     let (_, body) = mcp_call(
         &app,
-        sid,
+        &sid,
         &token,
         json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
     )
@@ -1215,6 +1301,7 @@ async fn orientation(tag: &str) -> Orientation {
                 work_item_id: Some(item.id.clone()),
                 model: "m/a".into(),
                 budget_tokens: Some(1000),
+                initial_prompt: None,
                 node_id: None,
                 phase: tracon::session::Phase::Plan,
                 review_id: None,

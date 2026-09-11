@@ -103,6 +103,7 @@ export interface Invite {
 export type SessionState =
   | 'starting'
   | 'running'
+  | 'paused'
   | 'waiting_on_you'
   | 'waiting_on_check'
   | 'closed'
