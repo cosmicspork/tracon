@@ -150,7 +150,7 @@ impl SignedTransfer {
             return Err(TransferError::Invalid("selected context is too large".into()));
         }
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        if hex::encode(digest) != self.sha256.to_ascii_lowercase() {
+        if hex::encode(digest) != self.sha256 {
             return Err(TransferError::BadDigest);
         }
         let key = proto::keys::key32(&self.payload.origin_node).ok_or(TransferError::BadOrigin)?;
