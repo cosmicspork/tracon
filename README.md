@@ -266,7 +266,7 @@ tracon channel bind work notify.enabled=false   # the desktop tray is enough for
 | **phase** | `plan` (ends by writing the plan), `execute` (does the work, submits), `review` (a fresh session reads the diff). |
 | **queue** | What is waiting on you, across all nodes: the first thing the home shows under the composer. |
 | **promotion** | A lesson an agent retained, waiting for your nightly yes/no before it enters memory. |
-| **corpus** | Documents and memories, replicated, plain-text exportable, meant to outlive the tooling. |
+| **corpus** | Markdown documents, HTML bundles, and memories; replicated and meant to outlive the tooling. |
 | **policy** | The signed bundle deciding what runs unasked, what is refused with a reason, and what reaches the queue. |
 
 ## Reference
@@ -284,7 +284,7 @@ tracon channel bind work notify.enabled=false   # the desktop tray is enough for
 | `tracon mesh id\|init\|invite\|members\|remove\|admit`, `enroll` | the mesh |
 | `tracon channel create\|list\|bind\|share` | channels and their bindings |
 | `tracon credential import\|ls\|rm\|share` | what the broker holds (import is also on Settings) |
-| `tracon doc import\|ls\|get\|put\|rm\|export` | documents |
+| `tracon doc import\|ls\|get\|put\|rm\|export` | Markdown documents; import, preview, replace, download, archive, and delete HTML bundles in Documents |
 | `tracon memory ls\|add\|rm\|recall\|batch` | memories, and the promotion batch on demand |
 | `tracon work add\|ls\|ready\|show\|close\|dep\|rm` | the ledger |
 | `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |
@@ -383,10 +383,12 @@ enabled = false
 idle_timeout_secs = 3600            # an attachment with no call for this long is closed (at least 60)
 repo_roots = ["~/src"]              # a worktree put up for review must belong to a repository under one of these
 
-[docs]                              # the documents mirrored into a directory; off unless export_dir is set
-# export_dir = "~/notes"            # <slug>.md, archived ones under archive/; files that are not documents are left alone
+[docs]
+# export_dir = "~/notes"            # Markdown only: <slug>.md, archived ones under archive/
 export_channel = ""                 # empty: [session] default_channel
 export_every_secs = 1800            # at startup, then this often (at least 60)
+preview_listen = "127.0.0.1:7422"   # isolated HTML capability origin
+# preview_url = "https://preview.example.com" # public origin when a reverse proxy terminates TLS
 
 [embed]                             # semantic search; off unless enabled
 enabled = false
@@ -402,6 +404,16 @@ timeout_secs = 60
 For `[embed]`, a local `llama-server --embedding -m <model>.gguf` is enough; BGE-M3
 and Qwen3-Embedding-0.6B (which wants `pooling = last`) are the models it was built
 against. Without an endpoint, search is text-only and the Documents screen says so.
+
+HTML bundle previews are served from `preview_listen`, never the operator
+origin, and embedded with `sandbox="allow-scripts"`. Set `preview_url` when a
+reverse proxy exposes that listener; it must be an HTTP(S) origin distinct from
+the operator origin. Preview capabilities expire after an hour idle and are
+invalidated when their document is replaced or deleted. The preview policy
+permits inline and bundle-local scripts, styles, images, and media, but denies
+network connections, forms, nested frames, workers, and plugins. Fonts that
+must work in the opaque-origin sandbox should be embedded as `data:` URLs.
+
 
 ### Policy
 

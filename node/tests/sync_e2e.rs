@@ -24,7 +24,7 @@ use tracon::corpus;
 use tracon::mesh::client::MeshClient;
 use tracon::mesh::HubState;
 use tracon::store::{now_ms, Store};
-use tracon::stream::Bus;
+use tracon::stream::{Bus, Frame};
 use tracon_sync::ChangeOp;
 
 /// A hub that can be taken away and brought back. Aborting its accept loop
@@ -367,6 +367,41 @@ async fn a_late_joiner_backfills_records_from_each_site() {
         doc("guide-b", "from b"),
     )
     .unwrap();
+    let (html, html_changes) = a
+        .store
+        .write_html_document_change(
+            &ai,
+            "personal",
+            "ref-bundle",
+            "bundle",
+            "index.html",
+            vec![
+                tracon::corpus::html::HtmlFile {
+                    path: "index.html".into(),
+                    bytes: b"<title>Synced bundle</title><script src=\"app.js\"></script>".to_vec(),
+                },
+                tracon::corpus::html::HtmlFile {
+                    path: "app.js".into(),
+                    bytes: b"document.body.dataset.ready='yes'".to_vec(),
+                },
+            ],
+            None,
+            true,
+        )
+        .unwrap();
+    a.bus.publish(Frame::Changes {
+        channel: "personal".into(),
+        changes: html_changes,
+    });
+    wait_for("B to receive the HTML bundle", || {
+        let Ok(Some(document)) = b.store.doc_get("personal", "ref-bundle") else {
+            return false;
+        };
+        b.store
+            .read_html_bundle(&document)
+            .is_ok_and(|files| files.len() == 2)
+    })
+    .await;
     wait_for("A and B to converge", || {
         a.store
             .doc_get("personal", "guide-b")
@@ -418,7 +453,7 @@ async fn a_late_joiner_backfills_records_from_each_site() {
         .enqueue_direct(MESH_CHANNEL, &c_id.node_id(), &handoff)
         .unwrap();
 
-    wait_for("C to hold both documents", || {
+    wait_for("C to hold both documents and the HTML bundle", || {
         c.store
             .doc_get("personal", "guide-a")
             .ok()
@@ -429,6 +464,28 @@ async fn a_late_joiner_backfills_records_from_each_site() {
                 .ok()
                 .flatten()
                 .is_some()
+            && c.store
+                .doc_get("personal", "ref-bundle")
+                .ok()
+                .flatten()
+                .is_some_and(|document| c.store.read_html_bundle(&document).is_ok())
     })
     .await;
+    let received = c.store.doc_get("personal", "ref-bundle").unwrap().unwrap();
+    assert_eq!(received.hash, html.hash);
+    let files = c.store.read_html_bundle(&received).unwrap();
+    assert_eq!(files.len(), 2);
+    let changes = c
+        .store
+        .changes_of_site_after(&ai, "personal", 0, 1000)
+        .unwrap();
+    let document_ix = changes
+        .iter()
+        .position(|change| change.table == "document" && change.id == html.id)
+        .unwrap();
+    let last_chunk_ix = changes
+        .iter()
+        .rposition(|change| change.table == "document_bundle_chunk")
+        .unwrap();
+    assert!(last_chunk_ix < document_ix);
 }

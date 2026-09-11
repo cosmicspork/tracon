@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 mod mcp;
+pub mod preview;
 pub mod push;
 pub mod settings;
 mod spa;
@@ -10,7 +11,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::Request,
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderName, HeaderValue},
     middleware::{self, Next},
     response::Response,
@@ -29,8 +30,26 @@ use crate::{
 };
 
 use api::AppState;
+#[derive(Clone)]
+struct OperatorSecurityHeaders {
+    csp: HeaderValue,
+}
 
 pub fn router(state: AppState) -> Router {
+    let preview_origin = state
+        .cfg
+        .docs
+        .preview_origin()
+        .expect("validated preview origin");
+    let security_headers = OperatorSecurityHeaders {
+        csp: format!(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data: https:; connect-src 'self'; frame-src {preview_origin}; \
+             object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        )
+        .parse()
+        .expect("validated preview origin is a valid header value"),
+    };
     Router::new()
         // The tools, for a harness the operator runs outside the boundary.
         // Guarded like the rest of this router; see `mcp::handle_external`.
@@ -82,6 +101,17 @@ pub fn router(state: AppState) -> Router {
             "/api/docs/{channel}/{slug}",
             get(api::get_doc).put(api::put_doc).delete(api::delete_doc),
         )
+        .route(
+            "/api/docs/{channel}/{slug}/html",
+            post(api::import_html).layer(DefaultBodyLimit::max(
+                crate::corpus::html::MAX_BUNDLE_BYTES + 1024 * 1024,
+            )),
+        )
+        .route(
+            "/api/docs/{channel}/{slug}/download",
+            get(api::download_doc),
+        )
+        .route("/api/docs/{channel}/{slug}/preview", post(api::preview_doc))
         .route(
             "/api/memories",
             get(api::list_memories).post(api::add_memory),
@@ -171,21 +201,24 @@ pub fn router(state: AppState) -> Router {
         .route("/api/push/test", post(push::test))
         .route("/api/stream", get(stream::stream))
         .fallback(spa::serve)
-        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(
+            security_headers,
+            security_headers_middleware,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
-async fn security_headers(req: Request, next: Next) -> Response {
+async fn security_headers_middleware(
+    State(security): State<OperatorSecurityHeaders>,
+    req: Request,
+    next: Next,
+) -> Response {
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
     headers.insert(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-             img-src 'self' data: https:; connect-src 'self'; object-src 'none'; \
-             base-uri 'none'; frame-ancestors 'none'",
-        ),
+        security.csp,
     );
     headers.insert(
         HeaderName::from_static("x-content-type-options"),
@@ -442,8 +475,8 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
 
     // Now that the harness can reach the gateway, ask it what models it offers.
     // The probe presents the node's own read-only token; without a model
-    // credential there is nothing to inject, so the list stays empty and the
-    // interface says to connect a provider.
+    // credential there is nothing to inject, so the list stays empty and the interface says to connect a provider.
+
     {
         let probe_state = state.clone();
         let probe_backend = backend.clone();
@@ -451,6 +484,21 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             let _ = api::probe_models_into_store(&probe_state, probe_backend.as_ref()).await;
         });
     }
+    let preview_listen = cfg.docs.preview_listen;
+    let preview_listener = tokio::net::TcpListener::bind(preview_listen)
+        .await
+        .with_context(|| format!("bind HTML preview listener {preview_listen}"))?;
+    let preview_app = preview::router(store.clone(), state.manager.previews().clone());
+    tracing::info!(
+        listen = %preview_listen,
+        origin = %cfg.docs.preview_origin().expect("validated configuration"),
+        "HTML preview listener"
+    );
+    tokio::spawn(async move {
+        if let Err(error) = axum::serve(preview_listener, preview_app).await {
+            tracing::error!(%error, "HTML preview listener stopped");
+        }
+    });
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await

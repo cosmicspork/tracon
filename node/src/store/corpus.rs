@@ -3,6 +3,11 @@
 //! locally always. Ranking for recall lives here too, as SQL over the FTS5
 //! indexes the `sync` crate maintains.
 
+use crate::corpus::html::{
+    content_hash, media_type, validate_bundle, HtmlBundleError, HtmlFile, CHUNK_BYTES,
+};
+use crate::mcp::docs::kind_of;
+use base64::Engine;
 use rusqlite::{params, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -24,6 +29,10 @@ const FACT_HALF_LIFE_MS: f64 = 90.0 * 24.0 * 3600.0 * 1000.0;
 /// Below this a fact is proposed rather than active.
 pub const CONFIDENT: f64 = 0.7;
 
+fn default_document_format() -> String {
+    "markdown".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DocumentRow {
     pub id: String,
@@ -33,6 +42,12 @@ pub struct DocumentRow {
     pub title: String,
     pub body: String,
     pub hash: String,
+    #[serde(default = "default_document_format")]
+    pub format: String,
+    #[serde(default)]
+    pub entry_path: Option<String>,
+    #[serde(default)]
+    pub source_name: Option<String>,
     pub site: String,
     pub hlc_ms: i64,
     pub deleted: i64,
@@ -53,6 +68,42 @@ pub enum DocumentWrite {
         hash: String,
         body: String,
     },
+    HtmlDocument,
+}
+#[derive(Debug, thiserror::Error)]
+pub enum HtmlWriteError {
+    #[error(transparent)]
+    Bundle(#[from] HtmlBundleError),
+    #[error("source name is invalid")]
+    InvalidSourceName,
+    #[error("document precondition failed")]
+    Conflict { hash: String, body: String },
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
+    Sync(#[from] tracon_sync::SyncError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredHtmlFile {
+    pub path: String,
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HtmlFileMetadata {
+    pub path: String,
+    pub media_type: String,
+    pub size_bytes: i64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum HtmlReadError {
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("HTML bundle is incomplete or corrupt: {0}")]
+    Corrupt(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -147,6 +198,9 @@ pub struct RecallHit {
     /// Documents only: fetch the whole thing by this.
     pub slug: Option<String>,
     pub title: Option<String>,
+    /// Documents only: source format for list/search presentation.
+    #[serde(default)]
+    pub format: Option<String>,
     /// The memory body, or a snippet of the document.
     pub text: String,
     pub scope: Option<String>,
@@ -165,6 +219,9 @@ impl DocumentRow {
             title: r.get("title")?,
             body: r.get("body")?,
             hash: r.get("hash")?,
+            format: r.get("format")?,
+            entry_path: r.get("entry_path")?,
+            source_name: r.get("source_name")?,
             site: r.get("site")?,
             hlc_ms: r.get("hlc_ms")?,
             deleted: r.get("deleted")?,
@@ -179,6 +236,7 @@ impl DocumentRow {
         json!({
             "channel": self.channel, "slug": self.slug, "kind": self.kind, "title": self.title,
             "body": self.body, "hash": self.hash, "archived": self.archived,
+            "format": self.format, "entry_path": self.entry_path, "source_name": self.source_name,
             "created_ms": self.created_ms, "updated_ms": self.updated_ms,
         })
     }
@@ -466,6 +524,9 @@ impl Store {
             let (hash, body) = existing.map(|cur| (cur.hash, cur.body)).unwrap_or_default();
             return Ok(DocumentWrite::Conflict { hash, body });
         }
+        if existing.as_ref().is_some_and(|doc| doc.format == "html") {
+            return Ok(DocumentWrite::HtmlDocument);
+        }
 
         let now = now_ms();
         let mut row = DocumentRow {
@@ -479,6 +540,9 @@ impl Store {
             title: title.to_string(),
             body: body.to_string(),
             hash: hash.to_string(),
+            format: "markdown".to_string(),
+            entry_path: None,
+            source_name: None,
             site: site.to_string(),
             hlc_ms: 0,
             deleted: 0,
@@ -506,6 +570,334 @@ impl Store {
             row: Box::new(row),
             change,
         })
+    }
+
+    /// Change only an existing document's archive flag, preserving its format,
+    /// content identity, and bundle generation.
+    pub fn set_document_archived_change(
+        &self,
+        site: &str,
+        channel: &str,
+        slug: &str,
+        archived: bool,
+        if_hash: Option<&str>,
+    ) -> Result<DocumentWrite> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let Some(mut row) = tx
+            .query_row(
+                "SELECT * FROM document WHERE channel = ?1 AND slug = ?2 AND deleted = 0
+                 ORDER BY hlc_ms DESC, hlc_ctr DESC LIMIT 1",
+                params![channel, slug],
+                DocumentRow::from_row,
+            )
+            .optional()?
+        else {
+            return Ok(DocumentWrite::Conflict {
+                hash: String::new(),
+                body: String::new(),
+            });
+        };
+        if if_hash.is_some_and(|want| want != row.hash) {
+            return Ok(DocumentWrite::Conflict {
+                hash: row.hash,
+                body: row.body,
+            });
+        }
+        row.archived = i64::from(archived);
+        row.updated_ms = now_ms();
+        let change = tracon_sync::apply::write_change_in_tx(
+            &tx,
+            site,
+            channel,
+            "document",
+            ChangeOp::Upsert,
+            &row.id,
+            row.to_change_row(),
+            row.updated_ms,
+        )
+        .map_err(sync_err)?;
+        row.hlc_ms = change.hlc_ms;
+        tx.commit()?;
+        Ok(DocumentWrite::Written {
+            row: Box::new(row),
+            change,
+        })
+    }
+
+    /// Validate and atomically install one immutable HTML bundle generation.
+    ///
+    /// Bundle records precede the document change; prior-generation tombstones
+    /// follow it. Publishing the returned order prevents peers from observing
+    /// a document generation before its files and chunks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_html_document_change(
+        &self,
+        site: &str,
+        channel: &str,
+        slug: &str,
+        source_name: &str,
+        entry_path: &str,
+        files: Vec<HtmlFile>,
+        if_hash: Option<&str>,
+        create_only: bool,
+    ) -> std::result::Result<(DocumentRow, Vec<Change>), HtmlWriteError> {
+        if source_name.is_empty()
+            || source_name.len() > 255
+            || source_name.contains(['\0', '/', '\\'])
+        {
+            return Err(HtmlWriteError::InvalidSourceName);
+        }
+        let bundle = validate_bundle(slug, entry_path, files)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let existing = tx
+            .query_row(
+                "SELECT * FROM document WHERE channel = ?1 AND slug = ?2 AND deleted = 0
+                 ORDER BY hlc_ms DESC, hlc_ctr DESC LIMIT 1",
+                params![channel, slug],
+                DocumentRow::from_row,
+            )
+            .optional()?;
+        let hash_mismatch = if_hash
+            .is_some_and(|want| existing.as_ref().map(|cur| cur.hash.as_str()) != Some(want));
+        if (create_only && existing.is_some()) || hash_mismatch {
+            let (hash, body) = existing.map(|cur| (cur.hash, cur.body)).unwrap_or_default();
+            return Err(HtmlWriteError::Conflict { hash, body });
+        }
+
+        let mut old_chunk_ids: Vec<String> = Vec::new();
+        let mut old_file_ids: Vec<String> = Vec::new();
+        if let Some(current) = existing.as_ref().filter(|doc| doc.format == "html") {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM document_bundle_chunk
+                 WHERE channel = ?1 AND document_id = ?2 AND document_hash = ?3 AND deleted = 0
+                 ORDER BY file_id, chunk_ix",
+            )?;
+            old_chunk_ids = stmt
+                .query_map(params![channel, current.id, current.hash], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+            let mut stmt = tx.prepare(
+                "SELECT id FROM document_bundle_file
+                 WHERE channel = ?1 AND document_id = ?2 AND document_hash = ?3 AND deleted = 0
+                 ORDER BY path",
+            )?;
+            old_file_ids = stmt
+                .query_map(params![channel, current.id, current.hash], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+        }
+
+        let now = now_ms();
+        let document_id = existing
+            .as_ref()
+            .map(|doc| doc.id.clone())
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let mut changes = Vec::new();
+        for file in &bundle.files {
+            let file_id = uuid::Uuid::now_v7().to_string();
+            let chunks: Vec<&[u8]> = file.bytes.chunks(CHUNK_BYTES).collect();
+            let file_row = json!({
+                "channel": channel,
+                "document_id": document_id,
+                "document_hash": bundle.hash,
+                "path": file.path,
+                "media_type": media_type(&file.path, file.path == bundle.entry_path),
+                "size_bytes": file.bytes.len() as i64,
+                "content_hash": content_hash(&file.bytes),
+                "chunk_count": chunks.len() as i64,
+                "created_ms": now,
+                "updated_ms": now,
+            });
+            changes.push(tracon_sync::apply::write_change_in_tx(
+                &tx,
+                site,
+                channel,
+                "document_bundle_file",
+                ChangeOp::Upsert,
+                &file_id,
+                file_row,
+                now,
+            )?);
+            for (chunk_ix, bytes) in chunks.into_iter().enumerate() {
+                let chunk_id = uuid::Uuid::now_v7().to_string();
+                let chunk_row = json!({
+                    "channel": channel,
+                    "document_id": document_id,
+                    "document_hash": bundle.hash,
+                    "file_id": file_id,
+                    "chunk_ix": chunk_ix as i64,
+                    "bytes_b64": base64::engine::general_purpose::STANDARD.encode(bytes),
+                    "content_hash": content_hash(bytes),
+                    "created_ms": now,
+                    "updated_ms": now,
+                });
+                changes.push(tracon_sync::apply::write_change_in_tx(
+                    &tx,
+                    site,
+                    channel,
+                    "document_bundle_chunk",
+                    ChangeOp::Upsert,
+                    &chunk_id,
+                    chunk_row,
+                    now,
+                )?);
+            }
+        }
+
+        let mut row = DocumentRow {
+            id: document_id,
+            channel: channel.to_string(),
+            slug: slug.to_string(),
+            kind: kind_of(slug).to_string(),
+            title: bundle.title,
+            body: bundle.entry_html,
+            hash: bundle.hash,
+            format: "html".to_string(),
+            entry_path: Some(bundle.entry_path),
+            source_name: Some(source_name.to_string()),
+            site: site.to_string(),
+            hlc_ms: 0,
+            deleted: 0,
+            archived: existing.as_ref().map(|doc| doc.archived).unwrap_or(0),
+            created_ms: existing.as_ref().map(|doc| doc.created_ms).unwrap_or(now),
+            updated_ms: now,
+        };
+        let document_change = tracon_sync::apply::write_change_in_tx(
+            &tx,
+            site,
+            channel,
+            "document",
+            ChangeOp::Upsert,
+            &row.id,
+            row.to_change_row(),
+            now,
+        )?;
+        row.hlc_ms = document_change.hlc_ms;
+        changes.push(document_change);
+
+        for id in old_chunk_ids {
+            changes.push(tracon_sync::apply::write_change_in_tx(
+                &tx,
+                site,
+                channel,
+                "document_bundle_chunk",
+                ChangeOp::Delete,
+                &id,
+                Value::Null,
+                now,
+            )?);
+        }
+        for id in old_file_ids {
+            changes.push(tracon_sync::apply::write_change_in_tx(
+                &tx,
+                site,
+                channel,
+                "document_bundle_file",
+                ChangeOp::Delete,
+                &id,
+                Value::Null,
+                now,
+            )?);
+        }
+
+        tx.commit()?;
+        Ok((row, changes))
+    }
+
+    /// Tombstone a document and the current HTML generation in one commit.
+    /// Markdown documents still produce exactly one document tombstone.
+    pub fn delete_document_change(
+        &self,
+        site: &str,
+        channel: &str,
+        slug: &str,
+    ) -> Result<Option<Vec<Change>>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let Some(existing) = tx
+            .query_row(
+                "SELECT * FROM document WHERE channel = ?1 AND slug = ?2 AND deleted = 0
+                 ORDER BY hlc_ms DESC, hlc_ctr DESC LIMIT 1",
+                params![channel, slug],
+                DocumentRow::from_row,
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let mut chunk_ids: Vec<String> = Vec::new();
+        let mut file_ids: Vec<String> = Vec::new();
+        if existing.format == "html" {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM document_bundle_chunk
+                 WHERE channel = ?1 AND document_id = ?2 AND document_hash = ?3 AND deleted = 0
+                 ORDER BY file_id, chunk_ix",
+            )?;
+            chunk_ids = stmt
+                .query_map(params![channel, existing.id, existing.hash], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+            let mut stmt = tx.prepare(
+                "SELECT id FROM document_bundle_file
+                 WHERE channel = ?1 AND document_id = ?2 AND document_hash = ?3 AND deleted = 0
+                 ORDER BY path",
+            )?;
+            file_ids = stmt
+                .query_map(params![channel, existing.id, existing.hash], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+        }
+
+        let now = now_ms();
+        let mut changes = vec![tracon_sync::apply::write_change_in_tx(
+            &tx,
+            site,
+            channel,
+            "document",
+            ChangeOp::Delete,
+            &existing.id,
+            Value::Null,
+            now,
+        )
+        .map_err(sync_err)?];
+        for id in chunk_ids {
+            changes.push(
+                tracon_sync::apply::write_change_in_tx(
+                    &tx,
+                    site,
+                    channel,
+                    "document_bundle_chunk",
+                    ChangeOp::Delete,
+                    &id,
+                    Value::Null,
+                    now,
+                )
+                .map_err(sync_err)?,
+            );
+        }
+        for id in file_ids {
+            changes.push(
+                tracon_sync::apply::write_change_in_tx(
+                    &tx,
+                    site,
+                    channel,
+                    "document_bundle_file",
+                    ChangeOp::Delete,
+                    &id,
+                    Value::Null,
+                    now,
+                )
+                .map_err(sync_err)?,
+            );
+        }
+        tx.commit()?;
+        Ok(Some(changes))
     }
 
     pub fn apply_changes(
@@ -561,6 +953,152 @@ impl Store {
         .map_err(Into::into)
     }
 
+    pub fn html_bundle_metadata(&self, document: &DocumentRow) -> Result<Vec<HtmlFileMetadata>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT path, media_type, size_bytes FROM document_bundle_file
+             WHERE channel = ?1 AND document_id = ?2 AND document_hash = ?3 AND deleted = 0
+             ORDER BY path",
+        )?;
+        let files = stmt
+            .query_map(
+                params![document.channel, document.id, document.hash],
+                |row| {
+                    Ok(HtmlFileMetadata {
+                        path: row.get(0)?,
+                        media_type: row.get(1)?,
+                        size_bytes: row.get(2)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(files)
+    }
+
+    /// Reassemble and authenticate the current HTML generation.
+    pub fn read_html_bundle(
+        &self,
+        document: &DocumentRow,
+    ) -> std::result::Result<Vec<StoredHtmlFile>, HtmlReadError> {
+        use crate::corpus::html::{MAX_BUNDLE_BYTES, MAX_FILES, MAX_FILE_BYTES};
+
+        if document.format != "html" {
+            return Err(HtmlReadError::Corrupt("document is not HTML".into()));
+        }
+        let entry_path = document
+            .entry_path
+            .as_deref()
+            .ok_or_else(|| HtmlReadError::Corrupt("entry path is missing".into()))?;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, path, media_type, size_bytes, content_hash, chunk_count
+             FROM document_bundle_file
+             WHERE channel = ?1 AND document_id = ?2 AND document_hash = ?3 AND deleted = 0
+             ORDER BY path",
+        )?;
+        let records: Vec<(String, String, String, i64, String, i64)> = stmt
+            .query_map(
+                params![document.channel, document.id, document.hash],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )?
+            .collect::<std::result::Result<_, _>>()?;
+        if records.is_empty() || records.len() > MAX_FILES {
+            return Err(HtmlReadError::Corrupt(
+                "file set is missing or oversized".into(),
+            ));
+        }
+
+        let mut total_bytes = 0usize;
+        let mut html_files = Vec::with_capacity(records.len());
+        let mut media_types = std::collections::HashMap::with_capacity(records.len());
+        for (file_id, path, media_type, size_bytes, file_hash, chunk_count) in records {
+            if size_bytes < 0 || size_bytes as usize > MAX_FILE_BYTES || chunk_count <= 0 {
+                return Err(HtmlReadError::Corrupt(format!(
+                    "invalid metadata for {path}"
+                )));
+            }
+            let mut stmt = conn.prepare(
+                "SELECT chunk_ix, bytes_b64, content_hash
+                 FROM document_bundle_chunk
+                 WHERE channel = ?1 AND document_id = ?2 AND document_hash = ?3
+                   AND file_id = ?4 AND deleted = 0
+                 ORDER BY chunk_ix",
+            )?;
+            let chunks: Vec<(i64, String, String)> = stmt
+                .query_map(
+                    params![document.channel, document.id, document.hash, file_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?
+                .collect::<std::result::Result<_, _>>()?;
+            if chunks.len() != chunk_count as usize {
+                return Err(HtmlReadError::Corrupt(format!(
+                    "chunk count does not match for {path}"
+                )));
+            }
+            let mut bytes = Vec::with_capacity(size_bytes as usize);
+            for (expected_ix, (chunk_ix, encoded, hash)) in chunks.into_iter().enumerate() {
+                if chunk_ix != expected_ix as i64 {
+                    return Err(HtmlReadError::Corrupt(format!(
+                        "chunk order is incomplete for {path}"
+                    )));
+                }
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(encoded.as_bytes())
+                    .map_err(|_| {
+                        HtmlReadError::Corrupt(format!("chunk encoding is invalid for {path}"))
+                    })?;
+                if content_hash(&decoded) != hash {
+                    return Err(HtmlReadError::Corrupt(format!(
+                        "chunk hash does not match for {path}"
+                    )));
+                }
+                bytes.extend_from_slice(&decoded);
+            }
+            if bytes.len() != size_bytes as usize || content_hash(&bytes) != file_hash {
+                return Err(HtmlReadError::Corrupt(format!(
+                    "file hash does not match for {path}"
+                )));
+            }
+            total_bytes = total_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| HtmlReadError::Corrupt("bundle size overflow".into()))?;
+            if total_bytes > MAX_BUNDLE_BYTES {
+                return Err(HtmlReadError::Corrupt(
+                    "bundle exceeds its size limit".into(),
+                ));
+            }
+            media_types.insert(path.clone(), media_type);
+            html_files.push(HtmlFile { path, bytes });
+        }
+        let validated = validate_bundle(&document.slug, entry_path, html_files)
+            .map_err(|error| HtmlReadError::Corrupt(error.to_string()))?;
+        if validated.hash != document.hash || validated.entry_html != document.body {
+            return Err(HtmlReadError::Corrupt(
+                "generation hash or entry body does not match".into(),
+            ));
+        }
+        Ok(validated
+            .files
+            .into_iter()
+            .map(|file| StoredHtmlFile {
+                media_type: media_types
+                    .remove(&file.path)
+                    .unwrap_or_else(|| "application/octet-stream".into()),
+                path: file.path,
+                bytes: file.bytes,
+            })
+            .collect())
+    }
+
     pub fn doc_by_id(&self, id: &str) -> Result<Option<DocumentRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
@@ -577,7 +1115,8 @@ impl Store {
     pub fn doc_list(&self, channel: Option<&str>) -> Result<Vec<DocumentRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, channel, slug, kind, title, '' AS body, hash, site, hlc_ms, deleted, archived, created_ms, updated_ms
+            "SELECT id, channel, slug, kind, title, '' AS body, hash, site, hlc_ms, deleted,
+                    archived, format, entry_path, source_name, created_ms, updated_ms
              FROM document WHERE deleted = 0 AND (?1 IS NULL OR channel = ?1)
              ORDER BY channel, kind, slug",
         )?;
@@ -594,8 +1133,10 @@ impl Store {
     pub fn rows_to_embed(&self) -> Result<Vec<(String, String, String, String)>> {
         let conn = self.conn.lock().unwrap();
         let mut out = Vec::new();
-        let mut stmt =
-            conn.prepare("SELECT id, channel, title, body FROM document WHERE deleted = 0")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, channel, title, body FROM document
+             WHERE deleted = 0 AND format = 'markdown'",
+        )?;
         let rows = stmt.query_map([], |r| {
             let title: String = r.get(2)?;
             let body: String = r.get(3)?;
@@ -660,7 +1201,7 @@ impl Store {
         let mut hits: Vec<RecallHit> = {
             let conn = self.conn.lock().unwrap();
             let mut stmt = conn.prepare(
-                "SELECT d.id, d.slug, d.title, snippet(document_fts, 1, '', '', '…', 14) AS snip, bm25(document_fts) AS score
+                "SELECT d.id, d.slug, d.title, d.format, snippet(document_fts, 1, '', '', '…', 14) AS snip, bm25(document_fts) AS score
                  FROM document_fts JOIN document d ON d.rowid = document_fts.rowid
                  WHERE document_fts MATCH ?1 AND d.deleted = 0 AND d.archived = 0
                    AND (?2 IS NULL OR d.channel = ?2) AND (?3 IS NULL OR d.kind = ?3)
@@ -673,10 +1214,11 @@ impl Store {
                         id: r.get(0)?,
                         slug: Some(r.get(1)?),
                         title: Some(r.get(2)?),
-                        text: r.get(3)?,
+                        format: Some(r.get(3)?),
+                        text: r.get(4)?,
                         scope: None,
                         confidence: None,
-                        rank: 3.0 + r.get::<_, f64>(4)?,
+                        rank: 3.0 + r.get::<_, f64>(5)?,
                     })
                 })?
                 .collect::<std::result::Result<_, _>>()?;
@@ -719,6 +1261,7 @@ impl Store {
                 id: row.id.clone(),
                 slug: Some(row.slug),
                 title: Some(row.title.clone()),
+                format: Some(row.format),
                 text: span_of(&row.title, &row.body, n.1, n.2),
                 scope: None,
                 confidence: None,
@@ -885,6 +1428,7 @@ impl Store {
                     id,
                     slug: None,
                     title: None,
+                    format: None,
                     text: body,
                     scope: Some(scope),
                     confidence: Some(confidence),
@@ -944,6 +1488,7 @@ impl Store {
                     id,
                     slug: None,
                     title: None,
+                    format: None,
                     text: body,
                     scope: Some(scope),
                     confidence: Some(confidence),
@@ -1321,6 +1866,145 @@ mod tests {
             .recall("personal", "???", None, None, None, 5)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn html_generations_write_bundle_before_document_and_retire_prior_rows() {
+        let store = Store::open_in_memory().unwrap();
+        let first = vec![
+            HtmlFile {
+                path: "index.html".into(),
+                bytes: b"<title>First</title><script src=\"app.js\"></script>".to_vec(),
+            },
+            HtmlFile {
+                path: "app.js".into(),
+                bytes: vec![b'x'; CHUNK_BYTES + 1],
+            },
+        ];
+        let (created, changes) = store
+            .write_html_document_change(
+                "node-a",
+                "personal",
+                "ref-demo",
+                "demo",
+                "index.html",
+                first,
+                None,
+                true,
+            )
+            .unwrap();
+        assert_eq!(created.format, "html");
+        assert_eq!(created.title, "First");
+        assert_eq!(
+            created.body,
+            "<title>First</title><script src=\"app.js\"></script>"
+        );
+        assert!(store
+            .rows_to_embed()
+            .unwrap()
+            .iter()
+            .all(|(table, id, ..)| table != "document" || id != &created.id));
+        let document_ix = changes
+            .iter()
+            .position(|change| change.table == "document")
+            .unwrap();
+        assert!(changes[..document_ix]
+            .iter()
+            .all(|change| change.op == ChangeOp::Upsert));
+        assert!(changes[..document_ix]
+            .iter()
+            .any(|change| change.table == "document_bundle_chunk"));
+
+        let stale = store.write_html_document_change(
+            "node-a",
+            "personal",
+            "ref-demo",
+            "demo",
+            "index.html",
+            vec![HtmlFile {
+                path: "index.html".into(),
+                bytes: b"<title>Stale</title>".to_vec(),
+            }],
+            Some("stale"),
+            false,
+        );
+        assert!(matches!(stale, Err(HtmlWriteError::Conflict { .. })));
+
+        let (replaced, changes) = store
+            .write_html_document_change(
+                "node-a",
+                "personal",
+                "ref-demo",
+                "demo",
+                "index.html",
+                vec![HtmlFile {
+                    path: "index.html".into(),
+                    bytes: b"<title>Second</title>".to_vec(),
+                }],
+                Some(&created.hash),
+                false,
+            )
+            .unwrap();
+        let document_ix = changes
+            .iter()
+            .position(|change| change.table == "document")
+            .unwrap();
+        assert!(changes[document_ix + 1..]
+            .iter()
+            .all(|change| change.op == ChangeOp::Delete));
+        let conn = store.conn();
+        let retired_files: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM document_bundle_file WHERE document_hash = ?1 AND deleted = 1",
+                [&created.hash],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retired_files, 2);
+        drop(conn);
+        let deleted = store
+            .delete_document_change("node-a", "personal", "ref-demo")
+            .unwrap()
+            .unwrap();
+        assert_eq!(deleted[0].table, "document");
+        assert_eq!(deleted.len(), 3);
+        assert!(store.doc_get("personal", "ref-demo").unwrap().is_none());
+        let conn = store.conn();
+        let live_generation_rows: i64 = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM document_bundle_file
+                     WHERE document_hash = ?1 AND deleted = 0) +
+                    (SELECT COUNT(*) FROM document_bundle_chunk
+                     WHERE document_hash = ?1 AND deleted = 0)",
+                [&replaced.hash],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(live_generation_rows, 0);
+    }
+
+    #[test]
+    fn legacy_document_json_defaults_to_markdown() {
+        let document: DocumentRow = serde_json::from_value(json!({
+            "id": "legacy",
+            "channel": "personal",
+            "slug": "guide-legacy",
+            "kind": "guide",
+            "title": "Legacy",
+            "body": "# Legacy",
+            "hash": "hash",
+            "site": "old-node",
+            "hlc_ms": 1,
+            "deleted": 0,
+            "archived": 0,
+            "created_ms": 1,
+            "updated_ms": 1
+        }))
+        .unwrap();
+        assert_eq!(document.format, "markdown");
+        assert_eq!(document.entry_path, None);
+        assert_eq!(document.source_name, None);
     }
 
     #[test]

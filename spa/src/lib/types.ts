@@ -360,6 +360,10 @@ export interface Document {
   title: string
   body: string
   hash: string
+  format: 'markdown' | 'html'
+  entry_path?: string | null
+  source_name?: string | null
+  bundle_files?: { path: string; media_type: string; size_bytes: number }[]
   site: string
   hlc_ms: number
   deleted: number
@@ -373,6 +377,7 @@ export interface Document {
 export interface RecallHit {
   kind: string
   id: string
+  format?: 'markdown' | 'html' | null
   slug: string | null
   title: string | null
   text: string

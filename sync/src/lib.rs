@@ -41,6 +41,9 @@ pub const TABLES: &[(&str, &[&str])] = &[
             "body",
             "hash",
             "archived",
+            "format",
+            "entry_path",
+            "source_name",
             "created_ms",
             "updated_ms",
         ],
@@ -91,10 +94,40 @@ pub const TABLES: &[(&str, &[&str])] = &[
             "updated_ms",
         ],
     ),
+    (
+        "document_bundle_file",
+        &[
+            "channel",
+            "document_id",
+            "document_hash",
+            "path",
+            "media_type",
+            "size_bytes",
+            "content_hash",
+            "chunk_count",
+            "created_ms",
+            "updated_ms",
+        ],
+    ),
+    (
+        "document_bundle_chunk",
+        &[
+            "channel",
+            "document_id",
+            "document_hash",
+            "file_id",
+            "chunk_ix",
+            "bytes_b64",
+            "content_hash",
+            "created_ms",
+            "updated_ms",
+        ],
+    ),
 ];
 
 /// Columns emptied on a tombstone so a deleted record carries no content.
-pub const CLEARED_ON_DELETE: &[&str] = &["title", "body", "items_json", "verdicts_json"];
+pub const CLEARED_ON_DELETE: &[&str] =
+    &["title", "body", "items_json", "verdicts_json", "bytes_b64"];
 
 pub fn columns_of(table: &str) -> Option<&'static [&'static str]> {
     TABLES.iter().find(|(t, _)| *t == table).map(|(_, c)| *c)

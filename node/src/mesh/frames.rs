@@ -69,23 +69,51 @@ pub fn to_payloads(frame: &Frame, store: &Store, self_id: &str) -> Vec<(String, 
         // Only this site's own changes leave here: a mirrored change that won
         // locally is republished untapped, and even if it were not, a change
         // stamped by another site must not be relayed as ours.
-        Frame::Changes { channel, changes } if changes.iter().all(|c| c.site == self_id) => changes
-            .chunks(CHANGES_PER_FRAME)
-            .map(|chunk| {
-                (
-                    channel.clone(),
-                    Payload::Changes {
-                        channel: channel.clone(),
-                        changes: chunk.to_vec(),
-                    },
-                )
-            })
-            .collect(),
+        Frame::Changes { channel, changes } if changes.iter().all(|c| c.site == self_id) => {
+            let mut out = Vec::new();
+            let mut ordinary = Vec::with_capacity(CHANGES_PER_FRAME);
+            for change in changes {
+                if change.table == "document_bundle_chunk" {
+                    push_change_batch(&mut out, channel, &mut ordinary);
+                    out.push((
+                        channel.clone(),
+                        Payload::Changes {
+                            channel: channel.clone(),
+                            changes: vec![change.clone()],
+                        },
+                    ));
+                } else {
+                    ordinary.push(change.clone());
+                    if ordinary.len() == CHANGES_PER_FRAME {
+                        push_change_batch(&mut out, channel, &mut ordinary);
+                    }
+                }
+            }
+            push_change_batch(&mut out, channel, &mut ordinary);
+            out
+        }
         // Live chunks and tool progress are not forwarded in this phase: the
         // remote view is message-granular. Mesh state is local by definition.
         Frame::Chunk { .. } | Frame::ToolUpdate { .. } | Frame::Mesh(_) => Vec::new(),
         _ => Vec::new(),
     }
+}
+
+fn push_change_batch(
+    out: &mut Vec<(String, Payload)>,
+    channel: &str,
+    changes: &mut Vec<proto::frame::Change>,
+) {
+    if changes.is_empty() {
+        return;
+    }
+    out.push((
+        channel.to_string(),
+        Payload::Changes {
+            channel: channel.to_string(),
+            changes: std::mem::take(changes),
+        },
+    ));
 }
 
 /// This node's full open state per member channel, for peers that connect
@@ -160,4 +188,81 @@ fn grouped<'a, T: serde::Serialize>(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proto::frame::{Change, ChangeOp};
+
+    fn change(table: &str, id: &str) -> Change {
+        Change {
+            table: table.to_string(),
+            op: ChangeOp::Upsert,
+            id: id.to_string(),
+            site: "self".to_string(),
+            site_seq: 1,
+            hlc_ms: 1,
+            hlc_ctr: 0,
+            row: json!({}),
+        }
+    }
+
+    #[test]
+    fn bundle_chunks_are_isolated_without_reordering_changes() {
+        let store = Store::open_in_memory().unwrap();
+        let frame = Frame::Changes {
+            channel: "personal".to_string(),
+            changes: vec![
+                change("document_bundle_file", "file"),
+                change("document_bundle_chunk", "chunk"),
+                change("document", "document"),
+            ],
+        };
+        let payloads = to_payloads(&frame, &store, "self");
+        let ids: Vec<Vec<&str>> = payloads
+            .iter()
+            .map(|(_, payload)| match payload {
+                Payload::Changes { changes, .. } => {
+                    changes.iter().map(|change| change.id.as_str()).collect()
+                }
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(ids, vec![vec!["file"], vec!["chunk"], vec!["document"]]);
+    }
+    #[test]
+    fn encrypted_bundle_chunk_payload_stays_below_frame_limit() {
+        use base64::Engine;
+        use proto::{
+            envelope::DataKey,
+            frame::{Envelope, MAX_FRAME_BYTES},
+            keyring::Keyring,
+            keys::Identity,
+        };
+
+        let store = Store::open_in_memory().unwrap();
+        let identity = Identity::from_seed(&[7u8; 32]);
+        let self_id = identity.node_id();
+        let ring = Keyring::genesis(&identity.x25519_public(), &DataKey::generate());
+        let mut chunk = change("document_bundle_chunk", "chunk");
+        chunk.site = self_id.clone();
+        chunk.row = json!({
+            "channel": "personal",
+            "bytes_b64": base64::engine::general_purpose::STANDARD
+                .encode(vec![0xff; crate::corpus::html::CHUNK_BYTES]),
+        });
+        let frame = Frame::Changes {
+            channel: "personal".into(),
+            changes: vec![chunk],
+        };
+        let payloads = to_payloads(&frame, &store, &self_id);
+        assert_eq!(payloads.len(), 1);
+        for (channel, payload) in payloads {
+            let envelope =
+                Envelope::seal_channel(&identity, &channel, None, &ring, &payload, 1).unwrap();
+            let size = serde_json::to_vec(&envelope).unwrap().len();
+            assert!(size < MAX_FRAME_BYTES, "{size} >= {MAX_FRAME_BYTES}");
+        }
+    }
 }

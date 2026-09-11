@@ -28,6 +28,7 @@ import type {
   WorkItem,
   WorkView,
 } from './types'
+import type { HtmlBundleSelection } from './html-bundle'
 
 /** A document edit that lost to another: the current state comes back. */
 export class DocConflict extends Error {
@@ -213,6 +214,52 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, json?.error?.message ?? text)
     return json as unknown as Document
   },
+  importHtml: async (
+    channel: string,
+    slug: string,
+    selection: HtmlBundleSelection,
+    ifMatch?: string,
+  ): Promise<Document> => {
+    const body = new FormData()
+    body.append('source_name', selection.sourceName)
+    body.append('entry_path', selection.entryPath)
+    for (const selected of selection.files) body.append('files', selected.file, selected.path)
+    const res = await fetch(`/api/docs/${channel}/${slug}/html`, {
+      method: 'POST',
+      headers: ifMatch ? { 'if-match': ifMatch } : { 'if-none-match': '*' },
+      body,
+    })
+    const text = await res.text()
+    let json: { error?: { message?: string }; hash?: string; body?: string } | null = null
+    try {
+      json = text ? JSON.parse(text) : null
+    } catch {
+      json = null
+    }
+    if (res.status === 412) throw new DocConflict(json?.hash ?? '', json?.body ?? '')
+    if (!res.ok) throw new ApiError(res.status, json?.error?.message ?? text)
+    return json as unknown as Document
+  },
+  previewDoc: (channel: string, slug: string) =>
+    call<{ url: string; expires_ms: number }>('POST', `/api/docs/${channel}/${slug}/preview`),
+  downloadDoc: async (channel: string, slug: string): Promise<{ blob: Blob; filename: string }> => {
+    const res = await fetch(`/api/docs/${channel}/${slug}/download`)
+    if (!res.ok) {
+      const text = await res.text()
+      let message = text
+      try {
+        message = JSON.parse(text)?.error?.message ?? text
+      } catch {
+        // Keep the non-JSON response.
+      }
+      throw new ApiError(res.status, message)
+    }
+    const disposition = res.headers.get('content-disposition') ?? ''
+    const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? `${slug}.html`
+    return { blob: await res.blob(), filename }
+  },
+  archiveDoc: (channel: string, slug: string, archived: boolean) =>
+    call<Document>('PUT', `/api/docs/${channel}/${slug}`, { archived }),
   deleteDoc: (channel: string, slug: string) => call<void>('DELETE', `/api/docs/${channel}/${slug}`),
   // Promotion batches: read, decide per item, or build tonight's now.
   promotion: (id: string) =>

@@ -146,6 +146,54 @@ const STEPS: &[&str] = &[
     r#"
     ALTER TABLE document ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
     "#,
+    // Step 4: HTML document generations retain their exact files as immutable,
+    // chunked records. Defaults keep tombstones from newer peers insertable.
+    r#"
+    ALTER TABLE document ADD COLUMN format TEXT NOT NULL DEFAULT 'markdown';
+    ALTER TABLE document ADD COLUMN entry_path TEXT;
+    ALTER TABLE document ADD COLUMN source_name TEXT;
+
+    CREATE TABLE IF NOT EXISTS document_bundle_file (
+        id            TEXT PRIMARY KEY,
+        channel       TEXT NOT NULL DEFAULT '',
+        document_id   TEXT NOT NULL DEFAULT '',
+        document_hash TEXT NOT NULL DEFAULT '',
+        path          TEXT NOT NULL DEFAULT '',
+        media_type    TEXT NOT NULL DEFAULT 'application/octet-stream',
+        size_bytes    INTEGER NOT NULL DEFAULT 0,
+        content_hash  TEXT NOT NULL DEFAULT '',
+        chunk_count   INTEGER NOT NULL DEFAULT 0,
+        site          TEXT NOT NULL,
+        site_seq      INTEGER NOT NULL,
+        hlc_ms        INTEGER NOT NULL,
+        hlc_ctr       INTEGER NOT NULL DEFAULT 0,
+        deleted       INTEGER NOT NULL DEFAULT 0,
+        created_ms    INTEGER NOT NULL DEFAULT 0,
+        updated_ms    INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS document_bundle_file_generation
+        ON document_bundle_file(channel, document_id, document_hash, path);
+
+    CREATE TABLE IF NOT EXISTS document_bundle_chunk (
+        id            TEXT PRIMARY KEY,
+        channel       TEXT NOT NULL DEFAULT '',
+        document_id   TEXT NOT NULL DEFAULT '',
+        document_hash TEXT NOT NULL DEFAULT '',
+        file_id       TEXT NOT NULL DEFAULT '',
+        chunk_ix      INTEGER NOT NULL DEFAULT 0,
+        bytes_b64     TEXT NOT NULL DEFAULT '',
+        content_hash  TEXT NOT NULL DEFAULT '',
+        site          TEXT NOT NULL,
+        site_seq      INTEGER NOT NULL,
+        hlc_ms        INTEGER NOT NULL,
+        hlc_ctr       INTEGER NOT NULL DEFAULT 0,
+        deleted       INTEGER NOT NULL DEFAULT 0,
+        created_ms    INTEGER NOT NULL DEFAULT 0,
+        updated_ms    INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS document_bundle_chunk_file
+        ON document_bundle_chunk(channel, document_id, document_hash, file_id, chunk_ix);
+    "#,
 ];
 
 /// Install or upgrade the replicated schema. Safe to call on every open.

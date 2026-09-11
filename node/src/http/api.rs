@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{ConnectInfo, Path, Query, State},
+    extract::{ConnectInfo, Multipart, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -1173,12 +1173,383 @@ pub async fn get_doc(
         StatusCode::NOT_FOUND,
         format!("no document {slug} on {channel}"),
     ))?;
-    Ok(Json(json!(doc)))
+    let mut value = json!(doc);
+    if doc.format == "html" {
+        value["bundle_files"] = json!(s.store().html_bundle_metadata(&doc)?);
+    }
+    Ok(Json(value))
+}
+
+pub async fn preview_doc(
+    State(s): State<AppState>,
+    Path((channel, slug)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let document = match s.store().doc_get(&channel, &slug) {
+        Ok(Some(document)) => document,
+        Ok(None) => {
+            return ApiError(
+                StatusCode::NOT_FOUND,
+                format!("no document {slug} on {channel}"),
+            )
+            .into_response();
+        }
+        Err(error) => return ApiError::from(error).into_response(),
+    };
+    if document.format != "html" {
+        return ApiError(StatusCode::CONFLICT, "document is not HTML".into()).into_response();
+    }
+    let forwarded_https = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("https"))
+        || headers
+            .get("forwarded")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(';')
+                    .any(|part| part.trim().eq_ignore_ascii_case("proto=https"))
+            });
+    if forwarded_https && s.cfg.docs.preview_url.is_none() {
+        return ApiError(
+            StatusCode::CONFLICT,
+            "docs.preview_url must name a separate HTTPS preview origin when the operator UI uses HTTPS"
+                .into(),
+        )
+        .into_response();
+    }
+    let Some(entry_path) = document.entry_path.as_deref() else {
+        return ApiError(
+            StatusCode::CONFLICT,
+            "HTML document has no entry path".into(),
+        )
+        .into_response();
+    };
+    let (token, expires_ms) = s.manager.previews().mint(super::preview::PreviewBinding {
+        channel,
+        document_id: document.id,
+        document_hash: document.hash,
+    });
+    let mut url = match url::Url::parse(
+        &s.cfg
+            .docs
+            .preview_origin()
+            .expect("validated preview origin"),
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            return ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+        }
+    };
+    {
+        let mut segments = url.path_segments_mut().expect("HTTP(S) origin");
+        segments.clear();
+        segments.push("p");
+        segments.push(&token);
+        for segment in entry_path.split('/') {
+            segments.push(segment);
+        }
+    }
+    Json(json!({ "url": url.as_str(), "expires_ms": expires_ms })).into_response()
+}
+
+pub async fn download_doc(
+    State(s): State<AppState>,
+    Path((channel, slug)): Path<(String, String)>,
+) -> Response {
+    use std::io::{Cursor, Write};
+
+    let document = match s.store().doc_get(&channel, &slug) {
+        Ok(Some(document)) => document,
+        Ok(None) => {
+            return ApiError(
+                StatusCode::NOT_FOUND,
+                format!("no document {slug} on {channel}"),
+            )
+            .into_response();
+        }
+        Err(error) => return ApiError::from(error).into_response(),
+    };
+    if document.format != "html" {
+        return ApiError(
+            StatusCode::CONFLICT,
+            "original downloads are available for HTML documents only".into(),
+        )
+        .into_response();
+    }
+    let files = match s.store().read_html_bundle(&document) {
+        Ok(files) => files,
+        Err(crate::store::HtmlReadError::Corrupt(error)) => {
+            return ApiError(StatusCode::CONFLICT, error).into_response();
+        }
+        Err(crate::store::HtmlReadError::Sqlite(error)) => {
+            return ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+        }
+    };
+    let source_name = document.source_name.as_deref().unwrap_or("document");
+    let (bytes, media_type, filename) = if files.len() == 1 {
+        (
+            files.into_iter().next().expect("one file").bytes,
+            "application/octet-stream",
+            safe_download_name(source_name),
+        )
+    } else {
+        let mut output = Cursor::new(Vec::new());
+        let zip_result = (|| -> Result<(), zip::result::ZipError> {
+            let mut archive = zip::ZipWriter::new(&mut output);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated)
+                .unix_permissions(0o644);
+            for file in files {
+                archive.start_file(file.path, options)?;
+                archive.write_all(&file.bytes)?;
+            }
+            archive.finish()?;
+            Ok(())
+        })();
+        if let Err(error) = zip_result {
+            return ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+        }
+        let mut name = safe_download_name(source_name);
+        if !name.to_ascii_lowercase().ends_with(".zip") {
+            name.push_str(".zip");
+        }
+        (output.into_inner(), "application/zip", name)
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, media_type)
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .header("x-content-type-options", "nosniff")
+        .body(axum::body::Body::from(bytes))
+        .unwrap_or_else(|error| {
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        })
+}
+
+fn safe_download_name(source_name: &str) -> String {
+    let safe: String = source_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ' ') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        "document".into()
+    } else {
+        safe
+    }
+}
+
+/// Import one exact HTML file or relative-path bundle under an explicit
+/// optimistic-concurrency precondition.
+pub async fn import_html(
+    State(s): State<AppState>,
+    Path((channel, slug)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    mut multipart: Multipart,
+) -> Response {
+    use crate::corpus::html::{
+        HtmlBundleError, HtmlFile, MAX_BUNDLE_BYTES, MAX_FILES, MAX_FILE_BYTES,
+    };
+    use crate::store::HtmlWriteError;
+
+    if !crate::mcp::docs::valid_slug(&slug) {
+        return ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("slug {slug:?} is not usable"),
+        )
+        .into_response();
+    }
+    let if_match = headers
+        .get("if-match")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim_matches('"').to_string());
+    let create_only = headers
+        .get("if-none-match")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim() == "*");
+    if if_match.is_some() == create_only {
+        return ApiError(
+            StatusCode::BAD_REQUEST,
+            "HTML import requires either If-None-Match: * or If-Match: <current hash>".into(),
+        )
+        .into_response();
+    }
+
+    let mut source_name = None;
+    let mut entry_path = None;
+    let mut files = Vec::new();
+    let mut total_bytes = 0usize;
+    let mut saw_file = false;
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(error) => {
+                return ApiError(StatusCode::BAD_REQUEST, error.to_string()).into_response();
+            }
+        };
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "source_name" if !saw_file && source_name.is_none() => {
+                match multipart_text(field, 1024).await {
+                    Ok(value) => source_name = Some(value),
+                    Err(error) => return error.into_response(),
+                }
+            }
+            "entry_path" if !saw_file && source_name.is_some() && entry_path.is_none() => {
+                match multipart_text(field, 1024).await {
+                    Ok(value) => entry_path = Some(value),
+                    Err(error) => return error.into_response(),
+                }
+            }
+            "files" if source_name.is_some() && entry_path.is_some() => {
+                saw_file = true;
+                if files.len() == MAX_FILES {
+                    return ApiError(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        HtmlBundleError::TooManyFiles.to_string(),
+                    )
+                    .into_response();
+                }
+                let Some(path) = field.file_name().map(str::to_string) else {
+                    return ApiError(
+                        StatusCode::BAD_REQUEST,
+                        "each files field requires a relative-path filename".into(),
+                    )
+                    .into_response();
+                };
+                let mut field = field;
+                let mut bytes = Vec::new();
+                loop {
+                    match field.chunk().await {
+                        Ok(Some(chunk)) => {
+                            if bytes.len() + chunk.len() > MAX_FILE_BYTES
+                                || total_bytes + chunk.len() > MAX_BUNDLE_BYTES
+                            {
+                                return ApiError(
+                                    StatusCode::PAYLOAD_TOO_LARGE,
+                                    "HTML bundle exceeds its size limit".into(),
+                                )
+                                .into_response();
+                            }
+                            total_bytes += chunk.len();
+                            bytes.extend_from_slice(&chunk);
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            return ApiError(StatusCode::BAD_REQUEST, error.to_string())
+                                .into_response();
+                        }
+                    }
+                }
+                files.push(HtmlFile { path, bytes });
+            }
+            _ => {
+                return ApiError(
+                    StatusCode::BAD_REQUEST,
+                    "multipart fields must be source_name, entry_path, then repeated files".into(),
+                )
+                .into_response();
+            }
+        }
+    }
+
+    let (Some(source_name), Some(entry_path)) = (source_name, entry_path) else {
+        return ApiError(
+            StatusCode::BAD_REQUEST,
+            "source_name and entry_path are required".into(),
+        )
+        .into_response();
+    };
+    match s.store().write_html_document_change(
+        &s.node_id,
+        &channel,
+        &slug,
+        &source_name,
+        &entry_path,
+        files,
+        if_match.as_deref(),
+        create_only,
+    ) {
+        Ok((doc, changes)) => {
+            for change in changes {
+                s.manager.bus().publish(crate::stream::Frame::Changes {
+                    channel: channel.clone(),
+                    changes: vec![change],
+                });
+            }
+            Json(json!(doc)).into_response()
+        }
+        Err(HtmlWriteError::Conflict { hash, body }) => (
+            StatusCode::PRECONDITION_FAILED,
+            Json(json!({
+                "error": { "message": "the document changed since it was read" },
+                "hash": hash,
+                "body": body,
+            })),
+        )
+            .into_response(),
+        Err(HtmlWriteError::Bundle(error)) => {
+            let status = match error {
+                HtmlBundleError::TooManyFiles
+                | HtmlBundleError::FileTooLarge(_)
+                | HtmlBundleError::BundleTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            ApiError(status, error.to_string()).into_response()
+        }
+        Err(HtmlWriteError::InvalidSourceName) => {
+            ApiError(StatusCode::BAD_REQUEST, "source name is invalid".into()).into_response()
+        }
+        Err(HtmlWriteError::Sqlite(error)) => {
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
+        Err(HtmlWriteError::Sync(error)) => {
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
+    }
+}
+
+async fn multipart_text(
+    mut field: axum::extract::multipart::Field<'_>,
+    max_bytes: usize,
+) -> ApiResult<String> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|error| ApiError(StatusCode::BAD_REQUEST, error.to_string()))?
+    {
+        if bytes.len() + chunk.len() > max_bytes {
+            return Err(ApiError(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "multipart text field is too large".into(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        ApiError(
+            StatusCode::BAD_REQUEST,
+            "multipart text must be UTF-8".into(),
+        )
+    })
 }
 
 #[derive(Deserialize)]
 pub struct PutDoc {
-    pub body: String,
+    #[serde(default)]
+    pub body: Option<String>,
     /// Archive or restore it with this write; absent keeps it as it was.
     #[serde(default)]
     pub archived: Option<bool>,
@@ -1209,28 +1580,97 @@ pub async fn put_doc(
         )
         .into_response();
     }
+    let existing = match s.store().doc_get(&channel, &slug) {
+        Ok(document) => document,
+        Err(error) => return ApiError::from(error).into_response(),
+    };
+    if existing
+        .as_ref()
+        .is_some_and(|document| document.format == "html")
+    {
+        if body.body.is_some() {
+            return ApiError(
+                StatusCode::CONFLICT,
+                "HTML documents must be replaced through import".into(),
+            )
+            .into_response();
+        }
+        let Some(archived) = body.archived else {
+            return ApiError(
+                StatusCode::BAD_REQUEST,
+                "archived is required when an HTML document body is omitted".into(),
+            )
+            .into_response();
+        };
+        if create_only {
+            let document = existing.expect("checked above");
+            return document_conflict_response(document.hash, document.body);
+        }
+        return match s.store().set_document_archived_change(
+            &s.node_id,
+            &channel,
+            &slug,
+            archived,
+            if_match.as_deref(),
+        ) {
+            Ok(crate::store::DocumentWrite::Written { row, change }) => {
+                s.manager.bus().publish(crate::stream::Frame::Changes {
+                    channel,
+                    changes: vec![change],
+                });
+                Json(json!(*row)).into_response()
+            }
+            Ok(crate::store::DocumentWrite::Conflict { hash, body }) => {
+                document_conflict_response(hash, body)
+            }
+            Ok(crate::store::DocumentWrite::HtmlDocument) => unreachable!(),
+            Err(error) => ApiError::from(error).into_response(),
+        };
+    }
+    let Some(markdown) = body.body.as_deref() else {
+        return ApiError(
+            StatusCode::BAD_REQUEST,
+            "body is required for Markdown documents".into(),
+        )
+        .into_response();
+    };
     match crate::mcp::docs::write_document(
         s.store(),
         s.manager.bus(),
         &s.node_id,
         &channel,
         &slug,
-        &body.body,
+        markdown,
         if_match.as_deref(),
         create_only,
         body.archived,
     ) {
         Ok(doc) => Json(json!(doc)).into_response(),
-        Err(crate::mcp::docs::WriteError::Conflict { hash, body }) => (
-            StatusCode::PRECONDITION_FAILED,
-            Json(json!({ "error": { "message": "the document changed since it was read" }, "hash": hash, "body": body })),
-        )
-            .into_response(),
+        Err(crate::mcp::docs::WriteError::Conflict { hash, body }) => {
+            document_conflict_response(hash, body)
+        }
         Err(crate::mcp::docs::WriteError::Slug(m)) => {
             ApiError(StatusCode::BAD_REQUEST, format!("slug {m:?} is not usable")).into_response()
         }
+        Err(crate::mcp::docs::WriteError::HtmlDocument) => ApiError(
+            StatusCode::CONFLICT,
+            "HTML documents must be replaced through import".into(),
+        )
+        .into_response(),
         Err(crate::mcp::docs::WriteError::Store(e)) => ApiError::from(e).into_response(),
     }
+}
+
+fn document_conflict_response(hash: String, body: String) -> Response {
+    (
+        StatusCode::PRECONDITION_FAILED,
+        Json(json!({
+            "error": { "message": "the document changed since it was read" },
+            "hash": hash,
+            "body": body,
+        })),
+    )
+        .into_response()
 }
 
 pub async fn delete_doc(

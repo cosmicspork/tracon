@@ -27,9 +27,10 @@ has been in real use.
 Since Phase 8, outside the phase structure: provisioning from anywhere (QR login,
 one-line enroll bootstrap, peer provider management and credential share over the
 mesh, wire contract 3), forge-backed repository listing and managed clones, the
-interface's fixture mode for screenshots, and an external harness mode — a
-harness the operator runs themselves, using the node's brokered tools through
-the operator door.
+interface's fixture mode for screenshots, an external harness mode — a harness
+the operator runs themselves, using the node's brokered tools through the
+operator door — and replicated HTML document bundles with isolated,
+capability-scoped interactive previews.
 
 ## To build
 
