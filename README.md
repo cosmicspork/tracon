@@ -33,23 +33,29 @@ no editor, no terminal.
 
 **On a laptop, the desktop app is the whole install.** Take the `.dmg` (macOS on
 Apple Silicon) or the `.AppImage` (Linux x86_64) from the
-[latest release](https://github.com/cosmicspork/tracon/releases/latest). It is
-unsigned; macOS wants a right-click → Open the first time, and only that first
-time. The app opens on a setup page that looks for rootless Podman — the boundary
+[latest release](https://github.com/cosmicspork/tracon/releases/latest). The
+macOS bundle is Developer ID signed and notarized once the publisher's Apple
+credentials are configured in the release workflow; a release built without them
+has no macOS desktop leg at all rather than an unsigned one. The app opens on a
+setup page that looks for rootless Podman — the boundary
 the agent runs inside; on a Mac that is `brew install podman`, then
 `podman machine init` once — and then, with one button, installs the `tracon`
 command in `~/.local/bin` and a user service (launchd, or systemd --user) that runs
 the node whether or not the app is open. From then on the window is the node's own
 interface.
 
-The app keeps itself and the node current. It checks GitHub Releases at launch,
-verifies GitHub's SHA-256 digest, and replaces itself from Settings or the tray; an
-update it fetches itself is never quarantined, so macOS does not ask again. On the
+The app keeps itself and the node current. It checks GitHub Releases at launch and
+replaces itself from Settings or the tray only after a verifier it carries has
+checked the download's GitHub build provenance against this repository and its
+release workflow, and — on macOS — that the new bundle is signed by the same
+publisher as the installed one; an update it fetches itself is never quarantined,
+so macOS does not ask again. On the
 next launch it moves the CLI and the service onto the node it now carries —
 restarting the node only once no session is running, and saying so in the tray
 while it waits — and rebuilds the boundary images if their definitions changed.
 
-**On a server or a VM,** one line fetches, verifies, and installs the binary (static
+**On a server or a VM,** one line fetches the binary, verifies its build provenance
+with the GitHub CLI (`gh` must be installed for this), and installs it (static
 Linux x86_64, or macOS on Apple Silicon):
 
 ```sh

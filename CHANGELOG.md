@@ -8,6 +8,8 @@
 * **onboarding:** put local runtime readiness first and keep hub pairing outside required setup
 * **metrics:** time to verified work, setup failures, interventions and waiting, per channel
 * **operator:** ask, notify, and report tools that survive disconnects and publish only what the operator inspected
+* **release:** provenance-attested, signed desktop releases with pinned build inputs and a bundled offline verifier
+* **forge:** bounded repository pages with explicit load-more and honest partial search
 
 ## [0.14.0](https://github.com/cosmicspork/tracon/compare/v0.13.1...v0.14.0) (2026-09-09)
 
