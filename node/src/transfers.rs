@@ -571,7 +571,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::store::candidate::{CandidateFile, CandidateRow};
+    use crate::store::{CandidateFile, CandidateRow};
 
     const HEAD_SHA: &str = "deadbeefcafebabedeadbeefcafebabedeadbeef";
     // The real git tree hash for one file `hello.txt` containing `hello\n`

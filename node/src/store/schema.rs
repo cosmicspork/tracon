@@ -566,6 +566,7 @@ const MIGRATIONS: &[&str] = &[
            json_object('legacy_source', 'event.check_result', 'candidate_provenance', 'unknown')
     FROM event
     WHERE kind = 'check_result' AND json_valid(payload);
+    "#,
     // 24: the monotonic sequence for bounded channel rollups sent only to a
     // hub replica that has explicitly been handed that channel's key.
     r#"
