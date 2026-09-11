@@ -388,6 +388,17 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             "closed sessions left over from a previous run"
         );
     }
+    // A dispatch still `pending` from before the restart never learned its own
+    // outcome; relabel it honestly so an operator reconciles it rather than
+    // the node silently presenting it as still in flight forever.
+    match store.authority_action_reconcile_pending() {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(
+            actions = n,
+            "marked authority actions uncertain after a restart interrupted their dispatch"
+        ),
+        Err(e) => tracing::error!(error = %e, "could not reconcile pending authority actions"),
+    }
     let manager = Manager::new(
         store.clone(),
         bus.clone(),
