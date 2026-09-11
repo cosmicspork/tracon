@@ -136,10 +136,10 @@ Stop broken execution without requiring an invented token budget for every task.
 
 Explain the job and make one-node use complete.
 
-- [ ] Lead the README with the personal workflow, authority, evidence, and interventions rather than topology.
+- [x] Lead the README with the personal workflow, authority, evidence, and interventions rather than topology.
 - [ ] Present work items, phases, review, memory, remote access, and mesh as optional.
-- [ ] Explain the agent-built project as a demonstration of design judgment and decision-making, not hand-written coding.
-- [ ] Reduce setup burden and keep the hub out of required first-run steps.
+- [x] Explain the agent-built project as a demonstration of design judgment and decision-making, not hand-written coding.
+- [x] Reduce setup burden and keep the hub out of required first-run steps.
 - [ ] Measure time to useful verified work, setup failures, human interventions/waiting, and tokens per accepted change.
 - [ ] Document current limitations and reconcile superseded decisions when changes land.
 

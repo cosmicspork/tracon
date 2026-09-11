@@ -152,10 +152,11 @@ reason and not selectable).
 runs under the user's service manager: podman (and on macOS its machine), the
 background service, and the CLI, each with the button or the command that does
 it. In the node's interface the composer then carries what stands between it and
-a first session — connect a provider, name a channel, and optionally pair a hub —
-each linking where it is done and marked off as the state it derives from
-appears. It comes back whenever one of them stops being true, however many
-sessions have run.
+a first session — verify the local runtime boundary, connect a provider, and use
+a channel. Default local channels satisfy that last prerequisite. Each step links
+to its actual settings; a refused boundary is still a prerequisite even when the
+provider is connected. Remote access and hub pairing remain a separate optional
+Settings link. The checklist returns whenever a prerequisite stops being true.
 
 **Enroll.** Invite (channels to hand off, code, QR, the one-line bootstrap, this
 node's fingerprint, expiry) → received (the other node's name and fingerprint;

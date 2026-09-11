@@ -8,29 +8,24 @@
     setupSteps({
       anyProviderConnected: store.providers.some((p) => p.state === 'connected'),
       anyChannel: store.channels.some((c) => !c.archived),
-      hubPaired: store.mesh?.hub.state === 'connected',
+      boundaryReady: store.node?.state === 'ready',
     }),
   )
-  const left = $derived(steps?.filter((s) => !s.done && !s.optional).length ?? 0)
+  const left = $derived(steps?.filter((s) => !s.done).length ?? 0)
 </script>
 
 {#if steps}
   <div class="setup">
     <p>
-      {store.node?.state === 'refused'
-        ? 'The boundary is refusing, and it is the first thing to fix.'
-        : 'The boundary holds.'}
-      {left === 1 ? 'One step stands' : `${left} steps stand`} between this node and a session it can start:
+      This node is a complete workspace. {left === 1 ? 'One step remains' : `${left} steps remain`} before useful work:
     </p>
     {#each steps as s, i (s.href)}
       <a href={s.href} class:done={s.done}>
         <i>{s.done ? '✓' : i + 1}</i>
-        <span
-          >{s.title}{#if s.optional}<em>optional</em>{/if}
-          <small>{s.detail}</small></span
-        >
+        <span>{s.title}<small>{s.detail}</small></span>
       </a>
     {/each}
+    <p>Remote access and mesh can be configured later in <a class="optional" href="/settings#mesh">Settings</a>.</p>
   </div>
 {/if}
 
@@ -76,12 +71,6 @@
     line-height: 18px;
     box-sizing: border-box;
   }
-  a em {
-    font: 11px var(--mono);
-    font-style: normal;
-    color: var(--dim);
-    margin-left: 8px;
-  }
   a.done {
     color: var(--dim);
   }
@@ -95,5 +84,11 @@
     color: var(--dim);
     font-weight: 400;
     margin-top: 1px;
+  }
+  a.optional {
+    display: inline;
+    padding: 0;
+    text-decoration: underline;
+    font: inherit;
   }
 </style>

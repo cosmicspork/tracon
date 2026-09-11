@@ -1,23 +1,28 @@
 # tracon
 
-Drive coding agents from anywhere — a phone on the couch, a laptop at the desk, a
-browser at work — while a supervisor you run yourself enforces the rules you used to
-write in a markdown file and hope for.
+tracon is a personal workspace for working with coding agents. Start work on a
+repository, keep credentials outside the agent's reach, inspect the evidence, and
+intervene when a decision needs you. One node is a complete installation; remote
+access and a mesh are optional.
 
-tracon sits between you and existing coding agents (Claude Code, omp). It runs them
-inside a boundary they cannot leave, routes their questions to a queue you answer from
-any device, holds every credential where the agent cannot read it, and refuses the
-things you decided should never happen — merge, deploy, publish-without-review — with
-a reason the agent can read. It is named for terminal radar approach control: the
-facility sequences traffic and issues clearances, and it never flies anything.
+The node supervises existing harnesses (Claude Code and omp), rather than running
+its own model loop. Policy controls what the node will do on an agent's behalf,
+the review queue makes proposed publication inspectable, and the session record
+keeps the work visible when the client disconnects.
+
+This project is built with coding agents. The demonstration is the design judgment:
+choosing useful workflows, defining authority and isolation boundaries, evaluating
+evidence, and revising decisions—not a claim that every line was hand-written.
+The name comes from terminal radar approach control: it issues clearances, but
+never flies the aircraft.
 
 ![The home: a place to start work, then what is waiting on you, running, and landed](docs/media/home-desktop.png)
 
 **What it is.** A single static Rust binary. Each node supervises local agent
 harnesses, enforces policy, brokers credentials, and serves the interface above.
-Nodes dial out to a small always-on hub that relays end-to-end-encrypted frames, so
-any node's interface can see and control work on any other. Laptops, servers, and
-Kubernetes pods all run the same binary.
+A single node works without a hub. Optionally, nodes dial out to a small hub that
+relays end-to-end-encrypted frames so one interface can reach work on other nodes.
+Laptops, servers, and Kubernetes pods run the same binary.
 
 **What it is not.** Not a coding agent — it drives Claude Code and omp over their own
 protocols and contains no model loop. Not multi-user — one operator holds the keys.
@@ -74,11 +79,14 @@ itself and says so when you are somewhere else.
 
 ![Settings: the boundary, the harness, credentials, and the model each phase runs](docs/media/settings-desktop.png)
 
-Until the node can start a session, the home says what is missing in its place —
-**connect a provider** (the harness's own sign-in runs on the node; you open the
-link and paste the code back — an API key works too, `tracon credential import
-creds.toml`) and **name a channel**. It comes back whenever that stops being true,
-however many sessions have run. A session is always a phase of one work
+Until the node can start a session, the home shows the remaining local prerequisites:
+**prepare this node** (verify the isolated runtime), **connect a provider** (the
+harness's own sign-in runs on the node; an API key also works), and **name a
+channel**. The default local channels already satisfy the last step. A refused
+boundary stays visible even if a provider is connected. Hub pairing is a separate
+optional Settings link, not a setup prerequisite.
+
+A session is currently a phase of one work
 item: a *plan* session reads and ends by writing the plan; an *execute* session does
 the work and submits a diff for your review; approving publishes it with a credential
 the agent never held.
