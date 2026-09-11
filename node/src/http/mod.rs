@@ -156,7 +156,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/mesh", get(api::get_mesh))
         .route("/api/mesh/rollups", get(api::get_mesh_rollups))
-        .route("/api/transfers", get(api::list_transfers).post(api::export_transfer))
+        .route(
+            "/api/transfers",
+            get(api::list_transfers).post(api::export_transfer),
+        )
         .route(
             "/api/transfers/stage",
             post(api::stage_transfer).layer(DefaultBodyLimit::max(

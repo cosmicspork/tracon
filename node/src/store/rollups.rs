@@ -66,9 +66,10 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        let seq = last.unwrap_or(0).checked_add(1).ok_or_else(|| {
-            super::StoreError::Invalid("rollup sequence exhausted".into())
-        })?;
+        let seq = last
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| super::StoreError::Invalid("rollup sequence exhausted".into()))?;
         tx.execute(
             "INSERT INTO mesh_rollup_seq (channel, seq) VALUES (?1, ?2)
              ON CONFLICT(channel) DO UPDATE SET seq = excluded.seq",

@@ -839,7 +839,6 @@ impl MeshClient {
         let res = req
             .body(body)
             .send()
-
             .await
             .map_err(|e| HubError::Transport(e.to_string()))?;
         let status = res.status();
@@ -867,7 +866,14 @@ impl MeshClient {
                 Ok(value)
             }
             Err(error) => {
-                if matches!(&error, HubError::Transport(_) | HubError::Refused { status: 500..=599, .. }) {
+                if matches!(
+                    &error,
+                    HubError::Transport(_)
+                        | HubError::Refused {
+                            status: 500..=599,
+                            ..
+                        }
+                ) {
                     self.set_state_down(error.to_string());
                 }
                 Err(error)
