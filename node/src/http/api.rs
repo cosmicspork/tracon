@@ -2811,6 +2811,20 @@ pub async fn cancel_invite(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn valid_operator_notification(title: &str, body: &str, path: &str, device_ids: &[String]) -> bool {
+    !title.trim().is_empty()
+        && !body.trim().is_empty()
+        && title.len() <= 8 * 1024
+        && body.len() <= 8 * 1024
+        && device_ids.len() <= 32
+        && device_ids.iter().all(|id| !id.is_empty() && id.len() <= 256)
+        && path.starts_with('/')
+        && !path.starts_with("//")
+        && !path.contains('\\')
+        && !path.contains('%')
+        && !path.split('/').any(|part| part == "..")
+}
+
 /// Commands other nodes forward to this one run exactly as local requests do.
 #[async_trait::async_trait]
 impl crate::mesh::forward::CommandExecutor for AppState {
@@ -2915,6 +2929,54 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                     .map_err(provider_err),
                 Err(error) => Err(error),
             },
+            C::OperatorNotify {
+                channel,
+                notification_id,
+                title,
+                body,
+                path,
+                device_ids,
+            } => {
+                let members = self.store().nodes_in_channel(&channel).map_err(ApiError::from)?;
+                if !members.contains(&sender.to_string()) || !members.contains(&self.node_id) {
+                    Err(ApiError(StatusCode::FORBIDDEN, "sender is not a member of this notification channel".into()))
+                } else if !valid_operator_notification(&title, &body, &path, &device_ids) {
+                    Err(ApiError(StatusCode::BAD_REQUEST, "invalid operator notification".into()))
+                } else {
+                    let bindings = self.store().channel_get(&channel)
+                        .map_err(ApiError::from)?
+                        .and_then(|row| serde_json::from_str::<serde_json::Value>(&row.bindings_json).ok())
+                        .unwrap_or_else(|| json!({}));
+                    if !crate::notify::enabled(&bindings) {
+                        Err(ApiError(StatusCode::CONFLICT, "notifications are disabled for this channel".into()))
+                    } else if !self.store().claim_operator_notification(
+                        &format!("remote:{sender}:{notification_id}"),
+                        &notification_id,
+                        60_000,
+                    ).map_err(ApiError::from)? {
+                        Ok(json!({ "deduplicated": true }))
+                    } else if !self.store().claim_operator_notification_rate(
+                        &channel,
+                        sender,
+                        10,
+                        60_000,
+                    ).map_err(ApiError::from)? {
+                        let _ = self.store().release_operator_notification(&notification_id);
+                        Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "operator notification rate limit exceeded".into()))
+                    } else {
+                        let attempts = crate::notify::send_operator(
+                            self.store(),
+                            &self.cfg,
+                            &notification_id,
+                            title,
+                            body,
+                            path,
+                            &device_ids,
+                        ).await;
+                        Ok(json!({ "deduplicated": false, "attempts": attempts }))
+                    }
+                }
+            }
         };
         r.map_err(|e| e.1)
     }

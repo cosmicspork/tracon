@@ -329,6 +329,17 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX operator_notification_attempt_notification ON operator_notification_attempt(notification_id, attempted_ms);
     "#,
+    // 15: unique operator notices are rate-limited independently of their
+    // dedup key, per sending node and channel.
+    r#"
+    CREATE TABLE operator_notification_rate (
+        channel TEXT NOT NULL,
+        origin TEXT NOT NULL,
+        window_started_ms INTEGER NOT NULL,
+        count INTEGER NOT NULL,
+        PRIMARY KEY(channel, origin)
+    );
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

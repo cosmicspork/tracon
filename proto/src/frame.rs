@@ -256,6 +256,18 @@ pub enum Command {
     ProviderDisconnect {
         name: String,
     },
+    /// An intentional notification that the destination node delivers only to
+    /// its own subscribed devices. The sender waits for this node's attempt
+    /// acknowledgement; an older node rejects this unknown command.
+    OperatorNotify {
+        channel: String,
+        notification_id: String,
+        title: String,
+        body: String,
+        path: String,
+        #[serde(default)]
+        device_ids: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

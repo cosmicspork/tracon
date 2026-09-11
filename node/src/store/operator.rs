@@ -157,9 +157,60 @@ impl Store {
             .collect::<std::result::Result<_, _>>()
             .map_err(Into::into)
     }
+
+    /// A durable per-origin/channel fixed window. Deduplicated calls never
+    /// reach here, so a body change cannot evade the quota.
+    pub fn claim_operator_notification_rate(
+        &self,
+        channel: &str,
+        origin: &str,
+        limit: i64,
+        window_ms: i64,
+    ) -> Result<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let now = now_ms();
+        let existing: Option<(i64, i64)> = tx
+            .query_row(
+                "SELECT window_started_ms, count FROM operator_notification_rate WHERE channel=?1 AND origin=?2",
+                params![channel, origin],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let allowed = match existing {
+            Some((started, count)) if now - started < window_ms => {
+                if count >= limit {
+                    false
+                } else {
+                    tx.execute(
+                        "UPDATE operator_notification_rate SET count=count+1 WHERE channel=?1 AND origin=?2",
+                        params![channel, origin],
+                    )?;
+                    true
+                }
+            }
+            _ => {
+                tx.execute(
+                    "INSERT INTO operator_notification_rate (channel,origin,window_started_ms,count)
+                     VALUES (?1,?2,?3,1)
+                     ON CONFLICT(channel,origin) DO UPDATE SET window_started_ms=excluded.window_started_ms,count=1",
+                    params![channel, origin, now],
+                )?;
+                true
+            }
+        };
+        tx.commit()?;
+        Ok(allowed)
+    }
     pub fn claim_operator_notification(&self, dedup_key: &str, id: &str, ttl_ms: i64) -> Result<bool> {
         let conn = self.conn.lock().unwrap(); let now=now_ms();
         conn.execute("DELETE FROM operator_notification WHERE expires_ms <= ?1", [now])?;
         Ok(conn.execute("INSERT OR IGNORE INTO operator_notification (dedup_key,id,expires_ms) VALUES (?1,?2,?3)", params![dedup_key,id,now+ttl_ms])? == 1)
+    }
+
+    pub fn release_operator_notification(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM operator_notification WHERE id=?1", [id])?;
+        Ok(())
     }
 }
