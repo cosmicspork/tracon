@@ -81,7 +81,7 @@ Demonstrate that the candidate works in the intended QA environment.
 - [x] Record environment identity and time; invalidate evidence when the deployment changes.
 - [x] Attach assertions, logs, screenshots, and demonstrations to the candidate.
 - [x] Keep deployment and browser permissions separate; neither grants production access or treats QA writes as harmless reads.
-- [ ] Exercise a real private GitLab QA target through deploy, browser verification, and evidence capture. (Needs a `glab` credential and a real QA target configured; not yet run.)
+- [ ] Exercise QA deploy and browser verification against a real target. (Needs a `glab` credential and a configured QA target; not yet run. The Kubernetes backend also has no scoped QA egress gateway yet — deploy/browser verification is Podman-only until it does.)
 
 **Dependencies:** capable execution environments and candidate-bound evidence.
 
@@ -142,7 +142,7 @@ Explain the job and make one-node use complete.
 - [x] Explain the agent-built project as a demonstration of design judgment and decision-making, not hand-written coding.
 - [x] Reduce setup burden and keep the hub out of required first-run steps.
 - [x] Measure time to useful verified work, setup failures, human interventions/waiting, and tokens per accepted change.
-- [ ] Document current limitations and reconcile superseded decisions when changes land.
+- [x] Document current limitations and reconcile superseded decisions when changes land.
 
 ### Other backlog
 
@@ -150,6 +150,28 @@ Explain the job and make one-node use complete.
 - [x] Add optional hub-side rollups without making local use depend on them.
 - [x] Sign desktop releases and pin mutable build inputs for reproducibility; checksums alone are not independent publisher authentication.
 - [x] Paginate forge repository listings.
+
+## Current limitations
+
+- No real private-repository end-to-end run: preparation, agent work, checks, and
+  authorized publication against a private repo need a model credential and a
+  private repository configured on the node, neither exercised here.
+- Native macOS signing and notarization are not exercised in this environment:
+  the release workflow requires Apple Developer ID credentials that are not
+  provisioned, and the macOS release leg fails closed without them rather than
+  shipping unsigned.
+- QA deployment and browser verification are implemented but not exercised
+  against a real target: no `glab` credential and QA target are configured here.
+- The Kubernetes runtime backend has no scoped QA browser egress gateway;
+  `scope_qa_egress` always refuses on that backend, so QA browser verification
+  is Podman-only until Kubernetes gets one.
+- The `providers` integration test is timing-sensitive: it polls fixed 2s/5s
+  timeouts for an async credential lift, which can miss under full test-suite
+  load rather than a single-test run.
+- `preflight` (used for continuity transfer imports) validates that an explicit
+  model is usable for the channel's bound provider before materializing a
+  workspace; `create` records an explicit model as given without that check,
+  so a session can start with a model the channel cannot actually authenticate.
 
 ## Hardening
 

@@ -198,10 +198,17 @@ Broker invariants:
 
 What the agent needs are not CLIs to wrap but verbs the node exposes over MCP: the
 credential never leaves the node, the harness never sees a process, and channel
-bindings apply because the tool is the node's. Verbs are chosen so that **the
-working agreements are the absence of a verb**: merge, transition, and deploy are
-not tools, and an agent cannot call what does not exist. Database access is a
-read-only SQL runner guarded twice, on both sides of the privilege boundary.
+bindings apply because the tool is the node's. Database access is a read-only SQL
+runner guarded twice, on both sides of the privilege boundary.
+
+**Consequential verbs are scoped grants, not open tools.** Merge, publish, ticket
+transition, and deploy exist as narrow tools (`mr_merge`/`pr_merge`, `deploy`, a
+ticket transition) rather than being absent, but each dispatch is decided twice:
+the signed policy first — a trusted deny always wins — then a scoped [authority
+grant](#authority-grants) naming that one target and, for merge, publish, and
+deploy, the one revision it covers. A grant that does not exist, or whose target
+moved, is asked, never assumed. QA browser verification and its test-account
+credential are authority actions of the same shape, not unattended tool calls.
 
 **Policy decides every tool call before the broker is touched.** An allow rule names
 the tool exactly; a deny returns its reason to the agent; a tool the bundle does not
@@ -211,26 +218,53 @@ request is asked: the failure mode of broken policy is more questions, never few
 Bundles are signed with a key never present on the hub, so a compromised hub can
 serve stale policy but not new policy.
 
+### Authority grants
+
+A grant is a local operator decision layered under signed policy, not a
+replacement for it: `authority::decide` checks the signed bundle first (a trusted
+deny dominates any grant, and an invalid or unsigned bundle still fails closed by
+asking), then the store's live grants for that channel, action, and target — a
+grant's own `deny` or `ask` outranks a broader policy `allow`, and no matching
+grant asks. Every dispatch reads grants at that instant, so expiry and revocation
+take effect immediately, never at the next poll. A grant is scoped to one target
+(a pull request, a merge request, an issue's exact transition, a deployment job)
+and, for merge, publish, and deploy, the one revision it covers; the target
+moving to a later sha drops the grant rather than carrying it forward silently.
+Grants are made and revoked one at a time from Settings' Authority panel.
+
 ### Review
 
 **Review the diff with a session that never saw the implementation.** A model that
 watched itself reason toward a design will rationalize it; a fresh session given
 only requirements and diff will not. The agent has no forge token and never runs the
-publishing CLI: the node captures the diff from the worktree itself, runs the
-project's checks in a throwaway container with no credentials and no tools, and the
-approved bytes are the only bytes that can be posted — each file's blob hash is
-recorded at submit, and approval of a branch that moved is refused naming the files.
-Diff size is capped at submit, because complexity accretes when nothing says no at
-submission time. An operator's hand-edit travels back as a request for changes: the
-agent applies it and resubmits, and **the agent remains the only writer to the
-worktree.**
+publishing CLI: submitting captures a **candidate** — an immutable copy of the
+exact Git tree at the submitted `head_sha`, addressed by hash rather than the
+mutable worktree, kept even after the review moves on — and each file's blob hash
+is recorded at submit so approval of a branch that moved is refused naming the
+files. Required checks run against an isolated copy of the candidate, never the
+worktree, in a throwaway container with no credentials and no tools; a check's
+evidence is keyed on source revision, check definition, execution image, and
+dependency inputs, and is reused rather than rerun only when every one of those is
+unchanged — a resubmission that edits only the title, description, or ticket prose
+reuses the same candidate's code evidence, and an explicit rerun always makes a new
+record. Diff size is capped at submit, because complexity accretes when nothing
+says no at submission time. An operator's hand-edit travels back as a request for
+changes: the agent applies it and resubmits, and **the agent remains the only
+writer to the worktree.** Every decision is recorded against the revision it
+decided, with the requirements pinned as they were at submission.
 
 ## Workspaces
 
-Sessions run in a git worktree, never a main checkout, created outside the repo from
-`origin/<default>` after a fetch. A dirty main checkout is left alone and reported.
-Harness config is materialized into scratch and passed explicitly, so instruction-file
-discovery by directory walk stops mattering.
+**Nothing is bind-mounted into the boundary.** A session's Git history is seeded
+once, host-side, into a short-lived clone or worktree — a managed clone fetched
+from `origin/<default>`, or a fetch against the operator's own checkout, which is
+left alone and reported if dirty — and that seed is copied, never bind-mounted,
+into a runtime-owned volume; the copy strips `.git` hooks, replace refs, grafts,
+alternates, and `config.worktree` before anything node-side or harness-side reads
+it. The harness sees `/work` and no host path. A workspace outlives its session:
+resume it, export a checked snapshot, or download it. Harness config is
+materialized into scratch and passed explicitly, so instruction-file discovery by
+directory walk stops mattering.
 
 ## Channels
 
@@ -332,17 +366,24 @@ collision, and a `discovered-from` edge so work found mid-session survives the
 session. Storage is the node's SQLite, replicated per channel; readiness is derived,
 never stored.
 
-**The advantage over asking nicely is structural enforcement.** The node owns the
-harness lifecycle, so it requires a work item to open a session, gates execute on
-the plan artifact existing, and ends the session at item close. Context rot is
-mitigated by mechanism, not by a line in a markdown file.
+**Work items are an opt-in structure, not a requirement.** A plain prompt starts
+an execute session claiming no item, plan, or review lifecycle at all. Naming an
+item is what turns structural enforcement on: the `plan` phase requires one,
+picking an item for `execute` gates on its plan artifact existing (a channel
+binding can waive that), and closing the item ends the session that held it.
+Context rot is mitigated by mechanism where the workflow opts in, not by a line
+in a markdown file a plain session never claimed to follow.
 
 ## Sessions, phases, budgets
 
 Plan, execute, and review are **separate sessions the node spawns**, not phases
-inside one — which sidesteps subagent model inheritance entirely, since each phase
-gets an explicit model and there is nothing to inherit. A spec with no model is a
-validation failure at spawn.
+inside one — which sidesteps subagent model inheritance entirely, since nothing
+is spawned as a subagent of another session's model. A session names its own
+model, or the channel's phase binding, the channel's own binding, or the node's
+model catalogue fills it in, in that order — resolved once at spawn and recorded
+as the session's `model_source`, so a silent default is never undocumented.
+Only an explicit model unusable for the channel's bound provider is a validation
+failure at spawn; an empty one never is.
 
 Budgets are denominated in tokens (dollars are derived where a provider binding
 carries a price) and enforced by killing the session, checked at turn end because
