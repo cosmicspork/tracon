@@ -356,6 +356,16 @@ impl Supervisor {
             .flatten()
             .is_some_and(|s| s.state == SessionState::Paused.as_str())
     }
+    fn is_fenced(&self) -> bool {
+        self.store
+            .get_session(&self.session_id)
+            .ok()
+            .flatten()
+            .is_some_and(|s| {
+                let state = SessionState::from_stored(&s.state);
+                state == SessionState::Paused || state.is_terminal()
+            })
+    }
 
     async fn pause(&mut self, source: PauseSource, reason: &str) -> Result<(), String> {
         let row = self
@@ -440,7 +450,7 @@ impl Supervisor {
     }
 
     async fn on_harness_event(&mut self, ev: HarnessEvent) -> bool {
-        if self.is_paused() {
+        if self.is_fenced() {
             match ev {
                 HarnessEvent::Permission { reply, .. } => {
                     let _ = reply.send(PermissionReply::Cancelled);
@@ -570,7 +580,7 @@ impl Supervisor {
             .and_then(|v| v.get("command"))
             .and_then(|c| c.as_str())
             .map(str::to_string);
-        if self.is_paused() {
+        if self.is_fenced() {
             let _ = reply.send(PermissionReply::Cancelled);
             return;
         }
@@ -643,7 +653,7 @@ impl Supervisor {
         option_id: &str,
         arguments: Option<serde_json::Value>,
     ) -> Result<(), String> {
-        if self.is_paused() {
+        if self.is_fenced() {
             return Err("session is paused".into());
         }
         on_answer_row(
