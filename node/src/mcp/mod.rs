@@ -199,9 +199,21 @@ impl Tools {
             };
             let (action, target, revision) = consequential(name, args)
                 .expect("consequential action record has canonical arguments");
+            let summary = summarize(name, args);
+            let policy = self.policy.read().unwrap();
+            let tool = policy.decide(&Request {
+                channel: &ctx.channel,
+                kind: Some(TOOL_KIND),
+                title: name,
+                command: Some(&summary),
+                arguments: Some(args),
+            });
+            if tool.verdict == Verdict::Deny {
+                return Err(refusal(tool));
+            }
             let access = self.session.get().ok_or("authority requires a session")?;
             let decision = crate::authority::decide(
-                access.store.as_ref(), &self.policy.read().unwrap(), &ctx.channel, &ctx.session_id,
+                access.store.as_ref(), &policy, &ctx.channel, &ctx.session_id,
                 action, &target, revision.as_deref(), args,
             )?;
             match decision.verdict {
