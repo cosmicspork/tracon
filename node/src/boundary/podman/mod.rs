@@ -208,7 +208,38 @@ impl Backend for PodmanBackend {
             let _ = podman(&["rm", "-f", "-i", name]).await;
         }
     }
+
+    async fn scope_qa_egress(
+        &self,
+        allowed_hosts: &[String],
+    ) -> Result<super::QaEgressGuard, BoundaryError> {
+        if self.cfg.gateway.qa_proxy_port == 0 {
+            return Err(BoundaryError::Podman(
+                "qa browser egress gateway is not configured (gateway.qa_proxy_port)".into(),
+            ));
+        }
+        let permit = QA_EGRESS.lock().await;
+        setup::write_qa_allowlist(allowed_hosts)?;
+        Ok(super::QaEgressGuard::new(permit, || {
+            if let Err(error) = setup::write_qa_allowlist(&[]) {
+                tracing::error!(%error, "could not reset QA browser egress allowlist");
+            }
+        }))
+    }
+
+    fn qa_proxy_url(&self) -> Option<String> {
+        Some(format!(
+            "http://{}:{}",
+            self.cfg.boundary.gateway_container, self.cfg.gateway.qa_proxy_port
+        ))
+    }
 }
+
+/// Serializes QA browser egress scoping: two runs writing the QA allow file
+/// at once would let one leak into the other's scope. Ordinary harness
+/// sessions never touch this — their egress is the separate, static
+/// `allow_hosts` filter, unaffected by QA runs.
+static QA_EGRESS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 static PODMAN_BIN: OnceLock<String> = OnceLock::new();
 

@@ -15,6 +15,7 @@
 * **session:** optional workflow with work-item-free plain-prompt sessions, deterministic model defaults, and durable pause/resume/stop controls that fence a watchdog-protected external harness as well as a managed one
 * **review:** immutable candidates with reusable, image-bound check evidence, pinned requirements, attributed decisions, and linked demonstrations
 * **continuity:** signed candidate/context transfer packages bound to their candidate's identity and file tree, single-import reservation with runtime-workspace reuse on retry, and opt-in, revocation-aware hub-side channel rollups
+* **qa:** deploy a candidate to an authorized QA target by exact commit SHA, verify it with a network-scoped headless browser, and build repository-derived prototypes
 
 ## [0.14.0](https://github.com/cosmicspork/tracon/compare/v0.13.1...v0.14.0) (2026-09-09)
 

@@ -3,6 +3,7 @@ pub mod auth;
 mod mcp;
 pub mod preview;
 pub mod push;
+pub mod qa;
 pub mod settings;
 mod spa;
 mod stream;
@@ -120,6 +121,19 @@ pub fn router(state: AppState) -> Router {
             get(api::download_doc),
         )
         .route("/api/docs/{channel}/{slug}/preview", post(api::preview_doc))
+        .route(
+            "/api/qa/candidates/{candidate_id}",
+            get(qa::candidate_evidence),
+        )
+        .route(
+            "/api/qa/candidates/{candidate_id}/targets",
+            get(qa::candidate_targets),
+        )
+        .route("/api/qa/deployments", post(qa::deploy))
+        .route("/api/qa/browser-runs", post(qa::browser_verify))
+        .route("/api/qa/browser-runs/{id}", get(qa::browser_run))
+        .route("/api/prototypes", post(qa::build_prototype))
+        .route("/api/prototypes/{candidate_id}", get(qa::prototypes))
         .route(
             "/api/memories",
             get(api::list_memories).post(api::add_memory),

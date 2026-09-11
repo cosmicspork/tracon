@@ -24,12 +24,14 @@ pub mod corpus;
 pub mod evidence;
 pub mod metrics;
 pub mod operator;
+pub mod qa;
 pub mod rollups;
 pub mod transfers;
 pub mod vectors;
 pub use corpus::*;
 pub use evidence::*;
 pub use operator::*;
+pub use qa::*;
 pub use records::*;
 pub use transfers::*;
 

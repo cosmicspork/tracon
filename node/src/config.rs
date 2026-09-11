@@ -28,6 +28,326 @@ pub struct Config {
     pub embed: Embed,
     pub external: External,
     pub docs: Docs,
+    /// Explicit, fail-closed targets for candidate-bound QA and browser proof.
+    pub qa: Qa,
+}
+
+/// QA has no implicit environment. Every destination, browser image, build
+/// image, and test-account broker key is configured by the operator and then
+/// validated before a request can use it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Qa {
+    pub targets: std::collections::BTreeMap<String, QaTarget>,
+    pub prototype: Option<PrototypeBuild>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QaTarget {
+    /// A QA target is never inferred from a deployable project. The operator
+    /// must explicitly attest that this configured destination is private.
+    #[serde(rename = "private")]
+    pub r#private: bool,
+    /// The application origin a browser is allowed to begin from.
+    pub origin: String,
+    /// An endpoint on `origin` that returns a stable deployment identity in
+    /// `identity_header`; without one, runs are deliberately unknown.
+    pub identity_url: String,
+    pub identity_header: String,
+    /// Exact origins that browser redirects, subresources, and WebSockets may
+    /// reach in addition to `origin`.
+    pub allowed_origins: Vec<String>,
+    pub deployment: QaDeployment,
+    pub browser: QaBrowser,
+}
+
+impl Default for QaTarget {
+    fn default() -> Self {
+        Self {
+            r#private: false,
+            origin: String::new(),
+            identity_url: String::new(),
+            identity_header: "x-tracon-deployment-id".into(),
+            allowed_origins: Vec::new(),
+            deployment: QaDeployment::default(),
+            browser: QaBrowser::default(),
+        }
+    }
+}
+
+/// GitLab's own pipeline-creation API resolves `ref` only against an
+/// existing branch or tag, never a bare commit SHA — there is no way to ask
+/// it for "a pipeline at this exact commit" directly. So a QA deploy never
+/// creates a pipeline: it finds one GitLab already ran at the candidate's
+/// exact SHA (a branch or merge-request pipeline CI already triggered) and
+/// plays `deploy_job`, the operator-configured manual job that does the
+/// deploy, inside it. If no pipeline exists for that SHA, or none has that
+/// job ready to play, the deploy refuses rather than starting a pipeline on
+/// a mutable ref. The node broker keeps the token outside the runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct QaDeployment {
+    pub project: String,
+    /// The manual job's exact name (as GitLab shows it) that performs the
+    /// deploy. Played, never a whole pipeline created.
+    pub deploy_job: String,
+    /// Pinned container image the pipeline must attest for this target.
+    pub execution_image: String,
+    pub variables: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QaBrowser {
+    /// A browser runtime image, pinned by content digest.
+    pub image: String,
+    /// Broker entry for the dedicated test account. Its value never crosses
+    /// into a harness, transcript, or API response.
+    pub test_credential: Option<String>,
+    pub timeout_secs: u64,
+}
+
+impl Default for QaBrowser {
+    fn default() -> Self {
+        Self {
+            image: String::new(),
+            test_credential: None,
+            timeout_secs: 120,
+        }
+    }
+}
+
+/// One build recipe for repository-derived preview bundles. It is optional:
+/// no configured recipe means no local source or host build fallback exists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrototypeBuild {
+    pub image: String,
+    /// Direct argv, deliberately not a shell line.
+    pub command: Vec<String>,
+    /// Relative directory the build writes in its prepared workspace.
+    pub output_dir: String,
+    /// Relative entry path inside `output_dir`.
+    pub entry_path: String,
+    /// Bounded execution; a build that no longer terminates never holds a
+    /// reusable prepared workspace forever.
+    pub timeout_secs: u64,
+}
+
+impl Default for PrototypeBuild {
+    fn default() -> Self {
+        Self {
+            image: String::new(),
+            command: Vec::new(),
+            output_dir: String::new(),
+            entry_path: "index.html".into(),
+            timeout_secs: 900,
+        }
+    }
+}
+
+impl Qa {
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, target) in &self.targets {
+            if !valid_qa_name(name) {
+                return Err(format!("qa target {name:?} is not a safe identifier"));
+            }
+            if name == "prod" || name.contains("production") {
+                return Err(format!(
+                    "qa target {name:?} must not name a production environment"
+                ));
+            }
+            target.validate(name)?;
+        }
+        if let Some(prototype) = &self.prototype {
+            prototype.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl QaTarget {
+    pub fn canonical_origins(&self) -> Result<Vec<String>, String> {
+        let origin = qa_origin(&self.origin)?;
+        let mut origins = vec![origin];
+        for value in &self.allowed_origins {
+            let value = qa_origin(value)?;
+            if !origins.contains(&value) {
+                origins.push(value);
+            }
+        }
+        Ok(origins)
+    }
+
+    pub fn identity_endpoint(&self) -> Result<url::Url, String> {
+        let origin = qa_origin(&self.origin)?;
+        let identity = url::Url::parse(&self.identity_url)
+            .map_err(|e| format!("qa.identity_url is not a URL: {e}"))?;
+        if identity.username() != ""
+            || identity.password().is_some()
+            || identity.query().is_some()
+            || identity.fragment().is_some()
+            || identity.origin().ascii_serialization() != origin
+        {
+            return Err("qa.identity_url must be a credential-free URL on qa.origin without query or fragment".into());
+        }
+        Ok(identity)
+    }
+
+    fn validate(&self, name: &str) -> Result<(), String> {
+        self.canonical_origins()?;
+        if !self.r#private {
+            return Err(format!(
+                "qa target {name:?} must be explicitly marked private"
+            ));
+        }
+        self.identity_endpoint()?;
+        if !valid_header_name(&self.identity_header) {
+            return Err(format!("qa target {name:?} has an unsafe identity_header"));
+        }
+        if self.deployment.project.trim().is_empty() || self.deployment.project.len() > 255 {
+            return Err(format!("qa target {name:?} needs a GitLab project"));
+        }
+        if !valid_job_name(&self.deployment.deploy_job) {
+            return Err(format!("qa target {name:?} needs a safe deploy_job name"));
+        }
+        immutable_image(&self.deployment.execution_image)
+            .map_err(|e| format!("qa target {name:?} deployment image: {e}"))?;
+        immutable_image(&self.browser.image)
+            .map_err(|e| format!("qa target {name:?} browser image: {e}"))?;
+        if self.browser.timeout_secs == 0 || self.browser.timeout_secs > 900 {
+            return Err(format!(
+                "qa target {name:?} browser timeout must be 1–900 seconds"
+            ));
+        }
+        if let Some(credential) = self.browser.test_credential.as_deref() {
+            if !valid_credential_name(credential) {
+                return Err(format!(
+                    "qa target {name:?} has an unsafe test credential name"
+                ));
+            }
+        }
+        for (key, value) in &self.deployment.variables {
+            if !valid_env_key(key) || value.len() > 4096 || value.contains('\0') {
+                return Err(format!(
+                    "qa target {name:?} has an unsafe deployment variable"
+                ));
+            }
+            if value.to_ascii_lowercase().contains("production") {
+                return Err(format!(
+                    "qa target {name:?} names production in a deployment variable"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl PrototypeBuild {
+    fn validate(&self) -> Result<(), String> {
+        immutable_image(&self.image).map_err(|e| format!("prototype image: {e}"))?;
+        if self.command.is_empty()
+            || self
+                .command
+                .iter()
+                .any(|part| part.is_empty() || part.contains('\0') || part.len() > 4096)
+        {
+            return Err("prototype command must be nonempty direct argv".into());
+        }
+        if !safe_relative_path(&self.output_dir) || !safe_relative_path(&self.entry_path) {
+            return Err("prototype output_dir and entry_path must be safe relative paths".into());
+        }
+        if self.timeout_secs == 0 || self.timeout_secs > 3600 {
+            return Err("prototype timeout must be 1–3600 seconds".into());
+        }
+        Ok(())
+    }
+}
+
+pub fn qa_origin(value: &str) -> Result<String, String> {
+    let url = url::Url::parse(value).map_err(|e| format!("qa origin is not a URL: {e}"))?;
+    let host = url.host_str().ok_or("qa origin has no host")?;
+    let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1");
+    if !(matches!(url.scheme(), "https") || url.scheme() == "http" && loopback)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !matches!(url.path(), "" | "/")
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(
+            "qa origins must be credential-free HTTPS origins (HTTP is loopback-only)".into(),
+        );
+    }
+    Ok(url.origin().ascii_serialization())
+}
+
+fn valid_qa_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
+
+fn valid_header_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn valid_env_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_uppercase() || (index > 0 && byte.is_ascii_digit())
+        })
+}
+
+fn valid_credential_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// GitLab job names are freeform (`deploy:staging`, `Deploy to prod`), so
+/// this only bounds length and forbids control characters — never a
+/// character-class allowlist that would reject a real job name.
+fn valid_job_name(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 255
+        && !trimmed.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+}
+
+pub fn immutable_image(value: &str) -> Result<(), String> {
+    let Some((name, digest)) = value.rsplit_once("@sha256:") else {
+        return Err("must be pinned as image@sha256:<64 lowercase hex>".into());
+    };
+    if name.is_empty()
+        || digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("must be pinned as image@sha256:<64 lowercase hex>".into());
+    }
+    Ok(())
+}
+
+pub fn safe_relative_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && value
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != ".." && !part.contains('\0'))
 }
 
 /// The corpus written back out as files, on a timer, so a directory kept under
@@ -437,6 +757,13 @@ pub struct Gateway {
     /// filter. Everything else is denied.
     pub allow_hosts: Vec<String>,
     pub proxy_port: u16,
+    /// A second CONNECT proxy in the same gateway container, filtered by a
+    /// separate allow file the node rewrites for the life of one QA browser
+    /// run (see `Backend::scope_qa_egress`). Never shares `allow_hosts`: a
+    /// QA target origin never becomes reachable from an ordinary harness
+    /// session, and an LLM provider host never becomes reachable from a QA
+    /// browser.
+    pub qa_proxy_port: u16,
     /// Port the gateway forwards from the internal network to the node.
     pub forward_port: u16,
     /// Where the node listens for the harness. Loopback: the gateway reaches it
@@ -599,6 +926,7 @@ impl Default for Config {
             embed: Embed::default(),
             external: External::default(),
             docs: Docs::default(),
+            qa: Qa::default(),
             harness: Harness {
                 id: "omp".into(),
                 version: "18.0.4".into(),
@@ -626,6 +954,7 @@ impl Default for Config {
                     r"^auth\.openai\.com$".into(),
                 ],
                 proxy_port: 8888,
+                qa_proxy_port: 8890,
                 forward_port: 7421,
                 harness_listen: HarnessListen::default(),
             },
@@ -824,6 +1153,13 @@ impl Config {
         Self::state_dir().join("gateway/allow.txt")
     }
 
+    /// The QA browser egress allow file: rewritten for the life of one QA
+    /// browser run (`Backend::scope_qa_egress`), never during an ordinary
+    /// harness session. Deny-all — an empty file — outside that window.
+    pub fn qa_allow_file() -> PathBuf {
+        Self::state_dir().join("gateway/qa_allow.txt")
+    }
+
     /// The harness's own state directory, node-owned. Only the harness's
     /// credential database is mounted into it; nothing else from `~/.omp`
     /// leaks in (its `AGENTS.md` is a symlink to the operator's workspace).
@@ -860,6 +1196,10 @@ impl Config {
                 config
                     .docs
                     .preview_origin()
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                config
+                    .qa
+                    .validate()
                     .map_err(|error| format!("{}: {error}", path.display()))?;
                 Ok(config)
             }

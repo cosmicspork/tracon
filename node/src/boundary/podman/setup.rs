@@ -77,6 +77,7 @@ pub async fn setup(cfg: &Config, rebuild: bool) -> Result<(), BoundaryError> {
     ensure_images(cfg, rebuild).await?;
     ensure_network(cfg).await?;
     write_allowlist(cfg)?;
+    write_qa_allowlist(&[])?;
     ensure_gateway(cfg).await?;
     std::fs::create_dir_all(Config::harness_state_dir())?;
     Ok(())
@@ -167,6 +168,45 @@ fn write_allowlist(cfg: &Config) -> Result<(), BoundaryError> {
     Ok(())
 }
 
+/// Rewrite the QA browser egress allow file: exactly the hosts of one QA
+/// target's configured origin(s), for the life of one browser run
+/// (`PodmanBackend::scope_qa_egress`), or empty (deny-all) outside it.
+/// Callers serialize this under the same mutex that scopes a run, so two
+/// runs never observe a write meant for the other.
+pub fn write_qa_allowlist(hosts: &[String]) -> Result<(), BoundaryError> {
+    let path = Config::qa_allow_file();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let body = hosts
+        .iter()
+        .map(|h| anchor_literal_host(h))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&path, format!("{body}\n"))?;
+    tracing::info!(path = %path.display(), hosts = hosts.len(), "qa egress allowlist written");
+    Ok(())
+}
+
+/// Anchor one literal hostname as an exact-match tinyproxy filter entry.
+/// Unlike [`anchor`] (for the operator-authored, regex-capable
+/// `[gateway] allow_hosts`), every regex metacharacter in the host itself is
+/// escaped: a QA target's host comes from a parsed URL, never from an
+/// operator writing a pattern, so a literal dot must never accidentally
+/// match any character.
+fn anchor_literal_host(host: &str) -> String {
+    let mut escaped = String::with_capacity(host.len() + 2);
+    escaped.push('^');
+    for ch in host.chars() {
+        if ".^$*+?()[]{}|\\".contains(ch) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped.push('$');
+    escaped
+}
+
 /// Anchor a tinyproxy allowlist entry at both ends so it matches a whole host,
 /// not a substring. Already-anchored entries are left as they are.
 pub fn anchor(host: &str) -> String {
@@ -183,6 +223,7 @@ pub fn anchor(host: &str) -> String {
 async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
     let _ = podman(&["rm", "-f", "-i", &cfg.boundary.gateway_container]).await;
     let allow = Config::allow_file();
+    let qa_allow = Config::qa_allow_file();
     let net_int = format!("{}:ip={}", cfg.boundary.network, cfg.boundary.gateway_ip);
     // Two forwards. On a Podman machine the node is outside the VM and gvproxy
     // reaches the host's loopback, so TCP via `host.containers.internal` works.
@@ -192,10 +233,15 @@ async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
     // Under SELinux a plain bind mount is unreadable from the container (the
     // gateway died on "allow.txt missing" on an SELinux host); `:z` relabels the node's
     // own files, which is fine for state tracon owns.
-    let mount = format!(
-        "{}:/etc/tinyproxy/allow.txt:ro{}",
-        allow.display(),
-        if selinux { ",z" } else { "" }
+    let label = if selinux { ",z" } else { "" };
+    let mount = format!("{}:/etc/tinyproxy/allow.txt:ro{label}", allow.display());
+    // A second CONNECT proxy, filtered by its own allow file, so a QA
+    // browser's egress and an ordinary harness session's egress can never
+    // widen into each other: rewriting one allow file never touches the
+    // other's Filter directive.
+    let qa_mount = format!(
+        "{}:/etc/tinyproxy/qa_allow.txt:ro{label}",
+        qa_allow.display()
     );
     let (upstream, socket_mount) = match &cfg.gateway.harness_listen {
         HarnessListen::Tcp(addr) => (
@@ -220,6 +266,7 @@ async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
     };
     let upstream_env = format!("TRACON_UPSTREAM={upstream}");
     let listen_env = format!("TRACON_LISTEN_IP={}", cfg.boundary.gateway_ip);
+    let qa_port_env = format!("TRACON_QA_PROXY_PORT={}", cfg.gateway.qa_proxy_port);
     let mut args: Vec<&str> = vec![
         "run",
         "-d",
@@ -233,6 +280,8 @@ async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
         &net_int,
         "-v",
         &mount,
+        "-v",
+        &qa_mount,
     ];
     if let Some(m) = &socket_mount {
         args.push("-v");
@@ -252,6 +301,8 @@ async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
         &upstream_env,
         "-e",
         &listen_env,
+        "-e",
+        &qa_port_env,
         &cfg.boundary.gateway_image,
     ]);
     podman(&args).await?;

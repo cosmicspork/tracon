@@ -75,12 +75,13 @@ Make evidence understandable without turning tracon into an IDE.
 
 Demonstrate that the candidate works in the intended QA environment.
 
-- [ ] Deploy an identified candidate to an explicitly authorized QA target.
-- [ ] Run browser verification with scoped browsing and test-account authority.
-- [ ] Link candidate → deployed build → QA target → browser run → evidence.
-- [ ] Record environment identity and time; invalidate evidence when the deployment changes.
-- [ ] Attach assertions, logs, screenshots, and demonstrations to the candidate.
-- [ ] Keep deployment and browser permissions separate; neither grants production access or treats QA writes as harmless reads.
+- [x] Deploy an identified candidate to an explicitly authorized QA target.
+- [x] Run browser verification with scoped browsing and test-account authority.
+- [x] Link candidate → deployed build → QA target → browser run → evidence.
+- [x] Record environment identity and time; invalidate evidence when the deployment changes.
+- [x] Attach assertions, logs, screenshots, and demonstrations to the candidate.
+- [x] Keep deployment and browser permissions separate; neither grants production access or treats QA writes as harmless reads.
+- [ ] Exercise a real private GitLab QA target through deploy, browser verification, and evidence capture. (Needs a `glab` credential and a real QA target configured; not yet run.)
 
 **Dependencies:** capable execution environments and candidate-bound evidence.
 
@@ -88,8 +89,8 @@ Demonstrate that the candidate works in the intended QA environment.
 
 Use real application components and styles in interactive design artifacts.
 
-- [ ] Build previews inside the execution environment and export versioned HTML/asset bundles with source revision and build metadata.
-- [ ] Render through the same sandboxed artifact viewer, without host file serving or bind-mount exceptions.
+- [x] Build previews inside the execution environment and export versioned HTML/asset bundles with source revision and build metadata.
+- [x] Render through the same sandboxed artifact viewer, without host file serving or bind-mount exceptions.
 
 **Dependencies:** a suitable project build environment; use the existing HTML bundle importer and sandboxed viewer.
 

@@ -14,6 +14,7 @@ pub mod gitlab;
 pub mod jira;
 pub mod memory;
 pub mod operator;
+pub mod qa;
 pub mod review;
 pub mod work;
 
@@ -148,6 +149,14 @@ impl Tools {
             // report do not touch a credential or widen a tool policy.
             out.extend(operator::definitions());
             out.extend(work::definitions());
+            // QA needs both a configured target and the credential its
+            // deploy transport broker call uses: offered with neither, a
+            // deploy or browser-verify call would fail immediately with
+            // "not configured" or a missing-credential broker error, which
+            // is exactly the pattern this method exists to avoid.
+            if qa_offered(&self.cfg, &available) {
+                out.extend(qa::definitions());
+            }
         }
         out
     }
@@ -309,6 +318,13 @@ impl Tools {
                     .get()
                     .ok_or_else(|| "node not ready".to_string())?;
                 work::call(access, ctx, name, args).await
+            }
+            qa::DEPLOY | qa::BROWSER_VERIFY | qa::PROTOTYPE_BUILD => {
+                let access = self
+                    .session
+                    .get()
+                    .ok_or("QA tools are not available on this node")?;
+                qa::call(self, access, ctx, name, args).await
             }
             docs::DOC_READ | docs::DOC_SEARCH | docs::DOC_WRITE => {
                 let access = self
@@ -1048,6 +1064,14 @@ fn canonical_consequential_payload(name: &str, args: &Value) -> Option<Value> {
 fn remote_outcome_unknown(error: &str) -> bool {
     error.starts_with("mutation-outcome-unknown:")
 }
+/// QA tools are offered only when both a QA target is configured and the
+/// `glab` credential is bound to the channel — matching every other
+/// credentialed tool family's rule that a channel with nothing to run a
+/// tool with is offered no tool rather than one that will fail.
+fn qa_offered(cfg: &Config, available: &[&str]) -> bool {
+    !cfg.qa.targets.is_empty() && available.contains(&gitlab::CREDENTIAL)
+}
+
 fn refusal(decision: Decision) -> String {
     format!(
         "refused by policy{}: {}",
@@ -1329,5 +1353,20 @@ mod tests {
         assert_eq!(res["result"]["isError"], true);
         let text = res["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.to_lowercase().contains("delete"), "{text}");
+    }
+
+    #[test]
+    fn qa_tools_need_both_a_configured_target_and_the_glab_credential() {
+        let mut cfg = Config::default();
+        assert!(!qa_offered(&cfg, &["glab"]), "no target configured");
+        assert!(!qa_offered(&cfg, &[]), "neither target nor credential");
+        cfg.qa.targets.insert("staging".into(), Default::default());
+        assert!(
+            !qa_offered(&cfg, &[]),
+            "target configured but no credential"
+        );
+        assert!(!qa_offered(&cfg, &["github"]), "wrong credential");
+        assert!(qa_offered(&cfg, &["glab"]));
+        assert!(qa_offered(&cfg, &["glab", "github"]));
     }
 }

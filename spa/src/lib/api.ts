@@ -36,6 +36,12 @@ import type {
   TransferStage,
   WorkItem,
   WorkView,
+  QaEvidence,
+  QaDeployment,
+  QaBrowserRun,
+  QaAsset,
+  Prototype,
+  QaTarget,
 } from './types'
 
 import type { HtmlBundleSelection } from './html-bundle'
@@ -449,4 +455,37 @@ export const api = {
   pollInvite: (code: string) => call<Invite>('GET', `/api/mesh/invite/${code}`),
   admitInvite: (code: string) => call<Invite>('POST', `/api/mesh/invite/${code}/admit`),
   cancelInvite: (code: string) => call<void>('DELETE', `/api/mesh/invite/${code}`),
+  // Candidate-bound QA. Inputs name a stored candidate and configured target;
+  // this surface accepts neither host commands nor browser credential values.
+  qaEvidence: (candidateId: string) =>
+    call<QaEvidence>('GET', `/api/qa/candidates/${encodeURIComponent(candidateId)}`),
+  qaTargets: (candidateId: string) =>
+    call<{ targets: QaTarget[] }>('GET', `/api/qa/candidates/${encodeURIComponent(candidateId)}/targets`),
+  deployCandidate: (candidateId: string, target: string) =>
+    call<QaDeployment>('POST', '/api/qa/deployments', { candidate_id: candidateId, target }),
+  browserVerify: (
+    deploymentId: string,
+    scenario: {
+      start_path: string
+      steps?: (
+        | { kind: 'navigate'; path: string }
+        | { kind: 'click'; selector: string }
+        | { kind: 'fill'; selector: string; value?: string; credential_env?: string }
+        | { kind: 'wait_for'; selector: string }
+      )[]
+      assertions?: (
+        | { kind: 'url_path_is'; path: string }
+        | { kind: 'title_contains'; text: string }
+        | { kind: 'text_visible'; selector: string; text: string }
+        | { kind: 'element_count'; selector: string; count: number }
+        | { kind: 'screenshot'; label: string }
+      )[]
+    },
+  ) => call<{ run: QaBrowserRun; assets: QaAsset[]; artifact_error: string | null }>(
+    'POST',
+    '/api/qa/browser-runs',
+    { deployment_id: deploymentId, scenario },
+  ),
+  buildPrototype: (candidateId: string) =>
+    call<Prototype>('POST', '/api/prototypes', { candidate_id: candidateId }),
 }
