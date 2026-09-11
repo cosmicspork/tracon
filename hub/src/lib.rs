@@ -161,6 +161,7 @@ pub fn app_with_state(state: AppState) -> Router {
         )
         .route("/v0/events", get(routes::events))
         .route("/v0/members", get(routes::list_members))
+        .route("/v0/rollups", get(routes::get_rollups))
         .route(
             "/v0/enroll/{code}",
             put(routes::open_enroll)

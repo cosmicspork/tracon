@@ -155,6 +155,16 @@ pub fn router(state: AppState) -> Router {
             post(api::node_disconnect_provider),
         )
         .route("/api/mesh", get(api::get_mesh))
+        .route("/api/mesh/rollups", get(api::get_mesh_rollups))
+        .route("/api/transfers", get(api::list_transfers).post(api::export_transfer))
+        .route(
+            "/api/transfers/stage",
+            post(api::stage_transfer).layer(DefaultBodyLimit::max(
+                crate::transfers::MAX_TRANSFER_BYTES + 1024 * 1024,
+            )),
+        )
+        .route("/api/transfers/{id}/import", post(api::import_transfer))
+        .route("/api/transfers/{id}", get(api::get_transfer))
         .route(
             "/api/channels",
             get(api::list_channels).post(api::create_channel),

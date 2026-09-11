@@ -13,10 +13,11 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use proto::frame::{Change, ChangeOp, Envelope, Payload, MESH_CHANNEL};
+use proto::frame::{Change, ChangeOp, Envelope, Payload, Rollup, MESH_CHANNEL};
 use proto::keyring::Keyring;
 use proto::keys::{key32, Identity};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Notify;
 
@@ -35,6 +36,35 @@ fn rand_id() -> u128 {
     u128::from_be_bytes(b)
 }
 const PAGE: usize = 200;
+
+/// The last aggregate a node published for one channel. `received_ms` is the
+/// hub clock; `rollup.captured_ms` remains the source clock for freshness.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HubRollup {
+    pub channel: String,
+    pub node_id: String,
+    #[serde(flatten)]
+    pub rollup: Rollup,
+    pub received_ms: i64,
+}
+
+const MAX_ROLLUP_STATES: usize = 16;
+const MAX_ROLLUP_STATE_NAME: usize = 64;
+const MAX_CLOCK_AHEAD_MS: i64 = 5 * 60 * 1000;
+
+fn valid_rollup(rollup: &Rollup) -> bool {
+    rollup.seq > 0
+        && rollup.captured_ms >= 0
+        && rollup.captured_ms <= now_ms().saturating_add(MAX_CLOCK_AHEAD_MS)
+        && rollup.session_counts.len() <= MAX_ROLLUP_STATES
+        && rollup.session_counts.keys().all(|state| {
+            !state.is_empty()
+                && state.len() <= MAX_ROLLUP_STATE_NAME
+                && state
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+}
 
 pub struct Replica {
     identity: Identity,
@@ -87,7 +117,18 @@ impl Replica {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS replica_channel (
                  name TEXT PRIMARY KEY, keyring BLOB NOT NULL, bindings_json TEXT NOT NULL DEFAULT '{}');
-             CREATE TABLE IF NOT EXISTS replica_cursor (channel TEXT PRIMARY KEY, seq INTEGER NOT NULL);",
+             CREATE TABLE IF NOT EXISTS replica_cursor (channel TEXT PRIMARY KEY, seq INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS hub_rollup (
+                 channel TEXT NOT NULL,
+                 node_id TEXT NOT NULL,
+                 seq INTEGER NOT NULL,
+                 captured_ms INTEGER NOT NULL,
+                 complete INTEGER NOT NULL,
+                 payload_json TEXT NOT NULL,
+                 received_ms INTEGER NOT NULL,
+                 PRIMARY KEY (channel, node_id)
+             );
+             CREATE INDEX IF NOT EXISTS hub_rollup_channel ON hub_rollup(channel, received_ms DESC);",
         )?;
         Ok(Arc::new(Self {
             identity,
@@ -153,6 +194,45 @@ impl Replica {
             .ok()
             .flatten();
         bytes.and_then(|b| Keyring::from_bytes(&b).ok())
+    }
+
+    /// The persisted, newest-per-node aggregate for a readable channel.
+    pub fn rollups_for(&self, channel: &str) -> Vec<HubRollup> {
+        let conn = self.db.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT channel, node_id, payload_json, received_ms FROM hub_rollup
+             WHERE channel = ?1 ORDER BY node_id",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([channel], |row| {
+            let payload: String = row.get(2)?;
+            let rollup: Rollup = serde_json::from_str(&payload).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    payload.len(),
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            Ok(HubRollup {
+                channel: row.get(0)?,
+                node_id: row.get(1)?,
+                rollup,
+                received_ms: row.get(3)?,
+            })
+        })
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .collect()
+    }
+
+    /// A key was explicitly handed to this hub for `channel`; ciphertext-only
+    /// channels must not get a rollup read surface.
+    pub fn reads_channel(&self, channel: &str) -> bool {
+        self.keyring(channel).is_some()
     }
 
     fn cursor(&self, channel: &str) -> u64 {
@@ -247,18 +327,37 @@ impl Replica {
             // Presence and node rows: not records. Nothing to keep.
             return false;
         }
+        // The HTTP route verifies the authenticated sender before persisting a
+        // frame. Repeat membership here because replayed frames are durable
+        // input and a replica must never attribute a row to a non-member.
+        if !self
+            .members
+            .get(&sender)
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.channels.iter().any(|c| c == channel))
+        {
+            return false;
+        }
         let Some(ring) = self.keyring(channel) else {
             self.undecryptable.fetch_add(1, Ordering::Relaxed);
             return false;
         };
         let payload = match env.open_channel(&ring, &self.identity) {
-            Ok(p) => p,
+            Ok(payload) => payload,
             Err(_) => {
                 self.undecryptable.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
         };
+
         match payload {
+            Payload::Rollup {
+                channel: claimed,
+                rollup,
+            } if claimed == channel && rollup.node_id == sender && valid_rollup(&rollup) => {
+                self.store_rollup(channel, &sender, &rollup)
+            }
             Payload::Changes {
                 channel: c,
                 changes,
@@ -326,7 +425,38 @@ impl Replica {
         }
     }
 
-    /// Only the hub's own changes, as any site answers.
+    /// Store only a strictly newer sequence. An old frame may arrive after a
+    /// reconnect, but it must never turn a current snapshot into stale state.
+    fn store_rollup(&self, channel: &str, sender: &str, rollup: &Rollup) -> bool {
+        let Ok(payload) = serde_json::to_string(rollup) else {
+            return false;
+        };
+        let Ok(seq) = i64::try_from(rollup.seq) else {
+            return false;
+        };
+        let conn = self.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO hub_rollup
+                (channel, node_id, seq, captured_ms, complete, payload_json, received_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(channel, node_id) DO UPDATE SET
+                seq=excluded.seq, captured_ms=excluded.captured_ms, complete=excluded.complete,
+                payload_json=excluded.payload_json, received_ms=excluded.received_ms
+             WHERE excluded.seq > hub_rollup.seq",
+            params![
+                channel,
+                sender,
+                seq,
+                rollup.captured_ms,
+                rollup.complete as i64,
+                payload,
+                now_ms()
+            ],
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false)
+    }
+
     fn answer_changes_request(&self, sender: &str, channel: &str, after: i64) {
         let Some(member) = self.members.get(sender).ok().flatten() else {
             return;

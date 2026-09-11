@@ -428,6 +428,26 @@ impl MeshClient {
                 self.pull_wake.notify_one();
                 return n > 0;
             }
+            Payload::CandidateTransfer { transfer } if env.is_direct() => {
+                match crate::transfers::receive_mesh(
+                    &self.store,
+                    &self.node_id(),
+                    &sender,
+                    &env.channel,
+                    transfer.clone(),
+                ) {
+                    Ok(id) => {
+                        tracing::info!(from = %sender, transfer = %id, "candidate transfer staged for confirmation");
+                        return true;
+                    }
+                    Err(error) => {
+                        tracing::warn!(from = %sender, error = %error, "candidate transfer refused");
+                        self.note_refusal(format!("candidate transfer from {sender}: {error}"));
+                        return false;
+                    }
+                }
+            }
+
             Payload::CredentialHandoff { credentials } if env.is_direct() => {
                 let Some((broker, path)) = self.broker.get() else {
                     tracing::warn!(from = %sender, "credential handoff before the broker exists; dropped");
@@ -580,6 +600,18 @@ impl MeshClient {
     pub fn send_snapshots(&self) {
         for (channel, payload) in frames::snapshots(&self.store, &self.node_id()) {
             let _ = self.enqueue(&channel, None, &payload);
+        }
+    }
+
+    /// Queue privacy-preserving aggregates only for channels whose members
+    /// explicitly shared their key with the hub replica. Failure is local to
+    /// the optional rollup: documents, work, and local metrics never depend on
+    /// its delivery.
+    pub fn send_rollups(&self) {
+        for (channel, payload) in frames::rollups(&self.store, &self.node_id()) {
+            if let Err(error) = self.enqueue(&channel, None, &payload) {
+                tracing::debug!(channel, error = %error, "hub rollup not queued");
+            }
         }
     }
 
@@ -766,6 +798,7 @@ impl MeshClient {
             }
             if self.hello().await.is_ok() && n.is_multiple_of(10) {
                 self.send_snapshots();
+                self.send_rollups();
             }
             n += 1;
             tokio::time::sleep(every).await;
@@ -793,6 +826,7 @@ impl MeshClient {
         let res = req
             .body(body)
             .send()
+
             .await
             .map_err(|e| HubError::Transport(e.to_string()))?;
         let status = res.status();
@@ -804,6 +838,26 @@ impl MeshClient {
             });
         }
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
+    /// Read the hub's aggregate for one channel. This is deliberately narrower
+    /// than exposing the transport helper: callers cannot turn the node into a
+    /// signed arbitrary-hub proxy.
+    pub async fn rollups(&self, channel: &str) -> Result<Value, HubError> {
+        if !proto::frame::valid_channel(channel) || channel == MESH_CHANNEL {
+            return Err(HubError::Local("invalid rollup channel".into()));
+        }
+        let path = format!("/v0/rollups?channel={channel}");
+        match self.get_json(&path).await {
+            Ok(value) => {
+                self.set_state_ok();
+                Ok(value)
+            }
+            Err(error) => {
+                self.set_state_down(error.to_string());
+                Err(error)
+            }
+        }
     }
 
     async fn get_json(&self, path: &str) -> Result<Value, HubError> {

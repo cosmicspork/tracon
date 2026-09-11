@@ -25,10 +25,13 @@ pub mod evidence;
 pub mod metrics;
 pub mod operator;
 pub mod vectors;
+pub mod rollups;
+pub mod transfers;
 pub use corpus::*;
 pub use evidence::*;
 pub use operator::*;
 pub use records::*;
+pub use transfers::*;
 
 pub struct Store {
     conn: Mutex<Connection>,

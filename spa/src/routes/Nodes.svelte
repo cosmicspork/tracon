@@ -6,8 +6,10 @@
 
   import ChannelMeters from '../components/ChannelMeters.svelte'
   import Credentials from '../components/Credentials.svelte'
+  import HubRollups from '../components/HubRollups.svelte'
   import Notifications from '../components/Notifications.svelte'
   import ProviderCard from '../components/ProviderCard.svelte'
+  import TransferInbox from '../components/TransferInbox.svelte'
 
   const nodes = $derived(store.nodes)
   const providers = $derived(store.providers)
@@ -125,6 +127,8 @@
   </div>
   <Credentials />
   <ChannelMeters />
+  <HubRollups />
+  <TransferInbox />
 {/if}
 
 <style>

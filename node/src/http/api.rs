@@ -17,6 +17,7 @@ use crate::{
     config::Config,
     session::{Manager, NewSession, Phase, SessionError},
     store::Store,
+    transfers::{self, ContextSelection, SignedTransfer, TransferError},
 };
 
 /// The channels a standalone node offers before any has been created. The
@@ -92,6 +93,35 @@ impl From<SessionError> for ApiError {
 impl From<crate::store::StoreError> for ApiError {
     fn from(e: crate::store::StoreError) -> Self {
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    }
+}
+
+impl From<TransferError> for ApiError {
+    fn from(error: TransferError) -> Self {
+        let status = match &error {
+            TransferError::CandidateNotFound => StatusCode::NOT_FOUND,
+            TransferError::DocumentNotFound(_)
+            | TransferError::MemoryNotFound(_)
+            | TransferError::UnsafePath(_)
+            | TransferError::UnsafeFileMode(_)
+            | TransferError::Invalid(_)
+            | TransferError::BadDigest
+            | TransferError::BadSignature
+            | TransferError::BadOrigin
+            | TransferError::SenderMismatch
+            | TransferError::ChannelMismatch
+            | TransferError::WrongTarget
+            | TransferError::TooLarge
+            | TransferError::TooManyFiles => StatusCode::UNPROCESSABLE_ENTITY,
+            TransferError::OriginUnauthorized(_)
+            | TransferError::ReceiverUnauthorized(_)
+            | TransferError::DestinationUnauthorized(_)
+            | TransferError::MeshUnavailable
+            | TransferError::MeshTooLarge
+            | TransferError::Workspace(_) => StatusCode::CONFLICT,
+            TransferError::Store(_) | TransferError::Json(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError::new(status, error.to_string())
     }
 }
 
@@ -465,7 +495,51 @@ pub async fn get_mesh(State(s): State<AppState>) -> ApiResult<Json<serde_json::V
     Ok(Json(json!(state)))
 }
 
+#[derive(Deserialize)]
+pub struct MeshRollupQuery {
+    channel: String,
+}
+
+/// Proxy one bounded hub rollup read through the node's signed mesh client.
+/// There is intentionally no local fallback: local metrics answer a different
+/// API, and pretending they were a mesh aggregate would hide a hub outage.
+pub async fn get_mesh_rollups(
+    State(s): State<AppState>,
+    Query(q): Query<MeshRollupQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !proto::frame::valid_channel(&q.channel) || q.channel.starts_with('@') {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "name one ordinary channel",
+        ));
+    }
+    if s.store().channel_get(&q.channel)?.is_none() {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "this node does not hold that channel",
+        ));
+    }
+    let mesh = s.mesh.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "hub rollups are optional and this node has no hub configured",
+        )
+    })?;
+    mesh.rollups(&q.channel).await.map(Json).map_err(|error| {
+        let status = match &error {
+            crate::mesh::client::HubError::Refused { status: 403, .. } => StatusCode::FORBIDDEN,
+            crate::mesh::client::HubError::Refused { status: 404, .. } => StatusCode::NOT_FOUND,
+            crate::mesh::client::HubError::Local(_) => StatusCode::BAD_REQUEST,
+            crate::mesh::client::HubError::Refused { .. } | crate::mesh::client::HubError::Transport(_) => {
+                StatusCode::BAD_GATEWAY
+            }
+        };
+        ApiError::new(status, format!("hub rollup unavailable: {error}"))
+    })
+}
+
 pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
+
     let row = s.store().get_node(&s.node_id)?;
     let Some(n) = row else {
         return Ok(
@@ -476,6 +550,260 @@ pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
     v["providers"] = json!(providers_json(s));
     v["default_channel"] = json!(s.cfg.session.default_channel);
     Ok(v)
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferDelivery {
+    Portable,
+    Mesh,
+}
+
+impl Default for TransferDelivery {
+    fn default() -> Self {
+        Self::Portable
+    }
+}
+/// A local inbox of immutable packages. The package bytes remain behind the
+/// transfer id; the list is enough to choose an explicit import.
+pub async fn list_transfers(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let mut transfers = Vec::new();
+    for transfer in s.store().transfer_summaries()? {
+        let import = s.store().transfer_import(&transfer.id)?;
+        transfers.push(json!({
+            "id": transfer.id,
+            "candidate_id": transfer.candidate_id,
+            "channel": transfer.channel,
+            "origin_node": transfer.origin_node,
+            "target_node": transfer.target_node,
+            "created_ms": transfer.created_ms,
+            "files": transfer.file_count,
+            "documents": transfer.document_count,
+            "memories": transfer.memory_count,
+            "note": transfer.handoff_note,
+            "import_state": import.as_ref().map(|row| &row.state),
+            "session_id": import.and_then(|row| row.session_id),
+        }));
+    }
+    Ok(Json(json!({ "transfers": transfers })))
+}
+
+
+#[derive(Deserialize)]
+pub struct ExportTransferBody {
+    candidate_id: String,
+    #[serde(default)]
+    context: ContextSelection,
+    #[serde(default)]
+    destination_node: Option<String>,
+    #[serde(default)]
+    delivery: TransferDelivery,
+}
+
+/// Create a signed portable package. Choosing `mesh` delivers the same package
+/// direct-sealed to that exact peer and never substitutes a local import when
+/// mesh delivery is unavailable.
+pub async fn export_transfer(
+    State(s): State<AppState>,
+    Json(body): Json<ExportTransferBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (identity, _) = crate::mesh::identity::load_or_generate()
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let transfer = transfers::export(
+        s.store(),
+        &identity,
+        &body.candidate_id,
+        body.context,
+        body.destination_node.clone(),
+    )?;
+    match body.delivery {
+        TransferDelivery::Portable => Ok(Json(json!({
+            "delivery": "portable",
+            "transfer": transfer,
+            "note": "Save this signed package and confirm import on the receiving node.",
+        }))),
+        TransferDelivery::Mesh => {
+            let destination = body.destination_node.ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "online delivery needs one destination node",
+                )
+            })?;
+            if !s
+                .store()
+                .nodes_in_channel(&transfer.payload.channel)?
+                .iter()
+                .any(|node| node == &destination)
+            {
+                return Err(TransferError::DestinationUnauthorized(
+                    transfer.payload.channel.clone(),
+                )
+                .into());
+            }
+            if transfer.serialized_len()? > transfers::MAX_MESH_TRANSFER_BYTES {
+                return Err(TransferError::MeshTooLarge.into());
+            }
+            let mesh = s.mesh.as_ref().ok_or(TransferError::MeshUnavailable)?;
+            mesh.enqueue_direct(
+                &transfer.payload.channel,
+                &destination,
+                &proto::frame::Payload::CandidateTransfer {
+                    transfer: serde_json::to_value(&transfer)?,
+                },
+            )
+            .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
+            s.store().append_transfer_event(
+                transfer.id(),
+                "mesh_queued",
+                Some(&destination),
+                None,
+            )?;
+            Ok(Json(json!({
+                "delivery": "mesh_queued",
+                "transfer": transfer,
+                "destination_node": destination,
+                "note": "The recipient must explicitly confirm import; no session has moved.",
+            })))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct StageTransferBody {
+    transfer: SignedTransfer,
+}
+
+/// Verify and persist a portable package before showing the explicit import
+/// confirmation. Staging never constructs a workspace or starts a session.
+pub async fn stage_transfer(
+    State(s): State<AppState>,
+    Json(body): Json<StageTransferBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    transfers::authorize_receiver(s.store(), &s.node_id, &body.transfer)?;
+    transfers::record_portable_receipt(s.store(), &body.transfer)?;
+    Ok(Json(json!({
+        "id": body.transfer.id(),
+        "candidate_id": body.transfer.payload.candidate_id,
+        "channel": body.transfer.payload.channel,
+        "origin_node": body.transfer.payload.origin_node,
+        "target_node": body.transfer.payload.target_node,
+        "files": body.transfer.payload.files.len(),
+        "documents": body.transfer.payload.context.documents.len(),
+        "memories": body.transfer.payload.context.memories.len(),
+        "confirmation_required": true,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct ImportTransferBody {
+    /// A package can be inspected and staged automatically, but materializing
+    /// its code and starting a harness always needs this explicit operator bit.
+    confirm: bool,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    budget_tokens: Option<i64>,
+    #[serde(default)]
+    branch: Option<String>,
+}
+
+/// Turn one staged, verified transfer into a new, local execute session. This
+/// has no relationship to the origin session beyond immutable candidate data.
+pub async fn import_transfer(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ImportTransferBody>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    if !body.confirm {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "set confirm=true to materialize this staged transfer",
+        ));
+    }
+    let row = s
+        .store()
+        .transfer(&id)?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "transfer not found"))?;
+    let transfer: SignedTransfer = serde_json::from_str(&row.package_json)
+        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "stored transfer is corrupt"))?;
+    transfers::authorize_receiver(s.store(), &s.node_id, &transfer)?;
+    match s.store().reserve_transfer_import(&id)? {
+        crate::store::ImportReservation::Reserved => {}
+        crate::store::ImportReservation::Imported => {
+            return Err(ApiError::new(StatusCode::CONFLICT, "this transfer has already been imported"));
+        }
+        crate::store::ImportReservation::Preparing => {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "this transfer may already be importing; its outcome is intentionally not guessed",
+            ));
+        }
+    }
+    let workspace = match transfers::import_workspace(
+        &transfer,
+        &s.cfg.publish.git,
+        s.manager.backend().as_ref(),
+    )
+    .await
+    {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            let detail = error.to_string();
+            s.store().fail_transfer_import(&id, &detail, None)?;
+            s.store().append_transfer_event(&id, "import_failed", Some(&detail), None)?;
+            return Err(error.into());
+        }
+    };
+    let branch = body
+        .branch
+        .unwrap_or_else(|| format!("continuation/{}", id.get(..12).unwrap_or(&id)));
+    let spec = NewSession {
+        channel: transfer.payload.channel.clone(),
+        repo_path: String::new(),
+        branch: Some(branch),
+        work_item_id: None,
+        model: body.model,
+        budget_tokens: body.budget_tokens,
+        node_id: None,
+        phase: Phase::Execute,
+        review_id: None,
+        base_sha: None,
+        workspace_id: Some(workspace.id.clone()),
+    };
+    let session = match s.manager.create_local(spec).await {
+        Ok(session) => session,
+        Err(error) => {
+            let detail = error.to_string();
+            s.store()
+                .fail_transfer_import(&id, &detail, Some(&workspace.id))?;
+            s.store().append_transfer_event(&id, "import_failed", Some(&detail), None)?;
+            return Err(error.into());
+        }
+    };
+    s.store()
+        .complete_transfer_import(&id, &workspace.id, &session.id)?;
+    s.store()
+        .append_transfer_event(&id, "imported", Some(&workspace.id), Some(&session.id))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "transfer_id": id,
+            "workspace_id": workspace.id,
+            "session": session,
+            "source_session_changed": false,
+        })),
+    ))
+}
+
+pub async fn get_transfer(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let transfer = s
+        .store()
+        .transfer_summary(&id)?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "transfer not found"))?;
+    let events = s.store().transfer_events(&id)?;
+    Ok(Json(json!({ "transfer": transfer, "events": events })))
 }
 
 pub(crate) fn node_row_json(n: &crate::store::NodeRow) -> serde_json::Value {

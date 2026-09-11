@@ -87,6 +87,93 @@ export interface MeshState {
   last_refusal: string | null
 }
 
+/** An opt-in aggregate retained by a hub that holds this channel's key. */
+export interface HubRollup {
+  node_id: string
+  seq: number
+  captured_ms: number
+  received_ms: number
+  complete: boolean
+  freshness: 'current' | 'stale'
+  session_counts: Record<string, number>
+  queued_permissions: number
+  queued_reviews: number
+  work_items: number
+  documents: number
+  memories: number
+}
+
+export interface HubRollups {
+  channel: string
+  state: 'current_complete' | 'partial' | 'stale'
+  summaries: HubRollup[]
+  coverage: {
+    expected_nodes: string[]
+    missing_nodes: string[]
+    stale_nodes: string[]
+    partial_nodes: string[]
+    current_complete: boolean
+  }
+}
+
+export interface TransferFile {
+  path: string
+  mode: number
+  content_b64: string
+}
+
+/** A signed portable continuity package. Importing remains a separate explicit action. */
+export interface CandidateTransfer {
+  payload: {
+    version: number
+    candidate_id: string
+    channel: string
+    origin_node: string
+    target_node: string | null
+    created_ms: number
+    candidate: unknown
+    evidence: unknown
+    files: TransferFile[]
+    context: { documents: unknown[]; memories: unknown[]; note: string }
+  }
+  sha256: string
+  signature: string
+}
+
+export interface TransferStage {
+  id: string
+  candidate_id: string
+  channel: string
+  origin_node: string
+  target_node: string | null
+  files: number
+  documents: number
+  memories: number
+  confirmation_required: boolean
+}
+
+export interface TransferInboxItem {
+  id: string
+  candidate_id: string
+  channel: string
+  origin_node: string
+  target_node: string | null
+  created_ms: number
+  files: number
+  documents: number
+  memories: number
+  note: string
+  import_state: 'preparing' | 'imported' | 'failed' | null
+  session_id: string | null
+}
+
+export interface TransferImport {
+  transfer_id: string
+  workspace_id: string
+  session: Session
+  source_session_changed: false
+}
+
 export interface Invite {
   code: string
   display_code: string

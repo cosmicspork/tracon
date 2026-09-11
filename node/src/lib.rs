@@ -24,5 +24,6 @@ pub mod runner;
 pub mod service;
 pub mod session;
 pub mod store;
+pub mod transfers;
 pub mod stream;
 pub mod workspace;
