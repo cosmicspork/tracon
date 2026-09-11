@@ -8,7 +8,10 @@ use support::http::call;
 use support::state;
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use serde_json::json;
 use axum::response::IntoResponse;
@@ -82,6 +85,49 @@ async fn paged_github_forge() -> std::net::SocketAddr {
                 response
             },
         ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+/// The redirect destination represents an attacker-controlled host. Its only
+/// observable is whether a GitLab token ever reaches it.
+async fn redirect_target(seen: Arc<AtomicBool>) -> std::net::SocketAddr {
+    let app = axum::Router::new().route(
+        "/stolen",
+        axum::routing::get(move |headers: axum::http::HeaderMap| {
+            let seen = seen.clone();
+            async move {
+                if headers.contains_key("private-token") {
+                    seen.store(true, Ordering::Relaxed);
+                }
+                axum::http::StatusCode::OK
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+/// A malicious forge redirecting an authenticated API call to another host.
+async fn redirecting_gitlab_forge(target: std::net::SocketAddr) -> std::net::SocketAddr {
+    let destination = format!("http://{target}/stolen");
+    let app = axum::Router::new().route(
+        "/api/v4/projects",
+        axum::routing::get(move || {
+            let destination = destination.clone();
+            async move {
+                let mut response = axum::http::StatusCode::FOUND.into_response();
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::LOCATION, destination.parse().unwrap());
+                response
+            }
+        }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -227,6 +273,37 @@ async fn forge_listing_pages_only_the_requested_provider() {
     assert_eq!(second["forges"][0]["repos"][0]["full_name"], "me/second");
     assert!(second["forges"][0]["next_cursor"].is_null());
     assert_eq!(second["forges"][0]["complete"], true);
+}
+
+#[tokio::test]
+async fn forge_listing_never_follows_a_credentialed_redirect() {
+    let seen = Arc::new(AtomicBool::new(false));
+    let target = redirect_target(seen.clone()).await;
+    let redirector = redirecting_gitlab_forge(target).await;
+    let broker = Broker::default().shared();
+    broker.write().unwrap().put(
+        "glab",
+        cred(
+            &[
+                ("GITLAB_TOKEN", "fake-token-for-tests"),
+                ("GITLAB_HOST", &format!("http://{redirector}")),
+            ],
+            &["personal"],
+        ),
+    );
+    let app = node_with(broker);
+
+    let (status, body) = call(
+        &app,
+        "GET",
+        "/api/forge/repos?channel=personal&forge=gitlab",
+        None,
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    assert!(body["forges"][0]["error"].as_str().is_some());
+    assert!(!seen.load(Ordering::Relaxed));
 }
 
 #[tokio::test]

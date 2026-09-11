@@ -16,30 +16,6 @@ permissions:
   pull-requests: write
 
 jobs:
-  # Release-please may prepare metadata without signing material. This gate
-  # blocks only the macOS artefacts that would otherwise be unsigned.
-  release-auth:
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    runs-on: ubuntu-24.04
-    permissions: {}
-    steps:
-      - name: Require Apple publisher credentials
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
-        run: |
-          test -n "${APPLE_CERTIFICATE:-}" || { echo "APPLE_CERTIFICATE is required"; exit 1; }
-          test -n "${APPLE_CERTIFICATE_PASSWORD:-}" || { echo "APPLE_CERTIFICATE_PASSWORD is required"; exit 1; }
-          test -n "${KEYCHAIN_PASSWORD:-}" || { echo "KEYCHAIN_PASSWORD is required"; exit 1; }
-          test -n "${APPLE_API_ISSUER:-}" || { echo "APPLE_API_ISSUER is required"; exit 1; }
-          test -n "${APPLE_API_KEY:-}" || { echo "APPLE_API_KEY is required"; exit 1; }
-          test -n "${APPLE_API_KEY_BASE64:-}" || { echo "APPLE_API_KEY_BASE64 is required"; exit 1; }
-
   # Opens/updates a release PR from the conventional-commit history; merging it
   # tags the release and sets release_created=true. On a manual re-run the
   # named tag is treated as the release to attach artefacts to.
@@ -218,7 +194,7 @@ jobs:
   # download is a working install. macOS bundles are Developer ID signed and
   # notarized; every desktop asset also carries GitHub build provenance.
   gui:
-    needs: [release-please, release-auth]
+    needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     strategy:
       matrix:
@@ -248,6 +224,12 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
         run: |
+          test -n "${APPLE_CERTIFICATE:-}" || { echo "APPLE_CERTIFICATE is required"; exit 1; }
+          test -n "${APPLE_CERTIFICATE_PASSWORD:-}" || { echo "APPLE_CERTIFICATE_PASSWORD is required"; exit 1; }
+          test -n "${KEYCHAIN_PASSWORD:-}" || { echo "KEYCHAIN_PASSWORD is required"; exit 1; }
+          test -n "${APPLE_API_ISSUER:-}" || { echo "APPLE_API_ISSUER is required"; exit 1; }
+          test -n "${APPLE_API_KEY:-}" || { echo "APPLE_API_KEY is required"; exit 1; }
+          test -n "${APPLE_API_KEY_BASE64:-}" || { echo "APPLE_API_KEY_BASE64 is required"; exit 1; }
           certificate="$RUNNER_TEMP/tracon-developer-id.p12"
           keychain="$RUNNER_TEMP/tracon-build.keychain-db"
           printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$certificate"
@@ -343,7 +325,7 @@ jobs:
 
   # One checksums.txt for install.sh, after every binary is attached.
   checksums:
-    needs: [release-please, release-auth, binaries, gui]
+    needs: [release-please, binaries]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-24.04
     permissions:

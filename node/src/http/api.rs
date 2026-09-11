@@ -428,7 +428,6 @@ pub async fn forge_repos(
         None => None,
     };
     let out = crate::forge::list_repos(
-        &s.tools.http,
         &s.tools.broker,
         &q.channel,
         &s.node_id,

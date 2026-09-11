@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -130,6 +131,21 @@ pub struct ForgeRepos {
 const REPOS_PER_PAGE: u32 = 50;
 const MAX_REPO_PAGE: u32 = 100;
 
+/// Credential-bearing forge requests never follow redirects, so a provider
+/// cannot send its authorization header to another host.
+static FORGE_LISTING_HTTP: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("could not initialize forge listing client: {error}"))
+});
+
+fn forge_listing_http() -> Result<&'static reqwest::Client, String> {
+    FORGE_LISTING_HTTP
+        .as_ref()
+        .map_err(|error| error.clone())
+}
+
 struct RepoPage {
     repos: Vec<Repo>,
     next_cursor: Option<String>,
@@ -141,13 +157,13 @@ struct RepoPage {
 /// bounded provider page at a time. `only` is used by the picker when it loads
 /// another page from one forge; no request can exhaust a forge in one call.
 pub async fn list_repos(
-    http: &reqwest::Client,
     broker: &SharedBroker,
     channel: &str,
     node_id: &str,
     only: Option<Forge>,
     cursor: Option<&str>,
 ) -> Vec<ForgeRepos> {
+    let http = forge_listing_http();
     let mut out = Vec::new();
     for forge in [Forge::Github, Forge::Gitlab] {
         if only.is_some_and(|selected| selected != forge) {
@@ -173,21 +189,9 @@ pub async fn list_repos(
                 continue;
             }
         };
-        let entry = match fetch_repos(http, forge, &env, cursor).await {
-            Ok(page) => ForgeRepos {
-                forge: forge.name(),
-                repos: page.repos,
-                next_cursor: page.next_cursor,
-                complete: page.complete,
-                error: page.error,
-            },
-            Err(e) => ForgeRepos {
-                forge: forge.name(),
-                repos: Vec::new(),
-                next_cursor: None,
-                complete: false,
-                error: Some(e),
-            },
+        let entry = match &http {
+            Ok(http) => fetch_repos(http, forge, &env, cursor).await,
+            Err(error) => Err(error.clone()),
         };
         out.push(entry);
     }

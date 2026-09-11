@@ -866,9 +866,9 @@ async fn download_and_swap(
     Ok(())
 }
 
-/// The first signed install is authenticated by macOS Gatekeeper. Every
-/// self-update then preserves both the signed bundle identifier and Developer
-/// ID team, so a release asset cannot substitute a different publisher.
+/// A self-signed code signature can claim any team identifier. Gatekeeper must
+/// first assess each bundle against Apple's Developer ID policy; only then do
+/// self-updates preserve the authenticated bundle identifier and team.
 #[cfg(target_os = "macos")]
 fn verify_same_publisher(installed: &Path, staged: &Path) -> Result<(), String> {
     let installed = publisher_identity(installed)?;
@@ -887,6 +887,14 @@ struct PublisherIdentity {
 
 #[cfg(target_os = "macos")]
 fn publisher_identity(bundle: &Path) -> Result<PublisherIdentity, String> {
+    let assessed = Command::new("/usr/sbin/spctl")
+        .args(["--assess", "--type", "execute", "--ignore-cache", "--verbose=4"])
+        .arg(bundle)
+        .status()
+        .map_err(|_| PUBLISHER_MISMATCH_MESSAGE.to_string())?;
+    if !assessed.success() {
+        return Err(PUBLISHER_MISMATCH_MESSAGE.to_string());
+    }
     let verified = Command::new("/usr/bin/codesign")
         .args(["--verify", "--deep", "--strict"])
         .arg(bundle)
