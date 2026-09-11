@@ -565,3 +565,107 @@ fn unique(values: Vec<String>) -> Vec<String> {
         .filter(|value| seen.insert(value.clone()))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::store::candidate::{CandidateFile, CandidateRow};
+
+    const HEAD_SHA: &str = "deadbeefcafebabedeadbeefcafebabedeadbeef";
+    // The real git tree hash for one file `hello.txt` containing `hello\n`
+    // at mode 100644, cross-checked against actual `git` in git_tree's tests.
+    const TREE_SHA: &str = "aaa96ced2d9a1c8e72c56b253a0e2fe78393feb7";
+
+    fn setup() -> (Store, proto::keys::Identity, String) {
+        let store = Store::open_in_memory().unwrap();
+        let identity = proto::keys::Identity::from_seed(&[9u8; 32]);
+        store.channel_put("personal", b"ring", "{}").unwrap();
+        let candidate_id = format!("{HEAD_SHA}:personal");
+        store
+            .insert_candidate(&CandidateRow {
+                id: candidate_id.clone(),
+                head_sha: HEAD_SHA.into(),
+                tree_sha: Some(TREE_SHA.into()),
+                channel: "personal".into(),
+                owner_session_id: "s1".into(),
+                source_kind: "git".into(),
+                captured_ms: 1,
+                capture_json: r#"{"materialized":true}"#.into(),
+            })
+            .unwrap();
+        store
+            .insert_candidate_files(
+                &candidate_id,
+                &[CandidateFile {
+                    path: "hello.txt".into(),
+                    mode: 0o100644,
+                    content: b"hello\n".to_vec(),
+                }],
+            )
+            .unwrap();
+        (store, identity, candidate_id)
+    }
+
+    #[test]
+    fn export_then_verify_round_trips() {
+        let (store, identity, candidate_id) = setup();
+        let transfer = export(
+            &store,
+            &identity,
+            &candidate_id,
+            ContextSelection::default(),
+            None,
+        )
+        .unwrap();
+        transfer.verify().unwrap();
+    }
+
+    #[test]
+    fn verify_rejects_evidence_naming_a_different_candidate() {
+        let (store, identity, candidate_id) = setup();
+        let mut transfer = export(
+            &store,
+            &identity,
+            &candidate_id,
+            ContextSelection::default(),
+            None,
+        )
+        .unwrap();
+        transfer.payload.evidence["candidate"]["id"] = json!("some-other-candidate");
+        assert!(matches!(transfer.verify(), Err(TransferError::Invalid(_))));
+    }
+
+    #[test]
+    fn verify_rejects_files_that_do_not_match_the_candidate_tree() {
+        let (store, identity, candidate_id) = setup();
+        let mut transfer = export(
+            &store,
+            &identity,
+            &candidate_id,
+            ContextSelection::default(),
+            None,
+        )
+        .unwrap();
+        transfer.payload.files[0].content_b64 =
+            base64::engine::general_purpose::STANDARD.encode(b"tampered");
+        assert!(matches!(transfer.verify(), Err(TransferError::Invalid(_))));
+    }
+
+    #[test]
+    fn verify_rejects_a_candidate_with_no_recorded_tree_hash() {
+        let (store, identity, candidate_id) = setup();
+        let mut transfer = export(
+            &store,
+            &identity,
+            &candidate_id,
+            ContextSelection::default(),
+            None,
+        )
+        .unwrap();
+        transfer.payload.candidate["tree_sha"] = Value::Null;
+        transfer.payload.evidence["candidate"]["tree_sha"] = Value::Null;
+        assert!(matches!(transfer.verify(), Err(TransferError::Invalid(_))));
+    }
+}
