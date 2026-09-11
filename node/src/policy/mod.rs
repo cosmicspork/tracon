@@ -90,7 +90,7 @@ impl Rule {
         // are not a shell line and carry no chaining to guard against. The
         // guard that matters for a tool is the tool's own (the SQL guard, the
         // review capture), which runs after policy says yes.
-        if req.kind == Some(crate::mcp::TOOL_KIND) {
+        if req.kind == Some(crate::mcp::TOOL_KIND) || req.kind == Some("authority") {
             let named = self.matches.is_empty()
                 || self
                     .matches
@@ -176,6 +176,10 @@ pub struct Policy {
     pub version: u32,
     #[serde(default, rename = "rule")]
     pub rules: Vec<Rule>,
+    /// Set only after cryptographic bundle verification. Local grants may add
+    /// narrowly scoped authority only while this boundary is intact.
+    #[serde(skip)]
+    pub trusted: bool,
 }
 
 impl Policy {
@@ -222,7 +226,10 @@ pub const WORKING_AGREEMENTS: &str = include_str!("working-agreements.toml");
 impl Policy {
     /// The bundle this binary ships, parsed. What `tracon policy init` signs.
     pub fn shipped() -> Self {
-        toml::from_str(WORKING_AGREEMENTS).expect("the shipped bundle parses")
+        let mut policy: Self =
+            toml::from_str(WORKING_AGREEMENTS).expect("the shipped bundle parses");
+        policy.trusted = true;
+        policy
     }
 
     pub fn shipped_shared() -> std::sync::Arc<std::sync::RwLock<Self>> {

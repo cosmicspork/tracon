@@ -210,7 +210,7 @@ export interface Review {
   base_ref: string
   added: number
   removed: number
-  state: 'new' | 'claimed' | 'revising' | 'approved' | 'rejected' | 'gone'
+  state: 'new' | 'claimed' | 'revising' | 'publishing' | 'approved' | 'rejected' | 'gone'
   verdict_reason: string | null
   publish_result: string | null
   claimed_ms: number | null
@@ -377,6 +377,31 @@ export interface ForgeList {
   next_cursor?: string
   complete: boolean
   error?: string
+}
+
+export interface PolicyRule {
+  id: string
+  verdict: 'allow' | 'ask' | 'deny'
+  reason: string
+  kinds: string[]
+  channels: string[]
+  matches: string[]
+  args: Record<string, string[]>
+}
+
+/** A narrow local authority decision. It never edits the signed policy bundle. */
+export interface AuthorityGrant {
+  id: string
+  action: 'merge' | 'publish' | 'ticket_transition' | 'deploy' | 'browser_verify' | 'browser_test_account'
+  verdict: 'allow' | 'ask' | 'deny'
+  target: string
+  channel: string
+  session_id: string | null
+  revision: string | null
+  expires_ms: number | null
+  revoked_ms: number | null
+  reason: string
+  created_ms: number
 }
 
 export interface Queue {

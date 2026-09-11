@@ -25,7 +25,7 @@
   <span class="bar"></span>
   <span class="mono">{formatAge(review.created_ms, clock.now)}</span>
   <span class="t">
-    <em>{review.state === 'revising' ? 'Changes requested' : 'Review'}</em>
+    <em>{review.state === 'revising' ? 'Changes requested' : review.state === 'publishing' ? 'Publishing — reconcile' : 'Review'}</em>
     {review.title}
     <small
       ><span class="chip" class:self={owner?.is_self} class:off={held !== null}>{chipLabel(store.nodes, review.node_id)}</span> · {noun} · {files} files · +{review.added} −{review.removed} · {review.channel}{review.claimed_ms
@@ -35,7 +35,7 @@
         · reviewing{/if}</small
     >
   </span>
-  <span class="act">{held !== null ? `${held} · cannot be decided until it returns` : 'Open'}</span>
+  <span class="act">{held !== null ? `${held} · cannot be decided until it returns` : review.state === 'publishing' ? 'Reconcile' : 'Open'}</span>
 </a>
 
 <style>

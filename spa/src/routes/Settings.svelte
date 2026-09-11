@@ -32,7 +32,7 @@
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { UpdateStatus } from '../lib/desktop-update'
-  import type { BoundaryCheck, EnrollStatus, NodeConfig } from '../lib/types'
+  import type { AuthorityGrant, BoundaryCheck, EnrollStatus, NodeConfig, PolicyRule } from '../lib/types'
 
   const local = $derived(store.node?.loopback ?? false)
   const origin = typeof location === 'undefined' ? '' : location.origin
@@ -121,6 +121,42 @@
     })
   }
 
+
+  let authority = $state<{ policy: { version: number; rules: PolicyRule[]; trusted: boolean }; grants: AuthorityGrant[] } | null>(null)
+  let grant = $state({
+    action: 'merge' as AuthorityGrant['action'],
+    verdict: 'allow' as AuthorityGrant['verdict'],
+    target: '',
+    channel: '',
+    session_id: null as string | null,
+    revision: null as string | null,
+    expires_ms: null as number | null,
+    reason: '',
+  })
+  async function loadAuthority() {
+    authority = await api.authorityGrants()
+  }
+  void loadAuthority()
+  function saveGrant() {
+    return act('authority', async () => {
+      await api.createAuthorityGrant({
+        ...grant,
+        channel: grant.channel.trim() || (store.node?.default_channel ?? 'personal'),
+        target: grant.target.trim(),
+        revision: grant.revision?.trim() || null,
+        session_id: grant.session_id?.trim() || null,
+        reason: grant.reason.trim(),
+      })
+      grant = { action: 'merge', verdict: 'allow', target: '', channel: '', session_id: null, revision: null, expires_ms: null, reason: '' }
+      await loadAuthority()
+    })
+  }
+  function revokeGrant(id: string) {
+    return act('authority', async () => {
+      await api.revokeAuthorityGrant(id)
+      await loadAuthority()
+    })
+  }
   // --- phase models -----------------------------------------------------
   // A channel decides which model plans and which one builds, so the operator
   // names them once instead of at every start. The node reads the same keys.
@@ -443,6 +479,7 @@
       <label>
         <span>Session budget (tokens)</span>
         <input type="number" bind:value={form.session.budget_tokens} disabled={!local} />
+
       </label>
       <label>
         <span>Default channel</span>
@@ -479,6 +516,50 @@
 <section id="credentials">
   <div class="h5">Credentials <b>provider and forge access held by this node</b></div>
   <CredentialSettings />
+</section>
+<section id="authority">
+  <div class="h5">Authority <b>signed policy is inspectable; local grants are narrow and revocable</b></div>
+  {#if authority}
+    {#if authority.policy.trusted}
+      <p class="why">Policy bundle version {authority.policy.version} has {authority.policy.rules.length} signed rules. This interface cannot change signing keys, trust roots, or policy text.</p>
+    {:else}
+      <div class="banner crit">policy verification failed <b>· consequential actions fail closed; local allow grants cannot authorize them until a valid signed bundle is installed</b></div>
+    {/if}
+    <div class="credentials">
+      {#each authority.policy.rules as rule (rule.id)}
+        <div class="credential">
+          <b>{rule.verdict} · {rule.id}</b>
+          <small>{rule.reason}</small>
+          <span>kinds: {rule.kinds.length ? rule.kinds.join(', ') : 'all'} · channels: {rule.channels.length ? rule.channels.join(', ') : 'all'}</span>
+          {#if rule.matches.length}<span>matches: {rule.matches.join(', ')}</span>{/if}
+          {#if Object.keys(rule.args).length}<span>arguments: {Object.entries(rule.args).map(([key, values]) => `${key}=${values.join('|')}`).join(', ')}</span>{/if}
+        </div>
+      {/each}
+    </div>
+    <div class="grid">
+      <label><span>Action</span><select bind:value={grant.action} disabled={!local}><option value="merge">merge</option><option value="publish">publish</option><option value="ticket_transition">ticket transition</option><option value="deploy">deploy</option></select></label>
+      <label><span>Decision</span><select bind:value={grant.verdict} disabled={!local}><option value="allow">allow</option><option value="ask">ask</option><option value="deny">deny</option></select></label>
+      <label><span>Canonical target</span><input bind:value={grant.target} disabled={!local} placeholder="github:owner/repo:pr:42" /></label>
+      <label><span>Channel</span><input bind:value={grant.channel} disabled={!local} placeholder={store.node?.default_channel ?? 'personal'} /></label>
+      <label><span>Session (optional)</span><input bind:value={grant.session_id} disabled={!local} placeholder="limit this grant to one session id" /></label>
+      <label><span>Immutable revision (optional)</span><input bind:value={grant.revision} disabled={!local} placeholder="commit SHA" /></label>
+      <label><span>Expires at (optional)</span><input type="datetime-local" value={grant.expires_ms ? new Date(grant.expires_ms).toISOString().slice(0, 16) : ''} onchange={(e) => grant.expires_ms = e.currentTarget.value ? Date.parse(e.currentTarget.value) : null} disabled={!local} /></label>
+      <label><span>Reason</span><input bind:value={grant.reason} disabled={!local} placeholder="why this precise action is permitted" /></label>
+    </div>
+    <div class="acts"><button class="btn p" onclick={saveGrant} disabled={!local || busy !== ''}>Add scoped grant</button></div>
+    {#if authority.grants.length}
+      <div class="credentials">
+        {#each authority.grants as item (item.id)}
+          <div class:dim={item.revoked_ms !== null} class="credential">
+            <b>{item.verdict} {item.action}</b>
+            <span>{item.target} · {item.channel}{item.revision ? ` · ${item.revision}` : ''}{item.expires_ms ? ` · expires ${new Date(item.expires_ms).toLocaleString()}` : ''}</span>
+            <small>{item.reason}</small>
+            {#if item.revoked_ms === null}<button class="btn" onclick={() => revokeGrant(item.id)} disabled={!local || busy !== ''}>Revoke</button>{:else}<small>revoked</small>{/if}
+          </div>
+        {/each}
+      </div>
+    {:else}<div class="empty">No local grants. Unmatched consequential actions ask.</div>{/if}
+  {:else}<div class="empty">Reading signed policy and local grants…</div>{/if}
 </section>
 
 <!-- 4. The channels, what each runs, and which are still in use. -->

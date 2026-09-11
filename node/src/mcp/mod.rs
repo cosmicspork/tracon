@@ -69,6 +69,16 @@ pub struct CallContext {
     pub node_id: String,
 }
 
+struct GatedCall {
+    arguments: Option<Value>,
+    one_shot: bool,
+}
+
+enum ActionRecord {
+    New(String),
+    Replay(Value),
+}
+
 impl Tools {
     /// The tools a review session gets: what it needs to read, and its
     /// verdict. Nothing that writes, publishes, or reaches a forge.
@@ -166,26 +176,113 @@ impl Tools {
             return operator::call(&access.store, &access.manager, &self.cfg, ctx, name, args)
                 .await;
         }
-        let edited = if plan_write {
-            None
+        if consequential_name(name) && consequential(name, args).is_none() {
+            return Err(
+                "consequential calls require a valid operation_id and canonical arguments".into(),
+            );
+        }
+        let gated = if plan_write {
+            GatedCall {
+                arguments: None,
+                one_shot: false,
+            }
         } else {
             self.gate(ctx, name, args).await?
         };
-        let args = edited.as_ref().unwrap_or(args);
-        match name {
+        let args = gated.arguments.as_ref().unwrap_or(args);
+        if consequential_name(name) && consequential(name, args).is_none() {
+            return Err(
+                "consequential calls require a valid operation_id and canonical arguments".into(),
+            );
+        }
+        self.revalidate_consequential(ctx, name, args, gated.one_shot)?;
+        let action_record = self.begin_consequential(ctx, name, args, gated.one_shot)?;
+        if let Some(ActionRecord::Replay(outcome)) = &action_record {
+            return Ok(outcome.clone());
+        }
+        let before_mutation = || {
+            let Some(ActionRecord::New(id)) = &action_record else {
+                return Ok(());
+            };
+            let (action, target, revision) = consequential(name, args)
+                .expect("consequential action record has canonical arguments");
+            let summary = summarize(name, args);
+            let policy = self.policy.read().unwrap();
+            let tool = policy.decide(&Request {
+                channel: &ctx.channel,
+                kind: Some(TOOL_KIND),
+                title: name,
+                command: Some(&summary),
+                arguments: Some(args),
+            });
+            if tool.verdict == Verdict::Deny {
+                return Err(refusal(tool));
+            }
+            let access = self.session.get().ok_or("authority requires a session")?;
+            let decision = crate::authority::decide(
+                access.store.as_ref(),
+                &policy,
+                &crate::authority::AuthorityQuery {
+                    channel: &ctx.channel,
+                    session_id: &ctx.session_id,
+                    action,
+                    target: &target,
+                    revision: revision.as_deref(),
+                    args,
+                },
+            )?;
+            match decision.verdict {
+                Verdict::Allow => {}
+                Verdict::Ask if gated.one_shot => {}
+                Verdict::Deny => return Err(refusal(decision)),
+                Verdict::Ask => {
+                    return Err(format!(
+                        "{action} for {target} needs a current scoped authority grant"
+                    ))
+                }
+            }
+            access
+                .store
+                .authority_action_set_grant(id, decision.rule_id.as_deref())
+                .map_err(|e| e.to_string())
+        };
+        let result = match name {
             consulta::QUERY | consulta::DESCRIBE => {
                 consulta::call(&self.broker, &self.cfg, ctx, name, args).await
             }
             gitlab::MR_STATUS
             | gitlab::MR_COMMENT
+            | gitlab::MR_MERGE
             | gitlab::PIPELINE_STATUS
             | gitlab::JOB_TRACE
-            | gitlab::PIPELINE_RUN => gitlab::call(&self.broker, &self.http, ctx, name, args).await,
+            | gitlab::PIPELINE_RUN
+            | gitlab::DEPLOY => {
+                gitlab::call(
+                    &self.broker,
+                    &self.http,
+                    ctx,
+                    name,
+                    args,
+                    Some(&before_mutation),
+                )
+                .await
+            }
             jira::ISSUE
             | jira::ISSUE_SEARCH
             | jira::ISSUE_COMMENT
             | jira::ISSUE_UPDATE
-            | jira::ISSUE_CREATE => jira::call(&self.broker, &self.http, ctx, name, args).await,
+            | jira::ISSUE_CREATE
+            | jira::ISSUE_TRANSITION => {
+                jira::call(
+                    &self.broker,
+                    &self.http,
+                    ctx,
+                    name,
+                    args,
+                    Some(&before_mutation),
+                )
+                .await
+            }
             review::SUBMIT | review::STATUS | review::VERDICT => {
                 let access = self
                     .session
@@ -214,10 +311,246 @@ impl Tools {
                     .ok_or("documents are not available on this node")?;
                 docs::call(self, access, ctx, name, args).await
             }
-            github::PR_STATUS | github::PR_COMMENT | github::RUN_STATUS => {
-                github::call(&self.broker, &self.http, ctx, name, args).await
+            github::PR_STATUS | github::PR_COMMENT | github::RUN_STATUS | github::PR_MERGE => {
+                github::call(
+                    &self.broker,
+                    &self.http,
+                    ctx,
+                    name,
+                    args,
+                    Some(&before_mutation),
+                )
+                .await
             }
             other => Err(format!("no tool named {other}")),
+        };
+        let result = match (name, result) {
+            (review::SUBMIT, Ok(submitted)) => self.auto_publish_review(ctx, args, submitted).await,
+            (_, result) => result,
+        };
+        if let Some(ActionRecord::New(id)) = action_record {
+            let (state, outcome) = match &result {
+                Ok(value) => ("succeeded", value.to_string()),
+                Err(error) if remote_outcome_unknown(error) => ("uncertain", error.clone()),
+                Err(error) => ("failed", error.clone()),
+            };
+            self.session
+                .get()
+                .expect("authority record requires session")
+                .store
+                .authority_action_finish(&id, state, &outcome)
+                .map_err(|e| e.to_string())?;
+        }
+        result
+    }
+
+    async fn auto_publish_review(
+        &self,
+        ctx: &CallContext,
+        _args: &Value,
+        submitted: Value,
+    ) -> Result<Value, String> {
+        let Some(review_id) = submitted.get("review_id").and_then(Value::as_str) else {
+            return Ok(submitted);
+        };
+        let access = self.session.get().ok_or("review tools are not available")?;
+        let review = access
+            .store
+            .get_review(review_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("review disappeared after capture")?;
+        let target: crate::review::publish::Target =
+            serde_json::from_str(&review.target).map_err(|e| e.to_string())?;
+        let prose = crate::corpus::hash_body(&format!(
+            "{}\u{1f}{}",
+            review.approved_title(),
+            review.approved_body()
+        ));
+        let canonical = format!(
+            "publish:{}:{}:{}:{}:prose:{}",
+            target.provider, target.project, target.base, target.branch, prose
+        );
+        let authority_args = serde_json::json!({
+            "target": canonical.clone(),
+            "revision": review.head_sha.clone(),
+            "prose_hash": prose.clone(),
+        });
+        let decision = crate::authority::decide(
+            access.store.as_ref(),
+            &self.policy.read().unwrap(),
+            &crate::authority::AuthorityQuery {
+                channel: &ctx.channel,
+                session_id: &ctx.session_id,
+                action: crate::authority::PUBLISH,
+                target: authority_args["target"].as_str().expect("canonical target"),
+                revision: authority_args["revision"].as_str(),
+                args: &authority_args,
+            },
+        )?;
+        if decision.verdict != Verdict::Allow {
+            let mut submitted = submitted;
+            if let Some(object) = submitted.as_object_mut() {
+                object.insert(
+                    "publication_authority".into(),
+                    serde_json::json!({
+                        "action": crate::authority::PUBLISH,
+                        "target": canonical,
+                        "revision": review.head_sha,
+                        "prose_hash": prose,
+                        "state": match decision.verdict {
+                            Verdict::Allow => "allow",
+                            Verdict::Ask => "ask",
+                            Verdict::Deny => "deny",
+                        },
+                        "reason": decision.reason,
+                    }),
+                );
+            }
+            return Ok(submitted);
+        }
+        let operation_id =
+            crate::corpus::hash_body(&format!("{canonical}\u{1f}{}", review.head_sha));
+        let evidence = serde_json::json!({
+            "target": canonical.clone(),
+            "revision": review.head_sha.clone(),
+            "prose_hash": prose.clone(),
+        })
+        .to_string();
+        if let Some((state, outcome, _)) = access
+            .store
+            .authority_action_existing(
+                crate::authority::PUBLISH,
+                &canonical,
+                &ctx.channel,
+                Some(&review.head_sha),
+                &operation_id,
+            )
+            .map_err(|e| e.to_string())?
+        {
+            if state == "succeeded" {
+                return Ok(serde_json::json!({
+                    "review_id": review.id,
+                    "state": "reconcile",
+                    "authority": {
+                        "mode": "automatic",
+                        "outcome": "replayed",
+                        "published": outcome,
+                    },
+                }));
+            }
+            return Err(format!(
+                "an identical publication is {state}; reconcile its recorded external outcome before retrying"
+            ));
+        }
+        let action_id = uuid::Uuid::now_v7().to_string();
+        if let Err(error) = access
+            .store
+            .authority_action_begin(&crate::store::ActionBegin {
+                id: &action_id,
+                grant_id: decision.rule_id.as_deref(),
+                action: crate::authority::PUBLISH,
+                target: &canonical,
+                channel: &ctx.channel,
+                session_id: &ctx.session_id,
+                revision: Some(&review.head_sha),
+                operation_id: Some(&operation_id),
+                evidence: &evidence,
+            })
+        {
+            if let Some((state, outcome, _)) = access
+                .store
+                .authority_action_existing(
+                    crate::authority::PUBLISH,
+                    &canonical,
+                    &ctx.channel,
+                    Some(&review.head_sha),
+                    &operation_id,
+                )
+                .map_err(|e| e.to_string())?
+            {
+                if state == "succeeded" {
+                    return Ok(serde_json::json!({
+                        "review_id": review.id,
+                        "state": "reconcile",
+                        "authority": {
+                            "mode": "automatic",
+                            "outcome": "replayed",
+                            "published": outcome,
+                        },
+                    }));
+                }
+                return Err(format!(
+                    "an identical publication is {state}; reconcile its recorded external outcome before retrying"
+                ));
+            }
+            return Err(error.to_string());
+        }
+        let recheck = || {
+            let current = crate::authority::decide(
+                access.store.as_ref(),
+                &self.policy.read().unwrap(),
+                &crate::authority::AuthorityQuery {
+                    channel: &ctx.channel,
+                    session_id: &ctx.session_id,
+                    action: crate::authority::PUBLISH,
+                    target: &canonical,
+                    revision: Some(&review.head_sha),
+                    args: &authority_args,
+                },
+            )?;
+            if current.verdict != Verdict::Allow {
+                return Err("publication authority was revoked or no longer applies".into());
+            }
+            access
+                .store
+                .authority_action_set_grant(&action_id, current.rule_id.as_deref())
+                .map_err(|e| e.to_string())
+        };
+        match crate::authority::publish_review(
+            &crate::authority::PublishContext {
+                store: access.store.as_ref(),
+                manager: &access.manager,
+                broker: &self.broker,
+                cfg: &self.cfg,
+                node_id: &ctx.node_id,
+            },
+            crate::authority::PublishRequest {
+                review: &review,
+                title: review.approved_title(),
+                body: review.approved_body(),
+                require_evidence: true,
+                recheck_authority: Some(&recheck),
+            },
+        )
+        .await
+        {
+            Ok(published) => {
+                access
+                    .store
+                    .authority_action_finish(&action_id, "succeeded", &published)
+                    .map_err(|e| e.to_string())?;
+                Ok(serde_json::json!({
+                    "review_id": review.id, "state": "approved", "published": published,
+                    "authority": { "mode": "automatic", "id": decision.rule_id },
+                }))
+            }
+            Err(error) => {
+                let error = error.to_string();
+                access
+                    .store
+                    .authority_action_finish(&action_id, "failed", &error)
+                    .map_err(|e| e.to_string())?;
+                let state = access
+                    .store
+                    .get_review(&review.id)
+                    .map_err(|e| e.to_string())?
+                    .map(|current| current.state)
+                    .unwrap_or_else(|| "missing".into());
+                Ok(serde_json::json!({
+                    "review_id": review.id, "state": state,
+                    "authority": { "mode": "automatic", "outcome": "failed", "reason": error },
+                }))
+            }
         }
     }
 
@@ -271,16 +604,14 @@ impl Tools {
     /// proceeds. A tool the policy does not mention is therefore asked, not
     /// run — adding a tool never widens what runs unattended. Returns the
     /// arguments the operator rewrote on the card, when they did.
-    async fn gate(
-        &self,
-        ctx: &CallContext,
-        name: &str,
-        args: &Value,
-    ) -> Result<Option<Value>, String> {
+    async fn gate(&self, ctx: &CallContext, name: &str, args: &Value) -> Result<GatedCall, String> {
         let summary = summarize(name, args);
         let decision = self.decide(ctx, name, &summary, args);
         match decision.verdict {
-            Verdict::Allow => Ok(None),
+            Verdict::Allow => Ok(GatedCall {
+                arguments: None,
+                one_shot: false,
+            }),
             Verdict::Deny => Err(refusal(decision)),
             Verdict::Ask => {
                 let access = self
@@ -311,7 +642,10 @@ impl Tools {
                     .await
                     .map_err(|e| e.to_string())?
                 {
-                    PermissionReply::Selected(o) if o == OPTION_ALLOW_ONCE => Ok(None),
+                    PermissionReply::Selected(o) if o == OPTION_ALLOW_ONCE => Ok(GatedCall {
+                        arguments: None,
+                        one_shot: true,
+                    }),
                     // What runs is the operator's rewrite, and a refusal is
                     // final whoever wrote the words.
                     PermissionReply::Edited {
@@ -323,7 +657,10 @@ impl Tools {
                         if edited.verdict == Verdict::Deny {
                             return Err(refusal(edited));
                         }
-                        Ok(Some(arguments))
+                        Ok(GatedCall {
+                            arguments: Some(arguments),
+                            one_shot: true,
+                        })
                     }
                     _ => Err("the operator did not allow this call".into()),
                 }
@@ -332,23 +669,213 @@ impl Tools {
     }
 
     fn decide(&self, ctx: &CallContext, name: &str, summary: &str, args: &Value) -> Decision {
-        self.policy.read().unwrap().decide(&Request {
+        let tool = self.policy.read().unwrap().decide(&Request {
             channel: &ctx.channel,
             kind: Some(TOOL_KIND),
             title: name,
             command: Some(summary),
             arguments: Some(args),
-        })
+        });
+        if tool.verdict == Verdict::Deny {
+            return tool;
+        }
+        if let Some((action, target, revision)) = consequential(name, args) {
+            let Some(access) = self.session.get() else {
+                return Decision {
+                    verdict: Verdict::Ask,
+                    rule_id: None,
+                    reason: None,
+                };
+            };
+            return crate::authority::decide(
+                access.store.as_ref(),
+                &self.policy.read().unwrap(),
+                &crate::authority::AuthorityQuery {
+                    channel: &ctx.channel,
+                    session_id: &ctx.session_id,
+                    action,
+                    target: &target,
+                    revision: revision.as_deref(),
+                    args,
+                },
+            )
+            .unwrap_or(Decision {
+                verdict: Verdict::Ask,
+                rule_id: None,
+                reason: None,
+            });
+        }
+        tool
     }
 
-    /// Handle one MCP JSON-RPC message. Returns `None` for notifications, which
-    /// take no response.
+    fn revalidate_tool_policy(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+    ) -> Result<(), String> {
+        let summary = summarize(name, args);
+        let decision = self.policy.read().unwrap().decide(&Request {
+            channel: &ctx.channel,
+            kind: Some(TOOL_KIND),
+            title: name,
+            command: Some(&summary),
+            arguments: Some(args),
+        });
+        if decision.verdict == Verdict::Deny {
+            return Err(refusal(decision));
+        }
+        Ok(())
+    }
+
+    /// Grants are re-read after every operator wait and immediately before a
+    /// consequential request. Revocation and expiry never rely on an earlier
+    /// cached decision.
+    fn revalidate_consequential(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+        one_shot: bool,
+    ) -> Result<(), String> {
+        self.revalidate_tool_policy(ctx, name, args)?;
+        let Some((action, target, revision)) = consequential(name, args) else {
+            return Ok(());
+        };
+        let decision = crate::authority::decide(
+            self.session
+                .get()
+                .ok_or("authority requires a session")?
+                .store
+                .as_ref(),
+            &self.policy.read().unwrap(),
+            &crate::authority::AuthorityQuery {
+                channel: &ctx.channel,
+                session_id: &ctx.session_id,
+                action,
+                target: &target,
+                revision: revision.as_deref(),
+                args,
+            },
+        )?;
+        match decision.verdict {
+            Verdict::Allow => Ok(()),
+            Verdict::Deny => Err(refusal(decision)),
+            Verdict::Ask if one_shot => Ok(()),
+            Verdict::Ask => Err(format!(
+                "{action} for {target} needs a current scoped authority grant"
+            )),
+        }
+    }
+
+    fn begin_consequential(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+        one_shot: bool,
+    ) -> Result<Option<ActionRecord>, String> {
+        self.revalidate_tool_policy(ctx, name, args)?;
+        let Some((action, target, revision)) = consequential(name, args) else {
+            return Ok(None);
+        };
+        let access = self.session.get().ok_or("authority requires a session")?;
+        let decision = crate::authority::decide(
+            access.store.as_ref(),
+            &self.policy.read().unwrap(),
+            &crate::authority::AuthorityQuery {
+                channel: &ctx.channel,
+                session_id: &ctx.session_id,
+                action,
+                target: &target,
+                revision: revision.as_deref(),
+                args,
+            },
+        )?;
+        if decision.verdict != Verdict::Allow && !(one_shot && decision.verdict == Verdict::Ask) {
+            return Err("authority changed before dispatch".into());
+        }
+        let evidence = serde_json::json!({
+            "arguments": canonical_consequential_payload(name, args).expect("validated consequential arguments"),
+        }).to_string();
+        let operation_id = args["operation_id"]
+            .as_str()
+            .expect("validated operation id")
+            .trim();
+        let request_hash = crate::corpus::hash_body(&evidence);
+        if let Some((state, outcome, recorded_hash)) = access
+            .store
+            .authority_action_existing(
+                action,
+                &target,
+                &ctx.channel,
+                revision.as_deref(),
+                operation_id,
+            )
+            .map_err(|e| e.to_string())?
+        {
+            if recorded_hash != request_hash {
+                return Err("operation_id was already used for a different request".into());
+            }
+            if state == "succeeded" {
+                let outcome = outcome.unwrap_or_default();
+                return Ok(Some(ActionRecord::Replay(
+                    serde_json::from_str(&outcome).unwrap_or(serde_json::json!(outcome)),
+                )));
+            }
+            return Err(format!(
+                "this operation is {state}; reconcile its recorded external outcome before retrying"
+            ));
+        }
+        let id = uuid::Uuid::now_v7().to_string();
+        if let Err(error) = access
+            .store
+            .authority_action_begin(&crate::store::ActionBegin {
+                id: &id,
+                grant_id: decision.rule_id.as_deref(),
+                action,
+                target: &target,
+                channel: &ctx.channel,
+                session_id: &ctx.session_id,
+                revision: revision.as_deref(),
+                operation_id: Some(operation_id),
+                evidence: &evidence,
+            })
+        {
+            if let Some((state, outcome, recorded_hash)) = access
+                .store
+                .authority_action_existing(
+                    action,
+                    &target,
+                    &ctx.channel,
+                    revision.as_deref(),
+                    operation_id,
+                )
+                .map_err(|e| e.to_string())?
+            {
+                if recorded_hash != request_hash {
+                    return Err("operation_id was already used for a different request".into());
+                }
+                if state == "succeeded" {
+                    let outcome = outcome.unwrap_or_default();
+                    return Ok(Some(ActionRecord::Replay(
+                        serde_json::from_str(&outcome).unwrap_or(serde_json::json!(outcome)),
+                    )));
+                }
+                return Err(format!(
+                    "this operation is {state}; reconcile its recorded external outcome before retrying"
+                ));
+            }
+            return Err(error.to_string());
+        }
+        Ok(Some(ActionRecord::New(id)))
+    }
+
+    /// Handle one MCP JSON-RPC message. Returns `None` for notifications.
     pub async fn handle(&self, ctx: &CallContext, msg: &Value) -> Option<Value> {
-        // Notifications carry no id and expect nothing back.
         let id = msg.get("id").cloned()?;
         let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
-
         let result = match method {
             "initialize" => Ok(json!({
                 "protocolVersion": PROTOCOL_VERSION,
@@ -359,17 +886,14 @@ impl Tools {
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                match self.call(ctx, name, &args).await {
-                    Ok(v) => Ok(tool_result(&v, false)),
-                    // A refused tool is a result the model can read and act on,
-                    // not a protocol error it cannot see.
-                    Err(e) => Ok(tool_result(&json!(e), true)),
-                }
+                self.call(ctx, name, &args)
+                    .await
+                    .map(|v| tool_result(&v, false))
+                    .or_else(|e| Ok(tool_result(&json!(e), true)))
             }
             "ping" => Ok(json!({})),
             other => Err(format!("unsupported method {other}")),
         };
-
         Some(match result {
             Ok(v) => json!({ "jsonrpc": "2.0", "id": id, "result": v }),
             Err(e) => {
@@ -379,6 +903,120 @@ impl Tools {
     }
 }
 
+/// Consequential verbs carry their scope in arguments. This parser is strict:
+/// malformed input cannot fall through to an unscoped authority decision.
+fn consequential_name(name: &str) -> bool {
+    matches!(
+        name,
+        github::PR_MERGE | gitlab::MR_MERGE | gitlab::DEPLOY | jira::ISSUE_TRANSITION
+    )
+}
+
+fn consequential(name: &str, args: &Value) -> Option<(&'static str, String, Option<String>)> {
+    let string = |key| {
+        args.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    if matches!(
+        name,
+        github::PR_MERGE | gitlab::MR_MERGE | gitlab::DEPLOY | jira::ISSUE_TRANSITION
+    ) && !string("operation_id").is_some_and(|id| {
+        id.len() >= 8 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    }) {
+        return None;
+    }
+    match name {
+        github::PR_MERGE => Some((
+            crate::authority::MERGE,
+            format!(
+                "github:{}:pr:{}",
+                string("repo")?.to_ascii_lowercase(),
+                args.get("number").and_then(Value::as_i64)?,
+            ),
+            string("head_sha").map(str::to_string),
+        )),
+        gitlab::MR_MERGE => Some((
+            crate::authority::MERGE,
+            format!(
+                "gitlab:{}:mr:{}",
+                string("project")?,
+                args.get("iid").and_then(Value::as_i64)?
+            ),
+            string("head_sha").map(str::to_string),
+        )),
+        gitlab::DEPLOY => Some((
+            crate::authority::DEPLOY,
+            format!(
+                "gitlab:{}:environment:{}:pipeline:{}:job:{}",
+                string("project")?,
+                string("environment")?,
+                args.get("pipeline_id").and_then(Value::as_i64)?,
+                args.get("job_id").and_then(Value::as_i64)?,
+            ),
+            string("source_sha").map(str::to_string),
+        )),
+        jira::ISSUE_TRANSITION => {
+            let transition = string("transition_id")?;
+            if !transition
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            {
+                return None;
+            }
+            Some((
+                crate::authority::TICKET_TRANSITION,
+                format!(
+                    "jira:issue:{}:transition:{transition}",
+                    string("key")?.to_ascii_uppercase(),
+                ),
+                None,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Normalize provider defaults and ignore arguments a consequential provider
+/// does not consume before comparing a stable operation id on replay.
+fn canonical_consequential_payload(name: &str, args: &Value) -> Option<Value> {
+    let string = |key| {
+        args.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    let operation_id = string("operation_id")?;
+    match name {
+        github::PR_MERGE => Some(serde_json::json!({
+            "repo": string("repo")?.to_ascii_lowercase(), "number": args.get("number")?.as_i64()?,
+            "head_sha": string("head_sha")?, "method": string("method").unwrap_or("squash"),
+            "operation_id": operation_id,
+        })),
+        gitlab::MR_MERGE => Some(serde_json::json!({
+            "project": string("project")?, "iid": args.get("iid")?.as_i64()?,
+            "head_sha": string("head_sha")?, "squash": args.get("squash").and_then(Value::as_bool).unwrap_or(true),
+            "operation_id": operation_id,
+        })),
+        gitlab::DEPLOY => Some(serde_json::json!({
+            "project": string("project")?, "pipeline_id": args.get("pipeline_id")?.as_i64()?,
+            "job_id": args.get("job_id")?.as_i64()?, "environment": string("environment")?,
+            "source_sha": string("source_sha")?, "operation_id": operation_id,
+        })),
+        jira::ISSUE_TRANSITION => Some(serde_json::json!({
+            "key": string("key")?.to_ascii_uppercase(), "transition_id": string("transition_id")?,
+            "operation_id": operation_id,
+        })),
+        _ => None,
+    }
+}
+
+/// Only a failed mutation transport or server error has an unknown remote
+/// outcome. Read-only preflight failures are safe to retry.
+fn remote_outcome_unknown(error: &str) -> bool {
+    error.starts_with("mutation-outcome-unknown:")
+}
 fn refusal(decision: Decision) -> String {
     format!(
         "refused by policy{}: {}",

@@ -347,6 +347,81 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX operator_question_request_key ON operator_question(session_id, request_key)
         WHERE request_key IS NOT NULL;
     "#,
+    // 17: narrowly scoped, local authority decisions. Policy itself remains a
+    // separately signed bundle: grants cannot alter trust roots or rules.
+    r#"
+    CREATE TABLE authority_grant (
+        id          TEXT PRIMARY KEY,
+        action      TEXT NOT NULL,
+        verdict     TEXT NOT NULL CHECK (verdict IN ('allow','ask','deny')),
+        target      TEXT NOT NULL,
+        channel     TEXT NOT NULL,
+        session_id  TEXT,
+        revision    TEXT,
+        expires_ms  INTEGER,
+        revoked_ms  INTEGER,
+        reason      TEXT NOT NULL,
+        created_ms  INTEGER NOT NULL
+    );
+    CREATE INDEX authority_grant_live ON authority_grant(action, target, channel, revoked_ms, expires_ms);
+
+    CREATE TABLE authority_action (
+        id          TEXT PRIMARY KEY,
+        grant_id    TEXT,
+        action      TEXT NOT NULL,
+        target      TEXT NOT NULL,
+        channel     TEXT NOT NULL,
+        session_id  TEXT NOT NULL,
+        revision    TEXT,
+        evidence    TEXT NOT NULL,
+        state       TEXT NOT NULL CHECK (state IN ('pending','succeeded','failed','uncertain')),
+        outcome     TEXT,
+        created_ms  INTEGER NOT NULL,
+        updated_ms  INTEGER NOT NULL
+    );
+    CREATE INDEX authority_action_pending ON authority_action(state, created_ms);
+    "#,
+    // 15: a remote result can be lost after the provider performs the action.
+    // Keep that scope blocked rather than guessing an idempotent retry.
+    r#"
+    CREATE UNIQUE INDEX authority_action_unresolved_scope
+        ON authority_action(action, target, channel, session_id, COALESCE(revision, ''))
+        WHERE state IN ('pending', 'uncertain');
+    "#,
+    // 16: distinguish two honest requests to the same target by their final
+    // canonical arguments while still blocking replay of an uncertain one.
+    r#"
+    DROP INDEX authority_action_unresolved_scope;
+    ALTER TABLE authority_action ADD COLUMN request_hash TEXT NOT NULL DEFAULT '';
+    CREATE UNIQUE INDEX authority_action_unresolved_scope
+        ON authority_action(action, target, channel, session_id, COALESCE(revision, ''), request_hash)
+        WHERE state IN ('pending', 'uncertain');
+    "#,
+    // 17: an acknowledged success can lose its MCP response too. The caller's
+    // operation id is part of request_hash, so a replay returns its record
+    // rather than performing the remote side effect again.
+    r#"
+    DROP INDEX authority_action_unresolved_scope;
+    CREATE UNIQUE INDEX authority_action_operation
+        ON authority_action(action, target, channel, session_id, COALESCE(revision, ''), request_hash)
+        WHERE state IN ('pending', 'uncertain', 'succeeded');
+    "#,
+    // 18: operation replay protection survives a session restart.
+    r#"
+    DROP INDEX authority_action_operation;
+    CREATE UNIQUE INDEX authority_action_operation
+        ON authority_action(action, target, channel, COALESCE(revision, ''), request_hash)
+        WHERE state IN ('pending', 'uncertain', 'succeeded');
+    "#,
+    // 19: client operation ids are the stable replay key. Payload hashes stay
+    // recorded so an id cannot be reused for a changed request.
+    r#"
+    ALTER TABLE authority_action ADD COLUMN operation_id TEXT NOT NULL DEFAULT '';
+    DROP INDEX authority_action_operation;
+    CREATE UNIQUE INDEX authority_action_operation
+        ON authority_action(action, target, channel, COALESCE(revision, ''), operation_id)
+        WHERE operation_id <> '' AND state IN ('pending', 'uncertain', 'succeeded');
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

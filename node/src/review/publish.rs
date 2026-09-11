@@ -104,6 +104,7 @@ pub async fn publish(
     head_sha: &str,
     title: &str,
     body: &str,
+    before_push: Option<&(dyn Fn() -> Result<(), String> + Send + Sync)>,
 ) -> Result<String, PublishError> {
     let provider = Provider::parse(&target.provider).ok_or(PublishError::UnknownProvider {
         provider: target.provider.clone(),
@@ -123,6 +124,9 @@ pub async fn publish(
             reviewed: head_sha.to_string(),
             now,
         });
+    }
+    if let Some(recheck) = before_push {
+        recheck().map_err(PublishError::Broker)?;
     }
 
     // The push carries the credential too: a branch the forge cannot see is not
@@ -183,6 +187,9 @@ pub async fn publish(
         ],
     };
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    if let Some(recheck) = before_push {
+        recheck().map_err(PublishError::Broker)?;
+    }
     run(
         provider.command(cfg),
         worktree,
@@ -307,6 +314,7 @@ mod tests {
             "deadbeef",
             "t",
             "b",
+            None,
         )
         .await
         .unwrap_err();
@@ -332,6 +340,7 @@ mod tests {
             "deadbeef",
             "t",
             "b",
+            None,
         )
         .await
         .unwrap_err();

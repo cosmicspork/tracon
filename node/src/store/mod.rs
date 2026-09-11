@@ -18,6 +18,8 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod authority;
+pub use authority::*;
 pub mod corpus;
 pub mod metrics;
 pub mod operator;
@@ -1039,7 +1041,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id FROM review WHERE node_id=?1 AND channel=?2
-             AND state IN ('new','claimed','revising')",
+             AND state IN ('new','claimed','revising','publishing')",
         )?;
         let open: Vec<String> = stmt
             .query_map([node_id, channel], |r| r.get(0))?
@@ -1956,10 +1958,10 @@ impl Store {
     /// permission requests in the queue: requests expire, reviews do not.
     pub fn open_reviews(&self) -> Result<Vec<ReviewRow>> {
         let conn = self.conn.lock().unwrap();
-        // `publishing` is a transient in-flight state and is deliberately left
-        // out: a review mid-publish is not a card the operator can act on.
+        // An interrupted publish remains visible for operator reconciliation;
+        // it is never silently reset and retried.
         let mut stmt = conn.prepare(
-            "SELECT * FROM review WHERE state IN ('new','claimed','revising') \
+            "SELECT * FROM review WHERE state IN ('new','claimed','revising','publishing') \
              ORDER BY created_ms ASC",
         )?;
         let rows = stmt
@@ -2014,7 +2016,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
             "UPDATE review SET state='publishing', updated_ms=?2
-             WHERE id=?1 AND state IN ('new','claimed','revising')",
+             WHERE id=?1 AND state IN ('new','claimed')",
             rusqlite::params![id, now_ms()],
         )?;
         Ok(n == 1)
@@ -2101,18 +2103,18 @@ impl Store {
         head_sha: &str,
         added: i64,
         removed: i64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let n = conn.execute(
             // The patch is cleared with the notes: it described the diff that
             // has just been replaced.
             "UPDATE review SET diff=?2, files=?3, head_sha=?4, added=?5, removed=?6, state='new',
                 verdict_reason=NULL, revision_patch=NULL, claimed_ms=NULL, resolved_mono_ms=NULL,
                 updated_ms=?7
-             WHERE id=?1",
+             WHERE id=?1 AND state='revising'",
             rusqlite::params![id, diff, files, head_sha, added, removed, now_ms()],
         )?;
-        Ok(())
+        Ok(n == 1)
     }
 }
 

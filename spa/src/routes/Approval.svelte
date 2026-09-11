@@ -64,6 +64,7 @@
     ),
   )
   const editedFiles = $derived([...editable.entries()].filter(([, f]) => f.now !== f.head).length)
+  const publishing = $derived(review?.state === 'publishing')
 
   /** Fetch each reviewed file as submitted and rebuild what it changed from. */
   async function startEditing() {
@@ -160,7 +161,7 @@
   )
 
   async function decide(verdict: 'approve' | 'reject' | 'revise') {
-    if (!review) return
+    if (!review || publishing) return
     busy = true
     error = null
     try {
@@ -261,6 +262,11 @@
       changes requested <b>· waiting on the agent to resubmit · {review.verdict_reason}</b>
     </div>
   {/if}
+  {#if publishing}
+    <div class="banner crit">
+      publication outcome requires reconciliation <b>· this review may have reached the forge; do not approve, revise, or reject it again</b>
+    </div>
+  {/if}
 
   {#if stale.length > 0}
     <div class="banner crit">
@@ -271,8 +277,8 @@
   <div class="h4">
     Title and body <b>{surface.phone ? 'edited on the desktop' : 'edit before approving if you want to'}</b>
   </div>
-  <input class="edit" bind:value={title} disabled={busy || surface.phone} />
-  <textarea class="edit body" bind:value={body} disabled={busy || surface.phone}></textarea>
+  <input class="edit" bind:value={title} disabled={busy || publishing || surface.phone} />
+  <textarea class="edit body" bind:value={body} disabled={busy || publishing || surface.phone}></textarea>
   {#if edited}
     <div class="note">Edited. Approving publishes what is written here, not what was submitted.</div>
   {/if}
@@ -326,10 +332,10 @@
   {#if !surface.phone}
     <div class="editbar">
       {#if !editing}
-        <button class="btn" disabled={busy} onclick={startEditing}>Edit the diff</button>
+        <button class="btn" disabled={busy || publishing} onclick={startEditing}>Edit the diff</button>
         <span class="note">Edits go back as a request for changes; the agent applies them.</span>
       {:else}
-        <button class="btn" disabled={busy} onclick={discardEdits}>Discard edits</button>
+        <button class="btn" disabled={busy || publishing} onclick={discardEdits}>Discard edits</button>
         <span class="note"
           >{editedFiles === 0
             ? 'No edits yet.'
@@ -346,18 +352,18 @@
   {/if}
 
   <div class="verdict">
-    <button class="btn p" disabled={busy || stale.length > 0} onclick={() => decide('approve')}>
+    <button class="btn p" disabled={busy || publishing || stale.length > 0} onclick={() => decide('approve')}>
       Approve and publish
     </button>
     <input
       bind:value={reason}
       placeholder="What to change, or why you are rejecting — goes back to the agent"
-      disabled={busy}
+      disabled={busy || publishing}
     />
-    <button class="btn" disabled={busy || !reason.trim()} onclick={() => decide('revise')}>
+    <button class="btn" disabled={busy || publishing || !reason.trim()} onclick={() => decide('revise')}>
       {editedFiles > 0 ? 'Send edits and request changes' : 'Request changes'}
     </button>
-    <button class="btn d" disabled={busy || !reason.trim()} onclick={() => decide('reject')}>
+    <button class="btn d" disabled={busy || publishing || !reason.trim()} onclick={() => decide('reject')}>
       Reject
     </button>
   </div>

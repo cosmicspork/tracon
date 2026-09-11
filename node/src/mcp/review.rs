@@ -228,7 +228,7 @@ async fn submit(
                 was.unwrap_or_default()
             ));
         }
-        store
+        let revised = store
             .revise_review(
                 id,
                 &capture.diff,
@@ -238,6 +238,9 @@ async fn submit(
                 capture.removed,
             )
             .map_err(|e| e.to_string())?;
+        if !revised {
+            return Err("that review is no longer awaiting a revision".into());
+        }
         let _ = store.set_checks(id, checks_json.as_deref());
         manager.publish_queue().await;
         let reviewer = spawn_review_session(store, manager, ctx, id, &session).await;

@@ -66,6 +66,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/boundary/check", post(api::recheck_boundary))
         .route("/api/boundary/setup", post(api::run_setup))
         .route("/api/config", get(api::get_config).put(api::put_config))
+        .route(
+            "/api/authority/grants",
+            get(api::list_authority_grants).post(api::create_authority_grant),
+        )
+        .route(
+            "/api/authority/grants/{id}",
+            axum::routing::delete(api::revoke_authority_grant),
+        )
         .route("/api/auth/qr", post(api::qr))
         .route("/api/mesh/init", post(api::mesh_init))
         .route("/api/mesh/unpair", post(api::mesh_unpair))
@@ -379,6 +387,17 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             sessions = cleaned.len(),
             "closed sessions left over from a previous run"
         );
+    }
+    // A dispatch still `pending` from before the restart never learned its own
+    // outcome; relabel it honestly so an operator reconciles it rather than
+    // the node silently presenting it as still in flight forever.
+    match store.authority_action_reconcile_pending() {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(
+            actions = n,
+            "marked authority actions uncertain after a restart interrupted their dispatch"
+        ),
+        Err(e) => tracing::error!(error = %e, "could not reconcile pending authority actions"),
     }
     let manager = Manager::new(
         store.clone(),

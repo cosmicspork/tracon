@@ -485,6 +485,20 @@ pipeline and check status, job logs, documents, memory, the ledger — and asks
 before every write that others see: a comment, an edited or new ticket, a
 pipeline run, a document other than working notes.
 
+### Granting authority
+
+Merging, publishing, transitioning a ticket, and deploying are not something a
+policy rule's argument text matches unattended — they are scoped grants, made and
+revoked one at a time from Settings' Authority panel, beside the signed rules
+they sit under. A grant names one target (a pull request, a merge request, an
+issue's exact transition, a deployment job) and, for merge, publish, and deploy,
+the one commit it covers; the branch moving to a later sha makes the grant no
+longer apply, rather than carrying it forward. A signed policy deny always wins
+over a local grant, however narrow it is scoped — production deploys, for
+instance, stay refused until the signed bundle itself changes, never by granting
+around it. Revoking a grant, or letting it expire, takes effect on the next
+action the node reads it for, not one already dispatched.
+
 ### Where things live
 
 | | macOS | Linux |
