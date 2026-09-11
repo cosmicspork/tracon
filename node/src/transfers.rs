@@ -453,6 +453,8 @@ pub fn validate_files(files: &[TransferFile]) -> Result<(), TransferError> {
         return Err(TransferError::TooManyFiles);
     }
     let mut total = 0usize;
+    // Source trees are portable only when they cannot collide on the
+    // case-insensitive, normalization-sensitive filesystems this node may use.
     let mut paths = std::collections::HashSet::with_capacity(files.len());
     for file in files {
         safe_path(&file.path)?;
@@ -461,8 +463,11 @@ pub fn validate_files(files: &[TransferFile]) -> Result<(), TransferError> {
         if file.mode & 0o170000 != 0o100000 {
             return Err(TransferError::UnsafeFileMode(file.path.clone()));
         }
-        if !paths.insert(file.path.as_str()) {
-            return Err(TransferError::Invalid(format!("duplicate file {:?}", file.path)));
+        if !paths.insert(file.path.to_ascii_lowercase()) {
+            return Err(TransferError::Invalid(format!(
+                "case-folded duplicate file {:?}",
+                file.path
+            )));
         }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(file.content_b64.as_bytes())
@@ -476,15 +481,16 @@ pub fn validate_files(files: &[TransferFile]) -> Result<(), TransferError> {
 }
 
 fn safe_path(path: &str) -> Result<(), TransferError> {
-    if path.is_empty() || path.len() > 1024 || path.contains('\0') {
+    if path.is_empty() || path.len() > 1024 || !path.is_ascii() || path.contains('\0') {
         return Err(TransferError::UnsafePath(path.into()));
     }
     let parsed = Path::new(path);
+    let lower = path.to_ascii_lowercase();
     if parsed.components().any(|component| !matches!(component, Component::Normal(_)))
         || parsed.components().next().is_none()
-        || parsed.components().any(|component| component.as_os_str() == ".git")
-        || parsed.components().any(|component| component.as_os_str() == ".tracon")
-        || parsed.components().any(|component| component.as_os_str() == ".tracon-transfer")
+        || lower.split('/').any(|component| {
+            matches!(component, ".git" | ".tracon" | ".tracon-transfer")
+        })
     {
         return Err(TransferError::UnsafePath(path.into()));
     }
