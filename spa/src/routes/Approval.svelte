@@ -10,9 +10,9 @@
     reviewChecks,
     reviewVerdict,
     type CandidateEvidence,
+    type PinnedRequirements,
     type Review,
     type ReviewContext,
-    type WorkItem,
   } from '../lib/types'
   import { baseFromDiff, buildPatch, fileSection } from '../lib/patch'
 
@@ -21,7 +21,7 @@
   let review = $state<Review | null>(null)
   let stale = $state<string[]>([])
   let evidence = $state<CandidateEvidence | null>(null)
-  let requirements = $state<WorkItem | null>(null)
+  let requirements = $state<PinnedRequirements | null>(null)
   let surroundingCode = $state<ReviewContext[]>([])
   let reason = $state('')
   let title = $state('')
@@ -308,6 +308,9 @@
           <b>Curated demonstrations</b>
           {#each evidence.demonstrations as demo (demo.id)}
             <a href={`/docs/${demo.channel}/${demo.document_slug}`}>{demo.label}</a>
+            {#if demo.stale}
+              <span class="chip warn" title="the document has changed since this was attached">stale</span>
+            {/if}
           {/each}
           <small>These linked documents are human-curated context; opening a review never executes them.</small>
         </div>

@@ -256,6 +256,10 @@ export interface CandidateEvidence {
     files: string
     head_sha: string
     context_json: string
+    requirements_work_item_id: string | null
+    requirements_title: string | null
+    requirements_body: string | null
+    requirements_hash: string | null
     created_ms: number
   }[]
   decisions: {
@@ -279,6 +283,8 @@ export interface CandidateEvidence {
     document_hash: string
     label: string
     created_ms: number
+    /** The document has been edited or deleted since this was attached. */
+    stale: boolean
   }[]
 }
 
@@ -306,10 +312,18 @@ export interface CandidateCheckRun {
 export interface ReviewDetails {
   review: Review
   stale: string[]
-  requirements: WorkItem | null
+  /** Pinned to the revision at submit time; never the live work item. */
+  requirements: PinnedRequirements | null
   surrounding_code: ReviewContext[]
   evidence: CandidateEvidence | null
   legacy_check_events: CandidateCheckRun[]
+}
+
+export interface PinnedRequirements {
+  id: string
+  title: string
+  body: string
+  hash: string
 }
 
 export interface CheckResult {
