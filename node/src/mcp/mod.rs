@@ -304,7 +304,11 @@ impl Tools {
                     "target": canonical,
                     "revision": review.head_sha,
                     "prose_hash": prose,
-                    "state": "ask",
+                    "state": match decision.verdict {
+                        Verdict::Allow => "allow",
+                        Verdict::Ask => "ask",
+                        Verdict::Deny => "deny",
+                    },
                     "reason": decision.reason,
                 }));
             }
