@@ -18,7 +18,7 @@ use parking_lot::Mutex;
 use semver::Version;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager};
+use tauri::{path::BaseDirectory, AppHandle, Manager};
 use tokio::{fs, io::AsyncWriteExt};
 
 #[cfg(unix)]
@@ -64,6 +64,10 @@ const PROVENANCE_MISMATCH_MESSAGE: &str =
     "The update provenance could not be verified; nothing was changed.";
 const RELEASE_REPOSITORY: &str = "cosmicspork/tracon";
 const RELEASE_WORKFLOW: &str = "cosmicspork/tracon/.github/workflows/release.yml";
+/// The provenance bundle is signed data but is still bounded before the
+/// bundled verifier parses it.
+const PROVENANCE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const VERIFIER_RESOURCE: &str = "verifier/gh";
 
 /// The bundle being replaced, renamed aside so the running app keeps the code
 /// it is executing. Swept at the next launch.
@@ -102,6 +106,13 @@ impl Target {
         match self {
             Target::AppImage(_) => format!("tracon_{version}_amd64.AppImage"),
             Target::MacApp(_) => format!("tracon_{version}_aarch64.app.tar.gz"),
+        }
+    }
+
+    fn provenance_name(&self, version: &Version) -> String {
+        match self {
+            Target::AppImage(_) => format!("tracon_{version}_amd64.AppImage.intoto.jsonl"),
+            Target::MacApp(_) => format!("tracon_{version}_aarch64.provenance.jsonl"),
         }
     }
 }
@@ -354,6 +365,7 @@ pub struct UpdateStatus {
 struct Asset {
     version: Version,
     url: String,
+    provenance_url: String,
     size: u64,
     digest: [u8; 32],
 }
@@ -507,7 +519,7 @@ impl Updater {
         };
         self.refresh(app);
 
-        let restart = match self.replace(&asset, &target).await {
+        let restart = match self.replace(app, &asset, &target).await {
             Ok(restart) => restart,
             Err(message) => return self.failed(app, message),
         };
@@ -521,10 +533,19 @@ impl Updater {
     /// Put the new version where the old one is, and say what starts it once
     /// this process is gone: one file for an AppImage, a whole directory
     /// swapped by rename for a `.app`.
-    async fn replace(&self, asset: &Asset, target: &Target) -> Result<Restart, String> {
+    async fn replace(
+        &self,
+        app: &AppHandle,
+        asset: &Asset,
+        target: &Target,
+    ) -> Result<Restart, String> {
         match target {
             Target::AppImage(path) => {
-                download_and_replace(&self.client, asset, path, verify_release_provenance).await?;
+                let client = &self.client;
+                download_and_replace(client, asset, path, |temporary| {
+                    verify_release_provenance(client, app, asset, temporary)
+                })
+                .await?;
                 let helper = std::env::current_exe()
                     .map_err(|error| format!("Could not prepare the restart: {error}"))?;
                 Ok(Restart {
@@ -538,7 +559,7 @@ impl Updater {
                     // Copied out before the swap: the running executable is
                     // inside the bundle that is about to be renamed.
                     let helper = stage_restart_helper()?;
-                    if let Err(message) = download_and_swap(&self.client, asset, root).await {
+                    if let Err(message) = download_and_swap(&self.client, app, asset, root).await {
                         let _ = std::fs::remove_file(&helper);
                         return Err(message);
                     }
@@ -549,7 +570,7 @@ impl Updater {
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    let _ = (asset, root);
+                    let _ = (app, asset, root);
                     Err(REPLACE_MESSAGE.to_string())
                 }
             }
@@ -650,14 +671,24 @@ fn select_asset(
     }
 
     let expected_name = target.asset_name(&version);
+    let expected_provenance = target.provenance_name(&version);
     let Some(asset) = release
         .assets
-        .into_iter()
+        .iter()
         .find(|asset| asset.name == expected_name)
     else {
         return Err(format!("release v{version} is not ready; try again"));
     };
-    if !asset.browser_download_url.starts_with("https://") {
+    let Some(provenance) = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == expected_provenance)
+    else {
+        return Err(format!("release v{version} is not ready; try again"));
+    };
+    if !asset.browser_download_url.starts_with("https://")
+        || !provenance.browser_download_url.starts_with("https://")
+    {
         return Err(format!("release v{version} is not ready; try again"));
     }
     let Some(digest) = asset.digest.as_deref().and_then(parse_digest) else {
@@ -665,7 +696,8 @@ fn select_asset(
     };
     Ok(Some(Asset {
         version,
-        url: asset.browser_download_url,
+        url: asset.browser_download_url.clone(),
+        provenance_url: provenance.browser_download_url.clone(),
         size: asset.size,
         digest,
     }))
@@ -791,33 +823,125 @@ where
     finish
 }
 
-/// GitHub's Sigstore-backed attestation is the Linux desktop publisher
-/// authentication. Its repository, workflow path, and source branch are fixed
-/// here rather than inherited from release metadata.
-async fn verify_release_provenance(path: PathBuf) -> Result<(), String> {
-    let output = tokio::time::timeout(
-        CHECK_TIMEOUT,
-        tokio::process::Command::new("gh")
-            .args(["attestation", "verify"])
-            .arg(path)
-            .args([
-                "--repo",
-                RELEASE_REPOSITORY,
-                "--signer-workflow",
-                RELEASE_WORKFLOW,
-                "--source-ref",
-                "refs/heads/main",
-            ])
-            .output(),
-    )
-    .await
-    .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?
-    .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
-    output
-        .status
-        .success()
-        .then_some(())
+/// Store the signed provenance bundle beside its subject. The bundle is not
+/// trusted until `gh` verifies it, so it has a strict size cap and never
+/// replaces an existing file.
+async fn download_provenance_bundle(
+    client: &reqwest::Client,
+    asset: &Asset,
+    path: &Path,
+) -> Result<(), String> {
+    match fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(PROVENANCE_MISMATCH_MESSAGE.to_string()),
+    }
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await
+        .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
+
+    let transfer = async {
+        let response = client
+            .get(&asset.provenance_url)
+            .send()
+            .await
+            .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?
+            .error_for_status()
+            .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > PROVENANCE_MAX_BYTES)
+        {
+            return Err(PROVENANCE_MISMATCH_MESSAGE.to_string());
+        }
+        let mut stream = response.bytes_stream();
+        let mut written = 0_u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
+            written = written
+                .checked_add(chunk.len() as u64)
+                .filter(|length| *length <= PROVENANCE_MAX_BYTES)
+                .ok_or_else(|| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
+            output
+                .write_all(&chunk)
+                .await
+                .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
+        }
+        output
+            .sync_all()
+            .await
+            .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
+        Ok(())
+    }
+    .await;
+
+    drop(output);
+    if transfer.is_err() {
+        let _ = fs::remove_file(path).await;
+    }
+    transfer
+}
+
+fn bundled_verifier(app: &AppHandle) -> Result<PathBuf, String> {
+    let verifier = app
+        .path()
+        .resolve(VERIFIER_RESOURCE, BaseDirectory::Resource)
+        .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
+    std::fs::metadata(&verifier)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+        .then_some(verifier)
         .ok_or_else(|| PROVENANCE_MISMATCH_MESSAGE.to_string())
+}
+
+/// GitHub's Sigstore-backed provenance is checked by the checksum-pinned
+/// verifier bundled with the desktop app. Its local JSONL bundle means no host
+/// CLI, credentials, or attestation lookup is a self-update prerequisite.
+async fn verify_release_provenance(
+    client: &reqwest::Client,
+    app: &AppHandle,
+    asset: &Asset,
+    path: PathBuf,
+) -> Result<(), String> {
+    let bundle = path.with_extension("intoto.jsonl");
+    let verified = async {
+        download_provenance_bundle(client, asset, &bundle).await?;
+        let verifier = bundled_verifier(app)?;
+        let output = tokio::time::timeout(
+            CHECK_TIMEOUT,
+            tokio::process::Command::new(verifier)
+                .args(["attestation", "verify"])
+                .arg(&path)
+                .arg("--bundle")
+                .arg(&bundle)
+                .args([
+                    "--hostname",
+                    "github.com",
+                    "--repo",
+                    RELEASE_REPOSITORY,
+                    "--signer-workflow",
+                    RELEASE_WORKFLOW,
+                    "--source-ref",
+                    "refs/heads/main",
+                    "--deny-self-hosted-runners",
+                ])
+                .output(),
+        )
+        .await
+        .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?
+        .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
+        output
+            .status
+            .success()
+            .then_some(())
+            .ok_or_else(|| PROVENANCE_MISMATCH_MESSAGE.to_string())
+    }
+    .await;
+    let _ = fs::remove_file(&bundle).await;
+    verified
 }
 
 /// A `.app` is a directory whose Developer ID signature covers its contents,
@@ -827,6 +951,7 @@ async fn verify_release_provenance(path: PathBuf) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 async fn download_and_swap(
     client: &reqwest::Client,
+    app: &AppHandle,
     asset: &Asset,
     app_root: &Path,
 ) -> Result<(), String> {
@@ -846,7 +971,7 @@ async fn download_and_swap(
         download_verified(client, asset, &archive).await?;
         // A release digest is metadata, not an extraction authority. Confirm
         // fixed-workflow provenance before tar sees any archive entry.
-        verify_release_provenance(archive.clone()).await?;
+        verify_release_provenance(client, app, asset, archive.clone()).await?;
         unpack(&archive, &staging).await?;
         let staged_app = staged_bundle_in(&staging)?;
         validate_staged_bundle(&staged_app, &asset.version)?;
@@ -891,7 +1016,13 @@ struct PublisherIdentity {
 #[cfg(target_os = "macos")]
 fn publisher_identity(bundle: &Path) -> Result<PublisherIdentity, String> {
     let assessed = Command::new("/usr/sbin/spctl")
-        .args(["--assess", "--type", "execute", "--ignore-cache", "--verbose=4"])
+        .args([
+            "--assess",
+            "--type",
+            "execute",
+            "--ignore-cache",
+            "--verbose=4",
+        ])
         .arg(bundle)
         .status()
         .map_err(|_| PUBLISHER_MISMATCH_MESSAGE.to_string())?;
@@ -1066,9 +1197,10 @@ mod tests {
                 team: "AB12C3D4E5".into(),
             })
         );
-        assert!(
-            publisher_identity_from("Identifier=com.cosmicspork.tracon\nTeamIdentifier=not set\n").is_none()
-        );
+        assert!(publisher_identity_from(
+            "Identifier=com.cosmicspork.tracon\nTeamIdentifier=not set\n"
+        )
+        .is_none());
         assert!(publisher_identity_from("TeamIdentifier=AB12C3D4E5\n").is_none());
     }
 
@@ -1158,12 +1290,19 @@ mod tests {
             &appimage(),
             release(
                 "v0.9.2",
-                vec![asset("tracon_0.9.2_amd64.AppImage", Some(&digest))],
+                vec![
+                    asset("tracon_0.9.2_amd64.AppImage", Some(&digest)),
+                    asset("tracon_0.9.2_amd64.AppImage.intoto.jsonl", None),
+                ],
             ),
         )
         .unwrap()
         .unwrap();
         assert_eq!(selected.version, Version::parse("0.9.2").unwrap());
+        assert_eq!(
+            selected.provenance_url,
+            "https://example.test/tracon.AppImage"
+        );
         assert_eq!(selected.size, 3);
     }
 
@@ -1191,8 +1330,27 @@ mod tests {
             "release v0.9.2 is not ready; try again"
         );
         let malformed = asset("tracon_0.9.2_amd64.AppImage", Some("sha256:ABC"));
+        let provenance = asset("tracon_0.9.2_amd64.AppImage.intoto.jsonl", None);
         assert_eq!(
-            select_asset(&current, &appimage(), release("v0.9.2", vec![malformed])).unwrap_err(),
+            select_asset(
+                &current,
+                &appimage(),
+                release("v0.9.2", vec![malformed, provenance]),
+            )
+            .unwrap_err(),
+            "release v0.9.2 is not ready; try again"
+        );
+        let missing_provenance = asset(
+            "tracon_0.9.2_amd64.AppImage",
+            Some(&format!("sha256:{}", "a".repeat(64))),
+        );
+        assert_eq!(
+            select_asset(
+                &current,
+                &appimage(),
+                release("v0.9.2", vec![missing_provenance]),
+            )
+            .unwrap_err(),
             "release v0.9.2 is not ready; try again"
         );
     }
@@ -1204,7 +1362,10 @@ mod tests {
         let mac = || {
             release(
                 "v0.9.2",
-                vec![asset("tracon_0.9.2_aarch64.app.tar.gz", Some(&digest))],
+                vec![
+                    asset("tracon_0.9.2_aarch64.app.tar.gz", Some(&digest)),
+                    asset("tracon_0.9.2_aarch64.provenance.jsonl", None),
+                ],
             )
         };
         assert!(select_asset(&current, &bundle(), mac()).unwrap().is_some());
@@ -1453,12 +1614,18 @@ mod tests {
         let asset = Asset {
             version: Version::new(0, 9, 2),
             url: serve_once(body.clone()).await,
+            provenance_url: "https://example.test/provenance.intoto.jsonl".into(),
             size: body.len() as u64,
             digest: Sha256::digest(&body).into(),
         };
-        download_and_replace(&reqwest::Client::new(), &asset, &destination, test_provenance)
-            .await
-            .unwrap();
+        download_and_replace(
+            &reqwest::Client::new(),
+            &asset,
+            &destination,
+            test_provenance,
+        )
+        .await
+        .unwrap();
         assert_eq!(fs::read(&destination).await.unwrap(), body);
         #[cfg(unix)]
         assert_eq!(
@@ -1488,13 +1655,19 @@ mod tests {
         let mismatch = Asset {
             version: Version::new(0, 9, 2),
             url: serve_once(body.clone()).await,
+            provenance_url: "https://example.test/provenance.intoto.jsonl".into(),
             size: body.len() as u64,
             digest: [0; 32],
         };
         assert_eq!(
-            download_and_replace(&reqwest::Client::new(), &mismatch, &destination, test_provenance)
-                .await
-                .unwrap_err(),
+            download_and_replace(
+                &reqwest::Client::new(),
+                &mismatch,
+                &destination,
+                test_provenance
+            )
+            .await
+            .unwrap_err(),
             DIGEST_MISMATCH_MESSAGE
         );
         assert_eq!(fs::read(&destination).await.unwrap(), b"old");
@@ -1502,13 +1675,19 @@ mod tests {
         let short = Asset {
             version: Version::new(0, 9, 2),
             url: serve_once(body).await,
+            provenance_url: "https://example.test/provenance.intoto.jsonl".into(),
             size: 4,
             digest,
         };
         assert_eq!(
-            download_and_replace(&reqwest::Client::new(), &short, &destination, test_provenance)
-                .await
-                .unwrap_err(),
+            download_and_replace(
+                &reqwest::Client::new(),
+                &short,
+                &destination,
+                test_provenance
+            )
+            .await
+            .unwrap_err(),
             DIGEST_MISMATCH_MESSAGE
         );
         assert_eq!(fs::read(&destination).await.unwrap(), b"old");
