@@ -7,6 +7,7 @@
 * **corpus:** replicate HTML document bundles and render capability-scoped interactive previews
 * **onboarding:** put local runtime readiness first and keep hub pairing outside required setup
 * **metrics:** time to verified work, setup failures, interventions and waiting, per channel
+* **operator:** ask, notify, and report tools that survive disconnects and publish only what the operator inspected
 
 ## [0.14.0](https://github.com/cosmicspork/tracon/compare/v0.13.1...v0.14.0) (2026-09-09)
 

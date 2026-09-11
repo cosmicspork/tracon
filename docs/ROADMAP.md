@@ -97,29 +97,29 @@ Use real application components and styles in interactive design artifacts.
 
 Provide a real question/answer tool, not an Allow/Deny permission workaround.
 
-- [ ] Accept free-text questions and optional choices; return structured answers to the originating call.
-- [ ] Persist questions and answers through client disconnection; surface them in the queue and session.
-- [ ] Allow asking for help without approval; silence is not consent and answers do not widen permissions.
-- [ ] Define unanswered-question behavior separately from permission expiry.
+- [x] Accept free-text questions and optional choices; return structured answers to the originating call.
+- [x] Persist questions and answers through client disconnection; surface them in the queue and session.
+- [x] Allow asking for help without approval; silence is not consent and answers do not widen permissions.
+- [x] Define unanswered-question behavior separately from permission expiry.
 
 ### Notify the operator
 
 Intentionally request an OS/PWA ping, not merely a transcript update.
 
-- [ ] Include a title, message, and session/artifact/question link.
-- [ ] Route through configured nodes/devices with rate limits and deduplication.
-- [ ] Record delivery attempts without claiming the human saw a delivered notification.
+- [x] Include a title, message, and session/artifact/question link.
+- [x] Route through configured nodes/devices with rate limits and deduplication.
+- [x] Record delivery attempts without claiming the human saw a delivered notification.
 
 ### Report an issue
 
 Lodge complaints about tracon, environments, tools, or harness integration.
 
-- [ ] Capture expected/actual behavior, reproduction, versions, relevant errors, and attempted recovery.
-- [ ] Distinguish observed evidence from the agent's diagnosis.
-- [ ] Support opening an issue in tracon's repository through the broker with operator authorization.
-- [ ] Make proposed issue text and attachments inspectable before publication.
-- [ ] Exclude secrets and private project material; reporting permission does not authorize wholesale transcript/repository uploads.
-- [ ] Keep reporting separate from declaring work blocked or pausing execution.
+- [x] Capture expected/actual behavior, reproduction, versions, relevant errors, and attempted recovery.
+- [x] Distinguish observed evidence from the agent's diagnosis.
+- [x] Support opening an issue in tracon's repository through the broker with operator authorization.
+- [x] Make proposed issue text and attachments inspectable before publication.
+- [x] Exclude secrets and private project material; reporting permission does not authorize wholesale transcript/repository uploads.
+- [x] Keep reporting separate from declaring work blocked or pausing execution.
 
 ### Pause controls and runaway protection
 
