@@ -244,6 +244,7 @@ access stopped" rather than "Killed" — your own client keeps running until you
 end it. A watchdog pauses a session on its own after repeated harness-turn
 failures, with the reason on the record, rather than restarting the same loop
 indefinitely.
+
 ### QA verification
 
 Once a candidate is captured, an operator-configured QA target can deploy and
@@ -261,6 +262,17 @@ screen. Every deployment observation, browser run, assertion, log, and
 screenshot attaches to the candidate as evidence, and a stale deployment
 (the target moved since the browser ran) is marked so rather than silently
 trusted.
+
+### Repository-derived prototypes
+
+A prototype is a static, sandboxed preview built from a candidate's own
+repository rather than hand-authored: the node prepares the pinned build
+image the same way a check would, runs the operator-configured build command
+in that isolated environment, and imports the resulting HTML/asset output
+through the same bundle importer and capability-scoped viewer as any other
+document — no host file serving, and no bind-mount exception for the
+prototype's own assets. Each build records its source revision and build
+image so a prototype is always traceable to the exact candidate it came from.
 
 ## Using the tools from your own harness
 

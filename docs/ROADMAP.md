@@ -81,6 +81,7 @@ Demonstrate that the candidate works in the intended QA environment.
 - [x] Record environment identity and time; invalidate evidence when the deployment changes.
 - [x] Attach assertions, logs, screenshots, and demonstrations to the candidate.
 - [x] Keep deployment and browser permissions separate; neither grants production access or treats QA writes as harmless reads.
+- [ ] Exercise a real private GitLab QA target through deploy, browser verification, and evidence capture. (Needs a `glab` credential and a real QA target configured; not yet run.)
 
 **Dependencies:** capable execution environments and candidate-bound evidence.
 
