@@ -14,15 +14,15 @@
 
 Start a session in a workspace with permissions, without prescribing how work is organized.
 
-- [ ] Offer scoped allow/ask/deny for merging, publishing, ticket transitions, and deployments.
-- [ ] Bind grants to targets and revisions where appropriate; revalidate before acting.
-- [ ] Execute consequential actions through the broker without exposing credentials.
+- [x] Offer scoped allow/ask/deny for merging, publishing, ticket transitions, and deployments.
+- [x] Bind grants to targets and revisions where appropriate; revalidate before acting.
+- [x] Execute consequential actions through the broker without exposing credentials.
 - [ ] Make work items, plan/execute phases, explicit model selection, and review optional.
 - [ ] Inherit sensible model defaults and record the actual model used.
 - [ ] Keep structured workflows as presets; require review only when policy requires it.
-- [ ] Record candidate, authority, evidence, and outcome even for automatically authorized actions.
-- [ ] Expose policy and grant management in the interface, preserving signing-key and trust-root boundaries.
-- [ ] Reconcile README, architecture, design, and shipped policy as behavior changes.
+- [x] Record candidate, authority, evidence, and outcome even for automatically authorized actions.
+- [x] Expose policy and grant management in the interface, preserving signing-key and trust-root boundaries.
+- [x] Reconcile README, architecture, design, and shipped policy as behavior changes.
 
 ### Managed workspaces and separate publication
 

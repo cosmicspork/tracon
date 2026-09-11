@@ -10,6 +10,7 @@
 * **operator:** ask, notify, and report tools that survive disconnects and publish only what the operator inspected
 * **release:** provenance-attested, signed desktop releases with pinned build inputs and a bundled offline verifier
 * **forge:** bounded repository pages with explicit load-more and honest partial search
+* **authority:** scoped allow/ask/deny grants for merge, publish, ticket transition, and deploy, with signed policy deny always dominant
 
 ## [0.14.0](https://github.com/cosmicspork/tracon/compare/v0.13.1...v0.14.0) (2026-09-09)
 
