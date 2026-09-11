@@ -96,6 +96,21 @@ impl Store {
         .optional()
         .map_err(Into::into)
     }
+
+    pub fn operator_question_for_channel_request(
+        &self,
+        channel: &str,
+        request_key: &str,
+    ) -> Result<Option<OperatorQuestionRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM operator_question WHERE channel=?1 AND request_key=?2 ORDER BY created_ms DESC LIMIT 1",
+            params![channel, request_key],
+            OperatorQuestionRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
     pub fn open_operator_questions(&self) -> Result<Vec<OperatorQuestionRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT * FROM operator_question WHERE state='unanswered' ORDER BY created_ms")?;

@@ -43,11 +43,22 @@ async fn ask(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Valu
     }
     let prompt = text(args, "question", true)?;
     let choices = string_array(args, "choices", 20, MAX_TEXT)?;
-    let row = match store.operator_question_for_request(&ctx.session_id, &request_key).map_err(|e| e.to_string())? {
+    let choices_json = serde_json::to_string(&choices).unwrap();
+    let external = store
+        .get_session(&ctx.session_id)
+        .map_err(|e| e.to_string())?
+        .is_some_and(|session| session.harness_id == crate::session::external::HARNESS_ID);
+    let existing = if external {
+        store.operator_question_for_channel_request(&ctx.channel, &request_key)
+    } else {
+        store.operator_question_for_request(&ctx.session_id, &request_key)
+    }
+    .map_err(|e| e.to_string())?;
+    let row = match existing {
         Some(existing) => {
             if existing.channel != ctx.channel || existing.node_id != ctx.node_id
                 || existing.prompt != prompt
-                || existing.choices_json != serde_json::to_string(&choices).unwrap()
+                || existing.choices_json != choices_json
             {
                 return Err("request_id is already bound to a different question".into());
             }
@@ -57,7 +68,7 @@ async fn ask(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Valu
             let row = OperatorQuestionRow {
                 id: uuid::Uuid::now_v7().to_string(), session_id: ctx.session_id.clone(),
                 channel: ctx.channel.clone(), node_id: ctx.node_id.clone(), request_key: Some(request_key),
-                prompt, choices_json: serde_json::to_string(&choices).unwrap(), state: "unanswered".into(),
+                prompt, choices_json, state: "unanswered".into(),
                 answer_json: None, created_ms: now_ms(), answered_ms: None,
             };
             store.insert_operator_question(&row).map_err(|e| e.to_string())?;
