@@ -156,7 +156,13 @@
       {/if}
     {/each}
     {#if query && shownForges.every((f) => f.repos.length === 0)}
-      <small>{(forges ?? []).some((f) => f.next_cursor) ? 'No loaded repository matches; load more to continue searching' : 'No repository matches'}</small>
+      <small>
+        {(forges ?? []).some((f) => f.next_cursor)
+          ? 'No loaded repository matches; load more to continue searching'
+          : (forges ?? []).some((f) => !f.complete)
+            ? 'No loaded repository matches; the listing is incomplete'
+            : 'No repository matches'}
+      </small>
     {/if}
   </div>
 {/if}
