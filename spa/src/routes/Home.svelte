@@ -25,7 +25,7 @@
     setupSteps({
       anyProviderConnected: store.providers.some((p) => p.state === 'connected'),
       anyChannel: store.channels.some((c) => !c.archived),
-      hubPaired: store.mesh?.hub.state === 'connected',
+      boundaryReady: store.node?.state === 'ready',
     }) === null,
   )
 

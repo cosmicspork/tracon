@@ -9,17 +9,21 @@ export interface SetupStep {
   title: string
   detail: string
   done: boolean
-  /** Offered, not required: the node runs without it. */
-  optional?: boolean
 }
 
 export function setupSteps(s: {
   anyProviderConnected: boolean
   anyChannel: boolean
-  hubPaired: boolean
+  boundaryReady: boolean
 }): SetupStep[] | null {
-  if (s.anyProviderConnected && s.anyChannel) return null
+  if (s.boundaryReady && s.anyProviderConnected && s.anyChannel) return null
   return [
+    {
+      href: '/settings#boundary',
+      title: 'Prepare this node',
+      detail: 'Start the isolated runtime and verify its boundary before connecting a model.',
+      done: s.boundaryReady,
+    },
     {
       href: '/nodes',
       title: 'Connect a provider',
@@ -32,17 +36,10 @@ export function setupSteps(s: {
       detail: 'Work, credentials, and ceilings are scoped to it. One is plenty to start.',
       done: s.anyChannel,
     },
-    {
-      href: '/settings#mesh',
-      title: 'Pair a hub',
-      detail: 'Phones and other nodes reach this one through it. Skippable today, one tap later.',
-      done: s.hubPaired,
-      optional: true,
-    },
   ]
 }
 
 /** The first step still to do, for pointing the operator at one thing. */
 export function nextStep(steps: SetupStep[]): SetupStep {
-  return steps.find((s) => !s.done && !s.optional) ?? steps[steps.length - 1]
+  return steps.find((s) => !s.done) ?? steps[steps.length - 1]
 }

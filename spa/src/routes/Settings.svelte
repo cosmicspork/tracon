@@ -301,12 +301,12 @@
     const revision = router.revision
     const hash = router.hash
     void revision
-    if (hash !== '#mesh') return
+    if (hash !== '#mesh' && hash !== '#boundary') return
     let last = -1
     let tries = 0
     let timer: ReturnType<typeof setTimeout>
     const settle = () => {
-      const el = document.getElementById('mesh')
+      const el = document.getElementById(hash.slice(1))
       if (!el) return
       const top = el.getBoundingClientRect().top + window.scrollY
       if (top !== last) {
@@ -385,7 +385,7 @@
 {/if}
 
 <!-- 1. The boundary, first: nothing runs until it passes. -->
-<section>
+<section id="boundary">
   <div class="h5">Boundary <b>{store.node?.state ?? '…'}</b></div>
   {#if refused && store.node}
     <p class="why">
