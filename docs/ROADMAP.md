@@ -28,23 +28,23 @@ Start a session in a workspace with permissions, without prescribing how work is
 
 Work on independent repositories without host bind mounts.
 
-- [ ] Remove bind mounts entirely; persist sessions in runtime-owned storage.
-- [ ] Copy explicitly selected files/folders rather than granting ongoing host access.
-- [ ] Import selected uncommitted work without activating host Git configuration, hooks, or credentials.
-- [ ] Reject symlink escapes; never silently write back to the selected source.
-- [ ] Resume tracon-owned workspaces and provide explicit export/download.
-- [ ] Broker private source fetches without giving the agent forge credentials.
-- [ ] Transfer an immutable candidate into a separate publisher-controlled repository with trusted configuration and targets.
-- [ ] Never run credential-bearing host Git in the agent-owned clone.
+- [x] Remove bind mounts entirely; persist sessions in runtime-owned storage.
+- [x] Copy explicitly selected files/folders rather than granting ongoing host access.
+- [x] Import selected uncommitted work without activating host Git configuration, hooks, or credentials.
+- [x] Reject symlink escapes; never silently write back to the selected source.
+- [x] Resume tracon-owned workspaces and provide explicit export/download.
+- [x] Broker private source fetches without giving the agent forge credentials.
+- [x] Transfer an immutable candidate into a separate publisher-controlled repository with trusted configuration and targets.
+- [x] Never run credential-bearing host Git in the agent-owned clone.
 
 ### Prepared execution environments
 
 Run real project workflows on a fresh node without manual environment repair.
 
-- [ ] Separate dependency preparation, restricted execution, and candidate verification.
-- [ ] Reuse project toolchain/devcontainer conventions where safe; reject privileged settings, host mounts, sockets, and unsafe setup configuration.
-- [ ] Identify approved images, dependency inputs, and isolated caches without requiring a new repo format.
-- [ ] Exercise a real private repository through preparation, agent work, checks, and authorized publication.
+- [x] Separate dependency preparation, restricted execution, and candidate verification.
+- [x] Reuse project toolchain/devcontainer conventions where safe; reject privileged settings, host mounts, sockets, and unsafe setup configuration.
+- [x] Identify approved images, dependency inputs, and isolated caches without requiring a new repo format.
+- [ ] Exercise a real private repository through preparation, agent work, checks, and authorized publication. (Needs a model credential and a private repository on the node; not yet run.)
 
 **Dependencies:** managed workspace and publication boundaries for the complete workflow.
 
