@@ -141,12 +141,16 @@ over-cap block approve rather than warn. An edit replaces the verdict — it *is
 request for changes.
 
 **Start a session.** Channel (under its ceiling) → repository (recents, managed
-clones, browse-a-forge, or a typed path) → work item from the ready list (execute
-refused without the item's plan, before the click) → model (required, no silent
-default; the last used is preselected when the node offers it) → budget (from the
-channel's binding, editable) → node (bindings decide the eligible set; the operator
-picks within it; refused, unreachable, and mismatched nodes are listed with the
-reason and not selectable).
+clones, browse-a-forge, or a typed path) → optionally a work item from the ready
+list (picking one gates its `execute` phase on the item's plan existing, unless
+the channel binding waives it; naming none starts a plain, item-free session) →
+model (optional — a name here wins as `explicit`; empty falls through the
+channel's phase binding, then the channel's own binding, then the node's model
+catalogue, and the interface shows which source won; the last used is
+preselected when the node offers it) → budget (from the channel's binding,
+editable) → node (bindings decide the eligible set; the operator picks within
+it; refused, unreachable, and mismatched nodes are listed with the reason and
+not selectable).
 
 **First run.** On the desktop the app opens on its own setup page until the node
 runs under the user's service manager: podman (and on macOS its machine), the
@@ -187,4 +191,3 @@ operator's information, not the model's.
 7. **Fixture mode is the screenshot rig.** `TRACON_FIXTURES=1` serves the interface
    against canned state with request-time timestamps, so the README's images
    regenerate without a node and never age.
-

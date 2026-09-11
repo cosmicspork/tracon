@@ -92,10 +92,10 @@ channel**. The default local channels already satisfy the last step. A refused
 boundary stays visible even if a provider is connected. Hub pairing is a separate
 optional Settings link, not a setup prerequisite.
 
-A session is currently a phase of one work
-item: a *plan* session reads and ends by writing the plan; an *execute* session does
-the work and submits a diff for your review; approving publishes it with a credential
-the agent never held.
+A session runs one phase of an optional work item, or none at all: a *plan*
+session reads and ends by writing the plan; an *execute* session does the work and
+submits a diff for your review; approving publishes it with a credential the agent
+never held.
 
 A node that fails `check-boundary` refuses to run harnesses and says which check
 failed. That refusal is the design working, not a bug to route around.
@@ -255,13 +255,15 @@ outright if no such pipeline exists. Browser verification then runs a real,
 headless browser against that deployment inside its own network boundary: the
 container reaches only the QA target's configured origin(s) for that one run,
 nothing else, through a dedicated egress gateway distinct from the harness's
-own. A scenario's steps and assertions are declarative — no script, no
-arbitrary URL — and a dedicated test-account credential may only be filled
-into a password-type input, never screenshotted while its form is still on
-screen. Every deployment observation, browser run, assertion, log, and
-screenshot attaches to the candidate as evidence, and a stale deployment
+own — the Kubernetes backend has no such gateway yet, so QA browser runs are a
+Podman-only capability today. A scenario's steps and assertions are declarative
+— no script, no arbitrary URL — and a dedicated test-account credential may
+only be filled into a password-type input, never screenshotted while its form
+is still on screen. Every deployment observation, browser run, assertion, log,
+and screenshot attaches to the candidate as evidence, and a stale deployment
 (the target moved since the browser ran) is marked so rather than silently
-trusted.
+trusted. Deploying and verifying are their own scoped authority grants, kept
+separate from merge, publish, and ticket-transition grants.
 
 ### Repository-derived prototypes
 
@@ -380,7 +382,7 @@ and revoked the moment the hub loses that key.
 | **harness** | The coding agent a node runs — Claude Code or omp — inside the boundary. |
 | **boundary** | The container/network setup that makes the harness's isolation real, proven at startup. |
 | **broker** | The sealed credential store. Agents get tools that use credentials, never the credentials. |
-| **work item / ledger** | The replicated to-do list. Every session is one phase of one item. |
+| **work item / ledger** | The replicated to-do list, optional per session. A session that names one runs one phase of it. |
 | **phase** | `plan` (ends by writing the plan), `execute` (does the work, submits), `review` (a fresh session reads the diff). |
 | **queue** | What is waiting on you, across all nodes: the first thing the home shows under the composer. |
 | **promotion** | A lesson an agent retained, waiting for your nightly yes/no before it enters memory. |
