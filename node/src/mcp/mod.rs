@@ -590,7 +590,7 @@ impl Tools {
         let evidence = serde_json::json!({
             "arguments": canonical_consequential_payload(name, args).expect("validated consequential arguments"),
         }).to_string();
-        let operation_id = args["operation_id"].as_str().expect("validated operation id");
+        let operation_id = args["operation_id"].as_str().expect("validated operation id").trim();
         let request_hash = crate::corpus::hash_body(&evidence);
         if let Some((state, outcome, recorded_hash)) = access.store.authority_action_existing(
             action, &target, &ctx.channel, revision.as_deref(), operation_id,
