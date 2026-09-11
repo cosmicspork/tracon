@@ -1157,12 +1157,6 @@ pub async fn publish_operator_issue(
         StatusCode::NOT_FOUND,
         "no such issue draft".into(),
     ))?;
-    if !s.store().begin_issue_publication(&id)? {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "this issue was already authorized or is no longer a draft".into(),
-        ));
-    }
     let env = s
         .tools
         .broker
@@ -1170,6 +1164,12 @@ pub async fn publish_operator_issue(
         .unwrap()
         .env_for("gh", &issue.channel, &s.node_id)
         .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
+    if !s.store().begin_issue_publication(&id)? {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this issue was already authorized or is no longer a draft".into(),
+        ));
+    }
     let result = tokio::process::Command::new(&s.cfg.publish.gh)
         .args([
             "issue",
