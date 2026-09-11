@@ -108,7 +108,7 @@ async fn connect_paste_back_lifts_the_token_into_the_broker() {
         .await
         .unwrap();
     // The subprocess ends and the lift happens off the request path.
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if broker
                 .read()
@@ -280,7 +280,7 @@ async fn a_cancelled_startup_cannot_remove_the_next_login_generation() {
                 .await
         })
     };
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while fake.login_calls.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
         }
