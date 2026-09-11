@@ -210,7 +210,27 @@ fn valid_local_path(path: &str) -> bool {
         && !path.contains('%')
         && !path.split('/').any(|segment| segment == "..")
 }
-fn attachments(args: &Value) -> Result<Vec<Value>, String> { let Some(items)=args.get("attachments").and_then(Value::as_array) else { return Ok(vec![]); }; if items.len()>MAX_ATTACHMENTS{return Err(format!("at most {MAX_ATTACHMENTS} inspectable attachments"));} items.iter().map(|v| { let name=v.get("name").and_then(Value::as_str).map(str::trim).filter(|s|!s.is_empty()).ok_or("attachment name is required")?; let content=v.get("content").and_then(Value::as_str).ok_or("attachment content is required")?; if content.len()>MAX_ATTACHMENT_BYTES{return Err(format!("attachment {name} exceeds {MAX_ATTACHMENT_BYTES} bytes"));} Ok(json!({"name":name,"content":scrub(content)})) }).collect() }
+fn attachments(args: &Value) -> Result<Vec<Value>, String> {
+    let Some(value) = args.get("attachments") else { return Ok(vec![]); };
+    let items = value.as_array().ok_or("attachments must be an array")?;
+    if items.len() > MAX_ATTACHMENTS {
+        return Err(format!("at most {MAX_ATTACHMENTS} inspectable attachments"));
+    }
+    items
+        .iter()
+        .map(|attachment| {
+            let name = attachment.get("name").and_then(Value::as_str).map(str::trim)
+                .filter(|name| !name.is_empty() && name.len() <= 256)
+                .ok_or("attachment name must be 1–256 bytes")?;
+            let content = attachment.get("content").and_then(Value::as_str)
+                .ok_or("attachment content is required")?;
+            if content.len() > MAX_ATTACHMENT_BYTES {
+                return Err(format!("attachment {name} exceeds {MAX_ATTACHMENT_BYTES} bytes"));
+            }
+            Ok(json!({"name": scrub(name), "content": scrub(content)}))
+        })
+        .collect()
+}
 
 fn string_array(args: &Value, key: &str, max_items: usize, max_bytes: usize) -> Result<Vec<String>, String> {
     let Some(value) = args.get(key) else { return Ok(Vec::new()); };
@@ -239,7 +259,7 @@ fn scrub(s: &str) -> String {
             in_pem = true;
         }
         let lowered = trimmed.to_ascii_lowercase();
-        let credential_assignment = ["password=", "password:", "token=", "token:", "secret=", "secret:", "api_key=", "authorization:", "cookie:"]
+        let credential_assignment = ["password=", "password:", "token=", "token:", "secret=", "secret:", "api_key=", "api_key:", "authorization:", "cookie:"]
             .iter()
             .any(|marker| lowered.contains(marker));
         if in_pem
