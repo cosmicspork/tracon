@@ -414,6 +414,17 @@ permits inline and bundle-local scripts, styles, images, and media, but denies
 network connections, forms, nested frames, workers, and plugins. Fonts that
 must work in the opaque-origin sandbox should be embedded as `data:` URLs.
 
+In Documents, import an HTML file or folder, replace it, open a full-window
+preview, or download the original file or ZIP bundle. Imports allow up to 256
+files, 20 MiB total, and 16 MiB per file. A folder needs a root `index.html` or
+one unambiguous HTML entry; browsers without folder selection can import a
+single file. External fonts, CDNs, and live API connections are intentionally
+blocked, not fetched automatically. HTTPS operator access needs a distinct HTTPS
+preview origin configured with `preview_url`.
+
+CLI import, put, and export remain Markdown-only. Agents can read HTML through
+`doc_read`; HTML creation and replacement use the operator's import flow, not
+`doc_write`.
 
 ### Policy
 
@@ -518,6 +529,6 @@ git worktree add /tmp/<slug> -b <branch> origin/main
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the rules: commitments, invariants, boundaries.
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what is to be built, and what deliberately is not.
 - [docs/DESIGN.md](docs/DESIGN.md) — the interface: principles, jobs, states.
-- [docs/reference/](docs/reference/) — what each phase learned while being built.
+- [docs/reference/external-harness-notes.md](docs/reference/external-harness-notes.md) — the external harness trust boundary and operating guidance.
 
 Contributions are welcome — open an issue or a PR.

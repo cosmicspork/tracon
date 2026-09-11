@@ -2,10 +2,8 @@
 
 The rules. This document holds the commitments, invariants, and boundaries that
 constrain everything else, with rationale where the reasoning is not obvious. It
-deliberately does not describe features: what each phase built, and what building it
-changed, is recorded in [reference/](reference/) so this file does not drift as the
-features do. Decisions here are settled unless listed under
-[Open questions](#open-questions).
+describes current constraints rather than implementation history. Planned changes
+to these commitments are tracked in [ROADMAP.md](ROADMAP.md).
 
 `tracon`: named for terminal radar approach control. The facility sequences aircraft
 and issues clearances; it never flies one. The node supervises and gates; it never
