@@ -149,12 +149,18 @@ box:
 
 ## Starting work
 
-Work starts by typing what needs doing. The prompt becomes a work item — its first
-line the title, the rest what done looks like — and a plan session starts on it. The
-channel supplies the rest: which model plans, which one builds, and the budget.
-**Adjust** opens those as fields when a session needs something other than the
-usual: a different repository, the execute phase, another node. The session is killed at its budget, checked at
-each turn's end; a channel at its daily ceiling starts no session at all.
+Work starts by typing what needs doing. A plain prompt starts an execute session
+with no work item at all: the text is held as a durable draft and sent once the
+harness comes up, so a closed tab or a lost connection loses nothing. Turning that
+same prompt into a tracked work item — with a title, a plan phase, and a place other
+sessions can pick it up from — is explicit, through **Adjust**'s structured toggle
+or `/api/compose`. Either way nothing about the workflow is mandatory: the channel's
+phase bindings are presets, not requirements, supplying a model and budget only when
+the session does not name its own; if neither does, the node falls back to a model
+already in its catalogue and records which source actually won as the session's
+`model_source`. **Adjust** opens repository, phase, model, and node as fields when a
+session needs something other than the usual. The session is killed at its budget,
+checked at each turn's end; a channel at its daily ceiling starts no session at all.
 
 **Repositories can come from a forge.** Give the broker a `gh` or `glab` credential
 (the same one publishing uses) and the form lists your GitHub/GitLab repositories
@@ -210,6 +216,21 @@ it. `report_issue` drafts a bug report against tracon itself, with expected and
 actual behaviour, reproduction, versions, and attachments, secrets scrubbed; the
 draft sits in the queue for you to read before you authorize opening it on
 GitHub through the broker. None of the three pauses the session.
+
+### Pause and stop
+
+**Pause** and **Stop** work differently depending on who is driving the harness.
+For a session the node itself launched, pause waits for the turn in flight to
+finish, then blocks new prompts and permission replies until you resume it —
+stop tears the container down outright, and both survive a node restart because
+the fence is durable state, not an in-memory flag. For a session attached from
+your own harness over `tracon external`, the node never held the process: pause
+and stop only fence its brokered tool access, so the interface labels the control
+"Stop broker access" rather than "Stop", and a stopped attachment reads "Broker
+access stopped" rather than "Killed" — your own client keeps running until you
+end it. A watchdog pauses a session on its own after repeated harness-turn
+failures, with the reason on the record, rather than restarting the same loop
+indefinitely.
 
 ## Using the tools from your own harness
 
