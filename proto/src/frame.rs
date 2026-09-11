@@ -19,6 +19,8 @@
 
 use std::collections::BTreeMap;
 
+use serde_json::Value;
+
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
