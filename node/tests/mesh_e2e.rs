@@ -421,18 +421,23 @@ async fn prompt_answer_and_kill_forward_to_the_owner() {
         .unwrap()
         .contains("not running"));
 
-    // A prompt to an unreachable owner is queued, not refused.
+    // A prompt to an unreachable owner is refused when this node already knows
+    // the session ended: a mirror that has seen the terminal state does not
+    // queue work for a session that cannot take it.
     b.store.set_reachable(&bi, false).unwrap();
     a.store.set_reachable(&bi, false).unwrap();
-    let (st, _) = call(
+    let (st, v) = call(
         &a.app,
         "POST",
         &format!("/api/sessions/{sid}/prompt"),
         Some(json!({"text": "later"})),
     )
     .await;
-    assert_eq!(st, StatusCode::ACCEPTED);
-    assert!(a.client.snapshot().queued >= 1 || a.store.outbox_len().unwrap() == 0);
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("no longer active"));
 
     // A verdict for a review B owns, while B is unreachable, is refused with
     // the reason the interface shows.
