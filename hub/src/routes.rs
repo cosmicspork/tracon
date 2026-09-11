@@ -270,7 +270,8 @@ pub async fn get_rollups(
         .filter(|node| !seen.contains(*node))
         .cloned()
         .collect();
-    let current_complete = !expected.is_empty() && missing.is_empty() && stale.is_empty() && partial.is_empty();
+    let current_complete =
+        !expected.is_empty() && missing.is_empty() && stale.is_empty() && partial.is_empty();
     let state = if current_complete {
         "current_complete"
     } else if !stale.is_empty() {
