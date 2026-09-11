@@ -137,23 +137,32 @@ pub async fn call(
         }
         PR_MERGE => {
             let n = number(args)?;
-            let head_sha = args.get("head_sha").and_then(Value::as_str).filter(|s| s.len() >= 7)
+            let head_sha = args
+                .get("head_sha")
+                .and_then(Value::as_str)
+                .filter(|s| s.len() >= 7)
                 .ok_or("head_sha is required")?;
             let pr = gh.get(&format!("{base}/pulls/{n}")).await?;
             if pr["head"]["sha"].as_str() != Some(head_sha) {
                 return Err("pull request head changed since the authorized revision".into());
             }
-            let method = args.get("method").and_then(Value::as_str).unwrap_or("squash");
+            let method = args
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("squash");
             if !matches!(method, "merge" | "squash" | "rebase") {
                 return Err("method must be merge, squash, or rebase".into());
             }
             if let Some(recheck) = before_mutation {
                 recheck()?;
             }
-            let v = gh.put(
-                &format!("{base}/pulls/{n}/merge"),
-                &json!({ "sha": head_sha, "merge_method": method }),
-            ).await.map_err(mutation_outcome_error)?;
+            let v = gh
+                .put(
+                    &format!("{base}/pulls/{n}/merge"),
+                    &json!({ "sha": head_sha, "merge_method": method }),
+                )
+                .await
+                .map_err(mutation_outcome_error)?;
             Ok(json!({ "merged": v["merged"], "sha": v["sha"], "message": v["message"] }))
         }
         RUN_STATUS => {

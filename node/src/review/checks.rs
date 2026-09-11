@@ -134,7 +134,9 @@ pub fn review_required_checks_current(
     review_id: &str,
     _cfg: &Config,
 ) -> Result<(), String> {
-    let review = store.get_review(review_id).map_err(|e| e.to_string())?
+    let review = store
+        .get_review(review_id)
+        .map_err(|e| e.to_string())?
         .ok_or("review is gone")?;
     let Some(recorded) = review.checks_json else {
         // External harness submissions do not run the node's isolated checks;

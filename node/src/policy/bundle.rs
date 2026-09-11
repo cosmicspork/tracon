@@ -104,7 +104,8 @@ pub fn load() -> Result<Policy, BundleError> {
         other => other,
     })?;
     verify(&text, signature_hex.trim(), &key_bytes)?;
-    let mut policy: Policy = toml::from_str(&text).map_err(|e| BundleError::Parse(e.to_string()))?;
+    let mut policy: Policy =
+        toml::from_str(&text).map_err(|e| BundleError::Parse(e.to_string()))?;
     policy.trusted = true;
     Ok(policy)
 }
@@ -136,7 +137,8 @@ pub fn install(
         Err(e) => return Err(e),
     }
     verify(bundle, signature_hex.trim(), &offered)?;
-    let mut policy: Policy = toml::from_str(bundle).map_err(|e| BundleError::Parse(e.to_string()))?;
+    let mut policy: Policy =
+        toml::from_str(bundle).map_err(|e| BundleError::Parse(e.to_string()))?;
     policy.trusted = true;
 
     let dir = Paths::bundle();

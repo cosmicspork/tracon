@@ -2,8 +2,8 @@
 //! interface it serves.
 
 pub mod acp;
-pub mod authority;
 pub mod adapter;
+pub mod authority;
 pub mod boundary;
 pub mod broker;
 pub mod config;

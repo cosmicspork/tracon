@@ -137,27 +137,46 @@ pub async fn create_authority_grant(
 ) -> ApiResult<Json<serde_json::Value>> {
     let action = b.action.trim();
     if !crate::authority::valid_action(action) {
-        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "unknown authority action"));
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unknown authority action",
+        ));
     }
     if !matches!(b.verdict.as_str(), "allow" | "ask" | "deny") {
-        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "verdict must be allow, ask, or deny"));
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "verdict must be allow, ask, or deny",
+        ));
     }
     if b.target.trim().is_empty() || b.target.contains(char::is_whitespace) {
-        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "target must be a canonical non-empty identifier"));
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "target must be a canonical non-empty identifier",
+        ));
     }
     if b.channel.trim().is_empty() || b.reason.trim().is_empty() {
-        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "channel and reason are required"));
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "channel and reason are required",
+        ));
     }
     if b.verdict == "allow"
-        && matches!(action, crate::authority::MERGE | crate::authority::PUBLISH | crate::authority::DEPLOY)
-        && b.revision.as_deref().is_none_or(|revision| revision.trim().is_empty())
+        && matches!(
+            action,
+            crate::authority::MERGE | crate::authority::PUBLISH | crate::authority::DEPLOY
+        )
+        && b.revision
+            .as_deref()
+            .is_none_or(|revision| revision.trim().is_empty())
     {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "merge, publish, and deploy allow grants must bind an immutable revision",
         ));
     }
-    if b.expires_ms.is_some_and(|expires_ms| expires_ms <= crate::store::now_ms()) {
+    if b.expires_ms
+        .is_some_and(|expires_ms| expires_ms <= crate::store::now_ms())
+    {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "expiry must be in the future",
@@ -185,7 +204,10 @@ pub async fn revoke_authority_grant(
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     if !s.store().authority_grant_revoke(&id)? {
-        return Err(ApiError::new(StatusCode::NOT_FOUND, "no active authority grant"));
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "no active authority grant",
+        ));
     }
     Ok(Json(json!({ "revoked": id })))
 }
@@ -1045,20 +1067,30 @@ pub(crate) async fn decide_local(
             let title = b.title.as_deref().unwrap_or(r.approved_title()).to_string();
             let body = b.body.as_deref().unwrap_or(r.approved_body()).to_string();
             match crate::authority::publish_review(
-                s.store(),
-                &s.manager,
-                &s.tools.broker,
-                &s.cfg,
-                &s.node_id,
-                &r,
-                &title,
-                &body,
-                false,
-                None,
+                &crate::authority::PublishContext {
+                    store: s.store(),
+                    manager: &s.manager,
+                    broker: &s.tools.broker,
+                    cfg: &s.cfg,
+                    node_id: &s.node_id,
+                },
+                crate::authority::PublishRequest {
+                    review: &r,
+                    title: &title,
+                    body: &body,
+                    require_evidence: false,
+                    recheck_authority: None,
+                },
             )
-            .await {
+            .await
+            {
                 Ok(published) => Ok(json!({ "state": "approved", "published": published })),
-                Err(error) => Err(ApiError(StatusCode::BAD_GATEWAY, error)),
+                Err(crate::authority::PublishError::Conflict(message)) => {
+                    Err(ApiError(StatusCode::CONFLICT, message))
+                }
+                Err(crate::authority::PublishError::External(message)) => {
+                    Err(ApiError(StatusCode::BAD_GATEWAY, message))
+                }
             }
         }
         other => Err(ApiError(

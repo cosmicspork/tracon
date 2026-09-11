@@ -29,7 +29,13 @@ pub fn target(kind: &str, parts: &[&str]) -> String {
     format!("{kind}:{}", parts.join(":"))
 }
 
-pub fn policy_decision(policy: &Policy, channel: &str, action: &str, target: &str, args: &Value) -> Decision {
+pub fn policy_decision(
+    policy: &Policy,
+    channel: &str,
+    action: &str,
+    target: &str,
+    args: &Value,
+) -> Decision {
     policy.decide(&Request {
         channel,
         kind: Some("authority"),
@@ -39,24 +45,40 @@ pub fn policy_decision(policy: &Policy, channel: &str, action: &str, target: &st
     })
 }
 
+/// What is being decided: the caller, the scope, and the arguments the
+/// summary is built from. Grouped so reordering eight positional arguments
+/// cannot silently swap two of them.
+pub struct AuthorityQuery<'a> {
+    pub channel: &'a str,
+    pub session_id: &'a str,
+    pub action: &'a str,
+    pub target: &'a str,
+    pub revision: Option<&'a str>,
+    pub args: &'a Value,
+}
+
 /// Decide at the last point before an external request.  Signed policy denial
 /// and an active local denial both dominate every allow; missing grants ask.
-pub fn decide(
-    store: &Store,
-    policy: &Policy,
-    channel: &str,
-    session_id: &str,
-    action: &str,
-    target: &str,
-    revision: Option<&str>,
-    args: &Value,
-) -> Result<Decision, String> {
-    let policy_decision = policy_decision(policy, channel, action, target, args);
+pub fn decide(store: &Store, policy: &Policy, query: &AuthorityQuery) -> Result<Decision, String> {
+    let policy_decision = policy_decision(
+        policy,
+        query.channel,
+        query.action,
+        query.target,
+        query.args,
+    );
     if policy.trusted && policy_decision.verdict == Verdict::Deny {
         return Ok(policy_decision);
     }
     let grants = store
-        .authority_grants_for(channel, session_id, action, target, revision, now_ms())
+        .authority_grants_for(
+            query.channel,
+            query.session_id,
+            query.action,
+            query.target,
+            query.revision,
+            now_ms(),
+        )
         .map_err(|e| e.to_string())?;
     if let Some(grant) = grants.iter().find(|g| g.verdict == "deny") {
         return Ok(Decision {
@@ -89,7 +111,11 @@ pub fn decide(
             reason: Some(grant.reason.clone()),
         });
     }
-    Ok(Decision { verdict: Verdict::Ask, rule_id: None, reason: None })
+    Ok(Decision {
+        verdict: Verdict::Ask,
+        rule_id: None,
+        reason: None,
+    })
 }
 
 pub fn grant_visible(row: &AuthorityGrantRow) -> Value {
@@ -108,51 +134,104 @@ pub fn grant_visible(row: &AuthorityGrantRow) -> Value {
     })
 }
 
+/// Whether a publish attempt failed because of the review's own state — stale
+/// since submit, claimed by a concurrent approval, authority revoked
+/// underneath it — or because the outside world it depended on returned an
+/// error. Callers answer the two differently: a conflict invites the operator
+/// to re-read the review, an external failure is the forge's fault, not
+/// theirs.
+#[derive(Debug)]
+pub enum PublishError {
+    Conflict(String),
+    External(String),
+}
+
+impl std::fmt::Display for PublishError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PublishError::Conflict(m) | PublishError::External(m) => f.write_str(m),
+        }
+    }
+}
+
+/// The node's own handles a publish needs, held apart from the
+/// review-specific request so the two cannot be passed in the wrong order.
+pub struct PublishContext<'a> {
+    pub store: &'a Store,
+    pub manager: &'a crate::session::Manager,
+    pub broker: &'a crate::broker::SharedBroker,
+    pub cfg: &'a crate::config::Config,
+    pub node_id: &'a str,
+}
+
+/// What is being published, and how strictly. Automatic publication requires
+/// node-recorded evidence and threads a recheck that re-reads authority right
+/// before the atomic claim; explicit operator approval needs neither.
+pub struct PublishRequest<'a> {
+    pub review: &'a crate::store::ReviewRow,
+    pub title: &'a str,
+    pub body: &'a str,
+    pub require_evidence: bool,
+    pub recheck_authority: Option<&'a (dyn Fn() -> Result<(), String> + Send + Sync)>,
+}
+
 /// Publish the exact candidate captured by a review. This is shared by the
 /// explicit operator approval and policy-authorized publication so neither can
 /// skip freshness, the atomic claim, or the brokered SHA precondition.
 pub async fn publish_review(
-    store: &Store,
-    manager: &crate::session::Manager,
-    broker: &crate::broker::SharedBroker,
-    cfg: &crate::config::Config,
-    node_id: &str,
-    review: &crate::store::ReviewRow,
-    title: &str,
-    body: &str,
-    require_evidence: bool,
-    recheck_authority: Option<&(dyn Fn() -> Result<(), String> + Send + Sync)>,
-) -> Result<String, String> {
+    ctx: &PublishContext<'_>,
+    request: PublishRequest<'_>,
+) -> Result<String, PublishError> {
+    let PublishRequest {
+        review,
+        title,
+        body,
+        require_evidence,
+        recheck_authority,
+    } = request;
     let worktree = serde_json::from_str::<crate::review::publish::Target>(&review.target)
         .ok()
         .and_then(|target| target.worktree)
         .or_else(|| {
-            store.get_session(&review.session_id).ok().flatten()
+            ctx.store
+                .get_session(&review.session_id)
+                .ok()
+                .flatten()
                 .and_then(|session| session.worktree_path)
         })
-        .ok_or("the worktree is gone")?;
+        .ok_or_else(|| PublishError::Conflict("the worktree is gone".into()))?;
     let files: Vec<crate::review::FileAtSubmit> =
         serde_json::from_str(&review.files).unwrap_or_default();
     let stale = crate::review::staleness(&worktree, &review.head_sha, &files).await;
     if !stale.is_empty() {
-        return Err(format!("changed since submit: {}", stale.join(", ")));
+        return Err(PublishError::Conflict(format!(
+            "changed since submit: {}",
+            stale.join(", ")
+        )));
     }
     if require_evidence {
-        crate::review::checks::review_required_checks_current(store, &review.id, cfg)?;
+        crate::review::checks::review_required_checks_current(ctx.store, &review.id, ctx.cfg)
+            .map_err(PublishError::Conflict)?;
     }
     if let Some(recheck) = recheck_authority {
-        recheck()?;
+        recheck().map_err(PublishError::Conflict)?;
     }
-    if !store.begin_publish(&review.id).map_err(|e| e.to_string())? {
-        return Err("this review is already being decided".into());
+    if !ctx
+        .store
+        .begin_publish(&review.id)
+        .map_err(|e| PublishError::External(e.to_string()))?
+    {
+        return Err(PublishError::Conflict(
+            "this review is already being decided".into(),
+        ));
     }
     let target: crate::review::publish::Target =
-        serde_json::from_str(&review.target).map_err(|e| e.to_string())?;
+        serde_json::from_str(&review.target).map_err(|e| PublishError::External(e.to_string()))?;
     match crate::review::publish::publish(
-        broker,
-        cfg,
+        ctx.broker,
+        ctx.cfg,
         &review.channel,
-        node_id,
+        ctx.node_id,
         &worktree,
         &target,
         &review.head_sha,
@@ -160,32 +239,54 @@ pub async fn publish_review(
         body,
         recheck_authority,
     )
-    .await {
+    .await
+    {
         Ok(published) => {
-            if !store.finish_publish(&review.id, title, body, &published)
-                .map_err(|e| e.to_string())? {
-                return Err("publish completed externally, but the review claim was lost; reconcile it before retrying".into());
+            if !ctx
+                .store
+                .finish_publish(&review.id, title, body, &published)
+                .map_err(|e| PublishError::External(e.to_string()))?
+            {
+                return Err(PublishError::Conflict(
+                    "publish completed externally, but the review claim was lost; reconcile it before retrying".into(),
+                ));
             }
-            manager.publish_queue().await;
-            if let Some(item) = store.get_session(&review.session_id).map_err(|e| e.to_string())?
+            ctx.manager.publish_queue().await;
+            if let Some(item) = ctx
+                .store
+                .get_session(&review.session_id)
+                .map_err(|e| PublishError::External(e.to_string()))?
                 .and_then(|session| session.work_item_id)
             {
                 if crate::corpus::work::close(
-                    store,
-                    manager.bus(),
-                    node_id,
+                    ctx.store,
+                    ctx.manager.bus(),
+                    ctx.node_id,
                     &item,
                     Some(&review.session_id),
-                ).is_ok() {
-                    manager.item_closed(&review.session_id, &format!("published: {published}")).await;
+                )
+                .is_ok()
+                {
+                    ctx.manager
+                        .item_closed(&review.session_id, &format!("published: {published}"))
+                        .await;
                 }
             }
             Ok(published)
         }
         Err(error) => {
-            store.abort_publish(&review.id).map_err(|e| e.to_string())?;
-            manager.publish_queue().await;
-            Err(error.to_string())
+            ctx.store
+                .abort_publish(&review.id)
+                .map_err(|e| PublishError::External(e.to_string()))?;
+            ctx.manager.publish_queue().await;
+            // A branch that moved between the reviewed tip and this push is a
+            // conflict with what was approved, not a forge failure.
+            Err(match error {
+                crate::review::publish::PublishError::BranchMoved { .. } => {
+                    PublishError::Conflict(error.to_string())
+                }
+                other => PublishError::External(other.to_string()),
+            })
         }
     }
 }
@@ -213,12 +314,23 @@ mod tests {
     #[test]
     fn scoped_ask_overrides_broader_allow() {
         let store = Store::open_in_memory().unwrap();
-        store.authority_grant_insert(&grant("allow", "allow")).unwrap();
+        store
+            .authority_grant_insert(&grant("allow", "allow"))
+            .unwrap();
         store.authority_grant_insert(&grant("ask", "ask")).unwrap();
         let decision = decide(
-            &store, &Policy::shipped(), "personal", "session", MERGE,
-            "github:me/project:pr:7", Some("abc1234"), &serde_json::json!({}),
-        ).unwrap();
+            &store,
+            &Policy::shipped(),
+            &AuthorityQuery {
+                channel: "personal",
+                session_id: "session",
+                action: MERGE,
+                target: "github:me/project:pr:7",
+                revision: Some("abc1234"),
+                args: &serde_json::json!({}),
+            },
+        )
+        .unwrap();
         assert_eq!(decision.verdict, Verdict::Ask);
         assert_eq!(decision.rule_id.as_deref(), Some("ask"));
     }
@@ -226,11 +338,22 @@ mod tests {
     #[test]
     fn unsigned_policy_cannot_activate_local_grant() {
         let store = Store::open_in_memory().unwrap();
-        store.authority_grant_insert(&grant("allow", "allow")).unwrap();
+        store
+            .authority_grant_insert(&grant("allow", "allow"))
+            .unwrap();
         let decision = decide(
-            &store, &Policy::default(), "personal", "session", MERGE,
-            "github:me/project:pr:7", Some("abc1234"), &serde_json::json!({}),
-        ).unwrap();
+            &store,
+            &Policy::default(),
+            &AuthorityQuery {
+                channel: "personal",
+                session_id: "session",
+                action: MERGE,
+                target: "github:me/project:pr:7",
+                revision: Some("abc1234"),
+                args: &serde_json::json!({}),
+            },
+        )
+        .unwrap();
         assert_eq!(decision.verdict, Verdict::Ask);
     }
 }

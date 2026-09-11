@@ -45,7 +45,8 @@ impl Store {
             "SELECT * FROM authority_grant WHERE revoked_ms IS NULL ORDER BY created_ms DESC"
         };
         let mut stmt = conn.prepare(sql)?;
-        let rows = stmt.query_map([], AuthorityGrantRow::from_row)?
+        let rows = stmt
+            .query_map([], AuthorityGrantRow::from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -88,32 +89,58 @@ impl Store {
                AND (expires_ms IS NULL OR expires_ms > ?6)
              ORDER BY created_ms DESC",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![action, target, channel, session_id, revision, at_ms],
-            AuthorityGrantRow::from_row,
-        )?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![action, target, channel, session_id, revision, at_ms],
+                AuthorityGrantRow::from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
     pub fn authority_grant(&self, id: &str) -> Result<Option<AuthorityGrantRow>> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT * FROM authority_grant WHERE id=?1", [id], AuthorityGrantRow::from_row)
-            .optional()
-            .map_err(Into::into)
+        conn.query_row(
+            "SELECT * FROM authority_grant WHERE id=?1",
+            [id],
+            AuthorityGrantRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     /// Create an outcome before dispatch. A crash after the remote side effect
     /// remains honestly pending rather than being retried blindly on restart.
-    pub fn authority_action_begin(&self, id: &str, grant_id: Option<&str>, action: &str, target: &str, channel: &str, session_id: &str, revision: Option<&str>, operation_id: Option<&str>, evidence: &str) -> Result<()> {
+    pub fn authority_action_begin(&self, begin: &ActionBegin) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let request_hash = crate::corpus::hash_body(evidence);
+        let request_hash = crate::corpus::hash_body(begin.evidence);
         conn.execute(
             "INSERT INTO authority_action (id, grant_id, action, target, channel, session_id, revision, operation_id, evidence, state, outcome, created_ms, updated_ms, request_hash)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'pending',NULL,?10,?10,?11)",
-            rusqlite::params![id, grant_id, action, target, channel, session_id, revision, operation_id.unwrap_or(""), evidence, now_ms(), request_hash],
+            rusqlite::params![
+                begin.id, begin.grant_id, begin.action, begin.target, begin.channel,
+                begin.session_id, begin.revision, begin.operation_id.unwrap_or(""),
+                begin.evidence, now_ms(), request_hash,
+            ],
         )?;
         Ok(())
+    }
+
+    /// Every dispatch still marked `pending` when the node comes back up was
+    /// interrupted before it could learn its own outcome — the crash could
+    /// have landed before or after the remote side effect. Relabel it
+    /// `uncertain` rather than leaving it silently `pending` forever: the
+    /// replay guard still blocks the same scope either way, but `uncertain`
+    /// is the honest word for "an operator must reconcile this".
+    pub fn authority_action_reconcile_pending(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE authority_action SET state='uncertain',
+                outcome=COALESCE(outcome, 'node restarted before this dispatch could report its outcome'),
+                updated_ms=?1
+             WHERE state='pending'",
+            rusqlite::params![now_ms()],
+        )?)
     }
 
     pub fn authority_action_existing(
@@ -156,4 +183,18 @@ impl Store {
         )?;
         Ok(())
     }
+}
+
+/// The fields one outcome record starts pending with. Grouped so a caller
+/// cannot transpose two of the many string arguments a dispatch carries.
+pub struct ActionBegin<'a> {
+    pub id: &'a str,
+    pub grant_id: Option<&'a str>,
+    pub action: &'a str,
+    pub target: &'a str,
+    pub channel: &'a str,
+    pub session_id: &'a str,
+    pub revision: Option<&'a str>,
+    pub operation_id: Option<&'a str>,
+    pub evidence: &'a str,
 }

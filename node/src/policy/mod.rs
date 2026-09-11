@@ -226,7 +226,8 @@ pub const WORKING_AGREEMENTS: &str = include_str!("working-agreements.toml");
 impl Policy {
     /// The bundle this binary ships, parsed. What `tracon policy init` signs.
     pub fn shipped() -> Self {
-        let mut policy: Self = toml::from_str(WORKING_AGREEMENTS).expect("the shipped bundle parses");
+        let mut policy: Self =
+            toml::from_str(WORKING_AGREEMENTS).expect("the shipped bundle parses");
         policy.trusted = true;
         policy
     }

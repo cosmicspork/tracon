@@ -323,8 +323,15 @@ pub async fn call(
         }
         ISSUE_TRANSITION => {
             let key = issue_key(args.get("key"), "key")?;
-            let transition = args.get("transition_id").and_then(Value::as_str).map(str::trim)
-                .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')))
+            let transition = args
+                .get("transition_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|v| {
+                    !v.is_empty()
+                        && v.chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                })
                 .ok_or("transition_id is required")?;
             if let Some(recheck) = before_mutation {
                 recheck()?;
@@ -333,14 +340,18 @@ pub async fn call(
                 .post(format!("{url}/rest/api/2/issue/{key}/transitions"))
                 .basic_auth(email, Some(token))
                 .json(&json!({ "transition": { "id": transition } }))
-                .send().await.map_err(|e| format!("mutation-outcome-unknown: jira: {e}"))?;
+                .send()
+                .await
+                .map_err(|e| format!("mutation-outcome-unknown: jira: {e}"))?;
             let status = res.status();
             if !status.is_success() {
                 let v: Value = res.json().await.unwrap_or(Value::Null);
                 let error = refusal("jira refused the transition", status, &v);
                 return Err(if status.is_server_error() {
                     format!("mutation-outcome-unknown: {error}")
-                } else { error });
+                } else {
+                    error
+                });
             }
             Ok(json!({ "key": key, "transition_id": transition }))
         }

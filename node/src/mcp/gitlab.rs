@@ -151,7 +151,10 @@ pub async fn call(
                 .filter(|n| *n > 0)
                 .ok_or("iid is required")?;
             if name == MR_MERGE {
-                let sha = args.get("head_sha").and_then(Value::as_str).filter(|v| !v.is_empty())
+                let sha = args
+                    .get("head_sha")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
                     .ok_or("head_sha is required")?;
                 let mr = get(http, token, &format!("{project_url}/merge_requests/{iid}")).await?;
                 if mr["sha"].as_str() != Some(sha) {
@@ -160,19 +163,28 @@ pub async fn call(
                 if let Some(recheck) = before_mutation {
                     recheck()?;
                 }
-                let res = http.put(format!("{project_url}/merge_requests/{iid}/merge"))
+                let res = http
+                    .put(format!("{project_url}/merge_requests/{iid}/merge"))
                     .header("PRIVATE-TOKEN", token)
-                    .json(&json!({ "sha": sha, "squash": args["squash"].as_bool().unwrap_or(true) }))
-                    .send().await.map_err(|e| format!("mutation-outcome-unknown: gitlab: {e}"))?;
+                    .json(
+                        &json!({ "sha": sha, "squash": args["squash"].as_bool().unwrap_or(true) }),
+                    )
+                    .send()
+                    .await
+                    .map_err(|e| format!("mutation-outcome-unknown: gitlab: {e}"))?;
                 let status = res.status();
                 let v: Value = res.json().await.unwrap_or(Value::Null);
                 if !status.is_success() {
                     let error = format!("gitlab refused the merge ({status}): {}", v["message"]);
                     return Err(if status.is_server_error() {
                         format!("mutation-outcome-unknown: {error}")
-                    } else { error });
+                    } else {
+                        error
+                    });
                 }
-                Ok(json!({ "state": v["state"], "merge_commit_sha": v["merge_commit_sha"], "web_url": v["web_url"] }))
+                Ok(
+                    json!({ "state": v["state"], "merge_commit_sha": v["merge_commit_sha"], "web_url": v["web_url"] }),
+                )
             } else {
                 merge_request(http, token, &project_url, iid, name, args).await
             }
@@ -285,16 +297,37 @@ pub async fn call(
             Ok(json!({ "id": v["id"], "status": v["status"], "web_url": v["web_url"] }))
         }
         DEPLOY => {
-            let pipeline_id = args.get("pipeline_id").and_then(Value::as_i64).filter(|id| *id > 0)
+            let pipeline_id = args
+                .get("pipeline_id")
+                .and_then(Value::as_i64)
+                .filter(|id| *id > 0)
                 .ok_or("pipeline_id is required")?;
-            let job_id = args.get("job_id").and_then(Value::as_i64).filter(|id| *id > 0)
+            let job_id = args
+                .get("job_id")
+                .and_then(Value::as_i64)
+                .filter(|id| *id > 0)
                 .ok_or("job_id is required")?;
-            let environment = args.get("environment").and_then(Value::as_str).map(str::trim)
-                .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+            let environment = args
+                .get("environment")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|v| {
+                    !v.is_empty()
+                        && v.chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                })
                 .ok_or("environment is required")?;
-            let source_sha = args.get("source_sha").and_then(Value::as_str).filter(|v| v.len() >= 7)
+            let source_sha = args
+                .get("source_sha")
+                .and_then(Value::as_str)
+                .filter(|v| v.len() >= 7)
                 .ok_or("source_sha is required")?;
-            let pipeline = get(http, token, &format!("{project_url}/pipelines/{pipeline_id}")).await?;
+            let pipeline = get(
+                http,
+                token,
+                &format!("{project_url}/pipelines/{pipeline_id}"),
+            )
+            .await?;
             if pipeline["sha"].as_str() != Some(source_sha) {
                 return Err("pipeline does not contain the authorized source SHA".into());
             }
@@ -311,17 +344,29 @@ pub async fn call(
             if let Some(recheck) = before_mutation {
                 recheck()?;
             }
-            let res = http.post(format!("{project_url}/jobs/{job_id}/play")).header("PRIVATE-TOKEN", token)
-                .json(&json!({})).send().await.map_err(|e| format!("mutation-outcome-unknown: gitlab: {e}"))?;
+            let res = http
+                .post(format!("{project_url}/jobs/{job_id}/play"))
+                .header("PRIVATE-TOKEN", token)
+                .json(&json!({}))
+                .send()
+                .await
+                .map_err(|e| format!("mutation-outcome-unknown: gitlab: {e}"))?;
             let status = res.status();
             let v: Value = res.json().await.unwrap_or(Value::Null);
             if !status.is_success() {
-                let error = format!("gitlab refused the deployment job ({status}): {}", v["message"]);
+                let error = format!(
+                    "gitlab refused the deployment job ({status}): {}",
+                    v["message"]
+                );
                 return Err(if status.is_server_error() {
                     format!("mutation-outcome-unknown: {error}")
-                } else { error });
+                } else {
+                    error
+                });
             }
-            Ok(json!({ "id": v["id"], "status": v["status"], "web_url": v["web_url"], "environment": environment, "source_sha": source_sha, "pipeline_id": pipeline_id }))
+            Ok(
+                json!({ "id": v["id"], "status": v["status"], "web_url": v["web_url"], "environment": environment, "source_sha": source_sha, "pipeline_id": pipeline_id }),
+            )
         }
         other => Err(format!("no gitlab tool named {other}")),
     }
