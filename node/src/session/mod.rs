@@ -1174,7 +1174,7 @@ impl Manager {
             .get(channel)
             .map(|a| a.session_id.clone())
             .ok_or(SessionError::NotFound)?;
-        self.kill(&id).await
+        self.send(&id, Command::Kill).await
     }
 
     /// A channel a session may run on: one this node holds, or one of the two
