@@ -571,7 +571,8 @@ pub async fn get_session(
         .into_iter()
         .filter(|p| p.session_id == id)
         .collect();
-    Ok(Json(json!({ "session": row, "waiting": waiting })))
+    let questions = s.store().session_operator_questions(&id)?;
+    Ok(Json(json!({ "session": row, "waiting": waiting, "questions": questions })))
 }
 
 #[derive(Deserialize)]
@@ -1065,6 +1066,143 @@ pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Valu
     })))
 }
 
+
+#[derive(Deserialize)]
+pub struct OperatorAnswerBody {
+    pub answer: serde_json::Value,
+}
+
+pub async fn operator_questions(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({ "questions": s.store().open_operator_questions()? })))
+}
+
+pub async fn answer_operator_question(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<OperatorAnswerBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if s.store().operator_question(&id)?.is_none() {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such operator question".into()));
+    }
+    let answer = serde_json::to_string(&b.answer)
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    if s.store().answer_operator_question(&id, &answer)?.is_none() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this question was already answered or cancelled".into(),
+        ));
+    }
+    Ok(Json(json!({ "answered": true })))
+}
+
+pub async fn cancel_operator_question(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !s.store().cancel_operator_question(&id)? {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this question was already answered or cancelled".into(),
+        ));
+    }
+    Ok(Json(json!({ "cancelled": true })))
+}
+
+pub async fn operator_notification(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({
+        "notification_id": id,
+        "attempts": s.store().notification_attempts(&id)?,
+        "receipt": "delivery attempts are push-service outcomes, not proof a human saw a notification",
+    })))
+}
+
+pub async fn operator_notifications(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let notifications = s.store().operator_notifications()?;
+    let rows: Vec<_> = notifications
+        .into_iter()
+        .map(|notification| {
+            let attempts = s.store().notification_attempts(&notification.id).unwrap_or_default();
+            json!({ "notification_id": notification.id, "expires_ms": notification.expires_ms, "attempts": attempts })
+        })
+        .collect();
+    Ok(Json(json!({ "notifications": rows, "receipt": "attempts show only push-service outcomes; human receipt is unknown" })))
+}
+
+pub async fn operator_issues(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({ "issues": s.store().issue_drafts(false)? })))
+}
+
+pub async fn operator_issue(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let issue = s.store().issue_draft(&id)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        "no such issue draft".into(),
+    ))?;
+    Ok(Json(json!({ "issue": issue })))
+}
+
+/// An issue can leave only through the node-side broker, targeting tracon's
+/// repository. The row is claimed before spawning `gh`, so double-clicks and
+/// concurrent clients cannot publish two copies.
+pub async fn publish_operator_issue(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let issue = s.store().issue_draft(&id)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        "no such issue draft".into(),
+    ))?;
+    if !s.store().begin_issue_publication(&id)? {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this issue was already authorized or is no longer a draft".into(),
+        ));
+    }
+    let env = s
+        .tools
+        .broker
+        .read()
+        .unwrap()
+        .env_for("gh", &issue.channel, &s.node_id)
+        .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
+    let result = tokio::process::Command::new(&s.cfg.publish.gh)
+        .args([
+            "issue",
+            "create",
+            "--repo",
+            "cosmicspork/tracon",
+            "--title",
+            &issue.title,
+            "--body",
+            &issue.body,
+        ])
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .envs(env)
+        .output()
+        .await;
+    match result {
+        Ok(out) if out.status.success() => {
+            let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            s.store().finish_issue_publication(&id, &url)?;
+            Ok(Json(json!({ "published": true, "url": url })))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            s.store().fail_issue_publication(&id, &err)?;
+            Err(ApiError(StatusCode::BAD_GATEWAY, err))
+        }
+        Err(e) => {
+            s.store().fail_issue_publication(&id, &e.to_string())?;
+            Err(ApiError(StatusCode::BAD_GATEWAY, e.to_string()))
+        }
+    }
+}
 // ---- promotions ----
 
 pub async fn get_promotion(

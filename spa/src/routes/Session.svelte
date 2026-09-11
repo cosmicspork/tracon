@@ -1,12 +1,12 @@
 <script lang="ts">
   import Log from '../components/Log.svelte'
+  import OperatorQuestionCard from '../components/OperatorQuestionCard.svelte'
   import PermissionCard from '../components/PermissionCard.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { humanizeError } from '../lib/errors'
   import { formatAge, formatBudget, formatTokens } from '../lib/format'
-  import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
-  import { isTerminal } from '../lib/types'
+  import { isTerminal, type OperatorQuestion } from '../lib/types'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
 
@@ -23,6 +23,11 @@
   const busy = $derived(session?.turn_active === 1)
   const owner = $derived(session ? nodeById(store.nodes, session.node_id) : undefined)
   const remote = $derived(owner !== undefined && !owner.is_self)
+  let questions = $state<OperatorQuestion[]>([])
+  async function refreshQuestions() {
+    const result = await api.session(id)
+    questions = result.questions
+  }
   const unreachable = $derived(session ? unreachableReason(store.nodes, store.mesh, session.node_id) : null)
 
   $effect(() => {
@@ -31,8 +36,8 @@
     api
       .session(id)
       .then((d) => {
-        // The node holds the draft; a reopened tab resumes with it in the box.
         if (!draftLoaded) draft = d.session.draft ?? ''
+        questions = d.questions
         draftLoaded = true
       })
       .catch(() => (draftLoaded = true))
@@ -178,6 +183,10 @@
   {/if}
 
   <Log events={store.events} openChunks={store.openChunks} toolProgress={store.toolProgress} />
+
+  {#each questions as question (question.id)}
+    <OperatorQuestionCard {question} done={refreshQuestions} />
+  {/each}
 
   {#each waiting as p (p.id)}
     <PermissionCard permission={p} inline />

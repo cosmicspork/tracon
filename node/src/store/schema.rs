@@ -283,6 +283,52 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE session ADD COLUMN archived_ms INTEGER;
     CREATE INDEX session_archived ON session(archived_ms, created_ms);
     "#,
+    // 14: operator interventions are durable but node-local. Questions are
+    // not permissions, and issue drafts never leave this database until a
+    // separate, atomic operator approval claims their fixed bytes.
+    r#"
+    CREATE TABLE operator_question (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        choices_json TEXT NOT NULL,
+        state TEXT NOT NULL,
+        answer_json TEXT,
+        created_ms INTEGER NOT NULL,
+        answered_ms INTEGER
+    );
+    CREATE INDEX operator_question_open ON operator_question(state, created_ms);
+    CREATE INDEX operator_question_session ON operator_question(session_id, state, created_ms);
+    CREATE TABLE operator_issue (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        attachments_json TEXT NOT NULL,
+        state TEXT NOT NULL,
+        published_url TEXT,
+        publish_error TEXT,
+        created_ms INTEGER NOT NULL,
+        approved_ms INTEGER
+    );
+    CREATE INDEX operator_issue_state ON operator_issue(state, created_ms);
+    CREATE TABLE operator_notification (
+        dedup_key TEXT PRIMARY KEY,
+        id TEXT NOT NULL UNIQUE,
+        expires_ms INTEGER NOT NULL
+    );
+    CREATE TABLE operator_notification_attempt (
+        id TEXT PRIMARY KEY,
+        notification_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        attempted_ms INTEGER NOT NULL
+    );
+    CREATE INDEX operator_notification_attempt_notification ON operator_notification_attempt(notification_id, attempted_ms);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build
