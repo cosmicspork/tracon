@@ -476,7 +476,10 @@ fn make_tree_writable(path: &Path) {
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
             let child = entry.path();
-            if child.is_dir() {
+            if std::fs::symlink_metadata(&child)
+                .map(|metadata| metadata.file_type().is_dir())
+                .unwrap_or(false)
+            {
                 make_tree_writable(&child);
             }
         }

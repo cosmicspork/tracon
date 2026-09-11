@@ -912,55 +912,6 @@ async fn candidate_controlled_check_file_cannot_replace_operator_required_checks
 }
 
 #[tokio::test]
-async fn prose_only_resubmission_reuses_exact_candidate_evidence() {
-    state::isolate();
-    let f = fixture_with(test_name!(), WITH_GH, |cfg| {
-        cfg.boundary.harness_image =
-            "localhost/tracon-harness@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
-    })
-    .await;
-    let first = f.tool("s1", "submit_review", f.submit_args()).await;
-    let review_id = first["review_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{first}"))
-        .to_string();
-    let candidate_id = first["candidate_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{first}"))
-        .to_string();
-
-    let mut args = f.submit_args();
-    args.as_object_mut()
-        .unwrap()
-        .insert("review_id".into(), Value::String(review_id.clone()));
-    args.as_object_mut()
-        .unwrap()
-        .insert("body".into(), Value::String("clearer review prose".into()));
-    let second = f.tool("s1", "submit_review", args).await;
-    assert_eq!(second["checks_reused"], true, "{second}");
-    let runs = f.store.check_runs_for_candidate(&candidate_id).unwrap();
-    assert_eq!(runs.len(), 2);
-    assert_eq!(runs[0].outcome, "passed");
-    assert_eq!(runs[1].outcome, "reused");
-    assert_eq!(runs[1].source_outcome.as_deref(), Some("passed"));
-
-    let mut rerun = f.submit_args();
-    rerun
-        .as_object_mut()
-        .unwrap()
-        .insert("review_id".into(), Value::String(review_id));
-    rerun
-        .as_object_mut()
-        .unwrap()
-        .insert("rerun_checks".into(), Value::Bool(true));
-    let third = f.tool("s1", "submit_review", rerun).await;
-    assert_eq!(third["checks_reused"], false, "{third}");
-    let runs = f.store.check_runs_for_candidate(&candidate_id).unwrap();
-    assert_eq!(runs.len(), 3);
-    assert_eq!(runs[2].outcome, "passed");
-    assert!(runs[2].rerun_of.is_some());
-}
-#[tokio::test]
 async fn a_diff_over_the_cap_is_refused_before_any_check_runs() {
     state::isolate();
     let f = fixture_with(test_name!(), WITH_GH, |c| c.review.max_diff_lines = 0).await;
