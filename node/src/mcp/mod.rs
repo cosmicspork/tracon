@@ -673,7 +673,7 @@ fn consequential_name(name: &str) -> bool {
 }
 
 fn consequential(name: &str, args: &Value) -> Option<(&'static str, String, Option<String>)> {
-    let string = |key| args.get(key).and_then(Value::as_str).filter(|v| !v.trim().is_empty());
+    let string = |key| args.get(key).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
     if matches!(name, github::PR_MERGE | gitlab::MR_MERGE | gitlab::DEPLOY | jira::ISSUE_TRANSITION)
         && !string("operation_id").is_some_and(|id| {
             id.len() >= 8 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
@@ -684,7 +684,11 @@ fn consequential(name: &str, args: &Value) -> Option<(&'static str, String, Opti
     match name {
         github::PR_MERGE => Some((
             crate::authority::MERGE,
-            format!("github:{}:pr:{}", string("repo")?, args.get("number").and_then(Value::as_i64)?),
+            format!(
+                "github:{}:pr:{}",
+                string("repo")?.to_ascii_lowercase(),
+                args.get("number").and_then(Value::as_i64)?,
+            ),
             string("head_sha").map(str::to_string),
         )),
         gitlab::MR_MERGE => Some((
@@ -710,7 +714,10 @@ fn consequential(name: &str, args: &Value) -> Option<(&'static str, String, Opti
             }
             Some((
                 crate::authority::TICKET_TRANSITION,
-                format!("jira:issue:{}:transition:{transition}", string("key")?),
+                format!(
+                    "jira:issue:{}:transition:{transition}",
+                    string("key")?.to_ascii_uppercase(),
+                ),
                 None,
             ))
         }
@@ -721,11 +728,11 @@ fn consequential(name: &str, args: &Value) -> Option<(&'static str, String, Opti
 /// Normalize provider defaults and ignore arguments a consequential provider
 /// does not consume before comparing a stable operation id on replay.
 fn canonical_consequential_payload(name: &str, args: &Value) -> Option<Value> {
-    let string = |key| args.get(key).and_then(Value::as_str).filter(|v| !v.trim().is_empty());
+    let string = |key| args.get(key).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
     let operation_id = string("operation_id")?;
     match name {
         github::PR_MERGE => Some(serde_json::json!({
-            "repo": string("repo")?, "number": args.get("number")?.as_i64()?,
+            "repo": string("repo")?.to_ascii_lowercase(), "number": args.get("number")?.as_i64()?,
             "head_sha": string("head_sha")?, "method": string("method").unwrap_or("squash"),
             "operation_id": operation_id,
         })),
@@ -740,7 +747,7 @@ fn canonical_consequential_payload(name: &str, args: &Value) -> Option<Value> {
             "source_sha": string("source_sha")?, "operation_id": operation_id,
         })),
         jira::ISSUE_TRANSITION => Some(serde_json::json!({
-            "key": string("key")?, "transition_id": string("transition_id")?,
+            "key": string("key")?.to_ascii_uppercase(), "transition_id": string("transition_id")?,
             "operation_id": operation_id,
         })),
         _ => None,
