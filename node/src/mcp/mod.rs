@@ -293,9 +293,18 @@ impl Tools {
             &ctx.channel, &ctx.session_id, Some(&review.head_sha),
             &serde_json::json!({ "review_id": review.id, "candidate": review.head_sha, "prose": prose }).to_string(),
         ).map_err(|e| e.to_string())?;
+        let recheck = || {
+            let current = crate::authority::decide(
+                access.store.as_ref(), &self.policy.read().unwrap(), &ctx.channel, &ctx.session_id,
+                crate::authority::PUBLISH, &canonical, Some(&review.head_sha), &authority_args,
+            )?;
+            (current.verdict == Verdict::Allow)
+                .then_some(())
+                .ok_or_else(|| "publication authority was revoked or no longer applies".into())
+        };
         match crate::authority::publish_review(
             access.store.as_ref(), &access.manager, &self.broker, &self.cfg,
-            &ctx.node_id, &review, review.approved_title(), review.approved_body(),
+            &ctx.node_id, &review, review.approved_title(), review.approved_body(), true, Some(&recheck),
         ).await {
             Ok(published) => {
                 access.store.authority_action_finish(&action_id, "succeeded", &published)
@@ -433,6 +442,16 @@ impl Tools {
     }
 
     fn decide(&self, ctx: &CallContext, name: &str, summary: &str, args: &Value) -> Decision {
+        let tool = self.policy.read().unwrap().decide(&Request {
+            channel: &ctx.channel,
+            kind: Some(TOOL_KIND),
+            title: name,
+            command: Some(summary),
+            arguments: Some(args),
+        });
+        if tool.verdict == Verdict::Deny {
+            return tool;
+        }
         if let Some((action, target, revision)) = consequential(name, args) {
             let Some(access) = self.session.get() else {
                 return Decision { verdict: Verdict::Ask, rule_id: None, reason: None };
@@ -449,13 +468,7 @@ impl Tools {
             )
             .unwrap_or(Decision { verdict: Verdict::Ask, rule_id: None, reason: None });
         }
-        self.policy.read().unwrap().decide(&Request {
-            channel: &ctx.channel,
-            kind: Some(TOOL_KIND),
-            title: name,
-            command: Some(summary),
-            arguments: Some(args),
-        })
+        tool
     }
 
     /// Grants are re-read after every operator wait and immediately before a

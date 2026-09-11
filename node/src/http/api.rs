@@ -1037,6 +1037,8 @@ pub(crate) async fn decide_local(
                 &r,
                 &title,
                 &body,
+                true,
+                None,
             )
             .await {
                 Ok(published) => Ok(json!({ "state": "approved", "published": published })),

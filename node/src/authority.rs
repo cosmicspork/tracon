@@ -51,6 +51,13 @@ pub fn decide(
     revision: Option<&str>,
     args: &Value,
 ) -> Result<Decision, String> {
+    if !policy.trusted {
+        return Ok(Decision {
+            verdict: Verdict::Ask,
+            rule_id: None,
+            reason: Some("the signed policy bundle is unavailable or invalid".into()),
+        });
+    }
     let policy = policy_decision(policy, channel, action, target, args);
     if policy.verdict == Verdict::Deny {
         return Ok(policy);
@@ -113,6 +120,8 @@ pub async fn publish_review(
     review: &crate::store::ReviewRow,
     title: &str,
     body: &str,
+    require_evidence: bool,
+    recheck_authority: Option<&dyn Fn() -> Result<(), String>>,
 ) -> Result<String, String> {
     let worktree = serde_json::from_str::<crate::review::publish::Target>(&review.target)
         .ok()
@@ -128,7 +137,12 @@ pub async fn publish_review(
     if !stale.is_empty() {
         return Err(format!("changed since submit: {}", stale.join(", ")));
     }
-    crate::review::checks::review_required_checks_current(store, &review.id, cfg)?;
+    if require_evidence {
+        crate::review::checks::review_required_checks_current(store, &review.id, cfg)?;
+    }
+    if let Some(recheck) = recheck_authority {
+        recheck()?;
+    }
     if !store.begin_publish(&review.id).map_err(|e| e.to_string())? {
         return Err("this review is already being decided".into());
     }
@@ -170,5 +184,50 @@ pub async fn publish_review(
             manager.publish_queue().await;
             Err(error.to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grant(id: &str, verdict: &str) -> AuthorityGrantRow {
+        AuthorityGrantRow {
+            id: id.into(),
+            action: MERGE.into(),
+            verdict: verdict.into(),
+            target: "github:me/project:pr:7".into(),
+            channel: "personal".into(),
+            session_id: None,
+            revision: Some("abc1234".into()),
+            expires_ms: None,
+            revoked_ms: None,
+            reason: id.into(),
+            created_ms: now_ms(),
+        }
+    }
+
+    #[test]
+    fn scoped_ask_overrides_broader_allow() {
+        let store = Store::open_in_memory().unwrap();
+        store.authority_grant_insert(&grant("allow", "allow")).unwrap();
+        store.authority_grant_insert(&grant("ask", "ask")).unwrap();
+        let decision = decide(
+            &store, &Policy::shipped(), "personal", "session", MERGE,
+            "github:me/project:pr:7", Some("abc1234"), &serde_json::json!({}),
+        ).unwrap();
+        assert_eq!(decision.verdict, Verdict::Ask);
+        assert_eq!(decision.rule_id.as_deref(), Some("ask"));
+    }
+
+    #[test]
+    fn unsigned_policy_cannot_activate_local_grant() {
+        let store = Store::open_in_memory().unwrap();
+        store.authority_grant_insert(&grant("allow", "allow")).unwrap();
+        let decision = decide(
+            &store, &Policy::default(), "personal", "session", MERGE,
+            "github:me/project:pr:7", Some("abc1234"), &serde_json::json!({}),
+        ).unwrap();
+        assert_eq!(decision.verdict, Verdict::Ask);
     }
 }
