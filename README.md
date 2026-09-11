@@ -202,6 +202,19 @@ approval is refused and the changed files are named. `tracon provenance <sha>`
 answers, later, which model, which prompts, which approval and which policy shipped
 a commit.
 
+What you review is a *candidate*: an immutable capture of the commit's tree,
+kept even after the review moves on. Required checks come only from the node's
+configuration (a repository's own `.tracon/checks` cannot replace them) and run
+against a writable copy of the candidate in the runtime; each run keeps its
+command, inputs, the image the runtime actually executed, the log, and the outcome.
+A resubmission that changes only the title, description, or ticket prose reuses
+the code evidence of the same candidate and says so; changed code, checks, or
+image runs again. Every decision — yours or a policy grant's — is recorded
+against the revision it decided, with the requirements pinned as they were when
+it was submitted. A curated demonstration (a document with commands, output,
+and images) can be attached beside the authoritative record; it is linked and
+hashed, never executed, and flagged stale if the document changed since.
+
 ### Asking, pinging, and complaining
 
 Three tools let an agent reach you without pretending a question is a permission.
