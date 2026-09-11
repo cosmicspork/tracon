@@ -1511,6 +1511,16 @@ impl Manager {
         if let Some(row) = self.store.get_session(id)? {
             if row.harness_id == external::HARNESS_ID {
                 let channel = self.store.channel_get(&row.channel)?;
+                if channel.is_none() {
+                    // Materialize both standalone defaults together; creating
+                    // one otherwise makes the other disappear from the
+                    // synthesized channel list.
+                    for name in crate::http::api::DEFAULT_CHANNELS {
+                        self.store.channel_put(name, &[], "{}")?;
+                        self.store.node_channel_add(&self.node_id, name)?;
+                    }
+                }
+                let channel = self.store.channel_get(&row.channel)?;
                 let (keyring, mut bindings) = match channel {
                     Some(channel) => (
                         channel.keyring,
@@ -1518,7 +1528,6 @@ impl Manager {
                     ),
                     None => (Vec::new(), json!({})),
                 };
-                bindings["external_stopped"] = json!(true);
                 self.store.channel_put(
                     &row.channel,
                     &keyring,
