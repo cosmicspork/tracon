@@ -57,9 +57,6 @@ pub struct RunnerCommand {
     /// bounded command. Long-lived harnesses leave this unset.
     pub image: Option<String>,
     pub name: String,
-    /// Overrides the runner's default image for this one command. `None`
-    /// runs the harness image every other command runs.
-    pub image: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

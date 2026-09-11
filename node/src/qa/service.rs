@@ -16,7 +16,7 @@ use std::{
 use serde_json::{json, Value};
 
 use crate::{
-    authority,
+    authority::{self, AuthorityQuery},
     config::{safe_relative_path, Config, PrototypeBuild, QaTarget},
     corpus::html::HtmlFile,
     mcp::{self, CallContext},
@@ -26,11 +26,13 @@ use crate::{
         deploy_authority_target, evidence_state, observe_environment, redact_secrets,
         requested_credential_keys, test_account_authority_target, BrowserAssertionResult,
         BrowserPlan, BrowserReport, BrowserRequest, DeployRequest, BROWSER_RUNNER,
-        BROWSER_TEST_ACCOUNT_ACTION, BROWSER_VERIFY_ACTION, DEPLOY_ACTION,
     },
     runner::RunnerCommand,
     session::Manager,
-    store::{BrowserRunRow, DemonstrationRow, PrototypeRow, QaAssetRow, QaDeploymentRow, Store},
+    store::{
+        ActionBegin, BrowserRunRow, DemonstrationRow, PrototypeRow, QaAssetRow, QaDeploymentRow,
+        Store,
+    },
     stream::Bus,
 };
 
@@ -82,7 +84,7 @@ pub async fn deploy(
         access,
         &candidate.channel,
         &owner_session,
-        DEPLOY_ACTION,
+        authority::DEPLOY,
         &authority_target,
         Some(&candidate.head_sha),
         &json!({ "candidate_id": candidate.id, "target": request.target, "head_sha": candidate.head_sha }),
@@ -107,6 +109,8 @@ pub async fn deploy(
         &candidate.head_sha,
         &request.target,
         &target,
+        &action_id,
+        &authority_target,
     )
     .await;
     let outcome = match pipeline {
@@ -242,7 +246,7 @@ pub async fn browser_verify(
         access,
         &candidate.channel,
         &owner_session,
-        BROWSER_VERIFY_ACTION,
+        authority::BROWSER_VERIFY,
         &browser_authority,
         Some(&candidate.head_sha),
         &json!({ "candidate_id": candidate.id, "deployment_id": deployment.id, "origin": deployment.origin }),
@@ -270,7 +274,7 @@ pub async fn browser_verify(
             access,
             &candidate.channel,
             &owner_session,
-            BROWSER_TEST_ACCOUNT_ACTION,
+            authority::BROWSER_TEST_ACCOUNT,
             &authority_target,
             Some(&candidate.head_sha),
             &json!({ "candidate_id": candidate.id, "deployment_id": deployment.id, "credential": name }),
@@ -513,20 +517,21 @@ pub async fn build_prototype(
             )
         }
     };
-    let prepared = match crate::environment::prepare(backend.as_ref(), &workspace, &plan).await {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            return insert_failed_prototype(
-                access,
-                &candidate,
-                &recipe,
-                &id,
-                started_ms,
-                plan_json,
-                format!("could not prepare build environment: {error}"),
-            )
-        }
-    };
+    let prepared =
+        match crate::environment::prepare(backend.as_ref(), access.cfg, &workspace, &plan).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return insert_failed_prototype(
+                    access,
+                    &candidate,
+                    &recipe,
+                    &id,
+                    started_ms,
+                    plan_json,
+                    format!("could not prepare build environment: {error}"),
+                )
+            }
+        };
     // Verification executes only the operator's locked checks in its fresh
     // runtime. The candidate recipe runs exactly once below, in its own
     // configured build image.
@@ -548,7 +553,7 @@ pub async fn build_prototype(
     };
     let command = RunnerCommand {
         argv: recipe.command.clone(),
-        mounts: vec![workspace.mount()],
+        mounts: vec![workspace.mount("/work", false)],
         workdir: Some("/work".into()),
         name: format!("tracon-prototype-{id}"),
         image: Some(recipe.image.clone()),
@@ -748,6 +753,7 @@ fn insert_prototype_outcome(
 /// candidate SHA and plays the operator-configured manual deploy job inside
 /// it. If no such pipeline, or none with that job ready to play, exists,
 /// the deploy refuses: it never falls back to a moving ref.
+#[allow(clippy::too_many_arguments)] // channel/session/sha/target identity plus the authority record to recheck before the one mutation
 async fn launch_pipeline(
     access: &QaAccess<'_>,
     channel: &str,
@@ -755,6 +761,8 @@ async fn launch_pipeline(
     sha: &str,
     target_id: &str,
     target: &QaTarget,
+    action_id: &str,
+    authority_target: &str,
 ) -> Result<Value, String> {
     let ctx = CallContext {
         session_id: session_id.into(),
@@ -767,6 +775,7 @@ async fn launch_pipeline(
         &ctx,
         mcp::gitlab::PIPELINE_LIST_BY_SHA,
         &json!({ "project": target.deployment.project, "sha": sha }),
+        None,
     )
     .await?;
     let candidate_ids: Vec<i64> = candidates
@@ -786,6 +795,7 @@ async fn launch_pipeline(
             &ctx,
             mcp::gitlab::PIPELINE_STATUS,
             &json!({ "project": target.deployment.project, "pipeline_id": pipeline_id }),
+            None,
         )
         .await?;
         statuses.push(status);
@@ -803,12 +813,46 @@ async fn launch_pipeline(
         "TRACON_EXECUTION_IMAGE".into(),
         Value::String(target.deployment.execution_image.clone()),
     );
+    // A final authority recheck, immediately before the one remote mutation
+    // this flow performs: authority state (a revoked grant, a changed
+    // policy) can move during the pipeline lookups above, and playing the
+    // job is not reversible.
+    let recheck = || -> Result<(), String> {
+        let policy = access
+            .policy
+            .read()
+            .map_err(|_| "policy lock is unavailable")?;
+        let decision = authority::decide(
+            access.store,
+            &policy,
+            &AuthorityQuery {
+                channel,
+                session_id,
+                action: authority::DEPLOY,
+                target: authority_target,
+                revision: Some(sha),
+                args: &json!({ "target": target_id, "head_sha": sha }),
+            },
+        )
+        .map_err(|error| format!("could not recheck deploy authority: {error}"))?;
+        if decision.verdict != Verdict::Allow {
+            return Err(format!(
+                "deploy authorization for {authority_target} is no longer valid: {}",
+                decision.reason.unwrap_or_default()
+            ));
+        }
+        access
+            .store
+            .authority_action_set_grant(action_id, decision.rule_id.as_deref())
+            .map_err(store_error)
+    };
     let played = mcp::gitlab::call(
         access.broker,
         access.http,
         &ctx,
         mcp::gitlab::JOB_PLAY,
         &json!({ "project": target.deployment.project, "job_id": job_id, "variables": variables }),
+        Some(&recheck),
     )
     .await?;
     Ok(json!({
@@ -874,6 +918,7 @@ async fn wait_for_pipeline(
             },
             mcp::gitlab::PIPELINE_STATUS,
             &json!({ "project": project, "pipeline_id": pipeline_id }),
+            None,
         )
         .await?;
         match status["status"].as_str() {
@@ -932,7 +977,7 @@ async fn run_browser_runtime(
                 "/work/browser.json".into(),
             ],
             env: credential_env.to_vec(),
-            mounts: vec![workspace.mount()],
+            mounts: vec![workspace.mount("/work", false)],
             workdir: Some("/work".into()),
             name: id,
             image: Some(target.browser.image.clone()),
@@ -1177,12 +1222,14 @@ fn authorize(
     let decision = authority::decide(
         access.store,
         &policy,
-        channel,
-        session_id,
-        action,
-        target,
-        revision,
-        evidence,
+        &AuthorityQuery {
+            channel,
+            session_id,
+            action,
+            target,
+            revision,
+            args: evidence,
+        },
     )
     .map_err(|error| format!("could not decide authority: {error}"))?;
     if decision.verdict != Verdict::Allow {
@@ -1199,17 +1246,17 @@ fn authorize(
     let evidence_json = evidence.to_string();
     access
         .store
-        .authority_action_begin(
-            &id,
-            decision.rule_id.as_deref(),
+        .authority_action_begin(&ActionBegin {
+            id: &id,
+            grant_id: decision.rule_id.as_deref(),
             action,
             target,
             channel,
             session_id,
             revision,
-            None,
-            &evidence_json,
-        )
+            operation_id: None,
+            evidence: &evidence_json,
+        })
         .map_err(store_error)?;
     Ok(id)
 }

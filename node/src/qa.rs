@@ -16,9 +16,6 @@ use crate::{
 };
 pub mod service;
 
-pub const DEPLOY_ACTION: &str = "deploy";
-pub const BROWSER_VERIFY_ACTION: &str = "browser_verify";
-pub const BROWSER_TEST_ACCOUNT_ACTION: &str = "browser_test_account";
 pub const MAX_STEPS: usize = 32;
 pub const MAX_ASSERTIONS: usize = 32;
 pub const MAX_SELECTOR: usize = 512;

@@ -174,12 +174,12 @@ fn target_views(state: &AppState, candidate: &CandidateRow) -> ApiResult<Vec<Val
     for (id, target) in &state.cfg.qa.targets {
         let mut missing = Vec::new();
         let deploy_target = qa::deploy_authority_target(id, target);
-        if !granted(state, candidate, qa::DEPLOY_ACTION, &deploy_target)? {
+        if !granted(state, candidate, authority::DEPLOY, &deploy_target)? {
             missing.push(format!("deploy: {deploy_target}"));
         }
         let browser_target = qa::browser_authority_target(id, target)
             .map_err(|error| ApiError::new(StatusCode::CONFLICT, error))?;
-        if !granted(state, candidate, qa::BROWSER_VERIFY_ACTION, &browser_target)? {
+        if !granted(state, candidate, authority::BROWSER_VERIFY, &browser_target)? {
             missing.push(format!("browser verification: {browser_target}"));
         }
         if let Some(credential) = target
@@ -192,7 +192,7 @@ fn target_views(state: &AppState, candidate: &CandidateRow) -> ApiResult<Vec<Val
             if !granted(
                 state,
                 candidate,
-                qa::BROWSER_TEST_ACCOUNT_ACTION,
+                authority::BROWSER_TEST_ACCOUNT,
                 &account_target,
             )? {
                 missing.push(format!("test account: {account_target}"));
@@ -232,12 +232,14 @@ fn granted(
     let decision = authority::decide(
         state.store(),
         &policy,
-        &candidate.channel,
-        session_id,
-        action,
-        target,
-        Some(&candidate.head_sha),
-        &evidence,
+        &authority::AuthorityQuery {
+            channel: &candidate.channel,
+            session_id,
+            action,
+            target,
+            revision: Some(&candidate.head_sha),
+            args: &evidence,
+        },
     )
     .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
     Ok(decision.verdict == Verdict::Allow)

@@ -566,7 +566,61 @@ const MIGRATIONS: &[&str] = &[
            json_object('legacy_source', 'event.check_result', 'candidate_provenance', 'unknown')
     FROM event
     WHERE kind = 'check_result' AND json_valid(payload);
-    // 24: append-only QA observations and repository-derived prototypes. These
+    "#,
+    // 24: the monotonic sequence for bounded channel rollups sent only to a
+    // hub replica that has explicitly been handed that channel's key.
+    r#"
+    CREATE TABLE mesh_rollup_seq (
+        channel TEXT PRIMARY KEY,
+        seq     INTEGER NOT NULL
+    );
+    "#,
+    // 25: signed candidate/context transfer packages and an append-only
+    // receiver-side outcome history. Package bytes never mutate in place.
+    r#"
+    CREATE TABLE transfer (
+        id             TEXT PRIMARY KEY,
+        candidate_id   TEXT NOT NULL,
+        channel        TEXT NOT NULL,
+        origin_node    TEXT NOT NULL,
+        target_node    TEXT,
+        payload_sha256 TEXT NOT NULL,
+        package_json   TEXT NOT NULL,
+        created_ms     INTEGER NOT NULL
+    );
+    CREATE INDEX transfer_channel ON transfer(channel, created_ms DESC);
+    CREATE TABLE transfer_event (
+        seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+        transfer_id TEXT NOT NULL REFERENCES transfer(id),
+        kind        TEXT NOT NULL,
+        detail      TEXT,
+        session_id  TEXT,
+        at_ms       INTEGER NOT NULL
+    );
+    CREATE INDEX transfer_event_transfer ON transfer_event(transfer_id, seq);
+    "#,
+    // 26: only one operator-confirmed session may emerge from a package.
+    // `preparing` survives a crash as an explicit uncertain outcome rather
+    // than silently materializing a second workspace on retry.
+    r#"
+    CREATE TABLE transfer_import (
+        transfer_id  TEXT PRIMARY KEY REFERENCES transfer(id),
+        state        TEXT NOT NULL CHECK(state IN ('preparing', 'imported', 'failed')),
+        workspace_id TEXT,
+        session_id   TEXT,
+        detail       TEXT,
+        updated_ms   INTEGER NOT NULL
+    );
+    "#,
+    // 27: the inbox can render a package's operator-visible manifest without
+    // loading its (potentially 64 MiB) immutable JSON body.
+    r#"
+    ALTER TABLE transfer ADD COLUMN file_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE transfer ADD COLUMN document_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE transfer ADD COLUMN memory_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE transfer ADD COLUMN handoff_note TEXT NOT NULL DEFAULT '';
+    "#,
+    // 28: append-only QA observations and repository-derived prototypes. These
     // are node-owned execution evidence, not replicated demonstrations: an
     // offline peer cannot truthfully inherit a runtime observation.
     r#"
@@ -641,59 +695,6 @@ const MIGRATIONS: &[&str] = &[
         finished_ms          INTEGER NOT NULL
     );
     CREATE INDEX prototype_candidate ON prototype(candidate_id, created_ms DESC);
-    "#,
-    // 24: the monotonic sequence for bounded channel rollups sent only to a
-    // hub replica that has explicitly been handed that channel's key.
-    r#"
-    CREATE TABLE mesh_rollup_seq (
-        channel TEXT PRIMARY KEY,
-        seq     INTEGER NOT NULL
-    );
-    "#,
-    // 25: signed candidate/context transfer packages and an append-only
-    // receiver-side outcome history. Package bytes never mutate in place.
-    r#"
-    CREATE TABLE transfer (
-        id             TEXT PRIMARY KEY,
-        candidate_id   TEXT NOT NULL,
-        channel        TEXT NOT NULL,
-        origin_node    TEXT NOT NULL,
-        target_node    TEXT,
-        payload_sha256 TEXT NOT NULL,
-        package_json   TEXT NOT NULL,
-        created_ms     INTEGER NOT NULL
-    );
-    CREATE INDEX transfer_channel ON transfer(channel, created_ms DESC);
-    CREATE TABLE transfer_event (
-        seq         INTEGER PRIMARY KEY AUTOINCREMENT,
-        transfer_id TEXT NOT NULL REFERENCES transfer(id),
-        kind        TEXT NOT NULL,
-        detail      TEXT,
-        session_id  TEXT,
-        at_ms       INTEGER NOT NULL
-    );
-    CREATE INDEX transfer_event_transfer ON transfer_event(transfer_id, seq);
-    "#,
-    // 26: only one operator-confirmed session may emerge from a package.
-    // `preparing` survives a crash as an explicit uncertain outcome rather
-    // than silently materializing a second workspace on retry.
-    r#"
-    CREATE TABLE transfer_import (
-        transfer_id  TEXT PRIMARY KEY REFERENCES transfer(id),
-        state        TEXT NOT NULL CHECK(state IN ('preparing', 'imported', 'failed')),
-        workspace_id TEXT,
-        session_id   TEXT,
-        detail       TEXT,
-        updated_ms   INTEGER NOT NULL
-    );
-    "#,
-    // 27: the inbox can render a package's operator-visible manifest without
-    // loading its (potentially 64 MiB) immutable JSON body.
-    r#"
-    ALTER TABLE transfer ADD COLUMN file_count INTEGER NOT NULL DEFAULT 0;
-    ALTER TABLE transfer ADD COLUMN document_count INTEGER NOT NULL DEFAULT 0;
-    ALTER TABLE transfer ADD COLUMN memory_count INTEGER NOT NULL DEFAULT 0;
-    ALTER TABLE transfer ADD COLUMN handoff_note TEXT NOT NULL DEFAULT '';
     "#,
 ];
 
