@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -135,6 +136,7 @@ const MAX_REPO_PAGE: u32 = 100;
 /// cannot send its authorization header to another host.
 static FORGE_LISTING_HTTP: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
     reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| format!("could not initialize forge listing client: {error}"))
