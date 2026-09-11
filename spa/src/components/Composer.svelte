@@ -103,6 +103,7 @@
         phase: sessionPhase,
         model: model || undefined,
         budget_tokens: budget === '' ? undefined : Number(budget),
+        node_id: node && !node.is_self ? node.id : undefined,
       }
       const lines = prompt.trim().split('\n')
       const session = item
