@@ -194,7 +194,6 @@ impl Tools {
             return Ok(outcome.clone());
         }
         let before_mutation = || {
-            self.revalidate_consequential(ctx, name, args, gated.one_shot)?;
             let Some(ActionRecord::New(id)) = &action_record else {
                 return Ok(());
             };
@@ -205,6 +204,14 @@ impl Tools {
                 access.store.as_ref(), &self.policy.read().unwrap(), &ctx.channel, &ctx.session_id,
                 action, &target, revision.as_deref(), args,
             )?;
+            match decision.verdict {
+                Verdict::Allow => {}
+                Verdict::Ask if gated.one_shot => {}
+                Verdict::Deny => return Err(refusal(decision)),
+                Verdict::Ask => return Err(format!(
+                    "{action} for {target} needs a current scoped authority grant"
+                )),
+            }
             access.store.authority_action_set_grant(id, decision.rule_id.as_deref())
                 .map_err(|e| e.to_string())
         };
