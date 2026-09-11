@@ -227,6 +227,9 @@
   {#if error}
     <div class="banner crit">refused <b>· {error}</b></div>
   {/if}
+  {#if isTerminal(session.state) && session.draft}
+    <div class="banner dim">unsent prompt retained <b>· copy it before starting another session</b><pre>{session.draft}</pre></div>
+  {/if}
 
   {#if !isTerminal(session.state)}
     <form class="prompt" onsubmit={send}>

@@ -120,7 +120,7 @@ impl Loop {
                         break;
                     }
                     // A turn cannot happen here; the harness reports none.
-                    Some(Command::TurnDone { .. }) => {}
+                    Some(Command::TurnDone { .. }) | Some(Command::PauseQuiesceTimeout { .. }) => {}
                     None => break,
                 },
                 _ = ticker.tick() => {

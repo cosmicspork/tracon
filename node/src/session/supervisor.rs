@@ -31,6 +31,7 @@ const MAX_TOOL_OUTPUT: usize = 64 * 1024;
 /// runaway protection as metered providers.
 const TURN_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
+const PAUSE_QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
 const WATCHDOG_FAILURE_LIMIT: u8 = 3;
 
 /// Commands the HTTP layer sends to a running session.
@@ -57,6 +58,7 @@ pub enum Command {
         reason: String,
         ack: oneshot::Sender<Result<(), String>>,
     },
+    PauseQuiesceTimeout { turn_id: u64 },
     Kill,
     /// End the session once the running turn finishes (now, if none is):
     /// the work item closed, or the phase's artifact landed.
@@ -123,6 +125,9 @@ pub struct Supervisor {
     active_turn: Option<u64>,
     next_turn: u64,
     consecutive_failures: u8,
+    /// A fenced turn is still allowed to report completion, but resume waits
+    /// for that exact receipt rather than trusting cancel's enqueue ack.
+    paused_turn: Option<u64>,
 }
 
 impl Supervisor {
@@ -148,6 +153,7 @@ impl Supervisor {
             active_turn: None,
             next_turn: 0,
             consecutive_failures: 0,
+            paused_turn: None,
             self_tx,
             runner,
             container,
@@ -198,7 +204,7 @@ impl Supervisor {
             state: Some(state.as_str().to_string()),
             end_reason: end_reason.map(|r| r.as_str().to_string()),
             ended_mono_ms: state.is_terminal().then(|| self.mono_ms()),
-            turn_active: (state.is_terminal() || state == SessionState::Paused).then_some(false),
+            turn_active: state.is_terminal().then_some(false),
             ..Default::default()
         };
         if let Err(e) = self.store.update_session(&self.session_id, patch) {
@@ -259,6 +265,13 @@ impl Supervisor {
                     Some(Command::Resume { source, reason, ack }) => {
                         let _ = ack.send(self.resume(source, &reason).await);
                     }
+                    Some(Command::PauseQuiesceTimeout { turn_id }) => {
+                        if self.paused_turn == Some(turn_id) && self.is_paused() {
+                            killed_by_us = true;
+                            self.shutdown(EndReason::Error).await;
+                            break;
+                        }
+                    }
                     Some(Command::TurnDone { turn_id, kind, payload, tokens }) => {
                         if self.active_turn != Some(turn_id) {
                             self.record(
@@ -269,8 +282,13 @@ impl Supervisor {
                             continue;
                         }
                         let turn_timeout = payload["turn_timeout"] == true;
+                        let paused_completion = self.paused_turn == Some(turn_id);
                         self.active_turn = None;
                         self.on_turn_done(kind, payload, tokens).await;
+                        if paused_completion {
+                            self.paused_turn = None;
+                            continue;
+                        }
                         if turn_timeout {
                             let reason = "watchdog stopped a session after its harness turn timed out";
                             self.set_state(SessionState::Paused, None);
@@ -352,11 +370,9 @@ impl Supervisor {
             return Ok(());
         }
 
-        // Fence before sending the harness an interrupt. `cancel` only queues
-        // an interrupt on current adapters; it is not a completion receipt.
-        // An active turn therefore cannot be safely resumed. Stop it after
-        // fencing rather than claiming a pause succeeded.
-        let had_turn = self.active_turn.take().is_some() || row.turn_active != 0;
+        // Fence first. Cancel only queues an interrupt, so keep the active
+        // turn identity and wait for its matching completion before resume.
+        let active = self.active_turn;
         self.set_state(SessionState::Paused, None);
         self.record(
             ek::SESSION_PAUSED,
@@ -374,10 +390,17 @@ impl Supervisor {
             self.publish_session();
         }
         self.reject_open_permissions().await;
-        if had_turn {
-            let _ = tokio::time::timeout(CANCEL_TIMEOUT, self.handle.cancel()).await;
-            self.shutdown(EndReason::Error).await;
-            return Err("an active turn cannot be safely paused; the session was stopped".into());
+        if let Some(turn_id) = active {
+            self.paused_turn = Some(turn_id);
+            if tokio::time::timeout(CANCEL_TIMEOUT, self.handle.cancel()).await.is_err() {
+                self.shutdown(EndReason::Error).await;
+                return Err("could not queue the interrupt; the session was stopped".into());
+            }
+            let tx = self.self_tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(PAUSE_QUIESCE_TIMEOUT).await;
+                let _ = tx.send(Command::PauseQuiesceTimeout { turn_id }).await;
+            });
         }
         Ok(())
     }
@@ -390,6 +413,9 @@ impl Supervisor {
             .ok_or("session is gone")?;
         if row.state != SessionState::Paused.as_str() {
             return Err(format!("session is {}", row.state));
+        }
+        if self.paused_turn.is_some() {
+            return Err("waiting for the paused turn to finish".into());
         }
         self.consecutive_failures = 0;
         self.set_state(SessionState::Running, None);

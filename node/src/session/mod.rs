@@ -1231,6 +1231,7 @@ impl Manager {
     }
 
     pub async fn prompt(&self, id: &str, text: String) -> Result<(), SessionError> {
+        self.ensure_active(id)?;
         let (ack, wait) = oneshot::channel();
         match self
             .send(
@@ -1509,16 +1510,42 @@ impl Manager {
     pub async fn stop(&self, id: &str) -> Result<(), SessionError> {
         if let Some(row) = self.store.get_session(id)? {
             if row.harness_id == external::HARNESS_ID {
-                if let Some(channel) = self.store.channel_get(&row.channel)? {
-                    let mut bindings: serde_json::Value =
-                        serde_json::from_str(&channel.bindings_json).unwrap_or_else(|_| json!({}));
-                    bindings["external_stopped"] = json!(true);
-                    self.store.channel_put(
-                        &row.channel,
-                        &channel.keyring,
-                        &serde_json::to_string(&bindings)
-                            .map_err(|error| SessionError::Rejected(error.to_string()))?,
-                    )?;
+                let channel = self.store.channel_get(&row.channel)?;
+                let (keyring, mut bindings) = match channel {
+                    Some(channel) => (
+                        channel.keyring,
+                        serde_json::from_str(&channel.bindings_json).unwrap_or_else(|_| json!({})),
+                    ),
+                    None => (Vec::new(), json!({})),
+                };
+                bindings["external_stopped"] = json!(true);
+                self.store.channel_put(
+                    &row.channel,
+                    &keyring,
+                    &serde_json::to_string(&bindings)
+                        .map_err(|error| SessionError::Rejected(error.to_string()))?,
+                )?;
+            }
+        }
+        // Fence dispatch synchronously before the asynchronous supervisor
+        // teardown. A 200 from Stop must never leave broker access open.
+        if let Some(row) = self.store.get_session(id)? {
+            if row.node_id == self.node_id
+                && row.state != SessionState::Starting.as_str()
+                && !SessionState::from_stored(&row.state).is_terminal()
+            {
+                self.store.update_session(
+                    id,
+                    SessionPatch {
+                        state: Some(SessionState::Closed.as_str().into()),
+                        end_reason: Some(EndReason::KilledUser.as_str().into()),
+                        ended_mono_ms: Some(0),
+                        turn_active: Some(false),
+                        ..Default::default()
+                    },
+                )?;
+                if let Ok(Some(row)) = self.store.get_session(id) {
+                    self.bus.publish(Frame::Session(Box::new(row)));
                 }
             }
         }
