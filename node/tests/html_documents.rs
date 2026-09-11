@@ -144,16 +144,19 @@ async fn multipart_folder_import_round_trips_exact_files() {
         .unwrap();
     assert_eq!(downloaded_css, css);
 
-    let conn = h.store.conn();
-    let files: Vec<(String, i64)> = conn
-        .prepare(
-            "SELECT path, size_bytes FROM document_bundle_file WHERE deleted = 0 ORDER BY path",
-        )
-        .unwrap()
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
+    let files: Vec<(String, i64)> = {
+        let conn = h.store.conn();
+        let files = conn
+            .prepare(
+                "SELECT path, size_bytes FROM document_bundle_file WHERE deleted = 0 ORDER BY path",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        files
+    };
     assert_eq!(
         files,
         vec![
@@ -161,7 +164,6 @@ async fn multipart_folder_import_round_trips_exact_files() {
             ("index.html".into(), html.len() as i64)
         ]
     );
-    drop(conn);
     let deleted = h
         .operator
         .clone()
