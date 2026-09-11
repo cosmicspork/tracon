@@ -276,6 +276,17 @@ impl Tools {
             &authority_args,
         )?;
         if decision.verdict != Verdict::Allow {
+            let mut submitted = submitted;
+            if let Some(object) = submitted.as_object_mut() {
+                object.insert("publication_authority".into(), serde_json::json!({
+                    "action": crate::authority::PUBLISH,
+                    "target": canonical,
+                    "revision": review.head_sha,
+                    "prose_hash": prose,
+                    "state": "ask",
+                    "reason": decision.reason,
+                }));
+            }
             return Ok(submitted);
         }
         let action_id = uuid::Uuid::now_v7().to_string();
