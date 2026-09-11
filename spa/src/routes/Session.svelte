@@ -182,7 +182,13 @@
       {:else if session.state !== 'starting'}
         <button class="lnk" onclick={() => void control('pause')} disabled={unreachable !== null || controlling}>Pause</button>
       {/if}
-      <button class="lnk d" onclick={stop} disabled={unreachable !== null}>{confirmingKill ? 'Stop — tap again' : 'Stop'}</button>
+      <button class="lnk d" onclick={stop} disabled={unreachable !== null}
+        >{confirmingKill
+          ? 'Stop — tap again'
+          : session.harness_id === 'external'
+            ? 'Stop broker access'
+            : 'Stop'}</button
+      >
       {#if confirmingKill}
         <button class="lnk" onclick={() => (confirmingKill = false)}>Cancel</button>
       {/if}

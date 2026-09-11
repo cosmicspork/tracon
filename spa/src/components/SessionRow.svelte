@@ -36,14 +36,16 @@
         session.end_reason === 'detached'
           ? 'Detached'
           : session.end_reason === 'killed_user'
-          ? 'Killed'
-          : session.end_reason === 'item_close'
-            ? 'Ended · item closed'
-            : session.end_reason === 'phase_done'
-              ? session.phase === 'plan'
-                ? 'Planned'
-                : 'Reviewed'
-              : 'Closed',
+            ? external
+              ? 'Broker access stopped'
+              : 'Killed'
+            : session.end_reason === 'item_close'
+              ? 'Ended · item closed'
+              : session.end_reason === 'phase_done'
+                ? session.phase === 'plan'
+                  ? 'Planned'
+                  : 'Reviewed'
+                : 'Closed',
       killed_budget: 'Killed · budget',
       failed: 'Failed',
     }[session.state],
