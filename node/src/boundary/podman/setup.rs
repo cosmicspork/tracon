@@ -187,8 +187,7 @@ async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
     // Two forwards. On a Podman machine the node is outside the VM and gvproxy
     // reaches the host's loopback, so TCP via `host.containers.internal` works.
     // On a Linux host that name is a pasta interface address, not loopback, so
-    // the node listens on a Unix socket and the gateway mounts its directory
-    // (see docs/reference/phase-2-notes.md).
+    // the node listens on a Unix socket and the gateway mounts its directory.
     let selinux = super::selinux_enabled().await;
     // Under SELinux a plain bind mount is unreadable from the container (the
     // gateway died on "allow.txt missing" on an SELinux host); `:z` relabels the node's

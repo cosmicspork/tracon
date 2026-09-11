@@ -4,7 +4,7 @@
 //! It exists so the adapter is exercised against a real process over real
 //! pipes rather than against a mock of itself. The frames it emits are the
 //! shapes read out of the shipped 2.1.247 binary and confirmed against a live
-//! run — see `docs/reference/phase-7-notes.md`.
+//! run.
 
 use std::io::{BufRead, Write};
 

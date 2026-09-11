@@ -187,5 +187,3 @@ operator's information, not the model's.
    against canned state with request-time timestamps, so the README's images
    regenerate without a node and never age.
 
-The build order and what each phase changed live in
-[reference/](reference/) and the git history; this file stays the current record.

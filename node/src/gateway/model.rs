@@ -32,7 +32,7 @@ use crate::{
 };
 
 /// The beta flag Anthropic's subscription tokens are issued under. Unverified
-/// against a live token (see `docs/reference/phase-4-notes.md`); kept as data
+/// against a live token; kept as data
 /// so the next observation changes one line.
 const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 

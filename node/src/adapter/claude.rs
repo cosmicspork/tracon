@@ -10,8 +10,7 @@
 //!
 //! The shapes below were read out of the shipped 2.1.247 binary and confirmed
 //! against a live run, because the CLI's `--help` documents neither the
-//! control protocol nor `--permission-prompt-tool`. `phase-7-notes.md` records
-//! them, since the next person will not find them in the published docs.
+//! control protocol nor `--permission-prompt-tool`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

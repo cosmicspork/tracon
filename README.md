@@ -518,6 +518,6 @@ git worktree add /tmp/<slug> -b <branch> origin/main
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the rules: commitments, invariants, boundaries.
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what is to be built, and what deliberately is not.
 - [docs/DESIGN.md](docs/DESIGN.md) — the interface: principles, jobs, states.
-- [docs/reference/](docs/reference/) — what each phase learned while being built.
+- [docs/reference/external-harness-notes.md](docs/reference/external-harness-notes.md) — the external harness trust boundary and operating guidance.
 
 Contributions are welcome — open an issue or a PR.
