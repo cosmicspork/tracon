@@ -125,7 +125,7 @@ impl Loop {
                 },
                 _ = ticker.tick() => {
                     self.expire(&mut open, started);
-                    if open.is_empty() && self.idle_elapsed() > self.idle_timeout {
+                    if !self.is_paused() && open.is_empty() && self.idle_elapsed() > self.idle_timeout {
                         self.close(&mut open, started, EndReason::Detached);
                         break;
                     }

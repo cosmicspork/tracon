@@ -630,6 +630,13 @@ impl Manager {
             archived_ms: None,
         };
         self.store.insert_session(&row)?;
+        // A plain session has no work item to retain its first instruction.
+        // Keep it as a draft before asynchronous setup, and let on_prompt
+        // clear it only after the supervisor accepts it.
+        if let Some(prompt) = spec.initial_prompt.as_deref().filter(|prompt| !prompt.trim().is_empty()) {
+            self.store.set_draft(&id, Some(prompt))?;
+        }
+        let row = self.store.get_session(&id)?.ok_or(SessionError::NotFound)?;
         self.bus.publish(Frame::Session(Box::new(row.clone())));
 
         let this = self.clone();
@@ -1508,7 +1515,10 @@ impl Manager {
                 .map(|_| ()),
             Err(SessionError::Rejected(_)) => {
                 let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
-                if row.node_id != self.node_id || row.state != SessionState::Starting.as_str() {
+                if row.node_id != self.node_id
+                    || (row.state != SessionState::Starting.as_str()
+                        && row.state != SessionState::Paused.as_str())
+                {
                     return Err(SessionError::Rejected("session is not running on this node".into()));
                 }
                 self.store.update_session(
