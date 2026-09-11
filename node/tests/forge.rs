@@ -13,8 +13,8 @@ use std::sync::{
     Arc,
 };
 
-use serde_json::json;
 use axum::response::IntoResponse;
+use serde_json::json;
 
 use tracon::{
     broker::{Broker, Credential, SharedBroker},

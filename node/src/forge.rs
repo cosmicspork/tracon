@@ -143,9 +143,7 @@ static FORGE_LISTING_HTTP: LazyLock<Result<reqwest::Client, String>> = LazyLock:
 });
 
 fn forge_listing_http() -> Result<&'static reqwest::Client, String> {
-    FORGE_LISTING_HTTP
-        .as_ref()
-        .map_err(|error| error.clone())
+    FORGE_LISTING_HTTP.as_ref().map_err(|error| error.clone())
 }
 
 struct RepoPage {
@@ -231,7 +229,8 @@ async fn fetch_repos(
     let (api, host) = forge.endpoints(env);
     match forge {
         Forge::Github => {
-            let endpoint = format!("{api}/user/repos?per_page={REPOS_PER_PAGE}&sort=pushed&page={page}");
+            let endpoint =
+                format!("{api}/user/repos?per_page={REPOS_PER_PAGE}&sort=pushed&page={page}");
             let endpoint_url =
                 url::Url::parse(&endpoint).map_err(|_| "configured GitHub API URL is invalid")?;
             let (v, headers) = get(
@@ -627,10 +626,9 @@ mod tests {
 
     #[test]
     fn github_pagination_link_must_stay_on_the_authenticated_endpoint() {
-        let expected = url::Url::parse(
-            "https://api.github.com/user/repos?per_page=50&sort=pushed&page=1",
-        )
-        .unwrap();
+        let expected =
+            url::Url::parse("https://api.github.com/user/repos?per_page=50&sort=pushed&page=1")
+                .unwrap();
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::LINK,
