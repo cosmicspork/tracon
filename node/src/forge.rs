@@ -519,6 +519,10 @@ pub fn git_env_for(
 
 /// Clone into the managed root. Idempotent: an existing clone is the answer,
 /// not an error. The URL carries no credential; the helper env does.
+/// Clone into the managed root. Idempotent: an existing clone is the answer,
+/// not an error. The URL carries no credential; the helper env does. Git runs
+/// in a clean process environment so ambient host helpers cannot become a
+/// second authentication path.
 pub async fn clone(
     http_env: Vec<(String, String)>,
     host: &str,
@@ -534,13 +538,33 @@ pub async fn clone(
     }
     let url = format!("https://{host}/{owner}/{name}.git");
     let mut cmd = tokio::process::Command::new("git");
-    cmd.arg("clone").arg(&url).arg(dest);
+    cmd.env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env(
+            "HOME",
+            crate::config::Config::state_dir().join("forge-home"),
+        )
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=",
+            "-c",
+            "core.useReplaceRefs=false",
+            "clone",
+            "--no-local",
+            "--no-hardlinks",
+            &url,
+        ])
+        .arg(dest);
     for (k, v) in &http_env {
         cmd.env(k, v);
     }
     let out = cmd.output().await.map_err(|e| e.to_string())?;
     if !out.status.success() {
-        // A failed partial clone would poison the idempotency check.
         let _ = std::fs::remove_dir_all(dest);
         return Err(format!(
             "git clone failed: {}",
@@ -548,6 +572,50 @@ pub async fn clone(
         ));
     }
     Ok(())
+}
+
+/// Refresh a trusted managed clone with broker-provided Git authentication.
+/// This is intentionally unavailable to agent workspaces: it only accepts a
+/// node-owned repository path, and runs with no ambient credential helpers.
+pub async fn fetch_managed(repo: &Path, env: &[(String, String)]) -> Result<(), String> {
+    let root = managed_root(&crate::config::Config::state_dir());
+    if !repo.starts_with(&root) {
+        return Err("refusing to fetch a repository outside managed storage".into());
+    }
+    let mut command = tokio::process::Command::new("git");
+    command
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env(
+            "HOME",
+            crate::config::Config::state_dir().join("forge-home"),
+        )
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=",
+            "-c",
+            "core.useReplaceRefs=false",
+            "fetch",
+            "--prune",
+            "origin",
+        ])
+        .envs(env.iter().map(|(key, value)| (key, value)));
+    let out = command.output().await.map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "git fetch failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
 }
 
 /// How deep under a host a clone may sit: an owner, or a GitLab group path

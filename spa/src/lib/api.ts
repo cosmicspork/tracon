@@ -77,6 +77,19 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return json as T
 }
 
+async function upload<T>(path: string, body: FormData): Promise<T> {
+  const res = await fetch(path, { method: 'POST', body })
+  const text = await res.text()
+  let json: { error?: { message?: string } } | null = null
+  try {
+    json = text ? JSON.parse(text) : null
+  } catch {
+    json = null
+  }
+  if (!res.ok) throw new ApiError(res.status, json?.error?.message ?? (text || `${res.status} ${res.statusText}`))
+  return json as T
+}
+
 export const api = {
   login: (token: string) => call<{ ok: boolean }>('POST', '/api/login', { token }),
   logout: () => call<{ ok: boolean }>('POST', '/api/logout'),
@@ -112,6 +125,15 @@ export const api = {
   },
   cloneRepo: (b: { channel: string; forge: string; host: string; owner: string; name: string }) =>
     call<{ repo_path: string }>('POST', '/api/repos/clone', b),
+  importWorkspace: (files: FileList | File[]) => {
+    const form = new FormData()
+    for (const file of Array.from(files)) {
+      const relative = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
+      form.append('files', file, relative)
+    }
+    return upload<{ workspace_id: string; files: number }>('/api/workspaces/import', form)
+  },
+  exportWorkspace: (id: string) => call<{ workspace_id: string; exported: boolean }>('POST', `/api/workspaces/${id}/export`),
   sessions: () => call<Session[]>('GET', '/api/sessions'),
   session: (id: string) =>
     call<{ session: Session; waiting: unknown[]; questions: OperatorQuestion[] }>('GET', `/api/sessions/${id}`),
@@ -136,6 +158,7 @@ export const api = {
   createSession: (spec: {
     channel: string
     repo_path: string
+    workspace_id?: string
     branch?: string
     work_item_id?: string
     model: string
@@ -149,6 +172,7 @@ export const api = {
     title: string
     body?: string
     repo_path: string
+    workspace_id?: string
     branch?: string
     phase?: 'plan' | 'execute'
     model?: string

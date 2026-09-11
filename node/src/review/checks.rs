@@ -4,16 +4,18 @@
 //! no gateway token, no MCP — and feeds failures back to the agent as the
 //! reason the submission was refused.
 
-use std::path::Path;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::boundary::Backend;
 use crate::config::Config;
-use crate::runner::{Mount, RunnerCommand};
+use crate::runner::RunnerCommand;
+use crate::workspace::Workspace;
 
-/// A worktree may carry its own list: one command per line, `#` comments.
+/// Required checks are node policy, not a repository-controlled file. A
+/// candidate may describe useful commands in its own docs, but it cannot
+/// silently replace the operator's required-check set.
 pub const CHECKS_FILE: &str = ".tracon/checks";
 /// How much of the output is kept per check.
 const TAIL_BYTES: usize = 4096;
@@ -28,19 +30,10 @@ pub struct CheckResult {
     pub ms: u64,
 }
 
-/// The commands to run for a worktree: its own file, else the node's list.
-pub fn commands_for(cfg: &Config, worktree: &Path) -> Vec<String> {
-    let own = std::fs::read_to_string(worktree.join(CHECKS_FILE))
-        .ok()
-        .map(|s| {
-            s.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .filter(|v| !v.is_empty());
-    own.unwrap_or_else(|| cfg.supervision.checks.clone())
+/// The configured required checks. Repository files are intentionally ignored:
+/// the candidate cannot relax or redirect the gate it is about to satisfy.
+pub fn commands_for(cfg: &Config) -> Vec<String> {
+    cfg.supervision.checks.clone()
 }
 
 /// Run every check in order, stopping at the first failure. Each runs as
@@ -49,18 +42,12 @@ pub fn commands_for(cfg: &Config, worktree: &Path) -> Vec<String> {
 pub async fn run(
     backend: &dyn Backend,
     cfg: &Config,
-    worktree: &Path,
+    workspace: &Workspace,
     session_slug: &str,
     commands: &[String],
 ) -> Vec<CheckResult> {
-    // The worktree rides on the command, not the runner, so every backend
-    // (including the local one tests use) sees it in the same place.
     let runner = backend.runner(Vec::new());
-    let mount = Mount {
-        source: worktree.to_string_lossy().into_owned(),
-        target: "/work".into(),
-        read_only: false,
-    };
+    let mount = workspace.mount("/work", true);
     let timeout = Duration::from_secs(cfg.supervision.timeout_secs.max(1));
     let mut out = Vec::new();
     for (i, command) in commands.iter().enumerate() {
@@ -71,6 +58,7 @@ pub async fn run(
             mounts: vec![mount.clone()],
             workdir: Some("/work".into()),
             name: format!("tracon-check-{session_slug}-{i}"),
+            image: None,
         };
         let result = match tokio::time::timeout(timeout, runner.run_capture(cmd)).await {
             Ok(Ok(o)) => {
@@ -156,21 +144,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_worktree_list_wins_and_comments_are_skipped() {
+    fn repository_checks_cannot_replace_node_policy() {
         let dir = std::env::temp_dir().join(format!("tracon-checks-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".tracon")).unwrap();
-        let cfg = Config::default();
-        assert_eq!(commands_for(&cfg, &dir), vec!["just check".to_string()]);
         std::fs::write(
             dir.join(CHECKS_FILE),
             "# project checks\n\ncargo test\n  bun test  \n",
         )
         .unwrap();
-        assert_eq!(
-            commands_for(&cfg, &dir),
-            vec!["cargo test".to_string(), "bun test".to_string()]
-        );
+        let cfg = Config::default();
+        assert_eq!(commands_for(&cfg), vec!["just check".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -98,8 +98,61 @@ async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> 
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    // `publish()` builds the forge remote itself (never trusting the
+    // candidate's own git config) and always pushes `https://`; this stub
+    // swaps that URL for the local bare repo right before `git remote add
+    // origin` runs (always the last four args of that call — see
+    // `review::publish::publisher_git_inner`), so the push lands somewhere
+    // real without touching the network. Every other git invocation passes
+    // straight through untouched.
+    std::fs::write(
+        bin.join("git-remote-stub"),
+        format!(
+            "#!/bin/bash\n\
+             args=(\"$@\")\n\
+             n=${{#args[@]}}\n\
+             if [ \"$n\" -ge 4 ] \\\n\
+             \t&& [ \"${{args[$((n-4))]}}\" = remote ] \\\n\
+             \t&& [ \"${{args[$((n-3))]}}\" = add ] \\\n\
+             \t&& [ \"${{args[$((n-2))]}}\" = origin ]; then\n\
+             \targs[$((n-1))]='{origin}'\n\
+             fi\n\
+             exec git \"${{args[@]}}\"\n",
+            origin = dir.join("origin.git").to_string_lossy(),
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            bin.join("git-remote-stub"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
 
-    let worktree = dir.join("wt").to_string_lossy().into_owned();
+    // The session's workspace is a runtime-owned volume, never the host
+    // checkout above: import it once through the same `LocalBackend` a real
+    // node uses, so what the rest of this fixture treats as "the worktree"
+    // is the mutable copy a harness would actually see, not a host bind
+    // mount. `workspace_id` is unique per test: every test hardcodes session
+    // id `s1`, but the state directory (and so `local-runtime/<volume>`) is
+    // shared by the whole test binary.
+    let workspace_id = format!("s1-{name}");
+    let backend: Arc<dyn tracon::boundary::Backend> = Arc::new(tracon::runner::local::LocalBackend);
+    let workspace = tracon::workspace::Workspace {
+        id: workspace_id.clone(),
+        volume: tracon::workspace::volume_name(&workspace_id),
+        snapshot: tracon::workspace::snapshot_path(&workspace_id),
+    };
+    tracon::workspace::import(backend.as_ref(), &workspace, &dir.join("wt"))
+        .await
+        .unwrap();
+    let worktree = tracon::runner::local::local_runtime_path(&workspace.volume)
+        .to_string_lossy()
+        .into_owned();
+
     let store = Arc::new(Store::open_in_memory().unwrap());
     store
         .put_node(&{
@@ -114,8 +167,10 @@ async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> 
     store
         .insert_session(&{
             let mut r = support::rows::session_row("s1", "n1", "work");
-            r.repo_path = dir.join("wt").to_string_lossy().into_owned();
-            r.worktree_path = Some(worktree.clone());
+            // `workspace://<id>` is how a session names a durable, runtime-owned
+            // workspace rather than a host checkout (see `Manager::snapshot_workspace`).
+            r.repo_path = format!("workspace://{workspace_id}");
+            r.worktree_path = None;
             r.branch = "feat/x".into();
             r.harness_id = "omp".into();
             r.harness_version = "18.0.4".into();
@@ -128,6 +183,7 @@ async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> 
     // process-global and races when these run in parallel.
     let mut cfg = Config::default();
     cfg.publish.gh = bin.join("gh").to_string_lossy().into_owned();
+    cfg.publish.git = bin.join("git-remote-stub").to_string_lossy().into_owned();
     // Checks run through the local runner in the worktree itself; the
     // default `just check` is not what a test fixture has.
     cfg.supervision.checks = vec!["test -f a.txt".into()];
@@ -147,7 +203,7 @@ async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> 
         "n1".into(),
         tools.clone(),
         Default::default(),
-        Arc::new(tracon::runner::local::LocalBackend),
+        backend,
     );
     let _ = tools.session.set(tracon::mcp::SessionAccess {
         store: store.clone(),
@@ -711,6 +767,7 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
         &cfg,
         "work",
         "n1",
+        "test-candidate",
         &f.worktree,
         &target,
         "0000000000000000000000000000000000000000",
@@ -772,14 +829,17 @@ async fn a_claim_from_a_vanished_client_lapses() {
 #[tokio::test]
 async fn submit_runs_the_checks_first_and_a_failure_refuses_the_submission() {
     state::isolate();
-    let f = fixture(test_name!(), WITH_GH).await;
-    // The worktree's own list wins over the node's, and this one fails.
-    std::fs::create_dir_all(f.dir.join("wt/.tracon")).unwrap();
-    std::fs::write(
-        f.dir.join("wt/.tracon/checks"),
-        "# project checks\ntest -f a.txt\nsh -c 'echo boom >&2; exit 3'\n",
-    )
-    .unwrap();
+    // Required checks are node policy, not something a candidate's own
+    // `.tracon/checks` can redirect (see `review::checks::commands_for`); a
+    // second command that only passes once the agent has done more work
+    // stands in for that policy gate.
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.supervision.checks = vec![
+            "test -f a.txt".into(),
+            "test -f .tracon/allowed || (echo boom >&2; exit 3)".into(),
+        ];
+    })
+    .await;
     let v = f.tool("s1", "submit_review", f.submit_args()).await;
     let err = v["error"].as_str().unwrap_or_default().to_string();
     assert!(err.contains("check failed"), "{v}");
@@ -799,8 +859,15 @@ async fn submit_runs_the_checks_first_and_a_failure_refuses_the_submission() {
         "back to running after the check"
     );
 
-    // Fix the check: the submission goes through, with the checks on the row.
-    std::fs::write(f.dir.join("wt/.tracon/checks"), "test -f a.txt\n").unwrap();
+    // Fix the check by doing the work in the session's own runtime workspace
+    // (never the host checkout): the submission goes through, with the
+    // checks on the row.
+    std::fs::create_dir_all(std::path::Path::new(&f.worktree).join(".tracon")).unwrap();
+    std::fs::write(
+        std::path::Path::new(&f.worktree).join(".tracon/allowed"),
+        "",
+    )
+    .unwrap();
     let v = f.tool("s1", "submit_review", f.submit_args()).await;
     let id = v["review_id"]
         .as_str()
@@ -809,9 +876,9 @@ async fn submit_runs_the_checks_first_and_a_failure_refuses_the_submission() {
     assert_eq!(v["review_session"]["state"], "none", "{v}");
     let r = f.store.get_review(&id).unwrap().unwrap();
     let checks: Vec<Value> = serde_json::from_str(r.checks_json.as_deref().unwrap()).unwrap();
-    assert_eq!(checks.len(), 1);
+    assert_eq!(checks.len(), 2);
     assert_eq!(checks[0]["command"], "test -f a.txt");
-    assert_eq!(checks[0]["ok"], true);
+    assert_eq!(checks[1]["ok"], true);
 }
 
 #[tokio::test]
@@ -857,10 +924,10 @@ async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_
     assert_eq!(rs.model, "m/reviewer");
     assert_eq!(rs.budget_tokens, 5000);
     assert_eq!(rs.review_id.as_deref(), Some(id.as_str()));
-    assert_eq!(
-        rs.repo_path,
-        f.store.get_session("s1").unwrap().unwrap().repo_path
-    );
+    // Its content comes from a fresh, frozen workspace snapshotted from the
+    // reviewed commit, not from the implementing session's own (still
+    // mutable) checkout.
+    assert_eq!(rs.repo_path, format!("workspace://review-{id}"));
     // Its worktree is at the reviewed commit, on its own branch.
     for _ in 0..300 {
         if f.store

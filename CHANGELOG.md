@@ -11,6 +11,7 @@
 * **release:** provenance-attested, signed desktop releases with pinned build inputs and a bundled offline verifier
 * **forge:** bounded repository pages with explicit load-more and honest partial search
 * **authority:** scoped allow/ask/deny grants for merge, publish, ticket transition, and deploy, with signed policy deny always dominant
+* **runtime:** runtime-owned workspaces with no host bind mounts, bounded browser imports, export/download, and credential-free dependency preparation
 
 ## [0.14.0](https://github.com/cosmicspork/tracon/compare/v0.13.1...v0.14.0) (2026-09-09)
 

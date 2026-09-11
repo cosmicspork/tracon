@@ -1219,6 +1219,7 @@ async fn orientation(tag: &str) -> Orientation {
                 phase: tracon::session::Phase::Plan,
                 review_id: None,
                 base_sha: None,
+                workspace_id: None,
             },
             adapter.clone(),
         )

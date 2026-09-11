@@ -95,13 +95,16 @@ impl RunSpec {
             a.push(format!("{k}={v}"));
         }
         for m in self.extra_mounts.iter().chain(cmd.mounts.iter()) {
-            a.push("-v".into());
-            a.push(format!(
-                "{}:{}{}",
-                m.source,
-                m.target,
-                if m.read_only { ":ro" } else { "" }
-            ));
+            let mut mount = format!("type=volume,src={},dst={}", m.volume, m.target);
+            if !m.sub_path.is_empty() {
+                mount.push_str(",volume-subpath=");
+                mount.push_str(&m.sub_path);
+            }
+            if m.read_only {
+                mount.push_str(",ro");
+            }
+            a.push("--mount".into());
+            a.push(mount);
         }
         // Podman 6.1 rejects an explicit `-w` whose path is only in the image
         // layer ("workdir does not exist on container"), so the flag is passed
@@ -117,7 +120,7 @@ impl RunSpec {
             a.push("-w".into());
             a.push(workdir);
         }
-        a.push(self.image.clone());
+        a.push(cmd.image.clone().unwrap_or_else(|| self.image.clone()));
         a.extend(cmd.argv.iter().cloned());
         a
     }
@@ -135,18 +138,40 @@ impl PodmanRunner {
     pub fn spec(&self) -> &RunSpec {
         &self.spec
     }
+
+    async fn ensure_volumes(&self, cmd: &RunnerCommand) -> Result<(), RunnerError> {
+        let mut seen = std::collections::BTreeSet::new();
+        for mount in self.spec.extra_mounts.iter().chain(cmd.mounts.iter()) {
+            if !seen.insert(&mount.volume) {
+                continue;
+            }
+            let out = Command::new(&self.spec.podman_bin)
+                .args(["volume", "create", "--ignore", &mount.volume])
+                .output()
+                .await?;
+            if !out.status.success() {
+                return Err(RunnerError::Other(format!(
+                    "create runtime volume {}: {}",
+                    mount.volume,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl Runner for PodmanRunner {
     async fn spawn(&self, cmd: RunnerCommand) -> Result<Spawned, RunnerError> {
+        self.ensure_volumes(&cmd).await?;
         let name = if cmd.name.is_empty() {
             "tracon-h".to_string()
         } else {
             cmd.name.clone()
         };
         let args = self.spec.podman_args(&name, &cmd, false);
-        tracing::debug!(?args, "podman run");
+        tracing::debug!(container = %name, "podman run");
         let child = Command::new(&self.spec.podman_bin)
             .args(&args)
             .stdin(Stdio::piped())
@@ -158,6 +183,7 @@ impl Runner for PodmanRunner {
     }
 
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
+        self.ensure_volumes(&cmd).await?;
         let name = format!(
             "{}-{}",
             if cmd.name.is_empty() {
@@ -238,26 +264,19 @@ mod tests {
     #[test]
     fn mounts_render_with_read_only_flag() {
         let mut s = spec();
-        s.extra_mounts.push(Mount {
-            source: "/state".into(),
-            target: "/root/.omp".into(),
-            read_only: false,
-        });
+        s.extra_mounts
+            .push(Mount::volume("tracon-state", "/root/.omp", false));
         let args = s.podman_args(
             "probe",
             &RunnerCommand {
-                mounts: vec![Mount {
-                    source: "/wt".into(),
-                    target: "/work".into(),
-                    read_only: true,
-                }],
+                mounts: vec![Mount::volume("tracon-work", "/work", true)],
                 ..Default::default()
             },
             false,
         );
         let joined = args.join(" ");
-        assert!(joined.contains("-v /state:/root/.omp "));
-        assert!(joined.contains("-v /wt:/work:ro"));
+        assert!(joined.contains("--mount type=volume,src=tracon-state,dst=/root/.omp"));
+        assert!(joined.contains("--mount type=volume,src=tracon-work,dst=/work,ro"));
         // A mount provides /work, so the explicit workdir is safe to pass.
         assert!(joined.contains("-w /work"));
     }

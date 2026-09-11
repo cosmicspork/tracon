@@ -593,6 +593,203 @@ pub async fn clone_repo(
     Ok(Json(json!({ "repo_path": dest })))
 }
 
+/// Import explicitly uploaded files into a new durable workspace. Browser
+/// uploads carry bytes and checked relative paths; this endpoint never accepts
+/// a host path and never writes to the selected source.
+pub async fn import_workspace(
+    State(s): State<AppState>,
+    mut multipart: Multipart,
+) -> ApiResult<Json<serde_json::Value>> {
+    let id = uuid::Uuid::now_v7().to_string();
+    let selected = Config::state_dir().join("workspace-imports").join(&id);
+    std::fs::create_dir_all(&selected)
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut files = std::collections::BTreeSet::new();
+    let mut total = 0u64;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?
+    {
+        if field.name() != Some("files") {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "only files fields are accepted",
+            ));
+        }
+        let relative = field
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                ApiError::new(StatusCode::BAD_REQUEST, "each file needs a relative name")
+            })?
+            .to_string();
+        if relative.split('/').any(|part| part == ".git") {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Git metadata cannot be imported",
+            ));
+        }
+        if !files.insert(relative.clone()) {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("duplicate selected file {relative}"),
+            ));
+        }
+        if files.len() > crate::workspace::MAX_IMPORT_FILES {
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "selected files exceed the managed workspace import limit",
+            ));
+        }
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
+        total = total.saturating_add(bytes.len() as u64);
+        if total > crate::workspace::MAX_IMPORT_BYTES {
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "selected files exceed the managed workspace import limit",
+            ));
+        }
+        let destination = crate::workspace::selected_path(&selected, &relative)
+            .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        }
+        std::fs::write(destination, bytes)
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    if files.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "select at least one file or folder",
+        ));
+    }
+    let workspace = crate::workspace::seed_from_files(&s.cfg.publish.git, &selected, &id)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    let result = crate::workspace::import(
+        s.manager.backend().as_ref(),
+        &workspace,
+        &crate::workspace::staging_path(&id),
+    )
+    .await
+    .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()));
+    let _ = std::fs::remove_dir_all(&selected);
+    result?;
+    Ok(Json(
+        json!({ "workspace_id": workspace.id, "files": files.len() }),
+    ))
+}
+
+/// Materialize a node-owned snapshot for an explicit export operation.
+pub async fn export_workspace(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let _snapshot = s.manager.snapshot_workspace_or_session(&id).await?;
+    Ok(Json(json!({ "workspace_id": id, "exported": true })))
+}
+
+/// Prepare lockfile dependencies in a separate, credential-free runtime. The
+/// project can select only a pinned or explicitly approved image; it cannot
+/// supply a setup command.
+pub async fn prepare_workspace(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::environment::PreparedEnvironment>> {
+    let snapshot = s.manager.snapshot_workspace_or_session(&id).await?;
+    let workspace = crate::workspace::Workspace {
+        id: id.clone(),
+        volume: crate::workspace::volume_name(&id),
+        snapshot,
+    };
+    let plan = crate::environment::inspect(&workspace.snapshot)
+        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    let prepared =
+        crate::environment::prepare(s.manager.backend().as_ref(), &s.cfg, &workspace, &plan)
+            .await
+            .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(Json(prepared))
+}
+
+/// Download a workspace snapshot as a bounded zip. Symlinks were refused at
+/// import and again at runtime export, so this archive cannot carry an escape.
+pub async fn download_workspace(State(s): State<AppState>, Path(id): Path<String>) -> Response {
+    let snapshot = match s.manager.snapshot_workspace_or_session(&id).await {
+        Ok(path) => path,
+        Err(error) => return ApiError::from(error).into_response(),
+    };
+    let bytes = match zip_workspace(&snapshot) {
+        Ok(bytes) => bytes,
+        Err(error) => return ApiError(StatusCode::CONFLICT, error).into_response(),
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/zip")
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!(
+                "attachment; filename=\"workspace-{}.zip\"",
+                safe_download_name(&id)
+            ),
+        )
+        .header("x-content-type-options", "nosniff")
+        .body(axum::body::Body::from(bytes))
+        .unwrap_or_else(|error| {
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        })
+}
+
+fn zip_workspace(root: &std::path::Path) -> Result<Vec<u8>, String> {
+    use std::io::{Cursor, Write};
+
+    crate::workspace::validate_tree(root).map_err(|e| e.to_string())?;
+    fn add(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        archive: &mut zip::ZipWriter<&mut Cursor<Vec<u8>>>,
+        options: zip::write::SimpleFileOptions,
+    ) -> Result<(), String> {
+        for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+            if metadata.file_type().is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
+                return Err(format!("refusing unsafe workspace path {}", path.display()));
+            }
+            let name = path
+                .strip_prefix(root)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if metadata.is_dir() {
+                add(root, &path, archive, options)?;
+            } else {
+                archive
+                    .start_file(name, options)
+                    .map_err(|e| e.to_string())?;
+                let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+                archive.write_all(&bytes).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
+    }
+    let mut cursor = Cursor::new(Vec::new());
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+    {
+        let mut archive = zip::ZipWriter::new(&mut cursor);
+        add(root, root, &mut archive, options)?;
+        archive.finish().map_err(|e| e.to_string())?;
+    }
+    Ok(cursor.into_inner())
+}
+
 pub async fn create_session(
     State(s): State<AppState>,
     Json(spec): Json<NewSession>,
@@ -613,6 +810,8 @@ pub struct ComposeBody {
     pub repo_path: String,
     #[serde(default)]
     pub branch: Option<String>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     #[serde(default = "plan_phase")]
     pub phase: Phase,
     #[serde(default)]
@@ -658,6 +857,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
     let spec = NewSession {
         channel: c.channel,
         repo_path: c.repo_path,
+        workspace_id: c.workspace_id,
         branch: c.branch,
         work_item_id: Some(item.id.clone()),
         model: c.model,
@@ -880,6 +1080,14 @@ fn worktree_of(s: &AppState, r: &crate::store::ReviewRow) -> Option<String> {
 /// What changed in the worktree since submit. An empty list means the diff
 /// still describes the branch.
 async fn staleness_of(s: &AppState, r: &crate::store::ReviewRow) -> Vec<String> {
+    if let Ok(Some(session)) = s.store().get_session(&r.session_id) {
+        if session.node_id == s.node_id
+            && session.harness_id != crate::session::external::HARNESS_ID
+            && s.manager.snapshot_workspace(&r.session_id).await.is_err()
+        {
+            return vec!["the runtime workspace could not be safely snapshotted".into()];
+        }
+    }
     let Some(worktree) = worktree_of(s, r) else {
         return vec!["the worktree is gone".into()];
     };
@@ -2772,14 +2980,17 @@ pub async fn probe_models_into_store(
         &backend.harness_host(),
         s.manager.probe_token(),
     );
-    let runner = backend.runner(
-        crate::session::materialize::probe_mounts(
-            &backend.harness_home(),
-            s.adapter.as_ref(),
-            &wiring,
-        )
-        .unwrap_or_default(),
-    );
+    let scratch = crate::session::materialize::probe_scratch(
+        &backend.harness_home(),
+        s.adapter.as_ref(),
+        &wiring,
+    )
+    .map_err(|e| e.to_string())?;
+    backend
+        .import_volume(&scratch.volume, &scratch.dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    let runner = backend.runner(scratch.mounts);
     let models = s
         .adapter
         .probe_models(runner.as_ref(), wiring.env)

@@ -8,7 +8,7 @@
 //! and in the pod's security context, which is rendered here and verified
 //! after admission.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -104,20 +104,28 @@ impl KubeSpec {
         }
     }
 
-    /// A host path on the shared volume, as a `subPath` under the claim. A
-    /// source outside the volume cannot be given to a pod at all, which is
-    /// the point: nothing of the node's is reachable except what it put on
-    /// the volume for this session.
-    fn sub_path(&self, source: &str) -> Result<String, RunnerError> {
-        Path::new(source)
-            .strip_prefix(&self.state_mount)
-            .map(|p| p.to_string_lossy().into_owned())
-            .map_err(|_| {
-                RunnerError::Other(format!(
-                    "mount source {source} is outside the state volume {}",
-                    self.state_mount.display()
-                ))
-            })
+    /// The pod's PVC is the runtime-owned storage root. Each conceptual
+    /// volume gets its own checked subdirectory under it; no host path is ever
+    /// interpreted as a mount source.
+    fn sub_path(&self, mount: &Mount) -> Result<String, RunnerError> {
+        if mount.volume.is_empty()
+            || !mount
+                .volume
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            || mount.sub_path.starts_with('/')
+            || mount.sub_path.split('/').any(|part| part == "..")
+        {
+            return Err(RunnerError::Other(format!(
+                "invalid runtime volume {}:{}",
+                mount.volume, mount.sub_path
+            )));
+        }
+        Ok(if mount.sub_path.is_empty() {
+            mount.volume.clone()
+        } else {
+            format!("{}/{}", mount.volume, mount.sub_path)
+        })
     }
 
     fn volume_mounts(&self, cmd: &RunnerCommand) -> Result<Vec<VolumeMount>, RunnerError> {
@@ -128,7 +136,7 @@ impl KubeSpec {
                 Ok(VolumeMount {
                     name: STATE_VOLUME.into(),
                     mount_path: m.target.clone(),
-                    sub_path: Some(self.sub_path(&m.source)?),
+                    sub_path: Some(self.sub_path(m)?),
                     read_only: Some(m.read_only),
                     ..Default::default()
                 })
@@ -226,7 +234,7 @@ impl KubeSpec {
                 }]),
                 containers: vec![Container {
                     name: "harness".into(),
-                    image: Some(self.image.clone()),
+                    image: Some(cmd.image.clone().unwrap_or_else(|| self.image.clone())),
                     image_pull_policy: Some("IfNotPresent".into()),
                     command: Some(cmd.argv.clone()),
                     working_dir: Some(workdir),
@@ -340,11 +348,22 @@ impl KubeRunner {
             .delete(name, &DeleteParams::default().grace_period(0))
             .await;
     }
+
+    async fn ensure_mount_roots(&self, cmd: &RunnerCommand) -> Result<(), RunnerError> {
+        for mount in self.spec.extra_mounts.iter().chain(cmd.mounts.iter()) {
+            let path = self.spec.state_mount.join(self.spec.sub_path(mount)?);
+            tokio::fs::create_dir_all(path)
+                .await
+                .map_err(|e| RunnerError::Other(format!("prepare PVC runtime volume: {e}")))?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl Runner for KubeRunner {
     async fn spawn(&self, cmd: RunnerCommand) -> Result<Spawned, RunnerError> {
+        self.ensure_mount_roots(&cmd).await?;
         let name = Self::name_for(&cmd, "tracon-h");
         let pod = self.spec.pod(&name, &cmd, false)?;
         let pods = self.pods();
@@ -410,6 +429,7 @@ impl Runner for KubeRunner {
 
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
         use std::os::unix::process::ExitStatusExt;
+        self.ensure_mount_roots(&cmd).await?;
         let name = format!(
             "{}-{}",
             Self::name_for(&cmd, "tracon-x"),
@@ -475,16 +495,13 @@ mod tests {
             argv: vec!["omp".into(), "acp".into()],
             name: "tracon-h-1".into(),
             mounts: vec![
-                Mount {
-                    source: "/state/work/repo-x".into(),
-                    target: "/work".into(),
-                    read_only: false,
-                },
-                Mount {
-                    source: "/state/work/repos/x/.git/config".into(),
-                    target: "/state/work/repos/x/.git/config".into(),
-                    read_only: true,
-                },
+                Mount::volume("tracon-workspace-repo-x", "/work", false),
+                Mount::at(
+                    "tracon-scratch-repo-x",
+                    "gitconfig",
+                    "/home/harness/.gitconfig",
+                    true,
+                ),
             ],
             ..Default::default()
         }
@@ -541,24 +558,24 @@ mod tests {
             .clone()
             .unwrap();
         let work = mounts.iter().find(|m| m.mount_path == "/work").unwrap();
-        assert_eq!(work.sub_path.as_deref(), Some("work/repo-x"));
+        assert_eq!(work.sub_path.as_deref(), Some("tracon-workspace-repo-x"));
         assert_eq!(work.read_only, Some(false));
         let cfg = mounts
             .iter()
-            .find(|m| m.mount_path == "/state/work/repos/x/.git/config")
+            .find(|m| m.mount_path == "/home/harness/.gitconfig")
             .unwrap();
+        assert_eq!(
+            cfg.sub_path.as_deref(),
+            Some("tracon-scratch-repo-x/gitconfig")
+        );
         assert_eq!(cfg.read_only, Some(true));
         assert!(mounts.iter().all(|m| m.name == STATE_VOLUME));
     }
 
     #[test]
-    fn a_source_outside_the_volume_cannot_be_mounted() {
+    fn invalid_runtime_volume_is_refused() {
         let mut c = cmd();
-        c.mounts.push(Mount {
-            source: "/home/someone/.omp".into(),
-            target: "/x".into(),
-            read_only: true,
-        });
+        c.mounts.push(Mount::volume("../host", "/x", true));
         assert!(spec().pod("p", &c, false).is_err());
     }
 

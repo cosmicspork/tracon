@@ -24,6 +24,7 @@
   let prompt = $state('')
   let channel = $state('')
   let repo = $state('')
+  let workspaceId = $state<string | null>(null)
   let branch = $state('')
   let model = $state('')
   let budget = $state('')
@@ -55,9 +56,7 @@
     !blocked &&
       !atCeiling &&
       !needsPlan &&
-      channel !== '' &&
-      repo.trim() !== '' &&
-      model !== '' &&
+      (repo.trim() !== '' || workspaceId !== null) &&
       (item !== null || prompt.trim() !== '') &&
       !busy,
   )
@@ -79,10 +78,10 @@
   })
   // The repository this channel worked in last, so the common case needs no pick.
   $effect(() => {
-    if (repo !== '' || !channel) return
+    if (repo !== '' || workspaceId !== null || !channel) return
     const last = [...store.sessions.values()]
       .sort((a, b) => b.created_ms - a.created_ms)
-      .find((s) => s.channel === channel && s.repo_path)
+      .find((s) => s.channel === channel && s.repo_path && !s.repo_path.startsWith('workspace://'))
     if (last) repo = last.repo_path
   })
   $effect(() => {
@@ -110,7 +109,8 @@
     try {
       const common = {
         channel,
-        repo_path: repo.trim(),
+        repo_path: workspaceId ? '' : repo.trim(),
+        workspace_id: workspaceId ?? undefined,
         branch: branch.trim() || undefined,
         phase,
         model,
@@ -192,7 +192,7 @@
       </label>
       <div class="field">
         <span>Repository</span>
-        <RepoPicker bind:value={repo} {channel} />
+        <RepoPicker bind:value={repo} bind:workspaceId {channel} />
       </div>
       <label>
         <span>Branch</span>

@@ -142,6 +142,50 @@ impl Backend for KubeBackend {
         }
     }
 
+    async fn import_volume(
+        &self,
+        volume: &str,
+        source: &std::path::Path,
+    ) -> Result<(), BoundaryError> {
+        crate::workspace::validate_tree(source).map_err(|e| BoundaryError::Other(e.to_string()))?;
+        let root = self.cfg.runtime.kubernetes.state_mount.join(volume);
+        let staged = root.with_extension(format!("staging-{}", uuid::Uuid::now_v7()));
+        let _ = std::fs::remove_dir_all(&staged);
+        crate::workspace::copy_tree(source, &staged, false)
+            .map_err(|e| BoundaryError::Other(e.to_string()))?;
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        std::fs::rename(staged, root)?;
+        Ok(())
+    }
+
+    async fn export_volume(
+        &self,
+        volume: &str,
+        destination: &std::path::Path,
+    ) -> Result<(), BoundaryError> {
+        let source = self.cfg.runtime.kubernetes.state_mount.join(volume);
+        if !source.is_dir() {
+            return Err(BoundaryError::Other(format!(
+                "runtime volume {volume} does not exist"
+            )));
+        }
+        let staged = destination.with_extension(format!("staging-{}", uuid::Uuid::now_v7()));
+        let _ = std::fs::remove_dir_all(&staged);
+        crate::workspace::copy_tree(&source, &staged, false)
+            .map_err(|e| BoundaryError::Other(e.to_string()))?;
+        if destination.exists() {
+            std::fs::remove_dir_all(destination)?;
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(staged, destination)?;
+        crate::workspace::validate_tree(destination)
+            .map_err(|e| BoundaryError::Other(e.to_string()))
+    }
+
     fn harness_host(&self) -> String {
         self.cfg.runtime.kubernetes.gateway_host.clone()
     }

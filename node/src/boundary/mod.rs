@@ -44,6 +44,20 @@ pub trait Backend: Send + Sync {
     async fn check_all(&self, cfg: &Config, deep: bool) -> BoundaryReport;
     /// A runner carrying these mounts in addition to the boundary's own.
     fn runner(&self, extra_mounts: Vec<Mount>) -> Arc<dyn Runner>;
+    /// Copy an explicitly staged directory into runtime-owned storage. The
+    /// source is never mounted into a harness.
+    async fn import_volume(
+        &self,
+        volume: &str,
+        source: &std::path::Path,
+    ) -> Result<(), BoundaryError>;
+    /// Copy a runtime-owned directory into a node-owned staging path. Callers
+    /// validate the snapshot before interpreting it as source or Git data.
+    async fn export_volume(
+        &self,
+        volume: &str,
+        destination: &std::path::Path,
+    ) -> Result<(), BoundaryError>;
     /// The name by which a harness reaches the node (the MCP endpoint and the
     /// deep probe's ping).
     fn harness_host(&self) -> String;

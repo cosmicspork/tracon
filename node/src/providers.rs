@@ -204,6 +204,35 @@ impl Providers {
         self.store_root.join(provider)
     }
 
+    fn state_volume(&self, provider: &str) -> String {
+        format!(
+            "tracon-provider-{}",
+            provider
+                .bytes()
+                .map(|b| if b.is_ascii_alphanumeric() {
+                    b as char
+                } else {
+                    '-'
+                })
+                .collect::<String>()
+        )
+    }
+
+    async fn clear_state_volume(&self, provider: &str) -> Result<(), ProviderError> {
+        let empty = self
+            .store_root
+            .join(format!(".{}-empty-{}", provider, uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&empty)
+            .map_err(|error| ProviderError::Failed(error.to_string()))?;
+        let result = self
+            .backend
+            .import_volume(&self.state_volume(provider), &empty)
+            .await
+            .map_err(|error| ProviderError::Failed(error.to_string()));
+        let _ = std::fs::remove_dir_all(empty);
+        result
+    }
+
     pub fn list_private(&self) -> Vec<Value> {
         self.list(true)
     }
@@ -332,18 +361,11 @@ impl Providers {
     }
 
     fn runner_for(&self, provider: &str) -> std::io::Result<Arc<dyn crate::runner::Runner>> {
-        let dir = self.store_dir(provider);
-        std::fs::create_dir_all(dir.join("agent"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-        }
-        Ok(self.backend.runner(vec![Mount {
-            source: dir.to_string_lossy().into_owned(),
-            target: state_target(&self.backend.harness_home(), self.adapter.layout()),
-            read_only: false,
-        }]))
+        Ok(self.backend.runner(vec![Mount::volume(
+            self.state_volume(provider),
+            state_target(&self.backend.harness_home(), self.adapter.layout()),
+            false,
+        )]))
     }
 
     pub async fn connect(
@@ -375,6 +397,10 @@ impl Providers {
                     state: InflightState::Starting,
                 },
             );
+        }
+        if let Err(error) = self.clear_state_volume(name).await {
+            self.remove_generation(name, generation);
+            return Err(error);
         }
         let login_process = format!("tracon-login-{name}-{generation}");
 
@@ -752,11 +778,15 @@ impl Providers {
         channels: Vec<String>,
         kind: LiftKind,
     ) -> Result<(), ProviderError> {
-        let token: LiftedToken = self
-            .adapter
-            .lift(&self.store_dir(name), login)
+        let state = self.store_dir(name);
+        self.backend
+            .export_volume(&self.state_volume(name), &state)
             .await
             .map_err(|error| ProviderError::Failed(error.to_string()))?;
+        let lifted = self.adapter.lift(&state, login).await;
+        let _ = std::fs::remove_dir_all(&state);
+        let token: LiftedToken =
+            lifted.map_err(|error| ProviderError::Failed(error.to_string()))?;
         let credential_name = self.credential_name(name)?;
         let mut broker = self.broker.write().unwrap();
         let mut staged = broker.clone();

@@ -171,11 +171,24 @@ channels = ["personal"]
 GH_TOKEN = "…"
 ```
 
+**Nothing on this machine is bind-mounted into the boundary.** A session works in
+a runtime-owned volume: a forge clone the node made, or files you pick in the
+browser, which are copied in once (bounded in size and count, symlinks and Git
+metadata refused) and never written back. The harness sees `/work` and no host
+path; your Git configuration, hooks, and credentials stay outside. A workspace
+outlives its session — start another on it, export a checked snapshot, or download
+it as a zip — and publication happens from that snapshot through a separate,
+credential-bearing repository the node owns, never from the agent's clone.
+Dependency preparation runs first as its own credential-free command in an
+isolated cache: a `devcontainer.json` may name a digest-pinned image, but hooks,
+mounts, sockets, and privilege in it are refused rather than partly honoured, and
+`[runtime] approved_images` is the operator's list of anything else acceptable.
+
 ### Review before publish
 
 An agent has no forge token and never runs `gh` or `glab`. To publish it commits,
-submits, and waits: the node captures the diff from the worktree itself, runs the
-project's checks in a throwaway container, and refuses a failure or an oversized
+submits, and waits: the node snapshots the workspace volume itself, runs the
+project's checks against that snapshot in a throwaway container, and refuses a failure or an oversized
 diff before you ever see it. You approve, reject with a reason, or — on a desktop —
 edit the diff and send it back as a request for changes. Approval publishes exactly
 the reviewed bytes with the brokered credential; if the branch moved since submit,
@@ -365,6 +378,7 @@ claim_grace_secs = 60               # a review claim lapses this long after the 
 [runtime]
 kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # [runtime.kubernetes]              # namespace, harness_image, state_claim, state_mount, harness_home, uid, gateway_host
+# approved_images = []              # digest-pinned project images preparation may use besides the harness image
 
 [providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
 credential = "anthropic"
@@ -397,7 +411,7 @@ command_timeout_secs = 15
 promote_at = "02:00"                # the nightly promotion batch
 
 [supervision]
-checks = ["just check"]             # run in the worktree before a review is accepted
+checks = ["just check"]             # run against a snapshot of the workspace before a review is accepted
 timeout_secs = 900
 
 [review]
