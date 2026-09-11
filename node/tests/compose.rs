@@ -30,7 +30,7 @@ struct Harness {
 }
 
 impl Harness {
-    async fn new() -> Self {
+    async fn new(models_json: Option<&str>) -> Self {
         let store = Arc::new(Store::open_in_memory().unwrap());
         store
             .put_node(&NodeRow {
@@ -42,7 +42,7 @@ impl Harness {
                 harness_id: "fake".into(),
                 harness_pinned: "1.0.0".into(),
                 harness_found: Some("1.0.0".into()),
-                models_json: Some(r#"[{"value":"m/a","name":"A"}]"#.into()),
+                models_json: models_json.map(Into::into),
                 checked_at_ms: Some(now_ms()),
                 is_self: 1,
                 x25519_pub: None,
@@ -111,7 +111,7 @@ impl Harness {
 #[tokio::test]
 async fn a_prompt_writes_the_item_and_starts_the_session() {
     state::isolate();
-    let h = Harness::new().await;
+    let h = Harness::new(Some(r#"[{"value":"m/a","name":"A"}]"#)).await;
     let (st, body) = h
         .call(
             "POST",
@@ -148,8 +148,8 @@ async fn a_prompt_writes_the_item_and_starts_the_session() {
 #[tokio::test]
 async fn a_refused_session_keeps_the_item_and_says_where_it_went() {
     state::isolate();
-    let h = Harness::new().await;
-    // No model, and no binding to supply one.
+    let h = Harness::new(None).await;
+    // No model, no binding to supply one, and no node catalogue to fall back to.
     let (st, body) = h
         .call(
             "POST",
@@ -165,7 +165,7 @@ async fn a_refused_session_keeps_the_item_and_says_where_it_went() {
     assert!(body["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("no model"));
+        .contains("no usable model"));
     let id = body["work_item_id"]
         .as_str()
         .expect("the refusal names the item it saved");
@@ -177,7 +177,7 @@ async fn a_refused_session_keeps_the_item_and_says_where_it_went() {
 #[tokio::test]
 async fn a_prompt_takes_the_channel_s_bound_model() {
     state::isolate();
-    let h = Harness::new().await;
+    let h = Harness::new(Some(r#"[{"value":"m/a","name":"A"}]"#)).await;
     let (st, body) = h
         .call("POST", "/api/channels", Some(json!({ "name": "personal" })))
         .await;
