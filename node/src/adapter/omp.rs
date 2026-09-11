@@ -115,11 +115,14 @@ impl HarnessAdapter for OmpAdapter {
         let child = runner
             .spawn(Self::acp_cmd_with("omp-probe", &[], env))
             .await?;
-        let mut session = match tokio::time::timeout(START_TIMEOUT, OmpSession::start(child)).await {
+        let mut session = match tokio::time::timeout(START_TIMEOUT, OmpSession::start(child)).await
+        {
             Ok(result) => result?,
             Err(_) => {
                 let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill("omp-probe")).await;
-                return Err(AdapterError::Protocol("OMP model probe startup timed out".into()));
+                return Err(AdapterError::Protocol(
+                    "OMP model probe startup timed out".into(),
+                ));
             }
         };
         let models = session.model_options();
@@ -150,7 +153,9 @@ impl HarnessAdapter for OmpAdapter {
             Ok(result) => result?,
             Err(_) => {
                 let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container_name)).await;
-                return Err(AdapterError::Protocol("OMP harness startup timed out".into()));
+                return Err(AdapterError::Protocol(
+                    "OMP harness startup timed out".into(),
+                ));
             }
         };
 
@@ -512,16 +517,13 @@ impl OmpSession {
                     }
                     None => break,
                 },
-                barrier = barriers.recv() => match barrier {
-                    Some(done) => {
-                        while let Ok(msg) = self.incoming.try_recv() {
-                            if !Self::process(msg, &tx).await {
-                                return;
-                            }
+                barrier = barriers.recv() => if let Some(done) = barrier {
+                    while let Ok(msg) = self.incoming.try_recv() {
+                        if !Self::process(msg, &tx).await {
+                            return;
                         }
-                        let _ = done.send(());
                     }
-                    None => {}
+                    let _ = done.send(());
                 },
             }
         }

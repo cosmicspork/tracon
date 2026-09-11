@@ -994,7 +994,6 @@ pub async fn stop(State(s): State<AppState>, Path(id): Path<String>) -> ApiResul
     Ok(StatusCode::OK)
 }
 
-
 pub async fn kill(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<StatusCode> {
     s.manager.kill(&id).await?;
     Ok(StatusCode::OK)
