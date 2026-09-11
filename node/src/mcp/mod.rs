@@ -163,7 +163,8 @@ impl Tools {
                 .session
                 .get()
                 .ok_or("operator interventions are not available on this node")?;
-            return operator::call(&access.store, &access.manager, &self.cfg, ctx, name, args).await;
+            return operator::call(&access.store, &access.manager, &self.cfg, ctx, name, args)
+                .await;
         }
         let edited = if plan_write {
             None

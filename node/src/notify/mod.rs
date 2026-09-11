@@ -515,11 +515,17 @@ pub async fn send_operator(
         tag: format!("tracon-operator-{notification_id}"),
     };
     let devices = store.push_subscriptions_live(now_ms()).unwrap_or_default();
-    for device in devices.into_iter().filter(|d| device_ids.is_empty() || device_ids.contains(&d.id)) {
+    for device in devices
+        .into_iter()
+        .filter(|d| device_ids.is_empty() || device_ids.contains(&d.id))
+    {
         let outcome = deliver(store, cfg, &device, &notification, now_ms()).await;
-        let _ = store.record_notification_attempt(notification_id, &device.id, &format!("{outcome:?}"));
+        let _ =
+            store.record_notification_attempt(notification_id, &device.id, &format!("{outcome:?}"));
     }
-    store.notification_attempts(notification_id).unwrap_or_default()
+    store
+        .notification_attempts(notification_id)
+        .unwrap_or_default()
 }
 
 fn http_client() -> reqwest::Client {

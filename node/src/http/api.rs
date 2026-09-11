@@ -572,7 +572,9 @@ pub async fn get_session(
         .filter(|p| p.session_id == id)
         .collect();
     let questions = s.store().session_operator_questions(&id)?;
-    Ok(Json(json!({ "session": row, "waiting": waiting, "questions": questions })))
+    Ok(Json(
+        json!({ "session": row, "waiting": waiting, "questions": questions }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1066,14 +1068,15 @@ pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Valu
     })))
 }
 
-
 #[derive(Deserialize)]
 pub struct OperatorAnswerBody {
     pub answer: String,
 }
 
 pub async fn operator_questions(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(json!({ "questions": s.store().open_operator_questions()? })))
+    Ok(Json(
+        json!({ "questions": s.store().open_operator_questions()? }),
+    ))
 }
 
 pub async fn answer_operator_question(
@@ -1085,10 +1088,13 @@ pub async fn answer_operator_question(
         StatusCode::NOT_FOUND,
         "no such operator question".into(),
     ))?;
-    let origin = s.store().get_session(&question.session_id)?.ok_or(ApiError(
-        StatusCode::CONFLICT,
-        "question origin session is unavailable".into(),
-    ))?;
+    let origin = s
+        .store()
+        .get_session(&question.session_id)?
+        .ok_or(ApiError(
+            StatusCode::CONFLICT,
+            "question origin session is unavailable".into(),
+        ))?;
     if origin.harness_id != crate::session::external::HARNESS_ID
         && matches!(origin.state.as_str(), "closed" | "killed_budget" | "failed")
     {
@@ -1099,12 +1105,22 @@ pub async fn answer_operator_question(
     }
     let answer = b.answer.trim();
     if answer.is_empty() || answer.len() > 8 * 1024 {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "answer must be 1–8192 bytes".into()));
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "answer must be 1–8192 bytes".into(),
+        ));
     }
-    let choices: Vec<String> = serde_json::from_str(&question.choices_json)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "stored question choices are invalid".into()))?;
+    let choices: Vec<String> = serde_json::from_str(&question.choices_json).map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stored question choices are invalid".into(),
+        )
+    })?;
     if !choices.is_empty() && !choices.iter().any(|choice| choice == answer) {
-        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, "answer must select one offered choice".into()));
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "answer must select one offered choice".into(),
+        ));
     }
     let answer = json!({ "text": answer }).to_string();
     if s.store().answer_operator_question(&id, &answer)?.is_none() {
@@ -1140,7 +1156,9 @@ pub async fn operator_notification(
     })))
 }
 
-pub async fn operator_notifications(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn operator_notifications(
+    State(s): State<AppState>,
+) -> ApiResult<Json<serde_json::Value>> {
     let notifications = s.store().operator_notifications()?;
     let rows: Vec<_> = notifications
         .into_iter()
@@ -1186,10 +1204,16 @@ pub async fn reconcile_operator_issue(
     Json(body): Json<ReconcileIssueBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     if !body.confirmed_absent {
-        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, "confirm the draft marker is absent before retrying".into()));
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "confirm the draft marker is absent before retrying".into(),
+        ));
     }
     if !s.store().retry_uncertain_issue_publication(&id)? {
-        return Err(ApiError(StatusCode::CONFLICT, "only an uncertain issue draft can be reconciled".into()));
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "only an uncertain issue draft can be reconciled".into(),
+        ));
     }
     Ok(Json(json!({ "reconciled": true, "state": "draft" })))
 }
@@ -1209,8 +1233,13 @@ pub async fn publish_operator_issue(
         .unwrap()
         .env_for("gh", &issue.channel, &s.node_id)
         .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
-    let attachments: serde_json::Value = serde_json::from_str(&issue.attachments_json)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "stored issue attachments are invalid".into()))?;
+    let attachments: serde_json::Value =
+        serde_json::from_str(&issue.attachments_json).map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stored issue attachments are invalid".into(),
+            )
+        })?;
     let body = format!(
         "{}\n\n## Inspectable attachments\n\n```json\n{}\n```\n\n<!-- tracon-issue-draft:{} -->",
         issue.body,
@@ -2875,7 +2904,9 @@ fn valid_operator_notification(title: &str, body: &str, path: &str, device_ids: 
         && title.len() <= 8 * 1024
         && body.len() <= 8 * 1024
         && device_ids.len() <= 32
-        && device_ids.iter().all(|id| !id.is_empty() && id.len() <= 256)
+        && device_ids
+            .iter()
+            .all(|id| !id.is_empty() && id.len() <= 256)
         && path.starts_with('/')
         && !path.starts_with("//")
         && !path.contains('\\')
@@ -2995,32 +3026,54 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 path,
                 device_ids,
             } => {
-                let members = self.store().nodes_in_channel(&channel).map_err(|e| e.to_string())?;
+                let members = self
+                    .store()
+                    .nodes_in_channel(&channel)
+                    .map_err(|e| e.to_string())?;
                 if !members.contains(&sender.to_string()) || !members.contains(&self.node_id) {
-                    Err(ApiError(StatusCode::FORBIDDEN, "sender is not a member of this notification channel".into()))
+                    Err(ApiError(
+                        StatusCode::FORBIDDEN,
+                        "sender is not a member of this notification channel".into(),
+                    ))
                 } else if !valid_operator_notification(&title, &body, &path, &device_ids) {
-                    Err(ApiError(StatusCode::BAD_REQUEST, "invalid operator notification".into()))
+                    Err(ApiError(
+                        StatusCode::BAD_REQUEST,
+                        "invalid operator notification".into(),
+                    ))
                 } else {
-                    let bindings = self.store().channel_get(&channel)
+                    let bindings = self
+                        .store()
+                        .channel_get(&channel)
                         .map_err(|e| e.to_string())?
-                        .and_then(|row| serde_json::from_str::<serde_json::Value>(&row.bindings_json).ok())
+                        .and_then(|row| {
+                            serde_json::from_str::<serde_json::Value>(&row.bindings_json).ok()
+                        })
                         .unwrap_or_else(|| json!({}));
                     if !crate::notify::enabled(&bindings) {
-                        Err(ApiError(StatusCode::CONFLICT, "notifications are disabled for this channel".into()))
-                    } else if !self.store().claim_operator_notification(
-                        &format!("remote:{sender}:{notification_id}"),
-                        &notification_id,
-                        60_000,
-                    ).map_err(|e| e.to_string())? {
+                        Err(ApiError(
+                            StatusCode::CONFLICT,
+                            "notifications are disabled for this channel".into(),
+                        ))
+                    } else if !self
+                        .store()
+                        .claim_operator_notification(
+                            &format!("remote:{sender}:{notification_id}"),
+                            &notification_id,
+                            60_000,
+                        )
+                        .map_err(|e| e.to_string())?
+                    {
                         Ok(json!({ "deduplicated": true }))
-                    } else if !self.store().claim_operator_notification_rate(
-                        &channel,
-                        sender,
-                        10,
-                        60_000,
-                    ).map_err(|e| e.to_string())? {
+                    } else if !self
+                        .store()
+                        .claim_operator_notification_rate(&channel, sender, 10, 60_000)
+                        .map_err(|e| e.to_string())?
+                    {
                         let _ = self.store().release_operator_notification(&notification_id);
-                        Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "operator notification rate limit exceeded".into()))
+                        Err(ApiError(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "operator notification rate limit exceeded".into(),
+                        ))
                     } else {
                         let attempts = crate::notify::send_operator(
                             self.store(),
@@ -3030,7 +3083,8 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                             body,
                             path,
                             &device_ids,
-                        ).await;
+                        )
+                        .await;
                         Ok(json!({ "deduplicated": false, "attempts": attempts }))
                     }
                 }
