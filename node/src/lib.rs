@@ -21,6 +21,7 @@ pub mod notify;
 pub mod policy;
 pub mod providers;
 pub mod review;
+pub mod qa;
 pub mod runner;
 pub mod service;
 pub mod session;

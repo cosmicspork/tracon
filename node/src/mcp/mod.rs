@@ -16,6 +16,7 @@ pub mod memory;
 pub mod operator;
 pub mod review;
 pub mod work;
+pub mod qa;
 
 use std::sync::Arc;
 
@@ -148,6 +149,7 @@ impl Tools {
             // report do not touch a credential or widen a tool policy.
             out.extend(operator::definitions());
             out.extend(work::definitions());
+            out.extend(qa::definitions());
         }
         out
     }
@@ -309,6 +311,13 @@ impl Tools {
                     .get()
                     .ok_or_else(|| "node not ready".to_string())?;
                 work::call(access, ctx, name, args).await
+            }
+            qa::DEPLOY | qa::BROWSER_VERIFY | qa::PROTOTYPE_BUILD => {
+                let access = self
+                    .session
+                    .get()
+                    .ok_or("QA tools are not available on this node")?;
+                qa::call(self, access, ctx, name, args).await
             }
             docs::DOC_READ | docs::DOC_SEARCH | docs::DOC_WRITE => {
                 let access = self

@@ -566,6 +566,81 @@ const MIGRATIONS: &[&str] = &[
            json_object('legacy_source', 'event.check_result', 'candidate_provenance', 'unknown')
     FROM event
     WHERE kind = 'check_result' AND json_valid(payload);
+    // 24: append-only QA observations and repository-derived prototypes. These
+    // are node-owned execution evidence, not replicated demonstrations: an
+    // offline peer cannot truthfully inherit a runtime observation.
+    r#"
+    CREATE TABLE qa_deployment (
+        id                   TEXT PRIMARY KEY,
+        candidate_id         TEXT NOT NULL,
+        channel              TEXT NOT NULL,
+        target_id            TEXT NOT NULL,
+        build_id             TEXT NOT NULL,
+        execution_image      TEXT NOT NULL,
+        origin               TEXT NOT NULL,
+        environment_identity TEXT,
+        identity_state       TEXT NOT NULL CHECK(identity_state IN ('fresh','unknown','failed')),
+        observed_ms          INTEGER NOT NULL,
+        started_ms           INTEGER NOT NULL,
+        finished_ms          INTEGER NOT NULL,
+        outcome              TEXT NOT NULL CHECK(outcome IN ('succeeded','failed','unknown')),
+        detail_json          TEXT NOT NULL
+    );
+    CREATE INDEX qa_deployment_candidate ON qa_deployment(candidate_id, observed_ms DESC);
+    CREATE INDEX qa_deployment_target ON qa_deployment(channel, target_id, observed_ms DESC);
+    CREATE INDEX qa_deployment_target_global ON qa_deployment(target_id, observed_ms DESC);
+
+    CREATE TABLE qa_browser_run (
+        id                       TEXT PRIMARY KEY,
+        deployment_id            TEXT NOT NULL REFERENCES qa_deployment(id),
+        candidate_id             TEXT NOT NULL,
+        channel                  TEXT NOT NULL,
+        target_id                TEXT NOT NULL,
+        authorized_origins_json  TEXT NOT NULL,
+        test_credential          TEXT,
+        assertions_json          TEXT NOT NULL,
+        outcome                  TEXT NOT NULL CHECK(outcome IN ('passed','failed','unknown')),
+        environment_before       TEXT,
+        environment_after        TEXT,
+        evidence_state           TEXT NOT NULL CHECK(evidence_state IN ('fresh','stale','unknown')),
+        log_tail                 TEXT NOT NULL,
+        started_ms               INTEGER NOT NULL,
+        finished_ms               INTEGER NOT NULL
+    );
+    CREATE INDEX qa_browser_run_candidate ON qa_browser_run(candidate_id, started_ms DESC);
+    CREATE INDEX qa_browser_run_deployment ON qa_browser_run(deployment_id);
+
+    CREATE TABLE qa_asset (
+        id            TEXT PRIMARY KEY,
+        browser_run_id TEXT NOT NULL REFERENCES qa_browser_run(id),
+        candidate_id  TEXT NOT NULL,
+        channel       TEXT NOT NULL,
+        kind          TEXT NOT NULL CHECK(kind IN ('screenshots','browser-log','demonstration')),
+        document_id   TEXT NOT NULL,
+        document_hash TEXT NOT NULL,
+        slug          TEXT NOT NULL,
+        created_ms    INTEGER NOT NULL
+    );
+    CREATE INDEX qa_asset_run ON qa_asset(browser_run_id, created_ms);
+
+    CREATE TABLE prototype (
+        id                   TEXT PRIMARY KEY,
+        candidate_id         TEXT NOT NULL,
+        channel              TEXT NOT NULL,
+        source_revision      TEXT NOT NULL,
+        source_identity_json TEXT NOT NULL,
+        build_image          TEXT NOT NULL,
+        build_inputs_json    TEXT NOT NULL,
+        document_id          TEXT,
+        document_hash        TEXT,
+        slug                 TEXT NOT NULL,
+        entry_path           TEXT NOT NULL,
+        outcome              TEXT NOT NULL CHECK(outcome IN ('succeeded','failed','unknown')),
+        detail               TEXT NOT NULL,
+        created_ms           INTEGER NOT NULL,
+        finished_ms          INTEGER NOT NULL
+    );
+    CREATE INDEX prototype_candidate ON prototype(candidate_id, created_ms DESC);
     "#,
     // 24: the monotonic sequence for bounded channel rollups sent only to a
     // hub replica that has explicitly been handed that channel's key.

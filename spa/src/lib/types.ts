@@ -737,3 +737,101 @@ export interface EnrollStatus {
   channels: string[]
   restart_required: boolean
 }
+
+/** Candidate-bound, node-authoritative QA deployment observation. */
+export interface QaDeployment {
+  id: string
+  candidate_id: string
+  channel: string
+  target_id: string
+  build_id: string
+  execution_image: string
+  origin: string
+  environment_identity: string | null
+  identity_state: 'fresh' | 'unknown' | 'failed'
+  observed_ms: number
+  started_ms: number
+  finished_ms: number
+  outcome: 'succeeded' | 'failed' | 'unknown'
+  detail_json: string
+}
+
+export interface BrowserAssertionResult {
+  kind: string
+  ok: boolean
+  detail: string
+}
+
+export interface QaBrowserRun {
+  id: string
+  deployment_id: string
+  candidate_id: string
+  channel: string
+  target_id: string
+  authorized_origins_json: string
+  test_credential: string | null
+  assertions_json: string
+  outcome: 'passed' | 'failed' | 'unknown'
+  environment_before: string | null
+  environment_after: string | null
+  evidence_state: 'fresh' | 'stale' | 'unknown'
+  log_tail: string
+  started_ms: number
+  finished_ms: number
+}
+
+export interface QaAsset {
+  id: string
+  browser_run_id: string
+  candidate_id: string
+  channel: string
+  kind: 'screenshots' | 'browser-log' | 'demonstration'
+  document_id: string
+  document_hash: string
+  slug: string
+  created_ms: number
+}
+
+export interface Prototype {
+  id: string
+  candidate_id: string
+  channel: string
+  source_revision: string
+  source_identity_json: string
+  build_image: string
+  build_inputs_json: string
+  document_id: string | null
+  document_hash: string | null
+  slug: string
+  entry_path: string
+  outcome: 'succeeded' | 'failed' | 'unknown'
+  detail: string
+  created_ms: number
+  finished_ms: number
+}
+
+export interface QaTarget {
+  id: string
+  origin: string
+  identity_url: string
+  identity_header: string
+  execution_image: string
+  browser_image: string
+  test_credential: string | null
+  missing_grants: string[]
+}
+
+export interface QaEvidence {
+  candidate: {
+    id: string
+    channel: string
+    head_sha: string
+    owner_session_id: string
+    captured_ms: number
+  }
+  targets: QaTarget[]
+  deployments: QaDeployment[]
+  browser_runs: QaBrowserRun[]
+  assets: QaAsset[]
+  prototypes: Prototype[]
+}

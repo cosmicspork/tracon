@@ -14,6 +14,7 @@
   import Session from './routes/Session.svelte'
   import Enroll from './routes/Enroll.svelte'
   import Login from './routes/Login.svelte'
+  import Qa from './routes/Qa.svelte'
   import { stashToken, tokenFromHash } from './lib/auth'
   import { clock } from './lib/clock.svelte'
   import { formatAge } from './lib/format'
@@ -69,13 +70,15 @@
       ? 'settings'
       : router.path === '/nodes' || enroll || router.path === '/metrics'
         ? 'nodes'
+      : router.path.startsWith('/qa')
+        ? 'qa'
         : router.path.startsWith('/docs')
           ? 'docs'
           : router.path.startsWith('/work')
             ? 'work'
             : router.path === '/sessions'
               ? 'sessions'
-              : 'home',
+              : 'home'
   )
   const hubDown = $derived(store.mesh?.hub.state === 'unreachable')
   /** No hub is a thing to do something about, so it links to doing it. */
@@ -115,6 +118,10 @@
     <a href="/work" class:on={nav === 'work'}>
       <svg viewBox="0 0 24 24"><path d="M5 7h3M5 12h3M5 17h3" /><path d="M11 7h8M11 12h8M11 17h5" /></svg>
       <span class="lbl">Work</span>
+    </a>
+    <a href="/qa" class:on={nav === 'qa'}>
+      <svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z" /><path d="M8 9h8M8 13h5" /><path d="M16.5 17.5l2 2 3.5-4" /></svg>
+      <span class="lbl">QA</span>
     </a>
     <a href="/docs" class:on={nav === 'docs'}>
       <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
@@ -176,6 +183,8 @@
       <WorkItem id={workId} />
     {:else if nav === 'work'}
       <Work />
+    {:else if nav === 'qa'}
+      <Qa />
     {:else if docRef}
       <Doc channel={docRef[1]} slug={docRef[2]} edit={docEdit} />
     {:else if nav === 'docs'}
@@ -202,6 +211,10 @@
     <a href="/docs" class:on={nav === 'docs'}>
       <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
       <span>Docs</span>
+    </a>
+    <a href="/qa" class:on={nav === 'qa'}>
+      <svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z" /><path d="M8 9h8M8 13h5" /><path d="M16.5 17.5l2 2 3.5-4" /></svg>
+      <span>QA</span>
     </a>
     <a href="/nodes" class:on={nav === 'nodes'}>
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14.5v2.5" /></svg>
@@ -251,7 +264,7 @@
     main { padding: 14px 12px calc(72px + env(safe-area-inset-bottom)); }
     .tabs {
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
+      grid-template-columns: repeat(6, 1fr);
       position: fixed;
       inset: auto 0 0 0;
       background: var(--s1);

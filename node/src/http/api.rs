@@ -45,7 +45,7 @@ impl AppState {
     }
 }
 
-pub struct ApiError(StatusCode, String);
+pub(crate) struct ApiError(StatusCode, String);
 
 impl ApiError {
     pub fn new(code: StatusCode, message: impl Into<String>) -> Self {
@@ -125,7 +125,7 @@ impl From<TransferError> for ApiError {
     }
 }
 
-type ApiResult<T> = Result<T, ApiError>;
+pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 #[derive(Deserialize)]
 pub struct AuthorityGrantBody {
