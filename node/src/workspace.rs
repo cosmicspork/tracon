@@ -2,10 +2,13 @@
 //! through bounded copies; a harness never receives a host path or a forge
 //! credential.
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use serde::Serialize;
 use tokio::process::Command;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::runner::Mount;
 
@@ -50,7 +53,9 @@ pub fn scratch_volume_name(id: &str) -> String {
 }
 
 pub fn snapshot_path(id: &str) -> PathBuf {
-    crate::config::Config::state_dir().join("workspaces").join(safe_id(id))
+    crate::config::Config::state_dir()
+        .join("workspaces")
+        .join(safe_id(id))
 }
 
 pub fn staging_path(id: &str) -> PathBuf {
@@ -61,15 +66,58 @@ pub fn staging_path(id: &str) -> PathBuf {
 
 fn safe_id(id: &str) -> String {
     id.bytes()
-        .map(|b| if b.is_ascii_alphanumeric() { b as char } else { '-' })
+        .map(|b| {
+            if b.is_ascii_alphanumeric() {
+                b as char
+            } else {
+                '-'
+            }
+        })
         .collect()
+}
+
+/// One lock per runtime volume, serializing import/export against it. Two
+/// operations racing the same volume (a session's own start-up export racing
+/// a client's `/download`, or two concurrent approvals snapshotting the same
+/// workspace) would otherwise interleave a remove-and-rename with a reader,
+/// handing back a torn directory or content that was never the tree
+/// `validate_tree` just approved.
+fn volume_lock(volume: &str) -> Arc<AsyncMutex<()>> {
+    static LOCKS: std::sync::LazyLock<StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
+        std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
+    LOCKS
+        .lock()
+        .unwrap()
+        .entry(volume.to_string())
+        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .clone()
+}
+
+/// Open a file without following a symlink at its leaf. Combined with
+/// checking the *opened* descriptor's metadata (`std::fs::File::metadata`
+/// stats the fd, not the path), this collapses the classic stat-then-open
+/// TOCTOU into one resolution: a symlink swapped in after `read_dir` but
+/// before this call cannot make an open elsewhere succeed silently.
+#[cfg(unix)]
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 /// Copy selected bytes without following symlinks.  `skip_git` is used only
 /// when overlaying an operator checkout onto the separately cloned seed: host
 /// Git configuration and executable metadata never cross that boundary.
 pub fn copy_tree(source: &Path, destination: &Path, skip_git: bool) -> Result<(), WorkspaceError> {
-    let metadata = std::fs::symlink_metadata(source).map_err(|_| WorkspaceError::Missing(source.into()))?;
+    let metadata =
+        std::fs::symlink_metadata(source).map_err(|_| WorkspaceError::Missing(source.into()))?;
 
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(WorkspaceError::Unsafe(source.into()));
@@ -85,6 +133,8 @@ pub async fn import(
     workspace: &Workspace,
     source: &Path,
 ) -> Result<(), WorkspaceError> {
+    let lock = volume_lock(&workspace.volume);
+    let _guard = lock.lock().await;
     validate_tree(source)?;
     backend
         .import_volume(&workspace.volume, source)
@@ -101,6 +151,8 @@ pub async fn export(
     backend: &dyn crate::boundary::Backend,
     workspace: &Workspace,
 ) -> Result<PathBuf, WorkspaceError> {
+    let lock = volume_lock(&workspace.volume);
+    let _guard = lock.lock().await;
     backend
         .export_volume(&workspace.volume, &workspace.snapshot)
         .await
@@ -108,7 +160,12 @@ pub async fn export(
             op: "runtime export",
             message: e.to_string(),
         })?;
-    validate_tree(&workspace.snapshot)?;
+    if let Err(error) = validate_tree(&workspace.snapshot) {
+        // A rejected snapshot never sits around at a predictable node-local
+        // path for something else to stumble into later.
+        let _ = std::fs::remove_dir_all(&workspace.snapshot);
+        return Err(error);
+    }
     Ok(workspace.snapshot.clone())
 }
 
@@ -160,8 +217,19 @@ fn copy_dir(
         if !metadata.is_file() {
             return Err(WorkspaceError::Unsafe(source_path));
         }
+        // The lstat above and a copy-by-path would resolve `source_path`
+        // twice; a symlink swapped in between would make the second
+        // resolution copy an arbitrary file's bytes into the snapshot.
+        // Opening without following a symlink and re-checking the *opened*
+        // descriptor collapses that into one resolution.
+        let mut src = open_no_follow(&source_path)
+            .map_err(|_| WorkspaceError::Unsafe(source_path.clone()))?;
+        let opened = src.metadata()?;
+        if !opened.is_file() {
+            return Err(WorkspaceError::Unsafe(source_path));
+        }
         budget.files += 1;
-        budget.bytes = budget.bytes.saturating_add(metadata.len());
+        budget.bytes = budget.bytes.saturating_add(opened.len());
         if budget.files > MAX_IMPORT_FILES {
             return Err(WorkspaceError::TooManyFiles);
         }
@@ -171,7 +239,8 @@ fn copy_dir(
         if let Some(parent) = destination_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(&source_path, &destination_path)?;
+        let mut dst = std::fs::File::create(&destination_path)?;
+        std::io::copy(&mut src, &mut dst)?;
     }
     Ok(())
 }
@@ -179,7 +248,9 @@ fn copy_dir(
 /// Check a tree received from a runtime before node-side Git, export, or
 /// publication reads it.  It is deliberately the same strict shape as import.
 pub fn validate_tree(root: &Path) -> Result<(), WorkspaceError> {
-    let parent = root.parent().ok_or_else(|| WorkspaceError::Unsafe(root.into()))?;
+    let parent = root
+        .parent()
+        .ok_or_else(|| WorkspaceError::Unsafe(root.into()))?;
     let inspection = parent.join(format!(".tracon-inspect-{}", uuid::Uuid::now_v7()));
     let result = copy_tree(root, &inspection, false);
 
@@ -189,23 +260,26 @@ pub fn validate_tree(root: &Path) -> Result<(), WorkspaceError> {
 /// Attach signed transfer context as inert JSON. Tracon never executes or uses
 /// this file as configuration; it is solely visible provenance for the next
 /// session. The staging root must already be a checked directory.
-pub fn write_context(
-    selected: &Path,
-    context: &serde_json::Value,
-) -> Result<(), WorkspaceError> {
+pub fn write_context(selected: &Path, context: &serde_json::Value) -> Result<(), WorkspaceError> {
     let metadata = std::fs::symlink_metadata(selected)
         .map_err(|_| WorkspaceError::Missing(selected.into()))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(WorkspaceError::Unsafe(selected.into()));
     }
     let context_dir = selected.join(".tracon");
-    if context_dir.exists() && std::fs::symlink_metadata(&context_dir)?.file_type().is_symlink() {
+    if context_dir.exists()
+        && std::fs::symlink_metadata(&context_dir)?
+            .file_type()
+            .is_symlink()
+    {
         return Err(WorkspaceError::Unsafe(context_dir));
     }
     std::fs::create_dir_all(&context_dir)?;
     let path = context_dir.join("transfer-context.json");
-    let encoded = serde_json::to_vec_pretty(context)
-        .map_err(|e| WorkspaceError::Git { op: "transfer context", message: e.to_string() })?;
+    let encoded = serde_json::to_vec_pretty(context).map_err(|e| WorkspaceError::Git {
+        op: "transfer context",
+        message: e.to_string(),
+    })?;
     std::fs::write(path, encoded)?;
     Ok(())
 }
@@ -224,6 +298,17 @@ pub async fn seed_from_checkout(
     if !source.is_dir() {
         return Err(WorkspaceError::Missing(source.into()));
     }
+    // `branch`/`base_sha` are client-supplied (`NewSession::branch`/`base_sha`)
+    // and reach `git` as bare positional arguments below. A value starting
+    // with `-` would be parsed as an option instead of a revision — with
+    // `clone --no-local` forcing a remote-style transport, an option like
+    // `--upload-pack=...` on a revision is a known command-injection vector.
+    if branch.starts_with('-') || base_sha.is_some_and(|s| s.starts_with('-')) {
+        return Err(WorkspaceError::Git {
+            op: "checkout",
+            message: "branch or base commit looks like a command-line option".into(),
+        });
+    }
     let stage = staging_path(id);
     let _ = std::fs::remove_dir_all(&stage);
     if let Some(parent) = stage.parent() {
@@ -240,14 +325,27 @@ pub async fn seed_from_checkout(
             "--no-local",
             "--no-hardlinks",
             "--no-checkout",
+            "--",
             source_arg.as_str(),
             stage_arg.as_str(),
         ],
     )
     .await?;
     let revision = base_sha.unwrap_or("HEAD");
-    run_git(git, Some(&stage), "checkout", ["checkout", "--detach", revision]).await?;
-    run_git(git, Some(&stage), "branch", ["checkout", "-B", branch, revision]).await?;
+    run_git(
+        git,
+        Some(&stage),
+        "checkout",
+        ["checkout", "--detach", revision],
+    )
+    .await?;
+    run_git(
+        git,
+        Some(&stage),
+        "branch",
+        ["checkout", "-B", branch, revision],
+    )
+    .await?;
     // Overlay files after checkout so selected, uncommitted work arrives as
     // bytes only. .git stays the fresh, node-created checkout.
     copy_tree(source, &stage, true)?;
@@ -262,7 +360,11 @@ pub async fn seed_from_checkout(
 /// Seed an empty, commit-capable managed workspace from explicit uploaded
 /// files.  The caller has already written the upload into `selected` using
 /// checked relative paths.
-pub async fn seed_from_files(git: &str, selected: &Path, id: &str) -> Result<Workspace, WorkspaceError> {
+pub async fn seed_from_files(
+    git: &str,
+    selected: &Path,
+    id: &str,
+) -> Result<Workspace, WorkspaceError> {
     let stage = staging_path(id);
     let _ = std::fs::remove_dir_all(&stage);
     std::fs::create_dir_all(&stage)?;
@@ -282,7 +384,8 @@ pub async fn seed_from_files(git: &str, selected: &Path, id: &str) -> Result<Wor
 /// blob identity can be verified without trusting metadata behavior.
 pub fn sanitize_git(root: &Path) -> Result<(), WorkspaceError> {
     let git = root.join(".git");
-    let metadata = std::fs::symlink_metadata(&git).map_err(|_| WorkspaceError::Unsafe(git.clone()))?;
+    let metadata =
+        std::fs::symlink_metadata(&git).map_err(|_| WorkspaceError::Unsafe(git.clone()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(WorkspaceError::Unsafe(git));
     }

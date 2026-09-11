@@ -540,7 +540,10 @@ pub async fn clone(
     let mut cmd = tokio::process::Command::new("git");
     cmd.env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", crate::config::Config::state_dir().join("forge-home"))
+        .env(
+            "HOME",
+            crate::config::Config::state_dir().join("forge-home"),
+        )
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
@@ -574,10 +577,7 @@ pub async fn clone(
 /// Refresh a trusted managed clone with broker-provided Git authentication.
 /// This is intentionally unavailable to agent workspaces: it only accepts a
 /// node-owned repository path, and runs with no ambient credential helpers.
-pub async fn fetch_managed(
-    repo: &Path,
-    env: &[(String, String)],
-) -> Result<(), String> {
+pub async fn fetch_managed(repo: &Path, env: &[(String, String)]) -> Result<(), String> {
     let root = managed_root(&crate::config::Config::state_dir());
     if !repo.starts_with(&root) {
         return Err("refusing to fetch a repository outside managed storage".into());
@@ -586,7 +586,10 @@ pub async fn fetch_managed(
     command
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", crate::config::Config::state_dir().join("forge-home"))
+        .env(
+            "HOME",
+            crate::config::Config::state_dir().join("forge-home"),
+        )
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
@@ -603,7 +606,7 @@ pub async fn fetch_managed(
             "--prune",
             "origin",
         ])
-        .envs(env);
+        .envs(env.iter().map(|(key, value)| (key, value)));
     let out = command.output().await.map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(())

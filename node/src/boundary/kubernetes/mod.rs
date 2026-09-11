@@ -182,7 +182,8 @@ impl Backend for KubeBackend {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::rename(staged, destination)?;
-        crate::workspace::validate_tree(destination).map_err(|e| BoundaryError::Other(e.to_string()))
+        crate::workspace::validate_tree(destination)
+            .map_err(|e| BoundaryError::Other(e.to_string()))
     }
 
     fn harness_host(&self) -> String {

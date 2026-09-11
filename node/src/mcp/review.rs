@@ -411,12 +411,8 @@ async fn spawn_review_session(
         Err(error) => return json!({ "state": "failed", "reason": error.to_string() }),
     };
     let workspace_id = format!("review-{review_id}");
-    if let Err(error) = crate::workspace::from_snapshot(
-        manager.backend().as_ref(),
-        &workspace_id,
-        &source,
-    )
-    .await
+    if let Err(error) =
+        crate::workspace::from_snapshot(manager.backend().as_ref(), &workspace_id, &source).await
     {
         return json!({ "state": "failed", "reason": error.to_string() });
     }

@@ -122,7 +122,12 @@ pub async fn publish(
             now,
         });
     }
-    let source_type = source_git(&cfg.publish.git, candidate_path, ["cat-file", "-t", head_sha]).await?;
+    let source_type = source_git(
+        &cfg.publish.git,
+        candidate_path,
+        ["cat-file", "-t", head_sha],
+    )
+    .await?;
     if source_type != "commit" {
         return Err(PublishError::IdentityChanged);
     }
@@ -147,12 +152,36 @@ pub async fn publish(
         })?;
     }
     init_publisher(&cfg.publish.git, &publisher).await?;
+    // `git bundle create` needs the positive revision to resolve to a named
+    // ref: a bare commit SHA has no ref to advertise in the bundle header, so
+    // git refuses it as "empty" even though the objects are all there. Point
+    // a throwaway ref at it for the bundle, then remove the ref again; the
+    // candidate is a private snapshot, so nothing else observes it.
+    let bundle_ref = "refs/tracon/publish-candidate";
     source_git(
         &cfg.publish.git,
         candidate_path,
-        ["bundle", "create", bundle.to_string_lossy().as_ref(), head_sha],
+        ["update-ref", bundle_ref, head_sha],
     )
     .await?;
+    let bundled = source_git(
+        &cfg.publish.git,
+        candidate_path,
+        [
+            "bundle",
+            "create",
+            bundle.to_string_lossy().as_ref(),
+            bundle_ref,
+        ],
+    )
+    .await;
+    let _ = source_git(
+        &cfg.publish.git,
+        candidate_path,
+        ["update-ref", "-d", bundle_ref],
+    )
+    .await;
+    bundled?;
     publisher_git(
         &cfg.publish.git,
         &publisher,
@@ -198,15 +227,34 @@ pub async fn publish(
 
     let args: Vec<String> = match provider {
         Provider::Github => vec![
-            "pr".into(), "create".into(), "--repo".into(), target.project.clone(),
-            "--base".into(), target.base.clone(), "--head".into(), target.branch.clone(),
-            "--title".into(), title.to_string(), "--body".into(), body.to_string(),
+            "pr".into(),
+            "create".into(),
+            "--repo".into(),
+            target.project.clone(),
+            "--base".into(),
+            target.base.clone(),
+            "--head".into(),
+            target.branch.clone(),
+            "--title".into(),
+            title.to_string(),
+            "--body".into(),
+            body.to_string(),
         ],
         Provider::Gitlab => vec![
-            "mr".into(), "create".into(), "--repo".into(), target.project.clone(),
-            "--target-branch".into(), target.base.clone(), "--source-branch".into(), target.branch.clone(),
-            "--title".into(), title.to_string(), "--description".into(), body.to_string(),
-            "--no-squash-before-merge".into(), "--yes".into(),
+            "mr".into(),
+            "create".into(),
+            "--repo".into(),
+            target.project.clone(),
+            "--target-branch".into(),
+            target.base.clone(),
+            "--source-branch".into(),
+            target.branch.clone(),
+            "--title".into(),
+            title.to_string(),
+            "--description".into(),
+            body.to_string(),
+            "--no-squash-before-merge".into(),
+            "--yes".into(),
         ],
     };
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -222,7 +270,9 @@ fn publisher_dir(candidate_id: &str) -> Result<PathBuf, PublishError> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
     {
-        return Err(PublishError::Target("candidate id must be an opaque safe id".into()));
+        return Err(PublishError::Target(
+            "candidate id must be an opaque safe id".into(),
+        ));
     }
     Ok(Config::state_dir().join("publishers").join(candidate_id))
 }
@@ -246,8 +296,14 @@ fn remote_url(
         return Err(PublishError::Target("project path is not canonical".into()));
     }
     let raw_host = match provider {
-        Provider::Github => env.get("GITHUB_HOST").map(String::as_str).unwrap_or("github.com"),
-        Provider::Gitlab => env.get("GITLAB_HOST").map(String::as_str).unwrap_or("gitlab.com"),
+        Provider::Github => env
+            .get("GITHUB_HOST")
+            .map(String::as_str)
+            .unwrap_or("github.com"),
+        Provider::Gitlab => env
+            .get("GITLAB_HOST")
+            .map(String::as_str)
+            .unwrap_or("gitlab.com"),
     };
     let host = raw_host
         .trim()
@@ -265,8 +321,14 @@ fn remote_url(
 }
 
 const GIT_SAFE: &[&str] = &[
-    "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=", "-c", "core.useReplaceRefs=false",
-    "-c", "credential.helper=",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=",
+    "-c",
+    "core.useReplaceRefs=false",
+    "-c",
+    "credential.helper=",
 ];
 
 async fn source_git<'a>(
@@ -366,10 +428,13 @@ async fn run_cli(
 }
 
 async fn output(cli: &str, mut command: Command) -> Result<String, PublishError> {
-    let out = command.output().await.map_err(|source| PublishError::Spawn {
-        cli: cli.to_string(),
-        source,
-    })?;
+    let out = command
+        .output()
+        .await
+        .map_err(|source| PublishError::Spawn {
+            cli: cli.to_string(),
+            source,
+        })?;
     if out.status.success() {
         let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
         Ok(if stdout.is_empty() {

@@ -112,7 +112,11 @@ async fn volume_copy_out(
         )));
     }
     let copied = tokio::process::Command::new(podman_bin)
-        .args(["cp", &format!("{name}:/data/."), &destination.to_string_lossy()])
+        .args([
+            "cp",
+            &format!("{name}:/data/."),
+            &destination.to_string_lossy(),
+        ])
         .output()
         .await
         .map_err(BoundaryError::Io);
@@ -181,11 +185,7 @@ impl Backend for PodmanBackend {
         .await
     }
 
-    async fn export_volume(
-        &self,
-        volume: &str,
-        destination: &Path,
-    ) -> Result<(), BoundaryError> {
+    async fn export_volume(&self, volume: &str, destination: &Path) -> Result<(), BoundaryError> {
         volume_copy_out(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
             &self.cfg.boundary.harness_image,

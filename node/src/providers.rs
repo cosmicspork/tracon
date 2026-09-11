@@ -209,7 +209,11 @@ impl Providers {
             "tracon-provider-{}",
             provider
                 .bytes()
-                .map(|b| if b.is_ascii_alphanumeric() { b as char } else { '-' })
+                .map(|b| if b.is_ascii_alphanumeric() {
+                    b as char
+                } else {
+                    '-'
+                })
                 .collect::<String>()
         )
     }
@@ -218,7 +222,8 @@ impl Providers {
         let empty = self
             .store_root
             .join(format!(".{}-empty-{}", provider, uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&empty).map_err(|error| ProviderError::Failed(error.to_string()))?;
+        std::fs::create_dir_all(&empty)
+            .map_err(|error| ProviderError::Failed(error.to_string()))?;
         let result = self
             .backend
             .import_volume(&self.state_volume(provider), &empty)
@@ -780,7 +785,8 @@ impl Providers {
             .map_err(|error| ProviderError::Failed(error.to_string()))?;
         let lifted = self.adapter.lift(&state, login).await;
         let _ = std::fs::remove_dir_all(&state);
-        let token: LiftedToken = lifted.map_err(|error| ProviderError::Failed(error.to_string()))?;
+        let token: LiftedToken =
+            lifted.map_err(|error| ProviderError::Failed(error.to_string()))?;
         let credential_name = self.credential_name(name)?;
         let mut broker = self.broker.write().unwrap();
         let mut staged = broker.clone();

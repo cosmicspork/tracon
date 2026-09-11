@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::boundary::Backend;
 use crate::config::Config;
-use crate::workspace::Workspace;
 use crate::runner::RunnerCommand;
+use crate::workspace::Workspace;
 
 /// Required checks are node policy, not a repository-controlled file. A
 /// candidate may describe useful commands in its own docs, but it cannot

@@ -81,10 +81,22 @@ pub fn inspect(workspace: &Path) -> Result<PreparationPlan, EnvironmentError> {
         ("package-lock.json", "npm ci --ignore-scripts"),
         ("npm-shrinkwrap.json", "npm ci --ignore-scripts"),
         ("bun.lock", "bun install --frozen-lockfile --ignore-scripts"),
-        ("bun.lockb", "bun install --frozen-lockfile --ignore-scripts"),
-        ("pnpm-lock.yaml", "pnpm install --frozen-lockfile --ignore-scripts"),
-        ("yarn.lock", "yarn install --frozen-lockfile --ignore-scripts"),
-        ("composer.lock", "composer install --no-interaction --no-scripts --prefer-dist"),
+        (
+            "bun.lockb",
+            "bun install --frozen-lockfile --ignore-scripts",
+        ),
+        (
+            "pnpm-lock.yaml",
+            "pnpm install --frozen-lockfile --ignore-scripts",
+        ),
+        (
+            "yarn.lock",
+            "yarn install --frozen-lockfile --ignore-scripts",
+        ),
+        (
+            "composer.lock",
+            "composer install --no-interaction --no-scripts --prefer-dist",
+        ),
     ] {
         let path = workspace.join(file);
         if path.is_file() {
@@ -108,7 +120,7 @@ pub fn inspect(workspace: &Path) -> Result<PreparationPlan, EnvironmentError> {
         image,
         dependency_inputs: inputs,
         command: command.to_string(),
-        cache_volume: format!("tracon-cache-{}", hex::encode(hash.finalize())[..24].to_string()),
+        cache_volume: format!("tracon-cache-{}", &hex::encode(hash.finalize())[..24]),
     })
 }
 
@@ -206,8 +218,8 @@ fn inspect_devcontainer(workspace: &Path) -> Result<Option<String>, EnvironmentE
         return Ok(None);
     }
     let source = std::fs::read_to_string(&path)?;
-    let value: Value = serde_json::from_str(&source)
-        .map_err(|e| EnvironmentError::Devcontainer(e.to_string()))?;
+    let value: Value =
+        serde_json::from_str(&source).map_err(|e| EnvironmentError::Devcontainer(e.to_string()))?;
     let object = value
         .as_object()
         .ok_or_else(|| EnvironmentError::Devcontainer("top level must be an object".into()))?;
@@ -232,7 +244,9 @@ fn inspect_devcontainer(workspace: &Path) -> Result<Option<String>, EnvironmentE
     }
     match object.get("image") {
         Some(Value::String(image)) if !image.trim().is_empty() => Ok(Some(image.clone())),
-        Some(_) => Err(EnvironmentError::Devcontainer("image must be a string".into())),
+        Some(_) => Err(EnvironmentError::Devcontainer(
+            "image must be a string".into(),
+        )),
         None => Err(EnvironmentError::Devcontainer(
             "a build-based devcontainer is not allowed; use an approved image digest".into(),
         )),
@@ -256,7 +270,14 @@ fn approved_image(cfg: &Config, selected: Option<&str>) -> Result<String, Enviro
             crate::config::RuntimeKind::Podman => cfg.boundary.harness_image.clone(),
             crate::config::RuntimeKind::Kubernetes => cfg.runtime.kubernetes.harness_image.clone(),
         }),
-        Some(image) if image.contains("@sha256:") || cfg.runtime.approved_images.iter().any(|allowed| allowed == image) => {
+        Some(image)
+            if image.contains("@sha256:")
+                || cfg
+                    .runtime
+                    .approved_images
+                    .iter()
+                    .any(|allowed| allowed == image) =>
+        {
             Ok(image.to_string())
         }
         Some(_) => Err(EnvironmentError::UnapprovedImage),

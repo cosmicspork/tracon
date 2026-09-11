@@ -307,7 +307,10 @@ impl Manager {
     /// export, and publication consume this path; no caller receives the
     /// mutable runtime volume or an operator-selected source path.
     pub async fn snapshot_workspace(&self, session_id: &str) -> Result<PathBuf, SessionError> {
-        let session = self.store.get_session(session_id)?.ok_or(SessionError::NotFound)?;
+        let session = self
+            .store
+            .get_session(session_id)?
+            .ok_or(SessionError::NotFound)?;
         if session.node_id != self.node_id {
             return Err(SessionError::Remote(session.node_id, session.channel));
         }
@@ -515,12 +518,14 @@ impl Manager {
                     None,
                 )
             }
-            None => crate::corpus::project::identify(
-                &spec.channel,
-                std::path::Path::new(&spec.repo_path),
-                &self.cfg.publish.git,
-            )
-            .await,
+            None => {
+                crate::corpus::project::identify(
+                    &spec.channel,
+                    std::path::Path::new(&spec.repo_path),
+                    &self.cfg.publish.git,
+                )
+                .await
+            }
         };
         let _ = self.store.project_put(&crate::store::ProjectRow {
             id: project_id.clone(),
@@ -675,8 +680,12 @@ impl Manager {
                     id,
                 )
                 .await?;
-                crate::workspace::import(self.backend.as_ref(), &workspace, &crate::workspace::staging_path(id))
-                    .await?;
+                crate::workspace::import(
+                    self.backend.as_ref(),
+                    &workspace,
+                    &crate::workspace::staging_path(id),
+                )
+                .await?;
                 workspace
             }
         };
@@ -830,7 +839,10 @@ impl Manager {
 
         let mut harness_env = wiring.env.clone();
         harness_env.extend([
-            ("GIT_CONFIG_GLOBAL".into(), format!("{}/.gitconfig", self.backend.harness_home())),
+            (
+                "GIT_CONFIG_GLOBAL".into(),
+                format!("{}/.gitconfig", self.backend.harness_home()),
+            ),
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
         ]);

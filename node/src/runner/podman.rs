@@ -141,7 +141,7 @@ impl PodmanRunner {
 
     async fn ensure_volumes(&self, cmd: &RunnerCommand) -> Result<(), RunnerError> {
         let mut seen = std::collections::BTreeSet::new();
-        for mount in self.extra_mounts.iter().chain(cmd.mounts.iter()) {
+        for mount in self.spec.extra_mounts.iter().chain(cmd.mounts.iter()) {
             if !seen.insert(&mount.volume) {
                 continue;
             }

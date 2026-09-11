@@ -8,7 +8,7 @@
 //! and in the pod's security context, which is rendered here and verified
 //! after admission.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -350,7 +350,7 @@ impl KubeRunner {
     }
 
     async fn ensure_mount_roots(&self, cmd: &RunnerCommand) -> Result<(), RunnerError> {
-        for mount in self.extra_mounts.iter().chain(cmd.mounts.iter()) {
+        for mount in self.spec.extra_mounts.iter().chain(cmd.mounts.iter()) {
             let path = self.spec.state_mount.join(self.spec.sub_path(mount)?);
             tokio::fs::create_dir_all(path)
                 .await
@@ -564,7 +564,10 @@ mod tests {
             .iter()
             .find(|m| m.mount_path == "/home/harness/.gitconfig")
             .unwrap();
-        assert_eq!(cfg.sub_path.as_deref(), Some("tracon-scratch-repo-x/gitconfig"));
+        assert_eq!(
+            cfg.sub_path.as_deref(),
+            Some("tracon-scratch-repo-x/gitconfig")
+        );
         assert_eq!(cfg.read_only, Some(true));
         assert!(mounts.iter().all(|m| m.name == STATE_VOLUME));
     }
@@ -572,8 +575,7 @@ mod tests {
     #[test]
     fn invalid_runtime_volume_is_refused() {
         let mut c = cmd();
-        c.mounts
-            .push(Mount::volume("../host", "/x", true));
+        c.mounts.push(Mount::volume("../host", "/x", true));
         assert!(spec().pod("p", &c, false).is_err());
     }
 

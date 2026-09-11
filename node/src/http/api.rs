@@ -620,7 +620,9 @@ pub async fn import_workspace(
         let relative = field
             .file_name()
             .filter(|name| !name.is_empty())
-            .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "each file needs a relative name"))?
+            .ok_or_else(|| {
+                ApiError::new(StatusCode::BAD_REQUEST, "each file needs a relative name")
+            })?
             .to_string();
         if relative.split('/').any(|part| part == ".git") {
             return Err(ApiError::new(
@@ -632,6 +634,12 @@ pub async fn import_workspace(
             return Err(ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!("duplicate selected file {relative}"),
+            ));
+        }
+        if files.len() > crate::workspace::MAX_IMPORT_FILES {
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "selected files exceed the managed workspace import limit",
             ));
         }
         let bytes = field
@@ -668,11 +676,13 @@ pub async fn import_workspace(
         &workspace,
         &crate::workspace::staging_path(&id),
     )
-        .await
-        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()));
+    .await
+    .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()));
     let _ = std::fs::remove_dir_all(&selected);
     result?;
-    Ok(Json(json!({ "workspace_id": workspace.id, "files": files.len() })))
+    Ok(Json(
+        json!({ "workspace_id": workspace.id, "files": files.len() }),
+    ))
 }
 
 /// Materialize a node-owned snapshot for an explicit export operation.
@@ -699,18 +709,16 @@ pub async fn prepare_workspace(
     };
     let plan = crate::environment::inspect(&workspace.snapshot)
         .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
-    let prepared = crate::environment::prepare(s.manager.backend().as_ref(), &s.cfg, &workspace, &plan)
-        .await
-        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let prepared =
+        crate::environment::prepare(s.manager.backend().as_ref(), &s.cfg, &workspace, &plan)
+            .await
+            .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(prepared))
 }
 
 /// Download a workspace snapshot as a bounded zip. Symlinks were refused at
 /// import and again at runtime export, so this archive cannot carry an escape.
-pub async fn download_workspace(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn download_workspace(State(s): State<AppState>, Path(id): Path<String>) -> Response {
     let snapshot = match s.manager.snapshot_workspace(&id).await {
         Ok(path) => path,
         Err(error) => return ApiError::from(error).into_response(),
@@ -724,11 +732,16 @@ pub async fn download_workspace(
         .header(axum::http::header::CONTENT_TYPE, "application/zip")
         .header(
             axum::http::header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"workspace-{}.zip\"", safe_download_name(&id)),
+            format!(
+                "attachment; filename=\"workspace-{}.zip\"",
+                safe_download_name(&id)
+            ),
         )
         .header("x-content-type-options", "nosniff")
         .body(axum::body::Body::from(bytes))
-        .unwrap_or_else(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response())
+        .unwrap_or_else(|error| {
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        })
 }
 
 fn zip_workspace(root: &std::path::Path) -> Result<Vec<u8>, String> {
@@ -756,7 +769,9 @@ fn zip_workspace(root: &std::path::Path) -> Result<Vec<u8>, String> {
             if metadata.is_dir() {
                 add(root, &path, archive, options)?;
             } else {
-                archive.start_file(name, options).map_err(|e| e.to_string())?;
+                archive
+                    .start_file(name, options)
+                    .map_err(|e| e.to_string())?;
                 let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
                 archive.write_all(&bytes).map_err(|e| e.to_string())?;
             }
@@ -843,6 +858,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         channel: c.channel,
         repo_path: c.repo_path,
         workspace_id: c.workspace_id,
+        branch: c.branch,
         work_item_id: Some(item.id.clone()),
         model: c.model,
         budget_tokens: c.budget_tokens,
