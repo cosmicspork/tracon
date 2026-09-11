@@ -143,20 +143,26 @@ impl SignedTransfer {
 
     pub fn verify(&self) -> Result<(), TransferError> {
         if self.payload.version != TRANSFER_VERSION {
-            return Err(TransferError::Invalid("unsupported transfer version".into()));
+            return Err(TransferError::Invalid(
+                "unsupported transfer version".into(),
+            ));
         }
         let bytes = self.payload_bytes()?;
         validate_files(&self.payload.files)?;
         if self.payload.context.documents.len() > MAX_CONTEXT_DOCUMENTS
             || self.payload.context.memories.len() > MAX_CONTEXT_MEMORIES
         {
-            return Err(TransferError::Invalid("selected context is too large".into()));
+            return Err(TransferError::Invalid(
+                "selected context is too large".into(),
+            ));
         }
         if self.payload.context.note.len() > MAX_HANDOFF_NOTE_BYTES
             || self.payload.candidate_id.len() > MAX_CANDIDATE_ID_BYTES
             || self.payload.channel.len() > 64
         {
-            return Err(TransferError::Invalid("transfer manifest field is too large".into()));
+            return Err(TransferError::Invalid(
+                "transfer manifest field is too large".into(),
+            ));
         }
         let candidate = &self.payload.candidate;
         let head_sha = candidate["head_sha"].as_str();
@@ -172,6 +178,37 @@ impl SignedTransfer {
         {
             return Err(TransferError::Invalid(
                 "candidate identity does not bind the transfer id and channel".into(),
+            ));
+        }
+        // The embedded evidence must describe the very same candidate, not
+        // just an id string that happens to match: an authorized signer must
+        // not be able to label a package with one candidate's identity while
+        // its evidence (checks, review history) describes another.
+        if &self.payload.evidence["candidate"] != candidate {
+            return Err(TransferError::Invalid(
+                "embedded evidence describes a different candidate than the transfer manifest"
+                    .into(),
+            ));
+        }
+        // Bind the transferred files themselves to the candidate's own
+        // recorded git tree, so a signer cannot ship a tree that does not
+        // match the commit its labels claim.
+        let tree_sha = candidate["tree_sha"].as_str().filter(|sha| !sha.is_empty());
+        let Some(tree_sha) = tree_sha else {
+            return Err(TransferError::Invalid(
+                "candidate has no recorded tree hash to bind the transferred files to".into(),
+            ));
+        };
+        if tree_sha.len() > MAX_HEAD_SHA_BYTES
+            || !tree_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(TransferError::Invalid(
+                "candidate tree hash is malformed".into(),
+            ));
+        }
+        if crate::git_tree::tree_sha1(&self.payload.files) != tree_sha {
+            return Err(TransferError::Invalid(
+                "transferred files do not match the candidate's recorded tree".into(),
             ));
         }
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
@@ -229,10 +266,16 @@ pub fn export(
     selection: ContextSelection,
     target_node: Option<String>,
 ) -> Result<SignedTransfer, TransferError> {
-    if selection.documents.len() > MAX_CONTEXT_DOCUMENTS || selection.memories.len() > MAX_CONTEXT_MEMORIES {
-        return Err(TransferError::Invalid("too many selected context records".into()));
+    if selection.documents.len() > MAX_CONTEXT_DOCUMENTS
+        || selection.memories.len() > MAX_CONTEXT_MEMORIES
+    {
+        return Err(TransferError::Invalid(
+            "too many selected context records".into(),
+        ));
     }
-    let candidate = store.candidate(candidate_id)?.ok_or(TransferError::CandidateNotFound)?;
+    let candidate = store
+        .candidate(candidate_id)?
+        .ok_or(TransferError::CandidateNotFound)?;
     let channel = candidate.channel.clone();
     if store.channel_get(&channel)?.is_none() {
         return Err(TransferError::ReceiverUnauthorized(channel));
@@ -370,16 +413,26 @@ pub fn authorize_receiver(
         return Err(TransferError::WrongTarget);
     }
     if store.channel_get(&transfer.payload.channel)?.is_none() {
-        return Err(TransferError::ReceiverUnauthorized(transfer.payload.channel.clone()));
+        return Err(TransferError::ReceiverUnauthorized(
+            transfer.payload.channel.clone(),
+        ));
     }
     let members = store.nodes_in_channel(&transfer.payload.channel)?;
-    if !members.iter().any(|node| node == &transfer.payload.origin_node) {
-        return Err(TransferError::OriginUnauthorized(transfer.payload.channel.clone()));
+    if !members
+        .iter()
+        .any(|node| node == &transfer.payload.origin_node)
+    {
+        return Err(TransferError::OriginUnauthorized(
+            transfer.payload.channel.clone(),
+        ));
     }
     Ok(())
 }
 
-pub fn record_portable_receipt(store: &Store, transfer: &SignedTransfer) -> Result<(), TransferError> {
+pub fn record_portable_receipt(
+    store: &Store,
+    transfer: &SignedTransfer,
+) -> Result<(), TransferError> {
     let row = transfer.as_row()?;
     if store.insert_transfer(&row)? {
         store.append_transfer_event(transfer.id(), "received_portable", None, None)?;
@@ -410,8 +463,10 @@ pub async fn import_workspace(
             let parent = destination
                 .parent()
                 .ok_or_else(|| TransferError::UnsafePath(file.path.clone()))?;
-            fs::create_dir_all(parent).map_err(|error| TransferError::Workspace(error.to_string()))?;
-            fs::write(&destination, bytes).map_err(|error| TransferError::Workspace(error.to_string()))?;
+            fs::create_dir_all(parent)
+                .map_err(|error| TransferError::Workspace(error.to_string()))?;
+            fs::write(&destination, bytes)
+                .map_err(|error| TransferError::Workspace(error.to_string()))?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -437,7 +492,7 @@ pub async fn import_workspace(
         let workspace = crate::workspace::seed_from_files(git, &selected, &id)
             .await
             .map_err(|error| TransferError::Workspace(error.to_string()))?;
-        crate::workspace::import(backend, &workspace, &crate::workspace::staging_path(&id))
+        crate::workspace::import(backend, &workspace)
             .await
             .map_err(|error| TransferError::Workspace(error.to_string()))?;
         Ok(workspace)
@@ -472,7 +527,9 @@ pub fn validate_files(files: &[TransferFile]) -> Result<(), TransferError> {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(file.content_b64.as_bytes())
             .map_err(|_| TransferError::Invalid(format!("bad base64 for {:?}", file.path)))?;
-        total = total.checked_add(bytes.len()).ok_or(TransferError::TooLarge)?;
+        total = total
+            .checked_add(bytes.len())
+            .ok_or(TransferError::TooLarge)?;
         if total > MAX_TRANSFER_BYTES {
             return Err(TransferError::TooLarge);
         }
@@ -486,11 +543,13 @@ fn safe_path(path: &str) -> Result<(), TransferError> {
     }
     let parsed = Path::new(path);
     let lower = path.to_ascii_lowercase();
-    if parsed.components().any(|component| !matches!(component, Component::Normal(_)))
+    if parsed
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
         || parsed.components().next().is_none()
-        || lower.split('/').any(|component| {
-            matches!(component, ".git" | ".tracon" | ".tracon-transfer")
-        })
+        || lower
+            .split('/')
+            .any(|component| matches!(component, ".git" | ".tracon" | ".tracon-transfer"))
     {
         return Err(TransferError::UnsafePath(path.into()));
     }
@@ -499,5 +558,8 @@ fn safe_path(path: &str) -> Result<(), TransferError> {
 
 fn unique(values: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::with_capacity(values.len());
-    values.into_iter().filter(|value| seen.insert(value.clone())).collect()
+    values
+        .into_iter()
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
 }

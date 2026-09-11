@@ -155,9 +155,13 @@ impl Store {
 
     pub fn transfer(&self, id: &str) -> Result<Option<TransferRow>> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT * FROM transfer WHERE id = ?1", [id], TransferRow::from_row)
-            .optional()
-            .map_err(Into::into)
+        conn.query_row(
+            "SELECT * FROM transfer WHERE id = ?1",
+            [id],
+            TransferRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn transfer_summary(&self, id: &str) -> Result<Option<TransferSummary>> {
@@ -179,9 +183,10 @@ impl Store {
                     file_count, document_count, memory_count, handoff_note
              FROM transfer ORDER BY created_ms DESC, id DESC LIMIT 200",
         )?;
-        stmt.query_map([], TransferSummary::from_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        let rows = stmt
+            .query_map([], TransferSummary::from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Atomically reserve a package's single materialization. A survivor of a
@@ -193,7 +198,8 @@ impl Store {
             "INSERT OR IGNORE INTO transfer_import (transfer_id, state, updated_ms)
              VALUES (?1, 'preparing', ?2)",
             rusqlite::params![id, now_ms()],
-        )? > 0 {
+        )? > 0
+        {
             return Ok(ImportReservation::Reserved);
         }
         let state: String = conn.query_row(
@@ -227,7 +233,12 @@ impl Store {
         .map_err(Into::into)
     }
 
-    pub fn complete_transfer_import(&self, id: &str, workspace_id: &str, session_id: &str) -> Result<()> {
+    pub fn complete_transfer_import(
+        &self,
+        id: &str,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE transfer_import
@@ -260,9 +271,10 @@ impl Store {
             "SELECT transfer_id, kind, detail, session_id, at_ms FROM transfer_event
              WHERE transfer_id = ?1 ORDER BY seq",
         )?;
-        stmt.query_map([id], TransferEventRow::from_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        let rows = stmt
+            .query_map([id], TransferEventRow::from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn append_transfer_event(

@@ -17,6 +17,7 @@ tracon-proto = { path = "proto" }
 tracon-sync = { path = "sync" }
 base64 = "0.22"
 hex = "0.4"
+sha1 = "0.10"
 sha2 = "0.10"
 anyhow = "1"
 async-trait = "0.1"
