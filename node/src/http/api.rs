@@ -1094,7 +1094,7 @@ pub async fn answer_operator_question(
     {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "this question's session ended; it remains inspectable but cannot be answered",
+            "this question's session ended; it remains inspectable but cannot be answered".into(),
         ));
     }
     let answer = b.answer.trim();
