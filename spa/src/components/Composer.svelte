@@ -102,8 +102,7 @@
         branch: branch.trim() || undefined,
         phase: sessionPhase,
         model: model || undefined,
-        budget_tokens: Number(budget) || undefined,
-        node_id: node && !node.is_self ? node.id : undefined,
+        budget_tokens: budget === '' ? undefined : Number(budget),
       }
       const lines = prompt.trim().split('\n')
       const session = item
@@ -239,7 +238,10 @@
           placeholder="No cap"
           inputmode="numeric"
           spellcheck="false"
-          oninput={(e) => (budget = String(digits((e.currentTarget as HTMLInputElement).value)))}
+          oninput={(e) => {
+            const raw = (e.currentTarget as HTMLInputElement).value
+            budget = raw.replace(/\D/g, '') ? String(digits(raw)) : ''
+          }}
         />
         <small>Optional cap across input, output, and cached-read tokens. A session is stopped only when a cap is set and reached.</small>
       </label>

@@ -123,9 +123,6 @@ pub struct Supervisor {
     active_turn: Option<u64>,
     next_turn: u64,
     consecutive_failures: u8,
-    /// A cancelled turn may resume only after the harness confirms the
-    /// interrupt; dropping its future alone does not stop model/tool work.
-    turn_cancellation_pending: bool,
 }
 
 impl Supervisor {
@@ -151,7 +148,6 @@ impl Supervisor {
             active_turn: None,
             next_turn: 0,
             consecutive_failures: 0,
-            turn_cancellation_pending: false,
             self_tx,
             runner,
             container,
@@ -273,18 +269,19 @@ impl Supervisor {
                             continue;
                         }
                         let turn_timeout = payload["turn_timeout"] == true;
-                        let cancel_confirmed = payload["cancel_confirmed"] == true;
                         self.active_turn = None;
                         self.on_turn_done(kind, payload, tokens).await;
                         if turn_timeout {
-                            self.turn_cancellation_pending = !cancel_confirmed;
-                            let reason = if cancel_confirmed {
-                                "watchdog paused after a timed-out harness turn"
-                            } else {
-                                "watchdog paused: timed-out harness turn could not be interrupted; stop required"
-                            };
-                            let _ = self.pause(PauseSource::Watchdog, reason).await;
-                            continue;
+                            let reason = "watchdog stopped a session after its harness turn timed out";
+                            self.set_state(SessionState::Paused, None);
+                            self.record(
+                                ek::SESSION_PAUSED,
+                                None,
+                                json!({ "source": PauseSource::Watchdog.as_str(), "reason": reason }),
+                            );
+                            killed_by_us = true;
+                            self.shutdown(EndReason::Error).await;
+                            break;
                         }
                         if self.watchdog_pause_if_needed().await {
                             continue;
@@ -355,10 +352,11 @@ impl Supervisor {
             return Ok(());
         }
 
-        // Fence before waiting for the harness's interrupt. This makes the
-        // model gateway and MCP route deny any work that races it.
+        // Fence before sending the harness an interrupt. `cancel` only queues
+        // an interrupt on current adapters; it is not a completion receipt.
+        // An active turn therefore cannot be safely resumed. Stop it after
+        // fencing rather than claiming a pause succeeded.
         let had_turn = self.active_turn.take().is_some() || row.turn_active != 0;
-        self.turn_cancellation_pending = had_turn;
         self.set_state(SessionState::Paused, None);
         self.record(
             ek::SESSION_PAUSED,
@@ -377,17 +375,9 @@ impl Supervisor {
         }
         self.reject_open_permissions().await;
         if had_turn {
-            match tokio::time::timeout(CANCEL_TIMEOUT, self.handle.cancel()).await {
-                Ok(Ok(())) => self.turn_cancellation_pending = false,
-                Ok(Err(e)) => {
-                    self.record(ek::ERROR, None, json!({ "pause_interrupt_failed": e.to_string() }));
-                    return Err("could not interrupt the running turn; the session remains paused and must be stopped".into());
-                }
-                Err(_) => {
-                    self.record(ek::ERROR, None, json!({ "pause_interrupt_timed_out": true }));
-                    return Err("interrupting the running turn timed out; the session remains paused and must be stopped".into());
-                }
-            }
+            let _ = tokio::time::timeout(CANCEL_TIMEOUT, self.handle.cancel()).await;
+            self.shutdown(EndReason::Error).await;
+            return Err("an active turn cannot be safely paused; the session was stopped".into());
         }
         Ok(())
     }
@@ -400,9 +390,6 @@ impl Supervisor {
             .ok_or("session is gone")?;
         if row.state != SessionState::Paused.as_str() {
             return Err(format!("session is {}", row.state));
-        }
-        if self.turn_cancellation_pending {
-            return Err("the paused turn was not confirmed stopped; stop this session instead of resuming".into());
         }
         self.consecutive_failures = 0;
         self.set_state(SessionState::Running, None);

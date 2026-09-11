@@ -1047,6 +1047,11 @@ impl Manager {
     /// never resolve one of these for the model gateway.
     pub async fn attach_external(&self, channel: &str) -> Result<String, SessionError> {
         self.channel_usable(channel)?;
+        if self.bindings(channel)["external_stopped"] == true {
+            return Err(SessionError::Rejected(
+                "external broker access was stopped by the operator; explicitly clear channel binding external_stopped before reattaching".into(),
+            ));
+        }
         let mut attached = self.external.lock().await;
         if let Some(a) = attached.get(channel) {
             if self.live.lock().await.contains_key(&a.session_id) {
@@ -1502,6 +1507,21 @@ impl Manager {
     /// Stop a live session. A startup row has no supervisor to command yet, so
     /// it is made terminal directly and startup observes that fence.
     pub async fn stop(&self, id: &str) -> Result<(), SessionError> {
+        if let Some(row) = self.store.get_session(id)? {
+            if row.harness_id == external::HARNESS_ID {
+                if let Some(channel) = self.store.channel_get(&row.channel)? {
+                    let mut bindings: serde_json::Value =
+                        serde_json::from_str(&channel.bindings_json).unwrap_or_else(|_| json!({}));
+                    bindings["external_stopped"] = json!(true);
+                    self.store.channel_put(
+                        &row.channel,
+                        &channel.keyring,
+                        &serde_json::to_string(&bindings)
+                            .map_err(|error| SessionError::Rejected(error.to_string()))?,
+                    )?;
+                }
+            }
+        }
         match self.send(id, Command::Kill).await {
             Err(SessionError::Remote(node, _)) => self
                 .forward(
@@ -1520,6 +1540,19 @@ impl Manager {
                         && row.state != SessionState::Paused.as_str())
                 {
                     return Err(SessionError::Rejected("session is not running on this node".into()));
+                }
+                if row.harness_id == external::HARNESS_ID {
+                    if let Some(channel) = self.store.channel_get(&row.channel)? {
+                        let mut bindings: serde_json::Value =
+                            serde_json::from_str(&channel.bindings_json).unwrap_or_else(|_| json!({}));
+                        bindings["external_stopped"] = json!(true);
+                        self.store.channel_put(
+                            &row.channel,
+                            &channel.keyring,
+                            &serde_json::to_string(&bindings)
+                                .map_err(|error| SessionError::Rejected(error.to_string()))?,
+                        )?;
+                    }
                 }
                 self.store.update_session(
                     id,

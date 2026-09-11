@@ -179,7 +179,7 @@
         <button class="lnk" onclick={() => void control('resume')} disabled={unreachable !== null || controlling}
           >{session.harness_id === 'external' ? 'Resume broker access' : 'Resume'}</button
         >
-      {:else}
+      {:else if session.state !== 'starting'}
         <button class="lnk" onclick={() => void control('pause')} disabled={unreachable !== null || controlling}>Pause</button>
       {/if}
       <button class="lnk d" onclick={stop} disabled={unreachable !== null}>{confirmingKill ? 'Stop — tap again' : 'Stop'}</button>
