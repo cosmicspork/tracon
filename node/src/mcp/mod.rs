@@ -326,11 +326,34 @@ impl Tools {
             }
             return Ok(submitted);
         }
+        let operation_id = crate::corpus::hash_body(&format!("{canonical}\u{1f}{}", review.head_sha));
+        let evidence = serde_json::json!({
+            "target": canonical.clone(),
+            "revision": review.head_sha.clone(),
+            "prose_hash": prose.clone(),
+        }).to_string();
+        if let Some((state, outcome, _)) = access.store.authority_action_existing(
+            crate::authority::PUBLISH, &canonical, &ctx.channel, Some(&review.head_sha), &operation_id,
+        ).map_err(|e| e.to_string())? {
+            if state == "succeeded" {
+                return Ok(serde_json::json!({
+                    "review_id": review.id,
+                    "state": "reconcile",
+                    "authority": {
+                        "mode": "automatic",
+                        "outcome": "replayed",
+                        "published": outcome,
+                    },
+                }));
+            }
+            return Err(format!(
+                "an identical publication is {state}; reconcile its recorded external outcome before retrying"
+            ));
+        }
         let action_id = uuid::Uuid::now_v7().to_string();
         access.store.authority_action_begin(
             &action_id, decision.rule_id.as_deref(), crate::authority::PUBLISH, &canonical,
-            &ctx.channel, &ctx.session_id, Some(&review.head_sha), None,
-            &serde_json::json!({ "review_id": review.id, "candidate": review.head_sha, "prose": prose }).to_string(),
+            &ctx.channel, &ctx.session_id, Some(&review.head_sha), Some(&operation_id), &evidence,
         ).map_err(|e| e.to_string())?;
         let recheck = || {
             let current = crate::authority::decide(
