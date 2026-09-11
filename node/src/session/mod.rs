@@ -200,6 +200,32 @@ impl Manager {
         &self.backend
     }
 
+    /// A read-only snapshot path for a session's prepared source, for QA
+    /// prototype builds. This is a minimal stand-in for the
+    /// managed-execution workspace feature's own concept of a session's
+    /// prepared source (see `node/src/workspace.rs`, `from_snapshot`
+    /// there): today a session's checkout is still a host path
+    /// (`SessionRow::worktree_path`), so that is what this returns,
+    /// unmodified. It does not copy or otherwise isolate the checkout;
+    /// `crate::workspace::from_snapshot` is what copies it into a workspace
+    /// the runner mounts.
+    pub async fn snapshot_workspace(&self, session_id: &str) -> Result<PathBuf, String> {
+        let session = self
+            .store
+            .get_session(session_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("session was not found")?;
+        let path = session
+            .worktree_path
+            .filter(|p| !p.trim().is_empty())
+            .ok_or("session has no prepared worktree")?;
+        let path = PathBuf::from(path);
+        if !path.is_dir() {
+            return Err("session worktree is no longer on disk".into());
+        }
+        Ok(path)
+    }
+
     pub fn cfg(&self) -> &Arc<Config> {
         &self.cfg
     }

@@ -1,9 +1,9 @@
 pub mod api;
-pub mod qa;
 pub mod auth;
 mod mcp;
 pub mod preview;
 pub mod push;
+pub mod qa;
 pub mod settings;
 mod spa;
 mod stream;

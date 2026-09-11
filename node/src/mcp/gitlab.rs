@@ -1,9 +1,14 @@
 //! GitLab, as narrow tools: read a merge request's state and comment on it,
-//! read a pipeline and a job's log, and run a pipeline on a branch. Opening a
-//! merge request is the review path (`review::publish`); merging and marking
-//! ready are not tools at all — "no merge" is the absence of a verb, not a
-//! rule about one. A pipeline on a tag, which is how a production deploy
-//! runs, is refused by the tool itself. The token never leaves the node.
+//! read a pipeline and a job's log, list the pipelines that ran at an exact
+//! commit and play a manual job in one, and run a pipeline on a branch.
+//! Opening a merge request is the review path (`review::publish`); merging
+//! and marking ready are not tools at all — "no merge" is the absence of a
+//! verb, not a rule about one. A pipeline on a tag, which is how a
+//! production deploy runs, is refused by the tool itself. GitLab's own
+//! pipeline-creation API resolves `ref` only against a branch or tag, never
+//! a bare commit SHA, so an exact-SHA deploy never creates a pipeline: it
+//! finds one GitLab already ran at that SHA and plays its configured manual
+//! job. The token never leaves the node.
 
 use serde_json::{json, Value};
 
@@ -13,7 +18,9 @@ pub const CREDENTIAL: &str = "glab";
 pub const MR_STATUS: &str = "mr_status";
 pub const MR_COMMENT: &str = "mr_comment";
 pub const PIPELINE_STATUS: &str = "pipeline_status";
+pub const PIPELINE_LIST_BY_SHA: &str = "pipeline_list_by_sha";
 pub const JOB_TRACE: &str = "job_trace";
+pub const JOB_PLAY: &str = "job_play";
 pub const PIPELINE_RUN: &str = "pipeline_run";
 pub const MR_MERGE: &str = "mr_merge";
 pub const DEPLOY: &str = "deploy";
@@ -21,6 +28,10 @@ pub const DEPLOY: &str = "deploy";
 /// How much of a job's log `job_trace` returns, in KiB, unless asked.
 const TRACE_KIB: u64 = 16;
 const TRACE_KIB_MAX: u64 = 64;
+/// `pipeline_list_by_sha` never hands back more than this many candidates:
+/// an exact-SHA deploy inspects a handful of pipelines, not a project's
+/// whole history.
+const SHA_PIPELINES_MAX: u32 = 20;
 
 pub fn definitions() -> Vec<Value> {
     vec![
@@ -64,6 +75,19 @@ pub fn definitions() -> Vec<Value> {
             },
         }),
         json!({
+            "name": PIPELINE_LIST_BY_SHA,
+            "description": "Pipelines GitLab already ran at an exact commit SHA (never resolved \
+                            against a branch or tag): id, ref, status, and web URL, newest first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "group/project path or numeric id." },
+                    "sha": { "type": "string", "description": "The exact commit SHA." },
+                },
+                "required": ["project", "sha"],
+            },
+        }),
+        json!({
             "name": JOB_TRACE,
             "description": "The end of a job's log, for reading why it failed.",
             "inputSchema": {
@@ -72,6 +96,21 @@ pub fn definitions() -> Vec<Value> {
                     "project": { "type": "string" },
                     "job_id": { "type": "integer" },
                     "kib": { "type": "integer", "description": "How much of the end, in KiB (16 unless you say, at most 64)." },
+                },
+                "required": ["project", "job_id"],
+            },
+        }),
+        json!({
+            "name": JOB_PLAY,
+            "description": "Play a manual job, as the web UI's Play button does. Never with a \
+                            variable naming production: those deploys are run by hand. The \
+                            operator is asked before this runs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" },
+                    "job_id": { "type": "integer" },
+                    "variables": { "type": "object", "description": "Job variables, name to value." },
                 },
                 "required": ["project", "job_id"],
             },
@@ -236,6 +275,36 @@ pub async fn call(
                 "jobs": jobs,
             }))
         }
+        PIPELINE_LIST_BY_SHA => {
+            let sha = args
+                .get("sha")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or("sha is required")?;
+            if !sha.bytes().all(|b| b.is_ascii_hexdigit()) || sha.len() < 7 || sha.len() > 64 {
+                return Err("sha must be a commit hash".into());
+            }
+            let pipelines = get(
+                http,
+                token,
+                &format!(
+                    "{project_url}/pipelines?sha={}&order_by=id&sort=desc&per_page={SHA_PIPELINES_MAX}",
+                    urlencode(sha)
+                ),
+            )
+            .await?;
+            let pipelines: Vec<Value> = pipelines
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter(|p| p["sha"].as_str().is_some_and(|s| s.eq_ignore_ascii_case(sha)))
+                        .map(|p| json!({ "id": p["id"], "ref": p["ref"], "status": p["status"], "web_url": p["web_url"] }))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(Value::Array(pipelines))
+        }
         JOB_TRACE => {
             let job = args
                 .get("job_id")
@@ -259,6 +328,29 @@ pub async fn call(
             }
             let (tail, truncated) = tail(&log, (kib * 1024) as usize);
             Ok(json!({ "job_id": job, "truncated": truncated, "log": tail }))
+        }
+        JOB_PLAY => {
+            let job = args
+                .get("job_id")
+                .and_then(Value::as_i64)
+                .ok_or("job_id is required")?;
+            let variables = pipeline_variables(args.get("variables"))?;
+            let res = http
+                .post(format!("{project_url}/jobs/{job}/play"))
+                .header("PRIVATE-TOKEN", token)
+                .json(&json!({ "job_variables_attributes": variables }))
+                .send()
+                .await
+                .map_err(|e| format!("gitlab: {e}"))?;
+            let status = res.status();
+            let v: Value = res.json().await.unwrap_or(Value::Null);
+            if !status.is_success() {
+                return Err(format!(
+                    "gitlab refused to play job {job} ({status}): {}",
+                    v["message"]
+                ));
+            }
+            Ok(json!({ "id": v["id"], "status": v["status"], "web_url": v["web_url"] }))
         }
         PIPELINE_RUN => {
             let r = args

@@ -6,7 +6,10 @@ use serde_json::{json, Value};
 
 use crate::{
     mcp::{CallContext, SessionAccess, Tools},
-    qa::{self, service::{self, QaAccess}},
+    qa::{
+        self,
+        service::{self, QaAccess},
+    },
 };
 
 pub const DEPLOY: &str = "qa_deploy";
@@ -83,7 +86,9 @@ pub async fn call(
             }
             let request: Request = serde_json::from_value(args.clone())
                 .map_err(|error| format!("prototype_build arguments are invalid: {error}"))?;
-            Ok(json!(service::build_prototype(&qa_access, &request.candidate_id).await?))
+            Ok(json!(
+                service::build_prototype(&qa_access, &request.candidate_id).await?
+            ))
         }
         other => Err(format!("no QA tool named {other}")),
     }

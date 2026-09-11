@@ -76,26 +76,25 @@ impl Default for QaTarget {
     }
 }
 
-/// The existing GitLab pipeline API is the only deployment transport this
-/// surface drives. It receives an exact candidate SHA, never a moving branch
-/// name, and the node broker keeps the token outside the runtime.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// GitLab's own pipeline-creation API resolves `ref` only against an
+/// existing branch or tag, never a bare commit SHA — there is no way to ask
+/// it for "a pipeline at this exact commit" directly. So a QA deploy never
+/// creates a pipeline: it finds one GitLab already ran at the candidate's
+/// exact SHA (a branch or merge-request pipeline CI already triggered) and
+/// plays `deploy_job`, the operator-configured manual job that does the
+/// deploy, inside it. If no pipeline exists for that SHA, or none has that
+/// job ready to play, the deploy refuses rather than starting a pipeline on
+/// a mutable ref. The node broker keeps the token outside the runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct QaDeployment {
     pub project: String,
+    /// The manual job's exact name (as GitLab shows it) that performs the
+    /// deploy. Played, never a whole pipeline created.
+    pub deploy_job: String,
     /// Pinned container image the pipeline must attest for this target.
     pub execution_image: String,
     pub variables: std::collections::BTreeMap<String, String>,
-}
-
-impl Default for QaDeployment {
-    fn default() -> Self {
-        Self {
-            project: String::new(),
-            execution_image: String::new(),
-            variables: std::collections::BTreeMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,7 +154,9 @@ impl Qa {
                 return Err(format!("qa target {name:?} is not a safe identifier"));
             }
             if name == "prod" || name.contains("production") {
-                return Err(format!("qa target {name:?} must not name a production environment"));
+                return Err(format!(
+                    "qa target {name:?} must not name a production environment"
+                ));
             }
             target.validate(name)?;
         }
@@ -197,7 +198,9 @@ impl QaTarget {
     fn validate(&self, name: &str) -> Result<(), String> {
         self.canonical_origins()?;
         if !self.r#private {
-            return Err(format!("qa target {name:?} must be explicitly marked private"));
+            return Err(format!(
+                "qa target {name:?} must be explicitly marked private"
+            ));
         }
         self.identity_endpoint()?;
         if !valid_header_name(&self.identity_header) {
@@ -206,24 +209,35 @@ impl QaTarget {
         if self.deployment.project.trim().is_empty() || self.deployment.project.len() > 255 {
             return Err(format!("qa target {name:?} needs a GitLab project"));
         }
+        if !valid_job_name(&self.deployment.deploy_job) {
+            return Err(format!("qa target {name:?} needs a safe deploy_job name"));
+        }
         immutable_image(&self.deployment.execution_image)
             .map_err(|e| format!("qa target {name:?} deployment image: {e}"))?;
         immutable_image(&self.browser.image)
             .map_err(|e| format!("qa target {name:?} browser image: {e}"))?;
         if self.browser.timeout_secs == 0 || self.browser.timeout_secs > 900 {
-            return Err(format!("qa target {name:?} browser timeout must be 1–900 seconds"));
+            return Err(format!(
+                "qa target {name:?} browser timeout must be 1–900 seconds"
+            ));
         }
         if let Some(credential) = self.browser.test_credential.as_deref() {
             if !valid_credential_name(credential) {
-                return Err(format!("qa target {name:?} has an unsafe test credential name"));
+                return Err(format!(
+                    "qa target {name:?} has an unsafe test credential name"
+                ));
             }
         }
         for (key, value) in &self.deployment.variables {
             if !valid_env_key(key) || value.len() > 4096 || value.contains('\0') {
-                return Err(format!("qa target {name:?} has an unsafe deployment variable"));
+                return Err(format!(
+                    "qa target {name:?} has an unsafe deployment variable"
+                ));
             }
             if value.to_ascii_lowercase().contains("production") {
-                return Err(format!("qa target {name:?} names production in a deployment variable"));
+                return Err(format!(
+                    "qa target {name:?} names production in a deployment variable"
+                ));
             }
         }
         Ok(())
@@ -234,7 +248,10 @@ impl PrototypeBuild {
     fn validate(&self) -> Result<(), String> {
         immutable_image(&self.image).map_err(|e| format!("prototype image: {e}"))?;
         if self.command.is_empty()
-            || self.command.iter().any(|part| part.is_empty() || part.contains('\0') || part.len() > 4096)
+            || self
+                .command
+                .iter()
+                .any(|part| part.is_empty() || part.contains('\0') || part.len() > 4096)
         {
             return Err("prototype command must be nonempty direct argv".into());
         }
@@ -252,14 +269,16 @@ pub fn qa_origin(value: &str) -> Result<String, String> {
     let url = url::Url::parse(value).map_err(|e| format!("qa origin is not a URL: {e}"))?;
     let host = url.host_str().ok_or("qa origin has no host")?;
     let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1");
-    if (!matches!(url.scheme(), "https") && !(url.scheme() == "http" && loopback))
+    if !(matches!(url.scheme(), "https") || url.scheme() == "http" && loopback)
         || !url.username().is_empty()
         || url.password().is_some()
         || !matches!(url.path(), "" | "/")
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err("qa origins must be credential-free HTTPS origins (HTTP is loopback-only)".into());
+        return Err(
+            "qa origins must be credential-free HTTPS origins (HTTP is loopback-only)".into(),
+        );
     }
     Ok(url.origin().ascii_serialization())
 }
@@ -267,9 +286,9 @@ pub fn qa_origin(value: &str) -> Result<String, String> {
 fn valid_qa_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_'))
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
 }
 
 fn valid_header_name(value: &str) -> bool {
@@ -291,9 +310,19 @@ fn valid_env_key(value: &str) -> bool {
 fn valid_credential_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// GitLab job names are freeform (`deploy:staging`, `Deploy to prod`), so
+/// this only bounds length and forbids control characters — never a
+/// character-class allowlist that would reject a real job name.
+fn valid_job_name(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 255
+        && !trimmed.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
 }
 
 pub fn immutable_image(value: &str) -> Result<(), String> {
@@ -302,7 +331,9 @@ pub fn immutable_image(value: &str) -> Result<(), String> {
     };
     if name.is_empty()
         || digest.len() != 64
-        || !digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err("must be pinned as image@sha256:<64 lowercase hex>".into());
     }
@@ -726,6 +757,13 @@ pub struct Gateway {
     /// filter. Everything else is denied.
     pub allow_hosts: Vec<String>,
     pub proxy_port: u16,
+    /// A second CONNECT proxy in the same gateway container, filtered by a
+    /// separate allow file the node rewrites for the life of one QA browser
+    /// run (see `Backend::scope_qa_egress`). Never shares `allow_hosts`: a
+    /// QA target origin never becomes reachable from an ordinary harness
+    /// session, and an LLM provider host never becomes reachable from a QA
+    /// browser.
+    pub qa_proxy_port: u16,
     /// Port the gateway forwards from the internal network to the node.
     pub forward_port: u16,
     /// Where the node listens for the harness. Loopback: the gateway reaches it
@@ -916,6 +954,7 @@ impl Default for Config {
                     r"^auth\.openai\.com$".into(),
                 ],
                 proxy_port: 8888,
+                qa_proxy_port: 8890,
                 forward_port: 7421,
                 harness_listen: HarnessListen::default(),
             },
@@ -1112,6 +1151,13 @@ impl Config {
 
     pub fn allow_file() -> PathBuf {
         Self::state_dir().join("gateway/allow.txt")
+    }
+
+    /// The QA browser egress allow file: rewritten for the life of one QA
+    /// browser run (`Backend::scope_qa_egress`), never during an ordinary
+    /// harness session. Deny-all — an empty file — outside that window.
+    pub fn qa_allow_file() -> PathBuf {
+        Self::state_dir().join("gateway/qa_allow.txt")
     }
 
     /// The harness's own state directory, node-owned. Only the harness's

@@ -244,6 +244,23 @@ access stopped" rather than "Killed" — your own client keeps running until you
 end it. A watchdog pauses a session on its own after repeated harness-turn
 failures, with the reason on the record, rather than restarting the same loop
 indefinitely.
+### QA verification
+
+Once a candidate is captured, an operator-configured QA target can deploy and
+prove it before anyone reviews the diff. Deploy never creates a GitLab pipeline
+on a moving ref — it finds the pipeline GitLab already ran at the candidate's
+exact commit and plays the configured manual deploy job inside it, or refuses
+outright if no such pipeline exists. Browser verification then runs a real,
+headless browser against that deployment inside its own network boundary: the
+container reaches only the QA target's configured origin(s) for that one run,
+nothing else, through a dedicated egress gateway distinct from the harness's
+own. A scenario's steps and assertions are declarative — no script, no
+arbitrary URL — and a dedicated test-account credential may only be filled
+into a password-type input, never screenshotted while its form is still on
+screen. Every deployment observation, browser run, assertion, log, and
+screenshot attaches to the candidate as evidence, and a stale deployment
+(the target moved since the browser ran) is marked so rather than silently
+trusted.
 
 ## Using the tools from your own harness
 

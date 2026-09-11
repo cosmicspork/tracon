@@ -22,16 +22,15 @@ use crate::{
     mcp::{self, CallContext},
     policy::{Policy, Verdict},
     qa::{
-        browser_authority_target, browser_plan, browser_report, bounded_redacted_log, deploy_authority_target,
-        evidence_state, observe_environment, requested_credential_keys, test_account_authority_target,
-        BrowserAssertionResult, BrowserPlan, BrowserReport, BrowserRequest, DeployRequest,
-        BROWSER_TEST_ACCOUNT_ACTION, BROWSER_VERIFY_ACTION, BROWSER_RUNNER, DEPLOY_ACTION,
+        bounded_redacted_log, browser_authority_target, browser_plan, browser_report,
+        deploy_authority_target, evidence_state, observe_environment, redact_secrets,
+        requested_credential_keys, test_account_authority_target, BrowserAssertionResult,
+        BrowserPlan, BrowserReport, BrowserRequest, DeployRequest, BROWSER_RUNNER,
+        BROWSER_TEST_ACCOUNT_ACTION, BROWSER_VERIFY_ACTION, DEPLOY_ACTION,
     },
-    runner::{Runner, RunnerCommand},
+    runner::RunnerCommand,
     session::Manager,
-    store::{
-        BrowserRunRow, DemonstrationRow, PrototypeRow, QaAssetRow, QaDeploymentRow, Store,
-    },
+    store::{BrowserRunRow, DemonstrationRow, PrototypeRow, QaAssetRow, QaDeploymentRow, Store},
     stream::Bus,
 };
 
@@ -65,7 +64,10 @@ pub struct BrowserRunResult {
 /// Start the configured GitLab QA pipeline at an exact candidate SHA, then
 /// persist the resulting deployment identity observation whether it succeeds,
 /// fails, or cannot be observed.
-pub async fn deploy(access: &QaAccess<'_>, request: DeployRequest) -> Result<QaDeploymentRow, String> {
+pub async fn deploy(
+    access: &QaAccess<'_>,
+    request: DeployRequest,
+) -> Result<QaDeploymentRow, String> {
     let candidate = candidate(access.store, &request.candidate_id)?;
     let owner_session = candidate_owner(&candidate)?;
     let target = configured_target(access.cfg, &request.target)?;
@@ -110,6 +112,7 @@ pub async fn deploy(access: &QaAccess<'_>, request: DeployRequest) -> Result<QaD
     let outcome = match pipeline {
         Ok(pipeline) => match pipeline["id"].as_i64() {
             Some(pipeline_id) => {
+                let job_id = pipeline["job_id"].as_i64();
                 let terminal = wait_for_pipeline(
                     access,
                     &candidate.channel,
@@ -121,10 +124,15 @@ pub async fn deploy(access: &QaAccess<'_>, request: DeployRequest) -> Result<QaD
                 match terminal {
                     Ok(status) => {
                         let sha = status["sha"].as_str().unwrap_or_default();
-                        build_id = format!("gitlab:{}:{pipeline_id}:{sha}", target.deployment.project);
+                        build_id = format!(
+                            "gitlab:{}:{pipeline_id}:{}:{sha}",
+                            target.deployment.project,
+                            job_id.map(|id| id.to_string()).unwrap_or_default(),
+                        );
                         detail = json!({
                             "transport": "gitlab_pipeline",
                             "pipeline": status,
+                            "deploy_job_id": job_id,
                             "target": request.target,
                             "candidate_id": candidate.id,
                             "head_sha": candidate.head_sha,
@@ -182,8 +190,21 @@ pub async fn deploy(access: &QaAccess<'_>, request: DeployRequest) -> Result<QaD
         finish_action(access.store, &action_id, "failed", &detail);
         return Err(detail);
     }
-    let action_outcome = if row.outcome == "succeeded" { "pipeline completed" } else { "pipeline failed or did not attest the candidate SHA" };
-    finish_action(access.store, &action_id, if row.outcome == "succeeded" { "succeeded" } else { "failed" }, action_outcome);
+    let action_outcome = if row.outcome == "succeeded" {
+        "pipeline completed"
+    } else {
+        "pipeline failed or did not attest the candidate SHA"
+    };
+    finish_action(
+        access.store,
+        &action_id,
+        if row.outcome == "succeeded" {
+            "succeeded"
+        } else {
+            "failed"
+        },
+        action_outcome,
+    );
     Ok(row)
 }
 
@@ -210,7 +231,9 @@ pub async fn browser_verify(
     }
     let target = configured_target(access.cfg, &deployment.target_id)?;
     if crate::config::qa_origin(&target.origin)? != deployment.origin {
-        return Err("QA target origin changed since deployment; create a new deployment observation".into());
+        return Err(
+            "QA target origin changed since deployment; create a new deployment observation".into(),
+        );
     }
     ensure_browser_target_binding(&deployment, &target)?;
     let plan = browser_plan(&target, &request.scenario)?;
@@ -236,13 +259,11 @@ pub async fn browser_verify(
             .filter(|name| !name.trim().is_empty())
         {
             Some(name) => name,
-            None => {
-                return fail_browser_action(
-                    access,
-                    &browser_action,
-                    "scenario requests a credential but this QA target has no dedicated test account",
-                )
-            }
+            None => return fail_browser_action(
+                access,
+                &browser_action,
+                "scenario requests a credential but this QA target has no dedicated test account",
+            ),
         };
         let authority_target = test_account_authority_target(&deployment.target_id, name);
         let action = match authorize(
@@ -261,8 +282,17 @@ pub async fn browser_verify(
             let broker = match access.broker.read() {
                 Ok(broker) => broker,
                 Err(_) => {
-                    finish_action(access.store, &action, "failed", "credential broker lock is unavailable");
-                    return fail_browser_action(access, &browser_action, "credential broker lock is unavailable");
+                    finish_action(
+                        access.store,
+                        &action,
+                        "failed",
+                        "credential broker lock is unavailable",
+                    );
+                    return fail_browser_action(
+                        access,
+                        &browser_action,
+                        "credential broker lock is unavailable",
+                    );
                 }
             };
             match broker.env_for(name, &candidate.channel, access.node_id) {
@@ -305,16 +335,22 @@ pub async fn browser_verify(
         if let Some(error) = &runtime_error {
             raw.extend_from_slice(error.as_bytes());
         }
-        bounded_redacted_log(&raw, secret_values)
+        bounded_redacted_log(&raw, secret_values.clone())
     };
     let assertions: Vec<BrowserAssertionResult> = report
         .as_ref()
         .map(|report| report.assertions.clone())
-        .unwrap_or_else(|| vec![BrowserAssertionResult {
-            kind: "runner".into(),
-            ok: false,
-            detail: "browser runtime did not produce an accepted report".into(),
-        }]);
+        .unwrap_or_else(|| {
+            vec![BrowserAssertionResult {
+                kind: "runner".into(),
+                ok: false,
+                detail: "browser runtime did not produce an accepted report".into(),
+            }]
+        });
+    let assertions_json = redact_secrets(
+        &serde_json::to_string(&assertions).expect("assertions serialize"),
+        secret_values,
+    );
     let outcome = if report.as_ref().is_some_and(|report| report.ok) && runtime_error.is_none() {
         "passed"
     } else if report.is_some() {
@@ -322,19 +358,21 @@ pub async fn browser_verify(
     } else {
         "unknown"
     };
+    let evidence_state = run_identity_state(&deployment, &before, &after);
     let preliminary = BrowserRunRow {
         id: uuid::Uuid::now_v7().to_string(),
         deployment_id: deployment.id.clone(),
         candidate_id: candidate.id.clone(),
         channel: candidate.channel.clone(),
         target_id: deployment.target_id.clone(),
-        authorized_origins_json: serde_json::to_string(&plan.allowed_origins).expect("origins serialize"),
+        authorized_origins_json: serde_json::to_string(&plan.allowed_origins)
+            .expect("origins serialize"),
         test_credential: credential_name,
-        assertions_json: serde_json::to_string(&assertions).expect("assertions serialize"),
+        assertions_json,
         outcome: outcome.into(),
         environment_before: before.identity,
         environment_after: after.identity,
-        evidence_state: run_identity_state(&deployment, &before, &after).into(),
+        evidence_state: evidence_state.into(),
         log_tail: log,
         started_ms,
         finished_ms,
@@ -350,27 +388,41 @@ pub async fn browser_verify(
     finish_action(
         access.store,
         &browser_action,
-        if preliminary.outcome == "passed" { "succeeded" } else { "failed" },
-        if preliminary.outcome == "passed" { "browser run completed" } else { "browser run failed or was not observable" },
+        if preliminary.outcome == "passed" {
+            "succeeded"
+        } else {
+            "failed"
+        },
+        if preliminary.outcome == "passed" {
+            "browser run completed"
+        } else {
+            "browser run failed or was not observable"
+        },
     );
     if let Some(action) = test_account_action {
         finish_action(
             access.store,
             &action,
-            if preliminary.outcome == "passed" { "succeeded" } else { "failed" },
+            if preliminary.outcome == "passed" {
+                "succeeded"
+            } else {
+                "failed"
+            },
             "dedicated test account was injected only into the browser runtime",
         );
     }
 
     let mut assets = Vec::new();
     let artifact_error = match (report.as_ref(), exported.as_deref()) {
-        (Some(report), Some(root)) => match attach_browser_bundle(access, &candidate, &preliminary, report, root) {
-            Ok(rows) => {
-                assets = rows;
-                None
+        (Some(report), Some(root)) => {
+            match attach_browser_bundle(access, &candidate, &preliminary, report, root) {
+                Ok(rows) => {
+                    assets = rows;
+                    None
+                }
+                Err(error) => Some(error),
             }
-            Err(error) => Some(error),
-        },
+        }
         _ => runtime_error,
     };
     Ok(BrowserRunResult {
@@ -383,7 +435,10 @@ pub async fn browser_verify(
 /// Build configured repository-derived output from the candidate owner's
 /// prepared snapshot, then import the result using the same HTML bundle store
 /// and isolated preview path as every other artifact.
-pub async fn build_prototype(access: &QaAccess<'_>, candidate_id: &str) -> Result<PrototypeRow, String> {
+pub async fn build_prototype(
+    access: &QaAccess<'_>,
+    candidate_id: &str,
+) -> Result<PrototypeRow, String> {
     let candidate = candidate(access.store, candidate_id)?;
     let owner_session = candidate_owner(&candidate)?;
     ensure_requester_scope(access, &candidate, &owner_session)?;
@@ -485,7 +540,11 @@ pub async fn build_prototype(access: &QaAccess<'_>, candidate_id: &str) -> Resul
     .map_err(|error| format!("prepared environment verification failed: {error}"));
     let verification = match verification {
         Ok(result) => result,
-        Err(error) => return insert_failed_prototype(access, &candidate, &recipe, &id, started_ms, plan_json, error),
+        Err(error) => {
+            return insert_failed_prototype(
+                access, &candidate, &recipe, &id, started_ms, plan_json, error,
+            )
+        }
     };
     let command = RunnerCommand {
         argv: recipe.command.clone(),
@@ -500,14 +559,19 @@ pub async fn build_prototype(access: &QaAccess<'_>, candidate_id: &str) -> Resul
         backend.runner(Vec::new()).run_capture(command),
     )
     .await
-    .map_err(|_| "prototype build timed out")
+    .map_err(|_| "prototype build timed out".to_string())
     .and_then(|output| output.map_err(|error| format!("prototype runtime failed: {error}")));
     let detail = match &output {
-        Ok(output) => bounded_redacted_log(&[output.stdout.as_slice(), output.stderr.as_slice()].concat(), Vec::new()),
+        Ok(output) => bounded_redacted_log(
+            &[output.stdout.as_slice(), output.stderr.as_slice()].concat(),
+            Vec::new(),
+        ),
         Err(error) => error.clone(),
     };
     if !output.as_ref().is_ok_and(|output| output.status.success()) {
-        return insert_failed_prototype(access, &candidate, &recipe, &id, started_ms, plan_json, detail);
+        return insert_failed_prototype(
+            access, &candidate, &recipe, &id, started_ms, plan_json, detail,
+        );
     }
     let exported = match crate::workspace::export(backend.as_ref(), &workspace).await {
         Ok(exported) => exported,
@@ -527,13 +591,7 @@ pub async fn build_prototype(access: &QaAccess<'_>, candidate_id: &str) -> Resul
         Ok(files) => files,
         Err(error) => {
             return insert_failed_prototype(
-                access,
-                &candidate,
-                &recipe,
-                &id,
-                started_ms,
-                plan_json,
-                error,
+                access, &candidate, &recipe, &id, started_ms, plan_json, error,
             )
         }
     };
@@ -644,6 +702,7 @@ fn insert_unknown_prototype(
     )
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors insert_failed_prototype/insert_unknown_prototype's shape plus outcome
 fn insert_prototype_outcome(
     access: &QaAccess<'_>,
     candidate: &crate::store::CandidateRow,
@@ -661,13 +720,21 @@ fn insert_prototype_outcome(
         source_revision: candidate.head_sha.clone(),
         source_identity_json: candidate.capture_json.clone(),
         build_image: recipe.image.clone(),
-        build_inputs_json: json!({ "recipe": recipe.command, "preparation": preparation }).to_string(),
+        build_inputs_json: json!({ "recipe": recipe.command, "preparation": preparation })
+            .to_string(),
         document_id: None,
         document_hash: None,
         slug: format!("ref-prototype-{id}"),
         entry_path: recipe.entry_path.clone(),
         outcome: outcome.into(),
-        detail: detail.chars().rev().take(64 * 1024).collect::<String>().chars().rev().collect(),
+        detail: detail
+            .chars()
+            .rev()
+            .take(64 * 1024)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect(),
         created_ms: started_ms,
         finished_ms: crate::store::now_ms(),
     };
@@ -675,6 +742,12 @@ fn insert_prototype_outcome(
     Ok(row)
 }
 
+/// GitLab's pipeline-creation API resolves `ref` only against an existing
+/// branch or tag — never a bare commit SHA — so this never creates a
+/// pipeline. It finds an existing pipeline GitLab already ran at the exact
+/// candidate SHA and plays the operator-configured manual deploy job inside
+/// it. If no such pipeline, or none with that job ready to play, exists,
+/// the deploy refuses: it never falls back to a moving ref.
 async fn launch_pipeline(
     access: &QaAccess<'_>,
     channel: &str,
@@ -683,6 +756,41 @@ async fn launch_pipeline(
     target_id: &str,
     target: &QaTarget,
 ) -> Result<Value, String> {
+    let ctx = CallContext {
+        session_id: session_id.into(),
+        channel: channel.into(),
+        node_id: access.node_id.into(),
+    };
+    let candidates = mcp::gitlab::call(
+        access.broker,
+        access.http,
+        &ctx,
+        mcp::gitlab::PIPELINE_LIST_BY_SHA,
+        &json!({ "project": target.deployment.project, "sha": sha }),
+    )
+    .await?;
+    let candidate_ids: Vec<i64> = candidates
+        .as_array()
+        .map(|pipelines| pipelines.iter().filter_map(|p| p["id"].as_i64()).collect())
+        .unwrap_or_default();
+    if candidate_ids.is_empty() {
+        return Err(format!(
+            "no GitLab pipeline exists for candidate sha {sha}; a QA deploy never creates one on a mutable ref"
+        ));
+    }
+    let mut statuses = Vec::with_capacity(candidate_ids.len());
+    for pipeline_id in candidate_ids {
+        let status = mcp::gitlab::call(
+            access.broker,
+            access.http,
+            &ctx,
+            mcp::gitlab::PIPELINE_STATUS,
+            &json!({ "project": target.deployment.project, "pipeline_id": pipeline_id }),
+        )
+        .await?;
+        statuses.push(status);
+    }
+    let (pipeline_id, job_id) = select_deploy_job(&statuses, sha, &target.deployment.deploy_job)?;
     let mut variables: BTreeMap<String, Value> = target
         .deployment
         .variables
@@ -695,18 +803,56 @@ async fn launch_pipeline(
         "TRACON_EXECUTION_IMAGE".into(),
         Value::String(target.deployment.execution_image.clone()),
     );
-    mcp::gitlab::call(
+    let played = mcp::gitlab::call(
         access.broker,
         access.http,
-        &CallContext {
-            session_id: session_id.into(),
-            channel: channel.into(),
-            node_id: access.node_id.into(),
-        },
-        mcp::gitlab::PIPELINE_RUN,
-        &json!({ "project": target.deployment.project, "ref": sha, "variables": variables }),
+        &ctx,
+        mcp::gitlab::JOB_PLAY,
+        &json!({ "project": target.deployment.project, "job_id": job_id, "variables": variables }),
     )
-    .await
+    .await?;
+    Ok(json!({
+        "id": pipeline_id,
+        "job_id": job_id,
+        "job_status": played["status"],
+    }))
+}
+
+/// Pick the first candidate pipeline (already fetched by
+/// `PIPELINE_LIST_BY_SHA` and re-fetched in full by `PIPELINE_STATUS`) whose
+/// `sha` still matches exactly and that has `deploy_job` sitting `manual`.
+/// The SHA is re-verified here, not just trusted from the list call, so an
+/// id is never played against without confirming what it actually is.
+fn select_deploy_job(
+    statuses: &[Value],
+    sha: &str,
+    deploy_job: &str,
+) -> Result<(i64, i64), String> {
+    for status in statuses {
+        let Some(pipeline_id) = status["id"].as_i64() else {
+            continue;
+        };
+        if !status["sha"]
+            .as_str()
+            .is_some_and(|s| s.eq_ignore_ascii_case(sha))
+        {
+            continue;
+        }
+        let job_id = status["jobs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|job| {
+                job["name"].as_str() == Some(deploy_job) && job["status"].as_str() == Some("manual")
+            })
+            .and_then(|job| job["id"].as_i64());
+        if let Some(job_id) = job_id {
+            return Ok((pipeline_id, job_id));
+        }
+    }
+    Err(format!(
+        "no pipeline at sha {sha} has a manual {deploy_job:?} job ready to play"
+    ))
 }
 
 async fn wait_for_pipeline(
@@ -732,7 +878,9 @@ async fn wait_for_pipeline(
         .await?;
         match status["status"].as_str() {
             Some("success" | "failed" | "canceled" | "skipped" | "manual") => return Ok(status),
-            _ if started.elapsed() >= DEPLOY_TIMEOUT => return Err("QA deployment pipeline timed out".into()),
+            _ if started.elapsed() >= DEPLOY_TIMEOUT => {
+                return Err("QA deployment pipeline timed out".into())
+            }
             _ => tokio::time::sleep(POLL_INTERVAL).await,
         }
     }
@@ -750,24 +898,39 @@ async fn run_browser_runtime(
     plan: &BrowserPlan,
     credential_env: &[(String, String)],
 ) -> Result<BrowserRuntime, String> {
-    let transfer = tempfile::tempdir().map_err(|error| format!("could not stage browser runner: {error}"))?;
+    let backend = access.manager.backend();
+    // Scoped for the life of this one run: the container's egress gateway
+    // narrows to exactly the configured target origin(s), never the
+    // harness's LLM-provider-only allowlist and never open egress. Held
+    // across the whole container run below; dropping it restores deny-all.
+    let allowed_hosts = origin_hosts(&plan.allowed_origins)?;
+    let egress = backend
+        .scope_qa_egress(&allowed_hosts)
+        .await
+        .map_err(|error| format!("could not scope QA browser egress: {error}"))?;
+    let proxy_url = backend.qa_proxy_url();
+    let transfer =
+        tempfile::tempdir().map_err(|error| format!("could not stage browser runner: {error}"))?;
     fs::write(transfer.path().join("browser-runner.cjs"), BROWSER_RUNNER)
         .map_err(|error| format!("could not stage browser runner: {error}"))?;
-    let spec = browser_runtime_spec(target, plan)?;
+    let spec = browser_runtime_spec(target, plan, proxy_url.as_deref())?;
     fs::write(
         transfer.path().join("browser.json"),
         serde_json::to_vec(&spec).expect("browser spec serializes"),
     )
     .map_err(|error| format!("could not stage browser scenario: {error}"))?;
     let id = format!("qa-browser-{}", uuid::Uuid::now_v7());
-    let backend = access.manager.backend();
     let workspace = crate::workspace::from_snapshot(backend.as_ref(), &id, transfer.path())
         .await
         .map_err(|error| format!("could not create browser workspace: {error}"))?;
     let output = backend
         .runner(Vec::new())
         .run_capture(RunnerCommand {
-            argv: vec!["node".into(), "/work/browser-runner.cjs".into(), "/work/browser.json".into()],
+            argv: vec![
+                "node".into(),
+                "/work/browser-runner.cjs".into(),
+                "/work/browser.json".into(),
+            ],
             env: credential_env.to_vec(),
             mounts: vec![workspace.mount()],
             workdir: Some("/work".into()),
@@ -775,12 +938,14 @@ async fn run_browser_runtime(
             image: Some(target.browser.image.clone()),
         })
         .await;
+    drop(egress);
     let exported = crate::workspace::export(backend.as_ref(), &workspace)
         .await
         .map_err(|error| format!("could not export browser evidence: {error}"))?;
     let bytes = limited_file(&exported, "output/report.json", REPORT_BYTES)?;
     let report = browser_report(
-        serde_json::from_slice(&bytes).map_err(|error| format!("browser report is not JSON: {error}"))?,
+        serde_json::from_slice(&bytes)
+            .map_err(|error| format!("browser report is not JSON: {error}"))?,
     )?;
     let output = output.map_err(|error| format!("browser runtime failed: {error}"))?;
     let mut raw = output.stdout;
@@ -792,7 +957,25 @@ async fn run_browser_runtime(
     })
 }
 
-fn browser_runtime_spec(target: &QaTarget, plan: &BrowserPlan) -> Result<Value, String> {
+/// The exact hosts of a plan's approved origins, for the QA egress gateway
+/// (which filters by host, not by scheme or path).
+fn origin_hosts(origins: &[String]) -> Result<Vec<String>, String> {
+    origins
+        .iter()
+        .map(|origin| {
+            url::Url::parse(origin)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_string))
+                .ok_or_else(|| format!("QA target origin {origin:?} has no host"))
+        })
+        .collect()
+}
+
+fn browser_runtime_spec(
+    target: &QaTarget,
+    plan: &BrowserPlan,
+    proxy_url: Option<&str>,
+) -> Result<Value, String> {
     let origin = crate::config::qa_origin(&target.origin)?;
     let steps: Result<Vec<Value>, String> = plan
         .steps
@@ -814,6 +997,7 @@ fn browser_runtime_spec(target: &QaTarget, plan: &BrowserPlan) -> Result<Value, 
         "steps": steps?,
         "assertions": plan.assertions,
         "timeout_ms": target.browser.timeout_secs * 1000,
+        "proxy_url": proxy_url,
     }))
 }
 
@@ -835,11 +1019,17 @@ fn attach_browser_bundle(
     for shot in &report.screenshots {
         let bytes = limited_file(exported, &shot.path, 6 * 1024 * 1024)?;
         let path = format!("screenshots/{}.png", shot.label);
-        body.push_str(&format!("<figure><figcaption>{}</figcaption><img src=\"{}\" alt=\"{}\"></figure>", shot.label, path, shot.label));
+        body.push_str(&format!(
+            "<figure><figcaption>{}</figcaption><img src=\"{}\" alt=\"{}\"></figure>",
+            shot.label, path, shot.label
+        ));
         files.push(HtmlFile { path, bytes });
     }
     body.push_str("</body></html>");
-    files.push(HtmlFile { path: "index.html".into(), bytes: body.into_bytes() });
+    files.push(HtmlFile {
+        path: "index.html".into(),
+        bytes: body.into_bytes(),
+    });
     let (document, changes) = access
         .store
         .write_html_document_change(
@@ -1000,7 +1190,9 @@ fn authorize(
             "{} is not authorized for {}: {}",
             action,
             target,
-            decision.reason.unwrap_or_else(|| "an active exact grant is required".into())
+            decision
+                .reason
+                .unwrap_or_else(|| "an active exact grant is required".into())
         ));
     }
     let id = uuid::Uuid::now_v7().to_string();
@@ -1018,7 +1210,6 @@ fn authorize(
             None,
             &evidence_json,
         )
-
         .map_err(store_error)?;
     Ok(id)
 }
@@ -1081,7 +1272,8 @@ fn limited_file(root: &Path, relative: &str, max: u64) -> Result<Vec<u8>, String
         return Err("runtime export named an unsafe path".into());
     }
     let path = root.join(relative);
-    let metadata = fs::symlink_metadata(&path).map_err(|error| format!("exported evidence is missing: {error}"))?;
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| format!("exported evidence is missing: {error}"))?;
     if !metadata.file_type().is_file() || metadata.len() > max {
         return Err("exported evidence is not a bounded regular file".into());
     }
@@ -1094,8 +1286,11 @@ fn collect_html_files(root: &Path, recipe: &PrototypeBuild) -> Result<Vec<HtmlFi
     let mut files = Vec::new();
     let mut bytes = 0u64;
     while let Some(directory) = pending.pop() {
-        for item in fs::read_dir(&directory).map_err(|error| format!("prototype output is missing: {error}"))? {
-            let item = item.map_err(|error| format!("could not enumerate prototype output: {error}"))?;
+        for item in fs::read_dir(&directory)
+            .map_err(|error| format!("prototype output is missing: {error}"))?
+        {
+            let item =
+                item.map_err(|error| format!("could not enumerate prototype output: {error}"))?;
             let metadata = fs::symlink_metadata(item.path())
                 .map_err(|error| format!("could not inspect prototype output: {error}"))?;
             if metadata.file_type().is_symlink() {
@@ -1105,7 +1300,10 @@ fn collect_html_files(root: &Path, recipe: &PrototypeBuild) -> Result<Vec<HtmlFi
                 pending.push(item.path());
                 continue;
             }
-            if !metadata.is_file() || metadata.len() > HTML_BYTES || bytes.saturating_add(metadata.len()) > HTML_BYTES {
+            if !metadata.is_file()
+                || metadata.len() > HTML_BYTES
+                || bytes.saturating_add(metadata.len()) > HTML_BYTES
+            {
                 return Err("prototype output contains an invalid or oversized file".into());
             }
             let relative = item
@@ -1119,7 +1317,8 @@ fn collect_html_files(root: &Path, recipe: &PrototypeBuild) -> Result<Vec<HtmlFi
             }
             files.push(HtmlFile {
                 path: relative,
-                bytes: fs::read(item.path()).map_err(|error| format!("could not read prototype output: {error}"))?,
+                bytes: fs::read(item.path())
+                    .map_err(|error| format!("could not read prototype output: {error}"))?,
             });
             bytes += metadata.len();
             if files.len() > HTML_FILES {
@@ -1141,4 +1340,88 @@ fn escape_html(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+fn store_error(error: crate::store::StoreError) -> String {
+    error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(id: i64, sha: &str, jobs: Value) -> Value {
+        json!({ "id": id, "sha": sha, "jobs": jobs })
+    }
+
+    #[test]
+    fn no_candidate_pipelines_is_refused() {
+        let error = select_deploy_job(&[], "deadbeef", "deploy").unwrap_err();
+        assert!(error.contains("deadbeef"), "{error}");
+    }
+
+    #[test]
+    fn a_pipeline_whose_sha_no_longer_matches_is_never_played() {
+        // The list call filtered on this SHA, but the id is re-verified here:
+        // a pipeline fetched by id is never trusted from the list alone.
+        let statuses = vec![status(
+            1,
+            "other-sha",
+            json!([{ "id": 9, "name": "deploy", "status": "manual" }]),
+        )];
+        let error = select_deploy_job(&statuses, "deadbeef", "deploy").unwrap_err();
+        assert!(error.contains("deadbeef"), "{error}");
+    }
+
+    #[test]
+    fn a_pipeline_with_no_matching_job_name_is_refused() {
+        let statuses = vec![status(
+            1,
+            "deadbeef",
+            json!([{ "id": 9, "name": "build", "status": "manual" }]),
+        )];
+        let error = select_deploy_job(&statuses, "deadbeef", "deploy").unwrap_err();
+        assert!(error.contains("deploy"), "{error}");
+    }
+
+    #[test]
+    fn a_matching_job_not_currently_manual_is_refused() {
+        let statuses = vec![status(
+            1,
+            "deadbeef",
+            json!([{ "id": 9, "name": "deploy", "status": "success" }]),
+        )];
+        assert!(select_deploy_job(&statuses, "deadbeef", "deploy").is_err());
+    }
+
+    #[test]
+    fn an_exact_sha_match_with_a_manual_job_is_selected() {
+        let statuses = vec![
+            status(
+                1,
+                "other-sha",
+                json!([{ "id": 5, "name": "deploy", "status": "manual" }]),
+            ),
+            status(
+                2,
+                "deadbeef",
+                json!([{ "id": 9, "name": "deploy", "status": "manual" }]),
+            ),
+        ];
+        let (pipeline_id, job_id) = select_deploy_job(&statuses, "deadbeef", "deploy").unwrap();
+        assert_eq!(pipeline_id, 2);
+        assert_eq!(job_id, 9);
+    }
+
+    #[test]
+    fn sha_matching_is_case_insensitive() {
+        let statuses = vec![status(
+            1,
+            "DEADBEEF",
+            json!([{ "id": 9, "name": "deploy", "status": "manual" }]),
+        )];
+        let (pipeline_id, job_id) = select_deploy_job(&statuses, "deadbeef", "deploy").unwrap();
+        assert_eq!(pipeline_id, 1);
+        assert_eq!(job_id, 9);
+    }
 }

@@ -54,7 +54,19 @@ async function main() {
   const log = []
   const results = []
   const screenshots = []
-  const browser = await chromium.launch({ headless: true })
+  // WebRTC's own ICE/STUN candidate gathering is not HTTP(S)/WS traffic and
+  // is invisible to `context.route`/`routeWebSocket` below; these two flags
+  // are Chromium's own switch to stop it from ever dialling a candidate
+  // outside the configured proxy (`disable_non_proxied_udp` refuses direct
+  // UDP entirely once a proxy is set).
+  const browser = await chromium.launch({
+    headless: true,
+    proxy: spec.proxy_url ? { server: spec.proxy_url } : undefined,
+    args: [
+      '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+      '--disable-features=WebRtcHideLocalIpsWithMdns',
+    ],
+  })
   let page
   try {
     // Blocking service workers prevents cached or service-worker initiated
@@ -96,12 +108,24 @@ async function main() {
         } else if (step.kind === 'click') {
           await page.locator(step.selector).click({ timeout: spec.timeout_ms })
         } else if (step.kind === 'fill') {
-          if (step.credential_env && new URL(page.url()).origin !== new URL(spec.start_url).origin) {
-            throw new Error('dedicated test credentials may be filled only on the primary QA origin')
+          const locator = page.locator(step.selector)
+          if (step.credential_env) {
+            if (new URL(page.url()).origin !== new URL(spec.start_url).origin) {
+              throw new Error('dedicated test credentials may be filled only on the primary QA origin')
+            }
+            // Masking is not a promise the value stays off screen — a
+            // misconfigured selector could point at a plain text input that
+            // echoes it. A password-type input is the one element type a
+            // full-page screenshot cannot render legibly, so it is the only
+            // one a credential is ever filled into.
+            const inputType = await locator.evaluate(el => (el.getAttribute('type') || '').toLowerCase())
+            if (inputType !== 'password') {
+              throw new Error('a dedicated test credential may be filled only into a password-type input')
+            }
           }
           const value = step.credential_env ? process.env[step.credential_env] : step.value
           if (typeof value !== 'string') throw new Error('dedicated test credential is unavailable')
-          await page.locator(step.selector).fill(value, { timeout: spec.timeout_ms })
+          await locator.fill(value, { timeout: spec.timeout_ms })
         } else if (step.kind === 'wait_for') {
           await page.locator(step.selector).waitFor({ state: 'visible', timeout: spec.timeout_ms })
         } else {

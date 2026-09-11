@@ -32,6 +32,34 @@ pub enum BoundaryError {
     Other(String),
 }
 
+/// Held for exactly one QA browser run's container. Dropping it restores
+/// the QA egress gateway to deny-all; the mutex permit inside it also keeps
+/// two QA browser runs from ever observing each other's scope.
+pub struct QaEgressGuard {
+    _permit: tokio::sync::MutexGuard<'static, ()>,
+    reset: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl QaEgressGuard {
+    pub fn new(
+        permit: tokio::sync::MutexGuard<'static, ()>,
+        reset: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        Self {
+            _permit: permit,
+            reset: Some(Box::new(reset)),
+        }
+    }
+}
+
+impl Drop for QaEgressGuard {
+    fn drop(&mut self) {
+        if let Some(reset) = self.reset.take() {
+            reset();
+        }
+    }
+}
+
 /// One way of putting a harness behind a boundary the node can verify.
 #[async_trait]
 pub trait Backend: Send + Sync {
@@ -67,6 +95,27 @@ pub trait Backend: Send + Sync {
     /// The port the node itself serves the CONNECT allowlist proxy on, when
     /// no gateway container carries it.
     fn proxy_port(&self) -> Option<u16> {
+        None
+    }
+    /// Restrict this backend's dedicated QA browser egress gateway to
+    /// exactly these hosts for the life of the returned guard. Every QA
+    /// browser run acquires this before its container starts and holds it
+    /// until the container exits. `Err` when this backend has no scoped QA
+    /// gateway wired: the caller refuses to run rather than proceed on the
+    /// harness's own (LLM-provider-only, and shared with every other
+    /// session) egress path.
+    async fn scope_qa_egress(
+        &self,
+        _allowed_hosts: &[String],
+    ) -> Result<QaEgressGuard, BoundaryError> {
+        Err(BoundaryError::Other(format!(
+            "the {} backend has no QA browser egress gateway",
+            self.kind()
+        )))
+    }
+    /// `http://host:port` a QA browser container gives Playwright as its
+    /// proxy once `scope_qa_egress` succeeds. `None` when it always errors.
+    fn qa_proxy_url(&self) -> Option<String> {
         None
     }
     /// Remove harnesses left over from a previous run, by name.

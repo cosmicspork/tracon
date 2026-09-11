@@ -28,6 +28,7 @@ pub mod qa;
 pub mod rollups;
 pub mod transfers;
 pub mod vectors;
+pub use candidate::*;
 pub use corpus::*;
 pub use evidence::*;
 pub use operator::*;

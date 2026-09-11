@@ -45,7 +45,7 @@ impl AppState {
     }
 }
 
-pub(crate) struct ApiError(StatusCode, String);
+pub struct ApiError(StatusCode, String);
 
 impl ApiError {
     pub fn new(code: StatusCode, message: impl Into<String>) -> Self {

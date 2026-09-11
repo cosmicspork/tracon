@@ -1,13 +1,20 @@
 //! Operator API for candidate-bound QA and repository-derived prototypes.
 
-use axum::{extract::{Path, State}, http::StatusCode, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
     authority,
     policy::Verdict,
-    qa::{self, service::{self, QaAccess}},
+    qa::{
+        self,
+        service::{self, QaAccess},
+    },
     store::CandidateRow,
 };
 
@@ -33,7 +40,9 @@ pub async fn candidate_targets(
     Path(candidate_id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let candidate = candidate(&state, &candidate_id)?;
-    Ok(Json(json!({ "targets": target_views(&state, &candidate)? })))
+    Ok(Json(
+        json!({ "targets": target_views(&state, &candidate)? }),
+    ))
 }
 
 pub async fn deploy(
@@ -86,10 +95,13 @@ pub async fn browser_run(
     let deployment = state
         .store()
         .qa_deployment(&run.deployment_id)?
-        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "QA browser run has no deployment record"))?;
-    let newest = state
-        .store()
-        .qa_latest_target_observation(&run.target_id)?;
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "QA browser run has no deployment record",
+            )
+        })?;
+    let newest = state.store().qa_latest_target_observation(&run.target_id)?;
     run.evidence_state = qa::evidence_state(&deployment, &run, newest.as_ref()).into();
     let assets = state.store().qa_assets_for_run(&id)?;
     Ok(Json(json!({ "run": run, "assets": assets })))
@@ -111,7 +123,10 @@ fn access(state: &AppState) -> QaAccess<'_> {
 
 fn candidate(state: &AppState, id: &str) -> ApiResult<CandidateRow> {
     if id.is_empty() || id.len() > 256 || id.contains(['\0', '\r', '\n']) {
-        return Err(ApiError::new(StatusCode::BAD_REQUEST, "candidate id is malformed"));
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "candidate id is malformed",
+        ));
     }
     state
         .store()
@@ -127,10 +142,13 @@ fn qa_evidence_json(state: &AppState, candidate: &CandidateRow) -> ApiResult<Val
         let deployment = state
             .store()
             .qa_deployment(&run.deployment_id)?
-            .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "QA browser run has no deployment record"))?;
-        let newest = state
-            .store()
-            .qa_latest_target_observation(&run.target_id)?;
+            .ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::CONFLICT,
+                    "QA browser run has no deployment record",
+                )
+            })?;
+        let newest = state.store().qa_latest_target_observation(&run.target_id)?;
         run.evidence_state = qa::evidence_state(&deployment, run, newest.as_ref()).into();
         assets.extend(state.store().qa_assets_for_run(&run.id)?);
     }
@@ -164,9 +182,19 @@ fn target_views(state: &AppState, candidate: &CandidateRow) -> ApiResult<Vec<Val
         if !granted(state, candidate, qa::BROWSER_VERIFY_ACTION, &browser_target)? {
             missing.push(format!("browser verification: {browser_target}"));
         }
-        if let Some(credential) = target.browser.test_credential.as_deref().filter(|name| !name.is_empty()) {
+        if let Some(credential) = target
+            .browser
+            .test_credential
+            .as_deref()
+            .filter(|name| !name.is_empty())
+        {
             let account_target = qa::test_account_authority_target(id, credential);
-            if !granted(state, candidate, qa::BROWSER_TEST_ACCOUNT_ACTION, &account_target)? {
+            if !granted(
+                state,
+                candidate,
+                qa::BROWSER_TEST_ACCOUNT_ACTION,
+                &account_target,
+            )? {
                 missing.push(format!("test account: {account_target}"));
             }
         }
@@ -194,11 +222,12 @@ fn granted(
     if session_id.is_empty() {
         return Ok(false);
     }
-    let policy = state
-        .tools
-        .policy
-        .read()
-        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "policy lock is unavailable"))?;
+    let policy = state.tools.policy.read().map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "policy lock is unavailable",
+        )
+    })?;
     let evidence = json!({ "candidate_id": candidate.id, "head_sha": candidate.head_sha });
     let decision = authority::decide(
         state.store(),

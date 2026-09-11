@@ -57,8 +57,12 @@ pub struct BrowserScenario {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BrowserStep {
-    Navigate { path: String },
-    Click { selector: String },
+    Navigate {
+        path: String,
+    },
+    Click {
+        selector: String,
+    },
     /// `credential_env` is the *name* of a key inside the configured dedicated
     /// test-account broker entry. The value is never accepted from, returned to,
     /// or persisted by this API.
@@ -69,7 +73,9 @@ pub enum BrowserStep {
         #[serde(default)]
         credential_env: Option<String>,
     },
-    WaitFor { selector: String },
+    WaitFor {
+        selector: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,7 +113,10 @@ pub fn deploy_authority_target(target_id: &str, target: &QaTarget) -> String {
 }
 
 pub fn browser_authority_target(target_id: &str, target: &QaTarget) -> Result<String, String> {
-    Ok(format!("qa:{target_id}:origin:{}", qa_origin(&target.origin)?))
+    Ok(format!(
+        "qa:{target_id}:origin:{}",
+        qa_origin(&target.origin)?
+    ))
 }
 
 pub fn test_account_authority_target(target_id: &str, credential: &str) -> String {
@@ -121,15 +130,20 @@ pub fn browser_plan(target: &QaTarget, scenario: &BrowserScenario) -> Result<Bro
         return Err(format!("browser scenario has more than {MAX_STEPS} steps"));
     }
     if scenario.assertions.len() > MAX_ASSERTIONS {
-        return Err(format!("browser scenario has more than {MAX_ASSERTIONS} assertions"));
+        return Err(format!(
+            "browser scenario has more than {MAX_ASSERTIONS} assertions"
+        ));
     }
+    ensure_no_screenshot_before_credential_leaves_screen(scenario)?;
     let mut screenshots = 0usize;
     for step in &scenario.steps {
         match step {
             BrowserStep::Navigate { path } => {
                 browser_url(&origin, path)?;
             }
-            BrowserStep::Click { selector } | BrowserStep::WaitFor { selector } => selector_ok(selector)?,
+            BrowserStep::Click { selector } | BrowserStep::WaitFor { selector } => {
+                selector_ok(selector)?
+            }
             BrowserStep::Fill {
                 selector,
                 value,
@@ -162,7 +176,9 @@ pub fn browser_plan(target: &QaTarget, scenario: &BrowserScenario) -> Result<Bro
             BrowserAssertion::Screenshot { label } => {
                 screenshots += 1;
                 if screenshots > MAX_SCREENSHOTS {
-                    return Err(format!("browser scenario has more than {MAX_SCREENSHOTS} screenshots"));
+                    return Err(format!(
+                        "browser scenario has more than {MAX_SCREENSHOTS} screenshots"
+                    ));
                 }
                 label_ok(label)?;
             }
@@ -174,6 +190,49 @@ pub fn browser_plan(target: &QaTarget, scenario: &BrowserScenario) -> Result<Bro
         steps: scenario.steps.clone(),
         assertions: scenario.assertions.clone(),
     })
+}
+
+/// Refuse a scenario that could screenshot a credential-bearing form still
+/// on screen. `Screenshot` assertions all run after every step, so the
+/// question is not interleaving order — it is whether the page that had the
+/// credential filled into it was ever left. A `Navigate` step after the
+/// last credential fill is what "the form was submitted or navigated away
+/// from" means for this declarative surface; nothing here can tell whether
+/// a bare `Click` happened to submit a form, so that alone is never treated
+/// as enough.
+fn ensure_no_screenshot_before_credential_leaves_screen(
+    scenario: &BrowserScenario,
+) -> Result<(), String> {
+    let has_screenshot = scenario
+        .assertions
+        .iter()
+        .any(|assertion| matches!(assertion, BrowserAssertion::Screenshot { .. }));
+    if !has_screenshot {
+        return Ok(());
+    }
+    let Some(last_credential_fill) = scenario.steps.iter().rposition(|step| {
+        matches!(
+            step,
+            BrowserStep::Fill {
+                credential_env: Some(_),
+                ..
+            }
+        )
+    }) else {
+        return Ok(());
+    };
+    let navigated_away = scenario.steps[last_credential_fill + 1..]
+        .iter()
+        .any(|step| matches!(step, BrowserStep::Navigate { .. }));
+    if navigated_away {
+        Ok(())
+    } else {
+        Err(
+            "a screenshot is refused while a credential-bearing form may still be on screen; \
+             add a navigate step after the credential fill before requesting a screenshot"
+                .into(),
+        )
+    }
 }
 
 pub fn requested_credential_keys(scenario: &BrowserScenario) -> BTreeSet<String> {
@@ -231,7 +290,12 @@ pub async fn observe_environment(target: &QaTarget) -> EnvironmentObservation {
     };
     match client.head(endpoint).send().await {
         Ok(response) if response.status().is_success() => match response.headers().get(header) {
-            Some(value) => match value.to_str().ok().map(str::trim).filter(|v| identity_ok(v)) {
+            Some(value) => match value
+                .to_str()
+                .ok()
+                .map(str::trim)
+                .filter(|v| identity_ok(v))
+            {
                 Some(identity) => EnvironmentObservation {
                     identity: Some(identity.to_string()),
                     state: "fresh",
@@ -289,7 +353,10 @@ pub fn evidence_state(
     match newest_target_observation {
         Some(newest)
             if newest.identity_state == "fresh"
-                && newest.environment_identity == deployment.environment_identity => "fresh",
+                && newest.environment_identity == deployment.environment_identity =>
+        {
+            "fresh"
+        }
         Some(newest) if newest.identity_state == "fresh" => "stale",
         Some(_) => "unknown",
         None => "unknown",
@@ -301,7 +368,17 @@ pub fn evidence_state(
 /// returned to callers, even if a page or browser wrote one into its console.
 pub fn bounded_redacted_log(raw: &[u8], secret_values: impl IntoIterator<Item = String>) -> String {
     let start = raw.len().saturating_sub(MAX_LOG_BYTES);
-    let mut text = String::from_utf8_lossy(&raw[start..]).into_owned();
+    let text = String::from_utf8_lossy(&raw[start..]).into_owned();
+    redact_secrets(&text, secret_values)
+}
+
+/// Replace every occurrence of a secret value with a fixed marker. Applied
+/// to runner logs and to the assertion results a run produces: a credential
+/// value is never persisted verbatim into durable evidence, however it got
+/// there — an assertion's own `detail` (a page title, a visible text match)
+/// is exactly as capable of echoing one back as a console log line is.
+pub fn redact_secrets(text: &str, secret_values: impl IntoIterator<Item = String>) -> String {
+    let mut text = text.to_string();
     for value in secret_values {
         if !value.is_empty() {
             text = text.replace(&value, "[redacted]");
@@ -318,7 +395,8 @@ pub fn browser_url(origin: &str, path: &str) -> Result<String, String> {
     {
         return Err("browser paths must be bounded absolute paths on the configured origin".into());
     }
-    let mut url = url::Url::parse(origin).map_err(|e| format!("configured origin is invalid: {e}"))?;
+    let mut url =
+        url::Url::parse(origin).map_err(|e| format!("configured origin is invalid: {e}"))?;
     url.set_path(path);
     url.set_query(None);
     url.set_fragment(None);
@@ -360,7 +438,9 @@ fn env_key_ok(value: &str) -> Result<(), String> {
 fn label_ok(value: &str) -> Result<(), String> {
     if value.is_empty()
         || value.len() > 64
-        || !value.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
     {
         Err("screenshot labels must be lowercase letters, digits, or dashes".into())
     } else {
@@ -377,8 +457,12 @@ fn identity_ok(value: &str) -> bool {
 }
 
 /// The program placed into a trusted runtime volume before a browser run. It
-/// uses Playwright's network interception for every request and WebSocket;
-/// callers also set the container's proxy/boundary, giving defence in depth.
+/// uses Playwright's network interception for every request and WebSocket,
+/// and its `proxy_url` when set is the same run's scoped egress gateway
+/// (`Backend::scope_qa_egress`) — the container's own network boundary,
+/// narrowed to the configured target origin(s) for exactly this run, not
+/// the harness's LLM-provider-only allowlist. Route interception is defence
+/// in depth on top of that network boundary, not a substitute for it.
 pub const BROWSER_RUNNER: &str = include_str!("qa/browser-runner.cjs");
 
 /// Parse the browser's bounded JSON report. The report is only accepted after
@@ -428,4 +512,91 @@ pub struct BrowserScreenshot {
     pub label: String,
     /// Relative to the browser workspace's exported immutable snapshot.
     pub path: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::QaTarget;
+
+    fn target() -> QaTarget {
+        QaTarget {
+            origin: "http://localhost:4000".into(),
+            ..QaTarget::default()
+        }
+    }
+
+    fn scenario(steps: Vec<BrowserStep>, assertions: Vec<BrowserAssertion>) -> BrowserScenario {
+        BrowserScenario {
+            start_path: "/".into(),
+            steps,
+            assertions,
+        }
+    }
+
+    #[test]
+    fn a_screenshot_after_a_credential_fill_with_no_navigation_is_refused() {
+        let scenario = scenario(
+            vec![BrowserStep::Fill {
+                selector: "#password".into(),
+                value: None,
+                credential_env: Some("TEST_PASSWORD".into()),
+            }],
+            vec![BrowserAssertion::Screenshot {
+                label: "after-login".into(),
+            }],
+        );
+        let error = browser_plan(&target(), &scenario).unwrap_err();
+        assert!(error.contains("screenshot"), "{error}");
+    }
+
+    #[test]
+    fn a_screenshot_after_navigating_away_from_a_credential_fill_is_allowed() {
+        let scenario = scenario(
+            vec![
+                BrowserStep::Fill {
+                    selector: "#password".into(),
+                    value: None,
+                    credential_env: Some("TEST_PASSWORD".into()),
+                },
+                BrowserStep::Navigate {
+                    path: "/dashboard".into(),
+                },
+            ],
+            vec![BrowserAssertion::Screenshot {
+                label: "after-login".into(),
+            }],
+        );
+        assert!(browser_plan(&target(), &scenario).is_ok());
+    }
+
+    #[test]
+    fn a_screenshot_with_no_credential_fill_at_all_is_allowed() {
+        let scenario = scenario(
+            vec![BrowserStep::Fill {
+                selector: "#q".into(),
+                value: Some("search text".into()),
+                credential_env: None,
+            }],
+            vec![BrowserAssertion::Screenshot {
+                label: "results".into(),
+            }],
+        );
+        assert!(browser_plan(&target(), &scenario).is_ok());
+    }
+
+    #[test]
+    fn a_credential_fill_with_no_screenshot_at_all_is_allowed() {
+        let scenario = scenario(
+            vec![BrowserStep::Fill {
+                selector: "#password".into(),
+                value: None,
+                credential_env: Some("TEST_PASSWORD".into()),
+            }],
+            vec![BrowserAssertion::TitleContains {
+                text: "Dashboard".into(),
+            }],
+        );
+        assert!(browser_plan(&target(), &scenario).is_ok());
+    }
 }

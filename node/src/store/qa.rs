@@ -217,10 +217,10 @@ impl Store {
         let mut statement = conn.prepare(
             "SELECT * FROM qa_deployment WHERE candidate_id=?1 ORDER BY observed_ms DESC, id DESC",
         )?;
-        statement
+        let rows = statement
             .query_map([candidate_id], QaDeploymentRow::from_row)?
-            .collect::<std::result::Result<_, _>>()
-            .map_err(Into::into)
+            .collect::<std::result::Result<_, _>>();
+        rows.map_err(Into::into)
     }
 
     /// Append one browser run. There is no update path: a later external
@@ -258,10 +258,10 @@ impl Store {
         let mut statement = conn.prepare(
             "SELECT * FROM qa_browser_run WHERE candidate_id=?1 ORDER BY started_ms DESC, id DESC",
         )?;
-        statement
+        let rows = statement
             .query_map([candidate_id], BrowserRunRow::from_row)?
-            .collect::<std::result::Result<_, _>>()
-            .map_err(Into::into)
+            .collect::<std::result::Result<_, _>>();
+        rows.map_err(Into::into)
     }
 
     pub fn qa_insert_asset(&self, row: &QaAssetRow) -> Result<()> {
@@ -279,13 +279,12 @@ impl Store {
 
     pub fn qa_assets_for_run(&self, browser_run_id: &str) -> Result<Vec<QaAssetRow>> {
         let conn = self.conn.lock().unwrap();
-        let mut statement = conn.prepare(
-            "SELECT * FROM qa_asset WHERE browser_run_id=?1 ORDER BY created_ms, id",
-        )?;
-        statement
+        let mut statement =
+            conn.prepare("SELECT * FROM qa_asset WHERE browser_run_id=?1 ORDER BY created_ms, id")?;
+        let rows = statement
             .query_map([browser_run_id], QaAssetRow::from_row)?
-            .collect::<std::result::Result<_, _>>()
-            .map_err(Into::into)
+            .collect::<std::result::Result<_, _>>();
+        rows.map_err(Into::into)
     }
 
     // ---- repository-derived prototypes ----------------------------------
@@ -307,9 +306,13 @@ impl Store {
 
     pub fn prototype(&self, id: &str) -> Result<Option<PrototypeRow>> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT * FROM prototype WHERE id=?1", [id], PrototypeRow::from_row)
-            .optional()
-            .map_err(Into::into)
+        conn.query_row(
+            "SELECT * FROM prototype WHERE id=?1",
+            [id],
+            PrototypeRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn prototypes_for_candidate(&self, candidate_id: &str) -> Result<Vec<PrototypeRow>> {
@@ -317,9 +320,9 @@ impl Store {
         let mut statement = conn.prepare(
             "SELECT * FROM prototype WHERE candidate_id=?1 ORDER BY created_ms DESC, id DESC",
         )?;
-        statement
+        let rows = statement
             .query_map([candidate_id], PrototypeRow::from_row)?
-            .collect::<std::result::Result<_, _>>()
-            .map_err(Into::into)
+            .collect::<std::result::Result<_, _>>();
+        rows.map_err(Into::into)
     }
 }
