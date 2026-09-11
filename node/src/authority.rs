@@ -158,6 +158,7 @@ pub async fn publish_review(
         &review.head_sha,
         title,
         body,
+        recheck_authority,
     )
     .await {
         Ok(published) => {

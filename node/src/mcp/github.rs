@@ -79,6 +79,7 @@ pub async fn call(
     ctx: &CallContext,
     name: &str,
     args: &Value,
+    before_mutation: Option<&dyn Fn() -> Result<(), String>>,
 ) -> Result<Value, String> {
     let env = broker
         .read()
@@ -145,6 +146,9 @@ pub async fn call(
             let method = args.get("method").and_then(Value::as_str).unwrap_or("squash");
             if !matches!(method, "merge" | "squash" | "rebase") {
                 return Err("method must be merge, squash, or rebase".into());
+            }
+            if let Some(recheck) = before_mutation {
+                recheck()?;
             }
             let v = gh.put(
                 &format!("{base}/pulls/{n}/merge"),

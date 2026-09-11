@@ -2016,7 +2016,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
             "UPDATE review SET state='publishing', updated_ms=?2
-             WHERE id=?1 AND state IN ('new','claimed','revising')",
+             WHERE id=?1 AND state IN ('new','claimed')",
             rusqlite::params![id, now_ms()],
         )?;
         Ok(n == 1)

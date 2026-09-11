@@ -118,6 +118,7 @@ pub async fn call(
     ctx: &CallContext,
     name: &str,
     args: &Value,
+    before_mutation: Option<&dyn Fn() -> Result<(), String>>,
 ) -> Result<Value, String> {
     let env = broker
         .read()
@@ -155,6 +156,9 @@ pub async fn call(
                 let mr = get(http, token, &format!("{project_url}/merge_requests/{iid}")).await?;
                 if mr["sha"].as_str() != Some(sha) {
                     return Err("merge request source changed since the authorized revision".into());
+                }
+                if let Some(recheck) = before_mutation {
+                    recheck()?;
                 }
                 let res = http.put(format!("{project_url}/merge_requests/{iid}/merge"))
                     .header("PRIVATE-TOKEN", token)
@@ -300,6 +304,12 @@ pub async fn call(
             }
             if job["status"].as_str() != Some("manual") {
                 return Err("deployment job is not waiting for a manual play".into());
+            }
+            if job["environment"]["name"].as_str() != Some(environment) {
+                return Err("deployment job does not target the authorized environment".into());
+            }
+            if let Some(recheck) = before_mutation {
+                recheck()?;
             }
             let res = http.post(format!("{project_url}/jobs/{job_id}/play")).header("PRIVATE-TOKEN", token)
                 .json(&json!({})).send().await.map_err(|e| format!("mutation-outcome-unknown: gitlab: {e}"))?;

@@ -193,14 +193,15 @@ impl Tools {
         if let Some(ActionRecord::Replay(outcome)) = &action_record {
             return Ok(outcome.clone());
         }
+        let before_mutation = || self.revalidate_consequential(ctx, name, args, gated.one_shot);
         let result = match name {
             consulta::QUERY | consulta::DESCRIBE => consulta::call(&self.broker, &self.cfg, ctx, name, args).await,
             gitlab::MR_STATUS | gitlab::MR_COMMENT | gitlab::MR_MERGE | gitlab::PIPELINE_STATUS
             | gitlab::JOB_TRACE | gitlab::PIPELINE_RUN | gitlab::DEPLOY =>
-                gitlab::call(&self.broker, &self.http, ctx, name, args).await,
+                gitlab::call(&self.broker, &self.http, ctx, name, args, Some(&before_mutation)).await,
             jira::ISSUE | jira::ISSUE_SEARCH | jira::ISSUE_COMMENT | jira::ISSUE_UPDATE
             | jira::ISSUE_CREATE | jira::ISSUE_TRANSITION =>
-                jira::call(&self.broker, &self.http, ctx, name, args).await,
+                jira::call(&self.broker, &self.http, ctx, name, args, Some(&before_mutation)).await,
             review::SUBMIT | review::STATUS | review::VERDICT => {
                 let access = self.session.get().ok_or("review tools are not available on this node")?;
                 review::call(&access.store, &access.manager, ctx, name, args).await
@@ -218,7 +219,7 @@ impl Tools {
                 docs::call(self, access, ctx, name, args).await
             }
             github::PR_STATUS | github::PR_COMMENT | github::RUN_STATUS | github::PR_MERGE =>
-                github::call(&self.broker, &self.http, ctx, name, args).await,
+                github::call(&self.broker, &self.http, ctx, name, args, Some(&before_mutation)).await,
             other => Err(format!("no tool named {other}")),
         };
         let result = match (name, result) {

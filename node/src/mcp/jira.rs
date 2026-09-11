@@ -116,6 +116,7 @@ pub async fn call(
     ctx: &CallContext,
     name: &str,
     args: &Value,
+    before_mutation: Option<&dyn Fn() -> Result<(), String>>,
 ) -> Result<Value, String> {
     let env = broker
         .read()
@@ -325,6 +326,9 @@ pub async fn call(
             let transition = args.get("transition_id").and_then(Value::as_str).map(str::trim)
                 .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')))
                 .ok_or("transition_id is required")?;
+            if let Some(recheck) = before_mutation {
+                recheck()?;
+            }
             let res = http
                 .post(format!("{url}/rest/api/2/issue/{key}/transitions"))
                 .basic_auth(email, Some(token))
