@@ -20,8 +20,10 @@ use serde_json::Value;
 
 pub mod corpus;
 pub mod metrics;
+pub mod operator;
 pub mod vectors;
 pub use corpus::*;
+pub use operator::*;
 pub use records::*;
 
 pub struct Store {

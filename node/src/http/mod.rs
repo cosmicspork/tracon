@@ -175,6 +175,33 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/kill", post(api::kill))
         .route("/api/sessions/{id}/draft", put(api::put_draft))
         .route("/api/permissions/{id}/answer", post(api::answer_permission))
+        .route("/api/operator/questions", get(api::operator_questions))
+        .route(
+            "/api/operator/questions/{id}/answer",
+            post(api::answer_operator_question),
+        )
+        .route(
+            "/api/operator/questions/{id}/cancel",
+            post(api::cancel_operator_question),
+        )
+        .route(
+            "/api/operator/notifications",
+            get(api::operator_notifications),
+        )
+        .route(
+            "/api/operator/notifications/{id}",
+            get(api::operator_notification),
+        )
+        .route("/api/operator/issues", get(api::operator_issues))
+        .route("/api/operator/issues/{id}", get(api::operator_issue))
+        .route(
+            "/api/operator/issues/{id}/reconcile",
+            post(api::reconcile_operator_issue),
+        )
+        .route(
+            "/api/operator/issues/{id}/publish",
+            post(api::publish_operator_issue),
+        )
         .route("/api/reviews/{id}", get(api::get_review))
         .route("/api/reviews/{id}/file", get(api::review_file))
         .route("/api/reviews/{id}/verdict", post(api::decide_review))
@@ -339,6 +366,14 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     tracing::info!(runtime = backend.kind(), "boundary backend");
     let (node_id, identity) = init_node(&store, &cfg, adapter.as_ref(), backend.as_ref()).await?;
     let cleaned = crate::session::reconcile_after_restart(&store, &node_id, backend.as_ref()).await;
+    match store.reconcile_operator_issue_publications() {
+        Ok(0) => {}
+        Ok(count) => tracing::warn!(
+            count,
+            "operator issue publications need reconciliation after restart"
+        ),
+        Err(error) => tracing::error!(%error, "could not reconcile operator issue publications"),
+    }
     if !cleaned.is_empty() {
         tracing::info!(
             sessions = cleaned.len(),

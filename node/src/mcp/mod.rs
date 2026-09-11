@@ -13,6 +13,7 @@ pub mod github;
 pub mod gitlab;
 pub mod jira;
 pub mod memory;
+pub mod operator;
 pub mod review;
 pub mod work;
 
@@ -133,6 +134,9 @@ impl Tools {
             // doing. This means every session gets an MCP server.
             out.extend(memory::definitions());
             out.extend(docs::definitions());
+            // These are intervention-only: asking, pinging, and drafting a
+            // report do not touch a credential or widen a tool policy.
+            out.extend(operator::definitions());
             out.extend(work::definitions());
         }
         out
@@ -153,6 +157,14 @@ impl Tools {
                 "{name} is for a review session the node starts; put your own change up with {}",
                 review::SUBMIT
             ));
+        }
+        if matches!(name, operator::ASK | operator::NOTIFY | operator::REPORT) {
+            let access = self
+                .session
+                .get()
+                .ok_or("operator interventions are not available on this node")?;
+            return operator::call(&access.store, &access.manager, &self.cfg, ctx, name, args)
+                .await;
         }
         let edited = if plan_write {
             None

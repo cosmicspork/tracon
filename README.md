@@ -177,6 +177,21 @@ approval is refused and the changed files are named. `tracon provenance <sha>`
 answers, later, which model, which prompts, which approval and which policy shipped
 a commit.
 
+### Asking, pinging, and complaining
+
+Three tools let an agent reach you without pretending a question is a permission.
+`ask_operator` posts a free-text question, optionally with choices, and blocks
+until you answer it from the queue or the session; the question survives the
+client disconnecting or the node restarting, and a retry with the same
+`request_id` picks the existing answer up instead of asking twice. Silence is
+not consent, and an answer widens nothing. `notify_operator` asks for a real
+push to your devices — title, message, and a link back — rate-limited and
+deduplicated, and reports only what the push service said, never that you saw
+it. `report_issue` drafts a bug report against tracon itself, with expected and
+actual behaviour, reproduction, versions, and attachments, secrets scrubbed; the
+draft sits in the queue for you to read before you authorize opening it on
+GitHub through the broker. None of the three pauses the session.
+
 ## Using the tools from your own harness
 
 Everything above is about harnesses the node starts. A harness you start

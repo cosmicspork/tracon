@@ -65,6 +65,7 @@ pub enum Kind {
     Permission,
     Review,
     Promotion,
+    Operator,
 }
 
 impl Kind {
@@ -73,6 +74,7 @@ impl Kind {
             Kind::Permission => "perm",
             Kind::Review => "review",
             Kind::Promotion => "promo",
+            Kind::Operator => "operator",
         }
     }
 
@@ -85,6 +87,8 @@ impl Kind {
             (Kind::Review, _) => "reviews",
             (Kind::Promotion, 1) => "memory batch",
             (Kind::Promotion, _) => "memory batches",
+            (Kind::Operator, 1) => "operator notification",
+            (Kind::Operator, _) => "operator notifications",
         };
         format!("{n} {noun} waiting")
     }
@@ -121,7 +125,7 @@ impl Notification {
     /// An approval is worth nothing after it expires; a review keeps.
     fn ttl_secs(&self) -> u32 {
         match self.kind {
-            Kind::Permission => TTL_ITEM_SECS,
+            Kind::Permission | Kind::Operator => TTL_ITEM_SECS,
             Kind::Review | Kind::Promotion => TTL_REVIEW_SECS,
         }
     }
@@ -490,6 +494,38 @@ pub async fn deliver(
         }
     }
     outcome
+}
+
+/// Send an intentional operator notification. A successful push-service
+/// response is recorded as an attempt, never represented as human receipt.
+pub async fn send_operator(
+    store: &Arc<Store>,
+    cfg: &Config,
+    notification_id: &str,
+    title: String,
+    body: String,
+    path: String,
+    device_ids: &[String],
+) -> Vec<crate::store::NotificationAttemptRow> {
+    let notification = Notification {
+        kind: Kind::Operator,
+        title,
+        body,
+        path,
+        tag: format!("tracon-operator-{notification_id}"),
+    };
+    let devices = store.push_subscriptions_live(now_ms()).unwrap_or_default();
+    for device in devices
+        .into_iter()
+        .filter(|d| device_ids.is_empty() || device_ids.contains(&d.id))
+    {
+        let outcome = deliver(store, cfg, &device, &notification, now_ms()).await;
+        let _ =
+            store.record_notification_attempt(notification_id, &device.id, &format!("{outcome:?}"));
+    }
+    store
+        .notification_attempts(notification_id)
+        .unwrap_or_default()
 }
 
 fn http_client() -> reqwest::Client {

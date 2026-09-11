@@ -164,6 +164,34 @@ export interface Permission {
   expires_ms: number
 }
 
+export interface OperatorQuestion {
+  id: string
+  session_id: string
+  channel: string
+  node_id: string
+  prompt: string
+  choices_json: string
+  request_key?: string | null
+  state: 'unanswered' | 'answered' | 'cancelled'
+  answer_json: string | null
+  created_ms: number
+  answered_ms: number | null
+}
+
+export interface OperatorIssue {
+  id: string
+  session_id: string
+  channel: string
+  title: string
+  body: string
+  attachments_json: string
+  state: 'draft' | 'publishing' | 'published' | 'uncertain'
+  published_url: string | null
+  publish_error: string | null
+  created_ms: number
+  approved_ms: number | null
+}
+
 export interface Review {
   id: string
   session_id: string

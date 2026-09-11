@@ -15,6 +15,8 @@ import type {
   MeshState,
   NodeConfig,
   NodeInfo,
+  OperatorIssue,
+  OperatorQuestion,
   Promotion,
   PromotionItem,
   ProviderConnectResult,
@@ -100,7 +102,7 @@ export const api = {
     call<{ repo_path: string }>('POST', '/api/repos/clone', b),
   sessions: () => call<Session[]>('GET', '/api/sessions'),
   session: (id: string) =>
-    call<{ session: Session; waiting: unknown[] }>('GET', `/api/sessions/${id}`),
+    call<{ session: Session; waiting: unknown[]; questions: OperatorQuestion[] }>('GET', `/api/sessions/${id}`),
   // Page through the whole history: a long session has more events than one
   // request returns, and stopping at a fixed cap would show the oldest events
   // with a gap before the live tail.
@@ -323,6 +325,29 @@ export const api = {
     }),
   nodeProviderCode: (nodeId: string, name: string, code: string) =>
     call<{ ok: boolean }>('POST', `/api/nodes/${nodeId}/providers/${name}/code`, { code }),
+  operatorQuestions: () => call<{ questions: OperatorQuestion[] }>('GET', '/api/operator/questions'),
+  answerOperatorQuestion: (id: string, answer: string) =>
+    call<{ answered: boolean }>('POST', `/api/operator/questions/${id}/answer`, { answer }),
+  cancelOperatorQuestion: (id: string) =>
+    call<{ cancelled: boolean }>('POST', `/api/operator/questions/${id}/cancel`),
+  operatorIssues: () => call<{ issues: OperatorIssue[] }>('GET', '/api/operator/issues'),
+  operatorIssue: (id: string) => call<{ issue: OperatorIssue }>('GET', `/api/operator/issues/${id}`),
+  publishOperatorIssue: (id: string) =>
+    call<{ published: boolean; url: string }>('POST', `/api/operator/issues/${id}/publish`),
+  operatorNotification: (id: string) =>
+    call<{ notification_id: string; attempts: unknown[]; receipt: string }>(
+      'GET',
+      `/api/operator/notifications/${id}`,
+    ),
+  reconcileOperatorIssue: (id: string) =>
+    call<{ reconciled: boolean; state: string }>('POST', `/api/operator/issues/${id}/reconcile`, {
+      confirmed_absent: true,
+    }),
+  operatorNotifications: () =>
+    call<{ notifications: { notification_id: string; expires_ms: number; attempts: { device_id: string; outcome: string }[] }[]; receipt: string }>(
+      'GET',
+      '/api/operator/notifications',
+    ),
   nodeDisconnectProvider: (nodeId: string, name: string) =>
     call<{ ok: boolean }>('POST', `/api/nodes/${nodeId}/providers/${name}/disconnect`),
   // The work ledger.

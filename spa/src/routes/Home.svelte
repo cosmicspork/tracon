@@ -1,9 +1,12 @@
 <script lang="ts">
+  import { onMount } from 'svelte'
   // What the operator opens onto: a place to start work, then what is waiting
   // on them, then what is running, then what landed. The queue that used to be
   // here showed two empty boxes above a wall of ended sessions — true, and no
   // use. Starting something is the first thing on the page instead.
   import Composer from '../components/Composer.svelte'
+  import OperatorIssueCard from '../components/OperatorIssueCard.svelte'
+  import OperatorQuestionCard from '../components/OperatorQuestionCard.svelte'
   import PermissionCard from '../components/PermissionCard.svelte'
   import PromotionCard from '../components/PromotionCard.svelte'
   import ReviewCard from '../components/ReviewCard.svelte'
@@ -13,7 +16,7 @@
   import { setupSteps } from '../lib/firstrun'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
-  import type { Session, WorkView } from '../lib/types'
+  import type { OperatorIssue, OperatorQuestion, Session, WorkView } from '../lib/types'
 
   const waiting = $derived(store.queue.waiting)
   const reviews = $derived(store.queue.reviews)
@@ -21,6 +24,22 @@
   const running = $derived(store.queue.running)
   // The home shows what landed lately; the whole history has its own screen.
   const landed = $derived(store.queue.ended.slice(0, 6))
+  let questions = $state<OperatorQuestion[]>([])
+  let issues = $state<OperatorIssue[]>([])
+  let notifications = $state<{ notification_id: string; attempts: { device_id: string; outcome: string }[] }[]>([])
+  async function refreshInterventions() {
+    const [questionResult, issueResult, notificationResult] = await Promise.allSettled([
+      api.operatorQuestions(), api.operatorIssues(), api.operatorNotifications(),
+    ])
+    if (questionResult.status === 'fulfilled') questions = questionResult.value.questions
+    if (issueResult.status === 'fulfilled') issues = issueResult.value.issues
+    if (notificationResult.status === 'fulfilled') notifications = notificationResult.value.notifications
+  }
+  onMount(() => {
+    void refreshInterventions()
+    const timer = setInterval(() => void refreshInterventions(), 2000)
+    return () => clearInterval(timer)
+  })
   const ready = $derived(
     setupSteps({
       anyProviderConnected: store.providers.some((p) => p.state === 'connected'),
@@ -72,23 +91,37 @@
   <SetupCard />
 {/if}
 
-{#if waiting.length || reviews.length || promotions.length}
+{#if questions.length || waiting.length || reviews.length || promotions.length || issues.some((issue) => issue.state !== 'published')}
   <div class="h4">
-    Waiting on you <b>{waiting.length + reviews.length + promotions.length} · requests before reviews · oldest first</b>
+    Waiting on you <b>{questions.length + waiting.length + reviews.length + promotions.length + issues.filter((issue) => issue.state !== 'published').length} · questions and requests before reviews · oldest first</b>
   </div>
   <div class="rows">
-    <!-- Requests expire; reviews do not. Requests come first. -->
+    {#each questions as question (question.id)}
+      <OperatorQuestionCard {question} done={refreshInterventions} />
+    {/each}
     {#each waiting as p (p.id)}
       <PermissionCard permission={p} />
     {/each}
     {#each reviews as r (r.id)}
       <ReviewCard review={r} />
     {/each}
-    <!-- Batches last: they neither expire nor hold an agent. -->
+    {#each issues.filter((issue) => issue.state !== 'published') as issue (issue.id)}
+      <OperatorIssueCard {issue} done={refreshInterventions} />
+    {/each}
     {#each promotions as p (p.id)}
       <PromotionCard promotion={p} />
     {/each}
   </div>
+{/if}
+
+{#if notifications.length}
+  <details class="deliveries">
+    <summary>Notification delivery attempts</summary>
+    <p>Attempt and peer-acknowledgement records only; they do not prove a person saw a notification.</p>
+    {#each notifications as notification (notification.notification_id)}
+      <div class="mono">{notification.notification_id.slice(0, 8)} · {notification.attempts.length ? notification.attempts.map((attempt) => `${attempt.device_id.slice(0, 8)}: ${attempt.outcome}`).join(', ') : 'no matching live device'}</div>
+    {/each}
+  </details>
 {/if}
 
 {#if running.length}
