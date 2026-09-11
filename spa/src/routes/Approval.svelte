@@ -298,6 +298,8 @@
                 </details>
               </div>
             {/each}
+          {:else if target?.worktree}
+            <p class="missing">Submitted from a harness you run yourself: the node ran no checks on this candidate.</p>
           {:else}
             <p class="missing">No required checks were configured for this candidate.</p>
           {/if}
