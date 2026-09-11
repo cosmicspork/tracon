@@ -88,9 +88,9 @@ async fn volume_copy_out(
     if destination.exists() {
         std::fs::remove_dir_all(destination)?;
     }
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    // `podman cp <container>:/data/. <dest>` copies into `<dest>`'s parent when
+    // `<dest>` does not exist yet; it must exist first to receive the tree.
+    std::fs::create_dir_all(destination)?;
     let name = format!("tracon-transfer-{}", uuid::Uuid::now_v7().simple());
     let created = tokio::process::Command::new(podman_bin)
         .args([

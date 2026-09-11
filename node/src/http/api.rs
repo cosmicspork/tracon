@@ -690,7 +690,7 @@ pub async fn export_workspace(
     State(s): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let _snapshot = s.manager.snapshot_workspace(&id).await?;
+    let _snapshot = s.manager.snapshot_workspace_or_session(&id).await?;
     Ok(Json(json!({ "workspace_id": id, "exported": true })))
 }
 
@@ -701,7 +701,7 @@ pub async fn prepare_workspace(
     State(s): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<crate::environment::PreparedEnvironment>> {
-    let snapshot = s.manager.snapshot_workspace(&id).await?;
+    let snapshot = s.manager.snapshot_workspace_or_session(&id).await?;
     let workspace = crate::workspace::Workspace {
         id: id.clone(),
         volume: crate::workspace::volume_name(&id),
@@ -719,7 +719,7 @@ pub async fn prepare_workspace(
 /// Download a workspace snapshot as a bounded zip. Symlinks were refused at
 /// import and again at runtime export, so this archive cannot carry an escape.
 pub async fn download_workspace(State(s): State<AppState>, Path(id): Path<String>) -> Response {
-    let snapshot = match s.manager.snapshot_workspace(&id).await {
+    let snapshot = match s.manager.snapshot_workspace_or_session(&id).await {
         Ok(path) => path,
         Err(error) => return ApiError::from(error).into_response(),
     };

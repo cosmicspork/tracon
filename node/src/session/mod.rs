@@ -344,6 +344,26 @@ impl Manager {
         Ok(snapshot)
     }
 
+    /// The same snapshot, addressed by either a session id or the id of an
+    /// imported workspace that has not run a session yet: an operator can
+    /// export and download what they imported without starting anything.
+    pub async fn snapshot_workspace_or_session(&self, id: &str) -> Result<PathBuf, SessionError> {
+        if self.store.get_session(id)?.is_some() {
+            return self.snapshot_workspace(id).await;
+        }
+        let workspace = crate::workspace::Workspace {
+            id: id.to_string(),
+            volume: crate::workspace::volume_name(id),
+            snapshot: crate::workspace::snapshot_path(id),
+        };
+        let snapshot = crate::workspace::export(self.backend.as_ref(), &workspace)
+            .await
+            .map_err(|e| SessionError::Rejected(e.to_string()))?;
+        crate::workspace::sanitize_git(&snapshot)
+            .map_err(|e| SessionError::Rejected(e.to_string()))?;
+        Ok(snapshot)
+    }
+
     pub fn bus(&self) -> &Bus {
         &self.bus
     }
