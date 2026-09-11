@@ -210,7 +210,7 @@ export interface Review {
   base_ref: string
   added: number
   removed: number
-  state: 'new' | 'claimed' | 'revising' | 'approved' | 'rejected' | 'gone'
+  state: 'new' | 'claimed' | 'revising' | 'publishing' | 'approved' | 'rejected' | 'gone'
   verdict_reason: string | null
   publish_result: string | null
   claimed_ms: number | null
