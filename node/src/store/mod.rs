@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod corpus;
+pub mod metrics;
 pub mod vectors;
 pub use corpus::*;
 pub use records::*;

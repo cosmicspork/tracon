@@ -78,6 +78,8 @@ pub struct ChannelMetrics {
     pub human_seconds: f64,
     pub agent_seconds: f64,
     pub sessions: i64,
+    #[serde(flatten)]
+    pub workflow: crate::store::metrics::WorkflowMetrics,
 }
 
 pub fn channel_metrics(
@@ -125,6 +127,9 @@ pub fn channel_metrics(
         / 1000.0;
     let n = accepted.len() as i64;
     let per = |x: f64| (n > 0).then(|| x / n as f64);
+    let mut workflow = store.workflow_metrics(channel, since_ms)?;
+    workflow.interventions += answers;
+    workflow.human_wait_seconds += human_perm;
     Ok(ChannelMetrics {
         channel: channel.into(),
         since_ms,
@@ -138,6 +143,7 @@ pub fn channel_metrics(
         human_seconds: human_perm + human_reviews,
         agent_seconds,
         sessions: sessions.len() as i64,
+        workflow,
     })
 }
 
