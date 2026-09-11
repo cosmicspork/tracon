@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
@@ -7,11 +8,18 @@
 
   let summaries = $state<Record<string, HubRollups>>({})
   let unavailable = $state<string | null>(null)
+  let refreshTick = $state(0)
   let loadedKey = ''
+  let loadedTick = -1
   let loading = false
 
   const channels = $derived(store.channels.filter((channel) => !channel.archived))
   const enabled = $derived(store.mesh?.hub.state === 'connected')
+
+  onMount(() => {
+    const timer = window.setInterval(() => (refreshTick += 1), 60_000)
+    return () => window.clearInterval(timer)
+  })
 
   async function load(key: string) {
     if (loading) return
@@ -34,18 +42,24 @@
     if (loadedKey === key) summaries = fetched
     if (loadedKey === key) unavailable = refusal
     loading = false
+    // A channel set can change while a fetch is running. Fetch its new key
+    // rather than silently leaving the old set visible until another event.
+    if (loadedKey && loadedKey !== key) void load(loadedKey)
   }
 
   $effect(() => {
     const key = enabled ? channels.map((channel) => channel.name).join('\u0000') : ''
+    const tick = refreshTick
     if (!key) {
       loadedKey = ''
+      loadedTick = tick
       summaries = {}
       unavailable = null
       return
     }
-    if (key === loadedKey) return
+    if (key === loadedKey && tick === loadedTick) return
     loadedKey = key
+    loadedTick = tick
     void load(key)
   })
 </script>

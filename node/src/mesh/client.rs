@@ -671,6 +671,19 @@ impl MeshClient {
                 });
             }
         }
+        // A membership response is a snapshot, not an incremental add list.
+        // Clear departed peers' channel grants so authorization never trusts a
+        // stale row after the hub has revoked a node.
+        let current: std::collections::HashSet<&str> = list
+            .iter()
+            .filter_map(|member| member["node_id"].as_str())
+            .collect();
+        for node in self.store.list_nodes().unwrap_or_default() {
+            if node.is_self == 0 && !current.contains(node.id.as_str()) {
+                let _ = self.store.node_channels_set(&node.id, &[]);
+                self.peers.lock().unwrap().remove(&node.id);
+            }
+        }
         self.set_state_ok();
         Ok(n)
     }
@@ -854,7 +867,9 @@ impl MeshClient {
                 Ok(value)
             }
             Err(error) => {
-                self.set_state_down(error.to_string());
+                if matches!(&error, HubError::Transport(_) | HubError::Refused { status: 500..=599, .. }) {
+                    self.set_state_down(error.to_string());
+                }
                 Err(error)
             }
         }

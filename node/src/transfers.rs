@@ -149,6 +149,17 @@ impl SignedTransfer {
         {
             return Err(TransferError::Invalid("selected context is too large".into()));
         }
+        let candidate = &self.payload.candidate;
+        if candidate["id"].as_str() != Some(self.payload.candidate_id.as_str())
+            || candidate["channel"].as_str() != Some(self.payload.channel.as_str())
+            || candidate["head_sha"].as_str().is_none()
+            || self.payload.candidate_id
+                != format!("{}:{}", candidate["head_sha"].as_str().unwrap_or_default(), self.payload.channel)
+        {
+            return Err(TransferError::Invalid(
+                "candidate identity does not bind the transfer id and channel".into(),
+            ));
+        }
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
         if hex::encode(digest) != self.sha256 {
             return Err(TransferError::BadDigest);

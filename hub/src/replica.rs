@@ -158,15 +158,24 @@ impl Replica {
         self.applied.load(Ordering::Relaxed)
     }
 
-    /// Channels the hub holds a keyring for: the ones a node chose to share.
+    /// Channels this hub may currently read. Retaining a key after its hub
+    /// membership is revoked must not keep either replication or summaries
+    /// alive; the encrypted rows remain inaccessible until a new authorization.
     pub fn readable_channels(&self) -> Vec<String> {
         let conn = self.db.lock().unwrap();
         let mut stmt = conn
             .prepare("SELECT name FROM replica_channel ORDER BY name")
             .expect("prepare");
-        stmt.query_map([], |r| r.get(0))
+        let channels = stmt
+            .query_map([], |r| r.get(0))
             .expect("query")
             .filter_map(|r| r.ok())
+            .collect::<Vec<String>>();
+        drop(stmt);
+        drop(conn);
+        channels
+            .into_iter()
+            .filter(|channel| self.hub_is_member(channel))
             .collect()
     }
 
@@ -194,6 +203,14 @@ impl Replica {
             .ok()
             .flatten();
         bytes.and_then(|b| Keyring::from_bytes(&b).ok())
+    }
+
+    fn hub_is_member(&self, channel: &str) -> bool {
+        self.members
+            .get(&self.node_id())
+            .ok()
+            .flatten()
+            .is_some_and(|member| member.channels.iter().any(|name| name == channel))
     }
 
     /// The persisted, newest-per-node aggregate for a readable channel.
@@ -229,10 +246,10 @@ impl Replica {
         .collect()
     }
 
-    /// A key was explicitly handed to this hub for `channel`; ciphertext-only
-    /// channels must not get a rollup read surface.
+    /// A key was explicitly handed to this hub and its live membership still
+    /// allows that channel. A retained key alone is never authorization.
     pub fn reads_channel(&self, channel: &str) -> bool {
-        self.keyring(channel).is_some()
+        self.hub_is_member(channel) && self.keyring(channel).is_some()
     }
 
     fn cursor(&self, channel: &str) -> u64 {
