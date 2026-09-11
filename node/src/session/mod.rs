@@ -298,7 +298,9 @@ impl Manager {
             let tokens = self.tokens.lock().await;
             tokens
                 .iter()
-                .find(|(_, (expected, _))| constant_time_eq(expected.as_bytes(), presented.as_bytes()))
+                .find(|(_, (expected, _))| {
+                    constant_time_eq(expected.as_bytes(), presented.as_bytes())
+                })
                 .map(|(id, (_, channel))| (id.clone(), channel.clone()))
         };
         let (id, channel) = found?;
@@ -310,7 +312,10 @@ impl Manager {
     /// await policy, checks, or an external service must call this again at
     /// dispatch so a concurrent pause or stop wins.
     pub fn ensure_active(&self, session_id: &str) -> Result<(), SessionError> {
-        let row = self.store.get_session(session_id)?.ok_or(SessionError::NotFound)?;
+        let row = self
+            .store
+            .get_session(session_id)?
+            .ok_or(SessionError::NotFound)?;
         let state = SessionState::from_stored(&row.state);
         if state == SessionState::Paused {
             return Err(SessionError::Rejected("session is paused".into()));
@@ -456,7 +461,8 @@ impl Manager {
         }
         let phase_bindings = &bindings["phases"][spec.phase.as_str()];
         let model_source = if spec.model.trim().is_empty() {
-            let (model, source) = self.resolve_default_model(&spec.channel, spec.phase, &bindings)?;
+            let (model, source) =
+                self.resolve_default_model(&spec.channel, spec.phase, &bindings)?;
             spec.model = model;
             source
         } else {
@@ -633,7 +639,11 @@ impl Manager {
         // A plain session has no work item to retain its first instruction.
         // Keep it as a draft before asynchronous setup, and let on_prompt
         // clear it only after the supervisor accepts it.
-        if let Some(prompt) = spec.initial_prompt.as_deref().filter(|prompt| !prompt.trim().is_empty()) {
+        if let Some(prompt) = spec
+            .initial_prompt
+            .as_deref()
+            .filter(|prompt| !prompt.trim().is_empty())
+        {
             self.store.set_draft(&id, Some(prompt))?;
         }
         let row = self.store.get_session(&id)?.ok_or(SessionError::NotFound)?;
@@ -715,6 +725,7 @@ impl Manager {
             .is_some_and(|row| row.state == SessionState::Starting.as_str()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start(
         &self,
         id: &str,
@@ -1047,19 +1058,39 @@ impl Manager {
     /// never resolve one of these for the model gateway.
     pub async fn attach_external(&self, channel: &str) -> Result<String, SessionError> {
         self.channel_usable(channel)?;
-        if self.bindings(channel)["external_stopped"] == true {
+        let bindings = self.bindings(channel);
+        if bindings["external_stopped"] == true {
             return Err(SessionError::Rejected(
                 "external broker access was stopped by the operator; explicitly clear channel binding external_stopped before reattaching".into(),
             ));
         }
         let mut attached = self.external.lock().await;
         if let Some(a) = attached.get(channel) {
-            if self.live.lock().await.contains_key(&a.session_id) {
+            // The in-memory `live` map's cleanup lags a Kill/Stop's
+            // synchronous store fence by a scheduler tick or two; trusting
+            // it here would hand a caller an attachment already published
+            // as closed. The store row is what that fence actually commits.
+            let reusable = self
+                .store
+                .get_session(&a.session_id)?
+                .is_some_and(|row| !SessionState::from_stored(&row.state).is_terminal());
+            if reusable {
                 if let Ok(mut t) = a.last_seen.lock() {
                     *t = Instant::now();
                 }
                 return Ok(a.session_id.clone());
             }
+        }
+        // The live attachment is gone (a node restart drops it; the pause
+        // fence does not), but the operator paused this channel and never
+        // resumed it. Creating a new running attachment here would resume
+        // broker work without the operator's say-so, which is the one thing
+        // a pause promises will not happen.
+        if bindings["external_paused"] == true {
+            return Err(SessionError::Rejected(
+                "external broker access is paused; resume the session before it accepts more work"
+                    .into(),
+            ));
         }
 
         let id = uuid::Uuid::now_v7().to_string();
@@ -1202,7 +1233,11 @@ impl Manager {
         match tx {
             Some(tx) => tokio::time::timeout(COMMAND_SEND_TIMEOUT, tx.send(cmd))
                 .await
-                .map_err(|_| SessionError::Rejected("session supervisor did not accept the command in time".into()))?
+                .map_err(|_| {
+                    SessionError::Rejected(
+                        "session supervisor did not accept the command in time".into(),
+                    )
+                })?
                 .map_err(|_| SessionError::Rejected("session is no longer running".into())),
             // Not live here. Someone else's, or one of ours that has ended.
             None => match self.store.get_session(id)? {
@@ -1425,7 +1460,12 @@ impl Manager {
             return false;
         };
         broker
-            .inject_for(&provider.credential, channel, &self.node_id, &provider.shape)
+            .inject_for(
+                &provider.credential,
+                channel,
+                &self.node_id,
+                &provider.shape,
+            )
             .is_ok()
     }
 
@@ -1472,7 +1512,9 @@ impl Manager {
         }
     }
 
-    /// Reopen only a session that remains supervised on its owning node.
+    /// Reopen a session that remains supervised on its owning node, or an
+    /// external attachment's paused fence, which a restart cannot restore a
+    /// process for but can still honestly release.
     pub async fn resume(&self, id: &str, reason: String) -> Result<(), SessionError> {
         let (ack, wait) = oneshot::channel();
         match self
@@ -1501,44 +1543,126 @@ impl Manager {
                 )
                 .await
                 .map(|_| ()),
+            Err(SessionError::Rejected(_)) => self.resume_stale_external(id, &reason).await,
             Err(e) => Err(e),
         }
     }
 
-    /// Stop a live session. A startup row has no supervisor to command yet, so
-    /// it is made terminal directly and startup observes that fence.
+    /// A restart drops the in-memory attachment an external harness had, but
+    /// the pause fence it left on the channel is durable and outlives it.
+    /// There is no live loop to hand the row back to, so this clears the
+    /// fence and closes the stale row honestly rather than pretending the
+    /// old attachment is running again; the next call re-attaches fresh.
+    /// A managed session has no such shortcut — its process is really gone —
+    /// so this refuses it exactly as `send` already would have.
+    async fn resume_stale_external(&self, id: &str, reason: &str) -> Result<(), SessionError> {
+        let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        if row.node_id != self.node_id
+            || row.state != SessionState::Paused.as_str()
+            || row.harness_id != external::HARNESS_ID
+        {
+            return Err(SessionError::Rejected(
+                "session is not running on this node".into(),
+            ));
+        }
+        if let Some(channel) = self.store.channel_get(&row.channel)? {
+            let mut bindings: serde_json::Value =
+                serde_json::from_str(&channel.bindings_json).unwrap_or_else(|_| json!({}));
+            bindings["external_paused"] = json!(false);
+            self.store.channel_put(
+                &row.channel,
+                &channel.keyring,
+                &serde_json::to_string(&bindings)
+                    .map_err(|error| SessionError::Rejected(error.to_string()))?,
+            )?;
+        }
+        self.store.update_session(
+            id,
+            SessionPatch {
+                state: Some(SessionState::Closed.as_str().into()),
+                end_reason: Some(EndReason::Detached.as_str().into()),
+                last_error: Some(
+                    "operator resumed broker access after a restart; the prior attachment did not survive it, reattach to continue".into(),
+                ),
+                ended_mono_ms: Some(0),
+                turn_active: Some(false),
+                ..Default::default()
+            },
+        )?;
+        self.record(NewEvent {
+            session_id: id.to_string(),
+            work_item_id: None,
+            kind: ek::STATE.into(),
+            ref_id: None,
+            payload: json!({ "state": "closed", "end_reason": "detached", "reason": reason }),
+            at_ms: now_ms(),
+            mono_ms: 0,
+        });
+        if let Ok(Some(row)) = self.store.get_session(id) {
+            self.bus.publish(Frame::Session(Box::new(row)));
+        }
+        Ok(())
+    }
+
+    /// Stop a live session and, for an external harness, durably fence the
+    /// channel: broker access stays refused until the operator explicitly
+    /// clears it. The operator's actual "Stop" action.
     pub async fn stop(&self, id: &str) -> Result<(), SessionError> {
-        if let Some(row) = self.store.get_session(id)? {
-            if row.harness_id == external::HARNESS_ID {
-                let channel = self.store.channel_get(&row.channel)?;
-                if channel.is_none() {
-                    // Materialize both standalone defaults together; creating
-                    // one otherwise makes the other disappear from the
-                    // synthesized channel list.
-                    for name in crate::http::api::DEFAULT_CHANNELS {
-                        self.store.channel_put(name, &[], "{}")?;
-                        self.store.node_channel_add(&self.node_id, name)?;
+        self.terminate(id, true).await
+    }
+
+    /// End one session without touching a channel-wide fence. An external
+    /// harness's next call reattaches fresh; a managed session's row closes
+    /// exactly as `stop` leaves it. Used where ending this attachment, not
+    /// refusing the channel, is the whole request.
+    pub async fn kill(&self, id: &str) -> Result<(), SessionError> {
+        self.terminate(id, false).await
+    }
+
+    /// A startup row has no supervisor to command yet, so it is made
+    /// terminal directly and startup observes that fence.
+    async fn terminate(&self, id: &str, fence_external: bool) -> Result<(), SessionError> {
+        if fence_external {
+            if let Some(row) = self.store.get_session(id)? {
+                if row.harness_id == external::HARNESS_ID {
+                    let channel = self.store.channel_get(&row.channel)?;
+                    if channel.is_none() {
+                        // Materialize both standalone defaults together; creating
+                        // one otherwise makes the other disappear from the
+                        // synthesized channel list.
+                        for name in crate::http::api::DEFAULT_CHANNELS {
+                            self.store.channel_put(name, &[], "{}")?;
+                            self.store.node_channel_add(&self.node_id, name)?;
+                        }
                     }
+                    let channel = self.store.channel_get(&row.channel)?;
+                    let (keyring, mut bindings) = match channel {
+                        Some(channel) => (
+                            channel.keyring,
+                            serde_json::from_str(&channel.bindings_json)
+                                .unwrap_or_else(|_| json!({})),
+                        ),
+                        None => (Vec::new(), json!({})),
+                    };
+                    // Stop supersedes any earlier pause: one fence gates
+                    // reattachment from here on, and it is this one.
+                    bindings["external_stopped"] = json!(true);
+                    bindings["external_paused"] = json!(false);
+                    self.store.channel_put(
+                        &row.channel,
+                        &keyring,
+                        &serde_json::to_string(&bindings)
+                            .map_err(|error| SessionError::Rejected(error.to_string()))?,
+                    )?;
                 }
-                let channel = self.store.channel_get(&row.channel)?;
-                let (keyring, mut bindings) = match channel {
-                    Some(channel) => (
-                        channel.keyring,
-                        serde_json::from_str(&channel.bindings_json).unwrap_or_else(|_| json!({})),
-                    ),
-                    None => (Vec::new(), json!({})),
-                };
-                bindings["external_stopped"] = json!(true);
-                self.store.channel_put(
-                    &row.channel,
-                    &keyring,
-                    &serde_json::to_string(&bindings)
-                        .map_err(|error| SessionError::Rejected(error.to_string()))?,
-                )?;
             }
         }
         // Fence dispatch synchronously before the asynchronous supervisor
-        // teardown. A 200 from Stop must never leave broker access open.
+        // teardown. A 200 must never leave broker access open.
+        // Tracked so the stale-row fallback below can report the teardown
+        // this call already performed instead of re-deriving eligibility
+        // from a row this same call just made terminal.
+        let mut already_closed = false;
         if let Some(row) = self.store.get_session(id)? {
             if row.node_id == self.node_id
                 && row.state != SessionState::Starting.as_str()
@@ -1554,6 +1678,7 @@ impl Manager {
                         ..Default::default()
                     },
                 )?;
+                already_closed = true;
                 if let Ok(Some(row)) = self.store.get_session(id) {
                     self.bus.publish(Frame::Session(Box::new(row)));
                 }
@@ -1570,26 +1695,20 @@ impl Manager {
                 )
                 .await
                 .map(|_| ()),
+            // No live supervisor, but this call already made the row
+            // terminal and published it above: the teardown happened, so
+            // report success rather than rejecting a row this call itself
+            // just closed.
+            Err(SessionError::Rejected(_)) if already_closed => Ok(()),
             Err(SessionError::Rejected(_)) => {
                 let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
                 if row.node_id != self.node_id
                     || (row.state != SessionState::Starting.as_str()
                         && row.state != SessionState::Paused.as_str())
                 {
-                    return Err(SessionError::Rejected("session is not running on this node".into()));
-                }
-                if row.harness_id == external::HARNESS_ID {
-                    if let Some(channel) = self.store.channel_get(&row.channel)? {
-                        let mut bindings: serde_json::Value =
-                            serde_json::from_str(&channel.bindings_json).unwrap_or_else(|_| json!({}));
-                        bindings["external_stopped"] = json!(true);
-                        self.store.channel_put(
-                            &row.channel,
-                            &channel.keyring,
-                            &serde_json::to_string(&bindings)
-                                .map_err(|error| SessionError::Rejected(error.to_string()))?,
-                        )?;
-                    }
+                    return Err(SessionError::Rejected(
+                        "session is not running on this node".into(),
+                    ));
                 }
                 self.store.update_session(
                     id,
@@ -1624,10 +1743,6 @@ impl Manager {
             }
             other => other,
         }
-    }
-
-    pub async fn kill(&self, id: &str) -> Result<(), SessionError> {
-        self.stop(id).await
     }
 
     /// Graceful shutdown: ask every live session to end and wait briefly.
@@ -1684,13 +1799,13 @@ pub async fn reconcile_after_restart(
                 });
             }
         }
-        if s.state == state::SessionState::Paused.as_str() {
-            if let Some(container) = &s.container_name {
-                backend.reconcile(std::slice::from_ref(container)).await;
-            }
-            // A pause deliberately preserves the session record and its
-            // workspace. It cannot resume after process restart because no
-            // harness is live to own, but it must never be resurrected here.
+        if s.state == state::SessionState::Paused.as_str() && s.harness_id == external::HARNESS_ID {
+            // External broker access is fenced on the channel, not owned by
+            // a process this node supervises: the pause already made that
+            // fence durable, a restart does not touch it, and only an
+            // explicit operator Resume (`Manager::resume_stale_external`)
+            // clears it. Resurrecting the row here would not help; closing
+            // it would silently drop the fence for the channel's next call.
             continue;
         }
         if let Some(container) = &s.container_name {
@@ -1701,7 +1816,7 @@ pub async fn reconcile_after_restart(
             SessionPatch {
                 state: Some(state::SessionState::Closed.as_str().into()),
                 end_reason: Some(state::EndReason::HarnessExit.as_str().into()),
-                last_error: Some("node restarted while the session was live".into()),
+                last_error: Some("node restarted while the session was active".into()),
                 turn_active: Some(false),
                 ..Default::default()
             },

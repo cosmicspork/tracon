@@ -157,9 +157,12 @@ impl Loop {
         }
         for (id, sender) in open.drain() {
             let _ = sender.send(PermissionReply::Cancelled);
-            let _ = self
-                .store
-                .resolve_permission(&id, "expired", None, started.elapsed().as_millis() as i64);
+            let _ = self.store.resolve_permission(
+                &id,
+                "expired",
+                None,
+                started.elapsed().as_millis() as i64,
+            );
             self.record(
                 ek::PERMISSION_EXPIRED,
                 Some(id),
@@ -175,6 +178,7 @@ impl Loop {
             started,
         );
         self.publish_queue();
+        self.set_access_fence("external_paused", true);
     }
 
     fn resume(&self, started: Instant, source: PauseSource, reason: &str) -> Result<(), String> {
@@ -188,7 +192,28 @@ impl Loop {
             json!({ "source": source.as_str(), "reason": reason }),
             started,
         );
+        self.set_access_fence("external_paused", false);
         Ok(())
+    }
+
+    fn set_access_fence(&self, key: &str, enabled: bool) {
+        let Ok(Some(session)) = self.store.get_session(&self.session_id) else {
+            return;
+        };
+        let channel = self.store.channel_get(&session.channel).ok().flatten();
+        let (keyring, mut bindings) = match channel {
+            Some(channel) => (
+                channel.keyring,
+                serde_json::from_str(&channel.bindings_json).unwrap_or_else(|_| json!({})),
+            ),
+            None => (Vec::new(), json!({})),
+        };
+        bindings[key] = json!(enabled);
+        let _ = self.store.channel_put(
+            &session.channel,
+            &keyring,
+            &serde_json::to_string(&bindings).unwrap_or_else(|_| "{}".into()),
+        );
     }
 
     fn idle_elapsed(&self) -> Duration {
