@@ -360,6 +360,20 @@ impl Store {
         patch.apply(&conn, id)
     }
 
+    /// Same as `update_session`, but only when the row is still in
+    /// `expected_state`; returns whether it matched. Guards a multi-step
+    /// transition (e.g. a startup handoff) from resurrecting a row a
+    /// concurrent Stop already made terminal underneath it.
+    pub fn update_session_if(
+        &self,
+        id: &str,
+        expected_state: &str,
+        patch: SessionPatch,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        patch.apply_if(&conn, id, expected_state)
+    }
+
     pub fn set_draft(&self, id: &str, text: Option<&str>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1618,7 +1632,7 @@ mod records {
             }
         }
 
-        pub(super) fn apply(self, conn: &Connection, id: &str) -> Result<()> {
+        fn columns(self) -> (Vec<&'static str>, Vec<Box<dyn rusqlite::ToSql>>) {
             let mut sets: Vec<&str> = Vec::new();
             let mut vals: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
             macro_rules! push {
@@ -1642,6 +1656,11 @@ mod records {
             push!("context_size", self.context_size);
             push!("started_mono_ms", self.started_mono_ms);
             push!("ended_mono_ms", self.ended_mono_ms);
+            (sets, vals)
+        }
+
+        pub(super) fn apply(self, conn: &Connection, id: &str) -> Result<()> {
+            let (mut sets, mut vals) = self.columns();
             if sets.is_empty() {
                 return Ok(());
             }
@@ -1653,6 +1672,34 @@ mod records {
             params.push(&id_owned);
             conn.execute(&sql, params.as_slice())?;
             Ok(())
+        }
+
+        /// Same, but only when the row is still in `expected_state`; reports
+        /// whether it matched. A multi-step transition (starting -> running)
+        /// uses this to refuse to resurrect a row a concurrent Stop already
+        /// made terminal between the caller's last check and this write.
+        pub(super) fn apply_if(
+            self,
+            conn: &Connection,
+            id: &str,
+            expected_state: &str,
+        ) -> Result<bool> {
+            let (mut sets, mut vals) = self.columns();
+            if sets.is_empty() {
+                return Ok(false);
+            }
+            sets.push("updated_ms=?");
+            vals.push(Box::new(now_ms()));
+            let sql = format!(
+                "UPDATE session SET {} WHERE id=? AND state=?",
+                sets.join(", ")
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = vals.iter().map(|b| b.as_ref()).collect();
+            let id_owned = id.to_string();
+            let expected_owned = expected_state.to_string();
+            params.push(&id_owned);
+            params.push(&expected_owned);
+            Ok(conn.execute(&sql, params.as_slice())? > 0)
         }
     }
 }

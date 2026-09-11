@@ -58,7 +58,9 @@ pub enum Command {
         reason: String,
         ack: oneshot::Sender<Result<(), String>>,
     },
-    PauseQuiesceTimeout { turn_id: u64 },
+    PauseQuiesceTimeout {
+        turn_id: u64,
+    },
     Kill,
     /// End the session once the running turn finishes (now, if none is):
     /// the work item closed, or the phase's artifact landed.
@@ -237,115 +239,120 @@ impl Supervisor {
         mut events: mpsc::Receiver<HarnessEvent>,
         mut commands: mpsc::Receiver<Command>,
     ) {
-        self.set_state(SessionState::Running, None);
-        let mut ticker = tokio::time::interval(Duration::from_secs(5));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut killed_by_us = false;
+        // Stop can land between the startup handoff's last check and this
+        // task's registration in `live`; only a row still `starting` may
+        // become the one this task drives, so that race cannot resurrect a
+        // row Stop already closed.
+        if self.claim_running() {
+            let mut ticker = tokio::time::interval(Duration::from_secs(5));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        loop {
-            tokio::select! {
-                ev = events.recv() => match ev {
-                    Some(ev) => {
-                        if self.on_harness_event(ev).await {
-                            break;
-                        }
-                    }
-                    None => break,
-                },
-                cmd = commands.recv() => match cmd {
-                    Some(Command::Prompt { text, ack }) => {
-                        let _ = ack.send(self.on_prompt(text).await);
-                    }
-                    Some(Command::Answer { permission_id, option_id, arguments, ack }) => {
-                        let _ = ack.send(self.on_answer(&permission_id, &option_id, arguments).await);
-                    }
-                    Some(Command::Pause { source, reason, ack }) => {
-                        let _ = ack.send(self.pause(source, &reason).await);
-                    }
-                    Some(Command::Resume { source, reason, ack }) => {
-                        let _ = ack.send(self.resume(source, &reason).await);
-                    }
-                    Some(Command::PauseQuiesceTimeout { turn_id }) => {
-                        if self.paused_turn == Some(turn_id) && self.is_paused() {
-                            killed_by_us = true;
-                            self.shutdown(EndReason::Error).await;
-                            break;
-                        }
-                    }
-                    Some(Command::TurnDone { turn_id, kind, payload, tokens }) => {
-                        if self.active_turn != Some(turn_id) {
-                            self.record(
-                                ek::ERROR,
-                                None,
-                                json!({ "late_completion_ignored": true, "turn_id": turn_id }),
-                            );
-                            continue;
-                        }
-                        let turn_timeout = payload["turn_timeout"] == true;
-                        let paused_completion = self.paused_turn == Some(turn_id);
-                        self.active_turn = None;
-                        self.on_turn_done(kind, payload, tokens).await;
-                        if paused_completion {
-                            // The adapter's barrier drained its inbound reader
-                            // before it let TurnDone through. Drain the
-                            // supervisor queue too, while still fenced, so a
-                            // stale permission/output cannot cross Resume.
-                            while let Ok(event) = events.try_recv() {
-                                let _ = self.on_harness_event(event).await;
+            loop {
+                tokio::select! {
+                    ev = events.recv() => match ev {
+                        Some(ev) => {
+                            if self.on_harness_event(ev).await {
+                                break;
                             }
-                            self.paused_turn = None;
-                            continue;
                         }
-                        if turn_timeout {
-                            let reason = "watchdog stopped a session after its harness turn timed out";
-                            self.set_state(SessionState::Paused, None);
-                            self.record(
-                                ek::SESSION_PAUSED,
-                                None,
-                                json!({ "source": PauseSource::Watchdog.as_str(), "reason": reason }),
-                            );
+                        None => break,
+                    },
+                    cmd = commands.recv() => match cmd {
+                        Some(Command::Prompt { text, ack }) => {
+                            let _ = ack.send(self.on_prompt(text).await);
+                        }
+                        Some(Command::Answer { permission_id, option_id, arguments, ack }) => {
+                            let _ = ack.send(self.on_answer(&permission_id, &option_id, arguments).await);
+                        }
+                        Some(Command::Pause { source, reason, ack }) => {
+                            let _ = ack.send(self.pause(source, &reason).await);
+                        }
+                        Some(Command::Resume { source, reason, ack }) => {
+                            let _ = ack.send(self.resume(source, &reason).await);
+                        }
+                        Some(Command::PauseQuiesceTimeout { turn_id }) => {
+                            if self.paused_turn == Some(turn_id) && self.is_paused() {
+                                killed_by_us = true;
+                                self.shutdown(EndReason::Error).await;
+                                break;
+                            }
+                        }
+                        Some(Command::TurnDone { turn_id, kind, payload, tokens }) => {
+                            if self.active_turn != Some(turn_id) {
+                                self.record(
+                                    ek::ERROR,
+                                    None,
+                                    json!({ "late_completion_ignored": true, "turn_id": turn_id }),
+                                );
+                                continue;
+                            }
+                            let turn_timeout = payload["turn_timeout"] == true;
+                            let paused_completion = self.paused_turn == Some(turn_id);
+                            self.active_turn = None;
+                            self.on_turn_done(kind, payload, tokens).await;
+                            if paused_completion {
+                                // The adapter's barrier drained its inbound reader
+                                // before it let TurnDone through. Drain the
+                                // supervisor queue too, while still fenced, so a
+                                // stale permission/output cannot cross Resume.
+                                while let Ok(event) = events.try_recv() {
+                                    let _ = self.on_harness_event(event).await;
+                                }
+                                self.paused_turn = None;
+                                continue;
+                            }
+                            if turn_timeout {
+                                let reason = "watchdog stopped a session after its harness turn timed out";
+                                self.set_state(SessionState::Paused, None);
+                                self.record(
+                                    ek::SESSION_PAUSED,
+                                    None,
+                                    json!({ "source": PauseSource::Watchdog.as_str(), "reason": reason }),
+                                );
+                                killed_by_us = true;
+                                self.shutdown(EndReason::Error).await;
+                                break;
+                            }
+                            if self.watchdog_pause_if_needed().await {
+                                continue;
+                            }
+                            if self.check_budget().await {
+                                break;
+                            }
+                            if let Some(reason) = self.end_after_turn.take() {
+                                killed_by_us = true;
+                                self.shutdown(reason).await;
+                                break;
+                            }
+                        }
+                        Some(Command::EndAfterTurn(reason)) => {
+                            let turning = self
+                                .store
+                                .get_session(&self.session_id)
+                                .ok()
+                                .flatten()
+                                .is_some_and(|s| s.turn_active != 0);
+                            if turning {
+                                self.end_after_turn = Some(reason);
+                            } else {
+                                killed_by_us = true;
+                                self.shutdown(reason).await;
+                                break;
+                            }
+                        }
+                        Some(Command::Permission { request, reply }) => {
+                            self.on_permission(request, reply).await;
+                        }
+                        Some(Command::Kill) => {
                             killed_by_us = true;
-                            self.shutdown(EndReason::Error).await;
+                            self.shutdown(EndReason::KilledUser).await;
                             break;
                         }
-                        if self.watchdog_pause_if_needed().await {
-                            continue;
-                        }
-                        if self.check_budget().await {
-                            break;
-                        }
-                        if let Some(reason) = self.end_after_turn.take() {
-                            killed_by_us = true;
-                            self.shutdown(reason).await;
-                            break;
-                        }
-                    }
-                    Some(Command::EndAfterTurn(reason)) => {
-                        let turning = self
-                            .store
-                            .get_session(&self.session_id)
-                            .ok()
-                            .flatten()
-                            .is_some_and(|s| s.turn_active != 0);
-                        if turning {
-                            self.end_after_turn = Some(reason);
-                        } else {
-                            killed_by_us = true;
-                            self.shutdown(reason).await;
-                            break;
-                        }
-                    }
-                    Some(Command::Permission { request, reply }) => {
-                        self.on_permission(request, reply).await;
-                    }
-                    Some(Command::Kill) => {
-                        killed_by_us = true;
-                        self.shutdown(EndReason::KilledUser).await;
-                        break;
-                    }
-                    None => break,
-                },
-                _ = ticker.tick() => self.expire_permissions().await,
+                        None => break,
+                    },
+                    _ = ticker.tick() => self.expire_permissions().await,
+                }
             }
         }
 
@@ -354,6 +361,28 @@ impl Supervisor {
         }
         self.flush_chunks();
         self.remove_container().await;
+    }
+
+    /// The only path from `starting` to `running`: guarded so a Stop that
+    /// closed the row in the gap between the startup handoff's last check
+    /// and this task's registration cannot be overwritten back to running.
+    fn claim_running(&self) -> bool {
+        match self.store.update_session_if(
+            &self.session_id,
+            SessionState::Starting.as_str(),
+            SessionPatch::state(SessionState::Running.as_str()),
+        ) {
+            Ok(true) => {
+                self.record(
+                    ek::STATE,
+                    None,
+                    json!({ "state": "running", "end_reason": null }),
+                );
+                self.publish_session();
+                true
+            }
+            _ => false,
+        }
     }
 
     fn is_paused(&self) -> bool {
@@ -409,7 +438,10 @@ impl Supervisor {
         self.reject_open_permissions().await;
         if let Some(turn_id) = active {
             self.paused_turn = Some(turn_id);
-            if tokio::time::timeout(CANCEL_TIMEOUT, self.handle.cancel()).await.is_err() {
+            if tokio::time::timeout(CANCEL_TIMEOUT, self.handle.cancel())
+                .await
+                .is_err()
+            {
                 self.shutdown(EndReason::Error).await;
                 return Err("could not queue the interrupt; the session was stopped".into());
             }
@@ -766,37 +798,38 @@ impl Supervisor {
         // The supervisor owns the result: a stalled harness cannot leave a
         // permanently active turn, and a late answer carries this turn id.
         tokio::spawn(async move {
-            let (kind, mut payload, tokens) = match tokio::time::timeout(TURN_TIMEOUT, handle.prompt(text)).await {
-                Ok(Ok(turn)) => (
-                    ek::TURN_END,
-                    json!({
-                        "stop_reason": turn.stop_reason,
-                        "usage": {
-                            "input_tokens": turn.usage.input_tokens,
-                            "output_tokens": turn.usage.output_tokens,
-                            "total_tokens": turn.usage.total_tokens,
-                            "cached_read_tokens": turn.usage.cached_read_tokens,
-                        }
-                    }),
-                    turn.usage.charged() as i64,
-                ),
-                Ok(Err(e)) => (ek::ERROR, json!({ "error": e.to_string() }), 0),
-                Err(_) => {
-                    let cancel_confirmed = matches!(
-                        tokio::time::timeout(CANCEL_TIMEOUT, handle.cancel()).await,
-                        Ok(Ok(()))
-                    );
-                    (
-                        ek::ERROR,
+            let (kind, mut payload, tokens) =
+                match tokio::time::timeout(TURN_TIMEOUT, handle.prompt(text)).await {
+                    Ok(Ok(turn)) => (
+                        ek::TURN_END,
                         json!({
-                            "error": "harness turn timed out",
-                            "turn_timeout": true,
-                            "cancel_confirmed": cancel_confirmed,
+                            "stop_reason": turn.stop_reason,
+                            "usage": {
+                                "input_tokens": turn.usage.input_tokens,
+                                "output_tokens": turn.usage.output_tokens,
+                                "total_tokens": turn.usage.total_tokens,
+                                "cached_read_tokens": turn.usage.cached_read_tokens,
+                            }
                         }),
-                        0,
-                    )
-                }
-            };
+                        turn.usage.charged() as i64,
+                    ),
+                    Ok(Err(e)) => (ek::ERROR, json!({ "error": e.to_string() }), 0),
+                    Err(_) => {
+                        let cancel_confirmed = matches!(
+                            tokio::time::timeout(CANCEL_TIMEOUT, handle.cancel()).await,
+                            Ok(Ok(()))
+                        );
+                        (
+                            ek::ERROR,
+                            json!({
+                                "error": "harness turn timed out",
+                                "turn_timeout": true,
+                                "cancel_confirmed": cancel_confirmed,
+                            }),
+                            0,
+                        )
+                    }
+                };
             match tokio::time::timeout(CANCEL_TIMEOUT, handle.quiesce_events()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => payload["event_barrier_error"] = json!(error.to_string()),
@@ -816,12 +849,7 @@ impl Supervisor {
 
     /// Record the end of a turn: flush whatever text was still streaming, log
     /// the outcome, and add the turn's tokens to the session's total.
-    async fn on_turn_done(
-        &mut self,
-        kind: &'static str,
-        payload: serde_json::Value,
-        tokens: i64,
-    ) {
+    async fn on_turn_done(&mut self, kind: &'static str, payload: serde_json::Value, tokens: i64) {
         self.flush_chunks();
         let previous = self
             .store
@@ -864,8 +892,12 @@ impl Supervisor {
     async fn remove_container(&self) {
         match tokio::time::timeout(CANCEL_TIMEOUT, self.runner.kill(&self.container)).await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::warn!(container = %self.container, error = %e, "could not remove harness container"),
-            Err(_) => tracing::warn!(container = %self.container, "timed out removing harness container"),
+            Ok(Err(e)) => {
+                tracing::warn!(container = %self.container, error = %e, "could not remove harness container")
+            }
+            Err(_) => {
+                tracing::warn!(container = %self.container, "timed out removing harness container")
+            }
         }
     }
 
