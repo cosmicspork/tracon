@@ -20,7 +20,7 @@ hex = "0.4"
 sha2 = "0.10"
 anyhow = "1"
 async-trait = "0.1"
-axum = { version = "0.8", features = ["json", "macros"] }
+axum = { version = "0.8", features = ["json", "macros", "multipart"] }
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
 mime_guess = "2"

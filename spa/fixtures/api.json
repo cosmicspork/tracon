@@ -851,5 +851,52 @@
         ]
       }
     ]
+  },
+  "/api/docs": {
+    "docs": [
+      {
+        "id": "doc-html-preview",
+        "channel": "personal",
+        "slug": "ref-html-preview",
+        "kind": "ref",
+        "title": "Interactive HTML preview",
+        "body": "",
+        "hash": "2d82d875d3314d1126c0352131662e162fbc4aa33da49c30fc5ed182b933688e",
+        "format": "html",
+        "entry_path": "index.html",
+        "source_name": "preview-demo",
+        "site": "fixture",
+        "hlc_ms": -3600000,
+        "deleted": 0,
+        "archived": 0,
+        "created_ms": -7200000,
+        "updated_ms": -3600000
+      }
+    ]
+  },
+  "/api/docs/personal/ref-html-preview": {
+    "id": "doc-html-preview",
+    "channel": "personal",
+    "slug": "ref-html-preview",
+    "kind": "ref",
+    "title": "Interactive HTML preview",
+    "body": "<!doctype html><title>Interactive HTML preview</title>",
+    "hash": "2d82d875d3314d1126c0352131662e162fbc4aa33da49c30fc5ed182b933688e",
+    "format": "html",
+    "entry_path": "index.html",
+    "source_name": "preview-demo",
+    "bundle_files": [
+      { "path": "index.html", "media_type": "text/html; charset=utf-8", "size_bytes": 743 }
+    ],
+    "site": "fixture",
+    "hlc_ms": -3600000,
+    "deleted": 0,
+    "archived": 0,
+    "created_ms": -7200000,
+    "updated_ms": -3600000
+  },
+  "/api/docs/personal/ref-html-preview/preview": {
+    "url": "/html-preview-fixture.html",
+    "expires_ms": 3600000
   }
 }

@@ -1,6 +1,9 @@
 //! Node configuration: `~/.config/tracon/node.toml`, overridden by flags.
 
-use std::path::{Path, PathBuf};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +41,10 @@ pub struct Docs {
     pub export_channel: String,
     /// How often, in seconds (at least 60). The first export is at startup.
     pub export_every_secs: u64,
+    /// Dedicated bind address for untrusted HTML preview resources.
+    pub preview_listen: SocketAddr,
+    /// Public HTTP(S) origin for the dedicated preview listener.
+    pub preview_url: Option<String>,
 }
 
 impl Default for Docs {
@@ -46,7 +53,33 @@ impl Default for Docs {
             export_dir: None,
             export_channel: String::new(),
             export_every_secs: 1800,
+            preview_listen: "127.0.0.1:7422".parse().expect("valid preview address"),
+            preview_url: None,
         }
+    }
+}
+
+impl Docs {
+    pub fn preview_origin(&self) -> Result<String, String> {
+        let Some(configured) = self.preview_url.as_deref() else {
+            return Ok(format!("http://127.0.0.1:{}", self.preview_listen.port()));
+        };
+        let url = url::Url::parse(configured)
+            .map_err(|error| format!("docs.preview_url is not a valid URL: {error}"))?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || !matches!(url.path(), "" | "/")
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(
+                "docs.preview_url must be an HTTP(S) origin without credentials, path, query, or fragment"
+                    .into(),
+            );
+        }
+        Ok(url.origin().ascii_serialization())
     }
 }
 
@@ -811,6 +844,10 @@ impl Config {
                 for (name, provider) in default_providers() {
                     config.providers.entry(name).or_insert(provider);
                 }
+                config
+                    .docs
+                    .preview_origin()
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
                 Ok(config)
             }
             Err(_) => Ok(Self::default()),
@@ -965,5 +1002,24 @@ shape = "openai"
         assert_eq!(codex.shape, SHAPE_OPENAI_CODEX);
         assert_eq!(codex.login.as_deref(), Some("openai-codex"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn preview_origin_is_separate_and_origin_only() {
+        let mut docs = Docs::default();
+        assert_eq!(docs.preview_origin().unwrap(), "http://127.0.0.1:7422");
+        docs.preview_url = Some("https://preview.example:8443".into());
+        assert_eq!(
+            docs.preview_origin().unwrap(),
+            "https://preview.example:8443"
+        );
+        for invalid in [
+            "ftp://preview.example",
+            "https://preview.example/path",
+            "https://user@preview.example",
+            "https://preview.example?x=1",
+        ] {
+            docs.preview_url = Some(invalid.into());
+            assert!(docs.preview_origin().is_err(), "{invalid}");
+        }
     }
 }

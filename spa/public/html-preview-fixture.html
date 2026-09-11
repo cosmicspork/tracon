@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Interactive HTML preview</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #16202a; color: #eef5fa; }
+  main { max-width: 32rem; padding: 2rem; border: 1px solid #456; border-radius: 1rem; background: #21303d; }
+  button { padding: .6rem 1rem; border: 0; border-radius: .4rem; font: inherit; cursor: pointer; }
+</style>
+<main>
+  <h1>Interactive HTML preview</h1>
+  <p id="status">Local CSS and inline JavaScript are ready.</p>
+  <button type="button">Run interaction</button>
+</main>
+<script>
+  document.querySelector('button').addEventListener('click', () => {
+    document.querySelector('#status').textContent = 'The sandboxed script handled the click.'
+  })
+</script>

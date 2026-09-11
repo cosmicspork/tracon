@@ -25,6 +25,7 @@ pub struct Report {
     pub written: usize,
     pub unchanged: usize,
     pub removed: usize,
+    pub skipped_html: usize,
 }
 
 /// Make `dir` hold exactly these documents.
@@ -80,10 +81,15 @@ fn prune(dir: &Path, keep: &HashSet<&str>) -> std::io::Result<usize> {
     Ok(removed)
 }
 
-/// Every document on a channel, with its body, as the store holds it now.
-pub fn from_store(store: &Store, channel: &str) -> Result<Vec<ExportDoc>, StoreError> {
+/// Every Markdown document on a channel, with an explicit HTML skip count.
+pub fn from_store(store: &Store, channel: &str) -> Result<(Vec<ExportDoc>, usize), StoreError> {
     let mut out = Vec::new();
+    let mut skipped_html = 0;
     for listed in store.doc_list(Some(channel))? {
+        if listed.format == "html" {
+            skipped_html += 1;
+            continue;
+        }
         if let Some(d) = store.doc_get(channel, &listed.slug)? {
             out.push(ExportDoc {
                 slug: d.slug,
@@ -92,7 +98,7 @@ pub fn from_store(store: &Store, channel: &str) -> Result<Vec<ExportDoc>, StoreE
             });
         }
     }
-    Ok(out)
+    Ok((out, skipped_html))
 }
 
 /// `[docs] export_dir` on its timer: at startup, then every
@@ -123,16 +129,19 @@ pub async fn run(store: Arc<Store>, cfg: Arc<Config>) {
         tick.tick().await;
         let (store, into, from) = (store.clone(), dir.clone(), channel.clone());
         let done = tokio::task::spawn_blocking(move || {
-            let docs = from_store(&store, &from).map_err(|e| e.to_string())?;
-            sync_dir(&into, &docs).map_err(|e| e.to_string())
+            let (docs, skipped_html) = from_store(&store, &from).map_err(|e| e.to_string())?;
+            let mut report = sync_dir(&into, &docs).map_err(|e| e.to_string())?;
+            report.skipped_html = skipped_html;
+            Ok::<_, String>(report)
         })
         .await;
         match done {
-            Ok(Ok(r)) if r.written + r.removed > 0 => tracing::info!(
+            Ok(Ok(r)) if r.written + r.removed + r.skipped_html > 0 => tracing::info!(
                 written = r.written,
                 removed = r.removed,
+                skipped_html = r.skipped_html,
                 dir = %dir.display(),
-                "documents exported"
+                "Markdown documents exported"
             ),
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
@@ -181,7 +190,8 @@ mod tests {
             Report {
                 written: 2,
                 unchanged: 1,
-                removed: 3
+                removed: 3,
+                skipped_html: 0,
             }
         );
         for kept in [
@@ -206,9 +216,53 @@ mod tests {
             Report {
                 written: 0,
                 unchanged: 3,
-                removed: 0
+                removed: 0,
+                skipped_html: 0,
             }
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn store_export_reports_and_skips_html_documents() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .write_change(
+                "node",
+                "personal",
+                "document",
+                tracon_sync::ChangeOp::Upsert,
+                "markdown",
+                serde_json::json!({
+                    "channel": "personal",
+                    "slug": "guide-markdown",
+                    "kind": "guide",
+                    "title": "Markdown",
+                    "body": "# Markdown",
+                    "hash": "hash",
+                    "created_ms": 1,
+                    "updated_ms": 1,
+                }),
+            )
+            .unwrap();
+        store
+            .write_html_document_change(
+                "node",
+                "personal",
+                "ref-html",
+                "page.html",
+                "page.html",
+                vec![crate::corpus::html::HtmlFile {
+                    path: "page.html".into(),
+                    bytes: b"<title>HTML</title>".to_vec(),
+                }],
+                None,
+                true,
+            )
+            .unwrap();
+        let (docs, skipped_html) = from_store(&store, "personal").unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].slug, "guide-markdown");
+        assert_eq!(skipped_html, 1);
     }
 }

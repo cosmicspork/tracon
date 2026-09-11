@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HtmlImport from '../components/HtmlImport.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
@@ -15,6 +16,7 @@
   let hits = $state<RecallHit[] | null>(null)
   let error = $state<string | null>(null)
   let creating = $state(false)
+  let importing = $state(false)
   let newSlug = $state('')
   let showArchived = $state(false)
 
@@ -71,6 +73,11 @@
     if (!slug || !channel) return
     router.go(`/docs/${channel}/${slug}/edit`)
   }
+
+  function imported(document: Document) {
+    importing = false
+    router.go(`/docs/${document.channel}/${document.slug}`)
+  }
 </script>
 
 <div class="h4">
@@ -80,9 +87,12 @@
       ? ' · hub down · search is local'
       : ''}{textOnly ? ' · text only · no semantic search' : ''}</b
   >
-  {#if !surface.phone}
-    <button class="lnk r" onclick={() => (creating = !creating)}>{creating ? 'Cancel' : 'New document'}</button>
-  {/if}
+  <span class="r actions">
+    {#if !surface.phone}
+      <button class="lnk" onclick={() => { creating = !creating; importing = false }}>{creating ? 'Cancel' : 'New Markdown'}</button>
+    {/if}
+    <button class="lnk" onclick={() => { importing = !importing; creating = false }}>{importing ? 'Cancel' : 'Import HTML'}</button>
+  </span>
 </div>
 
 <div class="bar">
@@ -103,6 +113,10 @@
   </div>
 {/if}
 
+{#if importing}
+  <HtmlImport {channel} onimported={imported} />
+{/if}
+
 {#if error}
   <div class="empty">{error}</div>
 {:else if hits !== null}
@@ -115,6 +129,7 @@
           <span class="bar"></span>
           <span class="t">
             <em>{h.slug?.split('-')[0]}</em>
+            {#if h.format === 'html'}<em>HTML</em>{/if}
             {h.title}
             <small>{h.text}</small>
           </span>
@@ -133,6 +148,7 @@
         <a class="row" href="/docs/{d.channel}/{d.slug}">
           <span class="bar"></span>
           <span class="t">
+            {#if d.format === 'html'}<em>HTML</em>{/if}
             {d.title}
             <small>{d.slug} · {formatAge(d.updated_ms, clock.now)}</small>
           </span>

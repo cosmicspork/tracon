@@ -56,7 +56,7 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, bool)
         .doc_list(Some(facts.channel))
         .unwrap_or_default()
         .into_iter()
-        .filter(|d| d.kind == "guide")
+        .filter(|d| d.kind == "guide" && d.format == "markdown")
         .filter_map(|d| store.doc_by_id(&d.id).ok().flatten())
         .collect();
     guides.sort_by_key(|d| d.body.len());
@@ -275,6 +275,20 @@ mod tests {
             )
             .unwrap();
         store
+            .write_change(
+                "n",
+                "personal",
+                "document",
+                ChangeOp::Upsert,
+                "html-guide",
+                json!({
+                "channel": "personal", "slug": "guide-html", "kind": "guide", "title": "HTML",
+                "body": "<p>HTML must not become orientation</p>", "hash": "html", "format": "html",
+                "entry_path": "index.html", "source_name": "index.html",
+                "created_ms": 1, "updated_ms": 1}),
+            )
+            .unwrap();
+        store
             .write_change("n", "personal", "memory", ChangeOp::Upsert, "m", json!({
                 "channel": "personal", "scope": "global", "scope_ref": null, "kind": "directive",
                 "body": "run just test", "source_session": null, "source_node": null, "confidence": 1.0,
@@ -305,6 +319,7 @@ mod tests {
         };
         assert!(i("## Conventions") < i("Conventional commits"));
         assert!(!text.contains("not a guide"));
+        assert!(!text.contains("HTML must not become orientation"));
         assert!(i("## This node") < i("## Working agreements"));
         assert!(i("no-merge") < i("## Known"));
         assert!(text.contains("(directive) run just test"));

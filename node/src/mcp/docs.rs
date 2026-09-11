@@ -3,7 +3,6 @@
 //! named by the shipped policy, so it is asked.
 
 use serde_json::{json, Value};
-use tracon_sync::ChangeOp;
 
 use crate::{
     corpus,
@@ -143,6 +142,7 @@ pub async fn call(
                 .ok_or_else(|| format!("no document {slug} on channel {}", ctx.channel))?;
             Ok(json!({
                 "slug": doc.slug, "kind": doc.kind, "title": doc.title, "hash": doc.hash,
+                "format": doc.format, "entry_path": doc.entry_path, "source_name": doc.source_name,
                 "archived": doc.archived != 0, "body": doc.body,
             }))
         }
@@ -192,6 +192,8 @@ pub enum WriteError {
     Slug(String),
     #[error("the document changed since it was read; its hash is now {hash}")]
     Conflict { hash: String, body: String },
+    #[error("HTML documents must be replaced through import")]
+    HtmlDocument,
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
 }
@@ -214,6 +216,12 @@ pub fn write_document(
 ) -> Result<DocumentRow, WriteError> {
     if !valid_slug(slug) {
         return Err(WriteError::Slug(slug.to_string()));
+    }
+    if store
+        .doc_get(channel, slug)?
+        .is_some_and(|document| document.format == "html")
+    {
+        return Err(WriteError::HtmlDocument);
     }
     let hash = corpus::hash_body(body);
     match store.write_document_change(
@@ -238,6 +246,7 @@ pub fn write_document(
             Ok(row)
         }
         DocumentWrite::Conflict { hash, body } => Err(WriteError::Conflict { hash, body }),
+        DocumentWrite::HtmlDocument => Err(WriteError::HtmlDocument),
     }
 }
 
@@ -249,19 +258,13 @@ pub fn delete_document(
     channel: &str,
     slug: &str,
 ) -> Result<bool, crate::store::StoreError> {
-    let Some(existing) = store.doc_get(channel, slug)? else {
+    let Some(changes) = store.delete_document_change(site, channel, slug)? else {
         return Ok(false);
     };
-    corpus::write(
-        store,
-        bus,
-        site,
-        channel,
-        "document",
-        ChangeOp::Delete,
-        &existing.id,
-        Value::Null,
-    )?;
+    bus.publish(crate::stream::Frame::Changes {
+        channel: channel.to_string(),
+        changes,
+    });
     Ok(true)
 }
 

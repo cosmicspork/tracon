@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HtmlImport from '../components/HtmlImport.svelte'
   import { api, ApiError, DocConflict } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
@@ -21,6 +22,9 @@
   let conflict = $state<{ hash: string; body: string } | null>(null)
   let changedElsewhere = $state(false)
   let loaded = $state(false)
+  let previewUrl = $state<string | null>(null)
+  let previewError = $state<string | null>(null)
+  let replacing = $state(false)
 
   async function load(keepDraft = false) {
     loadError = null
@@ -31,6 +35,13 @@
       if (!keepDraft) {
         draft = d.body
         hash = d.hash
+      }
+      previewUrl = null
+      previewError = null
+      replacing = false
+      if (d.format === 'html') {
+        editing = false
+        await mintPreview()
       }
     } catch (e) {
       doc = null
@@ -70,7 +81,7 @@
     else void load()
   })
 
-  const html = $derived(doc ? render(doc.body) : '')
+  const html = $derived(doc?.format === 'markdown' ? render(doc.body) : '')
 
   async function save() {
     busy = true
@@ -115,7 +126,10 @@
     busy = true
     error = null
     try {
-      const d = await api.putDoc(channel, slug, doc.body, doc.hash, archived)
+      const d =
+        doc.format === 'html'
+          ? await api.archiveDoc(channel, slug, archived)
+          : await api.putDoc(channel, slug, doc.body, doc.hash, archived)
       doc = d
       hash = d.hash
     } catch (e) {
@@ -123,6 +137,39 @@
     } finally {
       busy = false
     }
+  }
+
+  async function mintPreview() {
+    previewUrl = null
+    previewError = null
+    try {
+      const preview = await api.previewDoc(channel, slug)
+      previewUrl = preview.url
+    } catch (cause) {
+      previewError = cause instanceof Error ? cause.message : String(cause)
+    }
+  }
+
+  async function downloadOriginal() {
+    error = null
+    try {
+      const { blob, filename } = await api.downloadDoc(channel, slug)
+      const href = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = href
+      link.download = filename
+      link.click()
+      URL.revokeObjectURL(href)
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause)
+    }
+  }
+
+  function bundleReplaced(document: Document) {
+    doc = document
+    hash = document.hash
+    replacing = false
+    void mintPreview()
   }
 
   async function remove() {
@@ -147,7 +194,15 @@
     <span class="sep">/</span>
     {slug}
     <b>{channel}{doc ? ` · ${formatAge(doc.updated_ms, clock.now)}` : ' · new'}{doc ? ` · ${doc.hash.slice(0, 8)}` : ''}{doc?.archived ? ' · archived' : ''}{error && !editing ? ` · ${error}` : ''}</b>
-    {#if !surface.phone && !editing && !loadError}
+    {#if doc?.format === 'html' && !loadError}
+      <span class="r">
+        <button class="lnk" onclick={() => (replacing = !replacing)}>{replacing ? 'Cancel replace' : 'Replace bundle'}</button>
+        <button class="lnk" onclick={() => setArchived(!doc?.archived)} disabled={busy}>
+          {doc.archived ? 'Unarchive' : 'Archive'}
+        </button>
+        <button class="lnk d" onclick={remove} disabled={busy}>Delete</button>
+      </span>
+    {:else if !surface.phone && !editing && !loadError}
       <span class="r">
         <button class="lnk" onclick={() => (editing = true)}>{doc ? 'Edit' : 'Write it'}</button>
         {#if doc}
@@ -179,6 +234,41 @@
     <div class="empty">No document <code>{slug}</code> on {channel}.{#if !surface.phone} <button class="lnk" onclick={() => (editing = true)}>Write it.</button>{/if}</div>
   {:else if loadError}
     <div class="empty err">Could not load this document: {loadError}</div>
+  {:else if doc?.format === 'html'}
+    <section class="html-doc">
+      <div class="html-meta">
+        <span><b>Source</b> {doc.source_name}</span>
+        <span><b>Entry</b> <code>{doc.entry_path}</code></span>
+        <span><b>Generation</b> <code>{doc.hash}</code></span>
+        <span><b>Files</b> {doc.bundle_files?.length ?? 0}</span>
+      </div>
+      <div class="html-actions">
+        <a class="btn p" href="/docs/{channel}/{slug}/preview">Full window</a>
+        <button class="btn" onclick={downloadOriginal}>Download original</button>
+        <button class="btn" onclick={() => (replacing = !replacing)}>
+          {replacing ? 'Cancel replace' : 'Replace bundle'}
+        </button>
+      </div>
+      {#if replacing}
+        <HtmlImport {channel} initialSlug={slug} ifMatch={doc.hash} onimported={bundleReplaced} />
+      {/if}
+      {#if previewError}
+        <div class="empty err">Could not load the isolated preview: {previewError}</div>
+      {:else if previewUrl}
+        <iframe title={doc.title} src={previewUrl} sandbox="allow-scripts"></iframe>
+      {/if}
+      {#if doc.bundle_files?.length}
+        <details>
+          <summary>Bundle files</summary>
+          <div class="bundle-files">
+            {#each doc.bundle_files as file (file.path)}
+              <code>{file.path}</code><span>{file.media_type} · {file.size_bytes.toLocaleString()} bytes</span>
+            {/each}
+          </div>
+        </details>
+      {/if}
+      {#if error}<div class="err">{error}</div>{/if}
+    </section>
   {:else}
     <article class="md">{@html html}</article>
   {/if}
@@ -220,6 +310,20 @@
   }
   .banner .lnk {
     font: inherit;
+  }
+  .html-doc { display: grid; gap: 1rem; }
+  .html-meta { display: flex; gap: .5rem 1.25rem; flex-wrap: wrap; color: var(--ink2); font-size: .86rem; }
+  .html-meta span { min-width: 0; }
+  .html-meta code { overflow-wrap: anywhere; }
+  .html-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+  .html-actions a { text-decoration: none; }
+  iframe { width: 100%; height: min(72vh, 900px); border: 1px solid var(--rule); border-radius: 6px; background: white; }
+  details { color: var(--ink2); }
+  .bundle-files { display: grid; grid-template-columns: minmax(10rem, 1fr) auto; gap: .35rem 1rem; margin-top: .75rem; font-size: .8rem; }
+  .bundle-files span { text-align: right; }
+  @media (max-width: 640px) {
+    .bundle-files { grid-template-columns: 1fr; }
+    .bundle-files span { text-align: left; margin-bottom: .35rem; }
   }
   .md {
     max-width: 72ch;

@@ -90,8 +90,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum DocCommand {
-    /// Import a docs directory: flat `<kind>-<slug>.md` files, and those
-    /// under `archive/` as archived.
+    /// Import Markdown from a docs directory: flat `<kind>-<slug>.md` files,
+    /// and those under `archive/` as archived.
     Import {
         dir: std::path::PathBuf,
         #[arg(long, default_value = "personal")]
@@ -108,7 +108,7 @@ enum DocCommand {
         #[arg(long, default_value = "personal")]
         channel: String,
     },
-    /// Create or replace a document from a file (or stdin with `-`).
+    /// Create or replace a Markdown document from a file (or stdin with `-`).
     Put {
         slug: String,
         file: std::path::PathBuf,
@@ -121,9 +121,9 @@ enum DocCommand {
         #[arg(long, default_value = "personal")]
         channel: String,
     },
-    /// Mirror every document on a channel into a directory as `<slug>.md`,
-    /// archived ones under `archive/`. A deleted or archived document's old
-    /// file is removed; files that are not documents are left alone.
+    /// Mirror every Markdown document on a channel into `<slug>.md`, with
+    /// archived ones under `archive/`. HTML documents are reported and skipped.
+    /// A removed document's old file is removed; unrelated files remain.
     Export {
         dir: std::path::PathBuf,
         #[arg(long, default_value = "personal")]
@@ -1190,7 +1190,12 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
             )
             .await?;
             let mut docs = Vec::new();
+            let mut skipped_html = 0;
             for d in v["docs"].as_array().cloned().unwrap_or_default() {
+                if d["format"].as_str() == Some("html") {
+                    skipped_html += 1;
+                    continue;
+                }
                 let slug = d["slug"].as_str().unwrap_or("").to_string();
                 let full = node_call(
                     Method::GET,
@@ -1207,12 +1212,13 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
             }
             let r = tracon::corpus::export::sync_dir(&dir, &docs)?;
             println!(
-                "{} documents in {}: {} written, {} unchanged, {} removed",
+                "{} Markdown documents in {}: {} written, {} unchanged, {} removed, {} HTML skipped",
                 docs.len(),
                 dir.display(),
                 r.written,
                 r.unchanged,
-                r.removed
+                r.removed,
+                skipped_html,
             );
             Ok(())
         }

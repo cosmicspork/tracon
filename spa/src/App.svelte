@@ -1,6 +1,7 @@
 <script lang="ts">
   import Approval from './routes/Approval.svelte'
   import Doc from './routes/Doc.svelte'
+  import DocPreview from './routes/DocPreview.svelte'
   import Docs from './routes/Docs.svelte'
   import Metrics from './routes/Metrics.svelte'
   import Work from './routes/Work.svelte'
@@ -59,6 +60,7 @@
   const promotionId = $derived(router.path.match(/^\/promotions\/([^/]+)/)?.[1] ?? null)
   const enroll = $derived(router.path === '/nodes/enroll')
   const settings = $derived(router.path === '/settings')
+  const docPreviewRef = $derived(router.path.match(/^\/docs\/([^/]+)\/([^/]+)\/preview$/))
   const docRef = $derived(router.path.match(/^\/docs\/([^/]+)\/([^/]+)(\/edit)?$/))
   const docEdit = $derived(Boolean(docRef?.[3]))
   const workId = $derived(router.path.match(/^\/work\/([^/]+)/)?.[1] ?? null)
@@ -88,6 +90,8 @@
 
 {#if store.authRequired}
   <Login />
+{:else if docPreviewRef}
+  <DocPreview channel={docPreviewRef[1]} slug={docPreviewRef[2]} />
 {:else}
 <div class="shell" class:narrow={collapsed}>
   <nav class="rail">

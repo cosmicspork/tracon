@@ -4,6 +4,7 @@
 
 pub mod chunk;
 pub mod export;
+pub mod html;
 pub mod import;
 pub mod orientation;
 pub mod project;

@@ -149,6 +149,7 @@ pub struct Manager {
     providers: Arc<std::sync::OnceLock<Arc<crate::providers::Providers>>>,
     /// The node's harness adapter, for sessions the node spawns itself.
     adapter: Arc<std::sync::OnceLock<Arc<dyn HarnessAdapter>>>,
+    previews: Arc<crate::http::preview::PreviewTokens>,
 }
 
 impl Manager {
@@ -176,6 +177,7 @@ impl Manager {
             mesh: Arc::new(std::sync::OnceLock::new()),
             providers: Arc::new(std::sync::OnceLock::new()),
             adapter: Arc::new(std::sync::OnceLock::new()),
+            previews: Arc::new(crate::http::preview::PreviewTokens::default()),
         }
     }
 
@@ -185,6 +187,10 @@ impl Manager {
 
     pub fn cfg(&self) -> &Arc<Config> {
         &self.cfg
+    }
+
+    pub fn previews(&self) -> &Arc<crate::http::preview::PreviewTokens> {
+        &self.previews
     }
 
     /// Create a session on this node with the node's own adapter, for
