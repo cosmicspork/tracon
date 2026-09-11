@@ -347,6 +347,11 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     tracing::info!(runtime = backend.kind(), "boundary backend");
     let (node_id, identity) = init_node(&store, &cfg, adapter.as_ref(), backend.as_ref()).await?;
     let cleaned = crate::session::reconcile_after_restart(&store, &node_id, backend.as_ref()).await;
+    match store.reconcile_operator_issue_publications() {
+        Ok(0) => {}
+        Ok(count) => tracing::warn!(count, "operator issue publications need reconciliation after restart"),
+        Err(error) => tracing::error!(%error, "could not reconcile operator issue publications"),
+    }
     if !cleaned.is_empty() {
         tracing::info!(
             sessions = cleaned.len(),

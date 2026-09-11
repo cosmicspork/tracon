@@ -9,6 +9,7 @@ pub struct OperatorQuestionRow {
     pub session_id: String,
     pub channel: String,
     pub node_id: String,
+    pub request_key: Option<String>,
     pub prompt: String,
     pub choices_json: String,
     pub state: String,
@@ -21,7 +22,8 @@ impl OperatorQuestionRow {
     fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             id: r.get("id")?, session_id: r.get("session_id")?, channel: r.get("channel")?,
-            node_id: r.get("node_id")?, prompt: r.get("prompt")?, choices_json: r.get("choices_json")?,
+            node_id: r.get("node_id")?, request_key: r.get("request_key")?,
+            prompt: r.get("prompt")?, choices_json: r.get("choices_json")?,
             state: r.get("state")?, answer_json: r.get("answer_json")?, created_ms: r.get("created_ms")?,
             answered_ms: r.get("answered_ms")?,
         })
@@ -72,12 +74,27 @@ pub struct OperatorNotificationRow {
 impl Store {
     pub fn insert_operator_question(&self, row: &OperatorQuestionRow) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("INSERT INTO operator_question (id, session_id, channel, node_id, prompt, choices_json, state, answer_json, created_ms, answered_ms) VALUES (?1,?2,?3,?4,?5,?6,'unanswered',NULL,?7,NULL)", params![row.id,row.session_id,row.channel,row.node_id,row.prompt,row.choices_json,row.created_ms])?;
+        conn.execute("INSERT INTO operator_question (id, session_id, channel, node_id, request_key, prompt, choices_json, state, answer_json, created_ms, answered_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,'unanswered',NULL,?8,NULL)", params![row.id,row.session_id,row.channel,row.node_id,row.request_key,row.prompt,row.choices_json,row.created_ms])?;
         Ok(())
     }
     pub fn operator_question(&self, id: &str) -> Result<Option<OperatorQuestionRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row("SELECT * FROM operator_question WHERE id=?1", [id], OperatorQuestionRow::from_row).optional().map_err(Into::into)
+    }
+
+    pub fn operator_question_for_request(
+        &self,
+        session_id: &str,
+        request_key: &str,
+    ) -> Result<Option<OperatorQuestionRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM operator_question WHERE session_id=?1 AND request_key=?2",
+            params![session_id, request_key],
+            OperatorQuestionRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
     }
     pub fn open_operator_questions(&self) -> Result<Vec<OperatorQuestionRow>> {
         let conn = self.conn.lock().unwrap();
@@ -140,7 +157,31 @@ impl Store {
         Ok(conn.execute("UPDATE operator_issue SET state='publishing', approved_ms=?2 WHERE id=?1 AND state='draft'", params![id, now_ms()])? == 1)
     }
     pub fn finish_issue_publication(&self, id: &str, url: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap(); conn.execute("UPDATE operator_issue SET state='published', published_url=?2, publish_error=NULL WHERE id=?1 AND state='publishing'", params![id,url])?; Ok(())
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE operator_issue SET state='published', published_url=?2, publish_error=NULL WHERE id=?1 AND state='publishing'",
+            params![id, url],
+        )?;
+        Ok(())
+    }
+    pub fn mark_issue_publication_uncertain(&self, id: &str, reason: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE operator_issue SET state='uncertain', publish_error=?2 WHERE id=?1 AND state='publishing'",
+            params![id, reason],
+        )?;
+        Ok(())
+    }
+
+    /// A process can die after dispatch but before it hears GitHub's reply.
+    /// Preserve the marker-bearing draft for explicit operator reconciliation;
+    /// never retry blindly and create a second issue.
+    pub fn reconcile_operator_issue_publications(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE operator_issue SET state='uncertain', publish_error='publication outcome unknown after node restart; reconcile the draft marker before retrying' WHERE state='publishing'",
+            [],
+        )?)
     }
     pub fn fail_issue_publication(&self, id: &str, error: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap(); conn.execute("UPDATE operator_issue SET state='draft', publish_error=?2 WHERE id=?1 AND state='publishing'", params![id,error])?; Ok(())

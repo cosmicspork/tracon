@@ -340,6 +340,13 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY(channel, origin)
     );
     "#,
+    // 16: a harness retry carries a caller-stable key. One question survives
+    // reconnect/restart; a different body may never reuse its answer.
+    r#"
+    ALTER TABLE operator_question ADD COLUMN request_key TEXT;
+    CREATE UNIQUE INDEX operator_question_request_key ON operator_question(session_id, request_key)
+        WHERE request_key IS NOT NULL;
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

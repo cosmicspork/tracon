@@ -42,7 +42,11 @@
         draftLoaded = true
       })
       .catch(() => (draftLoaded = true))
-    return () => store.close()
+    const timer = setInterval(() => void refreshQuestions().catch(() => {}), 2000)
+    return () => {
+      clearInterval(timer)
+      store.close()
+    }
   })
 
   function onDraftInput() {

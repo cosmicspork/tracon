@@ -171,6 +171,7 @@ export interface OperatorQuestion {
   node_id: string
   prompt: string
   choices_json: string
+  request_key?: string | null
   state: 'unanswered' | 'answered' | 'cancelled'
   answer_json: string | null
   created_ms: number
@@ -184,9 +185,8 @@ export interface OperatorIssue {
   title: string
   body: string
   attachments_json: string
-  state: 'draft' | 'publishing' | 'published'
+  state: 'draft' | 'publishing' | 'published' | 'uncertain'
   published_url: string | null
-  publish_error: string | null
   created_ms: number
   approved_ms: number | null
 }

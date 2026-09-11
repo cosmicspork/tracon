@@ -14,7 +14,7 @@ const MAX_ATTACHMENTS: usize = 3;
 
 pub fn definitions() -> Vec<Value> {
     vec![
-        json!({"name": ASK, "description":"Ask the operator a free-text question, optionally choosing from explicit choices. This is not a permission request and does not grant access.", "inputSchema":{"type":"object","properties":{"question":{"type":"string"},"choices":{"type":"array","items":{"type":"string"},"maxItems":20}},"required":["question"]}}),
+        json!({"name": ASK, "description":"Ask the operator a free-text question, optionally choosing from explicit choices. Supply a stable request_id to recover an unanswered or answered question after reconnect/restart; it never grants access.", "inputSchema":{"type":"object","properties":{"request_id":{"type":"string","maxLength":128},"question":{"type":"string"},"choices":{"type":"array","items":{"type":"string"},"maxItems":20}},"required":["request_id","question"]}}),
         json!({"name": NOTIFY, "description":"Intentionally send an OS/PWA notification to configured operator devices. A push-service attempt is not evidence a human read it.", "inputSchema":{"type":"object","properties":{"title":{"type":"string"},"message":{"type":"string"},"path":{"type":"string"},"device_ids":{"type":"array","items":{"type":"string"}},"node_ids":{"type":"array","items":{"type":"string"}}},"required":["title","message"]}}),
         json!({"name": REPORT, "description":"Draft a report about tracon, its environments, tools, or harness integration. It never pauses execution or uploads repository files/transcripts. The operator inspects and authorizes publication separately.", "inputSchema":{"type":"object","properties":{"title":{"type":"string"},"expected":{"type":"string"},"actual":{"type":"string"},"reproduction":{"type":"string"},"versions":{"type":"string"},"errors":{"type":"string"},"recovery":{"type":"string"},"diagnosis":{"type":"string"},"attachments":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"content":{"type":"string"}},"required":["name","content"]},"maxItems":3}},"required":["title","expected","actual"]}}),
     ]
@@ -37,17 +37,37 @@ pub async fn call(
 }
 
 async fn ask(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, String> {
-    let prompt = text(args, "question", true)?;
-    let choices: Vec<String> = args.get("choices").and_then(Value::as_array).map(|xs| xs.iter().map(|x| x.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).ok_or("choices must contain nonempty strings".to_string())).collect::<Result<_,_>>()).transpose()?.unwrap_or_default();
-    if choices.len() > 20 || choices.iter().any(|choice| choice.len() > MAX_TEXT) {
-        return Err("at most 20 choices of up to 8192 bytes".into());
+    let request_key = text(args, "request_id", true)?;
+    if request_key.len() > 128 || !request_key.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')) {
+        return Err("request_id must be up to 128 ASCII letters, digits, dots, dashes, or underscores".into());
     }
-    let id = uuid::Uuid::now_v7().to_string();
-    store.insert_operator_question(&OperatorQuestionRow {
-        id: id.clone(), session_id: ctx.session_id.clone(), channel: ctx.channel.clone(),
-        node_id: ctx.node_id.clone(), prompt, choices_json: serde_json::to_string(&choices).unwrap(),
-        state: "unanswered".into(), answer_json: None, created_ms: now_ms(), answered_ms: None,
-    }).map_err(|e| e.to_string())?;
+    let prompt = text(args, "question", true)?;
+    let choices = string_array(args, "choices", 20, MAX_TEXT)?;
+    let row = match store.operator_question_for_request(&ctx.session_id, &request_key).map_err(|e| e.to_string())? {
+        Some(existing) => {
+            if existing.channel != ctx.channel || existing.node_id != ctx.node_id
+                || existing.prompt != prompt
+                || existing.choices_json != serde_json::to_string(&choices).unwrap()
+            {
+                return Err("request_id is already bound to a different question".into());
+            }
+            existing
+        }
+        None => {
+            let row = OperatorQuestionRow {
+                id: uuid::Uuid::now_v7().to_string(), session_id: ctx.session_id.clone(),
+                channel: ctx.channel.clone(), node_id: ctx.node_id.clone(), request_key: Some(request_key),
+                prompt, choices_json: serde_json::to_string(&choices).unwrap(), state: "unanswered".into(),
+                answer_json: None, created_ms: now_ms(), answered_ms: None,
+            };
+            store.insert_operator_question(&row).map_err(|e| e.to_string())?;
+            row
+        }
+    };
+    wait_for_question(store, row.id).await
+}
+
+async fn wait_for_question(store: &Arc<Store>, id: String) -> Result<Value, String> {
     loop {
         let row = store.operator_question(&id).map_err(|e| e.to_string())?.ok_or("operator question disappeared")?;
         match row.state.as_str() {
@@ -68,18 +88,17 @@ async fn notify_operator(
 ) -> Result<Value, String> {
     let title = text(args, "title", true)?;
     let message = text(args, "message", true)?;
-    let path = args.get("path").and_then(Value::as_str).unwrap_or("/").trim();
+    let default_path = format!("/sessions/{}", ctx.session_id);
+    let path = match args.get("path") {
+        None => default_path.as_str(),
+        Some(Value::String(path)) => path.trim(),
+        _ => return Err("path must be a string".into()),
+    };
     if !valid_local_path(path) {
         return Err("path must be an unencoded local absolute path".into());
     }
-    let devices = args.get("device_ids").and_then(Value::as_array).map(|xs| xs.iter().map(|v| v.as_str().map(str::to_string).ok_or("device_ids must be strings".to_string())).collect::<Result<Vec<_>,_>>()).transpose()?.unwrap_or_default();
-    if devices.len() > 32 || devices.iter().any(|id| id.is_empty() || id.len() > 256) {
-        return Err("at most 32 nonempty device ids of up to 256 bytes".into());
-    }
-    let mut nodes = args.get("node_ids").and_then(Value::as_array).map(|xs| xs.iter().map(|v| v.as_str().map(str::to_string).ok_or("node_ids must be strings".to_string())).collect::<Result<Vec<_>,_>>()).transpose()?.unwrap_or_default();
-    if nodes.len() > 32 || nodes.iter().any(|id| id.is_empty() || id.len() > 256) {
-        return Err("at most 32 nonempty node ids of up to 256 bytes".into());
-    }
+    let devices = string_array(args, "device_ids", 32, 256)?;
+    let mut nodes = string_array(args, "node_ids", 32, 256)?;
     if nodes.is_empty() {
         nodes.push(ctx.node_id.clone());
     }
@@ -119,11 +138,19 @@ async fn notify_operator(
             path: path.to_string(),
             device_ids: devices.clone(),
         };
-        let outcome = match mesh.command(node, command, std::time::Duration::from_secs(cfg.mesh.command_timeout_secs.max(1))).await {
-            Ok(_) => "acknowledged".to_string(),
-            Err(error) => format!("refused: {error}"),
-        };
-        let _ = store.record_notification_attempt(&id, &format!("node:{node}"), &outcome);
+        match mesh.command(node, command, std::time::Duration::from_secs(cfg.mesh.command_timeout_secs.max(1))).await {
+            Ok(reply) => {
+                let _ = store.record_notification_attempt(&id, &format!("node:{node}"), "peer acknowledged delivery request");
+                for attempt in reply["attempts"].as_array().into_iter().flatten() {
+                    let device = attempt["device_id"].as_str().unwrap_or("unknown-device");
+                    let outcome = attempt["outcome"].as_str().unwrap_or("unknown");
+                    let _ = store.record_notification_attempt(&id, &format!("node:{node}/{device}"), outcome);
+                }
+            }
+            Err(error) => {
+                let _ = store.record_notification_attempt(&id, &format!("node:{node}"), &format!("refused: {error}"));
+            }
+        }
     }
     Ok(json!({"notification_id": id, "deduplicated": false, "attempts": store.notification_attempts(&id).map_err(|e| e.to_string())?, "receipt": "push-service outcomes only; human receipt is unknown"}))
 }
@@ -169,21 +196,50 @@ fn valid_local_path(path: &str) -> bool {
         && !path.split('/').any(|segment| segment == "..")
 }
 fn attachments(args: &Value) -> Result<Vec<Value>, String> { let Some(items)=args.get("attachments").and_then(Value::as_array) else { return Ok(vec![]); }; if items.len()>MAX_ATTACHMENTS{return Err(format!("at most {MAX_ATTACHMENTS} inspectable attachments"));} items.iter().map(|v| { let name=v.get("name").and_then(Value::as_str).map(str::trim).filter(|s|!s.is_empty()).ok_or("attachment name is required")?; let content=v.get("content").and_then(Value::as_str).ok_or("attachment content is required")?; if content.len()>MAX_ATTACHMENT_BYTES{return Err(format!("attachment {name} exceeds {MAX_ATTACHMENT_BYTES} bytes"));} Ok(json!({"name":name,"content":scrub(content)})) }).collect() }
-fn scrub(s: &str) -> String {
-    s.lines()
-        .map(|line| {
-            let lowered = line.to_ascii_lowercase();
-            if ["password", "token", "secret", "authorization:", "bearer ", "api_key", "cookie:", "private key"]
-                .iter()
-                .any(|marker| lowered.contains(marker))
-                || lowered.trim_start().starts_with("ghp_")
-                || lowered.trim_start().starts_with("sk-")
-            {
-                "[redacted secret-looking content]".to_string()
-            } else {
-                line.to_string()
+
+fn string_array(args: &Value, key: &str, max_items: usize, max_bytes: usize) -> Result<Vec<String>, String> {
+    let Some(value) = args.get(key) else { return Ok(Vec::new()); };
+    let values = value.as_array().ok_or_else(|| format!("{key} must be an array"))?;
+    if values.len() > max_items {
+        return Err(format!("at most {max_items} {key}"));
+    }
+    values
+        .iter()
+        .map(|value| {
+            let value = value.as_str().map(str::trim).filter(|value| !value.is_empty())
+                .ok_or_else(|| format!("{key} must contain nonempty strings"))?;
+            if value.len() > max_bytes {
+                return Err(format!("{key} entries exceed {max_bytes} bytes"));
             }
+            Ok(value.to_string())
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
+}
+fn scrub(s: &str) -> String {
+    let mut in_pem = false;
+    let mut out = Vec::new();
+    for line in s.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("-----BEGIN ") {
+            in_pem = true;
+        }
+        let lowered = trimmed.to_ascii_lowercase();
+        let credential_assignment = ["password=", "password:", "token=", "token:", "secret=", "secret=", "api_key=", "authorization:", "cookie:"]
+            .iter()
+            .any(|marker| lowered.contains(marker));
+        if in_pem
+            || credential_assignment
+            || lowered.starts_with("bearer ")
+            || lowered.starts_with("ghp_")
+            || lowered.starts_with("sk-")
+        {
+            out.push("[redacted secret-looking content]".to_string());
+        } else {
+            out.push(line.to_string());
+        }
+        if trimmed.starts_with("-----END ") {
+            in_pem = false;
+        }
+    }
+    out.join("\n")
 }

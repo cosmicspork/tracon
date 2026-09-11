@@ -1069,7 +1069,7 @@ pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Valu
 
 #[derive(Deserialize)]
 pub struct OperatorAnswerBody {
-    pub answer: serde_json::Value,
+    pub answer: String,
 }
 
 pub async fn operator_questions(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
@@ -1081,11 +1081,20 @@ pub async fn answer_operator_question(
     Path(id): Path<String>,
     Json(b): Json<OperatorAnswerBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if s.store().operator_question(&id)?.is_none() {
-        return Err(ApiError(StatusCode::NOT_FOUND, "no such operator question".into()));
+    let question = s.store().operator_question(&id)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        "no such operator question".into(),
+    ))?;
+    let answer = b.answer.trim();
+    if answer.is_empty() || answer.len() > 8 * 1024 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "answer must be 1–8192 bytes".into()));
     }
-    let answer = serde_json::to_string(&b.answer)
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let choices: Vec<String> = serde_json::from_str(&question.choices_json)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "stored question choices are invalid".into()))?;
+    if !choices.is_empty() && !choices.iter().any(|choice| choice == answer) {
+        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, "answer must select one offered choice".into()));
+    }
+    let answer = json!({ "text": answer }).to_string();
     if s.store().answer_operator_question(&id, &answer)?.is_none() {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -1164,6 +1173,14 @@ pub async fn publish_operator_issue(
         .unwrap()
         .env_for("gh", &issue.channel, &s.node_id)
         .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
+    let attachments: serde_json::Value = serde_json::from_str(&issue.attachments_json)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "stored issue attachments are invalid".into()))?;
+    let body = format!(
+        "{}\n\n## Inspectable attachments\n\n```json\n{}\n```\n\n<!-- tracon-issue-draft:{} -->",
+        issue.body,
+        serde_json::to_string_pretty(&attachments).unwrap_or_else(|_| "[]".into()),
+        issue.id,
+    );
     if !s.store().begin_issue_publication(&id)? {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -1179,10 +1196,12 @@ pub async fn publish_operator_issue(
             "--title",
             &issue.title,
             "--body",
-            &issue.body,
+            &body,
         ])
+        .current_dir(Config::state_dir())
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", std::env::var("HOME").unwrap_or_default())
         .envs(env)
         .output()
         .await;
@@ -1198,7 +1217,10 @@ pub async fn publish_operator_issue(
             Err(ApiError(StatusCode::BAD_GATEWAY, err))
         }
         Err(e) => {
-            s.store().fail_issue_publication(&id, &e.to_string())?;
+            s.store().mark_issue_publication_uncertain(
+                &id,
+                &format!("publication dispatch outcome unknown: {e}; reconcile draft marker before retrying"),
+            )?;
             Err(ApiError(StatusCode::BAD_GATEWAY, e.to_string()))
         }
     }

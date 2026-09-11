@@ -91,9 +91,9 @@
   <SetupCard />
 {/if}
 
-{#if questions.length || waiting.length || reviews.length || promotions.length || issues.length}
+{#if questions.length || waiting.length || reviews.length || promotions.length || issues.some((issue) => issue.state !== 'published') || notifications.length}
   <div class="h4">
-    Waiting on you <b>{questions.length + waiting.length + reviews.length + promotions.length + issues.filter((i) => i.state === 'draft').length} · questions and requests before reviews · oldest first</b>
+    Waiting on you <b>{questions.length + waiting.length + reviews.length + promotions.length + issues.filter((issue) => issue.state !== 'published').length} · questions and requests before reviews · oldest first</b>
   </div>
   <div class="rows">
     {#each questions as question (question.id)}
@@ -105,13 +105,13 @@
     {#each reviews as r (r.id)}
       <ReviewCard review={r} />
     {/each}
-    {#each issues as issue (issue.id)}
+    {#each issues.filter((issue) => issue.state !== 'published') as issue (issue.id)}
       <OperatorIssueCard {issue} done={refreshInterventions} />
     {/each}
   {#if notifications.length}
     <details class="deliveries">
       <summary>Notification delivery attempts</summary>
-      <p>Push-service outcomes only; they do not prove a person saw a notification.</p>
+      <p>Attempt and peer-acknowledgement records only; they do not prove a person saw a notification.</p>
       {#each notifications as notification (notification.notification_id)}
         <div class="mono">{notification.notification_id.slice(0, 8)} · {notification.attempts.length ? notification.attempts.map((attempt) => `${attempt.device_id.slice(0, 8)}: ${attempt.outcome}`).join(', ') : 'no matching live device'}</div>
       {/each}
