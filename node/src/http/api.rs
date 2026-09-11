@@ -122,7 +122,11 @@ pub async fn list_authority_grants(
         .collect::<Vec<_>>();
     let policy = s.tools.policy.read().unwrap();
     Ok(Json(json!({
-        "policy": { "version": policy.version, "rules": policy.rules },
+        "policy": {
+            "version": policy.version,
+            "rules": policy.rules,
+            "trusted": policy.trusted,
+        },
         "grants": grants,
     })))
 }

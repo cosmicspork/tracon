@@ -88,7 +88,7 @@ export const api = {
   putChannelBindings: (name: string, patch: Record<string, unknown>) =>
     call<{ name: string; bindings: Record<string, unknown> }>('PUT', `/api/channels/${name}/bindings`, patch),
   authorityGrants: () =>
-    call<{ policy: { version: number; rules: PolicyRule[] }; grants: AuthorityGrant[] }>('GET', '/api/authority/grants'),
+    call<{ policy: { version: number; rules: PolicyRule[]; trusted: boolean }; grants: AuthorityGrant[] }>('GET', '/api/authority/grants'),
   // Push: this node pushes to the phones subscribed here.
   createAuthorityGrant: (grant: Omit<AuthorityGrant, 'id' | 'revoked_ms' | 'created_ms'>) =>
     call<AuthorityGrant>('POST', '/api/authority/grants', grant),

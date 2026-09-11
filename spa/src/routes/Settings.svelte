@@ -122,7 +122,7 @@
   }
 
 
-  let authority = $state<{ policy: { version: number; rules: PolicyRule[] }; grants: AuthorityGrant[] } | null>(null)
+  let authority = $state<{ policy: { version: number; rules: PolicyRule[]; trusted: boolean }; grants: AuthorityGrant[] } | null>(null)
   let grant = $state({
     action: 'merge' as AuthorityGrant['action'],
     verdict: 'allow' as AuthorityGrant['verdict'],
@@ -520,7 +520,11 @@
 <section id="authority">
   <div class="h5">Authority <b>signed policy is inspectable; local grants are narrow and revocable</b></div>
   {#if authority}
-    <p class="why">Policy bundle version {authority.policy.version} has {authority.policy.rules.length} signed rules. This interface cannot change signing keys, trust roots, or policy text.</p>
+    {#if authority.policy.trusted}
+      <p class="why">Policy bundle version {authority.policy.version} has {authority.policy.rules.length} signed rules. This interface cannot change signing keys, trust roots, or policy text.</p>
+    {:else}
+      <div class="banner crit">policy verification failed <b>· consequential actions fail closed; local allow grants cannot authorize them until a valid signed bundle is installed</b></div>
+    {/if}
     <div class="credentials">
       {#each authority.policy.rules as rule (rule.id)}
         <div class="credential">
