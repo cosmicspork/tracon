@@ -193,7 +193,22 @@ pub async fn list_repos(
             Ok(http) => fetch_repos(http, forge, &env, cursor).await,
             Err(error) => Err(error.clone()),
         };
-        out.push(entry);
+        out.push(match entry {
+            Ok(page) => ForgeRepos {
+                forge: forge.name(),
+                repos: page.repos,
+                next_cursor: page.next_cursor,
+                complete: page.complete,
+                error: page.error,
+            },
+            Err(error) => ForgeRepos {
+                forge: forge.name(),
+                repos: Vec::new(),
+                next_cursor: None,
+                complete: false,
+                error: Some(error),
+            },
+        });
     }
     out
 }
