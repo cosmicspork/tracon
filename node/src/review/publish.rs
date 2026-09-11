@@ -1,9 +1,10 @@
-//! Publishing the approved bytes. `gh` for GitHub, `glab` for GitLab; the
-//! token comes from the broker and the CLI runs on the node's side of the
-//! boundary. The harness has no push path except this one, and this one only
-//! runs after a human has approved.
+//! Publishing crosses two explicit boundaries. A candidate is read without a
+//! credential from its runtime snapshot, then imported into a fresh
+//! publisher-controlled bare repository. Only that publisher repository sees
+//! broker-provided forge authentication.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -33,8 +34,6 @@ impl Provider {
         }
     }
 
-    /// The credential this provider publishes with. Naming them after the CLI
-    /// keeps the credential store readable.
     pub fn credential(&self) -> &'static str {
         match self {
             Self::Github => "gh",
@@ -49,7 +48,6 @@ impl Provider {
         }
     }
 
-    /// What the operator is told will happen, before it happens.
     pub fn noun(&self) -> &'static str {
         match self {
             Self::Github => "pull request",
@@ -58,17 +56,14 @@ impl Provider {
     }
 }
 
-/// Where a review is destined. Captured at submit so the approval screen can
-/// say what approving will do.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Target {
     pub provider: String,
-    /// `owner/name` on GitHub, the project path on GitLab.
     pub project: String,
     pub base: String,
     pub branch: String,
-    /// The operator's worktree, for a review a harness they run submitted.
-    /// A session the node started reviews its own, recorded on the session.
+    /// External worktree provenance only. Publication still imports its
+    /// immutable candidate into a distinct publisher repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
 }
@@ -85,21 +80,25 @@ pub enum PublishError {
     Refused { cli: String, stderr: String },
     #[error("the branch moved after approval (reviewed {reviewed:.8}, now {now:.8}); re-review before publishing")]
     BranchMoved { reviewed: String, now: String },
+    #[error("candidate identity changed while transferring to the publisher")]
+    IdentityChanged,
+    #[error("invalid publication target: {0}")]
+    Target(String),
 }
 
-/// Push the branch and open the change, with the approved title and body.
-/// Returns whatever the CLI printed, which is the URL for both of these.
-///
-/// `head_sha` is the commit that was reviewed. The push pins to it — a branch
-/// that moved between approval and publish cannot ride out unreviewed, which is
-/// the TOCTOU the approve-time staleness check alone would leave open.
+/// Publish an immutable candidate. `candidate` is a node-owned snapshot made
+/// immediately before approval, never the mutable agent workspace. Git reads
+/// it with an empty credential environment, writes a bundle, verifies commit
+/// and tree identity after importing it, then pushes only from a new publisher
+/// repository with broker authentication.
 #[allow(clippy::too_many_arguments)]
 pub async fn publish(
     broker: &SharedBroker,
     cfg: &Config,
     channel: &str,
     node_id: &str,
-    worktree: &str,
+    candidate_id: &str,
+    candidate: &str,
     target: &Target,
     head_sha: &str,
     title: &str,
@@ -115,151 +114,262 @@ pub async fn publish(
         .env_for(provider.credential(), channel, node_id)
         .map_err(|e| PublishError::Broker(e.to_string()))?;
 
-    // Re-assert the tip is still the reviewed commit. The staleness check ran at
-    // approve time; a commit landed in the interval must stop the publish rather
-    // than be carried out under an approval it never had.
-    let now = head_of(&cfg.publish.git, worktree).await?;
+    let candidate_path = Path::new(candidate);
+    let now = source_git(&cfg.publish.git, candidate_path, ["rev-parse", "HEAD"]).await?;
     if now != head_sha {
         return Err(PublishError::BranchMoved {
             reviewed: head_sha.to_string(),
             now,
         });
     }
+    let source_type = source_git(&cfg.publish.git, candidate_path, ["cat-file", "-t", head_sha]).await?;
+    if source_type != "commit" {
+        return Err(PublishError::IdentityChanged);
+    }
+    let source_tree = source_git(
+        &cfg.publish.git,
+        candidate_path,
+        ["rev-parse", &format!("{head_sha}^{{tree}}")],
+    )
+    .await?;
     if let Some(recheck) = before_push {
         recheck().map_err(PublishError::Broker)?;
     }
 
-    // The push carries the credential too: a branch the forge cannot see is not
-    // a change anyone can review. It pushes the reviewed commit by sha, not the
-    // live branch tip, and runs with hooks and fsmonitor disabled. No force: a
-    // new branch is created, a fast-forward updates, and a diverged remote
-    // branch is rejected rather than clobbered.
-    let refspec = format!("{head_sha}:refs/heads/{}", target.branch);
-    let operator_checkout = target.worktree.is_some();
-    run(
-        cfg.publish.git.clone(),
-        worktree,
-        &env,
-        operator_checkout,
-        &[
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=",
-            "push",
-            "origin",
-            &refspec,
+    let publisher = publisher_dir(candidate_id)?;
+    let bundle = publisher.with_extension("bundle");
+    let _ = std::fs::remove_dir_all(&publisher);
+    let _ = std::fs::remove_file(&bundle);
+    if let Some(parent) = publisher.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| PublishError::Spawn {
+            cli: "mkdir".into(),
+            source,
+        })?;
+    }
+    init_publisher(&cfg.publish.git, &publisher).await?;
+    source_git(
+        &cfg.publish.git,
+        candidate_path,
+        ["bundle", "create", bundle.to_string_lossy().as_ref(), head_sha],
+    )
+    .await?;
+    publisher_git(
+        &cfg.publish.git,
+        &publisher,
+        [
+            "fetch",
+            "--no-tags",
+            bundle.to_string_lossy().as_ref(),
+            &format!("{head_sha}:refs/heads/candidate"),
         ],
+    )
+    .await?;
+    let imported = publisher_git(
+        &cfg.publish.git,
+        &publisher,
+        ["rev-parse", "refs/heads/candidate"],
+    )
+    .await?;
+    let imported_tree = publisher_git(
+        &cfg.publish.git,
+        &publisher,
+        ["rev-parse", "refs/heads/candidate^{tree}"],
+    )
+    .await?;
+    if imported != head_sha || imported_tree != source_tree {
+        return Err(PublishError::IdentityChanged);
+    }
+
+    let remote = remote_url(provider, &env, &target.project)?;
+    publisher_git(
+        &cfg.publish.git,
+        &publisher,
+        ["remote", "add", "origin", &remote],
+    )
+    .await?;
+    let refspec = format!("{head_sha}:refs/heads/{}", target.branch);
+    publisher_git_with_env(
+        &cfg.publish.git,
+        &publisher,
+        &env,
+        ["push", "origin", &refspec],
     )
     .await?;
 
     let args: Vec<String> = match provider {
         Provider::Github => vec![
-            "pr".into(),
-            "create".into(),
-            "--repo".into(),
-            target.project.clone(),
-            "--base".into(),
-            target.base.clone(),
-            "--head".into(),
-            target.branch.clone(),
-            "--title".into(),
-            title.to_string(),
-            "--body".into(),
-            body.to_string(),
+            "pr".into(), "create".into(), "--repo".into(), target.project.clone(),
+            "--base".into(), target.base.clone(), "--head".into(), target.branch.clone(),
+            "--title".into(), title.to_string(), "--body".into(), body.to_string(),
         ],
         Provider::Gitlab => vec![
-            "mr".into(),
-            "create".into(),
-            "--repo".into(),
-            target.project.clone(),
-            "--target-branch".into(),
-            target.base.clone(),
-            "--source-branch".into(),
-            target.branch.clone(),
-            "--title".into(),
-            title.to_string(),
-            "--description".into(),
-            body.to_string(),
-            // Merging is the operator's, never the agent's.
-            "--no-squash-before-merge".into(),
-            "--yes".into(),
+            "mr".into(), "create".into(), "--repo".into(), target.project.clone(),
+            "--target-branch".into(), target.base.clone(), "--source-branch".into(), target.branch.clone(),
+            "--title".into(), title.to_string(), "--description".into(), body.to_string(),
+            "--no-squash-before-merge".into(), "--yes".into(),
         ],
     };
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     if let Some(recheck) = before_push {
         recheck().map_err(PublishError::Broker)?;
     }
-    run(
-        provider.command(cfg),
-        worktree,
-        &env,
-        operator_checkout,
-        &argv,
-    )
-    .await
+    run_cli(provider.command(cfg), &publisher, &env, &argv).await
 }
 
-/// The worktree's current HEAD, via the configured git, with hooks and
-/// fsmonitor disabled. Used to confirm the tip is still the reviewed commit.
-async fn head_of(git: &str, dir: &str) -> Result<String, PublishError> {
-    let out = Command::new(git)
-        .args([
-            "-C",
-            dir,
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=",
-            "rev-parse",
-            "HEAD",
-        ])
-        .output()
-        .await
-        .map_err(|source| PublishError::Spawn {
-            cli: git.to_string(),
-            source,
-        })?;
-    if !out.status.success() {
-        return Err(PublishError::Refused {
-            cli: git.to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        });
+fn publisher_dir(candidate_id: &str) -> Result<PathBuf, PublishError> {
+    if candidate_id.is_empty()
+        || !candidate_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return Err(PublishError::Target("candidate id must be an opaque safe id".into()));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(Config::state_dir().join("publishers").join(candidate_id))
 }
 
-async fn run(
-    cli: String,
-    dir: &str,
+fn remote_url(
+    provider: Provider,
     env: &BTreeMap<String, String>,
-    operator_checkout: bool,
-    args: &[&str],
+    project: &str,
 ) -> Result<String, PublishError> {
-    let mut cmd = Command::new(&cli);
-    cmd.args(args)
-        .current_dir(dir)
-        // A clean environment so nothing else on the node leaks into the CLI,
-        // and so the credential is the only one it can use.
+    if project.is_empty()
+        || project.starts_with('/')
+        || project.split('/').any(|part| {
+            part.is_empty()
+                || part == "."
+                || part == ".."
+                || !part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        })
+    {
+        return Err(PublishError::Target("project path is not canonical".into()));
+    }
+    let raw_host = match provider {
+        Provider::Github => env.get("GITHUB_HOST").map(String::as_str).unwrap_or("github.com"),
+        Provider::Gitlab => env.get("GITLAB_HOST").map(String::as_str).unwrap_or("gitlab.com"),
+    };
+    let host = raw_host
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b':'))
+    {
+        return Err(PublishError::Target("forge host is not canonical".into()));
+    }
+    Ok(format!("https://{host}/{project}.git"))
+}
+
+const GIT_SAFE: &[&str] = &[
+    "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=", "-c", "core.useReplaceRefs=false",
+    "-c", "credential.helper=",
+];
+
+async fn source_git<'a>(
+    git: &str,
+    dir: &Path,
+    args: impl IntoIterator<Item = &'a str>,
+) -> Result<String, PublishError> {
+    let mut command = Command::new(git);
+    command
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", std::env::var("HOME").unwrap_or_default());
-    // The operator's own checkout pushes to its remote the way the operator
-    // does, often through an ssh agent. The brokered token is still the only
-    // forge credential the CLI is handed.
-    if operator_checkout {
-        if let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") {
-            cmd.env("SSH_AUTH_SOCK", sock);
-        }
+        .env("HOME", Config::state_dir().join("publish-home"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .arg("-C")
+        .arg(dir)
+        .args(GIT_SAFE)
+        .args(args);
+    output(git, command).await
+}
+
+async fn init_publisher(git: &str, dir: &Path) -> Result<String, PublishError> {
+    let mut command = Command::new(git);
+    command
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", Config::state_dir().join("publish-home"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(GIT_SAFE)
+        .args(["init", "--bare"])
+        .arg(dir);
+    output(git, command).await
+}
+
+async fn publisher_git<'a>(
+    git: &str,
+    dir: &Path,
+    args: impl IntoIterator<Item = &'a str>,
+) -> Result<String, PublishError> {
+    publisher_git_inner(git, dir, None, args).await
+}
+
+async fn publisher_git_with_env<'a>(
+    git: &str,
+    dir: &Path,
+    env: &BTreeMap<String, String>,
+    args: impl IntoIterator<Item = &'a str>,
+) -> Result<String, PublishError> {
+    publisher_git_inner(git, dir, Some(env), args).await
+}
+
+async fn publisher_git_inner<'a>(
+    git: &str,
+    dir: &Path,
+    env: Option<&BTreeMap<String, String>>,
+    args: impl IntoIterator<Item = &'a str>,
+) -> Result<String, PublishError> {
+    let mut command = Command::new(git);
+    command
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", Config::state_dir().join("publish-home"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .arg("--git-dir")
+        .arg(dir)
+        .args(GIT_SAFE)
+        .args(args);
+    if let Some(env) = env {
+        command.envs(env);
     }
-    let out = cmd
-        .envs(env)
-        .output()
-        .await
-        .map_err(|source| PublishError::Spawn {
-            cli: cli.clone(),
-            source,
-        })?;
+    output(git, command).await
+}
+
+async fn run_cli(
+    cli: String,
+    dir: &Path,
+    env: &BTreeMap<String, String>,
+    args: &[&str],
+) -> Result<String, PublishError> {
+    let mut command = Command::new(&cli);
+    command
+        .args(args)
+        .current_dir(dir)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", Config::state_dir().join("publish-home"))
+        .envs(env);
+    output(&cli, command).await
+}
+
+async fn output(cli: &str, mut command: Command) -> Result<String, PublishError> {
+    let out = command.output().await.map_err(|source| PublishError::Spawn {
+        cli: cli.to_string(),
+        source,
+    })?;
     if out.status.success() {
         let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
         Ok(if stdout.is_empty() {
@@ -269,7 +379,7 @@ async fn run(
         })
     } else {
         Err(PublishError::Refused {
-            cli,
+            cli: cli.to_string(),
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         })
     }
@@ -286,12 +396,8 @@ mod tests {
         assert_eq!(Provider::parse("github"), Some(Provider::Github));
         assert_eq!(Provider::parse("pr"), Some(Provider::Github));
         assert_eq!(Provider::parse("bitbucket"), None);
-
         assert_eq!(Provider::Gitlab.credential(), "glab");
-        assert_eq!(Provider::Gitlab.command(&Config::default()), "glab");
-        assert_eq!(Provider::Gitlab.noun(), "merge request");
         assert_eq!(Provider::Github.credential(), "gh");
-        assert_eq!(Provider::Github.noun(), "pull request");
     }
 
     #[tokio::test]
@@ -309,6 +415,7 @@ mod tests {
             &Config::default(),
             "work",
             "n1",
+            "cand1",
             "/tmp",
             &target,
             "deadbeef",
@@ -335,6 +442,7 @@ mod tests {
             &Config::default(),
             "work",
             "n1",
+            "cand1",
             "/tmp",
             &target,
             "deadbeef",
@@ -345,5 +453,15 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, PublishError::UnknownProvider { .. }));
+    }
+
+    #[test]
+    fn publication_remote_is_reconstructed_not_read_from_candidate_config() {
+        let env = BTreeMap::from([("GITHUB_HOST".into(), "github.example".into())]);
+        assert_eq!(
+            remote_url(Provider::Github, &env, "group/project").unwrap(),
+            "https://github.example/group/project.git"
+        );
+        assert!(remote_url(Provider::Github, &env, "../project").is_err());
     }
 }

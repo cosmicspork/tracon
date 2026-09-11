@@ -259,6 +259,9 @@ pub enum RuntimeKind {
 pub struct Runtime {
     pub kind: RuntimeKind,
     pub kubernetes: Kubernetes,
+    /// Immutable project images the operator explicitly accepts in addition to
+    /// digest-addressed images from safe devcontainer metadata.
+    pub approved_images: Vec<String>,
 }
 
 /// The pod-hosted boundary: one harness Pod per session, created by the node

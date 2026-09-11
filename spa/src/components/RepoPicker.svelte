@@ -1,15 +1,18 @@
 <script lang="ts">
-  // Where the session runs. The forge is asked first and its answer is the
-  // list: picking one there clones it into a checkout the node owns. What
-  // this node has worked in before sits under it as a shortcut, and a typed
-  // path stays as the escape hatch for a repo no forge knows.
+  // The node owns forge clones. Other source enters only as files explicitly
+  // selected in the browser and copied into a managed workspace; no operator
+  // machine path is ever sent to the node.
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
-  import { isManagedPath, repoLabel, repoMatches } from '../lib/repo'
+  import { repoLabel, repoMatches } from '../lib/repo'
   import type { ForgeList, ManagedRepo, RecentRepo } from '../lib/types'
 
-  let { value = $bindable(''), channel = '' }: { value?: string; channel?: string } = $props()
+  let {
+    value = $bindable(''),
+    workspaceId = $bindable<string | null>(null),
+    channel = '',
+  }: { value?: string; workspaceId?: string | null; channel?: string } = $props()
 
   let recents = $state<RecentRepo[]>([])
   let managed = $state<ManagedRepo[]>([])
@@ -35,6 +38,7 @@
   let forges = $state<ForgeList[] | null>(null)
   let cloning = $state<string | null>(null)
   let loadingMore = $state<string | null>(null)
+  let uploading = $state(false)
   let error = $state<string | null>(null)
   let showRecents = $state(false)
   let query = $state('')
@@ -45,10 +49,14 @@
   // be on the next bounded page even when the loaded rows do not match.
   const forgeCount = $derived((forges ?? []).reduce((n, f) => n + f.repos.length, 0))
   const searchable = $derived(forgeCount > 6 || (forges ?? []).some((f) => !f.complete))
+  const shownRecents = $derived(
+    recents.filter(
+      (r) => allManaged.some((managed) => managed.repo_path === r.repo_path) && repoMatches(query, repoLabel(r.repo_path), r.repo_path),
+    ),
+  )
   const shownForges = $derived(
     (forges ?? []).map((f) => ({ ...f, repos: f.repos.filter((r) => repoMatches(query, r.full_name, r.host)) })),
   )
-  const shownRecents = $derived(recents.filter((r) => repoMatches(query, repoLabel(r.repo_path), r.repo_path)))
   const shownManaged = $derived(managed.filter((m) => repoMatches(query, m.full_name, m.host)))
   $effect(() => {
     // A channel change re-scopes what the forges answer, so ask again.
@@ -117,6 +125,7 @@
     try {
       const d = await api.cloneRepo({ channel, forge, host: r.host, owner: r.owner, name: r.name })
       value = d.repo_path
+      workspaceId = null
       browsing = false
       version += 1
     } catch (e) {
@@ -126,6 +135,24 @@
     }
   }
 
+
+  async function importFiles(event: Event) {
+    const input = event.currentTarget as HTMLInputElement
+    if (!input.files?.length || uploading) return
+    uploading = true
+    error = null
+    try {
+      const imported = await api.importWorkspace(input.files)
+      workspaceId = imported.workspace_id
+      value = ''
+      browsing = false
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e)
+    } finally {
+      input.value = ''
+      uploading = false
+    }
+  }
 </script>
 
 {#if browsing && forges === null}
@@ -189,17 +216,29 @@
   >
   {#if showRecents}
     <div class="picker" role="radiogroup">
-      <!-- A path the node chose for its own clone is not worth reading; one
-           the operator typed is theirs, and is the only way to tell two apart. -->
       {#each shownRecents as r (r.repo_path)}
-        <button type="button" class:on={value === r.repo_path} onclick={() => (value = r.repo_path)}>
+        <button
+          type="button"
+          class:on={value === r.repo_path}
+          onclick={() => {
+            value = r.repo_path
+            workspaceId = null
+          }}
+        >
           <i></i>
-          <span>{repoLabel(r.repo_path)}{#if !isManagedPath(r.repo_path, allManaged)} <small>{r.repo_path}</small>{/if}</span>
+          <span>{repoLabel(r.repo_path)}</span>
           <small>{r.sessions} session{r.sessions === 1 ? '' : 's'} · {formatAge(r.last_used_ms, clock.now)}</small>
         </button>
       {/each}
       {#each shownManaged as m (m.repo_path)}
-        <button type="button" class:on={value === m.repo_path} onclick={() => (value = m.repo_path)}>
+        <button
+          type="button"
+          class:on={value === m.repo_path}
+          onclick={() => {
+            value = m.repo_path
+            workspaceId = null
+          }}
+        >
           <i></i>
           <span>{m.full_name} <small>{m.host}</small></span>
           <small>cloned</small>
@@ -212,18 +251,22 @@
   <small class="crit">{error}</small>
 {/if}
 
-{#if chosenManaged}
+{#if workspaceId}
+  <div class="chosen">
+    <span>Uploaded workspace <small>copied into this node</small></span>
+    <button type="button" class="lnk" onclick={() => (workspaceId = null)}>change</button>
+  </div>
+{:else if chosenManaged}
   <div class="chosen">
     <span>{chosenManaged.full_name} <small>{chosenManaged.host} · cloned on this node</small></span>
     <button type="button" class="lnk" onclick={() => (value = '')}>change</button>
   </div>
-{:else}
-  <input
-    bind:value
-    placeholder={known.length > 0 ? 'or type a path on the node' : '/Users/you/src/project'}
-    spellcheck="false"
-  />
 {/if}
+
+<label class="upload">
+  <span>{uploading ? 'Copying selected files…' : 'Copy files or folder into managed workspace'}</span>
+  <input type="file" multiple webkitdirectory onchange={importFiles} disabled={uploading} />
+</label>
 
 <style>
   .picker {
@@ -321,6 +364,13 @@
     padding: 8px 10px;
     font: 13.5px var(--sans);
     color: var(--ink);
+  }
+  .upload {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    color: var(--dim);
+    font-size: 12px;
   }
   .chosen span {
     flex: 1;

@@ -167,6 +167,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/mesh/invite/{code}/admit", post(api::admit_invite))
         .route("/api/repos/recent", get(api::recent_repos))
         .route("/api/repos/clone", post(api::clone_repo))
+        .route(
+            "/api/workspaces/import",
+            post(api::import_workspace).layer(DefaultBodyLimit::max(
+                crate::workspace::MAX_IMPORT_BYTES as usize + 1024 * 1024,
+            )),
+        )
+        .route("/api/workspaces/{id}/export", post(api::export_workspace))
+        .route("/api/workspaces/{id}/prepare", post(api::prepare_workspace))
+        .route("/api/workspaces/{id}/download", get(api::download_workspace))
         .route("/api/forge/repos", get(api::forge_repos))
         .route(
             "/api/sessions",

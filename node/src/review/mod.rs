@@ -116,10 +116,23 @@ pub struct Capture {
 /// `config`/`hooks`/`info` are mounted read-only (see `materialize`), these
 /// overrides are the second, independent line. Diff commands additionally pass
 /// `--no-ext-diff --no-textconv` at the call site.
-const GIT_SAFE: &[&str] = &["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor="];
+const GIT_SAFE: &[&str] = &[
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=",
+    "-c",
+    "core.useReplaceRefs=false",
+    "-c",
+    "credential.helper=",
+];
 
 async fn git(dir: &str, op: &'static str, args: &[&str]) -> Result<String, ReviewError> {
     let out = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
         .arg("-C")
         .arg(dir)
         .args(GIT_SAFE)
@@ -255,10 +268,11 @@ pub async fn file_at_submit(
     if f.blob == "absent" {
         return Ok(None);
     }
-    // Not `git`: that trims, and a file's trailing newline is part of the
-    // file. Losing it here would make the editor build a patch that quietly
-    // strips it.
     let out = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
         .arg("-C")
         .arg(worktree)
         .args(GIT_SAFE)
@@ -271,7 +285,6 @@ pub async fn file_at_submit(
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });
     }
-    // A file the operator can edit is text; anything else is not for this.
     let Ok(text) = String::from_utf8(out.stdout) else {
         return Ok(None);
     };

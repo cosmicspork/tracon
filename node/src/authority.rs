@@ -189,6 +189,20 @@ pub async fn publish_review(
         require_evidence,
         recheck_authority,
     } = request;
+    if let Ok(Some(session)) = ctx.store.get_session(&review.session_id) {
+        if session.node_id == ctx.node_id
+            && session.harness_id != crate::session::external::HARNESS_ID
+            && ctx
+                .manager
+                .snapshot_workspace(&review.session_id)
+                .await
+                .is_err()
+        {
+            return Err(PublishError::Conflict(
+                "the runtime workspace could not be safely snapshotted".into(),
+            ));
+        }
+    }
     let worktree = serde_json::from_str::<crate::review::publish::Target>(&review.target)
         .ok()
         .and_then(|target| target.worktree)
@@ -232,6 +246,7 @@ pub async fn publish_review(
         ctx.cfg,
         &review.channel,
         ctx.node_id,
+        &review.id,
         &worktree,
         &target,
         &review.head_sha,

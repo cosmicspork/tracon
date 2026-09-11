@@ -11,11 +11,40 @@ use futures_core::future::BoxFuture;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::Child;
 
-#[derive(Debug, Clone)]
+/// A runtime-owned directory mounted into a runner. `volume` is a named Podman
+/// volume or a PVC-relative directory; it is never a host path.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mount {
-    pub source: String,
+    pub volume: String,
+    /// A relative path inside `volume`; empty means its root.
+    pub sub_path: String,
     pub target: String,
     pub read_only: bool,
+}
+
+impl Mount {
+    pub fn volume(volume: impl Into<String>, target: impl Into<String>, read_only: bool) -> Self {
+        Self {
+            volume: volume.into(),
+            sub_path: String::new(),
+            target: target.into(),
+            read_only,
+        }
+    }
+
+    pub fn at(
+        volume: impl Into<String>,
+        sub_path: impl Into<String>,
+        target: impl Into<String>,
+        read_only: bool,
+    ) -> Self {
+        Self {
+            volume: volume.into(),
+            sub_path: sub_path.into(),
+            target: target.into(),
+            read_only,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -24,6 +53,9 @@ pub struct RunnerCommand {
     pub env: Vec<(String, String)>,
     pub mounts: Vec<Mount>,
     pub workdir: Option<String>,
+    /// An approved preparation image may replace the harness image for a
+    /// bounded command. Long-lived harnesses leave this unset.
+    pub image: Option<String>,
     pub name: String,
 }
 
@@ -122,15 +154,14 @@ pub mod local {
                 .argv
                 .split_first()
                 .ok_or_else(|| RunnerError::Other("empty argv".into()))?;
-            // No container: a workdir names a mount target, so run in that
-            // mount's source instead (the worktree itself, for checks).
-            let dir = cmd.workdir.as_deref().and_then(|w| {
-                cmd.mounts
-                    .iter()
-                    .find(|m| m.target == w)
-                    .map(|m| m.source.clone())
-                    .or_else(|| std::path::Path::new(w).is_dir().then(|| w.to_string()))
-            });
+            // Local runners exist only for adapter tests. Runtime volumes have
+            // no host path by design, so callers that need a local command must
+            // name a real local workdir explicitly.
+            let dir = cmd
+                .workdir
+                .as_deref()
+                .filter(|w| std::path::Path::new(w).is_dir())
+                .map(str::to_owned);
             let mut c = Command::new(bin);
             c.args(args).envs(cmd.env);
             if let Some(d) = dir {
@@ -163,6 +194,30 @@ pub mod local {
         }
         fn runner(&self, _extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
             Arc::new(LocalRunner)
+        }
+        async fn import_volume(
+            &self,
+            volume: &str,
+            source: &std::path::Path,
+        ) -> Result<(), BoundaryError> {
+            let destination = Config::state_dir().join("local-runtime").join(volume);
+            if destination.exists() {
+                std::fs::remove_dir_all(&destination)?;
+            }
+            crate::workspace::copy_tree(source, &destination, false)
+                .map_err(|e| BoundaryError::Other(e.to_string()))
+        }
+        async fn export_volume(
+            &self,
+            volume: &str,
+            destination: &std::path::Path,
+        ) -> Result<(), BoundaryError> {
+            crate::workspace::copy_tree(
+                &Config::state_dir().join("local-runtime").join(volume),
+                destination,
+                false,
+            )
+            .map_err(|e| BoundaryError::Other(e.to_string()))
         }
         fn harness_host(&self) -> String {
             "localhost".into()

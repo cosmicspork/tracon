@@ -55,6 +55,10 @@ pub struct NewSession {
     pub review_id: Option<String>,
     #[serde(default)]
     pub base_sha: Option<String>,
+    /// Resume a durable runtime-owned workspace rather than importing a new
+    /// selected checkout. The value is a workspace id, never a host path.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -299,6 +303,44 @@ impl Manager {
         &self.store
     }
 
+    /// Take a checked, node-owned snapshot of a durable workspace. Review,
+    /// export, and publication consume this path; no caller receives the
+    /// mutable runtime volume or an operator-selected source path.
+    pub async fn snapshot_workspace(&self, session_id: &str) -> Result<PathBuf, SessionError> {
+        let session = self.store.get_session(session_id)?.ok_or(SessionError::NotFound)?;
+        if session.node_id != self.node_id {
+            return Err(SessionError::Remote(session.node_id, session.channel));
+        }
+        if session.harness_id == external::HARNESS_ID {
+            return session
+                .worktree_path
+                .map(PathBuf::from)
+                .ok_or_else(|| SessionError::Rejected("external session has no worktree".into()));
+        }
+        let workspace_id = session
+            .repo_path
+            .strip_prefix("workspace://")
+            .unwrap_or(&session.id);
+        let workspace = crate::workspace::Workspace {
+            id: workspace_id.to_string(),
+            volume: crate::workspace::volume_name(workspace_id),
+            snapshot: crate::workspace::snapshot_path(workspace_id),
+        };
+        let snapshot = crate::workspace::export(self.backend.as_ref(), &workspace)
+            .await
+            .map_err(|e| SessionError::Rejected(e.to_string()))?;
+        crate::workspace::sanitize_git(&snapshot)
+            .map_err(|e| SessionError::Rejected(e.to_string()))?;
+        self.store.update_session(
+            session_id,
+            SessionPatch {
+                worktree_path: Some(snapshot.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        )?;
+        Ok(snapshot)
+    }
+
     pub fn bus(&self) -> &Bus {
         &self.bus
     }
@@ -464,12 +506,22 @@ impl Manager {
         // Bank identity: the channel and the repository's remote, resolved on
         // this side of the boundary and recorded on the row for memory to key
         // on; never a checkout path.
-        let (project_id, project_name, remote) = crate::corpus::project::identify(
-            &spec.channel,
-            std::path::Path::new(&spec.repo_path),
-            &self.cfg.publish.git,
-        )
-        .await;
+        let (project_id, project_name, remote) = match spec.workspace_id.as_deref() {
+            Some(workspace_id) => {
+                let canonical = format!("workspace/{workspace_id}");
+                (
+                    crate::corpus::project::project_id(&spec.channel, &canonical),
+                    "imported workspace".to_string(),
+                    None,
+                )
+            }
+            None => crate::corpus::project::identify(
+                &spec.channel,
+                std::path::Path::new(&spec.repo_path),
+                &self.cfg.publish.git,
+            )
+            .await,
+        };
         let _ = self.store.project_put(&crate::store::ProjectRow {
             id: project_id.clone(),
             channel: spec.channel.clone(),
@@ -488,7 +540,11 @@ impl Manager {
             node_id: self.node_id.clone(),
             channel: spec.channel.clone(),
             work_item_id: spec.work_item_id.clone(),
-            repo_path: spec.repo_path.clone(),
+            repo_path: spec
+                .workspace_id
+                .as_deref()
+                .map(|workspace_id| format!("workspace://{workspace_id}"))
+                .unwrap_or_else(|| spec.repo_path.clone()),
             worktree_path: None,
             branch: branch.clone(),
             harness_id: adapter.id().to_string(),
@@ -592,30 +648,44 @@ impl Manager {
             .insert(id.to_string(), (token.clone(), spec.channel.clone()));
 
         let repo = PathBuf::from(&spec.repo_path);
-        let wt = match spec.base_sha.as_deref() {
-            Some(sha) => {
-                worktree::create_at(&repo, &self.cfg.session.worktree_root, &branch, &slug, sha)
-                    .await?
-            }
+        let workspace = match spec.workspace_id.as_deref() {
+            Some(existing) => crate::workspace::Workspace {
+                id: existing.to_string(),
+                volume: crate::workspace::volume_name(existing),
+                snapshot: crate::workspace::snapshot_path(existing),
+            },
             None => {
-                // A managed clone (under the node's repos root) fetches with
-                // the forge credential its channel is bound to; anywhere else
-                // uses the operator's own git auth, as before.
-                let env = crate::forge::git_env_for(
-                    &self.tools.broker,
-                    &crate::config::Config::state_dir(),
-                    &spec.channel,
+                if repo.starts_with(crate::forge::managed_root(&Config::state_dir())) {
+                    let env = crate::forge::git_env_for(
+                        &self.tools.broker,
+                        &Config::state_dir(),
+                        &spec.channel,
+                        &repo,
+                        &self.node_id,
+                    );
+                    crate::forge::fetch_managed(&repo, &env)
+                        .await
+                        .map_err(anyhow::Error::msg)?;
+                }
+                let workspace = crate::workspace::seed_from_checkout(
+                    &self.cfg.publish.git,
                     &repo,
-                    &self.node_id,
-                );
-                worktree::create(&repo, &self.cfg.session.worktree_root, &branch, &slug, &env)
-                    .await?
+                    &branch,
+                    spec.base_sha.as_deref(),
+                    id,
+                )
+                .await?;
+                crate::workspace::import(self.backend.as_ref(), &workspace, &crate::workspace::staging_path(id))
+                    .await?;
+                workspace
             }
         };
+        let snapshot = crate::workspace::export(self.backend.as_ref(), &workspace).await?;
+        crate::workspace::sanitize_git(&snapshot)?;
         self.store.update_session(
             id,
             SessionPatch {
-                worktree_path: Some(wt.path.to_string_lossy().into_owned()),
+                worktree_path: Some(snapshot.to_string_lossy().into_owned()),
                 ..Default::default()
             },
         )?;
@@ -625,8 +695,10 @@ impl Manager {
             kind: ek::WORKTREE.into(),
             ref_id: None,
             payload: json!({
-                "path": wt.path, "branch": wt.branch, "base": wt.base,
-                "main_checkout_dirty": wt.main_checkout_dirty
+                "workspace_id": workspace.id,
+                "volume": workspace.volume,
+                "branch": branch,
+                "source": if spec.workspace_id.is_some() { "resumed" } else { "imported" }
             }),
             at_ms: now_ms(),
             mono_ms: started.elapsed().as_millis() as i64,
@@ -705,15 +777,21 @@ impl Manager {
 
         let scratch = materialize::scratch_for(
             id,
-            &wt.path,
+            &snapshot,
             &repo,
             &self.backend.harness_home(),
             adapter.as_ref(),
             &wiring,
             &orientation,
         )?;
+        self.backend
+            .import_volume(&scratch.volume, &scratch.dir)
+            .await
+            .map_err(anyhow::Error::msg)?;
         let container = format!("tracon-h-{slug}");
-        let runner: Arc<dyn Runner> = self.backend.runner(scratch.mounts);
+        let mut mounts = scratch.mounts;
+        mounts.push(workspace.mount("/work", false));
+        let runner: Arc<dyn Runner> = self.backend.runner(mounts);
 
         // Record the container name before it exists: it is deterministic, and a
         // launch that fails after the container is created would otherwise leave
@@ -750,6 +828,13 @@ impl Manager {
             })]
         };
 
+        let mut harness_env = wiring.env.clone();
+        harness_env.extend([
+            ("GIT_CONFIG_GLOBAL".into(), format!("{}/.gitconfig", self.backend.harness_home())),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
+        ]);
+
         let launched = adapter
             .launch(
                 runner.as_ref(),
@@ -759,7 +844,7 @@ impl Manager {
                     container_name: container.clone(),
                     mcp_servers,
                     tools: self.cfg.harness.tools.clone(),
-                    env: wiring.env.clone(),
+                    env: harness_env,
                     system_prompt_file: Some(scratch.orientation_path.clone()),
                 },
             )

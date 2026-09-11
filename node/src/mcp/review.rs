@@ -147,10 +147,12 @@ async fn submit(
             )
         }
         (false, None) => (
-            session
-                .worktree_path
-                .clone()
-                .ok_or("this session has no worktree to review")?,
+            manager
+                .snapshot_workspace(&ctx.session_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .into_owned(),
             session.branch.clone(),
         ),
     };
@@ -335,7 +337,14 @@ async fn run_checks(
     ctx: &CallContext,
     worktree: &str,
 ) -> Result<Option<String>, String> {
-    let commands = review::checks::commands_for(manager.cfg(), std::path::Path::new(&worktree));
+    let commands = review::checks::commands_for(manager.cfg());
+    let workspace = crate::workspace::from_snapshot(
+        manager.backend().as_ref(),
+        &format!("check-{}", ctx.session_id),
+        std::path::Path::new(worktree),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let slug = ctx.session_id.rsplit('-').next().unwrap_or("s").to_string();
     manager.set_checking(&ctx.session_id, true);
     manager.record_event(
@@ -346,7 +355,7 @@ async fn run_checks(
     let results = review::checks::run(
         manager.backend().as_ref(),
         manager.cfg(),
-        std::path::Path::new(&worktree),
+        &workspace,
         &slug,
         &commands,
     )
@@ -397,12 +406,27 @@ async fn spawn_review_session(
     let Ok(Some(r)) = store.get_review(review_id) else {
         return json!({ "state": "none", "reason": "review not found" });
     };
+    let source = match manager.snapshot_workspace(&implementing.id).await {
+        Ok(path) => path,
+        Err(error) => return json!({ "state": "failed", "reason": error.to_string() }),
+    };
+    let workspace_id = format!("review-{review_id}");
+    if let Err(error) = crate::workspace::from_snapshot(
+        manager.backend().as_ref(),
+        &workspace_id,
+        &source,
+    )
+    .await
+    {
+        return json!({ "state": "failed", "reason": error.to_string() });
+    }
     let short = &review_id[review_id.len().saturating_sub(12)..];
     let spec = crate::session::NewSession {
         channel: ctx.channel.clone(),
-        repo_path: implementing.repo_path.clone(),
+        repo_path: String::new(),
         branch: Some(format!("review/{short}")),
         work_item_id: implementing.work_item_id.clone(),
+        workspace_id: Some(workspace_id),
         model,
         budget_tokens: bindings["phases"]["review"]["budget_tokens"].as_i64(),
         node_id: None,

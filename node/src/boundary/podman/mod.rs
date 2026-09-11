@@ -17,6 +17,119 @@ use crate::config::Config;
 use crate::runner::podman::{PodmanRunner, RunSpec};
 use crate::runner::{Mount, Runner};
 
+async fn volume_copy_in(
+    podman_bin: &str,
+    image: &str,
+    volume: &str,
+    source: &Path,
+) -> Result<(), BoundaryError> {
+    crate::workspace::validate_tree(source).map_err(|e| BoundaryError::Other(e.to_string()))?;
+    let created = tokio::process::Command::new(podman_bin)
+        .args(["volume", "create", "--ignore", volume])
+        .output()
+        .await
+        .map_err(BoundaryError::Io)?;
+    if !created.status.success() {
+        return Err(BoundaryError::Other(format!(
+            "create runtime volume {volume}: {}",
+            String::from_utf8_lossy(&created.stderr).trim()
+        )));
+    }
+    let name = format!("tracon-transfer-{}", uuid::Uuid::now_v7().simple());
+    let created = tokio::process::Command::new(podman_bin)
+        .args([
+            "create",
+            "--name",
+            &name,
+            "--mount",
+            &format!("type=volume,src={volume},dst=/data"),
+            image,
+            "true",
+        ])
+        .output()
+        .await
+        .map_err(BoundaryError::Io)?;
+    if !created.status.success() {
+        return Err(BoundaryError::Other(format!(
+            "create runtime transfer: {}",
+            String::from_utf8_lossy(&created.stderr).trim()
+        )));
+    }
+    let copied = tokio::process::Command::new(podman_bin)
+        .args([
+            "cp",
+            &format!("{}/.", source.display()),
+            &format!("{name}:/data"),
+        ])
+        .output()
+        .await
+        .map_err(BoundaryError::Io);
+    let _ = tokio::process::Command::new(podman_bin)
+        .args(["rm", "-f", &name])
+        .output()
+        .await;
+    let copied = copied?;
+    if copied.status.success() {
+        Ok(())
+    } else {
+        Err(BoundaryError::Other(format!(
+            "copy into runtime volume: {}",
+            String::from_utf8_lossy(&copied.stderr).trim()
+        )))
+    }
+}
+
+async fn volume_copy_out(
+    podman_bin: &str,
+    image: &str,
+    volume: &str,
+    destination: &Path,
+) -> Result<(), BoundaryError> {
+    if destination.exists() {
+        std::fs::remove_dir_all(destination)?;
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let name = format!("tracon-transfer-{}", uuid::Uuid::now_v7().simple());
+    let created = tokio::process::Command::new(podman_bin)
+        .args([
+            "create",
+            "--name",
+            &name,
+            "--mount",
+            &format!("type=volume,src={volume},dst=/data"),
+            image,
+            "true",
+        ])
+        .output()
+        .await
+        .map_err(BoundaryError::Io)?;
+    if !created.status.success() {
+        return Err(BoundaryError::Other(format!(
+            "create runtime transfer: {}",
+            String::from_utf8_lossy(&created.stderr).trim()
+        )));
+    }
+    let copied = tokio::process::Command::new(podman_bin)
+        .args(["cp", &format!("{name}:/data/."), &destination.to_string_lossy()])
+        .output()
+        .await
+        .map_err(BoundaryError::Io);
+    let _ = tokio::process::Command::new(podman_bin)
+        .args(["rm", "-f", &name])
+        .output()
+        .await;
+    let copied = copied?;
+    if !copied.status.success() {
+        return Err(BoundaryError::Other(format!(
+            "copy out of runtime volume: {}",
+            String::from_utf8_lossy(&copied.stderr).trim()
+        )));
+    }
+    crate::workspace::validate_tree(destination).map_err(|e| BoundaryError::Other(e.to_string()))
+}
+
 pub struct PodmanBackend {
     cfg: Config,
     selinux: bool,
@@ -56,6 +169,30 @@ impl Backend for PodmanBackend {
         let mut spec = self.spec();
         spec.extra_mounts = extra_mounts;
         Arc::new(PodmanRunner::new(spec))
+    }
+
+    async fn import_volume(&self, volume: &str, source: &Path) -> Result<(), BoundaryError> {
+        volume_copy_in(
+            &crate::boundary::podman::resolve_podman_env(&self.cfg),
+            &self.cfg.boundary.harness_image,
+            volume,
+            source,
+        )
+        .await
+    }
+
+    async fn export_volume(
+        &self,
+        volume: &str,
+        destination: &Path,
+    ) -> Result<(), BoundaryError> {
+        volume_copy_out(
+            &crate::boundary::podman::resolve_podman_env(&self.cfg),
+            &self.cfg.boundary.harness_image,
+            volume,
+            destination,
+        )
+        .await
     }
 
     fn harness_host(&self) -> String {
