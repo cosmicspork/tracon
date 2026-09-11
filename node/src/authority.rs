@@ -121,7 +121,7 @@ pub async fn publish_review(
     title: &str,
     body: &str,
     require_evidence: bool,
-    recheck_authority: Option<&dyn Fn() -> Result<(), String>>,
+    recheck_authority: Option<&(dyn Fn() -> Result<(), String> + Send + Sync)>,
 ) -> Result<String, String> {
     let worktree = serde_json::from_str::<crate::review::publish::Target>(&review.target)
         .ok()

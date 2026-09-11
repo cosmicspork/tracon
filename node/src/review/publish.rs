@@ -104,7 +104,7 @@ pub async fn publish(
     head_sha: &str,
     title: &str,
     body: &str,
-    before_push: Option<&dyn Fn() -> Result<(), String>>,
+    before_push: Option<&(dyn Fn() -> Result<(), String> + Send + Sync)>,
 ) -> Result<String, PublishError> {
     let provider = Provider::parse(&target.provider).ok_or(PublishError::UnknownProvider {
         provider: target.provider.clone(),

@@ -116,7 +116,7 @@ pub async fn call(
     ctx: &CallContext,
     name: &str,
     args: &Value,
-    before_mutation: Option<&dyn Fn() -> Result<(), String>>,
+    before_mutation: Option<&(dyn Fn() -> Result<(), String> + Send + Sync)>,
 ) -> Result<Value, String> {
     let env = broker
         .read()

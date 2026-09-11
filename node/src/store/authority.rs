@@ -137,6 +137,17 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Attribute a pending dispatch to the authority decision that survived
+    /// the final, immediately-before-send recheck.
+    pub fn authority_action_set_grant(&self, id: &str, grant_id: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE authority_action SET grant_id=?2, updated_ms=?3 WHERE id=?1 AND state='pending'",
+            rusqlite::params![id, grant_id, now_ms()],
+        )?;
+        Ok(())
+    }
+
     pub fn authority_action_finish(&self, id: &str, state: &str, outcome: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
