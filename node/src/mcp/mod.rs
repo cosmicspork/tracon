@@ -172,20 +172,25 @@ impl Tools {
             self.gate(ctx, name, args).await?
         };
         let args = edited.as_ref().unwrap_or(args);
-        match name {
+        self.revalidate_consequential(ctx, name, args)?;
+        let action_record = self.begin_consequential(ctx, name, args)?;
+        let result = match name {
             consulta::QUERY | consulta::DESCRIBE => {
                 consulta::call(&self.broker, &self.cfg, ctx, name, args).await
             }
             gitlab::MR_STATUS
             | gitlab::MR_COMMENT
+            | gitlab::MR_MERGE
             | gitlab::PIPELINE_STATUS
             | gitlab::JOB_TRACE
-            | gitlab::PIPELINE_RUN => gitlab::call(&self.broker, &self.http, ctx, name, args).await,
+            | gitlab::PIPELINE_RUN
+            | gitlab::DEPLOY => gitlab::call(&self.broker, &self.http, ctx, name, args).await,
             jira::ISSUE
             | jira::ISSUE_SEARCH
             | jira::ISSUE_COMMENT
             | jira::ISSUE_UPDATE
-            | jira::ISSUE_CREATE => jira::call(&self.broker, &self.http, ctx, name, args).await,
+            | jira::ISSUE_CREATE
+            | jira::ISSUE_TRANSITION => jira::call(&self.broker, &self.http, ctx, name, args).await,
             review::SUBMIT | review::STATUS | review::VERDICT => {
                 let access = self
                     .session
@@ -214,11 +219,24 @@ impl Tools {
                     .ok_or("documents are not available on this node")?;
                 docs::call(self, access, ctx, name, args).await
             }
-            github::PR_STATUS | github::PR_COMMENT | github::RUN_STATUS => {
+            github::PR_STATUS | github::PR_COMMENT | github::RUN_STATUS | github::PR_MERGE => {
                 github::call(&self.broker, &self.http, ctx, name, args).await
             }
             other => Err(format!("no tool named {other}")),
+        };
+        if let Some(id) = action_record {
+            let (state, outcome) = match &result {
+                Ok(value) => ("succeeded", value.to_string()),
+                Err(error) => ("failed", error.clone()),
+            };
+            self.session
+                .get()
+                .expect("authority record requires session")
+                .store
+                .authority_action_finish(&id, state, &outcome)
+                .map_err(|e| e.to_string())?;
         }
+        result
     }
 
     /// The definitions this caller is offered: the channel's tools, less what
@@ -332,6 +350,22 @@ impl Tools {
     }
 
     fn decide(&self, ctx: &CallContext, name: &str, summary: &str, args: &Value) -> Decision {
+        if let Some((action, target, revision)) = consequential(name, args) {
+            let Some(access) = self.session.get() else {
+                return Decision { verdict: Verdict::Ask, rule_id: None, reason: None };
+            };
+            return crate::authority::decide(
+                access.store.as_ref(),
+                &self.policy.read().unwrap(),
+                &ctx.channel,
+                &ctx.session_id,
+                action,
+                &target,
+                revision.as_deref(),
+                args,
+            )
+            .unwrap_or(Decision { verdict: Verdict::Ask, rule_id: None, reason: None });
+        }
         self.policy.read().unwrap().decide(&Request {
             channel: &ctx.channel,
             kind: Some(TOOL_KIND),
@@ -339,6 +373,78 @@ impl Tools {
             command: Some(summary),
             arguments: Some(args),
         })
+    }
+
+    /// Grants are re-read after every operator wait and immediately before a
+    /// consequential request. Revocation and expiry never rely on an earlier
+    /// cached decision.
+    fn revalidate_consequential(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+    ) -> Result<(), String> {
+        let Some((action, target, revision)) = consequential(name, args) else {
+            return Ok(());
+        };
+        let decision = crate::authority::decide(
+            self.session
+                .get()
+                .ok_or("authority requires a session")?
+                .store
+                .as_ref(),
+            &self.policy.read().unwrap(),
+            &ctx.channel,
+            &ctx.session_id,
+            action,
+            &target,
+            revision.as_deref(),
+            args,
+        )?;
+        match decision.verdict {
+            Verdict::Allow => Ok(()),
+            Verdict::Deny => Err(refusal(decision)),
+            Verdict::Ask => Err(format!(
+                "{action} for {target} needs a current scoped authority grant"
+            )),
+        }
+    }
+
+    fn begin_consequential(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+    ) -> Result<Option<String>, String> {
+        let Some((action, target, revision)) = consequential(name, args) else {
+            return Ok(None);
+        };
+        let access = self.session.get().ok_or("authority requires a session")?;
+        let decision = crate::authority::decide(
+            access.store.as_ref(),
+            &self.policy.read().unwrap(),
+            &ctx.channel,
+            &ctx.session_id,
+            action,
+            &target,
+            revision.as_deref(),
+            args,
+        )?;
+        if decision.verdict != Verdict::Allow {
+            return Err("authority changed before dispatch".into());
+        }
+        let id = uuid::Uuid::now_v7().to_string();
+        access.store.authority_action_begin(
+            &id,
+            decision.rule_id.as_deref(),
+            action,
+            &target,
+            &ctx.channel,
+            &ctx.session_id,
+            revision.as_deref(),
+            &args.to_string(),
+        ).map_err(|e| e.to_string())?;
+        Ok(Some(id))
     }
 
     /// Handle one MCP JSON-RPC message. Returns `None` for notifications, which
@@ -379,6 +485,35 @@ impl Tools {
     }
 }
 
+
+/// Consequential verbs carry their scope in arguments. This parser is strict:
+/// malformed input cannot fall through to an unscoped authority decision.
+fn consequential(name: &str, args: &Value) -> Option<(&'static str, String, Option<String>)> {
+    let string = |key| args.get(key).and_then(Value::as_str).filter(|v| !v.trim().is_empty());
+    match name {
+        github::PR_MERGE => Some((
+            crate::authority::MERGE,
+            format!("github:{}:pr:{}", string("repo")?, args.get("number").and_then(Value::as_i64)?),
+            string("head_sha").map(str::to_string),
+        )),
+        gitlab::MR_MERGE => Some((
+            crate::authority::MERGE,
+            format!("gitlab:{}:mr:{}", string("project")?, args.get("iid").and_then(Value::as_i64)?),
+            string("head_sha").map(str::to_string),
+        )),
+        gitlab::DEPLOY => Some((
+            crate::authority::DEPLOY,
+            format!("gitlab:{}:environment:{}", string("project")?, string("environment")?),
+            string("source_sha").map(str::to_string),
+        )),
+        jira::ISSUE_TRANSITION => Some((
+            crate::authority::TICKET_TRANSITION,
+            format!("jira:issue:{}", string("key")?),
+            None,
+        )),
+        _ => None,
+    }
+}
 fn refusal(decision: Decision) -> String {
     format!(
         "refused by policy{}: {}",

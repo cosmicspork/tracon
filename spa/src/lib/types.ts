@@ -379,6 +379,20 @@ export interface ForgeList {
   error?: string
 }
 
+/** A narrow local authority decision. It never edits the signed policy bundle. */
+export interface AuthorityGrant {
+  action: 'merge' | 'publish' | 'ticket_transition' | 'deploy' | 'browser_verify' | 'browser_test_account'
+  verdict: 'allow' | 'ask' | 'deny'
+  target: string
+  channel: string
+  session_id: string | null
+  revision: string | null
+  expires_ms: number | null
+  revoked_ms: number | null
+  reason: string
+  created_ms: number
+}
+
 export interface Queue {
   waiting: Permission[]
   reviews: Review[]

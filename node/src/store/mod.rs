@@ -18,6 +18,8 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod authority;
+pub use authority::*;
 pub mod corpus;
 pub mod metrics;
 pub mod operator;

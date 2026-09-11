@@ -11,6 +11,7 @@ pub const CREDENTIAL: &str = "gh";
 pub const PR_STATUS: &str = "pr_status";
 pub const PR_COMMENT: &str = "pr_comment";
 pub const RUN_STATUS: &str = "run_status";
+pub const PR_MERGE: &str = "pr_merge";
 
 pub fn definitions() -> Vec<Value> {
     vec![
@@ -52,6 +53,20 @@ pub fn definitions() -> Vec<Value> {
                     "sha": { "type": "string" },
                 },
                 "required": ["repo"],
+            },
+        }),
+        json!({
+            "name": PR_MERGE,
+            "description": "Merge one GitHub pull request at the exact head SHA. This only runs with current scoped authority.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": { "type": "string", "description": "owner/name" },
+                    "number": { "type": "integer" },
+                    "head_sha": { "type": "string", "description": "The reviewed pull request head SHA." },
+                    "method": { "type": "string", "enum": ["merge", "squash", "rebase"] },
+                },
+                "required": ["repo", "number", "head_sha"],
             },
         }),
     ]
@@ -117,6 +132,24 @@ pub async fn call(
                 )
                 .await?;
             Ok(json!({ "id": v["id"], "url": v["html_url"] }))
+        }
+        PR_MERGE => {
+            let n = number(args)?;
+            let head_sha = args.get("head_sha").and_then(Value::as_str).filter(|s| s.len() >= 7)
+                .ok_or("head_sha is required")?;
+            let pr = gh.get(&format!("{base}/pulls/{n}")).await?;
+            if pr["head"]["sha"].as_str() != Some(head_sha) {
+                return Err("pull request head changed since the authorized revision".into());
+            }
+            let method = args.get("method").and_then(Value::as_str).unwrap_or("squash");
+            if !matches!(method, "merge" | "squash" | "rebase") {
+                return Err("method must be merge, squash, or rebase".into());
+            }
+            let v = gh.put(
+                &format!("{base}/pulls/{n}/merge"),
+                &json!({ "sha": head_sha, "merge_method": method }),
+            ).await?;
+            Ok(json!({ "merged": v["merged"], "sha": v["sha"], "message": v["message"] }))
         }
         RUN_STATUS => {
             let filter = match (
@@ -232,6 +265,16 @@ impl Client<'_> {
     async fn post(&self, url: &str, body: &Value) -> Result<Value, String> {
         read(
             self.request(reqwest::Method::POST, url)
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+
+    async fn put(&self, url: &str, body: &Value) -> Result<Value, String> {
+        read(
+            self.request(reqwest::Method::PUT, url)
                 .json(body)
                 .send()
                 .await,

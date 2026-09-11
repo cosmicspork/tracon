@@ -2,6 +2,7 @@
 // interface can say what the node said, not "request failed".
 
 import type {
+  AuthorityGrant,
   BoundaryResult,
   ChannelInfo,
   ChannelMetrics,
@@ -86,6 +87,12 @@ export const api = {
   putChannelBindings: (name: string, patch: Record<string, unknown>) =>
     call<{ name: string; bindings: Record<string, unknown> }>('PUT', `/api/channels/${name}/bindings`, patch),
   // Push: this node pushes to the phones subscribed here.
+  authorityGrants: () =>
+    call<{ policy: { version: number; rules: unknown[] }; grants: AuthorityGrant[] }>('GET', '/api/authority/grants'),
+  createAuthorityGrant: (grant: Omit<AuthorityGrant, 'id' | 'revoked_ms' | 'created_ms'>) =>
+    call<AuthorityGrant>('POST', '/api/authority/grants', grant),
+  revokeAuthorityGrant: (id: string) =>
+    call<{ revoked: string }>('DELETE', `/api/authority/grants/${encodeURIComponent(id)}`),
   pushKey: () => call<{ key: string }>('GET', '/api/push/key'),
   pushDevices: () => call<{ devices: PushDevice[] }>('GET', '/api/push/subscriptions'),
   putPushSubscription: (sub: unknown) => call<{ id: string }>('POST', '/api/push/subscriptions', sub),

@@ -66,6 +66,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/boundary/check", post(api::recheck_boundary))
         .route("/api/boundary/setup", post(api::run_setup))
         .route("/api/config", get(api::get_config).put(api::put_config))
+        .route(
+            "/api/authority/grants",
+            get(api::list_authority_grants).post(api::create_authority_grant),
+        )
+        .route(
+            "/api/authority/grants/{id}",
+            axum::routing::delete(api::revoke_authority_grant),
+        )
         .route("/api/auth/qr", post(api::qr))
         .route("/api/mesh/init", post(api::mesh_init))
         .route("/api/mesh/unpair", post(api::mesh_unpair))

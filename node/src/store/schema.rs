@@ -347,6 +347,40 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX operator_question_request_key ON operator_question(session_id, request_key)
         WHERE request_key IS NOT NULL;
     "#,
+    // 17: narrowly scoped, local authority decisions. Policy itself remains a
+    // separately signed bundle: grants cannot alter trust roots or rules.
+    r#"
+    CREATE TABLE authority_grant (
+        id          TEXT PRIMARY KEY,
+        action      TEXT NOT NULL,
+        verdict     TEXT NOT NULL CHECK (verdict IN ('allow','ask','deny')),
+        target      TEXT NOT NULL,
+        channel     TEXT NOT NULL,
+        session_id  TEXT,
+        revision    TEXT,
+        expires_ms  INTEGER,
+        revoked_ms  INTEGER,
+        reason      TEXT NOT NULL,
+        created_ms  INTEGER NOT NULL
+    );
+    CREATE INDEX authority_grant_live ON authority_grant(action, target, channel, revoked_ms, expires_ms);
+
+    CREATE TABLE authority_action (
+        id          TEXT PRIMARY KEY,
+        grant_id    TEXT,
+        action      TEXT NOT NULL,
+        target      TEXT NOT NULL,
+        channel     TEXT NOT NULL,
+        session_id  TEXT NOT NULL,
+        revision    TEXT,
+        evidence    TEXT NOT NULL,
+        state       TEXT NOT NULL CHECK (state IN ('pending','succeeded','failed','uncertain')),
+        outcome     TEXT,
+        created_ms  INTEGER NOT NULL,
+        updated_ms  INTEGER NOT NULL
+    );
+    CREATE INDEX authority_action_pending ON authority_action(state, created_ms);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

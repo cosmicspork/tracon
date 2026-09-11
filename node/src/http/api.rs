@@ -97,6 +97,83 @@ impl From<crate::store::StoreError> for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
+#[derive(Deserialize)]
+pub struct AuthorityGrantBody {
+    action: String,
+    verdict: String,
+    target: String,
+    channel: String,
+    session_id: Option<String>,
+    revision: Option<String>,
+    expires_ms: Option<i64>,
+    reason: String,
+}
+
+/// Local grants are intentionally data-only decisions. The signed policy
+/// bundle, signing key, and trust root have no HTTP mutation endpoint.
+pub async fn list_authority_grants(
+    State(s): State<AppState>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let grants = s
+        .store()
+        .authority_grants(true)?
+        .iter()
+        .map(crate::authority::grant_visible)
+        .collect::<Vec<_>>();
+    let policy = s.tools.policy.read().unwrap();
+    Ok(Json(json!({
+        "policy": { "version": policy.version, "rules": policy.rules },
+        "grants": grants,
+    })))
+}
+
+pub async fn create_authority_grant(
+    State(s): State<AppState>,
+    Json(b): Json<AuthorityGrantBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let action = b.action.trim();
+    if !crate::authority::valid_action(action) {
+        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "unknown authority action"));
+    }
+    if !matches!(b.verdict.as_str(), "allow" | "ask" | "deny") {
+        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "verdict must be allow, ask, or deny"));
+    }
+    if b.target.trim().is_empty() || b.target.contains(char::is_whitespace) {
+        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "target must be a canonical non-empty identifier"));
+    }
+    if b.channel.trim().is_empty() || b.reason.trim().is_empty() {
+        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "channel and reason are required"));
+    }
+    if b.expires_ms.is_some_and(|at| at <= crate::store::now_ms()) {
+        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "expiry must be in the future"));
+    }
+    let row = crate::store::AuthorityGrantRow {
+        id: uuid::Uuid::now_v7().to_string(),
+        action: action.into(),
+        verdict: b.verdict,
+        target: b.target,
+        channel: b.channel,
+        session_id: b.session_id.filter(|v| !v.trim().is_empty()),
+        revision: b.revision.filter(|v| !v.trim().is_empty()),
+        expires_ms: b.expires_ms,
+        revoked_ms: None,
+        reason: b.reason,
+        created_ms: crate::store::now_ms(),
+    };
+    s.store().authority_grant_insert(&row)?;
+    Ok(Json(crate::authority::grant_visible(&row)))
+}
+
+pub async fn revoke_authority_grant(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !s.store().authority_grant_revoke(&id)? {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "no active authority grant"));
+    }
+    Ok(Json(json!({ "revoked": id })))
+}
+
 pub async fn get_node(
     State(s): State<AppState>,
     parts: axum::http::request::Parts,

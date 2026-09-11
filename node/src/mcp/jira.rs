@@ -14,6 +14,7 @@ pub const ISSUE_COMMENT: &str = "issue_comment";
 pub const ISSUE_UPDATE: &str = "issue_update";
 pub const ISSUE_CREATE: &str = "issue_create";
 pub const ISSUE_SEARCH: &str = "issue_search";
+pub const ISSUE_TRANSITION: &str = "issue_transition";
 
 /// What a search row carries: enough to pick an issue, not to read it.
 const SEARCH_FIELDS: &str = "summary,status,assignee,priority,issuetype,parent";
@@ -97,6 +98,13 @@ pub fn definitions() -> Vec<Value> {
                 },
                 "required": ["project", "type", "summary"],
             },
+        }),
+        json!({
+            "name": ISSUE_TRANSITION,
+            "description": "Transition a Jira issue using a concrete transition id. Requires current scoped authority for that issue.",
+            "inputSchema": { "type": "object", "properties": {
+                "key": { "type": "string" }, "transition_id": { "type": "string" }
+            }, "required": ["key", "transition_id"] },
         }),
     ]
 }
@@ -310,6 +318,23 @@ pub async fn call(
             }
             let key = v["key"].as_str().unwrap_or_default().to_string();
             Ok(json!({ "key": key, "id": v["id"], "url": format!("{url}/browse/{key}") }))
+        }
+        ISSUE_TRANSITION => {
+            let key = issue_key(args.get("key"), "key")?;
+            let transition = args.get("transition_id").and_then(Value::as_str).map(str::trim)
+                .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')))
+                .ok_or("transition_id is required")?;
+            let res = http
+                .post(format!("{url}/rest/api/2/issue/{key}/transitions"))
+                .basic_auth(email, Some(token))
+                .json(&json!({ "transition": { "id": transition } }))
+                .send().await.map_err(|e| format!("jira: {e}"))?;
+            let status = res.status();
+            if !status.is_success() {
+                let v: Value = res.json().await.unwrap_or(Value::Null);
+                return Err(refusal("jira refused the transition", status, &v));
+            }
+            Ok(json!({ "key": key, "transition_id": transition }))
         }
         other => Err(format!("no jira tool named {other}")),
     }
