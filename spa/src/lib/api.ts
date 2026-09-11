@@ -96,8 +96,12 @@ export const api = {
   queue: () => call<Queue>('GET', '/api/queue'),
   recentRepos: () =>
     call<{ repos: RecentRepo[]; managed: ManagedRepo[] }>('GET', '/api/repos/recent'),
-  forgeRepos: (channel: string) =>
-    call<{ forges: ForgeList[] }>('GET', `/api/forge/repos?channel=${encodeURIComponent(channel)}`),
+  forgeRepos: (channel: string, forge?: string, cursor?: string) => {
+    const query = new URLSearchParams({ channel })
+    if (forge) query.set('forge', forge)
+    if (cursor) query.set('cursor', cursor)
+    return call<{ forges: ForgeList[] }>('GET', `/api/forge/repos?${query}`)
+  },
   cloneRepo: (b: { channel: string; forge: string; host: string; owner: string; name: string }) =>
     call<{ repo_path: string }>('POST', '/api/repos/clone', b),
   sessions: () => call<Session[]>('GET', '/api/sessions'),

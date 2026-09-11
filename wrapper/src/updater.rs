@@ -1,11 +1,12 @@
-//! Unsigned desktop updates verified against GitHub's release digest: a
-//! Linux AppImage, or a macOS `.app` swapped whole.
+//! Publisher-authenticated desktop updates: a provenance-attested Linux
+//! AppImage, or a Developer ID-signed macOS `.app` swapped whole.
 //!
 //! The updater deliberately owns its selected asset. The webview can ask it to
 //! check or install, but never chooses a URL, path, or checksum.
 
 use std::{
     ffi::{OsStr, OsString},
+    future::Future,
     path::{Path, PathBuf},
     process::{self, Command},
     thread,
@@ -56,6 +57,13 @@ const REPLACE_MESSAGE: &str =
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const STAGED_MESSAGE: &str =
     "The downloaded app was not what the release describes; nothing was changed.";
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const PUBLISHER_MISMATCH_MESSAGE: &str =
+    "The downloaded app is not signed by this publisher; nothing was changed.";
+const PROVENANCE_MISMATCH_MESSAGE: &str =
+    "The update provenance could not be verified; nothing was changed.";
+const RELEASE_REPOSITORY: &str = "cosmicspork/tracon";
+const RELEASE_WORKFLOW: &str = "cosmicspork/tracon/.github/workflows/release.yml";
 
 /// The bundle being replaced, renamed aside so the running app keeps the code
 /// it is executing. Swept at the next launch.
@@ -516,7 +524,7 @@ impl Updater {
     async fn replace(&self, asset: &Asset, target: &Target) -> Result<Restart, String> {
         match target {
             Target::AppImage(path) => {
-                download_and_replace(&self.client, asset, path).await?;
+                download_and_replace(&self.client, asset, path, verify_release_provenance).await?;
                 let helper = std::env::current_exe()
                     .map_err(|error| format!("Could not prepare the restart: {error}"))?;
                 Ok(Restart {
@@ -741,12 +749,17 @@ async fn download_verified(
     transfer
 }
 
-/// An AppImage is one file, so the replacement is one rename.
-async fn download_and_replace(
+/// An AppImage is one file, so the authenticated replacement is one rename.
+async fn download_and_replace<F, Fut>(
     client: &reqwest::Client,
     asset: &Asset,
     destination: &Path,
-) -> Result<(), String> {
+    verify: F,
+) -> Result<(), String>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
     let parent = destination
         .parent()
         .ok_or_else(|| REPLACE_MESSAGE.to_string())?;
@@ -762,6 +775,7 @@ async fn download_and_replace(
     download_verified(client, asset, &temporary).await?;
 
     let finish = async {
+        verify(temporary.clone()).await?;
         fs::set_permissions(&temporary, original_permissions)
             .await
             .map_err(|_| REPLACE_MESSAGE.to_string())?;
@@ -777,10 +791,39 @@ async fn download_and_replace(
     finish
 }
 
-/// A `.app` is a directory whose ad-hoc signature covers its contents, so the
-/// update is assembled beside it and swapped in by rename. The bundle being
-/// replaced is renamed aside rather than deleted: this process, and the node
-/// it supervises, are executing out of it.
+/// GitHub's Sigstore-backed attestation is the Linux desktop publisher
+/// authentication. Its repository, workflow path, and source branch are fixed
+/// here rather than inherited from release metadata.
+async fn verify_release_provenance(path: PathBuf) -> Result<(), String> {
+    let output = tokio::time::timeout(
+        CHECK_TIMEOUT,
+        tokio::process::Command::new("gh")
+            .args(["attestation", "verify"])
+            .arg(path)
+            .args([
+                "--repo",
+                RELEASE_REPOSITORY,
+                "--signer-workflow",
+                RELEASE_WORKFLOW,
+                "--source-ref",
+                "refs/heads/main",
+            ])
+            .output(),
+    )
+    .await
+    .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?
+    .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
+    output
+        .status
+        .success()
+        .then_some(())
+        .ok_or_else(|| PROVENANCE_MISMATCH_MESSAGE.to_string())
+}
+
+/// A `.app` is a directory whose Developer ID signature covers its contents,
+/// so the update is assembled beside it and swapped in by rename. The bundle
+/// being replaced is renamed aside rather than deleted: this process, and the
+/// node it supervises, are executing out of it.
 #[cfg(target_os = "macos")]
 async fn download_and_swap(
     client: &reqwest::Client,
@@ -804,6 +847,7 @@ async fn download_and_swap(
         unpack(&archive, &staging).await?;
         let staged_app = staged_bundle_in(&staging)?;
         validate_staged_bundle(&staged_app, &asset.version)?;
+        verify_same_publisher(app_root, &staged_app)?;
         Ok::<PathBuf, String>(staged_app)
     }
     .await;
@@ -820,6 +864,63 @@ async fn download_and_swap(
     swap_bundles(app_root, &staged_app, &old)?;
     let _ = fs::remove_dir_all(&staging).await;
     Ok(())
+}
+
+/// The first signed install is authenticated by macOS Gatekeeper. Every
+/// self-update then preserves both the signed bundle identifier and Developer
+/// ID team, so a release asset cannot substitute a different publisher.
+#[cfg(target_os = "macos")]
+fn verify_same_publisher(installed: &Path, staged: &Path) -> Result<(), String> {
+    let installed = publisher_identity(installed)?;
+    let staged = publisher_identity(staged)?;
+    (installed == staged)
+        .then_some(())
+        .ok_or_else(|| PUBLISHER_MISMATCH_MESSAGE.to_string())
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+struct PublisherIdentity {
+    identifier: String,
+    team: String,
+}
+
+#[cfg(target_os = "macos")]
+fn publisher_identity(bundle: &Path) -> Result<PublisherIdentity, String> {
+    let verified = Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(bundle)
+        .status()
+        .map_err(|_| PUBLISHER_MISMATCH_MESSAGE.to_string())?;
+    if !verified.success() {
+        return Err(PUBLISHER_MISMATCH_MESSAGE.to_string());
+    }
+    let details = Command::new("/usr/bin/codesign")
+        .args(["-dv", "--verbose=4"])
+        .arg(bundle)
+        .output()
+        .map_err(|_| PUBLISHER_MISMATCH_MESSAGE.to_string())?;
+    if !details.status.success() {
+        return Err(PUBLISHER_MISMATCH_MESSAGE.to_string());
+    }
+    let mut output = String::from_utf8_lossy(&details.stdout).into_owned();
+    output.push_str(&String::from_utf8_lossy(&details.stderr));
+    publisher_identity_from(&output).ok_or_else(|| PUBLISHER_MISMATCH_MESSAGE.to_string())
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn publisher_identity_from(details: &str) -> Option<PublisherIdentity> {
+    let value = |key: &str| {
+        details
+            .lines()
+            .find_map(|line| line.strip_prefix(key).map(str::trim))
+            .filter(|value| !value.is_empty() && *value != "not set")
+            .map(str::to_string)
+    };
+    Some(PublisherIdentity {
+        identifier: value("Identifier=")?,
+        team: value("TeamIdentifier=")?,
+    })
 }
 
 /// bsdtar ships with macOS and keeps the symlinks and modes a bundle needs.
@@ -943,6 +1044,23 @@ mod tests {
         assert!(busy_with_check("downloading", Some(long)));
     }
 
+    #[test]
+    fn publisher_identity_requires_a_developer_team_and_bundle_identifier() {
+        assert_eq!(
+            publisher_identity_from(
+                "Identifier=com.cosmicspork.tracon\nTeamIdentifier=AB12C3D4E5\n"
+            ),
+            Some(PublisherIdentity {
+                identifier: "com.cosmicspork.tracon".into(),
+                team: "AB12C3D4E5".into(),
+            })
+        );
+        assert!(
+            publisher_identity_from("Identifier=com.cosmicspork.tracon\nTeamIdentifier=not set\n").is_none()
+        );
+        assert!(publisher_identity_from("TeamIdentifier=AB12C3D4E5\n").is_none());
+    }
+
     fn release(tag_name: &str, assets: Vec<ReleaseAsset>) -> Release {
         Release {
             tag_name: tag_name.to_string(),
@@ -957,6 +1075,10 @@ mod tests {
             browser_download_url: "https://example.test/tracon.AppImage".to_string(),
             digest: digest.map(str::to_string),
         }
+    }
+
+    async fn test_provenance(_: PathBuf) -> Result<(), String> {
+        Ok(())
     }
 
     async fn serve_once(body: Vec<u8>) -> String {
@@ -1323,7 +1445,7 @@ mod tests {
             size: body.len() as u64,
             digest: Sha256::digest(&body).into(),
         };
-        download_and_replace(&reqwest::Client::new(), &asset, &destination)
+        download_and_replace(&reqwest::Client::new(), &asset, &destination, test_provenance)
             .await
             .unwrap();
         assert_eq!(fs::read(&destination).await.unwrap(), body);
@@ -1359,7 +1481,7 @@ mod tests {
             digest: [0; 32],
         };
         assert_eq!(
-            download_and_replace(&reqwest::Client::new(), &mismatch, &destination)
+            download_and_replace(&reqwest::Client::new(), &mismatch, &destination, test_provenance)
                 .await
                 .unwrap_err(),
             DIGEST_MISMATCH_MESSAGE
@@ -1373,7 +1495,7 @@ mod tests {
             digest,
         };
         assert_eq!(
-            download_and_replace(&reqwest::Client::new(), &short, &destination)
+            download_and_replace(&reqwest::Client::new(), &short, &destination, test_provenance)
                 .await
                 .unwrap_err(),
             DIGEST_MISMATCH_MESSAGE

@@ -34,12 +34,14 @@
   let browsing = $state(false)
   let forges = $state<ForgeList[] | null>(null)
   let cloning = $state<string | null>(null)
+  let loadingMore = $state<string | null>(null)
   let error = $state<string | null>(null)
   let showRecents = $state(false)
   let query = $state('')
-  // Long enough to need a search box; a short list is scanned faster than typed at.
+  // Search is always available while more provider pages remain: a result may
+  // be on the next bounded page even when the loaded rows do not match.
   const forgeCount = $derived((forges ?? []).reduce((n, f) => n + f.repos.length, 0))
-  const searchable = $derived(forgeCount > 6)
+  const searchable = $derived(forgeCount > 6 || (forges ?? []).some((f) => !f.complete))
   const shownForges = $derived(
     (forges ?? []).map((f) => ({ ...f, repos: f.repos.filter((r) => repoMatches(query, r.full_name, r.host)) })),
   )
@@ -62,6 +64,33 @@
       forges = []
     } finally {
       browsing = false
+    }
+  }
+
+  async function loadMore(forge: ForgeList) {
+    const cursor = forge.next_cursor
+    if (!cursor || loadingMore) return
+    loadingMore = forge.forge
+    try {
+      const page = (await api.forgeRepos(channel, forge.forge, cursor)).forges.find(
+        (entry) => entry.forge === forge.forge,
+      )
+      if (!page) throw new Error(`${forge.forge} did not return the requested repository page`)
+      forges = (forges ?? []).map((existing) => {
+        if (existing.forge !== forge.forge) return existing
+        const known = new Set(existing.repos.map((repo) => repo.full_name))
+        return {
+          ...page,
+          repos: [...existing.repos, ...page.repos.filter((repo) => !known.has(repo.full_name))],
+        }
+      })
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      forges = (forges ?? []).map((existing) =>
+        existing.forge === forge.forge ? { ...existing, complete: false, error: message } : existing,
+      )
+    } finally {
+      loadingMore = null
     }
   }
   const known = $derived([...recents, ...managed])
@@ -101,18 +130,33 @@
     {#each shownForges as f (f.forge)}
       {#if f.error}
         <small class="crit">{f.forge}: {f.error}</small>
-      {:else}
-        {#each f.repos as r (f.forge + r.full_name)}
-          <button type="button" disabled={cloning !== null} onclick={() => clone(f.forge, r)}>
-            <i></i>
-            <span>{r.full_name} <small>{r.host}{r.private ? ' · private' : ''}</small></span>
-            <small>{cloning === r.full_name ? 'cloning…' : f.forge}</small>
-          </button>
-        {/each}
+      {/if}
+      {#each f.repos as r (f.forge + r.full_name)}
+        <button type="button" disabled={cloning !== null || loadingMore !== null} onclick={() => clone(f.forge, r)}>
+          <i></i>
+          <span>{r.full_name} <small>{r.host}{r.private ? ' · private' : ''}</small></span>
+          <small>{cloning === r.full_name ? 'cloning…' : f.forge}</small>
+        </button>
+      {/each}
+      {#if f.next_cursor}
+        <button
+          type="button"
+          class="more"
+          disabled={cloning !== null || loadingMore !== null}
+          onclick={() => loadMore(f)}
+        >
+          {loadingMore === f.forge
+            ? `Loading ${f.forge} repositories…`
+            : query
+              ? `Load more ${f.forge} repositories to keep searching`
+              : `Load more ${f.forge} repositories`}
+        </button>
+      {:else if !f.complete}
+        <small class="crit">{f.forge}: repository listing is incomplete</small>
       {/if}
     {/each}
     {#if query && shownForges.every((f) => f.repos.length === 0)}
-      <small>No repository matches</small>
+      <small>{(forges ?? []).some((f) => f.next_cursor) ? 'No loaded repository matches; load more to continue searching' : 'No repository matches'}</small>
     {/if}
   </div>
 {/if}
@@ -221,6 +265,11 @@
   }
   small.crit {
     color: var(--crit);
+  }
+  .picker button.more {
+    display: block;
+    color: var(--acc);
+    text-align: center;
   }
   .lnk {
     background: none;

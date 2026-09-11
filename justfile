@@ -74,11 +74,11 @@ gui: spa
     cargo build --release --bin tracon
     mkdir -p wrapper/binaries
     cp target/release/tracon wrapper/binaries/tracon-$(rustc -vV | sed -n 's/^host: //p')
-    distrobox enter tracon-build -- bash -c 'cd {{justfile_directory()}}/wrapper && APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=true npx --yes @tauri-apps/cli@2 build --bundles appimage --config "{\"bundle\":{\"externalBin\":[\"binaries/tracon\"]}}"'
+    distrobox enter tracon-build -- bash -c 'cd {{justfile_directory()}}/wrapper && APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=true npx --yes @tauri-apps/cli@2.11.4 build --bundles appimage --config "{\"bundle\":{\"externalBin\":[\"binaries/tracon\"]}}"'
 
 # The desktop wrapper: its own workspace, and it needs webkit and gtk headers.
 # On an immutable host, build it in a container that has them:
-#   distrobox create --name tracon-build --image registry.fedoraproject.org/fedora:44 --yes
+#   distrobox create --name tracon-build --image registry.fedoraproject.org/fedora@sha256:f315f29f764e4c74fa5b1c60c5be42630fe9276134079fbfb12b44131d08967c --yes
 #   distrobox enter tracon-build -- sudo dnf install -y \
 #     webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel rust cargo clippy rustfmt
 # Without distrobox, `.devcontainer/` carries the same toolchain for the Dev

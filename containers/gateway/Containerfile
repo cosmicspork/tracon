@@ -1,5 +1,5 @@
-FROM docker.io/library/alpine:3.20
-RUN apk add --no-cache tinyproxy socat
+FROM docker.io/library/alpine@sha256:531f855bda2c73cd6ef67d56b733b357cea384185b3022bd09f05e002cd144ca
+RUN apk add --no-cache tinyproxy=1.11.2-r0 socat=1.8.0.0-r0
 COPY tinyproxy.conf /etc/tinyproxy/tinyproxy.conf
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && mkdir -p /var/log/tinyproxy

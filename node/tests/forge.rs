@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::json;
+use axum::response::IntoResponse;
 
 use tracon::{
     broker::{Broker, Credential, SharedBroker},
@@ -47,6 +48,41 @@ async fn fake_forge() -> std::net::SocketAddr {
                 ]))
             }),
         );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+/// A GitHub-shaped forge that requires the picker to ask explicitly for page
+/// two. The next link uses the request host so the node's strict host check
+/// still accepts this loopback fixture.
+async fn paged_github_forge() -> std::net::SocketAddr {
+    let app = axum::Router::new().route(
+        "/user/repos",
+        axum::routing::get(
+            |headers: axum::http::HeaderMap,
+             axum::extract::Query(query): axum::extract::Query<BTreeMap<String, String>>| async move {
+                let page = query.get("page").map(String::as_str).unwrap_or("1");
+                let rows = match page {
+                    "1" => json!([{ "full_name": "me/first", "private": true }]),
+                    "2" => json!([{ "full_name": "me/second", "private": false }]),
+                    _ => json!([]),
+                };
+                let mut response = axum::Json(rows).into_response();
+                if page == "1" {
+                    let host = headers.get("host").and_then(|value| value.to_str().ok()).unwrap();
+                    let next = format!(
+                        "<http://{host}/user/repos?per_page=50&sort=pushed&page=2>; rel=\"next\""
+                    );
+                    response
+                        .headers_mut()
+                        .insert(axum::http::header::LINK, next.parse().unwrap());
+                }
+                response
+            },
+        ),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -157,6 +193,40 @@ async fn forge_listing_is_channel_scoped_and_per_forge_honest() {
     assert!(forges[0]["error"].as_str().is_some());
     assert_eq!(forges[1]["repos"][0]["full_name"], "group/tool");
     assert_eq!(forges[1]["repos"][0]["owner"], "group");
+}
+
+#[tokio::test]
+async fn forge_listing_pages_only_the_requested_provider() {
+    let addr = paged_github_forge().await;
+    let broker = Broker::default().shared();
+    broker.write().unwrap().put(
+        "gh",
+        cred(
+            &[
+                ("GH_TOKEN", "fake-token-for-tests"),
+                ("GITHUB_API", &format!("http://{addr}")),
+            ],
+            &["personal"],
+        ),
+    );
+    let app = node_with(broker);
+
+    let (_, first) = call(&app, "GET", "/api/forge/repos?channel=personal", None).await;
+    assert_eq!(first["forges"][0]["repos"][0]["full_name"], "me/first");
+    assert_eq!(first["forges"][0]["next_cursor"], "2");
+    assert_eq!(first["forges"][0]["complete"], false);
+
+    let (_, second) = call(
+        &app,
+        "GET",
+        "/api/forge/repos?channel=personal&forge=github&cursor=2",
+        None,
+    )
+    .await;
+    assert_eq!(second["forges"].as_array().unwrap().len(), 1);
+    assert_eq!(second["forges"][0]["repos"][0]["full_name"], "me/second");
+    assert!(second["forges"][0]["next_cursor"].is_null());
+    assert_eq!(second["forges"][0]["complete"], true);
 }
 
 #[tokio::test]

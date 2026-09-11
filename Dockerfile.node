@@ -5,34 +5,48 @@
 # provisions the sidecar's dependencies itself). Laptops do not use this
 # image; they fetch the static binary.
 
-FROM docker.io/oven/bun:1 AS spa
+FROM docker.io/oven/bun@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS spa
 WORKDIR /build/spa
 COPY spa/package.json spa/bun.lock ./
 RUN bun install --frozen-lockfile
 COPY spa .
 RUN bun run build
 
-FROM docker.io/library/rust:1-slim-bookworm AS builder
+FROM docker.io/library/rust@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS builder
 WORKDIR /build
 COPY . .
 COPY --from=spa /build/spa/dist spa/dist
 RUN cargo build -p tracon --release --bin tracon
 
-# consulta, at a pinned ref, with its environment resolved at build time so the
-# first query does not wait on a download inside the boundary.
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS consulta
-ARG CONSULTA_REF=main
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+# consulta, at a pinned commit, with its environment resolved at build time so
+# the first query does not wait on a download inside the boundary.
+FROM ghcr.io/astral-sh/uv@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS consulta
+ARG CONSULTA_REV=5932f23a7bc33462bae3f1911bd807d0ac1ba28c
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
+      > /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-RUN git clone --depth 1 --branch "${CONSULTA_REF}" https://github.com/cosmicspork/consulta.git /opt/consulta
+RUN git init /opt/consulta \
+    && git -C /opt/consulta remote add origin https://github.com/cosmicspork/consulta.git \
+    && git -C /opt/consulta fetch --depth 1 origin "$CONSULTA_REV" \
+    && git -C /opt/consulta checkout --detach FETCH_HEAD
 WORKDIR /opt/consulta
 ENV UV_LINK_MODE=copy
 RUN uv sync --frozen --no-dev
 
 # The runtime is the same image consulta's environment was resolved on, so
 # its venv's interpreter link holds; uv runs it offline from here.
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
-RUN apt-get update \
+FROM ghcr.io/astral-sh/uv@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
+      > /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
     && apt-get install -y --no-install-recommends ca-certificates git curl \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/tracon /usr/local/bin/tracon
