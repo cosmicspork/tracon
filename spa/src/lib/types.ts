@@ -308,6 +308,12 @@ export interface ChannelMetrics {
   human_seconds: number
   agent_seconds: number
   sessions: number
+  setup_failures: number
+  verified_sessions: number
+  seconds_to_first_verified_candidate: number | null
+  interventions: number
+  question_wait_seconds: number
+  human_wait_seconds: number
 }
 
 /** One repository this node has run sessions against. */

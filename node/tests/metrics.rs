@@ -271,6 +271,8 @@ async fn approvals_and_tokens_per_accepted_change_are_numbers_you_can_read() {
     // 3 answers + 3 verdicts, over 2 accepted.
     assert_eq!(m["approvals"], 6);
     assert_eq!(m["approvals_per_accepted_change"], 3.0);
+    assert_eq!(m["interventions"], 3);
+    assert_eq!(m["human_wait_seconds"], 6.0);
     // (800 + 200 + 1000) / 2: e3 was rejected and is not behind an accepted change.
     assert_eq!(m["tokens_per_accepted_change"], 1000.0);
     assert_eq!(m["tokens"], 7000);
@@ -304,6 +306,97 @@ async fn approvals_and_tokens_per_accepted_change_are_numbers_you_can_read() {
     assert_eq!(st, StatusCode::NOT_FOUND);
     let (st, _) = call(&app, "GET", "/api/provenance/abc", None).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn workflow_metrics_distinguish_verified_work_setup_failures_and_operator_intervention() {
+    state::isolate();
+    let store = Store::open_in_memory().unwrap();
+    store.ensure_peer_node("n1").unwrap();
+    for (id, channel, state) in [
+        ("work", "work", "closed"),
+        ("setup", "work", "failed"),
+        ("runtime", "work", "failed"),
+        ("other", "personal", "failed"),
+    ] {
+        let mut row = session(id, channel, "execute", None);
+        row.created_ms = 1_000;
+        row.state = state.into();
+        store.insert_session(&row).unwrap();
+    }
+    for (id, kind, at_ms, payload) in [
+        ("runtime", "session_started", 2_000, json!({})),
+        (
+            "work",
+            "candidate_verified",
+            6_000,
+            json!({"candidate_id": "first"}),
+        ),
+        (
+            "work",
+            "candidate_verified",
+            9_000,
+            json!({"candidate_id": "second"}),
+        ),
+        (
+            "work",
+            "operator_question_answered",
+            7_000,
+            json!({"waiting_ms": 3_000}),
+        ),
+        (
+            "work",
+            "session_paused",
+            8_000,
+            json!({"source": "operator"}),
+        ),
+        (
+            "work",
+            "session_paused",
+            9_000,
+            json!({"source": "watchdog"}),
+        ),
+        (
+            "work",
+            "review_decision",
+            9_000,
+            json!({"source": "operator", "waiting_ms": 4_000}),
+        ),
+        (
+            "work",
+            "review_decision",
+            9_500,
+            json!({"source": "authority", "waiting_ms": 5_000}),
+        ),
+        (
+            "other",
+            "candidate_verified",
+            5_000,
+            json!({"candidate_id": "private"}),
+        ),
+    ] {
+        store
+            .append_event(&NewEvent {
+                session_id: id.into(),
+                work_item_id: None,
+                kind: kind.into(),
+                ref_id: None,
+                payload,
+                at_ms,
+                mono_ms: at_ms - 1_000,
+            })
+            .unwrap();
+    }
+    let metrics = store.workflow_metrics("work", 500).unwrap();
+    assert_eq!(metrics.setup_failures, 1);
+    assert_eq!(metrics.verified_sessions, 1);
+    assert_eq!(metrics.seconds_to_first_verified_candidate, Some(5.0));
+    assert_eq!(metrics.interventions, 3);
+    assert_eq!(metrics.question_wait_seconds, 3.0);
+    assert_eq!(metrics.human_wait_seconds, 7.0);
+    let empty = store.workflow_metrics("work", 10_000).unwrap();
+    assert_eq!(empty.verified_sessions, 0);
+    assert_eq!(empty.seconds_to_first_verified_candidate, None);
 }
 
 #[tokio::test]

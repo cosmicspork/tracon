@@ -140,7 +140,7 @@ Explain the job and make one-node use complete.
 - [ ] Present work items, phases, review, memory, remote access, and mesh as optional.
 - [x] Explain the agent-built project as a demonstration of design judgment and decision-making, not hand-written coding.
 - [x] Reduce setup burden and keep the hub out of required first-run steps.
-- [ ] Measure time to useful verified work, setup failures, human interventions/waiting, and tokens per accepted change.
+- [x] Measure time to useful verified work, setup failures, human interventions/waiting, and tokens per accepted change.
 - [ ] Document current limitations and reconcile superseded decisions when changes land.
 
 ### Other backlog
