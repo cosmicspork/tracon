@@ -844,6 +844,9 @@ async fn download_and_swap(
     let staged = async {
         let archive = staging.join("update.tar.gz");
         download_verified(client, asset, &archive).await?;
+        // A release digest is metadata, not an extraction authority. Confirm
+        // fixed-workflow provenance before tar sees any archive entry.
+        verify_release_provenance(archive.clone()).await?;
         unpack(&archive, &staging).await?;
         let staged_app = staged_bundle_in(&staging)?;
         validate_staged_bundle(&staged_app, &asset.version)?;
@@ -931,8 +934,8 @@ fn publisher_identity_from(details: &str) -> Option<PublisherIdentity> {
     })
 }
 
-/// bsdtar ships with macOS and keeps the symlinks and modes a bundle needs.
-/// It only ever reads an archive whose digest already matched the release.
+/// bsdtar receives only an archive whose fixed-workflow build provenance was
+/// verified before extraction.
 #[cfg(target_os = "macos")]
 async fn unpack(archive: &Path, into: &Path) -> Result<(), String> {
     let status = tokio::process::Command::new("/usr/bin/tar")
