@@ -414,6 +414,17 @@ permits inline and bundle-local scripts, styles, images, and media, but denies
 network connections, forms, nested frames, workers, and plugins. Fonts that
 must work in the opaque-origin sandbox should be embedded as `data:` URLs.
 
+In Documents, import an HTML file or folder, replace it, open a full-window
+preview, or download the original file or ZIP bundle. Imports allow up to 256
+files, 20 MiB total, and 16 MiB per file. A folder needs a root `index.html` or
+one unambiguous HTML entry; browsers without folder selection can import a
+single file. External fonts, CDNs, and live API connections are intentionally
+blocked, not fetched automatically. HTTPS operator access needs a distinct HTTPS
+preview origin configured with `preview_url`.
+
+CLI import, put, and export remain Markdown-only. Agents can read HTML through
+`doc_read`; HTML creation and replacement use the operator's import flow, not
+`doc_write`.
 
 ### Policy
 
