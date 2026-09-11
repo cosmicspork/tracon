@@ -65,6 +65,13 @@ pub fn decide(
             reason: Some(grant.reason.clone()),
         });
     }
+    if let Some(grant) = grants.iter().find(|g| g.verdict == "ask") {
+        return Ok(Decision {
+            verdict: Verdict::Ask,
+            rule_id: Some(grant.id.clone()),
+            reason: Some(grant.reason.clone()),
+        });
+    }
     if policy.verdict == Verdict::Allow {
         return Ok(policy);
     }

@@ -69,6 +69,11 @@ pub struct CallContext {
     pub node_id: String,
 }
 
+struct GatedCall {
+    arguments: Option<Value>,
+    one_shot: bool,
+}
+
 impl Tools {
     /// The tools a review session gets: what it needs to read, and its
     /// verdict. Nothing that writes, publishes, or reaches a forge.
@@ -166,14 +171,14 @@ impl Tools {
             return operator::call(&access.store, &access.manager, &self.cfg, ctx, name, args)
                 .await;
         }
-        let edited = if plan_write {
-            None
+        let gated = if plan_write {
+            GatedCall { arguments: None, one_shot: false }
         } else {
             self.gate(ctx, name, args).await?
         };
-        let args = edited.as_ref().unwrap_or(args);
-        self.revalidate_consequential(ctx, name, args)?;
-        let action_record = self.begin_consequential(ctx, name, args)?;
+        let args = gated.arguments.as_ref().unwrap_or(args);
+        self.revalidate_consequential(ctx, name, args, gated.one_shot)?;
+        let action_record = self.begin_consequential(ctx, name, args, gated.one_shot)?;
         let result = match name {
             consulta::QUERY | consulta::DESCRIBE => {
                 consulta::call(&self.broker, &self.cfg, ctx, name, args).await
@@ -366,11 +371,11 @@ impl Tools {
         ctx: &CallContext,
         name: &str,
         args: &Value,
-    ) -> Result<Option<Value>, String> {
+    ) -> Result<GatedCall, String> {
         let summary = summarize(name, args);
         let decision = self.decide(ctx, name, &summary, args);
         match decision.verdict {
-            Verdict::Allow => Ok(None),
+            Verdict::Allow => Ok(GatedCall { arguments: None, one_shot: false }),
             Verdict::Deny => Err(refusal(decision)),
             Verdict::Ask => {
                 let access = self
@@ -401,7 +406,10 @@ impl Tools {
                     .await
                     .map_err(|e| e.to_string())?
                 {
-                    PermissionReply::Selected(o) if o == OPTION_ALLOW_ONCE => Ok(None),
+                    PermissionReply::Selected(o) if o == OPTION_ALLOW_ONCE => Ok(GatedCall {
+                        arguments: None,
+                        one_shot: true,
+                    }),
                     // What runs is the operator's rewrite, and a refusal is
                     // final whoever wrote the words.
                     PermissionReply::Edited {
@@ -413,7 +421,10 @@ impl Tools {
                         if edited.verdict == Verdict::Deny {
                             return Err(refusal(edited));
                         }
-                        Ok(Some(arguments))
+                        Ok(GatedCall {
+                            arguments: Some(arguments),
+                            one_shot: true,
+                        })
                     }
                     _ => Err("the operator did not allow this call".into()),
                 }
@@ -455,6 +466,7 @@ impl Tools {
         ctx: &CallContext,
         name: &str,
         args: &Value,
+        one_shot: bool,
     ) -> Result<(), String> {
         let Some((action, target, revision)) = consequential(name, args) else {
             return Ok(());
@@ -476,6 +488,7 @@ impl Tools {
         match decision.verdict {
             Verdict::Allow => Ok(()),
             Verdict::Deny => Err(refusal(decision)),
+            Verdict::Ask if one_shot => Ok(()),
             Verdict::Ask => Err(format!(
                 "{action} for {target} needs a current scoped authority grant"
             )),
@@ -487,6 +500,7 @@ impl Tools {
         ctx: &CallContext,
         name: &str,
         args: &Value,
+        one_shot: bool,
     ) -> Result<Option<String>, String> {
         let Some((action, target, revision)) = consequential(name, args) else {
             return Ok(None);
@@ -502,7 +516,7 @@ impl Tools {
             revision.as_deref(),
             args,
         )?;
-        if decision.verdict != Verdict::Allow {
+        if decision.verdict != Verdict::Allow && !(one_shot && decision.verdict == Verdict::Ask) {
             return Err("authority changed before dispatch".into());
         }
         let id = uuid::Uuid::now_v7().to_string();
@@ -514,7 +528,10 @@ impl Tools {
             &ctx.channel,
             &ctx.session_id,
             revision.as_deref(),
-            &args.to_string(),
+            &serde_json::json!({
+                "arguments": args,
+                "one_shot_operator_approval": one_shot,
+            }).to_string(),
         ).map_err(|e| e.to_string())?;
         Ok(Some(id))
     }
