@@ -14,6 +14,7 @@
 * **runtime:** runtime-owned workspaces with no host bind mounts, bounded browser imports, export/download, and credential-free dependency preparation
 * **session:** optional workflow with work-item-free plain-prompt sessions, deterministic model defaults, and durable pause/resume/stop controls that fence a watchdog-protected external harness as well as a managed one
 * **review:** immutable candidates with reusable, image-bound check evidence, pinned requirements, attributed decisions, and linked demonstrations
+* **continuity:** signed candidate/context transfer packages bound to their candidate's identity and file tree, single-import reservation with runtime-workspace reuse on retry, and opt-in, revocation-aware hub-side channel rollups
 
 ## [0.14.0](https://github.com/cosmicspork/tracon/compare/v0.13.1...v0.14.0) (2026-09-09)
 
