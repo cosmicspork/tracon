@@ -23,6 +23,9 @@ pub const MAX_TRANSFER_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_TRANSFER_FILES: usize = 20_000;
 pub const MAX_CONTEXT_DOCUMENTS: usize = 128;
 pub const MAX_CONTEXT_MEMORIES: usize = 512;
+pub const MAX_HANDOFF_NOTE_BYTES: usize = 16 * 1024;
+pub const MAX_CANDIDATE_ID_BYTES: usize = 256;
+pub const MAX_HEAD_SHA_BYTES: usize = 128;
 /// Direct mesh envelopes add authenticated encryption and base64 overhead.
 pub const MAX_MESH_TRANSFER_BYTES: usize = 2 * 1024 * 1024;
 const SIGNING_DOMAIN: &[u8] = b"tracon/candidate-transfer/v1\0";
@@ -149,12 +152,23 @@ impl SignedTransfer {
         {
             return Err(TransferError::Invalid("selected context is too large".into()));
         }
+        if self.payload.context.note.len() > MAX_HANDOFF_NOTE_BYTES
+            || self.payload.candidate_id.len() > MAX_CANDIDATE_ID_BYTES
+            || self.payload.channel.len() > 64
+        {
+            return Err(TransferError::Invalid("transfer manifest field is too large".into()));
+        }
         let candidate = &self.payload.candidate;
+        let head_sha = candidate["head_sha"].as_str();
         if candidate["id"].as_str() != Some(self.payload.candidate_id.as_str())
             || candidate["channel"].as_str() != Some(self.payload.channel.as_str())
-            || candidate["head_sha"].as_str().is_none()
+            || head_sha.is_none_or(|head| {
+                head.is_empty()
+                    || head.len() > MAX_HEAD_SHA_BYTES
+                    || !head.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
             || self.payload.candidate_id
-                != format!("{}:{}", candidate["head_sha"].as_str().unwrap_or_default(), self.payload.channel)
+                != format!("{}:{}", head_sha.unwrap_or_default(), self.payload.channel)
         {
             return Err(TransferError::Invalid(
                 "candidate identity does not bind the transfer id and channel".into(),
