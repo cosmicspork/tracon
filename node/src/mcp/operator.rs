@@ -287,7 +287,7 @@ fn scrub(s: &str) -> String {
             || lowered.starts_with("bearer ")
             || lowered.contains("ghp_")
             || lowered.contains("github_pat_")
-            || lowered.contains("sk-")
+            || contains_secret_token(&lowered)
         {
             out.push("[redacted secret-looking content]".to_string());
         } else {
@@ -297,5 +297,15 @@ fn scrub(s: &str) -> String {
             in_pem = false;
         }
     }
+
     out.join("\n")
+}
+
+fn contains_secret_token(line: &str) -> bool {
+    line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .any(|token| {
+            token.starts_with("sk-")
+                && token.len() >= 20
+                && token[3..].chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
 }
