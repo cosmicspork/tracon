@@ -425,6 +425,7 @@ async fn spawn_review_session(
         workspace_id: Some(workspace_id),
         model,
         budget_tokens: bindings["phases"]["review"]["budget_tokens"].as_i64(),
+        initial_prompt: None,
         node_id: None,
         phase: crate::session::Phase::Review,
         review_id: Some(review_id.to_string()),

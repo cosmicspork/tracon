@@ -190,6 +190,12 @@ impl Tools {
             self.gate(ctx, name, args).await?
         };
         let args = gated.arguments.as_ref().unwrap_or(args);
+        if let Some(access) = self.session.get() {
+            access
+                .manager
+                .ensure_active(&ctx.session_id)
+                .map_err(|error| error.to_string())?;
+        }
         if consequential_name(name) && consequential(name, args).is_none() {
             return Err(
                 "consequential calls require a valid operation_id and canonical arguments".into(),

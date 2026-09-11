@@ -22,7 +22,7 @@ use crate::{
     adapter::{PermissionReply, PermissionRequest},
     session::{
         state::{event_kind as ek, EndReason, SessionState},
-        supervisor::{on_answer_row, permission_row, Command},
+        supervisor::{on_answer_row, permission_row, Command, PauseSource},
     },
     store::{now_ms, NewEvent, SessionPatch, Store},
     stream::{Bus, Frame},
@@ -63,26 +63,35 @@ impl Loop {
             tokio::select! {
                 cmd = commands.recv() => match cmd {
                     Some(Command::Permission { request, reply }) => {
-                        self.on_permission(&mut open, started, request, reply);
+                        if self.is_paused() {
+                            let _ = reply.send(PermissionReply::Cancelled);
+                        } else {
+                            self.on_permission(&mut open, started, request, reply);
+                        }
                     }
                     Some(Command::Answer { permission_id, option_id, arguments, ack }) => {
-                        let done = on_answer_row(
-                            &self.store,
-                            &mut open,
-                            &permission_id,
-                            &option_id,
-                            arguments.clone(),
-                            started.elapsed().as_millis() as i64,
-                        );
-                        if done.is_ok() {
-                            self.record(
-                                ek::PERMISSION_ANSWER,
-                                Some(permission_id.clone()),
-                                json!({ "permission_id": permission_id, "option_id": option_id, "arguments": arguments }),
-                                started,
+                        let done = if self.is_paused() {
+                            Err("broker access is paused for this external harness".into())
+                        } else {
+                            let done = on_answer_row(
+                                &self.store,
+                                &mut open,
+                                &permission_id,
+                                &option_id,
+                                arguments.clone(),
+                                started.elapsed().as_millis() as i64,
                             );
-                            self.back_to_running(&open);
-                        }
+                            if done.is_ok() {
+                                self.record(
+                                    ek::PERMISSION_ANSWER,
+                                    Some(permission_id.clone()),
+                                    json!({ "permission_id": permission_id, "option_id": option_id, "arguments": arguments }),
+                                    started,
+                                );
+                                self.back_to_running(&open);
+                            }
+                            done
+                        };
                         let _ = ack.send(done);
                     }
                     Some(Command::Prompt { ack, .. }) => {
@@ -92,6 +101,14 @@ impl Loop {
                             "this session is a harness you run yourself; prompt it in its own terminal"
                                 .into(),
                         ));
+                    }
+                    Some(Command::Pause { source, reason, ack }) => {
+                        self.pause(&mut open, started, source, &reason);
+                        let _ = ack.send(Ok(()));
+                    }
+                    Some(Command::Resume { source, reason, ack }) => {
+                        let done = self.resume(started, source, &reason);
+                        let _ = ack.send(done);
                     }
                     Some(Command::Kill) => {
                         self.close(&mut open, started, EndReason::KilledUser);
@@ -103,18 +120,100 @@ impl Loop {
                         break;
                     }
                     // A turn cannot happen here; the harness reports none.
-                    Some(Command::TurnDone { .. }) => {}
+                    Some(Command::TurnDone { .. }) | Some(Command::PauseQuiesceTimeout { .. }) => {}
                     None => break,
                 },
                 _ = ticker.tick() => {
                     self.expire(&mut open, started);
-                    if open.is_empty() && self.idle_elapsed() > self.idle_timeout {
+                    if !self.is_paused() && open.is_empty() && self.idle_elapsed() > self.idle_timeout {
                         self.close(&mut open, started, EndReason::Detached);
                         break;
                     }
                 }
             }
         }
+    }
+
+    fn is_paused(&self) -> bool {
+        self.store
+            .get_session(&self.session_id)
+            .ok()
+            .flatten()
+            .is_some_and(|s| s.state == SessionState::Paused.as_str())
+    }
+
+    /// There is no process to suspend outside the boundary. Pausing an
+    /// attachment fences its broker access and makes that explicit to the
+    /// external harness rather than pretending we stopped its terminal.
+    fn pause(
+        &self,
+        open: &mut HashMap<String, oneshot::Sender<PermissionReply>>,
+        started: Instant,
+        source: PauseSource,
+        reason: &str,
+    ) {
+        if self.is_paused() {
+            return;
+        }
+        for (id, sender) in open.drain() {
+            let _ = sender.send(PermissionReply::Cancelled);
+            let _ = self.store.resolve_permission(
+                &id,
+                "expired",
+                None,
+                started.elapsed().as_millis() as i64,
+            );
+            self.record(
+                ek::PERMISSION_EXPIRED,
+                Some(id),
+                json!({ "reason": "denied: broker access paused" }),
+                started,
+            );
+        }
+        self.set_state(SessionState::Paused, None, started);
+        self.record(
+            ek::SESSION_PAUSED,
+            None,
+            json!({ "source": source.as_str(), "reason": reason }),
+            started,
+        );
+        self.publish_queue();
+        self.set_access_fence("external_paused", true);
+    }
+
+    fn resume(&self, started: Instant, source: PauseSource, reason: &str) -> Result<(), String> {
+        if !self.is_paused() {
+            return Err("external harness broker access is not paused".into());
+        }
+        self.set_state(SessionState::Running, None, started);
+        self.record(
+            ek::SESSION_RESUMED,
+            None,
+            json!({ "source": source.as_str(), "reason": reason }),
+            started,
+        );
+        self.set_access_fence("external_paused", false);
+        Ok(())
+    }
+
+    fn set_access_fence(&self, key: &str, enabled: bool) {
+        let Ok(Some(session)) = self.store.get_session(&self.session_id) else {
+            return;
+        };
+        let channel = self.store.channel_get(&session.channel).ok().flatten();
+        let (keyring, mut bindings) = match channel {
+            Some(channel) => (
+                channel.keyring,
+                serde_json::from_str(&channel.bindings_json).unwrap_or_else(|_| json!({})),
+            ),
+            None => (Vec::new(), json!({})),
+        };
+        bindings[key] = json!(enabled);
+        let _ = self.store.channel_put(
+            &session.channel,
+            &keyring,
+            &serde_json::to_string(&bindings).unwrap_or_else(|_| "{}".into()),
+        );
     }
 
     fn idle_elapsed(&self) -> Duration {
@@ -236,7 +335,7 @@ impl Loop {
             state: Some(state.as_str().to_string()),
             end_reason: end_reason.map(|r| r.as_str().to_string()),
             ended_mono_ms: state.is_terminal().then_some(mono),
-            turn_active: state.is_terminal().then_some(false),
+            turn_active: (state.is_terminal() || state == SessionState::Paused).then_some(false),
             ..Default::default()
         };
         if let Err(e) = self.store.update_session(&self.session_id, patch) {

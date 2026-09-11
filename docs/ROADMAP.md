@@ -17,9 +17,9 @@ Start a session in a workspace with permissions, without prescribing how work is
 - [x] Offer scoped allow/ask/deny for merging, publishing, ticket transitions, and deployments.
 - [x] Bind grants to targets and revisions where appropriate; revalidate before acting.
 - [x] Execute consequential actions through the broker without exposing credentials.
-- [ ] Make work items, plan/execute phases, explicit model selection, and review optional.
-- [ ] Inherit sensible model defaults and record the actual model used.
-- [ ] Keep structured workflows as presets; require review only when policy requires it.
+- [x] Make work items, plan/execute phases, explicit model selection, and review optional.
+- [x] Inherit sensible model defaults and record the actual model used.
+- [x] Keep structured workflows as presets; require review only when policy requires it.
 - [x] Record candidate, authority, evidence, and outcome even for automatically authorized actions.
 - [x] Expose policy and grant management in the interface, preserving signing-key and trust-root boundaries.
 - [x] Reconcile README, architecture, design, and shipped policy as behavior changes.
@@ -125,11 +125,11 @@ Lodge complaints about tracon, environments, tools, or harness integration.
 
 Stop broken execution without requiring an invented token budget for every task.
 
-- [ ] Provide explicit pause/stop controls that actually prevent new agent work while preserving workspace and evidence.
-- [ ] Bound retries, recovery attempts, handshakes, and tool/process timeouts.
-- [ ] Pause and explain repeated failures instead of automatically restarting the same loop.
+- [x] Provide explicit pause/stop controls that actually prevent new agent work while preserving workspace and evidence.
+- [x] Bound retries, recovery attempts, handshakes, and tool/process timeouts.
+- [x] Pause and explain repeated failures instead of automatically restarting the same loop.
 - [ ] Treat repetition as a signal, not a universal measure of progress.
-- [ ] Retain watchdogs for failures the agent cannot report; keep token/spending limits optional.
+- [x] Retain watchdogs for failures the agent cannot report; keep token/spending limits optional.
 - [ ] Do not automatically pause on issue reports or treat notifications as questions.
 
 ### Local-first onboarding and README

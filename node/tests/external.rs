@@ -10,6 +10,7 @@ use support::harness::{harness_with, Harness};
 use support::http::call;
 use support::state;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -17,7 +18,9 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 use tracon::config::Config;
-use tracon::stream::Frame;
+use tracon::session::Manager;
+use tracon::store::Store;
+use tracon::stream::{Bus, Frame};
 
 fn enabled() -> Config {
     let mut cfg = Config::default();
@@ -71,6 +74,28 @@ fn attached(h: &Harness) -> Option<tracon::store::SessionRow> {
         .unwrap()
         .into_iter()
         .find(|s| s.harness_id == "external")
+}
+
+/// A fresh `Manager` over an existing store, sharing nothing else: what a
+/// restarted node's own startup builds, minus the process it never had.
+async fn manager_over(store: &Arc<Store>) -> Manager {
+    let cfg = Arc::new(enabled());
+    let tools = Arc::new(tracon::mcp::Tools {
+        broker: tracon::broker::Broker::default().shared(),
+        cfg: cfg.clone(),
+        policy: tracon::policy::Policy::shipped_shared(),
+        http: reqwest::Client::new(),
+        session: Default::default(),
+    });
+    Manager::new(
+        store.clone(),
+        Bus::new(),
+        cfg,
+        "n1".into(),
+        tools,
+        Default::default(),
+        Arc::new(tracon::runner::local::LocalBackend),
+    )
 }
 
 #[tokio::test]
@@ -593,6 +618,57 @@ async fn killing_an_attachment_ends_it_and_the_next_call_attaches_again() {
         .filter(|s| s.harness_id == "external")
         .collect();
     assert_eq!(rows.len(), 2, "a killed attachment is replaced, not reused");
+}
+
+/// A restart drops every in-memory attachment, but not the pause fence
+/// `Loop::pause` wrote to the channel's own bindings: the next call must not
+/// silently resume broker work, and only an explicit operator Resume lifts
+/// the fence and lets a fresh attachment through.
+#[tokio::test]
+async fn a_pause_fence_survives_a_restart_and_only_resume_clears_it() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    mcp(
+        &h.operator,
+        "work",
+        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
+    )
+    .await;
+    let id = attached(&h).unwrap().id;
+
+    let (status, _) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/sessions/{id}/pause"),
+        Some(json!({ "reason": "operator review" })),
+    )
+    .await;
+    assert!(status.is_success(), "{status}");
+    for _ in 0..100 {
+        if h.store.get_session(&id).unwrap().unwrap().state == "paused" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(h.manager.bindings("work")["external_paused"], true);
+
+    // A fresh process over the same store: no live attachment, no live
+    // supervisor, only what the pause left durable.
+    let restarted = manager_over(&h.store).await;
+    let err = restarted.attach_external("work").await.unwrap_err();
+    assert!(format!("{err}").contains("paused"), "{err}");
+
+    // The operator resumes; the fence lifts, the stale row closes honestly,
+    // and the next call attaches fresh.
+    restarted.resume(&id, "operator back".into()).await.unwrap();
+    assert_eq!(restarted.bindings("work")["external_paused"], false);
+    let stale = h.store.get_session(&id).unwrap().unwrap();
+    assert_eq!(stale.state, "closed");
+
+    let new_id = restarted.attach_external("work").await.unwrap();
+    assert_ne!(new_id, id);
+    let new_row = h.store.get_session(&new_id).unwrap().unwrap();
+    assert_eq!(new_row.state, "running");
 }
 
 #[tokio::test]

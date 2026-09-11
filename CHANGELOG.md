@@ -12,6 +12,7 @@
 * **forge:** bounded repository pages with explicit load-more and honest partial search
 * **authority:** scoped allow/ask/deny grants for merge, publish, ticket transition, and deploy, with signed policy deny always dominant
 * **runtime:** runtime-owned workspaces with no host bind mounts, bounded browser imports, export/download, and credential-free dependency preparation
+* **session:** optional workflow with work-item-free plain-prompt sessions, deterministic model defaults, and durable pause/resume/stop controls that fence a watchdog-protected external harness as well as a managed one
 
 ## [0.14.0](https://github.com/cosmicspork/tracon/compare/v0.13.1...v0.14.0) (2026-09-09)
 

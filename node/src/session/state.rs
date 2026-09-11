@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 pub enum SessionState {
     Starting,
     Running,
+    /// The supervisor has cancelled any active turn and fenced the harness's
+    /// prompt, tool, and model paths. Its workspace and evidence stay intact.
+    Paused,
     WaitingOnYou,
     /// Defined here because the schema and the interface both name it; nothing
     /// in this slice runs deterministic checks between turns yet.
@@ -21,6 +24,7 @@ impl SessionState {
         match self {
             Self::Starting => "starting",
             Self::Running => "running",
+            Self::Paused => "paused",
             Self::WaitingOnYou => "waiting_on_you",
             Self::WaitingOnCheck => "waiting_on_check",
             Self::Closed => "closed",
@@ -77,6 +81,10 @@ pub mod event_kind {
     /// What the session was told at start, so the transcript shows it.
     pub const ORIENTATION: &str = "orientation";
     pub const STATE: &str = "state";
+    /// An operator or a failure watchdog fenced this session before it could
+    /// start another turn. `source` is telemetry only; the state is decisive.
+    pub const SESSION_PAUSED: &str = "session_paused";
+    pub const SESSION_RESUMED: &str = "session_resumed";
     pub const USER_PROMPT: &str = "user_prompt";
     pub const MESSAGE: &str = "message";
     pub const THOUGHT: &str = "thought";
@@ -121,6 +129,7 @@ mod tests {
         // A session waiting on a decision takes the decision, not a prompt.
         assert!(!SessionState::WaitingOnYou.accepts_prompt());
         assert!(!SessionState::Starting.accepts_prompt());
+        assert!(!SessionState::Paused.accepts_prompt());
         for s in [
             SessionState::Closed,
             SessionState::KilledBudget,

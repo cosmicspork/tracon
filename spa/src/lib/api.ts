@@ -161,8 +161,9 @@ export const api = {
     workspace_id?: string
     branch?: string
     work_item_id?: string
-    model: string
+    model?: string
     budget_tokens?: number
+    initial_prompt?: string
     node_id?: string
     phase?: 'plan' | 'execute'
   }) => call<Session>('POST', '/api/sessions', spec),
@@ -189,6 +190,9 @@ export const api = {
   /** Forget an archived channel on this node; its sessions and work stay in history. */
   deleteChannel: (name: string) => call<{ deleted: string }>('DELETE', `/api/channels/${encodeURIComponent(name)}`),
   prompt: (id: string, text: string) => call<void>('POST', `/api/sessions/${id}/prompt`, { text }),
+  pause: (id: string, reason?: string) => call<void>('POST', `/api/sessions/${id}/pause`, { reason }),
+  resume: (id: string, reason?: string) => call<void>('POST', `/api/sessions/${id}/resume`, { reason }),
+  stop: (id: string) => call<void>('POST', `/api/sessions/${id}/stop`),
   kill: (id: string) => call<void>('POST', `/api/sessions/${id}/kill`),
   saveDraft: (id: string, text: string) => call<void>('PUT', `/api/sessions/${id}/draft`, { text }),
   review: (id: string) => call<{ review: Review; stale: string[] }>('GET', `/api/reviews/${id}`),

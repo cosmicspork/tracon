@@ -222,6 +222,11 @@ pub async fn handle(
         .and_then(|v| v["model"].as_str().map(str::to_string));
     req = req.body(body);
 
+    if let Some(session_id) = &session_id {
+        if let Err(error) = s.manager.ensure_active(session_id) {
+            return refuse(StatusCode::CONFLICT, &error.to_string());
+        }
+    }
     let upstream = match req.send().await {
         Ok(r) => r,
         Err(e) => {

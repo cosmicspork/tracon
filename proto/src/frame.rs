@@ -226,6 +226,14 @@ pub enum Command {
     Kill {
         session_id: String,
     },
+    Pause {
+        session_id: String,
+        reason: String,
+    },
+    Resume {
+        session_id: String,
+        reason: String,
+    },
     Verdict {
         review_id: String,
         verdict: String,

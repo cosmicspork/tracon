@@ -76,6 +76,7 @@
     }
   }
 
+  let controlling = $state(false)
   let confirmingKill = $state(false)
 
   // The check that is running: the last check_started without a later
@@ -91,7 +92,7 @@
   })
   const checkElapsed = $derived(checkStarted ? formatAge(checkStarted.at_ms, clock.now) : '')
 
-  async function kill() {
+  async function stop() {
     // Immediate in the browser; confirmed on the phone, where a stray thumb is
     // likely and the session is someone's work in progress.
     if (surface.phone && !confirmingKill) {
@@ -101,9 +102,22 @@
     confirmingKill = false
     error = null
     try {
-      await api.kill(id)
+      await api.stop(id)
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)
+    }
+  }
+
+  async function control(action: 'pause' | 'resume') {
+    if (controlling) return
+    controlling = true
+    error = null
+    try {
+      await (action === 'pause' ? api.pause(id) : api.resume(id))
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err)
+    } finally {
+      controlling = false
     }
   }
 
@@ -112,10 +126,11 @@
     // The operator is already talking to this one, in its own terminal.
     if (session.harness_id === 'external') return 'a harness you run yourself'
     if (isTerminal(session.state)) return `session ${session.state.replace('_', ' ')}`
+    if (session.state === 'paused') return 'paused'
     if (session.state === 'starting') return 'starting'
     if (session.state === 'waiting_on_check') return `running ${checkCommand ?? 'the checks'}`
     if (busy) return 'a turn is running'
-    if (session.tokens_used >= session.budget_tokens) return 'over budget'
+    if (session.budget_tokens > 0 && session.tokens_used >= session.budget_tokens) return 'over budget'
     return null
   })
   // A prompt to an unreachable owner is queued on this node and sent when it
@@ -160,7 +175,20 @@
       <a class="mono" href="/work/{session.work_item_id}">item {session.work_item_id.slice(0, 8)}</a>
     {/if}
     {#if !isTerminal(session.state)}
-      <button class="lnk d" onclick={kill} disabled={unreachable !== null}>{confirmingKill ? 'Kill — tap again' : 'Kill'}</button>
+      {#if session.state === 'paused'}
+        <button class="lnk" onclick={() => void control('resume')} disabled={unreachable !== null || controlling}
+          >{session.harness_id === 'external' ? 'Resume broker access' : 'Resume'}</button
+        >
+      {:else if session.state !== 'starting'}
+        <button class="lnk" onclick={() => void control('pause')} disabled={unreachable !== null || controlling}>Pause</button>
+      {/if}
+      <button class="lnk d" onclick={stop} disabled={unreachable !== null}
+        >{confirmingKill
+          ? 'Stop — tap again'
+          : session.harness_id === 'external'
+            ? 'Stop broker access'
+            : 'Stop'}</button
+      >
       {#if confirmingKill}
         <button class="lnk" onclick={() => (confirmingKill = false)}>Cancel</button>
       {/if}
@@ -178,6 +206,11 @@
     <div class="banner crit">failed <b>· {humanizeError(session.last_error) ?? 'the harness stopped without saying why'}</b></div>
   {:else if session.state === 'waiting_on_check'}
     <div class="banner dim">running <code>{checkCommand ?? 'checks'}</code> <b>· {checkElapsed} · input disabled until it finishes</b></div>
+  {:else if session.state === 'paused'}
+    <div class="banner dim">
+      {session.harness_id === 'external' ? 'broker access paused' : 'paused'}
+      <b>· {session.harness_id === 'external' ? 'the external host process continues; Tracon cannot control it' : 'new prompts, tools, and model requests are fenced until resume or stop'}</b>
+    </div>
   {:else if session.end_reason === 'item_close'}
     <div class="banner ok">ended at item close <b>· the work item is closed{session.work_item_id ? ` · ${session.work_item_id.slice(0, 8)}` : ''}</b></div>
   {:else if session.end_reason === 'phase_done'}
@@ -199,6 +232,9 @@
 
   {#if error}
     <div class="banner crit">refused <b>· {error}</b></div>
+  {/if}
+  {#if isTerminal(session.state) && session.draft}
+    <div class="banner dim">unsent prompt retained <b>· copy it before starting another session</b><pre>{session.draft}</pre></div>
   {/if}
 
   {#if !isTerminal(session.state)}

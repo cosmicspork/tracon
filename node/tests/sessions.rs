@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tower::ServiceExt;
 
 use tracon::{
-    adapter::{HarnessEvent, PermissionReply},
+    adapter::{AdapterError, HarnessEvent, HarnessHandle, PermissionReply, TurnResult},
     config::Config,
     http::api::AppState,
     runner::Runner,
@@ -113,30 +113,25 @@ impl Harness {
 }
 
 #[tokio::test]
-async fn a_session_without_a_model_or_a_binding_is_refused() {
+async fn a_plain_session_uses_the_node_model_default_without_a_work_item() {
     state::isolate();
-    let h = Harness::new(1000).await;
+    let h = Harness::new(0).await;
     let (status, body) = h
         .call(
             "POST",
             "/api/sessions",
-            Some(json!({ "channel": "personal", "repo_path": "/nonexistent/repo", "model": "" })),
+            Some(json!({
+                "channel": "personal",
+                "repo_path": "/nonexistent/repo",
+                "initial_prompt": "inspect this repository",
+            })),
         )
         .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("no model"));
-    // Omitting the field entirely reads the same as naming nothing.
-    let (status, _) = h
-        .call(
-            "POST",
-            "/api/sessions",
-            Some(json!({ "channel": "personal", "repo_path": "/nonexistent/repo" })),
-        )
-        .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["model"], "m/a");
+    assert_eq!(body["phase"], "execute");
+    assert!(body["work_item_id"].is_null());
+    assert_eq!(body["budget_tokens"], 0);
 }
 
 /// A channel binds a model per phase, so the operator names one once. The
@@ -233,13 +228,10 @@ async fn a_session_needs_a_ready_item_and_execute_needs_its_plan() {
         }
         v
     };
-    // No item at all.
+    // Plain execute sessions are unstructured by default.
     let (st, body) = h.call("POST", "/api/sessions", Some(spec(json!({})))).await;
-    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("work item is required"));
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    assert!(body["work_item_id"].is_null());
     // Blocked.
     let (st, body) = h
         .call(
@@ -545,6 +537,25 @@ struct Rig {
 
 impl Rig {
     async fn start(budget: i64, permission_timeout: Duration) -> Self {
+        Self::start_with_handle(
+            budget,
+            permission_timeout,
+            Arc::new(FakeHandle {
+                prompts: Arc::new(Mutex::new(Vec::new())),
+                tokens: Arc::new(Mutex::new(1500)),
+                killed: Arc::new(Mutex::new(false)),
+            }),
+        )
+        .await
+    }
+
+    /// Same as `start`, but with the harness handle a test wants to control
+    /// directly (e.g. one whose turns never resolve on their own).
+    async fn start_with_handle(
+        budget: i64,
+        permission_timeout: Duration,
+        handle: Arc<dyn HarnessHandle>,
+    ) -> Self {
         let store = Arc::new(Store::open_in_memory().unwrap());
         store
             .put_node(&NodeRow {
@@ -566,13 +577,20 @@ impl Rig {
             })
             .unwrap();
         let session_id = insert_running_session(&store, budget);
+        // `Supervisor::run` only claims a row still `starting`, matching the
+        // real startup handoff; a `Rig` drives the supervisor directly,
+        // without going through `Manager::start`.
+        store
+            .update_session(
+                &session_id,
+                tracon::store::SessionPatch {
+                    state: Some("starting".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let (ev_tx, ev_rx) = mpsc::channel(64);
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
-        let handle = Arc::new(FakeHandle {
-            prompts: Arc::new(Mutex::new(Vec::new())),
-            tokens: Arc::new(Mutex::new(1500)),
-            killed: Arc::new(Mutex::new(false)),
-        });
         let sup = Supervisor::new(
             session_id.clone(),
             "n1".into(),
@@ -803,6 +821,394 @@ async fn an_unanswered_request_is_denied_by_default() {
     );
     assert!(rig.store.open_permissions().unwrap().is_empty());
 }
+#[tokio::test]
+async fn pause_fences_prompts_and_pending_permissions_until_resume() {
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    let permission = rig.request_permission().await;
+    assert!(rig.await_state("waiting_on_you").await);
+
+    let (ack, wait) = oneshot::channel();
+    rig.commands
+        .send(Command::Pause {
+            source: tracon::session::supervisor::PauseSource::Operator,
+            reason: "operator review".into(),
+            ack,
+        })
+        .await
+        .unwrap();
+    assert!(wait.await.unwrap().is_ok());
+    assert!(rig.await_state("paused").await);
+    assert!(matches!(
+        permission.await.unwrap(),
+        PermissionReply::Cancelled
+    ));
+
+    let (prompt_ack, prompt_wait) = oneshot::channel();
+    rig.commands
+        .send(Command::Prompt {
+            text: "do not start".into(),
+            ack: prompt_ack,
+        })
+        .await
+        .unwrap();
+    assert_eq!(prompt_wait.await.unwrap(), Err("session is paused".into()));
+
+    let (ack, wait) = oneshot::channel();
+    rig.commands
+        .send(Command::Resume {
+            source: tracon::session::supervisor::PauseSource::Operator,
+            reason: "review complete".into(),
+            ack,
+        })
+        .await
+        .unwrap();
+    assert!(wait.await.unwrap().is_ok());
+    assert!(rig.await_state("running").await);
+    let events = rig.store.events_after(&rig.session_id, 0, 100).unwrap();
+    assert!(events.iter().any(|event| {
+        event.kind == "session_paused"
+            && event.payload["source"] == "operator"
+            && event.payload["reason"] == "operator review"
+    }));
+    assert!(events.iter().any(|event| {
+        event.kind == "session_resumed"
+            && event.payload["source"] == "operator"
+            && event.payload["reason"] == "review complete"
+    }));
+}
+
+/// Blocks forever in `prompt`, so a test can hold a turn open across several
+/// commands without racing the harness's own completion.
+struct BlockingHandle;
+
+#[async_trait]
+impl HarnessHandle for BlockingHandle {
+    fn harness_session_id(&self) -> &str {
+        "blocking"
+    }
+    async fn prompt(&self, _text: String) -> Result<TurnResult, AdapterError> {
+        std::future::pending().await
+    }
+    async fn cancel(&self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn close(&self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+}
+
+/// The regression `pause_fences_prompts_and_pending_permissions_until_resume`
+/// does not cover: the adapter's event barrier (639f77f) flushes every
+/// harness event from a cancelled turn onto the queue before `TurnDone` is
+/// even sent, so a stale permission from that turn is always already sitting
+/// there by the time the supervisor sees the completion. Draining it
+/// synchronously, while still fenced, is what keeps it from surviving to be
+/// treated as live once the operator resumes.
+#[tokio::test]
+async fn a_stale_permission_behind_a_paused_turns_completion_is_drained_before_resume() {
+    state::isolate();
+    let rig =
+        Rig::start_with_handle(10_000, Duration::from_secs(60), Arc::new(BlockingHandle)).await;
+
+    let (prompt_ack, prompt_wait) = oneshot::channel();
+    rig.commands
+        .send(Command::Prompt {
+            text: "do the thing".into(),
+            ack: prompt_ack,
+        })
+        .await
+        .unwrap();
+    // The prompt call itself never resolves (`BlockingHandle`); registering
+    // the turn does, so no background completion can race what follows.
+    assert_eq!(prompt_wait.await.unwrap(), Ok(()));
+
+    let (pause_ack, pause_wait) = oneshot::channel();
+    rig.commands
+        .send(Command::Pause {
+            source: tracon::session::supervisor::PauseSource::Operator,
+            reason: "operator review".into(),
+            ack: pause_ack,
+        })
+        .await
+        .unwrap();
+    assert!(pause_wait.await.unwrap().is_ok());
+    assert!(rig.await_state("paused").await);
+
+    // A permission request the cancelled turn's own harness left queued,
+    // exactly as the adapter's barrier would: ahead of the `TurnDone` that
+    // reports the turn over.
+    let permission = rig.request_permission().await;
+    rig.commands
+        .send(Command::TurnDone {
+            turn_id: 1,
+            kind: "turn_end",
+            payload: json!({}),
+            tokens: 0,
+        })
+        .await
+        .unwrap();
+    let (resume_ack, resume_wait) = oneshot::channel();
+    rig.commands
+        .send(Command::Resume {
+            source: tracon::session::supervisor::PauseSource::Operator,
+            reason: "review complete".into(),
+            ack: resume_ack,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        resume_wait.await.unwrap().is_ok(),
+        "resume should succeed once the paused turn's completion lands"
+    );
+    assert!(rig.await_state("running").await);
+    match permission.await.unwrap() {
+        PermissionReply::Cancelled => {}
+        other => panic!(
+            "a permission queued behind a paused turn's completion must be cancelled, not left to reach policy live: {other:?}"
+        ),
+    }
+    assert!(
+        rig.store.open_permissions().unwrap().is_empty(),
+        "the drained permission must not still be waiting on the operator after resume"
+    );
+}
+
+/// The startup handoff's final `startable` check happens before this task is
+/// registered in `live` or spawned; a Stop landing in that gap closes the
+/// row directly (`Manager::stop`'s stale-row fallback). `Supervisor::run`
+/// must never resurrect what Stop already made terminal.
+#[tokio::test]
+async fn a_stop_that_lands_before_the_startup_handoff_is_never_resurrected() {
+    state::isolate();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    store
+        .put_node(&NodeRow {
+            id: "n1".into(),
+            name: "t".into(),
+            state: "ready".into(),
+            failed_check: None,
+            failed_detail: None,
+            harness_id: "fake".into(),
+            harness_pinned: "1.0.0".into(),
+            harness_found: Some("1.0.0".into()),
+            models_json: None,
+            checked_at_ms: Some(now_ms()),
+            is_self: 1,
+            x25519_pub: None,
+            last_seen_ms: None,
+            reachable: 1,
+            providers_json: None,
+        })
+        .unwrap();
+    let session_id = insert_running_session(&store, 10_000);
+    // Stop won the race: the row is terminal before this task is ever
+    // registered in `live` or spawned, exactly as `Manager::stop`'s
+    // stale-row fallback leaves it.
+    store
+        .update_session(
+            &session_id,
+            tracon::store::SessionPatch {
+                state: Some("closed".into()),
+                end_reason: Some("killed_user".into()),
+                turn_active: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let (_ev_tx, ev_rx) = mpsc::channel(64);
+    let (cmd_tx, cmd_rx) = mpsc::channel(16);
+    let handle = Arc::new(FakeHandle {
+        prompts: Arc::new(Mutex::new(Vec::new())),
+        tokens: Arc::new(Mutex::new(1500)),
+        killed: Arc::new(Mutex::new(false)),
+    });
+    let sup = Supervisor::new(
+        session_id.clone(),
+        "n1".into(),
+        store.clone(),
+        Bus::new(),
+        handle,
+        Instant::now(),
+        Duration::from_secs(60),
+        cmd_tx.clone(),
+        Arc::new(NoRunner),
+        "tracon-h-test".into(),
+        Default::default(),
+        "personal".into(),
+    );
+    tokio::spawn(sup.run(ev_rx, cmd_rx));
+
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let row = store.get_session(&session_id).unwrap().unwrap();
+        assert_ne!(
+            row.state, "running",
+            "a row Stop already closed must never be resurrected to running"
+        );
+    }
+    let row = store.get_session(&session_id).unwrap().unwrap();
+    assert_eq!(row.state, "closed");
+    assert_eq!(row.end_reason.as_deref(), Some("killed_user"));
+
+    // The task never claimed the row, so it never entered the live loop: a
+    // command sent afterward is never acknowledged.
+    let (ack, wait) = oneshot::channel();
+    let _ = cmd_tx
+        .send(Command::Prompt {
+            text: "should never run".into(),
+            ack,
+        })
+        .await;
+    assert!(
+        wait.await.is_err(),
+        "a supervisor that lost the startup claim must not process commands"
+    );
+}
+
+/// A row a previous process left paused, with no live supervisor: exactly
+/// what `reconcile_after_restart` leaves a managed session in before this
+/// slice closes it. Stop must still close it cleanly, not report a conflict
+/// for a teardown it already performed.
+#[tokio::test]
+async fn stopping_a_stale_paused_row_reports_success_not_conflict() {
+    state::isolate();
+    let h = Harness::new(10_000).await;
+    let id = insert_running_session(&h.store, 10_000);
+    h.store
+        .update_session(&id, tracon::store::SessionPatch::state("paused"))
+        .unwrap();
+
+    let (status, _) = h
+        .call("POST", &format!("/api/sessions/{id}/stop"), None)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a stale paused row's Stop must report success, not a conflict"
+    );
+    let row = h.store.get_session(&id).unwrap().unwrap();
+    assert_eq!(row.state, "closed");
+    assert_eq!(row.end_reason.as_deref(), Some("killed_user"));
+}
+
+/// A managed session has no process to hand its pause back to after a
+/// restart, so it closes honestly instead of offering an impossible Resume.
+/// An external attachment's pause is only a channel fence; the fence
+/// survives a restart, so the row stays paused rather than dropping it.
+#[tokio::test]
+async fn reconcile_after_restart_closes_a_managed_pause_but_keeps_an_external_one_fenced() {
+    state::isolate();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    store
+        .put_node(&NodeRow {
+            id: "n1".into(),
+            name: "t".into(),
+            state: "ready".into(),
+            failed_check: None,
+            failed_detail: None,
+            harness_id: "fake".into(),
+            harness_pinned: "1.0.0".into(),
+            harness_found: Some("1.0.0".into()),
+            models_json: None,
+            checked_at_ms: Some(now_ms()),
+            is_self: 1,
+            x25519_pub: None,
+            last_seen_ms: None,
+            reachable: 1,
+            providers_json: None,
+        })
+        .unwrap();
+    let managed_id = insert_running_session(&store, 10_000);
+    store
+        .update_session(&managed_id, tracon::store::SessionPatch::state("paused"))
+        .unwrap();
+
+    let external_id = uuid::Uuid::now_v7().to_string();
+    store
+        .insert_session(&tracon::store::SessionRow {
+            id: external_id.clone(),
+            node_id: "n1".into(),
+            channel: "work".into(),
+            work_item_id: None,
+            repo_path: String::new(),
+            worktree_path: None,
+            branch: String::new(),
+            harness_id: "external".into(),
+            harness_version: String::new(),
+            harness_session_id: None,
+            container_name: None,
+            model: String::new(),
+            project_id: None,
+            phase: "execute".into(),
+            policy_version: None,
+            review_id: None,
+            budget_tokens: 0,
+            tokens_used: 0,
+            cost_usd: None,
+            context_used: None,
+            context_size: None,
+            state: "paused".into(),
+            end_reason: None,
+            last_error: None,
+            turn_active: 0,
+            draft: None,
+            draft_updated_ms: None,
+            created_ms: now_ms(),
+            started_mono_ms: Some(0),
+            ended_mono_ms: None,
+            updated_ms: now_ms(),
+            archived_ms: None,
+        })
+        .unwrap();
+
+    let cleaned = tracon::session::reconcile_after_restart(
+        &store,
+        "n1",
+        &tracon::runner::local::LocalBackend,
+    )
+    .await;
+    assert!(cleaned.contains(&managed_id), "{cleaned:?}");
+    assert!(!cleaned.contains(&external_id), "{cleaned:?}");
+
+    let managed_row = store.get_session(&managed_id).unwrap().unwrap();
+    assert_eq!(
+        managed_row.state, "closed",
+        "a managed session has no process to hand its pause back to"
+    );
+    assert_eq!(managed_row.end_reason.as_deref(), Some("harness_exit"));
+
+    let external_row = store.get_session(&external_id).unwrap().unwrap();
+    assert_eq!(
+        external_row.state, "paused",
+        "external broker access stays fenced until the operator resumes it"
+    );
+}
+
+#[tokio::test]
+async fn repeated_harness_failures_pause_the_session_before_more_work() {
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    for _ in 0..3 {
+        rig.events
+            .send(HarnessEvent::Other(
+                json!({ "type": "system", "subtype": "api_retry" }),
+            ))
+            .await
+            .unwrap();
+    }
+    assert!(rig.await_state("paused").await);
+    let events = rig.store.events_after(&rig.session_id, 0, 100).unwrap();
+    assert!(events.iter().any(|event| {
+        event.kind == "session_paused"
+            && event.payload["source"] == "watchdog"
+            && event.payload["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("3 consecutive"))
+    }));
+}
 
 #[tokio::test]
 async fn a_session_over_budget_is_killed_at_turn_end() {
@@ -938,6 +1344,25 @@ use tracon::mcp::Tools;
 /// The MCP surface over its real HTTP route, with the token check in place.
 async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
     let store = Arc::new(Store::open_in_memory().unwrap());
+    store
+        .put_node(&NodeRow {
+            id: "n1".into(),
+            name: "test".into(),
+            state: "ready".into(),
+            failed_check: None,
+            failed_detail: None,
+            harness_id: "fake".into(),
+            harness_pinned: "1.0.0".into(),
+            harness_found: Some("1.0.0".into()),
+            models_json: None,
+            checked_at_ms: Some(now_ms()),
+            is_self: 1,
+            x25519_pub: None,
+            last_seen_ms: None,
+            reachable: 1,
+            providers_json: None,
+        })
+        .unwrap();
     let cfg = Arc::new(Config::default());
     let broker: Broker = toml::from_str(store_toml).unwrap();
     let tools = Arc::new(Tools {
@@ -1015,13 +1440,13 @@ async fn a_tool_call_without_a_live_session_is_unauthorized() {
 #[tokio::test]
 async fn a_registered_session_can_list_tools_and_a_wrong_token_cannot() {
     state::isolate();
-    let (app, _store, manager) = mcp_harness(BROKER_STORE).await;
-    let sid = "sess-1";
-    let token = manager.register_tool_token_for_test(sid, "work").await;
+    let (app, store, manager) = mcp_harness(BROKER_STORE).await;
+    let sid = insert_running_session(&store, 0);
+    let token = manager.register_tool_token_for_test(&sid, "work").await;
 
     let (status, body) = mcp_call(
         &app,
-        sid,
+        &sid,
         &token,
         json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
     )
@@ -1041,7 +1466,7 @@ async fn a_registered_session_can_list_tools_and_a_wrong_token_cannot() {
     wrong.push(if last == '0' { '1' } else { '0' });
     let (status, _) = mcp_call(
         &app,
-        sid,
+        &sid,
         &wrong,
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
     )
@@ -1052,12 +1477,12 @@ async fn a_registered_session_can_list_tools_and_a_wrong_token_cannot() {
 #[tokio::test]
 async fn a_write_is_refused_before_the_credential_is_touched() {
     state::isolate();
-    let (app, _store, manager) = mcp_harness(BROKER_STORE).await;
-    let sid = "sess-2";
-    let token = manager.register_tool_token_for_test(sid, "work").await;
+    let (app, store, manager) = mcp_harness(BROKER_STORE).await;
+    let sid = insert_running_session(&store, 0);
+    let token = manager.register_tool_token_for_test(&sid, "work").await;
     let (status, body) = mcp_call(
         &app,
-        sid,
+        &sid,
         &token,
         json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
                "params":{"name":"query","arguments":{"sql":"DELETE FROM people"}}}),
@@ -1072,12 +1497,12 @@ async fn a_write_is_refused_before_the_credential_is_touched() {
 #[tokio::test]
 async fn a_session_on_an_unbound_channel_is_offered_no_tools() {
     state::isolate();
-    let (app, _store, manager) = mcp_harness(BROKER_STORE).await;
-    let sid = "sess-3";
-    let token = manager.register_tool_token_for_test(sid, "personal").await;
+    let (app, store, manager) = mcp_harness(BROKER_STORE).await;
+    let sid = insert_running_session(&store, 0);
+    let token = manager.register_tool_token_for_test(&sid, "personal").await;
     let (_, body) = mcp_call(
         &app,
-        sid,
+        &sid,
         &token,
         json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
     )
@@ -1215,6 +1640,7 @@ async fn orientation(tag: &str) -> Orientation {
                 work_item_id: Some(item.id.clone()),
                 model: "m/a".into(),
                 budget_tokens: Some(1000),
+                initial_prompt: None,
                 node_id: None,
                 phase: tracon::session::Phase::Plan,
                 review_id: None,
