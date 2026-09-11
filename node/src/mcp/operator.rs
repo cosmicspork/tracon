@@ -64,6 +64,7 @@ async fn ask(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Valu
                 return Err("request_id is already bound to a different question".into());
             }
             existing
+        },
         None => {
             let row = OperatorQuestionRow {
                 id: uuid::Uuid::now_v7().to_string(), session_id: ctx.session_id.clone(),
