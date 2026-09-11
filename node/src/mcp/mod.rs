@@ -193,7 +193,21 @@ impl Tools {
         if let Some(ActionRecord::Replay(outcome)) = &action_record {
             return Ok(outcome.clone());
         }
-        let before_mutation = || self.revalidate_consequential(ctx, name, args, gated.one_shot);
+        let before_mutation = || {
+            self.revalidate_consequential(ctx, name, args, gated.one_shot)?;
+            let Some(ActionRecord::New(id)) = &action_record else {
+                return Ok(());
+            };
+            let (action, target, revision) = consequential(name, args)
+                .expect("consequential action record has canonical arguments");
+            let access = self.session.get().ok_or("authority requires a session")?;
+            let decision = crate::authority::decide(
+                access.store.as_ref(), &self.policy.read().unwrap(), &ctx.channel, &ctx.session_id,
+                action, &target, revision.as_deref(), args,
+            )?;
+            access.store.authority_action_set_grant(id, decision.rule_id.as_deref())
+                .map_err(|e| e.to_string())
+        };
         let result = match name {
             consulta::QUERY | consulta::DESCRIBE => consulta::call(&self.broker, &self.cfg, ctx, name, args).await,
             gitlab::MR_STATUS | gitlab::MR_COMMENT | gitlab::MR_MERGE | gitlab::PIPELINE_STATUS
@@ -300,9 +314,11 @@ impl Tools {
                 access.store.as_ref(), &self.policy.read().unwrap(), &ctx.channel, &ctx.session_id,
                 crate::authority::PUBLISH, &canonical, Some(&review.head_sha), &authority_args,
             )?;
-            (current.verdict == Verdict::Allow)
-                .then_some(())
-                .ok_or_else(|| "publication authority was revoked or no longer applies".into())
+            if current.verdict != Verdict::Allow {
+                return Err("publication authority was revoked or no longer applies".into());
+            }
+            access.store.authority_action_set_grant(&action_id, current.rule_id.as_deref())
+                .map_err(|e| e.to_string())
         };
         match crate::authority::publish_review(
             access.store.as_ref(), &access.manager, &self.broker, &self.cfg,
