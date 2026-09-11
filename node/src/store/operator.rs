@@ -82,12 +82,14 @@ impl Store {
     pub fn open_operator_questions(&self) -> Result<Vec<OperatorQuestionRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT * FROM operator_question WHERE state='unanswered' ORDER BY created_ms")?;
-        stmt.query_map([], OperatorQuestionRow::from_row)?.collect::<std::result::Result<_,_>>().map_err(Into::into)
+        let rows = stmt.query_map([], OperatorQuestionRow::from_row)?.collect::<std::result::Result<_,_>>()?;
+        Ok(rows)
     }
     pub fn session_operator_questions(&self, session_id: &str) -> Result<Vec<OperatorQuestionRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT * FROM operator_question WHERE session_id=?1 AND state='unanswered' ORDER BY created_ms")?;
-        stmt.query_map([session_id], OperatorQuestionRow::from_row)?.collect::<std::result::Result<_,_>>().map_err(Into::into)
+        let rows = stmt.query_map([session_id], OperatorQuestionRow::from_row)?.collect::<std::result::Result<_,_>>()?;
+        Ok(rows)
     }
     /// Answer and record the intervention in one transaction. A duplicate
     /// answer cannot create a second metrics event.
@@ -126,7 +128,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let sql = if open_only { "SELECT * FROM operator_issue WHERE state IN ('draft','publishing') ORDER BY created_ms" } else { "SELECT * FROM operator_issue ORDER BY created_ms DESC" };
         let mut stmt = conn.prepare(sql)?;
-        stmt.query_map([], IssueDraftRow::from_row)?.collect::<std::result::Result<_,_>>().map_err(Into::into)
+        let rows = stmt.query_map([], IssueDraftRow::from_row)?.collect::<std::result::Result<_,_>>()?;
+        Ok(rows)
     }
     pub fn issue_draft(&self, id: &str) -> Result<Option<IssueDraftRow>> {
         let conn = self.conn.lock().unwrap();
@@ -146,16 +149,17 @@ impl Store {
         let conn = self.conn.lock().unwrap(); conn.execute("INSERT INTO operator_notification_attempt (id,notification_id,device_id,outcome,attempted_ms) VALUES (?1,?2,?3,?4,?5)", params![uuid::Uuid::now_v7().to_string(),notification_id,device_id,outcome,now_ms()])?; Ok(())
     }
     pub fn notification_attempts(&self, notification_id: &str) -> Result<Vec<NotificationAttemptRow>> {
-        let conn = self.conn.lock().unwrap(); let mut stmt=conn.prepare("SELECT * FROM operator_notification_attempt WHERE notification_id=?1 ORDER BY attempted_ms")?; stmt.query_map([notification_id], |r| Ok(NotificationAttemptRow{id:r.get("id")?,notification_id:r.get("notification_id")?,device_id:r.get("device_id")?,outcome:r.get("outcome")?,attempted_ms:r.get("attempted_ms")?}))?.collect::<std::result::Result<_,_>>().map_err(Into::into)
+        let conn = self.conn.lock().unwrap(); let mut stmt=conn.prepare("SELECT * FROM operator_notification_attempt WHERE notification_id=?1 ORDER BY attempted_ms")?; let rows = stmt.query_map([notification_id], |r| Ok(NotificationAttemptRow{id:r.get("id")?,notification_id:r.get("notification_id")?,device_id:r.get("device_id")?,outcome:r.get("outcome")?,attempted_ms:r.get("attempted_ms")?}))?.collect::<std::result::Result<_,_>>()?;
+        Ok(rows)
     }
     /// Dedup is durable: two MCP calls with the same content in the window send once.
 
     pub fn operator_notifications(&self) -> Result<Vec<OperatorNotificationRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT id, expires_ms FROM operator_notification ORDER BY expires_ms DESC")?;
-        stmt.query_map([], |r| Ok(OperatorNotificationRow { id: r.get(0)?, expires_ms: r.get(1)? }))?
-            .collect::<std::result::Result<_, _>>()
-            .map_err(Into::into)
+        let rows = stmt.query_map([], |r| Ok(OperatorNotificationRow { id: r.get(0)?, expires_ms: r.get(1)? }))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
     }
 
     /// A durable per-origin/channel fixed window. Deduplicated calls never

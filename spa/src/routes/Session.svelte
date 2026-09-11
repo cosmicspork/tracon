@@ -6,6 +6,7 @@
   import { clock } from '../lib/clock.svelte'
   import { humanizeError } from '../lib/errors'
   import { formatAge, formatBudget, formatTokens } from '../lib/format'
+  import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
   import { isTerminal, type OperatorQuestion } from '../lib/types'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'

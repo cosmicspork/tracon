@@ -10,10 +10,12 @@
   import PermissionCard from '../components/PermissionCard.svelte'
   import PromotionCard from '../components/PromotionCard.svelte'
   import ReviewCard from '../components/ReviewCard.svelte'
+  import SessionRow from '../components/SessionRow.svelte'
   import SetupCard from '../components/SetupCard.svelte'
   import { api } from '../lib/api'
   import { setupSteps } from '../lib/firstrun'
   import { router } from '../lib/router.svelte'
+  import { store } from '../lib/store.svelte'
   import type { OperatorIssue, OperatorQuestion, Session, WorkView } from '../lib/types'
 
   const waiting = $derived(store.queue.waiting)

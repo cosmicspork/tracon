@@ -2937,14 +2937,14 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 path,
                 device_ids,
             } => {
-                let members = self.store().nodes_in_channel(&channel).map_err(ApiError::from)?;
+                let members = self.store().nodes_in_channel(&channel).map_err(|e| e.to_string())?;
                 if !members.contains(&sender.to_string()) || !members.contains(&self.node_id) {
                     Err(ApiError(StatusCode::FORBIDDEN, "sender is not a member of this notification channel".into()))
                 } else if !valid_operator_notification(&title, &body, &path, &device_ids) {
                     Err(ApiError(StatusCode::BAD_REQUEST, "invalid operator notification".into()))
                 } else {
                     let bindings = self.store().channel_get(&channel)
-                        .map_err(ApiError::from)?
+                        .map_err(|e| e.to_string())?
                         .and_then(|row| serde_json::from_str::<serde_json::Value>(&row.bindings_json).ok())
                         .unwrap_or_else(|| json!({}));
                     if !crate::notify::enabled(&bindings) {
@@ -2953,14 +2953,14 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                         &format!("remote:{sender}:{notification_id}"),
                         &notification_id,
                         60_000,
-                    ).map_err(ApiError::from)? {
+                    ).map_err(|e| e.to_string())? {
                         Ok(json!({ "deduplicated": true }))
                     } else if !self.store().claim_operator_notification_rate(
                         &channel,
                         sender,
                         10,
                         60_000,
-                    ).map_err(ApiError::from)? {
+                    ).map_err(|e| e.to_string())? {
                         let _ = self.store().release_operator_notification(&notification_id);
                         Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "operator notification rate limit exceeded".into()))
                     } else {
