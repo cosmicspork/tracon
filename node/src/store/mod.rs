@@ -653,6 +653,26 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// How many events of `kind` this session recorded since its current turn
+    /// began — the last `user_prompt`, or the whole session before the first
+    /// one. This is how a retry inside a turn gets an attempt number without
+    /// anything having to hold a counter across the gateway and the
+    /// supervisor, which both observe the same failure from different sides.
+    pub fn count_events_this_turn(&self, session_id: &str, kind: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM event WHERE session_id = ?1 AND kind = ?2 AND seq >
+                COALESCE((SELECT MAX(seq) FROM event WHERE session_id = ?1 AND kind = ?3), 0)",
+            rusqlite::params![
+                session_id,
+                kind,
+                crate::session::state::event_kind::USER_PROMPT
+            ],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
     /// Totals per provider and model since `since_ms`, for one channel or all.
     pub fn usage_since(&self, channel: Option<&str>, since_ms: i64) -> Result<Vec<UsageTotal>> {
         let conn = self.conn.lock().unwrap();

@@ -300,7 +300,7 @@ pub async fn handle(
     let usage = Arc::new(Mutex::new(UsageRow {
         channel: channel.clone().unwrap_or_default(),
         node_id: s.node_id.clone(),
-        session_id,
+        session_id: session_id.clone(),
         provider: provider.clone(),
         model,
         at_ms: now_ms(),
@@ -308,8 +308,27 @@ pub async fn handle(
         output_tokens: 0,
         requests: 1,
     }));
+    // A refused call is the harness's business — it retries inside the turn,
+    // with backoff, and says nothing over ACP until it gives up, so the
+    // session reads as a hang. The gateway is the one place that sees the
+    // upstream answer, so it tells the session instead. The body is buffered
+    // rather than streamed only on this path: an error body is small, and it
+    // still reaches the harness byte for byte.
+    let inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>> =
+        if status.is_client_error() || status.is_server_error() {
+            let body = upstream.bytes().await.unwrap_or_else(|e| {
+                tracing::warn!(provider, error = %e, "error body from upstream was cut short");
+                Bytes::new()
+            });
+            if let Some(session_id) = &session_id {
+                note_provider_error(&s, session_id, &provider, status, &body);
+            }
+            Box::pin(tokio_stream::once(Ok(body)))
+        } else {
+            Box::pin(upstream.bytes_stream())
+        };
     let counted = Counted {
-        inner: Box::pin(upstream.bytes_stream()),
+        inner,
         scanner: UsageScanner::new(&p.shape),
         usage: usage.clone(),
         store: s.manager.store().clone(),
@@ -317,6 +336,70 @@ pub async fn handle(
     };
     out.body(Body::from_stream(counted))
         .unwrap_or_else(|_| refuse(StatusCode::BAD_GATEWAY, "bad upstream response"))
+}
+
+/// At most this many `provider_error` events per turn. A harness that retries
+/// without ever giving up would otherwise write the log full; the operator
+/// learns nothing from attempt 40 that attempt 20 did not already say.
+const MAX_PROVIDER_ERRORS_PER_TURN: i64 = 20;
+
+/// Record one failed upstream attempt on the session that made the call. The
+/// session state is untouched: the harness has not given up, and this is
+/// informational.
+fn note_provider_error(
+    s: &AppState,
+    session_id: &str,
+    provider: &str,
+    status: StatusCode,
+    body: &[u8],
+) {
+    let attempt = s
+        .manager
+        .store()
+        .count_events_this_turn(session_id, ek::PROVIDER_ERROR)
+        .unwrap_or(0)
+        + 1;
+    let message = short_error(status, body);
+    tracing::warn!(provider, status = status.as_u16(), attempt, %message, "provider refused a session's model call");
+    if attempt > MAX_PROVIDER_ERRORS_PER_TURN {
+        return;
+    }
+    s.manager.record_event(
+        session_id,
+        ek::PROVIDER_ERROR,
+        json!({
+            "provider": provider,
+            "status": status.as_u16(),
+            "message": message,
+            "attempt": attempt,
+        }),
+    );
+}
+
+/// One short line for the transcript out of a provider's error body. Both
+/// shapes nest the human-readable part differently, and a body that is not
+/// JSON at all (an edge proxy's HTML) still has to become something readable.
+fn short_error(status: StatusCode, body: &[u8]) -> String {
+    let value: Option<Value> = serde_json::from_slice(body).ok();
+    let text = value
+        .as_ref()
+        .and_then(|v| {
+            v["error"]["message"]
+                .as_str()
+                .or_else(|| v["message"].as_str())
+                .or_else(|| v["error"].as_str())
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| String::from_utf8_lossy(body).to_string());
+    let line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line: String = line.chars().take(200).collect();
+    if line.is_empty() {
+        return status
+            .canonical_reason()
+            .unwrap_or("upstream error")
+            .to_string();
+    }
+    line
 }
 
 /// Provider bindings, then the credential's own bindings. Fail closed: a
@@ -553,6 +636,35 @@ mod tests {
         assert!(shaped_for_subscription(already_blocks.as_bytes()).is_none());
         assert!(shaped_for_subscription(br#"{"model":"m"}"#).is_none());
         assert!(shaped_for_subscription(b"not json").is_none());
+    }
+
+    #[test]
+    fn an_error_body_becomes_one_readable_line() {
+        let anthropic =
+            br#"{"type":"error","error":{"type":"rate_limit_error","message":"Error"}}"#;
+        assert_eq!(
+            short_error(StatusCode::TOO_MANY_REQUESTS, anthropic),
+            "Error"
+        );
+        let openai = br#"{"message":"You exceeded your\n   current quota"}"#;
+        assert_eq!(
+            short_error(StatusCode::TOO_MANY_REQUESTS, openai),
+            "You exceeded your current quota"
+        );
+        // An edge that answers HTML, and one that answers nothing at all.
+        assert_eq!(
+            short_error(
+                StatusCode::BAD_GATEWAY,
+                b"<html>\n<body>502 Bad Gateway</body>"
+            ),
+            "<html> <body>502 Bad Gateway</body>"
+        );
+        assert_eq!(short_error(StatusCode::BAD_GATEWAY, b""), "Bad Gateway");
+        // Long enough to fill the transcript, cut to a line.
+        assert_eq!(
+            short_error(StatusCode::BAD_REQUEST, &vec![b'x'; 4096]).len(),
+            200
+        );
     }
 
     #[test]

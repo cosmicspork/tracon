@@ -123,6 +123,12 @@ pub mod event_kind {
     /// The channel reached its daily token ceiling; the gateway refused a
     /// model call. Recorded once per session.
     pub const CEILING: &str = "ceiling";
+    /// A provider answered a model call with an error and the harness is
+    /// retrying inside the turn (`provider`, `status`, `message`, `attempt`).
+    /// Informational: the session stays running, because the harness has not
+    /// given up. Recorded by the gateway, which sees the upstream answer, and
+    /// by the supervisor when the harness says so itself.
+    pub const PROVIDER_ERROR: &str = "provider_error";
 }
 
 #[cfg(test)]

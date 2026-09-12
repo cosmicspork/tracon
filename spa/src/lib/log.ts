@@ -50,6 +50,18 @@ export function groupLog(events: Event[], progress: Map<string, string> = new Ma
   return out
 }
 
+/// "anthropic answered 429 · Error · harness retrying · attempt 2" — one line
+/// for a provider refusal the harness is still retrying through. The session
+/// stays running, so this reads as progress being made on the operator's
+/// behalf, not as a failure.
+export function providerErrorLine(payload: Record<string, unknown>): string {
+  const provider = typeof payload.provider === 'string' && payload.provider ? payload.provider : 'the provider'
+  const status = typeof payload.status === 'number' ? `answered ${payload.status}` : 'refused the call'
+  const message = typeof payload.message === 'string' ? payload.message.trim() : ''
+  const attempt = typeof payload.attempt === 'number' && payload.attempt > 1 ? `attempt ${payload.attempt}` : ''
+  return [`${provider} ${status}`, message, 'harness retrying', attempt].filter(Boolean).join(' · ')
+}
+
 export function groupOpen(tools: ToolEntry[]): boolean {
   return tools.some((t) => !t.result)
 }

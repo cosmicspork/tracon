@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::any;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -32,6 +33,9 @@ type SeenRequest = (String, String, Vec<(String, String)>, String);
 #[derive(Clone, Default)]
 struct Seen {
     requests: Arc<Mutex<Vec<SeenRequest>>>,
+    /// When set, the stub answers this status with a provider-shaped error
+    /// body instead of the usual stream — a live provider's 429.
+    refuse: Arc<Mutex<Option<u16>>>,
 }
 
 /// A provider stub that records every request and answers a two-event stream
@@ -54,12 +58,21 @@ async fn start_upstream(seen: Seen) -> u16 {
                     headers,
                     String::from_utf8_lossy(&body).into_owned(),
                 ));
+                if let Some(code) = *seen.refuse.lock().unwrap() {
+                    return (
+                        StatusCode::from_u16(code).unwrap(),
+                        [("content-type", "application/json")],
+                        r#"{"type":"error","error":{"type":"rate_limit_error","message":"Error"}}"#,
+                    )
+                        .into_response();
+                }
                 let sse = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\n\
                            event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n";
                 (
                     [("content-type", "text/event-stream"), ("x-upstream", "stub")],
                     sse,
                 )
+                    .into_response()
             }
         },
     ));
@@ -353,6 +366,90 @@ async fn an_oauth_credential_becomes_a_bearer_with_the_beta_flag_merged() {
     assert!(
         !format!("{up:?}").contains("rt-1"),
         "refresh token never leaves the node"
+    );
+}
+
+/// A running session row for `id` on the `work` channel, so events have
+/// somewhere to land.
+fn running_session(store: &Store, id: &str) {
+    store.ensure_peer_node("n1").unwrap();
+    store
+        .conn()
+        .execute(
+            "INSERT INTO session (id, node_id, channel, repo_path, branch, harness_id, harness_version, model,
+                budget_tokens, tokens_used, state, turn_active, created_ms, updated_ms)
+             VALUES (?1, 'n1', 'work', '/r', 'b', 'fake', '1', 'm', 1000, 0, 'running', 1, 1, 1)",
+            [id],
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_provider_that_refuses_a_turn_is_reported_on_the_session_as_it_retries() {
+    state::isolate();
+    let h = harness(STORE, LOOPBACK).await;
+    let sid = "s-429";
+    running_session(&h.store, sid);
+    let token = h.manager.register_tool_token_for_test(sid, "work").await;
+    *h.seen.refuse.lock().unwrap() = Some(429);
+
+    // The harness's own retry loop: two attempts, each answered by the
+    // provider's own body, which reaches the harness unchanged.
+    for _ in 0..2 {
+        let (status, _, body) = call(
+            &h.app,
+            "POST",
+            "/model/stub/v1/messages",
+            &token,
+            json!({"model": "claude-x", "messages": []}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(body.contains("rate_limit_error"), "{body}");
+    }
+
+    let errors: Vec<_> = h
+        .store
+        .events_after(sid, 0, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "provider_error")
+        .collect();
+    assert_eq!(errors.len(), 2, "one event per failed attempt");
+    assert_eq!(errors[0].payload["provider"], "stub");
+    assert_eq!(errors[0].payload["status"], 429);
+    assert_eq!(errors[0].payload["message"], "Error");
+    assert_eq!(errors[0].payload["attempt"], 1);
+    assert_eq!(errors[1].payload["attempt"], 2);
+    // Informational: the harness has not given up, so neither has the session.
+    assert_eq!(
+        h.store.get_session(sid).unwrap().unwrap().state,
+        "running",
+        "a provider error during a turn does not end the session"
+    );
+
+    // The node's own probe belongs to no session, so its failures record
+    // nothing — and a call that succeeds says nothing either.
+    let probe = h.manager.probe_token().to_string();
+    call(&h.app, "GET", "/model/stub/v1/models", &probe, json!({})).await;
+    *h.seen.refuse.lock().unwrap() = None;
+    let (status, _, _) = call(
+        &h.app,
+        "POST",
+        "/model/stub/v1/messages",
+        &token,
+        json!({"model": "claude-x", "messages": []}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        h.store
+            .events_after(sid, 0, 50)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == "provider_error")
+            .count(),
+        2
     );
 }
 
