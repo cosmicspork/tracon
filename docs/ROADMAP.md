@@ -165,9 +165,6 @@ Explain the job and make one-node use complete.
 - The Kubernetes runtime backend has no scoped QA browser egress gateway;
   `scope_qa_egress` always refuses on that backend, so QA browser verification
   is Podman-only until Kubernetes gets one.
-- The `providers` integration test is timing-sensitive: it polls fixed 2s/5s
-  timeouts for an async credential lift, which can miss under full test-suite
-  load rather than a single-test run.
 
 ## Hardening
 

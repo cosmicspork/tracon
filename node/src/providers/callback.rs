@@ -520,18 +520,63 @@ mod tests {
         capture.stop();
     }
 
+    /// Hold `[::1]:port` for a port that is free on both loopback families,
+    /// for the collision test below. `None` when this machine has no IPv6
+    /// loopback to collide on.
+    ///
+    /// The port comes from a fixed range rather than an ephemeral bind, and
+    /// the IPv6 half stays held for the whole test. An ephemeral port would
+    /// make the test racy in a way that shows on macOS: IPv4 and IPv6 binds
+    /// to *distinct* loopback addresses do not conflict with each other, so
+    /// reserving `[::1]:port` leaves `127.0.0.1:port` free for the kernel to
+    /// hand to any other socket in this binary — every unit test runs in one
+    /// process — in the window between `CallbackCapture::start` releasing it
+    /// and the test taking it back. Ports below 32768 are outside both
+    /// platforms' ephemeral ranges (macOS 49152-65535, Linux 32768-60999), so
+    /// nothing is ever assigned one by accident.
+    ///
+    /// The occupier is v6-only on purpose: the collision under test is an
+    /// IPv6-loopback collision, and leaving `IPV6_V6ONLY` at the platform
+    /// default would make the precondition depend on `net.inet6.ip6.v6only`
+    /// (macOS) or `net.ipv6.bindv6only` (Linux).
+    fn occupied_ipv6_loopback() -> Option<(std::net::TcpListener, u16)> {
+        for port in 19_500..19_600u16 {
+            let Ok(socket) = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP)) else {
+                return None;
+            };
+            if socket.set_only_v6(true).is_err()
+                || socket
+                    .bind(&SocketAddr::from((Ipv6Addr::LOCALHOST, port)).into())
+                    .is_err()
+                || socket.listen(8).is_err()
+            {
+                continue;
+            }
+            // The capture binds IPv4 before IPv6, so the IPv4 half has to be
+            // free as well or the run would stop before the collision.
+            let Ok(ipv4) = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)) else {
+                continue;
+            };
+            drop(ipv4);
+            return Some((socket.into(), port));
+        }
+        None
+    }
+
     #[tokio::test]
     async fn an_ipv6_collision_releases_the_ipv4_listener() {
-        let Ok(occupied) = std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)) else {
+        let Some((occupied, port)) = occupied_ipv6_loopback() else {
             return;
         };
-        let port = occupied.local_addr().unwrap().port();
-        assert!(matches!(
-            CallbackCapture::start(target_at(port)).await,
-            Err(CallbackError::AddrInUse(value)) if value == port
-        ));
-        drop(occupied);
+        match CallbackCapture::start(target_at(port)).await {
+            Err(CallbackError::AddrInUse(value)) if value == port => {}
+            Err(other) => panic!("expected the IPv6 collision on {port}, got {other}"),
+            Ok(_) => panic!("the occupied IPv6 loopback on {port} did not collide"),
+        }
+        // `occupied` still holds the IPv6 half, so nothing but a listener the
+        // capture failed to release can be holding the IPv4 half.
         std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .expect("partial IPv4 listener was released");
+        drop(occupied);
     }
 }

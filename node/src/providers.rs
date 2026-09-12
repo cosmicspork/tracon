@@ -224,11 +224,20 @@ impl Providers {
             .join(format!(".{}-empty-{}", provider, uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&empty)
             .map_err(|error| ProviderError::Failed(error.to_string()))?;
-        let result = self
-            .backend
-            .import_volume(&self.state_volume(provider), &empty)
-            .await
-            .map_err(|error| ProviderError::Failed(error.to_string()));
+        let volume = self.state_volume(provider);
+        let result = {
+            // A clear replaces the volume wholesale. Held against the same
+            // lock the lift's export takes, so a refresh or a finishing login
+            // can never read the volume during the window where it does not
+            // exist; without it the reader fails with "source does not exist"
+            // and the credential is silently never lifted.
+            let lock = crate::workspace::volume_lock(&volume);
+            let _guard = lock.lock().await;
+            self.backend
+                .import_volume(&volume, &empty)
+                .await
+                .map_err(|error| ProviderError::Failed(error.to_string()))
+        };
         let _ = std::fs::remove_dir_all(empty);
         result
     }
@@ -779,10 +788,15 @@ impl Providers {
         kind: LiftKind,
     ) -> Result<(), ProviderError> {
         let state = self.store_dir(name);
-        self.backend
-            .export_volume(&self.state_volume(name), &state)
-            .await
-            .map_err(|error| ProviderError::Failed(error.to_string()))?;
+        let volume = self.state_volume(name);
+        {
+            let lock = crate::workspace::volume_lock(&volume);
+            let _guard = lock.lock().await;
+            self.backend
+                .export_volume(&volume, &state)
+                .await
+                .map_err(|error| ProviderError::Failed(error.to_string()))?;
+        }
         let lifted = self.adapter.lift(&state, login).await;
         let _ = std::fs::remove_dir_all(&state);
         let token: LiftedToken =
