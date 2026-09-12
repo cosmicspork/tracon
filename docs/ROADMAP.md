@@ -190,7 +190,7 @@ Findings originate from review of `2e32a59`; revalidate against the implementati
 
 - [ ] Recover interrupted publication honestly and idempotently, including crashes after external side effects.
 - [ ] Verify private HTTPS pushes use brokered authentication rather than ambient host helpers.
-- [ ] Verify desktop process identity before adoption/signaling, including stale handoff records and PID reuse.
+- [x] Verify desktop process identity before adoption/signaling, including stale handoff records and PID reuse.
 - [ ] Exercise cancellation during checks, stalled harness startup, and resubmission racing approval; reject late completions that resurrect terminal sessions.
 - [ ] Exercise delayed mesh keys, member removal/key revocation, restart recovery, and wire-version mismatches with visible refusals.
 - [ ] Verify hub outages preserve local work and never silently widen authority.
