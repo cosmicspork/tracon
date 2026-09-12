@@ -176,7 +176,7 @@ Findings originate from review of `2e32a59`; revalidate against the implementati
 ### Reproduced paths
 
 - [ ] Disable Git replacement/graft interpretation across capture, provenance, and publication; verify reviewed bytes match the pushed candidate.
-- [ ] Authenticate enrollment's signing/encryption key binding before handing off channel keys.
+- [x] Authenticate enrollment's signing/encryption key binding before handing off channel keys.
 - [ ] Eliminate executable agent-controlled Git metadata, including `config.worktree`. Git-side execution was reproduced; a full container escape was not exercised.
 - [ ] Restrict credentialed model proxy methods/paths to granted capabilities, not arbitrary provider-account operations.
 - [ ] Fix mutable-worktree checks and agent-controlled required-check overrides through candidate-bound verification.

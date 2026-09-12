@@ -57,6 +57,7 @@ impl Hub {
                 .put(&Member {
                     node_id: id.node_id(),
                     x25519_pub: id.x25519_hex(),
+                    binding_sig: proto::enroll::sign_binding(id),
                     name: "n".into(),
                     channels: vec![MESH_CHANNEL.into(), "personal".into()],
                     admitted_ms: 0,
@@ -424,6 +425,7 @@ async fn a_late_joiner_backfills_records_from_each_site() {
         .put(&Member {
             node_id: c_id.node_id(),
             x25519_pub: c_id.x25519_hex(),
+            binding_sig: proto::enroll::sign_binding(&c_id),
             name: "gamma".into(),
             channels: vec![MESH_CHANNEL.into(), "personal".into()],
             admitted_ms: 0,
