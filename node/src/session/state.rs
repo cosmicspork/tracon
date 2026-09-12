@@ -143,8 +143,8 @@ pub mod event_kind {
     /// indistinguishable from a race that was never noticed.
     pub const LATE_REFUSED: &str = "late_refused";
     /// A deterministic check was stopped mid-execution because the session
-    /// was paused or ended (`command`, `reason`). Its evidence row is
-    /// `cancelled`, which is never reusable and never a pass.
+    /// was paused or ended (`candidate_id`, `head_sha`, `reason`). Its
+    /// evidence row is `cancelled`, which is never reusable and never a pass.
     pub const CHECK_CANCELLED: &str = "check_cancelled";
     /// The gateway refused a model call before it reached the provider,
     /// because the method and path are not on the inference allowlist the
