@@ -150,6 +150,12 @@ impl Replica {
         self.identity.x25519_hex()
     }
 
+    /// This replica's proof that its sealing key belongs to its node id, so a
+    /// node sharing a channel with the hub binds the two before wrapping.
+    pub fn binding_sig(&self) -> String {
+        proto::enroll::sign_binding(&self.identity)
+    }
+
     pub fn undecryptable(&self) -> u64 {
         self.undecryptable.load(Ordering::Relaxed)
     }

@@ -63,6 +63,7 @@ pub async fn info(State(s): State<AppState>) -> Json<Value> {
         "replica": s.replica.is_some(),
         "hub_node_id": s.replica.as_ref().map(|r| r.node_id()),
         "hub_x25519_pub": s.replica.as_ref().map(|r| r.x25519_hex()),
+        "hub_binding_sig": s.replica.as_ref().map(|r| r.binding_sig()),
         "replica_channels": s.replica.as_ref().map(|r| r.readable_channels()),
         "replica_undecryptable": s.replica.as_ref().map(|r| r.undecryptable()),
     }))
@@ -377,6 +378,15 @@ pub async fn fill_enroll(
             ),
         ));
     }
+    // The slot is public, so the only thing tying the two keys together is the
+    // filler's own signature over them. Refuse here and the inviter never sees
+    // a pair whose sealing key the node id never claimed.
+    if !req.binding_ok() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "x25519_pub is not signed by node_id: binding_sig must prove the pair",
+        ));
+    }
     let body = serde_json::to_string(&req).expect("serializes");
     match s.enroll.fill(&code, body, now_unix()) {
         Fill::Filled => Ok((StatusCode::NO_CONTENT, Json(Value::Null))),
@@ -433,6 +443,12 @@ pub struct AdmitBody {
     pub node_id: String,
     pub x25519_pub: String,
     pub name: String,
+    /// The target's own signature over `(node_id, x25519_pub)`. Required
+    /// whenever this request would write the sealing key — the directory is
+    /// where other nodes read the key they wrap keyrings to, so an unproven
+    /// pair must never reach it.
+    #[serde(default)]
+    pub binding_sig: String,
     #[serde(default)]
     pub channels: Vec<String>,
     /// `hub` when a node shares channels with the replica. Only the hub's own
@@ -507,13 +523,29 @@ pub async fn admit(
     // A channel grant for an existing peer must not also be a directory-key
     // mutation. The target's authenticated request is the proof for its own
     // name/key rotation; third-party grants preserve both fields.
-    let (x25519_pub, name) = match (&existing, is_self) {
-        (Some(e), false) => (e.x25519_pub.clone(), e.name.clone()),
-        _ => (body.x25519_pub.to_ascii_lowercase(), body.name),
+    let (x25519_pub, name, binding_sig) = match (&existing, is_self) {
+        (Some(e), false) => (e.x25519_pub.clone(), e.name.clone(), e.binding_sig.clone()),
+        _ => {
+            // Writing the key at all requires the target's proof that it holds
+            // it: an admitter relays what the enrollment slot carried, and a
+            // node rotating its own key signs the new pair.
+            if !proto::enroll::verify_binding(&node_id, &body.x25519_pub, &body.binding_sig) {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "x25519_pub is not signed by node_id: binding_sig must prove the pair",
+                ));
+            }
+            (
+                body.x25519_pub.to_ascii_lowercase(),
+                body.name,
+                body.binding_sig.to_ascii_lowercase(),
+            )
+        }
     };
     let member = Member {
         node_id: node_id.clone(),
         x25519_pub,
+        binding_sig,
         name,
         channels,
         admitted_ms: existing

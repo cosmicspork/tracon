@@ -504,14 +504,8 @@ impl Manager {
             return Err(SessionError::ChannelArchived(spec.channel.clone()));
         }
         let phase_bindings = &bindings["phases"][spec.phase.as_str()];
-        let model_source = if spec.model.trim().is_empty() {
-            let (model, source) =
-                self.resolve_default_model(&spec.channel, spec.phase, &bindings)?;
-            spec.model = model;
-            source
-        } else {
-            "explicit"
-        };
+        let (model, model_source) = self.resolve_model(&spec, &bindings)?;
+        spec.model = model;
         let budget = spec
             .budget_tokens
             .or_else(|| phase_bindings["budget_tokens"].as_i64())
@@ -1536,6 +1530,27 @@ impl Manager {
             .is_ok()
     }
 
+    /// The model a spec will actually run on, and where it came from.
+    ///
+    /// An explicit model is checked against the channel's bound provider
+    /// exactly as a resolved default is: naming one is a request, not an
+    /// exemption, and a name the channel cannot authenticate would otherwise
+    /// start a session that can only fail at its first turn. `create` and
+    /// `preflight` both go through here, so both refuse it the same way.
+    fn resolve_model(
+        &self,
+        spec: &NewSession,
+        bindings: &serde_json::Value,
+    ) -> Result<(String, &'static str), SessionError> {
+        if spec.model.trim().is_empty() {
+            self.resolve_default_model(&spec.channel, spec.phase, bindings)
+        } else if self.model_usable(&spec.channel, &spec.model, bindings) {
+            Ok((spec.model.clone(), "explicit"))
+        } else {
+            Err(SessionError::ModelRequired)
+        }
+    }
+
     /// The channel-archived and model-availability checks `create` runs,
     /// without any of its side effects. A caller that must materialize
     /// something expensive before `create` (a continuity transfer's
@@ -1546,11 +1561,7 @@ impl Manager {
         if !bindings["archived"].is_null() {
             return Err(SessionError::ChannelArchived(spec.channel.clone()));
         }
-        if spec.model.trim().is_empty() {
-            self.resolve_default_model(&spec.channel, spec.phase, &bindings)?;
-        } else if !self.model_usable(&spec.channel, &spec.model, &bindings) {
-            return Err(SessionError::ModelRequired);
-        }
+        self.resolve_model(spec, &bindings)?;
         Ok(())
     }
 

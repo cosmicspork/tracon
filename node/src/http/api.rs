@@ -3814,6 +3814,7 @@ pub async fn admit_invite(
         mesh.hub_url(),
         &req.node_id,
         &req.x25519_pub,
+        &req.binding_sig,
         &req.name,
         &inv.channels,
         &handoff,

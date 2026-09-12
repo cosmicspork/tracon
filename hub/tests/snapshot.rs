@@ -33,6 +33,7 @@ fn snapshot_then_restore_reopens_the_same_hub() {
         .put(&Member {
             node_id: a.node_id(),
             x25519_pub: a.x25519_hex(),
+            binding_sig: proto::enroll::sign_binding(&a),
             name: "a".into(),
             channels: vec![MESH_CHANNEL.into(), "personal".into()],
             admitted_ms: 0,
