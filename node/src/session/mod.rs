@@ -858,11 +858,34 @@ impl Manager {
             return Ok(());
         }
 
-        // The harness reaches its models through the node: every provider is
-        // wired to the gateway with this session's token as the placeholder
-        // key, so the only secret in the container names the session.
-        let wiring =
-            crate::gateway::model::harness_wiring(&self.cfg, &self.backend.harness_host(), &token);
+        // The harness reaches its models through the node: the providers this
+        // channel could actually spend on are wired to the gateway with this
+        // session's token as the placeholder key, so the only secret in the
+        // container names the session. A provider the gateway would refuse is
+        // left out rather than offered and then denied mid-turn.
+        let wiring = {
+            let bindings = self.bindings(&spec.channel);
+            let broker = self.tools.broker.read().unwrap();
+            crate::gateway::model::harness_wiring(
+                &self.cfg,
+                &self.backend.harness_host(),
+                &token,
+                |name, provider| {
+                    let bound = bindings["providers"].as_array().is_none_or(|allowed| {
+                        allowed.iter().any(|value| value.as_str() == Some(name))
+                    });
+                    bound
+                        && broker
+                            .inject_for(
+                                &provider.credential,
+                                &spec.channel,
+                                &self.node_id,
+                                &provider.shape,
+                            )
+                            .is_ok()
+                },
+            )
+        };
         // What the session is told first: conventions from the corpus, this
         // node's facts, the channel's policy, and what is known. Recorded as
         // an event so the transcript shows what the agent was told.
