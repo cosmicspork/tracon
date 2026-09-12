@@ -81,3 +81,5 @@ tempfile = "3"
 [dev-dependencies]
 tracon-hub = { path = "../hub" }
 tower = { version = "0.5.3", features = ["util"] }
+# `start_paused`, so a test can drive a wait without serving it in real time.
+tokio = { workspace = true, features = ["test-util"] }

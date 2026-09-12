@@ -274,6 +274,11 @@ impl Fixture {
 
     /// What the agent sees when it asks about its review.
     async fn status_tool(&self, review_id: &str) -> Value {
+        self.status_tool_waiting(review_id, 0).await
+    }
+
+    /// The same tool, asked to block: what an agent gets when it waits.
+    async fn status_tool_waiting(&self, review_id: &str, wait_secs: u64) -> Value {
         let ctx = tracon::mcp::CallContext {
             session_id: "s1".into(),
             channel: "work".into(),
@@ -284,7 +289,7 @@ impl Fixture {
             &self.manager,
             &ctx,
             "review_status",
-            &json!({ "review_id": review_id, "wait_secs": 0 }),
+            &json!({ "review_id": review_id, "wait_secs": wait_secs }),
         )
         .await
         .unwrap()
@@ -414,6 +419,35 @@ async fn a_review_waits_in_the_queue_until_it_is_decided() {
         .unwrap()
         .claimed_ms
         .is_some());
+}
+
+/// An MCP client fails the call long before a human decides, and a failed call
+/// loses the turn. However long the agent asks to wait, the node comes back
+/// inside the client's budget with something the agent can act on.
+#[tokio::test(start_paused = true)]
+async fn a_long_wait_is_capped_and_returns_the_state_instead_of_timing_out() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+
+    let began = tokio::time::Instant::now();
+    let s = f.status_tool_waiting(&id, 600).await;
+    let waited = began.elapsed();
+
+    assert_eq!(s["review_id"], id.as_str());
+    assert_eq!(s["state"], "new");
+    assert_eq!(s["still_waiting"], true);
+    assert_eq!(s["waited_secs"], 20);
+    assert!(s["message"].as_str().unwrap().contains("review_status"));
+    // Capped, not honoured: nowhere near the 600 seconds asked for, and well
+    // inside the shortest client timeout seen in the wild (omp 18: 30s).
+    assert!(
+        waited < std::time::Duration::from_secs(25),
+        "waited {waited:?}"
+    );
+    // The wait leaves the review alone, so the next call picks up where this
+    // one left off.
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "new");
 }
 
 /// A harness the operator runs has no worktree on its session; the review
