@@ -78,11 +78,12 @@ fn safe_id(id: &str) -> String {
 
 /// One lock per runtime volume, serializing import/export against it. Two
 /// operations racing the same volume (a session's own start-up export racing
-/// a client's `/download`, or two concurrent approvals snapshotting the same
-/// workspace) would otherwise interleave a remove-and-rename with a reader,
-/// handing back a torn directory or content that was never the tree
-/// `validate_tree` just approved.
-fn volume_lock(volume: &str) -> Arc<AsyncMutex<()>> {
+/// a client's `/download`, two concurrent approvals snapshotting the same
+/// workspace, or a provider refresh exporting the login state a reconnect is
+/// clearing) would otherwise interleave a remove-and-rename with a reader,
+/// handing back a torn directory, content that was never the tree
+/// `validate_tree` just approved, or no directory at all.
+pub(crate) fn volume_lock(volume: &str) -> Arc<AsyncMutex<()>> {
     static LOCKS: std::sync::LazyLock<StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
         std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
     LOCKS
