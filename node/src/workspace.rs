@@ -123,7 +123,15 @@ pub fn copy_tree(source: &Path, destination: &Path, skip_git: bool) -> Result<()
         return Err(WorkspaceError::Unsafe(source.into()));
     }
     let mut budget = CopyBudget::default();
-    copy_dir(source, destination, skip_git, &mut budget)
+    copy_dir(source, destination, skip_git, &mut budget)?;
+    // A directory that vanished under the walk is copied as empty, which is
+    // the right answer for something inside the tree and the wrong one for the
+    // tree itself: no destination at all means the source went away, not that
+    // it held nothing.
+    if !destination.is_dir() {
+        return Err(WorkspaceError::Missing(source.into()));
+    }
+    Ok(())
 }
 /// Create or replace the runtime-owned bytes for a workspace from a validated
 /// node staging directory. This is the only bridge from a candidate snapshot
@@ -191,22 +199,52 @@ struct CopyBudget {
     files: usize,
 }
 
+/// An entry that was listed and is already gone by the time it is read.
+///
+/// The trees copied here are live: any `git commit` — the node's own, or the
+/// agent's inside its workspace — leaves `git maintenance run --auto --detach`
+/// running behind it, and that creates and removes
+/// `.git/objects/maintenance.lock` under this walk. Nothing that no longer
+/// exists has bytes to copy or can be a symlink pointing out of the tree, so
+/// it is skipped rather than failing the copy. This never relaxes a check:
+/// every entry that is still there is stated, opened, and budgeted exactly as
+/// before, and the copy that produces the imported bytes is the one whose
+/// checks bind.
+fn vanished(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+}
+
 fn copy_dir(
     source: &Path,
     destination: &Path,
     skip_git: bool,
     budget: &mut CopyBudget,
 ) -> Result<(), WorkspaceError> {
+    // Listed before the destination is created: a directory that vanished
+    // under the walk must not leave an empty one behind in the copy.
+    let entries = match std::fs::read_dir(source) {
+        Ok(entries) => entries,
+        Err(error) if vanished(&error) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
     std::fs::create_dir_all(destination)?;
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if vanished(&error) => continue,
+            Err(error) => return Err(error.into()),
+        };
         let name = entry.file_name();
         if skip_git && name.to_string_lossy().eq_ignore_ascii_case(".git") {
             continue;
         }
         let source_path = entry.path();
         let destination_path = destination.join(&name);
-        let metadata = std::fs::symlink_metadata(&source_path)?;
+        let metadata = match std::fs::symlink_metadata(&source_path) {
+            Ok(metadata) => metadata,
+            Err(error) if vanished(&error) => continue,
+            Err(error) => return Err(error.into()),
+        };
         if metadata.file_type().is_symlink() {
             return Err(WorkspaceError::Unsafe(source_path));
         }
@@ -222,8 +260,14 @@ fn copy_dir(
         // resolution copy an arbitrary file's bytes into the snapshot.
         // Opening without following a symlink and re-checking the *opened*
         // descriptor collapses that into one resolution.
-        let mut src = open_no_follow(&source_path)
-            .map_err(|_| WorkspaceError::Unsafe(source_path.clone()))?;
+        let mut src = match open_no_follow(&source_path) {
+            Ok(file) => file,
+            // Only an entry that is already gone is skipped. A refused open —
+            // a symlink swapped in under `O_NOFOLLOW`, which is `ELOOP`, or a
+            // permission change — is still unsafe.
+            Err(error) if vanished(&error) => continue,
+            Err(_) => return Err(WorkspaceError::Unsafe(source_path)),
+        };
         let opened = src.metadata()?;
         if !opened.is_file() {
             return Err(WorkspaceError::Unsafe(source_path));
@@ -445,8 +489,18 @@ fn scrub_git_dir(git: &Path, depth: usize) -> Result<(), WorkspaceError> {
             continue;
         };
         for entry in entries {
-            let nested = entry?.path();
-            let metadata = std::fs::symlink_metadata(&nested)?;
+            // Same live-tree race as the copy walk: a nested Git directory
+            // that is gone needs no scrubbing.
+            let nested = match entry {
+                Ok(entry) => entry.path(),
+                Err(error) if vanished(&error) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let metadata = match std::fs::symlink_metadata(&nested) {
+                Ok(metadata) => metadata,
+                Err(error) if vanished(&error) => continue,
+                Err(error) => return Err(error.into()),
+            };
             if metadata.file_type().is_symlink() {
                 return Err(WorkspaceError::Unsafe(nested));
             }
@@ -465,12 +519,18 @@ fn remove_metadata(path: &Path) -> Result<(), WorkspaceError> {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return Ok(());
     };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        std::fs::remove_file(path)?;
+    let removed = if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        std::fs::remove_file(path)
     } else {
-        std::fs::remove_dir_all(path)?;
+        std::fs::remove_dir_all(path)
+    };
+    match removed {
+        Ok(()) => Ok(()),
+        // A lock file Git wrote and then removed itself: gone is the outcome
+        // this asks for.
+        Err(error) if vanished(&error) => Ok(()),
+        Err(error) => Err(error.into()),
     }
-    Ok(())
 }
 
 /// Checked relative paths from browser folder uploads.  No path may escape,
@@ -694,6 +754,63 @@ mod tests {
             operator.join("pre-commit").exists(),
             "the symlink target must not have been emptied"
         );
+    }
+
+    /// Every tree copied here is live. Any `git commit` leaves a detached
+    /// `git maintenance run --auto` behind it, and that creates and removes
+    /// `.git/objects/maintenance.lock` while the node is walking the same
+    /// directory: treating a listed-then-gone entry as a failure lost whole
+    /// imports to a lock file that was never part of the workspace.
+    #[test]
+    fn an_entry_that_vanishes_under_the_walk_does_not_fail_the_copy() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("workspace");
+        std::fs::create_dir_all(source.join(".git/objects")).unwrap();
+        for i in 0..200 {
+            std::fs::write(source.join(format!("f{i}.txt")), "contents").unwrap();
+        }
+        let lock = source.join(".git/objects/maintenance.lock");
+        let stop = Arc::new(AtomicBool::new(false));
+        let churn = std::thread::spawn({
+            let stop = stop.clone();
+            move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = std::fs::write(&lock, "1");
+                    let _ = std::fs::remove_file(&lock);
+                }
+            }
+        });
+
+        let copies = (0..40)
+            .try_for_each(|i| copy_tree(&source, &tmp.path().join(format!("copy-{i}")), false));
+
+        stop.store(true, Ordering::Relaxed);
+        churn.join().unwrap();
+        copies.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("copy-39/f0.txt")).unwrap(),
+            "contents",
+            "the entries that were there must still have been copied"
+        );
+    }
+
+    /// The skip above is for entries that are gone, and for nothing else: a
+    /// symbolic link is still a tree the node refuses to copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_in_the_source_is_still_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("workspace");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("a.txt"), "contents").unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", source.join("escape")).unwrap();
+
+        assert!(matches!(
+            copy_tree(&source, &tmp.path().join("copy"), false),
+            Err(WorkspaceError::Unsafe(_))
+        ));
     }
 
     fn sh(dir: &Path, script: &str) {
