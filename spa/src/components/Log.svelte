@@ -97,6 +97,8 @@
         <div class="mark ok">verdict · {e.payload.verdict} · {e.payload.summary}</div>
       {:else if e.kind === 'provider_error'}
         <div class="mark wait">{providerErrorLine(e.payload)}</div>
+      {:else if e.kind === 'gateway_refused'}
+        <div class="mark crit">model call refused · {e.payload.provider} · {e.payload.reason}</div>
       {:else if e.kind === 'ceiling'}
         <div class="mark crit">channel at its daily ceiling · {e.payload.usage_today} of {e.payload.ceiling} tokens · model calls refused</div>
       {:else if e.kind === 'orientation'}

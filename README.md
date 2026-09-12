@@ -461,7 +461,10 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 [providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
 credential = "anthropic"
 upstream = "https://api.anthropic.com"
-shape = "anthropic"                 # or "openai", "openai-codex"
+shape = "anthropic"                 # or "openai", "openai-codex"; the shape also fixes which
+                                    # methods and paths the gateway will lend the credential to:
+                                    # inference, token counting, embeddings and the models list,
+                                    # never the provider account behind the key
 # login = "…"                       # the harness's login flow, if it has one
 # [providers.anthropic.price]
 # input_per_mtok = 3.0

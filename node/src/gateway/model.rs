@@ -6,6 +6,12 @@
 //! provider bindings and the counting point for usage: every model call passes
 //! through here, so cost is measured where it happens rather than reported by
 //! the harness.
+//!
+//! The credential is lent for inference and nothing else. The harness holds a
+//! session token rather than the key, so the only provider-account operations
+//! it can reach are the ones this gateway agrees to forward: an explicit
+//! per-shape allowlist of (method, path), matched on a normalised path, with
+//! everything else refused before the credential is attached.
 
 use std::{
     pin::Pin,
@@ -194,19 +200,182 @@ enum Caller {
     Probe,
 }
 
-/// Whether a proxied path is an embeddings call. Matched on the whole final
-/// segment rather than a prefix, so `/v1/embeddings-and-more` is not one.
-fn is_embeddings(rest: &str) -> bool {
-    rest.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .is_some_and(|last| last == "embeddings")
+/// One call the gateway forwards: a method, and the path as segments, where
+/// `*` stands for one opaque segment (a model id, a response id).
+type Route = (&'static str, &'static [&'static str]);
+
+/// The inference surface of an Anthropic-shaped provider: what the Claude and
+/// omp adapters send at `ANTHROPIC_BASE_URL`. Everything else on
+/// `api.anthropic.com` — the organization, workspace, invite, API-key and
+/// usage-report endpoints a Console key can drive — is refused here, because
+/// a session was granted a model, not the account behind it.
+const ANTHROPIC_ROUTES: &[Route] = &[
+    ("POST", &["v1", "messages"]),
+    ("POST", &["v1", "messages", "count_tokens"]),
+    ("GET", &["v1", "models"]),
+    ("GET", &["v1", "models", "*"]),
+];
+
+/// The inference surface of an OpenAI-shaped provider. The harness is wired to
+/// `…/model/<name>/v1`, so every path it sends opens with `v1`. Files,
+/// fine-tuning, batches, assistants, containers and everything under
+/// `/v1/organization` are off it deliberately: each one either spends money
+/// outside the metered path or reads the account.
+const OPENAI_ROUTES: &[Route] = &[
+    ("POST", &["v1", "chat", "completions"]),
+    ("POST", &["v1", "responses"]),
+    ("GET", &["v1", "responses", "*"]),
+    ("POST", &["v1", "embeddings"]),
+    ("GET", &["v1", "models"]),
+    ("GET", &["v1", "models", "*"]),
+];
+
+/// The inference surface of a Codex-shaped provider, whose upstream is the
+/// ChatGPT backend rather than the API: the Responses call the Codex client
+/// makes, under the prefixes its builds have used, and the catalogue. The rest
+/// of `chatgpt.com/backend-api` is the subscriber's account — conversations,
+/// settings, billing — and is refused.
+const OPENAI_CODEX_ROUTES: &[Route] = &[
+    ("POST", &["responses"]),
+    ("POST", &["codex", "responses"]),
+    ("POST", &["v1", "responses"]),
+    ("GET", &["responses", "*"]),
+    ("GET", &["codex", "responses", "*"]),
+    ("GET", &["models"]),
+    ("GET", &["codex", "models"]),
+    ("GET", &["v1", "models"]),
+];
+
+/// The allowlist for a shape. A shape this build does not know is held to the
+/// OpenAI surface rather than waved through: an unknown shape is wired as an
+/// OpenAI-compatible one (see `harness_wiring`), and fail-closed is the point.
+fn routes(shape: &str) -> &'static [Route] {
+    match shape {
+        SHAPE_ANTHROPIC => ANTHROPIC_ROUTES,
+        SHAPE_OPENAI_CODEX => OPENAI_CODEX_ROUTES,
+        _ => OPENAI_ROUTES,
+    }
+}
+
+/// A segment standing in for a model or response id: printable ASCII from a
+/// narrow set, so a matched path never needs re-encoding to be forwarded.
+fn is_opaque(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment.len() <= 128
+        && segment
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+        && segment != "."
+        && segment != ".."
+}
+
+/// Percent-decode one path segment, once. `None` for a truncated or non-hex
+/// escape, or bytes that are not UTF-8.
+fn decode_segment(segment: &str) -> Option<String> {
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let (hi, lo) = (*bytes.get(i + 1)?, *bytes.get(i + 2)?);
+            if !hi.is_ascii_hexdigit() || !lo.is_ascii_hexdigit() {
+                return None;
+            }
+            out.push(u8::from_str_radix(&segment[i + 1..i + 3], 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The path to match and forward, from the raw tail of the request path: each
+/// segment decoded once, empty and `.` segments dropped, and anything still
+/// ambiguous after decoding — `..`, an encoded separator, a second layer of
+/// encoding — refused rather than resolved. Matching the decoded form and
+/// forwarding that same form is what keeps the two from disagreeing.
+fn normalised(raw: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    for segment in raw.split('/') {
+        let decoded = decode_segment(segment)?;
+        match decoded.as_str() {
+            "" | "." => continue,
+            ".." => return None,
+            _ => {}
+        }
+        if decoded
+            .bytes()
+            .any(|b| matches!(b, b'/' | b'\\' | b'?' | b'#' | b'%' | 0..=0x20 | 0x7f))
+        {
+            return None;
+        }
+        out.push(decoded);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The node's own token reads the catalogue and writes exactly one thing: an
+/// embedding. It is not scoped to a channel, so anything it reaches is outside
+/// the per-channel provider bindings every session call is held to — it gets
+/// the models list and the embeddings call, never inference.
+fn probe_may(method: &Method, path: &[String]) -> bool {
+    let last = path.last().map(String::as_str);
+    (method == Method::GET && last == Some("models"))
+        || (method == Method::POST && last == Some("embeddings"))
+}
+
+/// The part of `/model/<provider>/<tail>` the provider is being asked for,
+/// still percent-encoded as it arrived.
+fn raw_tail(path: &str) -> Option<&str> {
+    path.strip_prefix("/model/")?
+        .split_once('/')
+        .map(|(_, t)| t)
+}
+
+/// The normalised path to forward, or why this call is not one the gateway
+/// lends the credential to.
+fn allowed_call(
+    shape: &str,
+    probe: bool,
+    method: &Method,
+    raw_tail: &str,
+) -> Result<String, String> {
+    let refused = |path: &str| {
+        format!("{method} /{path} is not a model call this gateway forwards; the credential is lent for inference only")
+    };
+    let Some(path) = normalised(raw_tail) else {
+        let shown: String = raw_tail.chars().take(120).collect();
+        return Err(refused(&shown));
+    };
+    let allowed = routes(shape).iter().any(|(verb, want)| {
+        method.as_str() == *verb
+            && want.len() == path.len()
+            && want.iter().zip(&path).all(|(want, got)| {
+                if *want == "*" {
+                    is_opaque(got)
+                } else {
+                    want == got
+                }
+            })
+    });
+    let joined = path.join("/");
+    if !allowed {
+        return Err(refused(&joined));
+    }
+    if probe && !probe_may(method, &path) {
+        return Err(format!(
+            "{method} /{joined} is not a call the node's own token may make; it may list models, or embed"
+        ));
+    }
+    Ok(joined)
 }
 
 /// `ANY /model/{provider}/{*rest}`.
 pub async fn handle(
     State(s): State<AppState>,
-    Path((provider, rest)): Path<(String, String)>,
+    Path((provider, _rest)): Path<(String, String)>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -231,23 +400,32 @@ pub async fn handle(
     } else {
         return refuse(StatusCode::UNAUTHORIZED, "unauthorized");
     };
-    // The node's own token reads the model catalogue and writes exactly one
-    // thing: an embedding. Widening it to POST at all is narrow on purpose —
-    // an embeddings path and nothing else — because this token is not scoped
-    // to a channel, so anything it can reach is outside the per-channel
-    // provider bindings that every session call is held to.
-    if matches!(caller, Caller::Probe) && method != Method::GET && !is_embeddings(&rest) {
-        return refuse(
-            StatusCode::FORBIDDEN,
-            "the node's own token may only read, or embed",
-        );
-    }
-
     let Some(p) = s.cfg.providers.get(&provider).cloned() else {
         return refuse(
             StatusCode::NOT_FOUND,
             &format!("no provider named {provider} on this node"),
         );
+    };
+
+    let (session_id, channel) = match &caller {
+        Caller::Session { id, channel } => (Some(id.clone()), Some(channel.clone())),
+        Caller::Probe => (None, None),
+    };
+    // What the credential is lent for. Matched on the raw path rather than
+    // axum's decoded capture, which has already lost the difference between a
+    // separator the caller sent and one it encoded.
+    let Some(raw_tail) = raw_tail(uri.path()) else {
+        return refuse(StatusCode::NOT_FOUND, "not a model path");
+    };
+    let rest = match allowed_call(&p.shape, matches!(caller, Caller::Probe), &method, raw_tail) {
+        Ok(path) => path,
+        Err(reason) => {
+            tracing::warn!(provider, channel = ?channel, method = %method, %reason, "model call refused: off the gateway's allowlist");
+            if let Some(session_id) = &session_id {
+                note_refusal(&s, session_id, &provider, &method, &reason);
+            }
+            return refuse(StatusCode::FORBIDDEN, &reason);
+        }
     };
     // The upstream must also pass the egress allowlist: the gateway cannot be
     // a wider hole than CONNECT was.
@@ -265,10 +443,6 @@ pub async fn handle(
         );
     }
 
-    let (session_id, channel) = match &caller {
-        Caller::Session { id, channel } => (Some(id.clone()), Some(channel.clone())),
-        Caller::Probe => (None, None),
-    };
     // The ceiling, enforced where the spending happens. The harness sees the
     // error and the turn fails; the session stays for the operator to decide.
     if let (Some(sid), Some(ch)) = (&session_id, &channel) {
@@ -390,6 +564,31 @@ pub async fn handle(
     };
     out.body(Body::from_stream(counted))
         .unwrap_or_else(|_| refuse(StatusCode::BAD_GATEWAY, "bad upstream response"))
+}
+
+/// Tell the session — and so the operator reading its log — that a call was
+/// refused before it reached the provider. Rate-limited like `provider_error`,
+/// since a harness that keeps trying would otherwise fill the transcript.
+fn note_refusal(s: &AppState, session_id: &str, provider: &str, method: &Method, reason: &str) {
+    let attempt = s
+        .manager
+        .store()
+        .count_events_this_turn(session_id, ek::GATEWAY_REFUSED)
+        .unwrap_or(0)
+        + 1;
+    if attempt > MAX_PROVIDER_ERRORS_PER_TURN {
+        return;
+    }
+    s.manager.record_event(
+        session_id,
+        ek::GATEWAY_REFUSED,
+        json!({
+            "provider": provider,
+            "method": method.as_str(),
+            "reason": reason,
+            "attempt": attempt,
+        }),
+    );
 }
 
 /// At most this many `provider_error` events per turn. A harness that retries
@@ -719,6 +918,127 @@ mod tests {
             short_error(StatusCode::BAD_REQUEST, &vec![b'x'; 4096]).len(),
             200
         );
+    }
+
+    fn allowed(shape: &str, method: &str, tail: &str) -> Result<String, String> {
+        allowed_call(
+            shape,
+            false,
+            &Method::from_bytes(method.as_bytes()).unwrap(),
+            tail,
+        )
+    }
+
+    #[test]
+    fn only_the_inference_surface_of_each_shape_is_forwarded() {
+        assert_eq!(
+            allowed(SHAPE_ANTHROPIC, "POST", "v1/messages"),
+            Ok("v1/messages".into())
+        );
+        assert_eq!(
+            allowed(SHAPE_ANTHROPIC, "POST", "v1/messages/count_tokens"),
+            Ok("v1/messages/count_tokens".into())
+        );
+        assert_eq!(
+            allowed(SHAPE_ANTHROPIC, "GET", "v1/models/claude-opus-5"),
+            Ok("v1/models/claude-opus-5".into())
+        );
+        assert_eq!(
+            allowed(SHAPE_OPENAI, "POST", "v1/chat/completions"),
+            Ok("v1/chat/completions".into())
+        );
+        assert_eq!(
+            allowed(SHAPE_OPENAI, "POST", "v1/embeddings"),
+            Ok("v1/embeddings".into())
+        );
+        assert_eq!(
+            allowed(SHAPE_OPENAI_CODEX, "POST", "codex/responses"),
+            Ok("codex/responses".into())
+        );
+
+        // The account behind the credential, by every route to it.
+        for (shape, method, tail) in [
+            (SHAPE_ANTHROPIC, "GET", "v1/organizations/me/api_keys"),
+            (SHAPE_ANTHROPIC, "POST", "v1/organizations/invites"),
+            (
+                SHAPE_ANTHROPIC,
+                "GET",
+                "v1/organizations/usage_report/messages",
+            ),
+            (SHAPE_ANTHROPIC, "DELETE", "v1/messages"),
+            (SHAPE_ANTHROPIC, "POST", "v1/files"),
+            (SHAPE_OPENAI, "GET", "v1/organization/costs"),
+            (SHAPE_OPENAI, "POST", "v1/organization/admin_api_keys"),
+            (SHAPE_OPENAI, "POST", "v1/files"),
+            (SHAPE_OPENAI, "POST", "v1/fine_tuning/jobs"),
+            (SHAPE_OPENAI, "POST", "v1/messages"),
+            (SHAPE_OPENAI_CODEX, "GET", "accounts/check"),
+            (SHAPE_OPENAI_CODEX, "POST", "payments/checkout"),
+        ] {
+            assert!(
+                allowed(shape, method, tail).is_err(),
+                "{shape} {method} /{tail} was forwarded"
+            );
+        }
+        // A shape this build does not know is wired as OpenAI-compatible, and
+        // held to that surface rather than waved through.
+        assert!(allowed("mystery", "POST", "v1/chat/completions").is_ok());
+        assert!(allowed("mystery", "GET", "v1/organization/costs").is_err());
+    }
+
+    #[test]
+    fn a_path_is_matched_and_forwarded_in_the_same_normalised_form() {
+        // Empty and `.` segments collapse, and the collapsed path is what is
+        // forwarded, so matching and forwarding cannot disagree.
+        assert_eq!(
+            allowed(SHAPE_ANTHROPIC, "POST", "v1//./messages/"),
+            Ok("v1/messages".into())
+        );
+        // Traversal, encoded separators and a second layer of encoding are
+        // refused rather than resolved.
+        for tail in [
+            "v1/messages/../../v1/organizations/me/api_keys",
+            "v1/..%2forganizations",
+            "v1/%2e%2e/organizations/me",
+            "v1/messages%2f..%2forganizations",
+            "v1/mess%",
+            "v1/%zzmessages",
+            "v1/organizations%00",
+            "v1/%252e%252e/organizations",
+        ] {
+            assert!(allowed(SHAPE_ANTHROPIC, "GET", tail).is_err(), "{tail}");
+            assert!(allowed(SHAPE_ANTHROPIC, "POST", tail).is_err(), "{tail}");
+        }
+        // An encoded path that decodes to something allowed still is.
+        assert_eq!(
+            allowed(SHAPE_ANTHROPIC, "POST", "v1/%6d%65ssages"),
+            Ok("v1/messages".into())
+        );
+        // The refusal names what was refused.
+        let reason = allowed(SHAPE_OPENAI, "DELETE", "v1/organization/projects/p1").unwrap_err();
+        assert!(
+            reason.contains("DELETE /v1/organization/projects/p1"),
+            "{reason}"
+        );
+        assert_eq!(raw_tail("/model/openai/v1/messages"), Some("v1/messages"));
+        assert_eq!(raw_tail("/model/openai"), None);
+    }
+
+    #[test]
+    fn the_node_s_own_token_lists_models_and_embeds_and_nothing_else() {
+        let probe = |method: &str, tail: &str| {
+            allowed_call(
+                SHAPE_OPENAI,
+                true,
+                &Method::from_bytes(method.as_bytes()).unwrap(),
+                tail,
+            )
+        };
+        assert!(probe("GET", "v1/models").is_ok());
+        assert!(probe("POST", "v1/embeddings").is_ok());
+        assert!(probe("POST", "v1/chat/completions").is_err());
+        assert!(probe("POST", "v1/responses").is_err());
+        assert!(probe("GET", "v1/responses/resp_1").is_err());
     }
 
     #[test]

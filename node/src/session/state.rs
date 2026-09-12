@@ -129,6 +129,10 @@ pub mod event_kind {
     /// given up. Recorded by the gateway, which sees the upstream answer, and
     /// by the supervisor when the harness says so itself.
     pub const PROVIDER_ERROR: &str = "provider_error";
+    /// The gateway refused a model call before it reached the provider,
+    /// because the method and path are not on the inference allowlist the
+    /// credential is lent for (`provider`, `method`, `reason`, `attempt`).
+    pub const GATEWAY_REFUSED: &str = "gateway_refused";
 }
 
 #[cfg(test)]
