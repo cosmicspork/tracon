@@ -81,6 +81,7 @@ pub fn admit_bootstrap(
             members.put(&Member {
                 node_id: id.clone(),
                 x25519_pub: String::new(),
+                binding_sig: String::new(),
                 name: String::new(),
                 channels: vec![proto::frame::MESH_CHANNEL.to_string()],
                 admitted_ms: now_ms,
@@ -143,6 +144,7 @@ pub fn admit_self(
     members.put(&Member {
         node_id: id,
         x25519_pub: replica.x25519_hex(),
+        binding_sig: replica.binding_sig(),
         name: "hub".into(),
         channels,
         admitted_ms: existing.map(|e| e.admitted_ms).unwrap_or(now_ms),

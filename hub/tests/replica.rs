@@ -38,6 +38,7 @@ fn rig() -> Rig {
         .put(&Member {
             node_id: a.node_id(),
             x25519_pub: a.x25519_hex(),
+            binding_sig: proto::enroll::sign_binding(&a),
             name: "a".into(),
             channels: vec![MESH_CHANNEL.into(), "personal".into(), "work".into()],
             admitted_ms: 0,

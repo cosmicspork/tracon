@@ -31,6 +31,7 @@ fn hub_with(admitted: &[(&Identity, &[&str])]) -> Hub {
             .put(&Member {
                 node_id: id.node_id(),
                 x25519_pub: id.x25519_hex(),
+                binding_sig: proto::enroll::sign_binding(id),
                 name: "n".into(),
                 channels: channels.iter().map(|s| s.to_string()).collect(),
                 admitted_ms: 0,
@@ -216,6 +217,7 @@ async fn cursor_behind_retention_is_gone() {
         .put(&Member {
             node_id: a.node_id(),
             x25519_pub: a.x25519_hex(),
+            binding_sig: proto::enroll::sign_binding(&a),
             name: "a".into(),
             channels: vec!["personal".into()],
             admitted_ms: 0,
@@ -265,7 +267,7 @@ async fn enrollment_lifecycle_and_admit() {
     let (st, _) = s(&h, &a, "GET", "/v0/enroll/7KQ4M2XA", "").await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     // Public fill: unknown code, bad body, then good.
-    let req = json!({"node_id": b.node_id(), "x25519_pub": b.x25519_hex(), "name": "laptop", "contract": proto::CONTRACT_VERSION, "facts": "x86_64"});
+    let req = json!({"node_id": b.node_id(), "x25519_pub": b.x25519_hex(), "name": "laptop", "contract": proto::CONTRACT_VERSION, "facts": "x86_64", "binding_sig": proto::enroll::sign_binding(&b)});
     let fill = |code: &str, body: String| {
         Request::post(format!("/v0/enroll/{code}"))
             .header("content-type", "application/json")
@@ -296,10 +298,21 @@ async fn enrollment_lifecycle_and_admit() {
     let (st, _) = s(&h, &b, "GET", "/v0/members", "").await;
     assert_eq!(st, StatusCode::FORBIDDEN);
     // A may admit B into personal (A is in it) but not into work (A is not).
-    let body = json!({"node_id": b.node_id(), "x25519_pub": b.x25519_hex(), "name": "laptop", "channels": ["work"]});
+    let sig_b = proto::enroll::sign_binding(&b);
+    let body = json!({"node_id": b.node_id(), "x25519_pub": b.x25519_hex(), "binding_sig": sig_b, "name": "laptop", "channels": ["work"]});
     let (st, _) = s(&h, &a, "POST", "/v0/admit", &body.to_string()).await;
     assert_eq!(st, StatusCode::FORBIDDEN);
+    // A new member with no proof that it holds the sealing key is refused: the
+    // directory is where every other peer reads the key it wraps keyrings to.
     let body = json!({"node_id": b.node_id(), "x25519_pub": b.x25519_hex(), "name": "laptop", "channels": ["personal"]});
+    let (st, v) = s(&h, &a, "POST", "/v0/admit", &body.to_string()).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    // Nor one whose proof covers a different sealing key.
+    let body = json!({"node_id": b.node_id(), "x25519_pub": c.x25519_hex(), "binding_sig": sig_b, "name": "laptop", "channels": ["personal"]});
+    let (st, _) = s(&h, &a, "POST", "/v0/admit", &body.to_string()).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(h.members.get(&b.node_id()).unwrap().is_none());
+    let body = json!({"node_id": b.node_id(), "x25519_pub": b.x25519_hex(), "binding_sig": sig_b, "name": "laptop", "channels": ["personal"]});
     let (st, v) = s(&h, &a, "POST", "/v0/admit", &body.to_string()).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let ch = v["channels"].as_array().unwrap();
@@ -307,13 +320,13 @@ async fn enrollment_lifecycle_and_admit() {
     assert_eq!(v["admitted_by"], a.node_id());
     // A may extend B's routing channels, but cannot substitute B's sealing
     // key or rename it as part of that third-party grant.
-    let body = json!({"node_id": b.node_id(), "x25519_pub": c.x25519_hex(), "name": "forged", "channels": ["personal"]});
+    let body = json!({"node_id": b.node_id(), "x25519_pub": c.x25519_hex(), "binding_sig": proto::enroll::sign_binding(&c), "name": "forged", "channels": ["personal"]});
     let (st, v) = s(&h, &a, "POST", "/v0/admit", &body.to_string()).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(v["x25519_pub"], b.x25519_hex());
     assert_eq!(v["name"], "laptop");
     // B is a member now and can self-extend into a channel A never had.
-    let body = json!({"node_id": b.node_id(), "x25519_pub": b.x25519_hex(), "name": "laptop", "channels": ["work"]});
+    let body = json!({"node_id": b.node_id(), "x25519_pub": b.x25519_hex(), "binding_sig": sig_b, "name": "laptop", "channels": ["work"]});
     let (st, v) = s(&h, &b, "POST", "/v0/admit", &body.to_string()).await;
     assert_eq!(st, StatusCode::OK);
     assert!(v["channels"].as_array().unwrap().contains(&json!("work")));
@@ -337,11 +350,79 @@ async fn enrollment_lifecycle_and_admit() {
     assert_eq!(st, StatusCode::NO_CONTENT);
 }
 
+/// The slot is a public write and the fingerprint the operator compares covers
+/// the node id alone, so the filler must sign its sealing key with its signing
+/// key. Anything else is the hub handing the inviter a pair to wrap channel
+/// keys to that nobody proved possession of.
+#[tokio::test]
+async fn a_forged_key_binding_is_refused_at_fill() {
+    let (a, b, c) = ids();
+    let h = hub_with(&[(&a, &[MESH_CHANNEL, "personal"])]);
+    let (st, _) = s(&h, &a, "PUT", "/v0/enroll/7KQ4M2XA", "{}").await;
+    assert_eq!(st, StatusCode::CREATED);
+    let fill = |body: String| {
+        Request::post("/v0/enroll/7KQ4M2XA")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    };
+    let filled = |x25519: String, sig: String| {
+        json!({"node_id": b.node_id(), "x25519_pub": x25519, "name": "laptop",
+               "contract": proto::CONTRACT_VERSION, "binding_sig": sig})
+        .to_string()
+    };
+    // B's id with C's sealing key, signed by either of them; B's own pair
+    // under C's signature; and a pair with no proof at all.
+    for body in [
+        filled(c.x25519_hex(), proto::enroll::sign_binding(&b)),
+        filled(c.x25519_hex(), proto::enroll::sign_binding(&c)),
+        filled(b.x25519_hex(), proto::enroll::sign_binding(&c)),
+        filled(b.x25519_hex(), String::new()),
+        filled(b.x25519_hex(), "00".repeat(64)),
+    ] {
+        let (st, v) = call(&h.app, fill(body)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("binding_sig"), "{v}");
+    }
+    // The slot is untouched, and B's own pair fills it.
+    let (st, _) = s(&h, &a, "GET", "/v0/enroll/7KQ4M2XA", "").await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (st, _) = call(
+        &h.app,
+        fill(filled(b.x25519_hex(), proto::enroll::sign_binding(&b))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    // The inviter reads the proof back with the keys.
+    let (st, v) = s(&h, &a, "GET", "/v0/enroll/7KQ4M2XA", "").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v["binding_sig"], proto::enroll::sign_binding(&b));
+}
+
+/// A node may rotate its own sealing key, but only under its own signature.
+#[tokio::test]
+async fn self_admit_cannot_install_an_unproven_sealing_key() {
+    let (a, _, c) = ids();
+    let h = hub_with(&[(&a, &[MESH_CHANNEL])]);
+    let body = json!({"node_id": a.node_id(), "x25519_pub": c.x25519_hex(),
+                      "binding_sig": proto::enroll::sign_binding(&c), "name": "a", "channels": []});
+    let (st, _) = s(&h, &a, "POST", "/v0/admit", &body.to_string()).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        h.members.get(&a.node_id()).unwrap().unwrap().x25519_pub,
+        a.x25519_hex()
+    );
+    let body = json!({"node_id": a.node_id(), "x25519_pub": a.x25519_hex(),
+                      "binding_sig": proto::enroll::sign_binding(&a), "name": "a", "channels": []});
+    let (st, _) = s(&h, &a, "POST", "/v0/admit", &body.to_string()).await;
+    assert_eq!(st, StatusCode::OK);
+}
+
 #[tokio::test]
 async fn public_fill_is_rate_limited() {
     let (a, b, _) = ids();
     let h = hub_with(&[(&a, &[MESH_CHANNEL])]);
-    let req = json!({"node_id": b.node_id(), "x25519_pub": b.x25519_hex(), "name": "l", "contract": proto::CONTRACT_VERSION});
+    let req = json!({"node_id": b.node_id(), "x25519_pub": b.x25519_hex(), "name": "l", "contract": proto::CONTRACT_VERSION, "binding_sig": proto::enroll::sign_binding(&b)});
     let mut last = StatusCode::OK;
     for _ in 0..12 {
         let r = Request::post("/v0/enroll/AAAAAAAA")

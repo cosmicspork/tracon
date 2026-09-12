@@ -33,6 +33,18 @@ node_id = hex(ed25519 public key)
 Fingerprint for human comparison during enrollment: first 16 hex characters of
 `SHA256(ed25519 public)` in groups of four.
 
+Key binding, signed by the node over its own two public keys:
+
+```
+binding = "tracon/v0/enroll-binding" ‖ ed25519 public(32) ‖ x25519 public(32)
+binding_sig = ed25519(binding)
+```
+
+The fingerprint covers the node id alone, so the binding is what ties the
+sealing key beside it to the same identity. Every enrollment fill and every
+member record that writes a sealing key carries it, and nothing wraps a channel
+keyring to a key without it.
+
 ## Sealing (`envelope.rs`)
 
 AEAD is XChaCha20-Poly1305 (24-byte nonce, 16-byte tag).
@@ -134,9 +146,9 @@ See `hub/` and `docs/ARCHITECTURE.md` (Mesh frames). Summary:
 | `GET /v0/events` | member | SSE pokes, no payload |
 | `GET /v0/members` | member | routing metadata |
 | `PUT /v0/enroll/{code}` | member | open a slot |
-| `POST /v0/enroll/{code}` | none, rate-limited | fill it (public keys and a name) |
+| `POST /v0/enroll/{code}` | none, rate-limited; `binding_sig` must prove the pair | fill it (public keys and a name) |
 | `GET /v0/enroll/{code}` | slot creator | fetch and delete |
-| `POST /v0/admit`, `DELETE /v0/admit/{id}` | member | membership |
+| `POST /v0/admit`, `DELETE /v0/admit/{id}` | member; writing a sealing key needs the target's `binding_sig` | membership |
 
 ## Vectors
 
