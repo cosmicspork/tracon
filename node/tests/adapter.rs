@@ -175,3 +175,109 @@ async fn denying_a_permission_fails_the_tool_call() {
     drain_until(&mut rx, &mut seen, "tool_update:failed").await;
     assert!(seen.contains(&"tool_update:failed".to_string()));
 }
+
+/// A harness process that starts but never answers the handshake.
+///
+/// It holds the node's end of a pipe, so the test can try to answer after the
+/// node has given up and see whether anything is still listening.
+struct SilentRunner {
+    /// The node's side of the harness's stdout, kept so the test can write a
+    /// late `initialize` response into it.
+    node_side: std::sync::Mutex<Option<tokio::io::DuplexStream>>,
+    killed: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl Runner for SilentRunner {
+    async fn spawn(
+        &self,
+        _cmd: RunnerCommand,
+    ) -> Result<tracon::runner::Spawned, tracon::runner::RunnerError> {
+        let (node_side, harness_side) = tokio::io::duplex(64 * 1024);
+        *self.node_side.lock().unwrap() = Some(node_side);
+        Ok(tracon::runner::Spawned {
+            stdin: Box::new(tokio::io::sink()),
+            stdout: Box::new(harness_side),
+            // A process that is still running: nothing ever reports an exit.
+            done: Box::pin(std::future::pending()),
+        })
+    }
+
+    async fn run_capture(
+        &self,
+        _cmd: RunnerCommand,
+    ) -> Result<std::process::Output, tracon::runner::RunnerError> {
+        Ok(std::process::Output {
+            status: Default::default(),
+            stdout: b"omp/18.0.4\n".to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+
+    async fn kill(&self, name: &str) -> Result<(), tracon::runner::RunnerError> {
+        self.killed.lock().unwrap().push(name.to_string());
+        Ok(())
+    }
+}
+
+/// A harness that starts and then says nothing.
+///
+/// Startup is bounded rather than hanging the session forever, the runtime is
+/// told to remove the harness, and — the part a timeout alone does not give —
+/// nothing on the node is left listening for the handshake, so an
+/// `initialize` answer that arrives after the node gave up has nowhere to
+/// land. The clock is paused: the wait is the adapter's, not the test's.
+#[tokio::test(start_paused = true)]
+async fn a_harness_that_never_handshakes_times_out_and_leaves_nothing_listening() {
+    state::isolate();
+    let runner = SilentRunner {
+        node_side: std::sync::Mutex::new(None),
+        killed: std::sync::Mutex::new(Vec::new()),
+    };
+    let error = OmpAdapter::new("18.0.4")
+        .launch(
+            &runner,
+            LaunchSpec {
+                cwd_in_runner: "/work".into(),
+                model: "m/a".into(),
+                container_name: "tracon-h-silent".into(),
+                mcp_servers: Vec::new(),
+                tools: Vec::new(),
+                env: Vec::new(),
+                system_prompt_file: None,
+            },
+        )
+        .await
+        .err()
+        .expect("a harness that never handshakes must not become a session");
+    assert!(
+        error.to_string().contains("startup timed out"),
+        "the reason says what happened: {error}"
+    );
+    assert_eq!(
+        runner.killed.lock().unwrap().as_slice(),
+        ["tracon-h-silent".to_string()],
+        "the harness the node started is removed rather than left running"
+    );
+
+    // The harness answers at last. Nothing is reading: the reader the
+    // handshake started was aborted with it, so the late answer cannot be
+    // taken for a session that started. (An abort is delivered at the task's
+    // next poll, so give the runtime a turn first.)
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    let mut node_side = runner.node_side.lock().unwrap().take().expect("spawned");
+    let late = br#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#;
+    let wrote = {
+        use tokio::io::AsyncWriteExt;
+        node_side
+            .write_all(late)
+            .await
+            .and(node_side.write_all(b"\n").await)
+    };
+    assert!(
+        wrote.is_err(),
+        "a late handshake must find the node's side of the harness closed"
+    );
+}

@@ -243,6 +243,9 @@ export const api = {
       title?: string
       body?: string
       patch?: string
+      /** The commit the operator was reading. The node refuses the verdict if
+       * the review has moved to a newer revision since. */
+      head_sha?: string
     },
   ) => call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/verdict`, verdict),
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),

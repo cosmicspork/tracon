@@ -430,6 +430,28 @@ async fn drain_until<R>(
     }
 }
 
+/// The background tasks a handshake needs before it knows whether the harness
+/// is there. Dropped without `keep`, they are aborted, so a startup that
+/// failed or timed out leaves nothing behind that would still answer for the
+/// harness.
+struct StartupTasks {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl StartupTasks {
+    fn keep(&mut self) {
+        self.tasks.clear();
+    }
+}
+
+impl Drop for StartupTasks {
+    fn drop(&mut self) {
+        for task in self.tasks.drain(..) {
+            task.abort();
+        }
+    }
+}
+
 impl OmpSession {
     async fn start(child: Spawned) -> Result<Self, AdapterError> {
         // ACP requires an absolute cwd; the image's workdir is the safe choice
@@ -443,9 +465,21 @@ impl OmpSession {
         mcp_servers: Vec<Value>,
     ) -> Result<Self, AdapterError> {
         let (peer, mut incoming, read) = Peer::new(child.stdin, child.stdout);
-        tokio::spawn(read);
-        // Await the exit so a child process is reaped and not left as a zombie.
-        tokio::spawn(child.done);
+        // The reader and the reaper start before it is known whether the
+        // harness will ever answer. If the handshake fails or times out, they
+        // are aborted with this guard rather than left running: a task still
+        // holding the harness's stdio would go on accepting an `initialize`
+        // that arrives after the node gave up, and would keep the process
+        // alive behind a launch the node has already called failed.
+        let mut startup = StartupTasks {
+            tasks: vec![
+                tokio::spawn(read),
+                // Await the exit so a child process is reaped, not a zombie.
+                tokio::spawn(async move {
+                    let _ = child.done.await;
+                }),
+            ],
+        };
 
         // Drain inbound traffic while the handshake requests are in flight, so a
         // chatty startup cannot deadlock the read loop (see `drain_until`).
@@ -471,6 +505,9 @@ impl OmpSession {
         )
         .await?;
 
+        // The handshake landed: the reader and reaper belong to the session
+        // from here on, so they outlive this guard.
+        startup.keep();
         Ok(Self {
             peer,
             incoming,

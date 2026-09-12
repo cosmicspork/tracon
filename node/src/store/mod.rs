@@ -395,6 +395,24 @@ impl Store {
         patch.apply_if(&conn, id, expected_state)
     }
 
+    /// Same as `update_session`, but refused outright while the row sits in
+    /// one of `excluded` states; returns whether it was applied. This is the
+    /// one write every transition writer outside the startup handoff uses:
+    /// passing `SessionState::TERMINAL` makes a session's ending final, so a
+    /// harness event, a check finishing, or a permission arriving after the
+    /// operator stopped it cannot put the row back into active work. The
+    /// comparison is in the UPDATE, so nothing can land between a caller's
+    /// read and its write.
+    pub fn update_session_unless(
+        &self,
+        id: &str,
+        excluded: &[&str],
+        patch: SessionPatch,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        patch.apply_unless(&conn, id, excluded)
+    }
+
     pub fn set_draft(&self, id: &str, text: Option<&str>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1795,6 +1813,37 @@ mod records {
             params.push(&expected_owned);
             Ok(conn.execute(&sql, params.as_slice())? > 0)
         }
+
+        /// Same, but refused while the row is in any of `excluded`; reports
+        /// whether it applied. The exclusion is evaluated by SQLite as part
+        /// of the write, which is what makes it a fence rather than a check
+        /// a concurrent Stop can slip past.
+        pub(super) fn apply_unless(
+            self,
+            conn: &Connection,
+            id: &str,
+            excluded: &[&str],
+        ) -> Result<bool> {
+            let (mut sets, mut vals) = self.columns();
+            if sets.is_empty() {
+                return Ok(false);
+            }
+            sets.push("updated_ms=?");
+            vals.push(Box::new(now_ms()));
+            let placeholders = vec!["?"; excluded.len()].join(",");
+            let sql = format!(
+                "UPDATE session SET {} WHERE id=? AND state NOT IN ({placeholders})",
+                sets.join(", ")
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = vals.iter().map(|b| b.as_ref()).collect();
+            let id_owned = id.to_string();
+            params.push(&id_owned);
+            let excluded_owned: Vec<String> = excluded.iter().map(|s| s.to_string()).collect();
+            for state in &excluded_owned {
+                params.push(state);
+            }
+            Ok(conn.execute(&sql, params.as_slice())? > 0)
+        }
     }
 }
 
@@ -2074,11 +2123,16 @@ impl Store {
     }
 
     /// Record a review session's verdict. Never a decision: the human's
-    /// verdict is the only one that resolves the row.
+    /// verdict is the only one that resolves the row. A review that has
+    /// already been decided takes none: a reviewer finishing after the
+    /// operator has approved or rejected is late, and writing its opinion
+    /// onto a settled card would rewrite the record of what was decided
+    /// against. Returns whether it was recorded.
     pub fn set_ai_verdict(&self, id: &str, verdict_json: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
-            "UPDATE review SET ai_verdict_json=?2, updated_ms=?3 WHERE id=?1",
+            "UPDATE review SET ai_verdict_json=?2, updated_ms=?3
+             WHERE id=?1 AND state IN ('new','claimed','revising')",
             rusqlite::params![id, verdict_json, now_ms()],
         )?;
         Ok(n == 1)

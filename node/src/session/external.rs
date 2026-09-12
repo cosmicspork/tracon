@@ -318,8 +318,9 @@ impl Loop {
         if open.is_empty() {
             if let Ok(Some(s)) = self.store.get_session(&self.session_id) {
                 if s.state == SessionState::WaitingOnYou.as_str() {
-                    let _ = self.store.update_session(
+                    let _ = self.store.update_session_unless(
                         &self.session_id,
+                        SessionState::TERMINAL,
                         SessionPatch::state(SessionState::Running.as_str()),
                     );
                     self.publish_session();
@@ -329,6 +330,9 @@ impl Loop {
         self.publish_queue();
     }
 
+    /// The attachment's own transition writer, fenced exactly as the
+    /// supervisor's is: a call still in flight when the operator stopped the
+    /// attachment must not put the row back on the queue.
     fn set_state(&self, state: SessionState, end_reason: Option<EndReason>, started: Instant) {
         let mono = started.elapsed().as_millis() as i64;
         let patch = SessionPatch {
@@ -338,8 +342,24 @@ impl Loop {
             turn_active: (state.is_terminal() || state == SessionState::Paused).then_some(false),
             ..Default::default()
         };
-        if let Err(e) = self.store.update_session(&self.session_id, patch) {
-            tracing::error!(error = %e, "failed to update session state");
+        match self
+            .store
+            .update_session_unless(&self.session_id, SessionState::TERMINAL, patch)
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                // Closing an attachment that is already closed is this loop
+                // catching up with a Stop, not a resurrection.
+                if !state.is_terminal() {
+                    self.refused("state", json!({ "attempted": state.as_str() }), started);
+                }
+                self.publish_session();
+                return;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to update session state");
+                return;
+            }
         }
         self.record(
             ek::STATE,
@@ -348,6 +368,21 @@ impl Loop {
             started,
         );
         self.publish_session();
+    }
+
+    /// Write down a transition that arrived after the attachment ended.
+    fn refused(&self, what: &str, mut detail: serde_json::Value, started: Instant) {
+        let state = self
+            .store
+            .get_session(&self.session_id)
+            .ok()
+            .flatten()
+            .map(|row| row.state)
+            .unwrap_or_else(|| "gone".into());
+        detail["what"] = json!(what);
+        detail["state"] = json!(state);
+        tracing::warn!(session = %self.session_id, %what, %state, "refused a late transition");
+        self.record(ek::LATE_REFUSED, None, detail, started);
     }
 
     fn record(

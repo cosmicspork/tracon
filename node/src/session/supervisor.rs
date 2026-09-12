@@ -201,6 +201,11 @@ impl Supervisor {
         }
     }
 
+    /// Move the session, unless it has already ended. An ending is final:
+    /// whatever this task was in the middle of when a Stop landed — a
+    /// permission arriving, a turn completing, a pause quiescing — must not
+    /// write over it. The refusal is recorded rather than swallowed, and the
+    /// row is still republished so a client sees the state that really holds.
     fn set_state(&self, state: SessionState, end_reason: Option<EndReason>) {
         let patch = SessionPatch {
             state: Some(state.as_str().to_string()),
@@ -209,8 +214,26 @@ impl Supervisor {
             turn_active: state.is_terminal().then_some(false),
             ..Default::default()
         };
-        if let Err(e) = self.store.update_session(&self.session_id, patch) {
-            tracing::error!(error = %e, "failed to update session state");
+        match self
+            .store
+            .update_session_unless(&self.session_id, SessionState::TERMINAL, patch)
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                // Ending a session that has already ended is this task
+                // catching up with a Stop that wrote the row first, not
+                // something trying to resurrect it: the outcome is the one
+                // that is already recorded, and nothing is refused.
+                if !state.is_terminal() {
+                    self.refused("state", json!({ "attempted": state.as_str() }));
+                }
+                self.publish_session();
+                return;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to update session state");
+                return;
+            }
         }
         self.record(
             ek::STATE,
@@ -218,6 +241,22 @@ impl Supervisor {
             json!({ "state": state.as_str(), "end_reason": end_reason.map(|r| r.as_str()) }),
         );
         self.publish_session();
+    }
+
+    /// Write down that something arrived too late to be applied. `what` names
+    /// the writer; the row's own state says what it was refused against.
+    fn refused(&self, what: &str, mut detail: serde_json::Value) {
+        let state = self
+            .store
+            .get_session(&self.session_id)
+            .ok()
+            .flatten()
+            .map(|row| row.state)
+            .unwrap_or_else(|| "gone".into());
+        detail["what"] = json!(what);
+        detail["state"] = json!(state);
+        tracing::warn!(session = %self.session_id, %what, %state, "refused a late transition");
+        self.record(ek::LATE_REFUSED, None, detail);
     }
 
     fn publish_session(&self) {
@@ -280,9 +319,8 @@ impl Supervisor {
                         }
                         Some(Command::TurnDone { turn_id, kind, payload, tokens }) => {
                             if self.active_turn != Some(turn_id) {
-                                self.record(
-                                    ek::ERROR,
-                                    None,
+                                self.refused(
+                                    "turn_done",
                                     json!({ "late_completion_ignored": true, "turn_id": turn_id }),
                                 );
                                 continue;
@@ -381,7 +419,16 @@ impl Supervisor {
                 self.publish_session();
                 true
             }
-            _ => false,
+            // The handoff lost: the row is no longer `starting`, so a Stop
+            // (or a previous claim) owns it. Say so, rather than leaving the
+            // operator to infer a silently abandoned startup.
+            other => {
+                if let Err(e) = other {
+                    tracing::error!(session = %self.session_id, error = %e, "failed to claim the session");
+                }
+                self.refused("startup_handoff", json!({ "attempted": "running" }));
+                false
+            }
         }
     }
 
@@ -401,6 +448,13 @@ impl Supervisor {
                 let state = SessionState::from_stored(&s.state);
                 state == SessionState::Paused || state.is_terminal()
             })
+    }
+    fn is_terminal(&self) -> bool {
+        self.store
+            .get_session(&self.session_id)
+            .ok()
+            .flatten()
+            .is_some_and(|s| SessionState::from_stored(&s.state).is_terminal())
     }
 
     async fn pause(&mut self, source: PauseSource, reason: &str) -> Result<(), String> {
@@ -490,15 +544,26 @@ impl Supervisor {
 
     async fn on_harness_event(&mut self, ev: HarnessEvent) -> bool {
         if self.is_fenced() {
+            // A session that has ended is not merely quiet: work still
+            // arriving for it is a late completion, and the log says so once
+            // rather than absorbing it silently.
+            let terminal = self.is_terminal();
             match ev {
                 HarnessEvent::Permission { reply, .. } => {
+                    if terminal {
+                        self.refused("harness_permission", json!({}));
+                    }
                     let _ = reply.send(PermissionReply::Cancelled);
                 }
                 HarnessEvent::Exited { code } => {
                     self.record(ek::ERROR, None, json!({ "harness_exit_code": code }));
                     return true;
                 }
-                _ => {}
+                _ => {
+                    if terminal {
+                        self.refused("harness_event", json!({}));
+                    }
+                }
             }
             return false;
         }

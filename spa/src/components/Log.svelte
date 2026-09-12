@@ -87,6 +87,10 @@
           <summary class={e.payload.ok ? '' : 'crit'}>{e.payload.ok ? '✓' : '✗'} {e.payload.command} · exit {e.payload.exit ?? 'none'} · {Math.round(((e.payload.ms as number) ?? 0) / 1000)}s</summary>
           <div>{e.payload.tail || '(no output)'}</div>
         </details>
+      {:else if e.kind === 'check_cancelled'}
+        <div class="mark crit">checks cancelled · {e.payload.reason} · nothing was verified</div>
+      {:else if e.kind === 'late_refused'}
+        <div class="sys">refused · {e.payload.what} arrived after the session was {e.payload.state}</div>
       {:else if e.kind === 'review_rejected'}
         <div class="mark crit">submission refused · {e.payload.reason}</div>
       {:else if e.kind === 'plan_artifact'}

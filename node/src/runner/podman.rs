@@ -184,15 +184,7 @@ impl Runner for PodmanRunner {
 
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
         self.ensure_volumes(&cmd).await?;
-        let name = format!(
-            "{}-{}",
-            if cmd.name.is_empty() {
-                "tracon-x"
-            } else {
-                &cmd.name
-            },
-            std::process::id()
-        );
+        let name = self.capture_name(&cmd.name);
         let args = self.spec.podman_args(&name, &cmd, false);
         Command::new(&self.spec.podman_bin)
             .args(&args)
@@ -207,6 +199,17 @@ impl Runner for PodmanRunner {
             .output()
             .await?;
         Ok(())
+    }
+
+    /// Two node processes can share a container runtime, so a capture's
+    /// container carries this process's id. `kill` has to be given the same
+    /// name back.
+    fn capture_name(&self, name: &str) -> String {
+        format!(
+            "{}-{}",
+            if name.is_empty() { "tracon-x" } else { name },
+            std::process::id()
+        )
     }
 
     /// Ask podman itself for the digest of `spec.image` rather than trusting

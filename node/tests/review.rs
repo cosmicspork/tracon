@@ -2029,3 +2029,242 @@ async fn an_opened_publication_is_reported_rather_than_opened_again() {
     assert!(f.git_log().is_empty(), "and neither was git");
     assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "approved");
 }
+
+/// The agent resubmits while the operator is deciding.
+///
+/// An approval is of particular bytes, not of a review id. The verdict names
+/// the commit the operator was reading; when a resubmission has replaced it,
+/// the approval is refused rather than quietly published as the new revision,
+/// and the claim itself is bound to the revision that was decided so nothing
+/// that arrives later can be attributed to it.
+#[tokio::test]
+async fn an_approval_is_refused_when_a_resubmission_replaced_what_was_reviewed() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let submitted = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = submitted["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{submitted}"))
+        .to_string();
+    let reviewed = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    let first_revision = f
+        .store
+        .latest_review_revision(&id)
+        .unwrap()
+        .expect("a submission records its revision");
+
+    // While the operator reads that diff, the agent commits more and
+    // resubmits onto the same card.
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo more >> a.txt && git add -A && git commit -qm second",
+    );
+    let mut resubmit = f.submit_args();
+    resubmit["review_id"] = json!(id);
+    let again = f.tool("s1", "submit_review", resubmit).await;
+    assert_eq!(again["state"], "new", "{again}");
+    let latest = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    assert_ne!(latest, reviewed, "the review moved to a new revision");
+
+    // The verdict the operator wrote names what they read.
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "head_sha": reviewed })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("moved to a new revision"),
+        "{body}"
+    );
+    assert_eq!(
+        f.store.get_review(&id).unwrap().unwrap().state,
+        "new",
+        "a refused approval decides nothing"
+    );
+    assert!(
+        !f.gh_log().contains("pr create"),
+        "and publishes nothing: {}",
+        f.gh_log()
+    );
+
+    // The claim underneath is bound the same way: the revision the operator
+    // decided on is no longer the review's, so it cannot be claimed at all.
+    assert!(
+        !f.store
+            .begin_publish(&id, Some(&first_revision.id))
+            .unwrap(),
+        "a publish claim for a superseded revision must lose"
+    );
+
+    // Deciding the revision that is actually current works, and publishes
+    // exactly it.
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "head_sha": latest })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "approved");
+    let decisions = f.store.review_decisions(&id).unwrap();
+    let decided = decisions.last().expect("a decision was recorded");
+    assert_eq!(
+        decided.revision_id,
+        f.store.latest_review_revision(&id).unwrap().unwrap().id,
+        "the decision is recorded against the revision it was made on"
+    );
+    assert_ne!(decided.revision_id, first_revision.id);
+}
+
+/// Whether a process id still names something on this host. `kill -0` is the
+/// portable ask; shelling out keeps it working on macOS as well as Linux.
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Poll until `f` holds, or give up after roughly `secs`. Checks run as real
+/// subprocesses, so there is nothing to await on them from here.
+async fn until(secs: u64, mut f: impl FnMut() -> bool) -> bool {
+    for _ in 0..(secs * 50) {
+        if f() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    f()
+}
+
+/// The operator stops a session while its required checks are executing.
+///
+/// Three things have to hold together: the process the node started is really
+/// gone — its whole group, so a command that backgrounded work does not
+/// survive its own cancellation — the evidence row says `cancelled` rather
+/// than inventing a pass or a failure, and a result arriving afterwards
+/// cannot overwrite what the cancellation recorded.
+#[tokio::test]
+async fn stopping_a_session_mid_check_cancels_the_run_and_kills_its_process_group() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        // A backgrounded grandchild in the same process group, whose pid the
+        // test can watch. Killing only the direct child would leave it
+        // running, reparented and alive; killing the group takes it too.
+        // Written relative to the check's own workdir, which is the scratch
+        // copy of the candidate the runner mounts at /work.
+        c.supervision.checks = vec!["sleep 30 & echo $! > child.pid; wait".into()];
+    })
+    .await;
+    let f = Arc::new(f);
+
+    let submitting = tokio::spawn({
+        let f = f.clone();
+        async move { f.tool("s1", "submit_review", f.submit_args()).await }
+    });
+
+    // Wait until the check is genuinely running: the session says so, and the
+    // command has written the pid of the work it backgrounded.
+    let candidate = {
+        let head = sh_out(std::path::Path::new(&f.worktree), "git rev-parse HEAD");
+        tracon::store::candidate_id(&head, "work")
+    };
+    let pid_file = |f: &Fixture| -> Option<String> {
+        let run = f.store.check_runs_for_candidate(&candidate).ok()?.pop()?;
+        let volume = format!("tracon-check-{}", run.id);
+        std::fs::read_to_string(
+            tracon::runner::local::local_runtime_path(&volume).join("child.pid"),
+        )
+        .ok()
+        .map(|pid| pid.trim().to_string())
+        .filter(|pid| !pid.is_empty())
+    };
+    assert!(
+        until(10, || pid_file(&f).is_some()).await,
+        "the check never started; the session is {:?}",
+        f.store.get_session("s1").unwrap().unwrap().state
+    );
+    let pid = pid_file(&f).unwrap();
+    assert!(
+        alive(&pid),
+        "the test is watching a process that is running"
+    );
+    assert_eq!(
+        f.store.get_session("s1").unwrap().unwrap().state,
+        "waiting_on_check"
+    );
+
+    // The operator stops the session while the check is executing.
+    f.manager.stop("s1").await.unwrap();
+
+    let submitted = submitting.await.unwrap();
+    let error = submitted["error"].as_str().unwrap_or_default().to_string();
+    assert!(
+        error.contains("cancelled"),
+        "the submission reports the cancellation rather than a verdict: {submitted}"
+    );
+    assert!(
+        f.store.open_reviews().unwrap().is_empty(),
+        "a cancelled run opens no review"
+    );
+
+    // The process group the node started is gone.
+    assert!(
+        until(10, || !alive(&pid)).await,
+        "the check's process group outlived its cancellation (pid {pid})"
+    );
+
+    // The evidence says cancelled — not passed, not failed, not still
+    // running — so nothing can later read it as proof.
+    let runs = f.store.check_runs_for_candidate(&candidate).unwrap();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0].outcome, "cancelled");
+    let kinds = f.event_kinds("s1");
+    assert!(kinds.contains(&"check_cancelled".to_string()), "{kinds:?}");
+    assert!(
+        !kinds.contains(&"candidate_verified".to_string()),
+        "a cancelled run verifies nothing: {kinds:?}"
+    );
+
+    // A result that arrives after the cancellation is dropped rather than
+    // becoming the outcome.
+    assert!(
+        !f.store
+            .finish_check_run(
+                &runs[0].id,
+                "passed",
+                None,
+                Some(0),
+                "late",
+                Some(1),
+                &json!({}),
+            )
+            .unwrap(),
+        "a late result must not be accepted"
+    );
+    assert_eq!(
+        f.store.check_run(&runs[0].id).unwrap().unwrap().outcome,
+        "cancelled",
+        "and must not overwrite what the cancellation recorded"
+    );
+
+    // The session the operator stopped stays stopped: the check finishing
+    // afterwards does not put it back into `running`.
+    let session = f.store.get_session("s1").unwrap().unwrap();
+    assert_eq!(session.state, "closed");
+    assert_eq!(session.end_reason.as_deref(), Some("killed_user"));
+    assert!(
+        kinds.contains(&"late_refused".to_string()),
+        "the refused transition is recorded: {kinds:?}"
+    );
+}

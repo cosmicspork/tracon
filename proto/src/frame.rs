@@ -289,6 +289,13 @@ pub enum Command {
         /// a node on an older build reads the rest of the verdict unchanged.
         #[serde(default)]
         patch: Option<String>,
+        /// The commit the deciding operator was reading. The owning node
+        /// refuses the verdict if its review has moved to a newer revision
+        /// since, so a decision made on one node is never applied to bytes
+        /// another node's resubmission replaced. Additive and optional: a
+        /// peer on an older build simply names none.
+        #[serde(default)]
+        head_sha: Option<String>,
     },
     /// Contract 3: a peer's providers, driven from another node's interface.
     /// The paste-back flow is request/response shaped — start the login and

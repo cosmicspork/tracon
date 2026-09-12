@@ -108,6 +108,15 @@ pub trait Runner: Send + Sync {
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError>;
     /// Force-remove a named process/container.
     async fn kill(&self, name: &str) -> Result<(), RunnerError>;
+    /// The name `run_capture` gives a command, which is not always the name
+    /// it was asked for: the container runners disambiguate concurrent node
+    /// processes with a suffix. A caller that has to stop a capture — a
+    /// timeout, a cancellation — must kill what the runtime named, so this is
+    /// where that translation lives rather than being reconstructed (and
+    /// getting it wrong) at the call site.
+    fn capture_name(&self, name: &str) -> String {
+        name.to_string()
+    }
     /// The image identity this runner actually used (or will use), confirmed
     /// against the runtime rather than merely read from configuration.
     /// `None` means no confirmed identity exists — evidence keyed on it must
@@ -124,13 +133,39 @@ pub trait Runner: Send + Sync {
 /// boundary backend's runner.
 pub mod local {
     use super::*;
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::process::Stdio;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, OnceLock};
     use tokio::process::Command;
 
     use crate::boundary::{Backend, BoundaryError, BoundaryReport};
     use crate::config::Config;
+
+    /// The process group each named command is running in. A container runner
+    /// asks the runtime to remove a container by name; there is no runtime
+    /// here, so the name has to be resolved to something killable, and the
+    /// group rather than the process so a `sh -c` that spawned children takes
+    /// them with it. Process-wide because `LocalRunner` is a unit struct that
+    /// every call constructs afresh.
+    fn running() -> &'static Mutex<HashMap<String, u32>> {
+        static RUNNING: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+        RUNNING.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn remember(name: &str, pid: Option<u32>) {
+        if let (false, Some(pid)) = (name.is_empty(), pid) {
+            if let Ok(mut map) = running().lock() {
+                map.insert(name.to_string(), pid);
+            }
+        }
+    }
+
+    fn forget(name: &str) {
+        if let Ok(mut map) = running().lock() {
+            map.remove(name);
+        }
+    }
 
     /// Where `LocalBackend` keeps a named volume's bytes on disk. Shared by
     /// the backend's import/export and by `LocalRunner`, which has no
@@ -176,6 +211,7 @@ pub mod local {
                 .argv
                 .split_first()
                 .ok_or_else(|| RunnerError::Other("empty argv".into()))?;
+            let name = cmd.name.clone();
             let mut c = Command::new(bin);
             c.args(args)
                 .envs(cmd.env)
@@ -183,10 +219,15 @@ pub mod local {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .kill_on_drop(true);
+            // Its own group, so `kill` reaches whatever it started too.
+            #[cfg(unix)]
+            c.process_group(0);
             if let Some(w) = cmd.workdir {
                 c.current_dir(w);
             }
-            Spawned::from_child(c.spawn()?)
+            let child = c.spawn()?;
+            remember(&name, child.id());
+            Spawned::from_child(child)
         }
 
         async fn run_capture(
@@ -202,15 +243,48 @@ pub mod local {
             // resolves to that volume's on-disk bytes; nothing else runs
             // relative to a container path that does not exist on the host.
             let dir = resolve_workdir(&cmd);
+            let name = cmd.name.clone();
             let mut c = Command::new(bin);
-            c.args(args).envs(cmd.env);
+            c.args(args)
+                .envs(cmd.env)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                // A capture whose future is dropped — a cancellation, a
+                // timeout — must not leave the command running on the host.
+                .kill_on_drop(true);
+            #[cfg(unix)]
+            c.process_group(0);
             if let Some(d) = dir {
                 c.current_dir(d);
             }
-            Ok(c.output().await?)
+            let child = c.spawn()?;
+            remember(&name, child.id());
+            let output = child.wait_with_output().await;
+            forget(&name);
+            Ok(output?)
         }
 
-        async fn kill(&self, _name: &str) -> Result<(), RunnerError> {
+        /// Kill the whole process group this name was started in. A container
+        /// runner removes a container; the honest local equivalent is the
+        /// group, not just the direct child, or a `sh -c` that backgrounded
+        /// work would survive its own cancellation.
+        async fn kill(&self, name: &str) -> Result<(), RunnerError> {
+            let pid = running().lock().ok().and_then(|map| map.get(name).copied());
+            let Some(pid) = pid else { return Ok(()) };
+            #[cfg(unix)]
+            {
+                let group = i32::try_from(pid).unwrap_or(0);
+                if group > 0 {
+                    // SAFETY: a kill(2) with a signal and a pid; it reads and
+                    // writes nothing of ours and cannot fail unsafely. A
+                    // negative pid addresses the group.
+                    unsafe {
+                        libc::kill(-group, libc::SIGKILL);
+                    }
+                }
+            }
+            forget(name);
             Ok(())
         }
 
@@ -273,5 +347,87 @@ pub mod local {
             crate::session::materialize::PODMAN_HARNESS_HOME.into()
         }
         async fn reconcile(&self, _names: &[String]) {}
+    }
+
+    #[cfg(all(test, unix))]
+    mod tests {
+        use super::*;
+        use std::time::Duration;
+
+        /// A container runner removes a container and everything in it. The
+        /// local equivalent has to be the process *group*, or a command that
+        /// backgrounded work would go on running after the node killed it —
+        /// which is exactly what a cancelled check does.
+        #[tokio::test]
+        async fn kill_reaches_the_whole_process_group() {
+            let dir = std::env::temp_dir().join(format!(
+                "tracon-kill-{}-{}",
+                std::process::id(),
+                uuid::Uuid::now_v7()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let pid_file = dir.join("child.pid");
+            let name = format!("tracon-test-kill-{}", uuid::Uuid::now_v7());
+            let capture = tokio::spawn({
+                let name = name.clone();
+                let pid_file = pid_file.clone();
+                async move {
+                    LocalRunner
+                        .run_capture(RunnerCommand {
+                            argv: vec![
+                                "sh".into(),
+                                "-c".into(),
+                                format!(
+                                    "sleep 30 & echo $! > {}; wait",
+                                    pid_file.to_string_lossy()
+                                ),
+                            ],
+                            name,
+                            ..Default::default()
+                        })
+                        .await
+                }
+            });
+
+            let alive = |pid: &str| {
+                std::process::Command::new("kill")
+                    .args(["-0", pid])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|status| status.success())
+                    .unwrap_or(false)
+            };
+            let mut backgrounded = None;
+            for _ in 0..500 {
+                if let Some(pid) = std::fs::read_to_string(&pid_file)
+                    .ok()
+                    .map(|pid| pid.trim().to_string())
+                    .filter(|pid| !pid.is_empty())
+                {
+                    backgrounded = Some(pid);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let backgrounded = backgrounded.expect("the command never backgrounded anything");
+            assert!(alive(&backgrounded));
+
+            LocalRunner.kill(&name).await.unwrap();
+            let _ = capture.await;
+            let mut gone = false;
+            for _ in 0..500 {
+                if !alive(&backgrounded) {
+                    gone = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                gone,
+                "work the killed command backgrounded is still running (pid {backgrounded})"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
