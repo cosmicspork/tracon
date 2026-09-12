@@ -356,6 +356,181 @@ async fn a_cross_origin_page_cannot_drive_the_api_with_a_stolen_ride() {
     assert_eq!(s, StatusCode::OK);
 }
 
+/// `Origin: null` is an opaque origin — a sandboxed iframe, a `file://` page,
+/// a cross-origin redirect. It can never equal this node's origin, so it is
+/// refused outright rather than read as "no Origin at all" and waved past the
+/// same-origin check. Loopback is not an exemption: a sandboxed page on the
+/// operator's own machine is exactly the reproduced path.
+#[tokio::test]
+async fn an_opaque_origin_is_refused_on_operator_routes() {
+    state::isolate();
+    let n = node();
+
+    // Loopback, state-changing, no credential needed today: still refused.
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/api/auth/token",
+        LOCAL,
+        "127.0.0.1:7420",
+        &[("origin", "null")],
+        Some(json!({ "token_hash": auth::hash("trc1.sandboxed") })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("opaque-origin"),
+        "the refusal should name the reason: {v}"
+    );
+
+    // The token was never set, which is how we know nothing ran.
+    let (s, _, _) = call(&n, "GET", "/api/node", REMOTE, "tracon.example", &[], None).await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "the sandboxed POST must not have configured a token"
+    );
+
+    set_token(&n, "trc1.secret").await;
+    let (_, cookies, _) = call(
+        &n,
+        "POST",
+        "/api/login",
+        REMOTE,
+        "tracon.example",
+        &[],
+        Some(json!({ "token": "trc1.secret" })),
+    )
+    .await;
+    let cookie = cookie_of(&cookies);
+
+    // A same-site sandboxed frame does get the cookie attached by the
+    // browser — SameSite is site-scoped, and the preview listener shares this
+    // node's site. The credential is not enough: the opaque origin is refused.
+    for (method, uri) in [
+        ("POST", "/api/sessions/abc/kill"),
+        ("GET", "/api/node"),
+        ("GET", "/api/queue"),
+    ] {
+        let (s, _, v) = call(
+            &n,
+            method,
+            uri,
+            REMOTE,
+            "tracon.example",
+            &[("cookie", &cookie), ("origin", "null")],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{method} {uri}: {v}");
+    }
+
+    // Nor does the bearer token buy an opaque origin a way in.
+    let (s, _, _) = call(
+        &n,
+        "GET",
+        "/api/node",
+        REMOTE,
+        "tracon.example",
+        &[("authorization", "Bearer trc1.secret"), ("origin", "null")],
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // Even the public shell, which needs no credential at all.
+    let (s, _, _) = call(
+        &n,
+        "GET",
+        "/reviews/abc",
+        REMOTE,
+        "tracon.example",
+        &[("origin", "null")],
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // The node's own origin still works, so the refusal is about opacity and
+    // not about sending an Origin at all.
+    let (s, _, _) = call(
+        &n,
+        "GET",
+        "/api/node",
+        REMOTE,
+        "tracon.example",
+        &[("cookie", &cookie), ("origin", "https://tracon.example")],
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+/// The middleware is one half; the browser holds the other. The operator
+/// response carries a CSP that refuses to be framed and frames only the
+/// preview origin, the cookie is withheld from cross-site writes, and the one
+/// sandboxed surface the node hosts can originate no request at all.
+#[tokio::test]
+async fn the_browser_side_defences_back_the_middleware() {
+    state::isolate();
+    let n = node();
+    set_token(&n, "trc1.secret").await;
+
+    let mut req = Request::builder()
+        .method("GET")
+        .uri("/api/node")
+        .header("host", "127.0.0.1:7420")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut()
+        .insert(ConnectInfo(LOCAL.parse::<SocketAddr>().unwrap()));
+    let res = n.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let csp = res.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
+    assert!(csp.contains("object-src 'none'"), "{csp}");
+    assert!(csp.contains("base-uri 'none'"), "{csp}");
+    // The only thing the operator page may frame is the preview listener,
+    // which is where the sandboxed viewer lives.
+    assert!(csp.contains("frame-src http://127.0.0.1:7422"), "{csp}");
+    assert_eq!(res.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(res.headers()["referrer-policy"], "no-referrer");
+
+    // That sandboxed viewer is the one context that legitimately has an
+    // opaque origin, and its own CSP leaves it nothing to make a request
+    // with — so no route needs an `Origin: null` exception.
+    let preview = tracon::http::preview::PREVIEW_CSP;
+    assert!(preview.contains("connect-src 'none'"), "{preview}");
+    assert!(preview.contains("form-action 'none'"), "{preview}");
+    assert!(preview.contains("frame-src 'none'"), "{preview}");
+
+    // And the cookie the browser would attach is withheld from cross-site
+    // writes and unreadable by script.
+    let (_, cookies, _) = call(
+        &n,
+        "POST",
+        "/api/login",
+        REMOTE,
+        "tracon.example",
+        &[],
+        Some(json!({ "token": "trc1.secret" })),
+    )
+    .await;
+    let raw = cookies
+        .iter()
+        .find(|c| c.starts_with("tracon_session="))
+        .expect("a session cookie");
+    assert!(raw.contains("HttpOnly"), "{raw}");
+    assert!(raw.contains("Secure"), "{raw}");
+    assert!(raw.contains("SameSite=Lax"), "{raw}");
+}
+
 #[tokio::test]
 async fn logging_out_ends_this_client_and_rotating_ends_all_of_them() {
     state::isolate();
