@@ -719,6 +719,39 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX mesh_held_channel ON mesh_held(channel, at_ms);
     "#,
+    // 31: what a publication did outside this node, written before each
+    // external side effect so an interrupted one can be recovered from what
+    // the forge actually holds rather than repeated or denied. `id` is
+    // derived from the review, revision, target and commit, so the same
+    // publication retried is the same row and a resubmission is a new one.
+    // `instance` is the process that owns an in-flight attempt: a row still
+    // in flight under another instance was interrupted by a crash.
+    r#"
+    CREATE TABLE publication (
+        id           TEXT PRIMARY KEY,
+        review_id    TEXT NOT NULL,
+        revision_id  TEXT,
+        candidate_id TEXT NOT NULL,
+        channel      TEXT NOT NULL,
+        node_id      TEXT NOT NULL,
+        provider     TEXT NOT NULL,
+        project      TEXT NOT NULL,
+        base         TEXT NOT NULL,
+        branch       TEXT NOT NULL,
+        head_sha     TEXT NOT NULL,
+        state        TEXT NOT NULL CHECK(state IN
+            ('pending','pushed','opening','opened','failed','uncertain')),
+        pushed_sha   TEXT,
+        result       TEXT,
+        note         TEXT,
+        attempts     INTEGER NOT NULL DEFAULT 0,
+        instance     TEXT NOT NULL,
+        created_ms   INTEGER NOT NULL,
+        updated_ms   INTEGER NOT NULL
+    );
+    CREATE INDEX publication_review ON publication(review_id, created_ms);
+    CREATE INDEX publication_state ON publication(state, updated_ms);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

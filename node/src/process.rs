@@ -149,6 +149,16 @@ impl Record {
     }
 }
 
+/// What this run of the node is called in records it leaves behind, for the
+/// one question a pid cannot answer: did *this* process start that work, or
+/// did a process that is no longer here? Fresh per run and never reused, so a
+/// row still claimed by another instance was interrupted rather than live.
+pub fn instance_id() -> &'static str {
+    static INSTANCE: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| uuid::Uuid::now_v7().to_string());
+    &INSTANCE
+}
+
 /// The record a desktop app leaves beside the node's state for a node it
 /// spawned itself.
 pub fn desktop_handoff_path(state_dir: &Path) -> PathBuf {

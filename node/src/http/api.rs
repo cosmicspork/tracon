@@ -958,19 +958,19 @@ pub async fn clone_repo(
     let root = crate::forge::managed_root(&Config::state_dir());
     let dest = crate::forge::clone_dest(&root, &b.host, &b.owner, &b.name)
         .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
-    let env = {
+    // A credential without a token clones anonymously; nothing else on the
+    // host may answer for it.
+    let token = {
         let broker = s.tools.broker.read().unwrap();
         let cred = broker
             .env_for(forge.credential(), &b.channel, &s.node_id)
             .map_err(|e| ApiError::new(StatusCode::CONFLICT, e.to_string()))?;
-        match forge.token(&cred) {
-            Some(t) => crate::forge::git_credential_env(forge, t),
-            None => Vec::new(), // a credential without a token: try anonymously
-        }
+        forge.token(&cred).cloned()
     };
+    let credential = crate::git_remote::brokered(forge.git_user(), token.as_deref());
     let cloned = tokio::time::timeout(
         std::time::Duration::from_secs(600),
-        crate::forge::clone(env, &b.host, &b.owner, &b.name, &dest),
+        crate::forge::clone(&credential, &b.host, &b.owner, &b.name, &dest),
     )
     .await
     .map_err(|_| ApiError::new(StatusCode::GATEWAY_TIMEOUT, "the clone ran out of time"))?;
@@ -1513,6 +1513,10 @@ pub async fn get_review(
         .and_then(|revision| serde_json::from_str::<serde_json::Value>(&revision.context_json).ok())
         .unwrap_or_else(|| json!([]));
     let legacy_check_events = s.store().legacy_check_runs_for_session(&r.session_id)?;
+    // What publication has already done outside this node. An interrupted
+    // attempt is visible here — including the `uncertain` one an operator has
+    // to verify on the forge — rather than only in the log.
+    let publications = s.store().publications_for_review(&id)?;
     Ok(Json(json!({
         "review": r,
         "stale": stale,
@@ -1520,6 +1524,7 @@ pub async fn get_review(
         "surrounding_code": surrounding_code,
         "evidence": evidence,
         "legacy_check_events": legacy_check_events,
+        "publications": publications,
     })))
 }
 
@@ -1930,7 +1935,8 @@ pub(crate) async fn decide_local(
                 Err(crate::authority::PublishError::Conflict(message)) => {
                     Err(ApiError(StatusCode::CONFLICT, message))
                 }
-                Err(crate::authority::PublishError::External(message)) => {
+                Err(crate::authority::PublishError::External(message))
+                | Err(crate::authority::PublishError::Uncertain(message)) => {
                     Err(ApiError(StatusCode::BAD_GATEWAY, message))
                 }
             }

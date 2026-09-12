@@ -24,6 +24,7 @@ pub mod corpus;
 pub mod evidence;
 pub mod metrics;
 pub mod operator;
+pub mod publication;
 pub mod qa;
 pub mod rollups;
 pub mod transfers;
@@ -31,6 +32,7 @@ pub mod vectors;
 pub use corpus::*;
 pub use evidence::*;
 pub use operator::*;
+pub use publication::*;
 pub use qa::*;
 pub use records::*;
 pub use transfers::*;
@@ -2175,6 +2177,30 @@ impl Store {
         Ok(n == 1)
     }
 
+    /// Reclaim a publish a previous process left in flight. The review is
+    /// already `publishing` — no other claim can be taken while it is — so
+    /// there is nothing to win here; what this checks is that the revision
+    /// being resumed is still the latest, exactly as `begin_publish` does, so
+    /// a resubmission that landed since is not published under the old claim.
+    pub fn reclaim_publish(&self, id: &str, revision_id: Option<&str>) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT id FROM review_revision WHERE review_id=?1 ORDER BY created_ms DESC, id DESC LIMIT 1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if current.as_deref() != revision_id {
+            return Ok(false);
+        }
+        let n = conn.execute(
+            "UPDATE review SET updated_ms=?2 WHERE id=?1 AND state='publishing'",
+            rusqlite::params![id, now_ms()],
+        )?;
+        Ok(n == 1)
+    }
+
     /// Complete a publish: record the approved bytes and where they landed. Only
     /// a row this call moved into `publishing` is finished.
     pub fn finish_publish(
@@ -2411,6 +2437,77 @@ mod tests {
         assert_eq!(
             outcome, "interrupted",
             "the explicit reconcile call does interrupt it"
+        );
+    }
+
+    /// A publish claim with no publication record behind it never reached
+    /// anything outside this node — the record is written first. On the next
+    /// start the review goes back in the queue instead of sitting in
+    /// `publishing` forever; one that did reach the forge is left alone.
+    #[test]
+    fn a_publish_claim_that_never_reached_a_record_goes_back_in_the_queue() {
+        let store = Store::open_in_memory().unwrap();
+        let nid = node(&store);
+        session(&store, "s1", &nid);
+        let mut review = ReviewRow {
+            id: "rv1".into(),
+            session_id: "s1".into(),
+            node_id: nid,
+            channel: "ch".into(),
+            kind: "pr".into(),
+            title: "t".into(),
+            body: "b".into(),
+            edited_title: None,
+            edited_body: None,
+            provider: "github".into(),
+            target: "{}".into(),
+            diff: "d".into(),
+            files: "[]".into(),
+            head_sha: "sha1".into(),
+            base_ref: "main".into(),
+            added: 1,
+            removed: 0,
+            state: "new".into(),
+            verdict_reason: None,
+            publish_result: None,
+            claimed_ms: None,
+            created_ms: now_ms(),
+            created_mono_ms: 0,
+            resolved_mono_ms: None,
+            updated_ms: now_ms(),
+            checks_json: None,
+            review_session_id: None,
+            ai_verdict_json: None,
+            revision_patch: None,
+        };
+        store.insert_review(&review).unwrap();
+        review.id = "rv2".into();
+        store.insert_review(&review).unwrap();
+        assert!(store.begin_publish("rv1", None).unwrap());
+        assert!(store.begin_publish("rv2", None).unwrap());
+        store
+            .publication_begin(&crate::store::PublicationBegin {
+                id: "pub2",
+                review_id: "rv2",
+                revision_id: None,
+                candidate_id: "cand1",
+                channel: "ch",
+                node_id: "n1",
+                provider: "github",
+                project: "owner/name",
+                base: "main",
+                branch: "feat/x",
+                head_sha: "sha1",
+                instance: "an-earlier-process",
+            })
+            .unwrap();
+
+        assert_eq!(store.reconcile_publishing_without_record().unwrap(), 1);
+        assert_eq!(store.get_review("rv1").unwrap().unwrap().state, "claimed");
+        assert_eq!(
+            store.get_review("rv2").unwrap().unwrap().state,
+            "publishing",
+            "an attempt that recorded what it was about to do is not this call's to decide"
         );
     }
 

@@ -6,7 +6,6 @@ pub mod external;
 pub mod materialize;
 pub mod state;
 pub mod supervisor;
-pub mod worktree;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration, time::Instant};
 
@@ -795,14 +794,20 @@ impl Manager {
             },
             None => {
                 if repo.starts_with(crate::forge::managed_root(&Config::state_dir())) {
-                    let env = crate::forge::git_env_for(
+                    let brokered = crate::forge::git_token_for(
                         &self.tools.broker,
                         &Config::state_dir(),
                         &spec.channel,
                         &repo,
                         &self.node_id,
                     );
-                    crate::forge::fetch_managed(&repo, &env)
+                    let credential = match &brokered {
+                        Some((forge, token)) => {
+                            crate::git_remote::brokered(forge.git_user(), Some(token.as_str()))
+                        }
+                        None => crate::git_remote::Credential::Anonymous,
+                    };
+                    crate::forge::fetch_managed(&repo, &credential)
                         .await
                         .map_err(anyhow::Error::msg)?;
                 }

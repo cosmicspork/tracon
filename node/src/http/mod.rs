@@ -459,6 +459,26 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         ),
         Err(e) => tracing::error!(error = %e, "could not reconcile pending authority actions"),
     }
+    // The same for a publication: a record still in flight under another
+    // instance was interrupted between a side effect and its outcome. It is
+    // not retried here — recovery inspects the forge when the publication is
+    // attempted again — but it stops looking live.
+    match store.publication_reconcile_interrupted(crate::process::instance_id()) {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(
+            publications = n,
+            "marked publications uncertain after a restart interrupted them"
+        ),
+        Err(e) => tracing::error!(error = %e, "could not reconcile interrupted publications"),
+    }
+    match store.reconcile_publishing_without_record() {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(
+            reviews = n,
+            "returned reviews to the queue that were claimed for publication but never reached it"
+        ),
+        Err(e) => tracing::error!(error = %e, "could not reconcile unrecorded publish claims"),
+    }
     let manager = Manager::new(
         store.clone(),
         bus.clone(),

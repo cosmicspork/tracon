@@ -143,6 +143,7 @@ async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> 
         format!(
             "#!/bin/bash\n\
              args=(\"$@\")\n\
+             echo \"$*\" >> \"$(dirname \"$0\")/../git.log\"\n\
              n=${{#args[@]}}\n\
              if [ \"$n\" -ge 4 ] \\\n\
              \t&& [ \"${{args[$((n-4))]}}\" = remote ] \\\n\
@@ -343,6 +344,24 @@ impl Fixture {
         let capture = tracon::review::capture(&self.worktree, "main", "feat/x")
             .await
             .unwrap();
+        // The candidate a real submission records, because publication
+        // refuses to push bytes it cannot check against a reviewed tree.
+        let tree = sh_out(
+            std::path::Path::new(&self.worktree),
+            &format!("git rev-parse {}^{{tree}}", capture.head_sha),
+        );
+        self.store
+            .insert_candidate(&tracon::store::CandidateRow {
+                id: tracon::store::candidate_id(&capture.head_sha, "work"),
+                head_sha: capture.head_sha.clone(),
+                tree_sha: Some(tree),
+                channel: "work".into(),
+                owner_session_id: session.into(),
+                source_kind: "git".into(),
+                captured_ms: now_ms(),
+                capture_json: "{}".into(),
+            })
+            .unwrap();
         let id = uuid::Uuid::now_v7().to_string();
         self.store
             .insert_review(&ReviewRow {
@@ -427,6 +446,73 @@ impl Fixture {
 
     fn gh_log(&self) -> String {
         std::fs::read_to_string(self.dir.join("gh.log")).unwrap_or_default()
+    }
+
+    /// Every git command the node ran, in order: what makes "it did not push
+    /// a second time" an observation rather than an inference.
+    fn git_log(&self) -> String {
+        std::fs::read_to_string(self.dir.join("git.log")).unwrap_or_default()
+    }
+
+    fn forget_logs(&self) {
+        let _ = std::fs::remove_file(self.dir.join("git.log"));
+        let _ = std::fs::remove_file(self.dir.join("gh.log"));
+    }
+
+    /// What the node calls this publication: the same review, revision,
+    /// target and commit name the same one, which is what a resumed attempt
+    /// relies on.
+    fn publication_id(&self, review_id: &str) -> String {
+        let review = self.store.get_review(review_id).unwrap().unwrap();
+        let target = serde_json::from_str(&review.target).unwrap();
+        let revision = self
+            .store
+            .latest_review_revision(review_id)
+            .unwrap()
+            .map(|r| r.id);
+        tracon::authority::publication_id(&review, revision.as_deref(), &target)
+    }
+
+    /// The publication record as it stands.
+    fn publication(&self, review_id: &str) -> tracon::store::PublicationRow {
+        self.store
+            .publication(&self.publication_id(review_id))
+            .unwrap()
+            .expect("a publication record")
+    }
+
+    /// An attempt a previous process began and never finished: exactly what a
+    /// crash leaves behind, written the way the node writes it.
+    fn interrupted_attempt(&self, review_id: &str, state: &str, pushed: Option<&str>) {
+        let review = self.store.get_review(review_id).unwrap().unwrap();
+        let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
+        let id = self.publication_id(review_id);
+        self.store
+            .publication_begin(&tracon::store::PublicationBegin {
+                id: &id,
+                review_id,
+                revision_id: None,
+                candidate_id: &tracon::store::candidate_id(&review.head_sha, "work"),
+                channel: "work",
+                node_id: "n1",
+                provider: &target.provider,
+                project: &target.project,
+                base: &target.base,
+                branch: &target.branch,
+                head_sha: &review.head_sha,
+                // Not this process: that is what makes it interrupted rather
+                // than a decision in progress.
+                instance: "a-process-that-is-no-longer-running",
+            })
+            .unwrap();
+        if let Some(sha) = pushed {
+            self.store.publication_pushed(&id, sha).unwrap();
+        }
+        if state == "opening" {
+            self.store.publication_opening(&id).unwrap();
+        }
+        // The review is mid-publish, as the crash left it.
+        assert!(self.store.begin_publish(review_id, None).unwrap());
     }
 }
 
@@ -839,16 +925,21 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
     let err = tracon::review::publish::publish(
         &broker,
         &cfg,
-        "work",
-        "n1",
-        "test-candidate",
-        &f.worktree,
-        &target,
-        "0000000000000000000000000000000000000000",
-        None,
-        "t",
-        "b",
-        None,
+        &tracon::review::publish::Publication {
+            channel: "work",
+            node_id: "n1",
+            id: "testcandidate",
+            candidate: &f.worktree,
+            target: &target,
+            head_sha: "0000000000000000000000000000000000000000",
+            reviewed_tree: "1111111111111111111111111111111111111111",
+            title: "t",
+            body: "b",
+            resume: false,
+            pushed: false,
+            before_push: None,
+            journal: &tracon::review::publish::NoJournal,
+        },
     )
     .await
     .unwrap_err();
@@ -1595,15 +1686,15 @@ async fn the_exported_snapshot_carries_no_agent_written_git_metadata() {
 async fn publication_refuses_a_candidate_whose_tree_is_not_the_reviewed_one() {
     state::isolate();
     let f = fixture(test_name!(), WITH_GH).await;
-    let id = f.submit().await;
-    let review = f.store.get_review(&id).unwrap().unwrap();
     // The evidence the node recorded when it captured the review, standing in
     // for a candidate whose commit still resolves but whose tree is not the
-    // one that was read.
+    // one that was read. Recorded before the submission, because a candidate
+    // is immutable: the capture that follows cannot overwrite it.
+    let head = sh_out(std::path::Path::new(&f.worktree), "git rev-parse HEAD");
     f.store
         .insert_candidate(&tracon::store::CandidateRow {
-            id: tracon::store::candidate_id(&review.head_sha, "work"),
-            head_sha: review.head_sha.clone(),
+            id: tracon::store::candidate_id(&head, "work"),
+            head_sha: head.clone(),
             tree_sha: Some("0".repeat(40)),
             channel: "work".into(),
             owner_session_id: "s1".into(),
@@ -1612,6 +1703,7 @@ async fn publication_refuses_a_candidate_whose_tree_is_not_the_reviewed_one() {
             capture_json: "{}".into(),
         })
         .unwrap();
+    let id = f.submit().await;
 
     let (status, body) = f
         .call(
@@ -1671,4 +1763,269 @@ async fn publication_proceeds_when_the_recorded_tree_is_the_one_being_pushed() {
         sh_out(&f.dir.join("origin.git"), "git rev-parse refs/heads/feat/x"),
         review.head_sha,
     );
+}
+
+// ---- interrupted publication ----
+//
+// Publication has two side effects this node cannot take back: the push, and
+// the opened change. A node can die between them, or between one of them and
+// the record of it. What follows is each of those crashes, arranged as the
+// node would find them on the next attempt: a record another process left in
+// flight, and a forge that already holds part of the work.
+
+/// A `gh` that also answers `pr list`, which is how a resumed attempt finds a
+/// change it may already have opened. What it lists comes from a file the
+/// test writes, so the test decides what the forge holds.
+fn gh_that_lists(f: &Fixture, listing: &str) {
+    std::fs::write(f.dir.join("pr-list.json"), listing).unwrap();
+    std::fs::write(
+        f.dir.join("bin/gh"),
+        "#!/bin/sh\n\
+         { echo \"ARGS: $*\"; echo \"GH_TOKEN=$GH_TOKEN\"; } >> \"$(dirname \"$0\")/../gh.log\"\n\
+         case \"$2\" in\n\
+         list) cat \"$(dirname \"$0\")/../pr-list.json\" ;;\n\
+         *) echo https://github.test/pull/1 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(f.dir.join("bin/gh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+}
+
+/// A git that reports every push as a success without performing it: a forge
+/// that accepts a push and does not keep it, which is indistinguishable from
+/// the client's side until the ref is read back.
+fn git_that_swallows_pushes(f: &Fixture) {
+    let script = format!(
+        "#!/bin/bash\n\
+         args=(\"$@\")\n\
+         echo \"$*\" >> \"$(dirname \"$0\")/../git.log\"\n\
+         for a in \"${{args[@]}}\"; do if [ \"$a\" = push ]; then exit 0; fi; done\n\
+         n=${{#args[@]}}\n\
+         if [ \"$n\" -ge 4 ] \\\n\
+         \t&& [ \"${{args[$((n-4))]}}\" = remote ] \\\n\
+         \t&& [ \"${{args[$((n-3))]}}\" = add ] \\\n\
+         \t&& [ \"${{args[$((n-2))]}}\" = origin ]; then\n\
+         \targs[$((n-1))]='{origin}'\n\
+         fi\n\
+         exec git \"${{args[@]}}\"\n",
+        origin = f.dir.join("origin.git").to_string_lossy(),
+    );
+    let path = f.dir.join("bin/git-remote-stub");
+    std::fs::write(&path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// The crash between a successful push and the record of it. The branch is on
+/// the forge; the node does not know. It must not push again, and above all
+/// must not report a failure of something that already succeeded.
+#[tokio::test]
+async fn a_publication_interrupted_after_its_push_resumes_without_pushing_again() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    // What the interrupted attempt had already done.
+    sh(
+        &f.dir.join("wt"),
+        &format!("git push -q origin {head}:refs/heads/feat/x"),
+    );
+    // The forge holds the branch but no change: the crash landed between the
+    // push and the record of it.
+    gh_that_lists(&f, "[]");
+    f.interrupted_attempt(&id, "pending", None);
+    f.forget_logs();
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["published"], "https://github.test/pull/1");
+
+    let git = f.git_log();
+    assert!(
+        git.contains("ls-remote"),
+        "the forge must be asked what the branch holds: {git}"
+    );
+    assert!(
+        !git.contains("push origin"),
+        "the push must not be repeated: {git}"
+    );
+    assert_eq!(
+        f.gh_log().matches("pr create").count(),
+        1,
+        "the change is opened exactly once"
+    );
+    let record = f.publication(&id);
+    assert_eq!(record.state, "opened");
+    assert_eq!(record.pushed_sha.as_deref(), Some(head.as_str()));
+    assert_eq!(
+        f.store.get_review(&id).unwrap().unwrap().state,
+        "approved",
+        "the review is resolved, not left mid-publish"
+    );
+}
+
+/// The crash inside the call that opens the change. A pull request may exist
+/// with nothing recorded about it. The resumed attempt finds it by the marker
+/// it wrote into the body and records that one, rather than opening a second.
+#[tokio::test]
+async fn a_publication_interrupted_while_opening_records_the_change_it_already_opened() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    sh(
+        &f.dir.join("wt"),
+        &format!("git push -q origin {head}:refs/heads/feat/x"),
+    );
+    let marker = tracon::review::publish::marker_comment(&f.publication_id(&id));
+    gh_that_lists(
+        &f,
+        &json!([{ "url": "https://github.test/pull/7", "body": format!("why\n\n{marker}") }])
+            .to_string(),
+    );
+    f.interrupted_attempt(&id, "opening", Some(&head));
+    f.forget_logs();
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["published"], "https://github.test/pull/7",
+        "the change that exists is the one reported"
+    );
+    let gh = f.gh_log();
+    assert!(gh.contains("pr list"), "{gh}");
+    assert!(
+        !gh.contains("pr create"),
+        "a second pull request must never be opened: {gh}"
+    );
+    let record = f.publication(&id);
+    assert_eq!(record.state, "opened");
+    assert_eq!(record.result.as_deref(), Some("https://github.test/pull/7"));
+}
+
+/// A forge that cannot be reached during recovery settles nothing. The node
+/// says so, keeps the claim, and leaves a record naming what to verify —
+/// rather than reporting a failure or pushing into the dark.
+#[tokio::test]
+async fn a_forge_that_cannot_be_reached_leaves_the_outcome_explicitly_unknown() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    sh(
+        &f.dir.join("wt"),
+        &format!("git push -q origin {head}:refs/heads/feat/x"),
+    );
+    f.interrupted_attempt(&id, "opening", Some(&head));
+    // The forge goes away between the crash and the recovery.
+    std::fs::rename(f.dir.join("origin.git"), f.dir.join("origin.gone")).unwrap();
+    f.forget_logs();
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    let message = body["error"]["message"].as_str().unwrap().to_string();
+    assert!(message.contains("verify"), "{message}");
+
+    let record = f.publication(&id);
+    assert_eq!(record.state, "uncertain");
+    assert!(record.note.unwrap_or_default().contains("verify"));
+    assert!(
+        !f.gh_log().contains("pr create"),
+        "nothing may be opened on a forge whose state is unknown"
+    );
+    assert_eq!(
+        f.store.get_review(&id).unwrap().unwrap().state,
+        "publishing",
+        "an unknown outcome keeps the claim rather than inviting a blind retry"
+    );
+}
+
+/// A push the forge reports as accepted but does not hold. Reading the ref
+/// back is the only way to know, and the mismatch is reported rather than
+/// papered over with a pull request against a commit that is not there.
+#[tokio::test]
+async fn a_push_the_forge_did_not_keep_is_reported() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    git_that_swallows_pushes(&f);
+    f.forget_logs();
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    let message = body["error"]["message"].as_str().unwrap().to_string();
+    assert!(message.contains("feat/x"), "{message}");
+    assert!(message.contains("not the reviewed commit"), "{message}");
+
+    assert!(
+        !f.gh_log().contains("pr create"),
+        "nothing is opened for a commit the forge does not hold"
+    );
+    let record = f.publication(&id);
+    assert_eq!(record.state, "failed");
+    assert!(record.pushed_sha.is_none());
+    assert_eq!(
+        f.store.get_review(&id).unwrap().unwrap().state,
+        "claimed",
+        "a settled failure returns the review to the queue"
+    );
+}
+
+/// A publication already recorded as open is reported, not opened again.
+#[tokio::test]
+async fn an_opened_publication_is_reported_rather_than_opened_again() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    f.interrupted_attempt(&id, "opening", Some(&head));
+    f.store
+        .publication_opened(&f.publication_id(&id), "https://github.test/pull/9")
+        .unwrap();
+    f.forget_logs();
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["published"], "https://github.test/pull/9");
+    assert!(f.gh_log().is_empty(), "the forge was not touched at all");
+    assert!(f.git_log().is_empty(), "and neither was git");
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "approved");
 }

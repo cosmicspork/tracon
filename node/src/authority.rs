@@ -144,12 +144,18 @@ pub fn grant_visible(row: &AuthorityGrantRow) -> Value {
 pub enum PublishError {
     Conflict(String),
     External(String),
+    /// Neither: the node could not establish what happened on the forge. The
+    /// publish claim is deliberately left standing and the publication record
+    /// says what to verify, because reporting either outcome would be a guess.
+    Uncertain(String),
 }
 
 impl std::fmt::Display for PublishError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PublishError::Conflict(m) | PublishError::External(m) => f.write_str(m),
+            PublishError::Conflict(m) | PublishError::External(m) | PublishError::Uncertain(m) => {
+                f.write_str(m)
+            }
         }
     }
 }
@@ -173,6 +179,67 @@ pub struct PublishRequest<'a> {
     pub body: &'a str,
     pub require_evidence: bool,
     pub recheck_authority: Option<&'a (dyn Fn() -> Result<(), String> + Send + Sync)>,
+}
+
+/// The publication record, as `review::publish` needs to speak to it: each
+/// external side effect is written down before it is attempted. Keeping it
+/// here is what lets publication stay free of the database.
+struct StoreJournal<'a> {
+    store: &'a Store,
+    id: &'a str,
+}
+
+impl crate::review::publish::Journal for StoreJournal<'_> {
+    fn pushed(&self, sha: &str) -> Result<(), String> {
+        self.store
+            .publication_pushed(self.id, sha)
+            .map_err(|e| e.to_string())
+    }
+
+    fn opening(&self) -> Result<(), String> {
+        self.store
+            .publication_opening(self.id)
+            .map_err(|e| e.to_string())
+    }
+
+    fn opened(&self, url: &str) -> Result<(), String> {
+        self.store
+            .publication_opened(self.id, url)
+            .map_err(|e| e.to_string())
+    }
+
+    fn uncertain(&self, note: &str) {
+        if let Err(error) = self.store.publication_uncertain(self.id, note) {
+            tracing::error!(%error, "could not record an uncertain publication");
+        }
+    }
+
+    fn failed(&self, note: &str) {
+        if let Err(error) = self.store.publication_failed(self.id, note) {
+            tracing::error!(%error, "could not record a failed publication");
+        }
+    }
+}
+
+/// One publication's identity: the same review, revision, target and commit
+/// name the same publication, so a retry after a crash looks for what the
+/// interrupted attempt would have left on the forge instead of starting a
+/// second one. A resubmission has a new revision, so it is a new publication.
+pub fn publication_id(
+    review: &crate::store::ReviewRow,
+    revision_id: Option<&str>,
+    target: &crate::review::publish::Target,
+) -> String {
+    crate::corpus::hash_body(&format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        review.id,
+        revision_id.unwrap_or(""),
+        target.provider,
+        target.project,
+        target.base,
+        target.branch,
+        review.head_sha,
+    ))
 }
 
 /// Publish the exact candidate captured by a review. This is shared by the
@@ -244,43 +311,111 @@ pub async fn publish_review(
         .latest_review_revision(&review.id)
         .map_err(|e| PublishError::External(e.to_string()))?
         .map(|revision| revision.id);
-    if !ctx
-        .store
-        .begin_publish(&review.id, revision_id.as_deref())
-        .map_err(|e| PublishError::External(e.to_string()))?
-    {
-        return Err(PublishError::Conflict(
-            "this review is already being decided".into(),
-        ));
-    }
     let target: crate::review::publish::Target =
         serde_json::from_str(&review.target).map_err(|e| PublishError::External(e.to_string()))?;
     // The tree the node hashed out of the candidate when it captured this
     // review. Publication compares the bytes it is about to push against it,
     // so the reviewed tree is asserted from node-held evidence rather than
-    // re-read out of the directory being published.
+    // re-read out of the directory being published. A candidate with none
+    // recorded — a review captured before candidates were, and never
+    // resubmitted since — is refused here rather than published on the word
+    // of the directory being published.
+    let candidate_id = crate::store::candidate_id(&review.head_sha, &review.channel);
     let reviewed_tree = ctx
         .store
-        .candidate(&crate::store::candidate_id(
-            &review.head_sha,
-            &review.channel,
-        ))
+        .candidate(&candidate_id)
         .map_err(|e| PublishError::External(e.to_string()))?
         .and_then(|candidate| candidate.tree_sha)
-        .filter(|tree| !tree.is_empty());
+        .filter(|tree| !tree.is_empty())
+        .ok_or_else(|| {
+            PublishError::Conflict(
+                "no reviewed tree is recorded for this candidate, so what would be pushed cannot \
+                 be checked against what was reviewed; resubmit it for review before publishing"
+                    .into(),
+            )
+        })?;
+
+    let publication_id = publication_id(review, revision_id.as_deref(), &target);
+    let existing = ctx
+        .store
+        .publication(&publication_id)
+        .map_err(|e| PublishError::External(e.to_string()))?;
+    // An attempt another process left in flight is not a competing decision:
+    // it is this node's own, interrupted. Take the claim back and resume it.
+    let interrupted = existing
+        .as_ref()
+        .is_some_and(|row| row.instance != crate::process::instance_id());
+    let claimed = ctx
+        .store
+        .begin_publish(&review.id, revision_id.as_deref())
+        .map_err(|e| PublishError::External(e.to_string()))?
+        || (interrupted
+            && ctx
+                .store
+                .reclaim_publish(&review.id, revision_id.as_deref())
+                .map_err(|e| PublishError::External(e.to_string()))?);
+    if !claimed {
+        return Err(PublishError::Conflict(
+            "this review is already being decided".into(),
+        ));
+    }
+    // Already done. A second attempt at an opened publication would open a
+    // second change; report the one that exists instead.
+    if let Some(url) = existing
+        .as_ref()
+        .filter(|row| row.state == "opened")
+        .and_then(|row| row.result.clone())
+    {
+        ctx.store
+            .finish_publish(&review.id, title, body, &url)
+            .map_err(|e| PublishError::External(e.to_string()))?;
+        ctx.manager.publish_queue().await;
+        return Ok(url);
+    }
+    // What a previous attempt may have left on the forge decides whether this
+    // one looks before it acts.
+    let resume = existing
+        .as_ref()
+        .is_some_and(|row| row.may_have_reached_the_forge());
+    let record = ctx
+        .store
+        .publication_begin(&crate::store::PublicationBegin {
+            id: &publication_id,
+            review_id: &review.id,
+            revision_id: revision_id.as_deref(),
+            candidate_id: &candidate_id,
+            channel: &review.channel,
+            node_id: ctx.node_id,
+            provider: &target.provider,
+            project: &target.project,
+            base: &target.base,
+            branch: &target.branch,
+            head_sha: &review.head_sha,
+            instance: crate::process::instance_id(),
+        })
+        .map_err(|e| PublishError::External(e.to_string()))?;
+    let journal = StoreJournal {
+        store: ctx.store,
+        id: &publication_id,
+    };
     match crate::review::publish::publish(
         ctx.broker,
         ctx.cfg,
-        &review.channel,
-        ctx.node_id,
-        &review.id,
-        &worktree,
-        &target,
-        &review.head_sha,
-        reviewed_tree.as_deref(),
-        title,
-        body,
-        recheck_authority,
+        &crate::review::publish::Publication {
+            channel: &review.channel,
+            node_id: ctx.node_id,
+            id: &publication_id,
+            candidate: &worktree,
+            target: &target,
+            head_sha: &review.head_sha,
+            reviewed_tree: &reviewed_tree,
+            title,
+            body,
+            resume,
+            pushed: record.pushed_sha.is_some(),
+            before_push: recheck_authority,
+            journal: &journal,
+        },
     )
     .await
     {
@@ -317,6 +452,13 @@ pub async fn publish_review(
             }
             Ok(published)
         }
+        // The outcome is unknown, so the claim stays: releasing it would
+        // invite a second attempt at a side effect that may already have
+        // landed. The publication record holds what to verify.
+        Err(error) if error.is_unknown() => {
+            ctx.manager.publish_queue().await;
+            Err(PublishError::Uncertain(error.to_string()))
+        }
         Err(error) => {
             ctx.store
                 .abort_publish(&review.id)
@@ -326,7 +468,8 @@ pub async fn publish_review(
             // conflict with what was approved, not a forge failure.
             Err(match error {
                 crate::review::publish::PublishError::BranchMoved { .. }
-                | crate::review::publish::PublishError::TreeChanged { .. } => {
+                | crate::review::publish::PublishError::TreeChanged { .. }
+                | crate::review::publish::PublishError::NoReviewedTree => {
                     PublishError::Conflict(error.to_string())
                 }
                 other => PublishError::External(other.to_string()),

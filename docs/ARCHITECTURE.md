@@ -263,12 +263,27 @@ changes: the agent applies it and resubmits, and **the agent remains the only
 writer to the worktree.** Every decision is recorded against the revision it
 decided, with the requirements pinned as they were at submission.
 
+**Publication is two side effects the node cannot take back, so it writes down
+what it is about to do before it does it.** Approval imports the candidate into a
+fresh publisher repository, pushes the reviewed commit, reads the ref back from
+the forge to confirm it is actually there, and then opens the change with a
+marker in its body. Each step is recorded before it is attempted, keyed on the
+review, revision, target and commit — so an attempt a crash interrupted is
+resumed rather than repeated: the next attempt asks the forge what the branch
+holds and whether that marker is already on an open change, and continues from
+what it observes. A forge that cannot be reached settles nothing, and is recorded
+as `uncertain` rather than reported as either success or failure. Every Git
+command that can reach a forge — clone, fetch, ls-remote, push — is built in one
+place with a brokered credential or none: an ambient host helper, an askpass
+program, or an `ssh-agent` identity can never answer for the node, and there is
+no setting that would let one.
+
 ## Workspaces
 
 **Nothing is bind-mounted into the boundary.** A session's Git history is seeded
-once, host-side, into a short-lived clone or worktree — a managed clone fetched
-from `origin/<default>`, or a fetch against the operator's own checkout, which is
-left alone and reported if dirty — and that seed is copied, never bind-mounted,
+once, host-side, into a short-lived clone or worktree — a managed clone the node
+refreshes with a brokered credential, or the operator's own checkout, which is
+read and never written — and that seed is copied, never bind-mounted,
 into a runtime-owned volume; the copy strips `.git` hooks, replace refs, grafts,
 alternates, and `config.worktree` before anything node-side or harness-side reads
 it. The harness sees `/work` and no host path. A workspace outlives its session:

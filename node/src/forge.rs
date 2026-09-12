@@ -55,7 +55,7 @@ impl Forge {
     /// The username the credential helper answers with. Both forges take any
     /// HTTPS basic auth with the token as the password; these are the values
     /// their own tooling uses.
-    fn git_user(&self) -> &'static str {
+    pub fn git_user(&self) -> &'static str {
         match self {
             Self::Github => "x-access-token",
             Self::Gitlab => "oauth2",
@@ -462,69 +462,43 @@ fn check_component(part: &str) -> Result<(), String> {
     }
 }
 
-/// The environment that lets node-side git authenticate to a forge without
-/// the token touching disk or argv: an inline credential helper that answers
-/// from two variables git never records.
-pub fn git_credential_env(forge: Forge, token: &str) -> Vec<(String, String)> {
-    vec![
-        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-        ("GIT_CONFIG_COUNT".into(), "1".into()),
-        ("GIT_CONFIG_KEY_0".into(), "credential.helper".into()),
-        (
-            "GIT_CONFIG_VALUE_0".into(),
-            r#"!f(){ printf 'username=%s\npassword=%s\n' "$TRACON_GIT_USER" "$TRACON_GIT_TOKEN"; }; f"#
-                .into(),
-        ),
-        ("TRACON_GIT_USER".into(), forge.git_user().into()),
-        ("TRACON_GIT_TOKEN".into(), token.into()),
-    ]
-}
-
-/// The auth environment for node-side git against `repo_path`, or empty when
-/// none applies: a repo outside the managed root is the operator's own
-/// checkout with the operator's own auth, and a broker refusal degrades to
-/// anonymous rather than failing a public repo.
-pub fn git_env_for(
+/// The brokered token for node-side git against `repo_path`, or none when no
+/// credential applies: a repo outside the managed root is not the node's to
+/// authenticate for, and a broker refusal degrades to anonymous rather than
+/// failing a public repo. What git does with the token is
+/// `crate::git_remote`'s business, so there is exactly one way to pass it.
+pub fn git_token_for(
     broker: &SharedBroker,
     state_dir: &Path,
     channel: &str,
     repo_path: &Path,
     node_id: &str,
-) -> Vec<(String, String)> {
+) -> Option<(Forge, String)> {
     let root = managed_root(state_dir);
-    let Ok(rest) = repo_path.strip_prefix(&root) else {
-        return Vec::new();
-    };
-    let Some(host) = rest.components().next() else {
-        return Vec::new();
-    };
+    let rest = repo_path.strip_prefix(&root).ok()?;
+    let host = rest.components().next()?;
     let host = host.as_os_str().to_string_lossy();
     let forge = if host.contains("github") {
         Forge::Github
     } else {
         Forge::Gitlab
     };
-    let Ok(env) = broker
+    let env = broker
         .read()
         .unwrap()
         .env_for(forge.credential(), channel, node_id)
-    else {
-        return Vec::new();
-    };
-    match forge.token(&env) {
-        Some(t) => git_credential_env(forge, t),
-        None => Vec::new(),
-    }
+        .ok()?;
+    forge.token(&env).map(|token| (forge, token.clone()))
 }
 
+/// The home `$HOME` points at for forge-side Git commands.
+pub const FORGE_HOME: &str = "forge-home";
+
 /// Clone into the managed root. Idempotent: an existing clone is the answer,
-/// not an error. The URL carries no credential; the helper env does.
-/// Clone into the managed root. Idempotent: an existing clone is the answer,
-/// not an error. The URL carries no credential; the helper env does. Git runs
-/// in a clean process environment so ambient host helpers cannot become a
-/// second authentication path.
+/// not an error. The URL carries no credential; the brokered helper does, and
+/// `git_remote` is what decides that no other helper can answer instead.
 pub async fn clone(
-    http_env: Vec<(String, String)>,
+    credential: &crate::git_remote::Credential<'_>,
     host: &str,
     owner: &str,
     name: &str,
@@ -537,34 +511,9 @@ pub async fn clone(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let url = format!("https://{host}/{owner}/{name}.git");
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env(
-            "HOME",
-            crate::config::Config::state_dir().join("forge-home"),
-        )
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .env("GIT_GRAFT_FILE", "/dev/null")
-        .args([
-            "--no-replace-objects",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=",
-            "-c",
-            "core.useReplaceRefs=false",
-            "clone",
-            "--no-local",
-            "--no-hardlinks",
-            &url,
-        ])
+    let mut cmd = crate::git_remote::git("git", FORGE_HOME, credential);
+    cmd.args(["clone", "--no-local", "--no-hardlinks", &url])
         .arg(dest);
-    for (k, v) in &http_env {
-        cmd.env(k, v);
-    }
     let out = cmd.output().await.map_err(|e| e.to_string())?;
     if !out.status.success() {
         let _ = std::fs::remove_dir_all(dest);
@@ -579,38 +528,16 @@ pub async fn clone(
 /// Refresh a trusted managed clone with broker-provided Git authentication.
 /// This is intentionally unavailable to agent workspaces: it only accepts a
 /// node-owned repository path, and runs with no ambient credential helpers.
-pub async fn fetch_managed(repo: &Path, env: &[(String, String)]) -> Result<(), String> {
+pub async fn fetch_managed(
+    repo: &Path,
+    credential: &crate::git_remote::Credential<'_>,
+) -> Result<(), String> {
     let root = managed_root(&crate::config::Config::state_dir());
     if !repo.starts_with(&root) {
         return Err("refusing to fetch a repository outside managed storage".into());
     }
-    let mut command = tokio::process::Command::new("git");
-    command
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env(
-            "HOME",
-            crate::config::Config::state_dir().join("forge-home"),
-        )
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .env("GIT_GRAFT_FILE", "/dev/null")
-        .arg("-C")
-        .arg(repo)
-        .args([
-            "--no-replace-objects",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=",
-            "-c",
-            "core.useReplaceRefs=false",
-            "fetch",
-            "--prune",
-            "origin",
-        ])
-        .envs(env.iter().map(|(key, value)| (key, value)));
+    let mut command = crate::git_remote::git_in("git", repo, FORGE_HOME, credential);
+    command.args(["fetch", "--prune", "origin"]);
     let out = command.output().await.map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(())
@@ -825,40 +752,26 @@ mod tests {
     }
 
     #[test]
-    fn the_credential_env_carries_the_token_out_of_argv() {
-        let env = git_credential_env(Forge::Github, "fake-token-for-tests");
-        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
-        assert!(keys.contains(&"GIT_CONFIG_KEY_0"));
-        assert!(keys.contains(&"TRACON_GIT_TOKEN"));
-        let helper = &env
-            .iter()
-            .find(|(k, _)| k == "GIT_CONFIG_VALUE_0")
-            .unwrap()
-            .1;
-        // The helper reads the variables; the token itself is not in the
-        // helper text, so `ps` and git traces never see it.
-        assert!(!helper.contains("fake-token-for-tests"));
-    }
-
-    #[test]
-    fn only_managed_repos_get_an_auth_env() {
+    fn only_managed_repos_get_a_brokered_token() {
         let broker = crate::broker::Broker::default().shared();
-        let env = git_env_for(
+        // Outside the managed root there is nothing for the node to
+        // authenticate: that checkout is the operator's own.
+        assert!(git_token_for(
             &broker,
             Path::new("/state"),
             "personal",
-            Path::new("/home/op/src/project"),
+            Path::new("/elsewhere/src/project"),
             "n1",
-        );
-        assert!(env.is_empty());
+        )
+        .is_none());
         // Managed path but no credential in the broker: anonymous, not an error.
-        let env = git_env_for(
+        assert!(git_token_for(
             &broker,
             Path::new("/state"),
             "personal",
             Path::new("/state/repos/github.com/me/proj"),
             "n1",
-        );
-        assert!(env.is_empty());
+        )
+        .is_none());
     }
 }
