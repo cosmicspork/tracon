@@ -12,6 +12,7 @@ pub mod embed;
 pub mod environment;
 pub mod forge;
 pub mod gateway;
+pub mod git_remote;
 pub mod git_tree;
 pub mod http;
 pub mod mcp;

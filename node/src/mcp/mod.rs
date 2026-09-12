@@ -582,10 +582,17 @@ impl Tools {
                 }))
             }
             Err(error) => {
+                // A publication whose outcome could not be established is
+                // `uncertain`, not `failed`: the replay guard keeps holding
+                // the scope, and nobody is told the change was not opened.
+                let outcome = match error {
+                    crate::authority::PublishError::Uncertain(_) => "uncertain",
+                    _ => "failed",
+                };
                 let error = error.to_string();
                 access
                     .store
-                    .authority_action_finish(&action_id, "failed", &error)
+                    .authority_action_finish(&action_id, outcome, &error)
                     .map_err(|e| e.to_string())?;
                 let state = access
                     .store
@@ -595,7 +602,7 @@ impl Tools {
                     .unwrap_or_else(|| "missing".into());
                 Ok(serde_json::json!({
                     "review_id": review.id, "state": state,
-                    "authority": { "mode": "automatic", "outcome": "failed", "reason": error },
+                    "authority": { "mode": "automatic", "outcome": outcome, "reason": error },
                 }))
             }
         }
