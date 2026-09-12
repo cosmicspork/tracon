@@ -210,10 +210,25 @@ pub async fn guard(
     let auth = state.auth.clone();
     let headers = req.headers().clone();
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
-    let origin = headers
-        .get(header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-        .filter(|o| *o != "null");
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+
+    // `Origin: null` is what a browser sends from an opaque origin: a
+    // sandboxed iframe, a `file://` page, a cross-origin redirect. It is not
+    // the absence of an origin — it is one that can never equal this node's,
+    // so letting it fall through as `None` would exempt exactly the contexts
+    // that most need the check from the same-origin test below. No operator
+    // client is opaque: the interface is served from this node's own origin,
+    // and the one sandboxed surface the node does host, the HTML preview
+    // viewer, is a separate listener this guard never sees, is reached with a
+    // capability token rather than the cookie, and is served under a CSP with
+    // `connect-src 'none'`/`form-action 'none'` so it can originate no
+    // request at all. There is therefore nothing to scope an exception to.
+    if origin.is_some_and(|o| o.trim().eq_ignore_ascii_case("null")) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "opaque-origin request refused",
+        ));
+    }
 
     // 1. On this machine, with a local Host and Origin: the operator.
     let local_host = host_is_local(host, &auth.bind)

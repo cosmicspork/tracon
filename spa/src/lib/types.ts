@@ -184,7 +184,14 @@ export interface Invite {
   channels: string[]
   expires_at: number
   state: 'waiting' | 'received' | 'admitted'
-  received: { node_id: string; x25519_pub: string; name: string; contract: number; facts: string } | null
+  received: {
+    node_id: string
+    x25519_pub: string
+    name: string
+    contract: number
+    facts: string
+    binding_sig: string
+  } | null
   received_fingerprint: string | null
   own_fingerprint: string | null
 }

@@ -50,6 +50,7 @@ pub async fn start_hub_managed(admitted: &[(&Identity, &[&str])], backlog: usize
             .put(&Member {
                 node_id: id.node_id(),
                 x25519_pub: id.x25519_hex(),
+                binding_sig: proto::enroll::sign_binding(id),
                 name: "n".into(),
                 channels: channels.iter().map(|s| s.to_string()).collect(),
                 admitted_ms: 0,
@@ -62,6 +63,16 @@ pub async fn start_hub_managed(admitted: &[(&Identity, &[&str])], backlog: usize
     for _ in 0..backlog {
         frames.append(MESH_CHANNEL, "{}", 0).unwrap();
     }
+    serve(frames, members).await
+}
+
+/// A hub over a member table the test wrote itself, for records the admit
+/// route would refuse to write — a sealing key its owner never signed for.
+pub async fn start_hub_with_members(members: Arc<MemoryMembers>) -> String {
+    serve(Arc::new(MemoryFrames::new()), members).await.url
+}
+
+async fn serve(frames: Arc<MemoryFrames>, members: Arc<MemoryMembers>) -> TestHub {
     let app = hub::app(frames.clone(), members.clone(), HubConfig::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

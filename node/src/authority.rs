@@ -255,6 +255,19 @@ pub async fn publish_review(
     }
     let target: crate::review::publish::Target =
         serde_json::from_str(&review.target).map_err(|e| PublishError::External(e.to_string()))?;
+    // The tree the node hashed out of the candidate when it captured this
+    // review. Publication compares the bytes it is about to push against it,
+    // so the reviewed tree is asserted from node-held evidence rather than
+    // re-read out of the directory being published.
+    let reviewed_tree = ctx
+        .store
+        .candidate(&crate::store::candidate_id(
+            &review.head_sha,
+            &review.channel,
+        ))
+        .map_err(|e| PublishError::External(e.to_string()))?
+        .and_then(|candidate| candidate.tree_sha)
+        .filter(|tree| !tree.is_empty());
     match crate::review::publish::publish(
         ctx.broker,
         ctx.cfg,
@@ -264,6 +277,7 @@ pub async fn publish_review(
         &worktree,
         &target,
         &review.head_sha,
+        reviewed_tree.as_deref(),
         title,
         body,
         recheck_authority,
@@ -311,7 +325,8 @@ pub async fn publish_review(
             // A branch that moved between the reviewed tip and this push is a
             // conflict with what was approved, not a forge failure.
             Err(match error {
-                crate::review::publish::PublishError::BranchMoved { .. } => {
+                crate::review::publish::PublishError::BranchMoved { .. }
+                | crate::review::publish::PublishError::TreeChanged { .. } => {
                     PublishError::Conflict(error.to_string())
                 }
                 other => PublishError::External(other.to_string()),

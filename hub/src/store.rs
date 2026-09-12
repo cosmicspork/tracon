@@ -271,6 +271,11 @@ pub enum MemberRole {
 pub struct Member {
     pub node_id: String,
     pub x25519_pub: String,
+    /// The member's own signature over `(node_id, x25519_pub)`, hex. Kept with
+    /// the record so a peer reading the directory can check the sealing key it
+    /// is about to wrap a keyring to, rather than trust the hub for it.
+    #[serde(default)]
+    pub binding_sig: String,
     pub name: String,
     pub channels: Vec<String>,
     pub admitted_ms: i64,
@@ -546,6 +551,7 @@ mod tests {
         let m = Member {
             node_id: "aa".into(),
             x25519_pub: "bb".into(),
+            binding_sig: String::new(),
             name: "n".into(),
             channels: vec!["@mesh".into(), "personal".into()],
             admitted_ms: 1,

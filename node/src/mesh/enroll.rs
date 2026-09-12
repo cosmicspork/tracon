@@ -14,13 +14,16 @@
 //!
 //! Nothing in the slot is secret — public keys and a name — so the hub holds
 //! it in the clear. What defeats a hub that swaps keys is the fingerprint
-//! comparison the operator makes before admitting.
+//! comparison the operator makes before admitting, plus the filler's signature
+//! over its own sealing key: the fingerprint covers the node id alone, so the
+//! signature is what stops anyone who can write the slot from keeping that id
+//! and substituting the key the channel keyrings get wrapped to.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use proto::auth::signed_headers;
-use proto::enroll::{fingerprint_hex, invite_url, new_code, EnrollRequest};
+use proto::enroll::{fingerprint_hex, invite_url, new_code, verify_binding, EnrollRequest};
 use proto::frame::{ChannelHandoff, Envelope, Payload, MESH_CHANNEL};
 use proto::keyring::Keyring;
 use proto::keys::{key32, Identity};
@@ -41,6 +44,12 @@ pub enum EnrollError {
 
 fn local(e: impl std::fmt::Display) -> EnrollError {
     EnrollError::Local(e.to_string())
+}
+
+/// A node id shortened for a message. By characters, not bytes: the id may be
+/// whatever a hub put in an enrollment slot.
+fn short_id(node_id: &str) -> String {
+    node_id.chars().take(16).collect()
 }
 
 /// An invitation this node has open.
@@ -187,7 +196,20 @@ pub async fn poll_invite(
         204 => Ok(None),
         _ => {
             let v = ok(st, text)?;
-            serde_json::from_value(v).map(Some).map_err(local)
+            let req: EnrollRequest = serde_json::from_value(v).map_err(local)?;
+            // The operator compares the node id's fingerprint, never the
+            // sealing key's, so the slot is only as good as the proof tying
+            // the two together. Refuse here and nothing downstream — display,
+            // admission, wrapping — ever sees an unproven pair.
+            if !req.binding_ok() {
+                return Err(EnrollError::Local(format!(
+                    "the enrolling node's sealing key is not signed by its node id {}; \
+                     the invitation was answered or relayed by something that cannot \
+                     prove it holds that key",
+                    short_id(&req.node_id)
+                )));
+            }
+            Ok(Some(req))
         }
     }
 }
@@ -257,6 +279,7 @@ pub async fn sync_own_channels(
     let body = serde_json::to_vec(&json!({
         "node_id": identity.node_id(),
         "x25519_pub": identity.x25519_hex(),
+        "binding_sig": proto::enroll::sign_binding(identity),
         "name": name,
         "channels": chans,
     }))
@@ -273,10 +296,22 @@ pub async fn admit(
     hub_url: &str,
     node_id: &str,
     x25519_pub: &str,
+    binding_sig: &str,
     name: &str,
     channels: &[String],
     credentials: &[(String, crate::broker::Credential)],
 ) -> Result<(), EnrollError> {
+    // No channel key is wrapped to a sealing key its owner has not signed for:
+    // the fingerprint the operator compared covers the node id alone, so this
+    // is what makes the two one identity.
+    if !node_id.eq_ignore_ascii_case(&identity.node_id())
+        && !verify_binding(node_id, x25519_pub, binding_sig)
+    {
+        return Err(EnrollError::Local(format!(
+            "{}'s sealing key is not signed by its node id; refusing to hand it channel keys",
+            short_id(node_id)
+        )));
+    }
     // The hub must know this node holds what it is about to grant.
     let own_name = crate::config::Config::load().node_name;
     sync_own_channels(store, identity, hub_url, &own_name).await?;
@@ -299,7 +334,8 @@ pub async fn admit(
     let keys = handoff_payload(store, identity, &grantee, &chans)?;
 
     let body = serde_json::to_vec(&json!({
-        "node_id": node_id, "x25519_pub": x25519_pub, "name": name, "channels": chans,
+        "node_id": node_id, "x25519_pub": x25519_pub, "binding_sig": binding_sig,
+        "name": name, "channels": chans,
     }))
     .map_err(local)?;
     let (st, text) = send(identity, hub_url, "POST", "/v0/admit", Some(body)).await?;
@@ -365,11 +401,21 @@ pub async fn share_with_hub(
         .as_str()
         .ok_or_else(|| EnrollError::Local("this hub runs no replica".into()))?
         .to_string();
-    let grantee = info["hub_x25519_pub"]
+    let hub_x25519 = info["hub_x25519_pub"]
         .as_str()
-        .and_then(key32)
+        .unwrap_or_default()
+        .to_string();
+    let grantee = key32(&hub_x25519)
         .map(x25519_dalek::PublicKey::from)
         .ok_or_else(|| EnrollError::Local("the hub's sealing key is malformed".into()))?;
+    // The replica signs the pair it advertises, like any other grantee.
+    let hub_sig = info["hub_binding_sig"].as_str().unwrap_or_default();
+    if !verify_binding(&hub_id, &hub_x25519, hub_sig) {
+        return Err(EnrollError::Local(
+            "the hub's sealing key is not signed by its node id; refusing to share channels with it"
+                .into(),
+        ));
+    }
     let own_name = crate::config::Config::load().node_name;
     sync_own_channels(store, identity, hub_url, &own_name).await?;
     let chans: Vec<String> = channels
@@ -394,7 +440,8 @@ pub async fn share_with_hub(
         }
     }
     let body = serde_json::to_vec(&json!({
-        "node_id": hub_id, "x25519_pub": info["hub_x25519_pub"], "name": "hub", "channels": chans, "role": "hub",
+        "node_id": hub_id, "x25519_pub": hub_x25519, "binding_sig": hub_sig,
+        "name": "hub", "channels": chans, "role": "hub",
     }))
     .map_err(local)?;
     let (st, text) = send(identity, hub_url, "POST", "/v0/admit", Some(body)).await?;
@@ -414,6 +461,22 @@ pub async fn share_with_hub(
         rehand_channel(store, identity, hub_url, channel).await?;
     }
     Ok(chans)
+}
+
+/// Is the sealing key the hub reports for this member signed by the member?
+/// The directory is the hub's own answer, so nothing is sealed to a key in it
+/// that its owner has not claimed — a hub that rewrites a member's key finds
+/// the substituted key skipped rather than wrapped to.
+fn member_binding_ok(node_id: &str, x25519_pub: &str, member: &Value) -> bool {
+    let sig = member["binding_sig"].as_str().unwrap_or_default();
+    if verify_binding(node_id, x25519_pub, sig) {
+        return true;
+    }
+    tracing::warn!(
+        node_id = %node_id,
+        "member's sealing key is not signed by its node id; nothing sealed to it"
+    );
+    false
 }
 
 /// Hand a channel again to every member the hub records in it (and the hub
@@ -440,6 +503,9 @@ pub async fn rehand_channel(
             .as_array()
             .is_some_and(|a| a.iter().any(|c| c.as_str() == Some(channel)));
         if !in_channel {
+            continue;
+        }
+        if !member_binding_ok(id, x, &m) {
             continue;
         }
         let Some(pk) = key32(x).map(x25519_dalek::PublicKey::from) else {
@@ -470,6 +536,9 @@ pub async fn push_policy(identity: &Identity, hub_url: &str) -> Result<usize, En
             continue;
         };
         if id == me || x.is_empty() {
+            continue;
+        }
+        if !member_binding_ok(id, x, &m) {
             continue;
         }
         let Some(pk) = key32(x).map(x25519_dalek::PublicKey::from) else {
@@ -525,13 +594,7 @@ pub async fn accept(
     progress: &dyn Progress,
 ) -> Result<Vec<String>, EnrollError> {
     let hub_url = hub_url.trim_end_matches('/');
-    let req = EnrollRequest {
-        node_id: identity.node_id(),
-        x25519_pub: identity.x25519_hex(),
-        name: name.to_string(),
-        contract: proto::CONTRACT_VERSION,
-        facts: facts.to_string(),
-    };
+    let req = EnrollRequest::signed(identity, name, facts);
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{hub_url}/v0/enroll/{code}"))

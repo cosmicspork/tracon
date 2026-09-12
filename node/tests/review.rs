@@ -48,6 +48,39 @@ fn sh(dir: &std::path::Path, script: &str) {
     );
 }
 
+/// The same, returning what the script printed.
+fn sh_out(dir: &std::path::Path, script: &str) -> String {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{script}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Point `refs/replace/<HEAD>` at a commit holding different bytes. Git
+/// substitutes it for HEAD everywhere that has not opted out, so every
+/// assertion after this is about whether the node opted out.
+fn plant_replace_ref(worktree: &std::path::Path) -> String {
+    let head = sh_out(worktree, "git rev-parse HEAD");
+    sh(
+        worktree,
+        "echo poisoned > a.txt && git add -A && git commit -qm poison",
+    );
+    let poison = sh_out(worktree, "git rev-parse HEAD");
+    sh(worktree, &format!("git reset -q --hard {head}"));
+    sh(worktree, &format!("git replace {head} {poison}"));
+    // The plant has to be live, or the assertions that follow prove nothing.
+    assert_eq!(sh_out(worktree, "git show HEAD:a.txt"), "poisoned");
+    head
+}
+
 /// A worktree with a commit beyond its base, a bare origin to push to, and a
 /// stub `gh` on PATH that records how it was called.
 async fn fixture(name: &str, credentials: &str) -> Fixture {
@@ -812,6 +845,7 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
         &f.worktree,
         &target,
         "0000000000000000000000000000000000000000",
+        None,
         "t",
         "b",
         None,
@@ -1365,5 +1399,276 @@ async fn a_demonstration_reports_when_its_document_has_since_changed() {
     assert_eq!(
         demos[0]["stale"], true,
         "the document changed since attachment and must be shown as stale: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_planted_replace_ref_does_not_change_what_is_reviewed() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let worktree = std::path::PathBuf::from(&f.worktree);
+    let head = plant_replace_ref(&worktree);
+
+    let capture = tracon::review::capture(&f.worktree, "main", "feat/x")
+        .await
+        .unwrap();
+
+    assert_eq!(capture.head_sha, head);
+    assert!(capture.diff.contains("+change"), "{}", capture.diff);
+    assert!(!capture.diff.contains("poisoned"), "{}", capture.diff);
+    // The context excerpts are read by the same hardened Git, so they cannot
+    // show the reviewer the replacement's source either.
+    assert!(
+        !capture.contexts.iter().any(|c| c.text.contains("poisoned")),
+        "{:?}",
+        capture.contexts
+    );
+}
+
+#[tokio::test]
+async fn a_planted_graft_does_not_change_what_is_reviewed() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let worktree = std::path::PathBuf::from(&f.worktree);
+    let head = sh_out(&worktree, "git rev-parse HEAD");
+    // A graft that makes HEAD parentless: the branch then shares no history
+    // with its base, so an unhardened three-dot diff has no merge base at all
+    // and the capture would fail rather than describe the change.
+    sh(
+        &worktree,
+        "mkdir -p .git/info && git rev-parse HEAD > .git/info/grafts",
+    );
+    assert_eq!(
+        sh_out(&worktree, "git rev-list --count HEAD"),
+        "1",
+        "the planted graft should be live"
+    );
+
+    let capture = tracon::review::capture(&f.worktree, "main", "feat/x")
+        .await
+        .unwrap();
+
+    assert_eq!(capture.head_sha, head);
+    assert!(capture.diff.contains("+change"), "{}", capture.diff);
+    assert_eq!(capture.added, 1, "{}", capture.diff);
+}
+
+#[tokio::test]
+async fn a_planted_replace_ref_does_not_change_what_is_pushed() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    // An external review publishes straight from the named worktree, so the
+    // planted metadata is still there when publication reads it — nothing but
+    // publication's own hardening stands between the replacement and origin.
+    f.store
+        .insert_session(&{
+            let mut r = support::rows::session_row("ext", "n1", "work");
+            r.harness_id = "external".into();
+            r.repo_path = String::new();
+            r.worktree_path = None;
+            r.branch = String::new();
+            r.started_mono_ms = Some(0);
+            r
+        })
+        .unwrap();
+    let id = f
+        .submit_as(
+            "ext",
+            json!({
+                "provider": "github", "project": "owner/name",
+                "base": "main", "branch": "feat/x", "worktree": f.worktree
+            }),
+        )
+        .await;
+    let head = plant_replace_ref(std::path::Path::new(&f.worktree));
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().head_sha, head);
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let origin = f.dir.join("origin.git");
+    assert_eq!(sh_out(&origin, "git rev-parse refs/heads/feat/x"), head);
+    assert_eq!(
+        sh_out(&origin, "git show refs/heads/feat/x:a.txt"),
+        "base\nchange"
+    );
+}
+
+#[tokio::test]
+async fn a_planted_graft_does_not_change_what_is_pushed() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    f.store
+        .insert_session(&{
+            let mut r = support::rows::session_row("ext", "n1", "work");
+            r.harness_id = "external".into();
+            r.repo_path = String::new();
+            r.worktree_path = None;
+            r.branch = String::new();
+            r.started_mono_ms = Some(0);
+            r
+        })
+        .unwrap();
+    let id = f
+        .submit_as(
+            "ext",
+            json!({
+                "provider": "github", "project": "owner/name",
+                "base": "main", "branch": "feat/x", "worktree": f.worktree
+            }),
+        )
+        .await;
+    let worktree = std::path::PathBuf::from(&f.worktree);
+    // A graft makes the reviewed commit look parentless, so a bundle built
+    // from the grafted reading would carry the tip with none of the history
+    // the commit actually names.
+    sh(
+        &worktree,
+        "mkdir -p .git/info && git rev-parse HEAD > .git/info/grafts",
+    );
+    assert_eq!(sh_out(&worktree, "git rev-list --count HEAD"), "1");
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let origin = f.dir.join("origin.git");
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    assert_eq!(sh_out(&origin, "git rev-parse refs/heads/feat/x"), head);
+    assert_eq!(
+        sh_out(&origin, "git rev-list --count refs/heads/feat/x"),
+        "2"
+    );
+}
+
+#[tokio::test]
+async fn the_exported_snapshot_carries_no_agent_written_git_metadata() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let worktree = std::path::PathBuf::from(&f.worktree);
+    let head = plant_replace_ref(&worktree);
+    // Everything an agent with write access to its own `.git` can leave for
+    // the node — and for the operator who downloads the same snapshot.
+    sh(
+        &worktree,
+        "mkdir -p .git/hooks .git/info .git/worktrees/w1 \
+         && printf '#!/bin/sh\\ntouch /pwned\\n' > .git/hooks/pre-commit \
+         && printf '[core]\\n\\tsshCommand = touch /pwned\\n' > .git/worktrees/w1/config.worktree \
+         && printf '/elsewhere.git\\n' > .git/commondir \
+         && printf 'deadbeef\\n' > .git/info/grafts \
+         && printf '[credential]\\n\\thelper = !touch /pwned\\n' > .git/config",
+    );
+
+    // The snapshot every node-side read of this workspace goes through.
+    let snapshot = f.manager.snapshot_workspace("s1").await.unwrap();
+
+    for gone in [
+        ".git/commondir",
+        ".git/hooks",
+        ".git/info/grafts",
+        ".git/refs/replace",
+        ".git/worktrees/w1/config.worktree",
+    ] {
+        assert!(!snapshot.join(gone).exists(), "{gone} reached the snapshot");
+    }
+    let config = std::fs::read_to_string(snapshot.join(".git/config")).unwrap();
+    assert!(!config.contains("helper"), "{config}");
+    // Objects and ordinary refs are identity and must survive — and the
+    // snapshot resolves at all, which the planted `commondir` alone is enough
+    // to prevent in the workspace it came from.
+    assert!(snapshot.join(".git/refs/heads").exists());
+    assert_eq!(sh_out(&snapshot, "git rev-parse HEAD"), head);
+}
+
+#[tokio::test]
+async fn publication_refuses_a_candidate_whose_tree_is_not_the_reviewed_one() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    // The evidence the node recorded when it captured the review, standing in
+    // for a candidate whose commit still resolves but whose tree is not the
+    // one that was read.
+    f.store
+        .insert_candidate(&tracon::store::CandidateRow {
+            id: tracon::store::candidate_id(&review.head_sha, "work"),
+            head_sha: review.head_sha.clone(),
+            tree_sha: Some("0".repeat(40)),
+            channel: "work".into(),
+            owner_session_id: "s1".into(),
+            source_kind: "git".into(),
+            captured_ms: now_ms(),
+            capture_json: "{}".into(),
+        })
+        .unwrap();
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("reviewed tree"),
+        "{body}"
+    );
+    assert!(
+        !f.gh_log().contains("pr create"),
+        "nothing may be published"
+    );
+}
+
+#[tokio::test]
+async fn publication_proceeds_when_the_recorded_tree_is_the_one_being_pushed() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let tree = sh_out(
+        std::path::Path::new(&f.worktree),
+        "git rev-parse 'HEAD^{tree}'",
+    );
+    f.store
+        .insert_candidate(&tracon::store::CandidateRow {
+            id: tracon::store::candidate_id(&review.head_sha, "work"),
+            head_sha: review.head_sha.clone(),
+            tree_sha: Some(tree),
+            channel: "work".into(),
+            owner_session_id: "s1".into(),
+            source_kind: "git".into(),
+            captured_ms: now_ms(),
+            capture_json: "{}".into(),
+        })
+        .unwrap();
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve" })),
+        )
+        .await;
+
+    // The check binds identity; it does not simply refuse everything.
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        sh_out(&f.dir.join("origin.git"), "git rev-parse refs/heads/feat/x"),
+        review.head_sha,
     );
 }
