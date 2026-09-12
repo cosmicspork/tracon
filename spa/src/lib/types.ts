@@ -379,6 +379,8 @@ export interface CandidateCheckRun {
   id: string
   candidate_id: string | null
   session_id: string
+  /** The operator-configured command that ran; null on a pre-migration row. */
+  command: string | null
   definition_json: string
   definition_hash: string | null
   execution_image: string | null

@@ -919,6 +919,44 @@ async fn candidate_controlled_check_file_cannot_replace_operator_required_checks
         .contains(&"candidate_verified".to_string()));
 }
 
+/// Evidence that names an image and an outcome but not what was run cannot be
+/// audited against the configuration that produced it: `command` is the check
+/// definition the reuse key is built from, so it belongs on the row.
+#[tokio::test]
+async fn check_run_evidence_returns_the_configured_command() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.supervision.checks = vec!["sh -c 'test -f a.txt'".into(), "sh -c 'exit 0'".into()];
+    })
+    .await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+
+    let (status, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let checks = body["evidence"]["checks"].as_array().unwrap();
+    let commands: Vec<&str> = checks
+        .iter()
+        .map(|check| {
+            check["command"]
+                .as_str()
+                .unwrap_or_else(|| panic!("every check must name its command: {body}"))
+        })
+        .collect();
+    assert_eq!(commands, ["sh -c 'test -f a.txt'", "sh -c 'exit 0'"]);
+    for check in checks {
+        assert_eq!(check["outcome"], "passed", "{body}");
+        // Exactly the string the definition hash, and so the reuse key, was
+        // built from — not a command re-read from today's configuration.
+        let definition: Value = serde_json::from_str(check["definition_json"].as_str().unwrap())
+            .unwrap_or_else(|_| panic!("{body}"));
+        assert_eq!(definition["command"], check["command"], "{body}");
+    }
+}
+
 #[tokio::test]
 async fn a_diff_over_the_cap_is_refused_before_any_check_runs() {
     state::isolate();

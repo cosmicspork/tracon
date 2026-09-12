@@ -289,6 +289,7 @@
                 <span class:ok={run.outcome === 'passed' || run.source_outcome === 'passed'} class:bad={run.outcome === 'failed' || run.outcome === 'interrupted' || run.outcome === 'cancelled'}>
                   {run.outcome}{run.outcome === 'reused' ? ` · ${run.source_outcome ?? 'unknown source'}` : ''}
                 </span>
+                <code>{run.command ?? 'command not recorded'}</code>
                 <code>{run.execution_image ?? 'image identity not recorded'}</code>
                 <small>{inputsFor(run)}</small>
                 {#if run.reused_from_id}<small>reused from {run.reused_from_id.slice(0, 8)}</small>{/if}
