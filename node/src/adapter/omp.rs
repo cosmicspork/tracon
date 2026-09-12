@@ -825,7 +825,8 @@ mod tests {
     #[test]
     fn no_local_model_server_is_left_for_omp_to_probe() {
         let cfg = crate::config::Config::default();
-        let wiring = crate::gateway::model::harness_wiring(&cfg, "tracon-gw", "session-token");
+        let wiring =
+            crate::gateway::model::harness_wiring(&cfg, "tracon-gw", "session-token", |_, _| true);
         let files = OmpAdapter::new("18.0.4").scratch_files(&wiring);
         for (_, content) in files
             .iter()
@@ -856,7 +857,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let wiring = crate::gateway::model::harness_wiring(&cfg, "tracon-gw", "session-token");
+        let wiring =
+            crate::gateway::model::harness_wiring(&cfg, "tracon-gw", "session-token", |_, _| true);
         let v: Value = serde_json::from_str(&provider_config(&wiring)).unwrap();
         assert_eq!(v["providers"]["ollama"]["apiKey"], "session-token");
         assert!(v["providers"]["ollama"]["disabled"].is_null());
