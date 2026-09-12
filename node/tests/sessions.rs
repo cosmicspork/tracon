@@ -30,6 +30,7 @@ use support::fake::{FakeAdapter, FakeHandle};
 struct Harness {
     app: axum::Router,
     store: Arc<Store>,
+    manager: Manager,
 }
 
 impl Harness {
@@ -81,7 +82,7 @@ impl Harness {
             Arc::new(tracon::runner::local::LocalBackend),
         );
         let app = tracon::http::router(AppState {
-            manager,
+            manager: manager.clone(),
             cfg,
             adapter,
             node_id: "n1".into(),
@@ -90,7 +91,11 @@ impl Harness {
             auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
             enroll: Default::default(),
         });
-        Self { app, store }
+        Self {
+            app,
+            store,
+            manager,
+        }
     }
 
     async fn call(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -192,6 +197,72 @@ async fn a_channel_binds_a_model_to_each_phase() {
     // An explicit model still wins over the binding.
     let (st, body) = start(mk("named").id, json!("m/a")).await;
     assert_eq!(st, StatusCode::CREATED, "{body}");
+    assert_eq!(body["model"], "m/a");
+}
+
+/// Naming a model is a request, not an exemption. `create` puts an explicit
+/// model through the same provider check `preflight` runs, so a session never
+/// starts on a model the channel cannot authenticate.
+#[tokio::test]
+async fn an_explicit_model_the_channel_cannot_authenticate_is_refused_by_create_too() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    // `anthropic` is a configured provider and this broker holds no
+    // credential for it, so nothing can be injected for this channel.
+    let refused = h
+        .manager
+        .preflight(&tracon::session::NewSession {
+            channel: "personal".into(),
+            repo_path: "/nonexistent/repo".into(),
+            branch: None,
+            work_item_id: None,
+            model: "anthropic/claude-x".into(),
+            budget_tokens: None,
+            initial_prompt: None,
+            node_id: None,
+            phase: tracon::session::Phase::Execute,
+            review_id: None,
+            base_sha: None,
+            workspace_id: None,
+        })
+        .expect_err("preflight refuses an unauthenticatable model")
+        .to_string();
+
+    let (status, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(json!({
+                "channel": "personal",
+                "repo_path": "/nonexistent/repo",
+                "model": "anthropic/claude-x",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(
+        body["error"]["message"], refused,
+        "create must refuse it exactly as preflight does"
+    );
+    assert!(
+        h.store.list_sessions(None).unwrap().is_empty(),
+        "nothing should have been recorded"
+    );
+
+    // The check refuses what cannot be authenticated, not every explicit
+    // model: an adapter-owned name from the node's catalogue still runs.
+    let (status, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(json!({
+                "channel": "personal",
+                "repo_path": "/nonexistent/repo",
+                "model": "m/a",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["model"], "m/a");
 }
 

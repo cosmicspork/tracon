@@ -168,10 +168,6 @@ Explain the job and make one-node use complete.
 - The `providers` integration test is timing-sensitive: it polls fixed 2s/5s
   timeouts for an async credential lift, which can miss under full test-suite
   load rather than a single-test run.
-- `preflight` (used for continuity transfer imports) validates that an explicit
-  model is usable for the channel's bound provider before materializing a
-  workspace; `create` records an explicit model as given without that check,
-  so a session can start with a model the channel cannot actually authenticate.
 
 ## Hardening
 
@@ -184,7 +180,7 @@ Findings originate from review of `2e32a59`; revalidate against the implementati
 - [ ] Eliminate executable agent-controlled Git metadata, including `config.worktree`. Git-side execution was reproduced; a full container escape was not exercised.
 - [ ] Restrict credentialed model proxy methods/paths to granted capabilities, not arbitrary provider-account operations.
 - [ ] Fix mutable-worktree checks and agent-controlled required-check overrides through candidate-bound verification.
-- [ ] Reject inappropriate `Origin: null` operator requests; verify browser defenses as well as the reproduced middleware behavior.
+- [x] Reject inappropriate `Origin: null` operator requests; verify browser defenses as well as the reproduced middleware behavior.
 
 ### Recovery and boundary verification
 
