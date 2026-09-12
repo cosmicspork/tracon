@@ -696,6 +696,17 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX prototype_candidate ON prototype(candidate_id, created_ms DESC);
     "#,
+    // 29: the operator command a check ran, as its own column. It was only
+    // ever inside `definition_json`, so the review API could show the image
+    // and outcome of a check without naming what was run. The backfill reads
+    // the same recorded definition, never a command reconstructed from
+    // today's configuration.
+    r#"
+    ALTER TABLE check_run ADD COLUMN command TEXT;
+    UPDATE check_run
+       SET command = json_extract(definition_json, '$.command')
+     WHERE command IS NULL AND json_valid(definition_json);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

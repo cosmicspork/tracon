@@ -63,6 +63,10 @@ pub struct CheckRunRow {
     pub id: String,
     pub candidate_id: Option<String>,
     pub session_id: String,
+    /// The exact operator-configured command this run executed — the same
+    /// string the definition hash, and so the reuse key, is built from. Null
+    /// only for a row written before it was recorded on its own.
+    pub command: Option<String>,
     pub definition_json: String,
     pub definition_hash: Option<String>,
     pub execution_image: Option<String>,
@@ -86,6 +90,7 @@ impl CheckRunRow {
             id: row.get("id")?,
             candidate_id: row.get("candidate_id")?,
             session_id: row.get("session_id")?,
+            command: row.get("command")?,
             definition_json: row.get("definition_json")?,
             definition_hash: row.get("definition_hash")?,
             execution_image: row.get("execution_image")?,
@@ -376,14 +381,16 @@ impl Store {
             .lock()
             .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
         conn.execute(
-            "INSERT INTO check_run (id, candidate_id, session_id, definition_json, definition_hash,
-                execution_image, inputs_json, reuse_key, outcome, source_outcome, exit_code, log,
-                duration_ms, started_ms, finished_ms, rerun_of, reused_from_id, metadata_json)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+            "INSERT INTO check_run (id, candidate_id, session_id, command, definition_json,
+                definition_hash, execution_image, inputs_json, reuse_key, outcome, source_outcome,
+                exit_code, log, duration_ms, started_ms, finished_ms, rerun_of, reused_from_id,
+                metadata_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
             params![
                 run.id,
                 run.candidate_id,
                 run.session_id,
+                run.command,
                 run.definition_json,
                 run.definition_hash,
                 run.execution_image,
