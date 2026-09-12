@@ -547,7 +547,9 @@ pub async fn clone(
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_GRAFT_FILE", "/dev/null")
         .args([
+            "--no-replace-objects",
             "-c",
             "core.hooksPath=/dev/null",
             "-c",
@@ -593,9 +595,11 @@ pub async fn fetch_managed(repo: &Path, env: &[(String, String)]) -> Result<(), 
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_GRAFT_FILE", "/dev/null")
         .arg("-C")
         .arg(repo)
         .args([
+            "--no-replace-objects",
             "-c",
             "core.hooksPath=/dev/null",
             "-c",

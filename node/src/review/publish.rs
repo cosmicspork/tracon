@@ -82,6 +82,12 @@ pub enum PublishError {
     BranchMoved { reviewed: String, now: String },
     #[error("candidate identity changed while transferring to the publisher")]
     IdentityChanged,
+    #[error("the reviewed tree ({reviewed:.8}) is not what {head:.8} holds now ({found:.8}); re-review before publishing")]
+    TreeChanged {
+        head: String,
+        reviewed: String,
+        found: String,
+    },
     #[error("invalid publication target: {0}")]
     Target(String),
 }
@@ -91,6 +97,11 @@ pub enum PublishError {
 /// it with an empty credential environment, writes a bundle, verifies commit
 /// and tree identity after importing it, then pushes only from a new publisher
 /// repository with broker authentication.
+///
+/// `reviewed_tree` is the tree hash the node recorded when it captured the
+/// candidate for review. It is the one value here that does not come from the
+/// directory being published, so it is what turns "this commit still resolves
+/// to a tree" into "this commit still holds the bytes that were reviewed".
 #[allow(clippy::too_many_arguments)]
 pub async fn publish(
     broker: &SharedBroker,
@@ -101,6 +112,7 @@ pub async fn publish(
     candidate: &str,
     target: &Target,
     head_sha: &str,
+    reviewed_tree: Option<&str>,
     title: &str,
     body: &str,
     before_push: Option<&(dyn Fn() -> Result<(), String> + Send + Sync)>,
@@ -137,6 +149,17 @@ pub async fn publish(
         ["rev-parse", &format!("{head_sha}^{{tree}}")],
     )
     .await?;
+    // Every other identity here is read out of the directory being published,
+    // so on its own it only proves that directory is self-consistent. This is
+    // the reviewed tree, recorded elsewhere at capture time, read back with
+    // replacement objects and grafts off.
+    if reviewed_tree.is_some_and(|reviewed| reviewed != source_tree) {
+        return Err(PublishError::TreeChanged {
+            head: head_sha.to_string(),
+            reviewed: reviewed_tree.unwrap_or_default().to_string(),
+            found: source_tree,
+        });
+    }
     if let Some(recheck) = before_push {
         recheck().map_err(PublishError::Broker)?;
     }
@@ -205,7 +228,13 @@ pub async fn publish(
         ["rev-parse", "refs/heads/candidate^{tree}"],
     )
     .await?;
-    if imported != head_sha || imported_tree != source_tree {
+    // What is pushed below is `head_sha` out of this publisher repository, so
+    // these three comparisons are what make the pushed commit the reviewed
+    // one: the imported commit id, its tree, and the tree the review recorded.
+    if imported != head_sha
+        || imported_tree != source_tree
+        || reviewed_tree.is_some_and(|reviewed| reviewed != imported_tree)
+    {
         return Err(PublishError::IdentityChanged);
     }
 
@@ -320,7 +349,12 @@ fn remote_url(
     Ok(format!("https://{host}/{project}.git"))
 }
 
+/// Publication reads and writes object identity, so every replacement and
+/// graft path is off: the bytes that are bundled, imported, and pushed must be
+/// the ones the reviewer saw, not a rewrite selected by metadata in the
+/// candidate's own Git directory.
 const GIT_SAFE: &[&str] = &[
+    "--no-replace-objects",
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
@@ -344,6 +378,7 @@ async fn source_git<'a>(
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_GRAFT_FILE", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
         .arg("-C")
         .arg(dir)
@@ -361,6 +396,7 @@ async fn init_publisher(git: &str, dir: &Path) -> Result<String, PublishError> {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_GRAFT_FILE", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(GIT_SAFE)
         .args(["init", "--bare"])
@@ -399,6 +435,7 @@ async fn publisher_git_inner<'a>(
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_GRAFT_FILE", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
         .arg("--git-dir")
         .arg(dir)
@@ -484,6 +521,7 @@ mod tests {
             "/tmp",
             &target,
             "deadbeef",
+            None,
             "t",
             "b",
             None,
@@ -511,6 +549,7 @@ mod tests {
             "/tmp",
             &target,
             "deadbeef",
+            None,
             "t",
             "b",
             None,

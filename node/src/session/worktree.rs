@@ -27,11 +27,22 @@ pub struct Worktree {
     pub main_checkout_dirty: bool,
 }
 
-/// Disable hooks and the fsmonitor daemon on node-side git. The operator's
-/// global config is trusted and still applies (fetch and push auth need it);
-/// this only overrides the config-driven exec paths, which is where a
-/// repo-local value the harness might set would otherwise run a program.
-const GIT_SAFE: &[&str] = &["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor="];
+/// Disable hooks, the fsmonitor daemon, and replacement-object interpretation
+/// on node-side git. The operator's global config is trusted and still applies
+/// (fetch and push auth need it); this only overrides the config-driven exec
+/// paths, which is where a repo-local value the harness might set would
+/// otherwise run a program. The replacement options matter here too: this is
+/// where a session's base commit is chosen, and a replace ref in the shared
+/// repository would silently make the worktree start from other bytes.
+const GIT_SAFE: &[&str] = &[
+    "--no-replace-objects",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=",
+    "-c",
+    "core.useReplaceRefs=false",
+];
 
 async fn git(repo: &Path, op: &'static str, args: &[&str]) -> Result<String, WorktreeError> {
     git_with_env(repo, op, args, &[]).await
@@ -46,7 +57,14 @@ async fn git_with_env(
     env: &[(String, String)],
 ) -> Result<String, WorktreeError> {
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(repo).args(GIT_SAFE).args(args);
+    cmd.arg("-C")
+        .arg(repo)
+        .args(GIT_SAFE)
+        .args(args)
+        // The deprecated graft file is still honoured when present, and it
+        // rewrites parentage the same way a replace ref does.
+        .env("GIT_GRAFT_FILE", "/dev/null")
+        .env("GIT_NO_REPLACE_OBJECTS", "1");
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -280,6 +298,44 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, WorktreeError::Git { op: "fetch", .. }));
+    }
+
+    /// A worktree is where a session's base bytes are chosen. A replace ref
+    /// in the repository substitutes one commit for another everywhere that
+    /// has not opted out, so without the opt-out the session would start from
+    /// bytes nobody selected.
+    #[tokio::test]
+    async fn a_replace_ref_does_not_change_the_base_a_worktree_starts_from() {
+        let (tmp, repo) = fixture().await;
+        sh(
+            &repo,
+            "git checkout -q --detach && echo poisoned > README.md \
+             && git add -A && git commit -qm poison \
+             && git replace $(git rev-parse origin/main) $(git rev-parse HEAD) \
+             && git checkout -q main",
+        )
+        .await;
+        // The plant is live for anything that reads the repo plainly.
+        let poisoned = Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "show",
+                "origin/main:README.md",
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&poisoned.stdout), "poisoned\n");
+
+        let wt = create(&repo, &tmp.path().join("work"), "feat/x", "x", &[])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(wt.path.join("README.md")).unwrap(),
+            "hello\n"
+        );
     }
 
     #[tokio::test]
