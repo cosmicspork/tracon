@@ -26,6 +26,8 @@ pub struct MeshState {
     pub delivered_since_reconnect: usize,
     /// Frames that arrived but could not be opened (unknown channel or epoch).
     pub undecryptable: u64,
+    /// Of those, the ones still parked, waiting for the key that opens them.
+    pub held: usize,
     pub last_error: Option<String>,
     pub last_refusal: Option<String>,
 }

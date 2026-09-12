@@ -22,6 +22,14 @@ pub fn identity(seed: u8) -> Identity {
     Identity::from_seed(&[seed; 32])
 }
 
+/// A hub whose stores the test keeps in hand, so a run can revoke a member or
+/// plant a frame no honest node would post.
+pub struct TestHub {
+    pub url: String,
+    pub members: Arc<MemoryMembers>,
+    pub frames: Arc<MemoryFrames>,
+}
+
 /// A hub with these members already admitted, on an ephemeral port.
 pub async fn start_hub(admitted: &[(&Identity, &[&str])]) -> String {
     start_hub_with_backlog(admitted, 0).await
@@ -31,6 +39,11 @@ pub async fn start_hub(admitted: &[(&Identity, &[&str])]) -> String {
 /// valid envelopes — a reader skips them — but they occupy sequence numbers,
 /// which is what a node catching up from seq 0 has to walk.
 pub async fn start_hub_with_backlog(admitted: &[(&Identity, &[&str])], backlog: usize) -> String {
+    start_hub_managed(admitted, backlog).await.url
+}
+
+/// As `start_hub_with_backlog`, handing back the stores as well.
+pub async fn start_hub_managed(admitted: &[(&Identity, &[&str])], backlog: usize) -> TestHub {
     let members = Arc::new(MemoryMembers::new());
     for (id, channels) in admitted {
         members
@@ -56,17 +69,21 @@ pub async fn start_hub_with_backlog(admitted: &[(&Identity, &[&str])], backlog: 
 /// A hub over a member table the test wrote itself, for records the admit
 /// route would refuse to write — a sealing key its owner never signed for.
 pub async fn start_hub_with_members(members: Arc<MemoryMembers>) -> String {
-    serve(Arc::new(MemoryFrames::new()), members).await
+    serve(Arc::new(MemoryFrames::new()), members).await.url
 }
 
-async fn serve(frames: Arc<MemoryFrames>, members: Arc<MemoryMembers>) -> String {
-    let app = hub::app(frames, members, HubConfig::default());
+async fn serve(frames: Arc<MemoryFrames>, members: Arc<MemoryMembers>) -> TestHub {
+    let app = hub::app(frames.clone(), members.clone(), HubConfig::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    format!("http://{addr}")
+    TestHub {
+        url: format!("http://{addr}"),
+        members,
+        frames,
+    }
 }
 
 /// A hub where every member is in `@mesh` and `personal`.

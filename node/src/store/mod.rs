@@ -868,6 +868,59 @@ impl Store {
         Ok(n)
     }
 
+    // ---- mesh: frames held for a key that has not arrived ----
+
+    /// Park a verified frame this node cannot open yet. `true` if it was not
+    /// already parked, so the caller counts it once however often the hub
+    /// replays it.
+    pub fn held_put(
+        &self,
+        frame_id: &str,
+        channel: &str,
+        envelope: &str,
+        at_ms: i64,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO mesh_held (frame_id, channel, envelope, at_ms) VALUES (?1,?2,?3,?4)",
+            rusqlite::params![frame_id, channel, envelope, at_ms],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// What is parked for one channel, oldest first: `(frame_id, envelope)`.
+    pub fn held_list(&self, channel: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT frame_id, envelope FROM mesh_held WHERE channel=?1 ORDER BY at_ms, frame_id",
+        )?;
+        let rows = stmt
+            .query_map([channel], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn held_delete(&self, frame_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM mesh_held WHERE frame_id=?1", [frame_id])?;
+        Ok(())
+    }
+
+    pub fn held_len(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM mesh_held", [], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
+    /// Forget frames whose key never came. Held beyond the hub's own retention
+    /// they are unrecoverable anyway, and the sites' change logs are how the
+    /// records behind them come back.
+    pub fn held_prune(&self, older_than_ms: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute("DELETE FROM mesh_held WHERE at_ms < ?1", [older_than_ms])?;
+        Ok(n)
+    }
+
     // ---- mesh: mirrored rows ----
 
     /// A minimal row for a peer we have rows about but no hello from yet, so

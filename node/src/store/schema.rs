@@ -707,6 +707,18 @@ const MIGRATIONS: &[&str] = &[
        SET command = json_extract(definition_json, '$.command')
      WHERE command IS NULL AND json_valid(definition_json);
     "#,
+    // 30: frames that arrived before their channel key. The cursor has to move
+    // past them or the channel stalls, so the verified ciphertext is parked
+    // here instead and replayed when the key lands.
+    r#"
+    CREATE TABLE mesh_held (
+        frame_id TEXT PRIMARY KEY,
+        channel  TEXT NOT NULL,
+        envelope TEXT NOT NULL,
+        at_ms    INTEGER NOT NULL
+    );
+    CREATE INDEX mesh_held_channel ON mesh_held(channel, at_ms);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

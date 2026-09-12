@@ -28,6 +28,7 @@ const connected: MeshState = {
   queued: 0,
   delivered_since_reconnect: 0,
   undecryptable: 0,
+  held: 0,
   last_error: null,
   last_refusal: null,
 }

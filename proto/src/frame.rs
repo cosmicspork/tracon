@@ -46,6 +46,10 @@ const DOMAIN_FRAME_ID: &[u8] = b"tracon/frame-id\0";
 pub enum FrameError {
     #[error("malformed frame field: {0}")]
     Malformed(&'static str),
+    /// Said in full, because this is the one verification failure an operator
+    /// can act on: a peer or hub is running a different build of the contract.
+    #[error("frame wire version {got} is not this build's contract version {expected}")]
+    UnsupportedVersion { got: u32, expected: u32 },
     #[error("frame id does not match its contents")]
     BadId,
     #[error("frame signature does not verify")]
@@ -523,7 +527,10 @@ impl Envelope {
     /// sender's key on success. Never trusts the stored id.
     pub fn verify(&self) -> Result<[u8; 32], FrameError> {
         if self.v != crate::CONTRACT_VERSION {
-            return Err(FrameError::Malformed("v"));
+            return Err(FrameError::UnsupportedVersion {
+                got: self.v,
+                expected: crate::CONTRACT_VERSION,
+            });
         }
         let (h, body) = self.parsed()?;
         let id = frame_id(&canonical_bytes(&h, &body));
@@ -709,6 +716,28 @@ mod tests {
         let mut t = f.clone();
         t.recipient = Some(c.node_id());
         assert!(matches!(t.verify(), Err(FrameError::BadId)));
+    }
+
+    /// A frame from a build on another wire version is refused by name, before
+    /// any key is touched, so the operator is told what to fix rather than
+    /// reading "malformed".
+    #[test]
+    fn an_unsupported_wire_version_is_refused_by_name() {
+        let (a, _, _) = ids();
+        let ring = Keyring::genesis(&a.x25519_public(), &DataKey::generate());
+        let f = Envelope::seal_channel(&a, "personal", None, &ring, &hello(), 1).unwrap();
+        let mut newer = f.clone();
+        newer.v = crate::CONTRACT_VERSION + 1;
+        let e = newer.verify().unwrap_err();
+        assert!(matches!(e, FrameError::UnsupportedVersion { got, expected }
+                if got == crate::CONTRACT_VERSION + 1 && expected == crate::CONTRACT_VERSION));
+        assert!(e.to_string().contains("wire version"));
+        let mut older = f;
+        older.v = 0;
+        assert!(matches!(
+            older.verify(),
+            Err(FrameError::UnsupportedVersion { got: 0, .. })
+        ));
     }
 
     #[test]
