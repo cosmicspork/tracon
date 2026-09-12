@@ -326,17 +326,128 @@ async fn an_upstream_off_the_egress_allowlist_is_refused() {
 }
 
 #[tokio::test]
-async fn the_probe_may_only_read() {
+async fn the_probe_lists_models_and_cannot_call_inference() {
     state::isolate();
     let h = harness(STORE, LOOPBACK).await;
     let probe = h.manager.probe_token().to_string();
     let (status, _, _) = call(&h.app, "GET", "/model/stub/v1/models", &probe, json!({})).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _, _) = call(&h.app, "POST", "/model/stub/v1/messages", &probe, json!({})).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    for (method, path) in [
+        ("POST", "/model/stub/v1/messages"),
+        ("POST", "/model/stub/v1/messages/count_tokens"),
+        ("GET", "/model/stub/v1/models/claude-x"),
+    ] {
+        let (status, _, body) = call(&h.app, method, path, &probe, json!({})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {body}");
+        assert!(body.contains("the node's own token"), "{body}");
+    }
     let seen = h.seen.requests.lock().unwrap();
-    assert_eq!(seen.len(), 1);
+    assert_eq!(seen.len(), 1, "only the models list was forwarded");
     assert_eq!(header(&seen[0].2, "x-api-key"), Some("real-key"));
+}
+
+#[tokio::test]
+async fn only_inference_methods_and_paths_reach_the_provider() {
+    state::isolate();
+    let h = harness(STORE, LOOPBACK).await;
+    let sid = "s-allow";
+    running_session(&h.store, sid);
+    let token = h.manager.register_tool_token_for_test(sid, "work").await;
+
+    // What inference needs, on an Anthropic-shaped provider.
+    for (method, path) in [
+        ("POST", "/model/stub/v1/messages"),
+        ("POST", "/model/stub/v1/messages/count_tokens"),
+        ("GET", "/model/stub/v1/models"),
+        ("GET", "/model/stub/v1/models/claude-x"),
+    ] {
+        let (status, _, body) = call(&h.app, method, path, &token, json!({"messages": []})).await;
+        assert_eq!(status, StatusCode::OK, "{method} {path}: {body}");
+    }
+    assert_eq!(h.seen.requests.lock().unwrap().len(), 4);
+    h.seen.requests.lock().unwrap().clear();
+
+    // The account behind the credential, reachable on the same host with the
+    // same key, is not this gateway's to lend — nor is a method inference
+    // never uses.
+    for (method, path) in [
+        ("GET", "/model/stub/v1/organizations/me/api_keys"),
+        ("POST", "/model/stub/v1/organizations/invites"),
+        ("GET", "/model/stub/v1/organizations/usage_report/messages"),
+        ("POST", "/model/stub/v1/files"),
+        ("DELETE", "/model/stub/v1/messages/msg_1"),
+        ("PUT", "/model/stub/v1/messages"),
+    ] {
+        let (status, _, body) = call(&h.app, method, path, &token, json!({})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {body}");
+        assert!(
+            body.contains("is not a model call this gateway forwards"),
+            "{method} {path}: {body}"
+        );
+        assert!(
+            body.contains(method),
+            "the refusal names the method: {body}"
+        );
+    }
+    assert!(
+        h.seen.requests.lock().unwrap().is_empty(),
+        "the credential never reached upstream"
+    );
+
+    // The operator sees each refusal on the session that made it.
+    let refused: Vec<_> = h
+        .store
+        .events_after(sid, 0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "gateway_refused")
+        .collect();
+    assert_eq!(refused.len(), 6);
+    assert_eq!(refused[0].payload["provider"], "stub");
+    assert_eq!(refused[0].payload["method"], "GET");
+    assert_eq!(refused[0].payload["attempt"], 1);
+    assert!(refused[0].payload["reason"]
+        .as_str()
+        .unwrap()
+        .contains("/v1/organizations/me/api_keys"));
+}
+
+#[tokio::test]
+async fn a_path_that_only_normalises_into_the_allowlist_is_refused() {
+    state::isolate();
+    let h = harness(STORE, LOOPBACK).await;
+    let token = h
+        .manager
+        .register_tool_token_for_test("s-walk", "work")
+        .await;
+    for path in [
+        "/model/stub/v1/messages/../../v1/organizations/me/api_keys",
+        "/model/stub/v1/..%2forganizations%2fme",
+        "/model/stub/v1/%2e%2e/organizations/me",
+        "/model/stub/v1/messages%2f..%2forganizations",
+        "/model/stub/v1/%252e%252e/organizations",
+        "/model/stub/v1/organizations/me/api_keys?beta=true",
+    ] {
+        let (status, _, body) = call(&h.app, "GET", path, &token, json!({})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
+    }
+    assert!(h.seen.requests.lock().unwrap().is_empty());
+
+    // Redundant separators around an allowed path are normalised, and the
+    // normalised path is what upstream is asked for.
+    let (status, _, body) = call(
+        &h.app,
+        "POST",
+        "/model/stub//v1/./messages?beta=true",
+        &token,
+        json!({"messages": []}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        h.seen.requests.lock().unwrap()[0].1,
+        "/v1/messages?beta=true"
+    );
 }
 
 #[tokio::test]

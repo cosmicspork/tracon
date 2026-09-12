@@ -107,7 +107,13 @@ Rules learned against real harnesses, kept as rules:
 only a placeholder session token and reaches every provider through the node's
 gateway, which injects the real credential by header — no TLS interception, the
 harness's own request forwarded with its own shape, which is what subscription OAuth
-tokens require. The gateway is therefore the enforcement point for provider bindings
+tokens require. **The credential is lent for inference and nothing else**: each
+provider shape carries an explicit allowlist of the methods and paths inference
+uses, matched on a normalised path, so the account behind the key — organization,
+billing, API-key and file endpoints on the very same host — is refused before the
+credential is attached, and the refusal is recorded on the session that tried. The
+node's own probe token is narrower still: the models list, and the one write it
+makes, an embedding. The gateway is therefore the enforcement point for provider bindings
 (fail closed) and the counting point for per-channel ceilings: usage is measured
 where it happens, never reported by the harness. What a harness is wired to is the
 same decision made early: only the providers that caller could actually spend on,
