@@ -20,6 +20,15 @@ pub const SUBMIT: &str = "submit_review";
 pub const STATUS: &str = "review_status";
 pub const VERDICT: &str = "review_verdict";
 
+/// The longest `review_status` will block inside a single call.
+///
+/// A harness's MCP client gives up on a tool call long before a human gets to
+/// a review — omp 18 fails one at 30 seconds — and that failure surfaces as a
+/// transport error the agent cannot act on. Returning "still waiting" well
+/// inside that budget turns the same wait into something it can retry, so the
+/// cap is deliberately far below any client's timeout rather than near it.
+const MAX_WAIT_SECS: u64 = 20;
+
 pub fn definitions() -> Vec<Value> {
     vec![
         json!({
@@ -49,15 +58,17 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": STATUS,
             "description": "Wait for a review's verdict and return it. Blocks until the review is \
-                            decided or the wait elapses (60 seconds unless you say otherwise; a \
-                            human often takes longer, so call it again while it says it is still \
-                            waiting). On approval the node publishes the approved text itself and \
-                            returns where it landed.",
+                            decided or the wait elapses, whichever comes first. The wait is capped \
+                            at 20 seconds so the call always returns before an MCP client gives up \
+                            on it; a human takes far longer than that, so expect to poll — while \
+                            the review is undecided this returns `still_waiting` with the current \
+                            state, and you call it again. On approval the node publishes the \
+                            approved text itself and returns where it landed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "review_id": { "type": "string" },
-                    "wait_secs": { "type": "integer", "description": "How long to block, up to 600. 0 returns the current state." },
+                    "wait_secs": { "type": "integer", "description": "How long to block, up to 20; larger values are capped at 20. Defaults to 20. 0 returns the current state." },
                 },
                 "required": ["review_id"],
             },
@@ -643,15 +654,9 @@ async fn verdict(
 
 async fn status(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, String> {
     let id = str_arg(args, "review_id")?;
-    // Short by default: an MCP client gives up on a call long before a human
-    // gets to a review, and a call that comes back saying "still waiting" is
-    // one the agent knows to repeat.
-    let wait = args
-        .get("wait_secs")
-        .and_then(Value::as_u64)
-        .unwrap_or(60)
-        .min(600);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+    let wait = wait_secs(args);
+    // tokio's clock, not std's, so the wait is the same thing a test can drive.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
 
     loop {
         let r = store
@@ -695,16 +700,35 @@ async fn status(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<V
                     "published": r.publish_result,
                 }));
             }
-            _ if std::time::Instant::now() >= deadline => {
+            _ if tokio::time::Instant::now() >= deadline => {
                 return Ok(json!({
                     "review_id": r.id,
                     "state": r.state,
-                    "message": "Still waiting on a human. Call review_status again to keep waiting.",
+                    "still_waiting": true,
+                    "waited_secs": wait,
+                    "message": format!(
+                        "Still waiting on a human; the review is {}. The wait is capped at \
+                         {MAX_WAIT_SECS} seconds so this call returns before your MCP client \
+                         times out — asking for longer will not help. Call review_status again \
+                         with the same review_id to keep waiting.",
+                        r.state,
+                    ),
                 }));
             }
             _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
         }
     }
+}
+
+/// How long a `review_status` call should block, clamped to [`MAX_WAIT_SECS`].
+///
+/// An oversized request is honoured up to the cap rather than rejected: the
+/// caller wants to wait, and polling is the only thing that actually works.
+fn wait_secs(args: &Value) -> u64 {
+    args.get("wait_secs")
+        .and_then(Value::as_u64)
+        .unwrap_or(MAX_WAIT_SECS)
+        .min(MAX_WAIT_SECS)
 }
 
 fn str_arg(args: &Value, key: &str) -> Result<String, String> {
@@ -725,5 +749,34 @@ mod tests {
         assert_eq!(str_arg(&args, "title").unwrap_err(), "title is required");
         assert_eq!(str_arg(&args, "body").unwrap_err(), "body is required");
         assert_eq!(str_arg(&json!({"body":"x"}), "body").unwrap(), "x");
+    }
+
+    #[test]
+    fn the_wait_stays_under_any_mcp_client_timeout() {
+        // The cap only earns its keep if it is well inside the shortest client
+        // timeout seen in the wild (omp 18: 30s).
+        const { assert!(MAX_WAIT_SECS <= 20) };
+        assert_eq!(wait_secs(&json!({})), MAX_WAIT_SECS);
+        assert_eq!(wait_secs(&json!({ "wait_secs": 600 })), MAX_WAIT_SECS);
+        assert_eq!(wait_secs(&json!({ "wait_secs": 300 })), MAX_WAIT_SECS);
+        assert_eq!(wait_secs(&json!({ "wait_secs": 5 })), 5);
+        assert_eq!(wait_secs(&json!({ "wait_secs": 0 })), 0);
+        // Nonsense falls back to the default rather than blocking forever.
+        assert_eq!(wait_secs(&json!({ "wait_secs": -1 })), MAX_WAIT_SECS);
+        assert_eq!(wait_secs(&json!({ "wait_secs": "600" })), MAX_WAIT_SECS);
+    }
+
+    #[test]
+    fn the_cap_is_what_the_tool_description_promises() {
+        let def = definitions()
+            .into_iter()
+            .find(|d| d["name"] == STATUS)
+            .expect("review_status is defined");
+        let cap = MAX_WAIT_SECS.to_string();
+        assert!(def["description"].as_str().unwrap().contains(&cap));
+        assert!(def["inputSchema"]["properties"]["wait_secs"]["description"]
+            .as_str()
+            .unwrap()
+            .contains(&cap));
     }
 }
