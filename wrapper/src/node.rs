@@ -36,55 +36,152 @@ pub fn state_dir() -> PathBuf {
 }
 
 /// The record an earlier version of this app left for a node it spawned.
+///
+/// A pid is not an identity: the kernel hands the number back out, so a record
+/// left by a node that died can name a stranger, and adopting one blocks setup
+/// behind it while stopping one sends it SIGTERM and then SIGKILL. The start
+/// time is what ties the record to a process — it is fixed for that process's
+/// life and never reused — and the binary is a second check on top.
+///
+/// This mirrors `tracon::process::Record` in the node crate, where the same
+/// logic is tested; the copy exists because this runs before the app has
+/// installed the CLI that carries that crate. Keep the two in agreement.
 #[derive(Debug, Deserialize)]
 struct Handoff {
     pid: u32,
+    /// Absent in records written before start times were recorded. Such a
+    /// record is refused: nothing in it separates the node it named from
+    /// whatever holds that pid now.
+    #[serde(default)]
+    started: Option<String>,
+    #[serde(default)]
+    exe: Option<String>,
 }
 
 fn handoff_path(state_dir: &Path) -> PathBuf {
     state_dir.join("desktop-node.json")
 }
 
-/// Whether a process with this pid exists. Signal 0 delivers nothing and
-/// only asks; a pid that is gone answers ESRCH, one owned by someone else
-/// answers EPERM — and is therefore alive.
-fn process_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
+/// The start time of a process, as an opaque token: only ever compared for
+/// equality. Linux reads field 22 of `/proc/<pid>/stat`, counted from the last
+/// `)` because the executable name in field 2 may hold spaces and parentheses.
+#[cfg(target_os = "linux")]
+fn started(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = &stat[stat.rfind(')')? + 1..];
+    after_comm.split_whitespace().nth(19).map(str::to_string)
+}
+
+/// macOS has no `/proc`; `ps` reports the start time to the second.
+#[cfg(not(target_os = "linux"))]
+fn started(pid: u32) -> Option<String> {
+    ps_field(pid, "lstart=")
+}
+
+#[cfg(target_os = "linux")]
+fn exe(pid: u32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exe(pid: u32) -> Option<String> {
+    ps_field(pid, "comm=")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ps_field(pid: u32, field: &str) -> Option<String> {
+    let out = Command::new("ps")
+        .args(["-o", field, "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
     }
-    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
-        return true;
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!line.is_empty()).then_some(line)
+}
+
+/// Whether the record still names the process it was written for, read from
+/// the system now. The reason is for saying out loud why a record was refused.
+fn still_that_process(record: &Handoff) -> Result<u32, String> {
+    if record.pid == 0 {
+        return Err("the record names no process".into());
     }
-    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    let Some(recorded) = record.started.as_deref() else {
+        return Err(
+            "the record carries no start time, so nothing ties it to a running process".into(),
+        );
+    };
+    let Some(found) = started(record.pid) else {
+        return Err(format!("no process {} is running", record.pid));
+    };
+    if found != recorded {
+        return Err(format!(
+            "pid {} was reused: it started at {found}, the record at {recorded}",
+            record.pid
+        ));
+    }
+    if let Some(recorded_exe) = record.exe.as_deref() {
+        let running = exe(record.pid);
+        if running.as_deref() != Some(recorded_exe) {
+            return Err(format!(
+                "pid {} is running {}, not {recorded_exe}",
+                record.pid,
+                running
+                    .as_deref()
+                    .unwrap_or("something this app cannot see")
+            ));
+        }
+    }
+    Ok(record.pid)
+}
+
+/// The record for a node an earlier version of this app spawned, while it
+/// still names that process. One that does not — gone, reused, or too old to
+/// carry a start time — is refused out loud and removed.
+fn verified_handoff(state_dir: &Path) -> Option<Handoff> {
+    let path = handoff_path(state_dir);
+    let bytes = std::fs::read(&path).ok()?;
+    let refuse = |why: String| {
+        eprintln!("tracon: ignoring {}: {why}", path.display());
+        let _ = std::fs::remove_file(&path);
+        None
+    };
+    let record: Handoff = match serde_json::from_slice(&bytes) {
+        Ok(record) => record,
+        Err(e) => return refuse(format!("the record is unreadable ({e})")),
+    };
+    match still_that_process(&record) {
+        Ok(_) => Some(record),
+        Err(why) => refuse(why),
+    }
 }
 
 /// The pid of a node an earlier version of this app spawned, while it is
-/// still running. A record naming a process that is gone is removed.
+/// still running and still that node.
 pub fn migrated_node(state_dir: &Path) -> Option<u32> {
-    let bytes = std::fs::read(handoff_path(state_dir)).ok()?;
-    let record: Handoff = serde_json::from_slice(&bytes).ok()?;
-    if process_alive(record.pid) {
-        Some(record.pid)
-    } else {
-        let _ = std::fs::remove_file(handoff_path(state_dir));
-        None
-    }
+    verified_handoff(state_dir).map(|record| record.pid)
 }
 
 /// Stop that node so the service can take its port: SIGTERM, then wait for
-/// it to end its sessions.
+/// it to end its sessions. Each wait re-checks the identity, so a pid the
+/// kernel re-issues while the node is shutting down is never the one that
+/// gets SIGKILL.
 pub fn stop_migrated_node(state_dir: &Path) {
-    let Some(pid) = migrated_node(state_dir) else {
+    let Some(record) = verified_handoff(state_dir) else {
         return;
     };
+    let pid = record.pid;
     let _ = Command::new("kill")
         .args(["-TERM", &pid.to_string()])
         .status();
     let deadline = Instant::now() + STOP_TIMEOUT;
-    while Instant::now() < deadline && process_alive(pid) {
+    while Instant::now() < deadline && still_that_process(&record).is_ok() {
         std::thread::sleep(Duration::from_millis(200));
     }
-    if process_alive(pid) {
+    if still_that_process(&record).is_ok() {
         let _ = Command::new("kill")
             .args(["-KILL", &pid.to_string()])
             .status();
@@ -392,21 +489,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn sleeper() -> std::process::Child {
+        Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    /// The record the app writes for a node it spawned: the pid, bound to that
+    /// process by its start time.
+    fn record_for(pid: u32) -> String {
+        format!(
+            r#"{{"pid":{pid},"started":"{}"}}"#,
+            started(pid).expect("the process is running")
+        )
+    }
+
     #[test]
     fn a_stale_handoff_record_is_ignored_and_a_live_one_is_found() {
         let dir = scratch("handoff");
         assert_eq!(migrated_node(&dir), None);
-        let mut sleeper = Command::new("sleep")
-            .arg("30")
-            .stdin(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut sleeper = sleeper();
         let pid = sleeper.id();
-        std::fs::write(
-            handoff_path(&dir),
-            format!(r#"{{"pid":{pid},"binary":"/opt/tracon"}}"#),
-        )
-        .unwrap();
+        std::fs::write(handoff_path(&dir), record_for(pid)).unwrap();
         assert_eq!(migrated_node(&dir), Some(pid));
         sleeper.kill().unwrap();
         sleeper.wait().unwrap();
@@ -416,15 +522,66 @@ mod tests {
     }
 
     #[test]
+    fn a_record_that_cannot_identify_its_process_is_refused_and_the_pid_left_alone() {
+        let dir = scratch("unverifiable");
+        let mut sleeper = sleeper();
+        let pid = sleeper.id();
+        // What earlier versions wrote: the number and nothing else. The pid
+        // may be anyone's by now, so it is neither adopted nor signalled.
+        std::fs::write(
+            handoff_path(&dir),
+            format!(r#"{{"pid":{pid},"binary":"/opt/tracon"}}"#),
+        )
+        .unwrap();
+        assert_eq!(migrated_node(&dir), None);
+        assert!(!handoff_path(&dir).exists());
+
+        // And a record whose pid the kernel has since handed to something
+        // else: the number is live, the process behind it is not the node.
+        std::fs::write(
+            handoff_path(&dir),
+            format!(r#"{{"pid":{pid},"started":"not-when-it-started"}}"#),
+        )
+        .unwrap();
+        assert_eq!(migrated_node(&dir), None);
+        assert!(!handoff_path(&dir).exists());
+
+        stop_migrated_node(&dir);
+        assert!(
+            started(pid).is_some(),
+            "a refused record must not get the process behind that pid killed"
+        );
+        sleeper.kill().unwrap();
+        sleeper.wait().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_record_naming_another_binary_is_refused() {
+        let dir = scratch("binary");
+        let mut sleeper = sleeper();
+        let pid = sleeper.id();
+        std::fs::write(
+            handoff_path(&dir),
+            format!(
+                r#"{{"pid":{pid},"started":"{}","exe":"/nowhere/tracon"}}"#,
+                started(pid).unwrap()
+            ),
+        )
+        .unwrap();
+        assert_eq!(migrated_node(&dir), None);
+        assert!(!handoff_path(&dir).exists());
+        sleeper.kill().unwrap();
+        sleeper.wait().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn stopping_a_migrated_node_ends_it_and_clears_the_record() {
         let dir = scratch("stop");
-        let mut sleeper = Command::new("sleep")
-            .arg("30")
-            .stdin(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut sleeper = sleeper();
         let pid = sleeper.id();
-        std::fs::write(handoff_path(&dir), format!(r#"{{"pid":{pid}}}"#)).unwrap();
+        std::fs::write(handoff_path(&dir), record_for(pid)).unwrap();
         let reaper = std::thread::spawn(move || sleeper.wait());
         stop_migrated_node(&dir);
         reaper.join().unwrap().unwrap();

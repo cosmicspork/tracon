@@ -19,6 +19,7 @@ pub mod mesh;
 pub mod metrics;
 pub mod notify;
 pub mod policy;
+pub mod process;
 pub mod providers;
 pub mod qa;
 pub mod review;
