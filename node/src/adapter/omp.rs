@@ -63,6 +63,39 @@ impl OmpAdapter {
     }
 }
 
+/// The local model servers omp has built in and probes at startup unless the
+/// config says otherwise. The node binds no credential to any of them, and the
+/// harness network has no loopback model server to reach: each probe is a
+/// plain-HTTP request that leaves through the harness's CONNECT proxy, which
+/// refuses anything but CONNECT with a 403 — three wasted round-trips before
+/// every session and every model probe. They are named here rather than simply
+/// left out of the config, because omp ships them: absence is what enables
+/// them, so the config has to turn them off explicitly.
+const BUILT_IN_LOCAL_PROVIDERS: [&str; 3] = ["llama.cpp", "ollama", "lm-studio"];
+
+/// The provider document omp reads: this session's gateway wiring, plus an
+/// explicit off for every built-in local provider the node has not configured.
+fn provider_config(wiring: &crate::gateway::model::Wiring) -> String {
+    let mut value: Value = match serde_json::from_str(&wiring.models_json) {
+        Ok(value) => value,
+        Err(_) => return wiring.models_json.clone(),
+    };
+    if !value["providers"].is_object() {
+        value["providers"] = serde_json::json!({});
+    }
+    let Some(providers) = value["providers"].as_object_mut() else {
+        return wiring.models_json.clone();
+    };
+    for name in BUILT_IN_LOCAL_PROVIDERS {
+        // A provider the operator did configure under one of these names has a
+        // credential bound to it and is wired to the gateway; leave it alone.
+        providers
+            .entry(name)
+            .or_insert_with(|| serde_json::json!({ "disabled": true }));
+    }
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| wiring.models_json.clone())
+}
+
 fn parse_version(s: &str) -> String {
     // `omp/18.0.4` -> `18.0.4`
     s.trim().rsplit('/').next().unwrap_or(s).trim().to_string()
@@ -89,9 +122,10 @@ impl HarnessAdapter for OmpAdapter {
     /// memory backend off — memory is the node's, and a harness backend
     /// would write into state the node does not model.
     fn scratch_files(&self, wiring: &crate::gateway::model::Wiring) -> Vec<(String, String)> {
+        let providers = provider_config(wiring);
         vec![
-            ("agent/models.json".into(), wiring.models_json.clone()),
-            ("agent/models.yml".into(), wiring.models_json.clone()),
+            ("agent/models.json".into(), providers.clone()),
+            ("agent/models.yml".into(), providers),
             (
                 "agent/config.yml".into(),
                 "memory:\n  backend: off\n".into(),
@@ -556,7 +590,16 @@ impl OmpSession {
                         }
                     }
                 }
-                Incoming::Notification { .. } => {}
+                // Every other notification is kept whole rather than dropped:
+                // omp reports a provider it is retrying this way, and a turn
+                // that says nothing for minutes is exactly what the node
+                // needs to be able to show.
+                Incoming::Notification { method, params } => {
+                    let notice = serde_json::json!({ "method": method, "params": params });
+                    if tx.send(HarnessEvent::Other(notice)).await.is_err() {
+                        return false;
+                    }
+                }
                 Incoming::Request {
                     method,
                     params,
@@ -776,6 +819,46 @@ mod tests {
                 "{name} must parse as the YAML omp reads"
             );
         }
+    }
+
+    #[test]
+    fn no_local_model_server_is_left_for_omp_to_probe() {
+        let cfg = crate::config::Config::default();
+        let wiring = crate::gateway::model::harness_wiring(&cfg, "tracon-gw", "session-token");
+        let files = OmpAdapter::new("18.0.4").scratch_files(&wiring);
+        for (_, content) in files
+            .iter()
+            .filter(|(path, _)| path.starts_with("agent/models"))
+        {
+            let v: Value = serde_json::from_str(content).unwrap();
+            for name in BUILT_IN_LOCAL_PROVIDERS {
+                let entry = &v["providers"][name];
+                assert_eq!(entry["disabled"], true, "{name} still probed: {content}");
+                assert!(
+                    entry["baseUrl"].is_null() && entry["apiKey"].is_null(),
+                    "{name} has no bound credential, so it is wired to nothing"
+                );
+            }
+            // The configured providers are untouched.
+            assert_eq!(v["providers"]["openai"]["apiKey"], "session-token");
+        }
+    }
+
+    #[test]
+    fn a_configured_provider_keeps_its_wiring_under_a_local_name() {
+        let mut cfg = crate::config::Config::default();
+        cfg.providers.insert(
+            "ollama".into(),
+            crate::config::Provider {
+                credential: "ollama".into(),
+                upstream: "https://ollama.example".into(),
+                ..Default::default()
+            },
+        );
+        let wiring = crate::gateway::model::harness_wiring(&cfg, "tracon-gw", "session-token");
+        let v: Value = serde_json::from_str(&provider_config(&wiring)).unwrap();
+        assert_eq!(v["providers"]["ollama"]["apiKey"], "session-token");
+        assert!(v["providers"]["ollama"]["disabled"].is_null());
     }
 
     /// omp's YAML reader accepts JSON (YAML 1.2 is a superset); the assertion

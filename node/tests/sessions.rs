@@ -1194,13 +1194,23 @@ async fn repeated_harness_failures_pause_the_session_before_more_work() {
     for _ in 0..3 {
         rig.events
             .send(HarnessEvent::Other(
-                json!({ "type": "system", "subtype": "api_retry" }),
+                json!({ "type": "system", "subtype": "api_retry", "provider": "anthropic", "status": 429 }),
             ))
             .await
             .unwrap();
     }
     assert!(rig.await_state("paused").await);
     let events = rig.store.events_after(&rig.session_id, 0, 100).unwrap();
+    // Each retry is surfaced as it happens, numbered, rather than only when
+    // the watchdog finally gives up.
+    let retries: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "provider_error")
+        .collect();
+    assert_eq!(retries.len(), 3);
+    assert_eq!(retries[0].payload["provider"], "anthropic");
+    assert_eq!(retries[0].payload["status"], 429);
+    assert_eq!(retries[2].payload["attempt"], 3);
     assert!(events.iter().any(|event| {
         event.kind == "session_paused"
             && event.payload["source"] == "watchdog"

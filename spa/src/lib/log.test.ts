@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { groupLog, groupOpen, groupSummary } from './log'
+import { groupLog, groupOpen, groupSummary, providerErrorLine } from './log'
 import type { Event } from './types'
 
 let seq = 0
@@ -54,4 +54,16 @@ test('summary counts by kind and reports failures', () => {
 test('an orphan tool_result is kept as a leaf', () => {
   const log = groupLog([ev('tool_result', 'ghost', { status: 'completed' })])
   expect(log[0].kind).toBe('leaf')
+})
+
+test('a provider error reads as a retry in progress', () => {
+  expect(providerErrorLine({ provider: 'anthropic', status: 429, message: 'Error', attempt: 2 })).toBe(
+    'anthropic answered 429 · Error · harness retrying · attempt 2',
+  )
+  // The first attempt needs no number, and a harness notice may carry neither
+  // a status nor a message.
+  expect(providerErrorLine({ provider: 'anthropic', status: 429, attempt: 1 })).toBe(
+    'anthropic answered 429 · harness retrying',
+  )
+  expect(providerErrorLine({})).toBe('the provider refused the call · harness retrying')
 })

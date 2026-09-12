@@ -582,9 +582,25 @@ impl Supervisor {
                 self.on_permission(request, reply).await;
             }
             HarnessEvent::Other(v) => {
-                if v["type"] == "system" && v["subtype"] == "api_retry" {
+                if let Some(retry) = retry_notice(&v) {
                     self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-                    self.record(ek::ERROR, None, json!({ "provider_retry": v }));
+                    let attempt = retry.attempt.unwrap_or_else(|| {
+                        self.store
+                            .count_events_this_turn(&self.session_id, ek::PROVIDER_ERROR)
+                            .unwrap_or(0)
+                            + 1
+                    });
+                    self.record(
+                        ek::PROVIDER_ERROR,
+                        None,
+                        json!({
+                            "provider": retry.provider,
+                            "status": retry.status,
+                            "message": retry.message,
+                            "attempt": attempt,
+                            "source": "harness",
+                        }),
+                    );
                     let _ = self.watchdog_pause_if_needed().await;
                 }
             }
@@ -969,6 +985,66 @@ impl SessionState {
     }
 }
 
+/// What a harness said when it told the node it is retrying a provider call.
+/// Every field is optional: the point of the notice is that it happened, and
+/// the gateway records the authoritative status for calls it forwards.
+#[derive(Debug, PartialEq)]
+struct RetryNotice {
+    provider: Option<String>,
+    status: Option<i64>,
+    message: Option<String>,
+    attempt: Option<i64>,
+}
+
+/// Recognise a harness's own "the provider refused, I am retrying" notice.
+///
+/// Two harnesses say it two ways and neither is in the ACP schema: the Claude
+/// adapter forwards `{"type":"system","subtype":"api_retry",…}`, and omp sends
+/// an unmodelled `session/update` (or a bare notification) whose discriminator
+/// names a retry. Rather than model either, match on the discriminator
+/// wherever it sits and read whatever fields came with it.
+fn retry_notice(v: &serde_json::Value) -> Option<RetryNotice> {
+    let named_retry = [
+        v["subtype"].as_str(),
+        v["sessionUpdate"].as_str(),
+        v["update"]["sessionUpdate"].as_str(),
+        v["params"]["update"]["sessionUpdate"].as_str(),
+        v["method"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|name| name.contains("retry"));
+    if !named_retry {
+        return None;
+    }
+    // The fields may sit on the notice itself or in the update it wraps.
+    let scopes = [
+        v,
+        &v["params"],
+        &v["update"],
+        &v["params"]["update"],
+        &v["error"],
+    ];
+    let string = |keys: &[&str]| {
+        scopes.iter().find_map(|scope| {
+            keys.iter()
+                .find_map(|k| scope[*k].as_str())
+                .map(str::to_string)
+        })
+    };
+    let number = |keys: &[&str]| {
+        scopes
+            .iter()
+            .find_map(|scope| keys.iter().find_map(|k| scope[*k].as_i64()))
+    };
+    Some(RetryNotice {
+        provider: string(&["provider", "providerId"]),
+        status: number(&["status", "statusCode", "status_code", "code"]),
+        message: string(&["message", "reason", "error"]),
+        attempt: number(&["attempt", "attempts", "retry"]).filter(|n| *n > 0),
+    })
+}
+
 fn truncate(v: Option<&serde_json::Value>) -> (Option<String>, bool) {
     let Some(v) = v else { return (None, false) };
     let s = serde_json::to_string(v).unwrap_or_default();
@@ -1093,6 +1169,43 @@ mod tests {
         assert!(out.len() <= MAX_TOOL_OUTPUT);
         // It is still valid UTF-8 (the assertion is that we got here at all).
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn a_retry_notice_is_recognised_whichever_harness_sent_it() {
+        // The Claude adapter's system message.
+        let claude = retry_notice(&json!({
+            "type": "system", "subtype": "api_retry", "provider": "anthropic",
+            "status": 429, "message": "Error", "attempt": 2
+        }))
+        .expect("claude's api_retry");
+        assert_eq!(
+            claude,
+            RetryNotice {
+                provider: Some("anthropic".into()),
+                status: Some(429),
+                message: Some("Error".into()),
+                attempt: Some(2),
+            }
+        );
+        // An unmodelled omp `session/update`, fields on the update itself.
+        let omp = retry_notice(&json!({
+            "sessionUpdate": "provider_retry",
+            "error": { "provider": "anthropic", "statusCode": 429, "message": "rate limited" }
+        }))
+        .expect("omp's retry update");
+        assert_eq!(omp.status, Some(429));
+        assert_eq!(omp.message.as_deref(), Some("rate limited"));
+        assert_eq!(
+            omp.attempt, None,
+            "the node counts when the harness does not"
+        );
+        // A bare notification the adapter forwarded whole.
+        assert!(retry_notice(&json!({ "method": "session/api_retry", "params": {} })).is_some());
+        // Anything else is not a retry, including a plain error.
+        assert!(retry_notice(&json!({ "sessionUpdate": "session_info_update" })).is_none());
+        assert!(retry_notice(&json!({ "type": "system", "subtype": "init" })).is_none());
+        assert!(retry_notice(&json!({ "method": "session/update" })).is_none());
     }
 
     #[test]
