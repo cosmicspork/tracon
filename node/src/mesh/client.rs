@@ -27,6 +27,27 @@ const PULL_LIMIT: usize = 200;
 const SEEN_RETENTION_MS: i64 = 30 * 86_400_000;
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
+/// What opening and applying one verified envelope came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Opened {
+    /// Local state changed.
+    Applied,
+    /// Nothing changed: a duplicate, a refusal, or a payload for someone else.
+    Ignored,
+    /// Its channel key is not here yet; parked for a later replay.
+    Held,
+}
+
+impl From<bool> for Opened {
+    fn from(applied: bool) -> Self {
+        if applied {
+            Opened::Applied
+        } else {
+            Opened::Ignored
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HubError {
     #[error("hub unreachable: {0}")]
@@ -171,6 +192,7 @@ impl MeshClient {
         s.queued = self.store.outbox_len().unwrap_or(0);
         s.delivered_since_reconnect = self.delivered.load(Ordering::Relaxed);
         s.undecryptable = self.undecryptable.load(Ordering::Relaxed);
+        s.held = self.store.held_len().unwrap_or(0);
         s
     }
 
@@ -304,11 +326,49 @@ impl MeshClient {
             .channel_list()
             .map_err(|e| HubError::Local(e.to_string()))?;
         let mut applied = 0;
+        let held = self.store.held_len().unwrap_or(0) > 0;
         for ch in channels {
             applied += self.pull_channel(&ch.name).await?;
+            // A key can also arrive outside the mesh (an operator import, a
+            // channel created here after frames for it were parked), so the
+            // parked frames get one try per pull as well as one per handoff.
+            if held {
+                applied += self.apply_held(&ch.name);
+            }
         }
         let _ = self.store.seen_prune(now_ms() - SEEN_RETENTION_MS);
+        let _ = self.store.held_prune(now_ms() - SEEN_RETENTION_MS);
         Ok(applied)
+    }
+
+    /// Re-open the frames parked for `channel`, now that a key may have
+    /// arrived. A frame that still cannot be opened stays parked.
+    pub fn apply_held(&self, channel: &str) -> usize {
+        let mut applied = 0;
+        for (id, envelope) in self.store.held_list(channel).unwrap_or_default() {
+            let Ok(env) = serde_json::from_str::<Envelope>(&envelope) else {
+                let _ = self.store.held_delete(&id);
+                continue;
+            };
+            // Re-verified rather than trusted for having been parked: nothing
+            // reaches the mirror on the strength of the local database alone.
+            let Ok(sender_key) = env.verify() else {
+                let _ = self.store.held_delete(&id);
+                continue;
+            };
+            let sender = hex::encode(sender_key);
+            match self.open_and_apply(&env, &sender) {
+                Opened::Held => {}
+                Opened::Applied => {
+                    let _ = self.store.held_delete(&id);
+                    applied += 1;
+                }
+                Opened::Ignored => {
+                    let _ = self.store.held_delete(&id);
+                }
+            }
+        }
+        applied
     }
 
     async fn pull_channel(&self, channel: &str) -> Result<usize, HubError> {
@@ -376,6 +436,12 @@ impl MeshClient {
         let sender_key = match env.verify() {
             Ok(k) => k,
             Err(e) => {
+                // A build on another wire version is the one verification
+                // failure the operator can act on, so it is named rather than
+                // left to the log.
+                if matches!(e, proto::frame::FrameError::UnsupportedVersion { .. }) {
+                    self.note_refusal(format!("frame on {}: {e}", env.channel));
+                }
                 tracing::warn!(id = %env.id, error = %e, "frame failed verification; dropped");
                 return false;
             }
@@ -387,6 +453,13 @@ impl MeshClient {
         if !self.store.seen_insert(&env.id, now_ms()).unwrap_or(true) {
             return false;
         }
+        matches!(self.open_and_apply(env, &sender), Opened::Applied)
+    }
+
+    /// The half of [`ingest`](Self::ingest) after deduplication, so a frame
+    /// parked for a missing key can be replayed without being dropped as one
+    /// this node has already seen. The caller has verified `sender`.
+    fn open_and_apply(&self, env: &Envelope, sender: &str) -> Opened {
         let payload = if env.is_direct() {
             env.open_direct(&self.identity)
         } else {
@@ -397,11 +470,15 @@ impl MeshClient {
         };
         let payload = match payload {
             Ok(p) => p,
-            Err(proto::frame::FrameError::NotRecipient) => return false,
+            Err(proto::frame::FrameError::NotRecipient) => return Opened::Ignored,
+            // No key for this epoch yet. The frame is authentic and the hub
+            // will not hold it forever, so park the ciphertext and say so;
+            // `apply_held` opens it when the key lands.
+            Err(e @ proto::frame::FrameError::UnknownEpoch(_)) => return self.hold(env, &e),
             Err(e) => {
                 self.undecryptable.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(channel = %env.channel, sender = %sender, error = %e, "frame could not be opened");
-                return false;
+                return Opened::Ignored;
             }
         };
         // Learn a peer's sealing key from its hello, so direct frames to it
@@ -411,7 +488,7 @@ impl MeshClient {
                 self.peers
                     .lock()
                     .unwrap()
-                    .insert(sender.clone(), x.to_string());
+                    .insert(sender.to_string(), x.to_string());
             }
         }
         // Key and policy handoffs are direct-sealed and change what this node
@@ -426,24 +503,30 @@ impl MeshClient {
                     self.request_changes_backfill_all(&c.name);
                 }
                 self.pull_wake.notify_one();
-                return n > 0;
+                // Frames for those channels that were parked unreadable can
+                // be opened now.
+                let mut applied = n;
+                for c in channels {
+                    applied += self.apply_held(&c.name);
+                }
+                return Opened::from(applied > 0);
             }
             Payload::CandidateTransfer { transfer } if env.is_direct() => {
                 match crate::transfers::receive_mesh(
                     &self.store,
                     &self.node_id(),
-                    &sender,
+                    sender,
                     &env.channel,
                     transfer.clone(),
                 ) {
                     Ok(id) => {
                         tracing::info!(from = %sender, transfer = %id, "candidate transfer staged for confirmation");
-                        return true;
+                        return Opened::Applied;
                     }
                     Err(error) => {
                         tracing::warn!(from = %sender, error = %error, "candidate transfer refused");
                         self.note_refusal(format!("candidate transfer from {sender}: {error}"));
-                        return false;
+                        return Opened::Ignored;
                     }
                 }
             }
@@ -451,7 +534,7 @@ impl MeshClient {
             Payload::CredentialHandoff { credentials } if env.is_direct() => {
                 let Some((broker, path)) = self.broker.get() else {
                     tracing::warn!(from = %sender, "credential handoff before the broker exists; dropped");
-                    return false;
+                    return Opened::Ignored;
                 };
                 let n = {
                     let mut b = broker.write().unwrap();
@@ -464,7 +547,7 @@ impl MeshClient {
                     n
                 };
                 tracing::info!(from = %sender, credentials = n, "credential handoff received");
-                return n > 0;
+                return Opened::from(n > 0);
             }
             Payload::PolicyBundle {
                 toml,
@@ -475,18 +558,18 @@ impl MeshClient {
                     Ok(p) => {
                         tracing::info!(from = %sender, rules = p.rules.len(), "policy bundle installed");
                         *self.policy.write().unwrap() = p;
-                        return true;
+                        return Opened::Applied;
                     }
                     Err(e) => {
                         tracing::warn!(from = %sender, error = %e, "policy bundle refused");
                         self.note_refusal(format!("policy from {sender}: {e}"));
-                        return false;
+                        return Opened::Ignored;
                     }
                 }
             }
             Payload::Command { cmd_id, command } if env.is_direct() => {
-                self.run_command(sender.clone(), cmd_id.clone(), command.clone());
-                return true;
+                self.run_command(sender.to_string(), cmd_id.clone(), command.clone());
+                return Opened::Applied;
             }
             Payload::Ack { cmd_id, ok, err } if env.is_direct() => {
                 if let Some(tx) = self.pending.lock().unwrap().remove(cmd_id) {
@@ -495,66 +578,88 @@ impl MeshClient {
                         None => Ok(ok.clone().unwrap_or(Value::Null)),
                     });
                 }
-                return true;
+                return Opened::Applied;
             }
             Payload::EventsRequest {
                 session_id,
                 after_origin_seq,
             } if env.is_direct() => {
-                self.answer_events_request(&sender, session_id, *after_origin_seq);
-                return true;
+                self.answer_events_request(sender, session_id, *after_origin_seq);
+                return Opened::Applied;
             }
             Payload::EventsBatch {
                 session_id, events, ..
             } if env.is_direct() => {
-                let n = self.apply_events_batch(&sender, session_id, events);
-                return n > 0;
+                let n = self.apply_events_batch(sender, session_id, events);
+                return Opened::from(n > 0);
             }
             Payload::ChangesRequest {
                 channel,
                 after_site_seq,
             } if env.is_direct() => {
-                self.answer_changes_request(&sender, channel, *after_site_seq);
-                return true;
+                self.answer_changes_request(sender, channel, *after_site_seq);
+                return Opened::Applied;
             }
             Payload::ChangesBatch {
                 channel, changes, ..
             } if env.is_direct() => {
-                let n = self.apply_changes_batch(&sender, channel, changes);
-                return n > 0;
+                let n = self.apply_changes_batch(sender, channel, changes);
+                return Opened::from(n > 0);
             }
             Payload::Changes { changes, .. } if !env.is_direct() => {
                 // A sequence gap means frames were missed (retention, or a
                 // pull that raced): ask the site for what lies between.
                 if let Some(first) = changes.first() {
-                    let known = self
-                        .store
-                        .change_log_max(&sender, &env.channel)
-                        .unwrap_or(0);
+                    let known = self.store.change_log_max(sender, &env.channel).unwrap_or(0);
                     if first.site_seq > known + 1 {
-                        self.request_changes_backfill(&sender, &env.channel);
+                        self.request_changes_backfill(sender, &env.channel);
                     }
                 }
             }
             _ => {}
         }
-        match self.mirror.apply(&sender, &env.channel, payload) {
-            Applied::Stored => true,
-            Applied::Duplicate => false,
+        match self.mirror.apply(sender, &env.channel, payload) {
+            Applied::Stored => Opened::Applied,
+            Applied::Duplicate => Opened::Ignored,
             Applied::Impersonation => {
                 tracing::warn!(sender = %sender, "peer spoke for another node; dropped");
                 self.note_refusal(format!("{sender} spoke for another node"));
-                false
+                Opened::Ignored
             }
             Applied::Unhandled(kind) => {
                 tracing::debug!(kind, sender = %sender, "payload kind not handled here");
-                false
+                Opened::Ignored
             }
             Applied::Malformed => {
                 tracing::warn!(sender = %sender, "malformed payload; dropped");
-                false
+                Opened::Ignored
             }
         }
+    }
+
+    /// Park a verified frame whose channel key is not here yet, counting and
+    /// naming it once however often it is replayed to us.
+    fn hold(&self, env: &Envelope, reason: &proto::frame::FrameError) -> Opened {
+        let Ok(json) = serde_json::to_string(env) else {
+            return Opened::Ignored;
+        };
+        match self.store.held_put(&env.id, &env.channel, &json, now_ms()) {
+            Ok(true) => {
+                self.undecryptable.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(channel = %env.channel, sender = %env.sender, error = %reason, "frame held until its channel key arrives");
+                self.note_refusal(format!(
+                    "frame on {} held until its channel key arrives ({reason})",
+                    env.channel
+                ));
+            }
+            Ok(false) => {}
+            Err(e) => {
+                self.undecryptable.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(channel = %env.channel, error = %e, "frame could not be held; dropped");
+                return Opened::Ignored;
+            }
+        }
+        Opened::Held
     }
 
     // ------------------------------------------------------------ presence

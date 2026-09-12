@@ -714,7 +714,7 @@
         <span>
           {m.queued} queued · {m.delivered_since_reconnect} delivered since reconnect{m.undecryptable
             ? ` · ${m.undecryptable} unreadable`
-            : ''}
+            : ''}{m.held ? ` · ${m.held} held for a key` : ''}
         </span>
         {#if m.last_error}<span class="l bad">{m.last_error}</span>{/if}
         {#if m.last_refusal}<span class="l bad">refused: {m.last_refusal}</span>{/if}

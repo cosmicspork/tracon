@@ -83,6 +83,8 @@ export interface MeshState {
   queued: number
   delivered_since_reconnect: number
   undecryptable: number
+  /** Of those, the frames still parked, waiting for the key that opens them. */
+  held: number
   last_error: string | null
   last_refusal: string | null
 }

@@ -8,8 +8,9 @@ use support::state;
 
 use std::sync::Arc;
 
+use hub::store::{FrameStore, MemberStore};
 use proto::envelope::DataKey;
-use proto::frame::{Payload, MESH_CHANNEL};
+use proto::frame::{Envelope, Payload, MESH_CHANNEL};
 use proto::keyring::Keyring;
 use proto::keys::Identity;
 use serde_json::json;
@@ -24,6 +25,24 @@ struct Node {
     store: Arc<Store>,
     bus: Bus,
     client: Arc<MeshClient>,
+}
+
+/// POST one frame the way a node does, so a test can send bytes no node would
+/// build.
+async fn post_frame(id: &Identity, hub_url: &str, env: &Envelope) -> (u16, String) {
+    let body = serde_json::to_vec(env).unwrap();
+    let ts = (now_ms() / 1000).max(0) as u64;
+    let mut req = reqwest::Client::new().post(format!("{hub_url}/v0/frames"));
+    for (k, v) in proto::auth::signed_headers(id, "POST", "/v0/frames", &body, ts) {
+        req = req.header(k, v);
+    }
+    let res = req
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    (res.status().as_u16(), res.text().await.unwrap_or_default())
 }
 
 /// The next frame that is not the hub-state banner update.
@@ -76,13 +95,24 @@ fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Node {
 
 /// Two nodes sharing `@mesh` and `personal`; B's rings are handoffs from A.
 async fn pair() -> (Node, Node) {
+    let (a, b, _) = pair_managed().await;
+    (a, b)
+}
+
+/// As [`pair`], over a hub whose member and frame stores the test keeps, for
+/// revoking a member or planting a frame no honest node would post.
+async fn pair_managed() -> (Node, Node, support::mesh::TestHub) {
     let a_id = Identity::from_seed(&[1u8; 32]);
     let b_id = Identity::from_seed(&[2u8; 32]);
-    let hub = support::mesh::start_hub(&[
-        (&a_id, &[MESH_CHANNEL, "personal", "secret"]),
-        (&b_id, &[MESH_CHANNEL, "personal", "secret"]),
-    ])
+    let test_hub = support::mesh::start_hub_managed(
+        &[
+            (&a_id, &[MESH_CHANNEL, "personal", "secret"][..]),
+            (&b_id, &[MESH_CHANNEL, "personal", "secret"][..]),
+        ],
+        0,
+    )
     .await;
+    let hub = test_hub.url.clone();
     let mesh_ring = Keyring::genesis(&a_id.x25519_public(), &DataKey::generate());
     let personal_ring = Keyring::genesis(&a_id.x25519_public(), &DataKey::generate());
     let secret_ring = Keyring::genesis(&a_id.x25519_public(), &DataKey::generate());
@@ -112,7 +142,7 @@ async fn pair() -> (Node, Node) {
             ("secret", b_secret),
         ],
     );
-    (a, b)
+    (a, b, test_hub)
 }
 
 #[tokio::test]
@@ -204,7 +234,18 @@ async fn a_peer_cannot_speak_for_another_node_and_unknown_keys_are_counted() {
     a.client
         .enqueue("personal", None, &Payload::Session(json!(row)))
         .unwrap();
-    // A also sends on a channel B has the wrong key for.
+    a.client.drain_once().await.unwrap();
+    assert_eq!(b.client.pull_once().await.unwrap(), 0);
+    assert!(b.store.get_session("forged").unwrap().is_none());
+    let s = b.client.snapshot();
+    assert_eq!(s.undecryptable, 0);
+    assert!(s
+        .last_refusal
+        .as_deref()
+        .unwrap()
+        .contains("spoke for another node"));
+
+    // A also sends on a channel B has the wrong key for: counted, not applied.
     a.client
         .enqueue(
             "secret",
@@ -214,14 +255,7 @@ async fn a_peer_cannot_speak_for_another_node_and_unknown_keys_are_counted() {
         .unwrap();
     a.client.drain_once().await.unwrap();
     assert_eq!(b.client.pull_once().await.unwrap(), 0);
-    assert!(b.store.get_session("forged").unwrap().is_none());
-    let s = b.client.snapshot();
-    assert_eq!(s.undecryptable, 1);
-    assert!(s
-        .last_refusal
-        .as_deref()
-        .unwrap()
-        .contains("spoke for another node"));
+    assert_eq!(b.client.snapshot().undecryptable, 1);
 }
 
 #[tokio::test]
@@ -449,4 +483,188 @@ async fn a_credential_handoff_lands_in_the_receivers_sealed_store() {
     .unwrap();
     assert!(back.get("glab").is_some());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A channel key that arrives after frames sealed under it: the frames are
+/// held, named to the operator, and applied the moment the key lands. Dropping
+/// them would lose a peer's state with nothing to ask for it back.
+#[tokio::test]
+async fn a_frame_that_precedes_its_key_is_held_and_applied_when_the_key_lands() {
+    state::isolate();
+    let (a, b) = pair().await;
+    // A rotates `personal`; its next frame is sealed under an epoch B has not
+    // been handed.
+    let ring =
+        Keyring::from_bytes(&a.store.channel_get("personal").unwrap().unwrap().keyring).unwrap();
+    let (rotated, _) = ring.rotate(&a.id.x25519_public(), 1000);
+    a.store
+        .channel_put("personal", &rotated.to_bytes(), "{}")
+        .unwrap();
+    let row = support::rows::session_row("s1", &a.id.node_id(), "personal");
+    a.client
+        .enqueue("personal", None, &Payload::Session(json!(row)))
+        .unwrap();
+    assert_eq!(a.client.drain_once().await.unwrap(), 1);
+
+    // B cannot open it. It is held, counted, and named — not dropped.
+    assert_eq!(b.client.pull_once().await.unwrap(), 0);
+    assert!(b.store.get_session("s1").unwrap().is_none());
+    let s = b.client.snapshot();
+    assert_eq!(s.held, 1);
+    assert_eq!(s.undecryptable, 1);
+    assert!(
+        s.last_refusal
+            .as_deref()
+            .unwrap()
+            .contains("held until its channel key arrives"),
+        "{s:?}"
+    );
+    // Pulling again moves the cursor past it without dropping or recounting it.
+    assert_eq!(b.client.pull_once().await.unwrap(), 0);
+    assert_eq!(b.client.snapshot().held, 1);
+    assert_eq!(b.client.snapshot().undecryptable, 1);
+
+    // The key arrives; what was waiting on it is applied at once.
+    let handoff = tracon::mesh::enroll::handoff_payload(
+        &a.store,
+        &a.id,
+        &b.id.x25519_public(),
+        &["personal".into()],
+    )
+    .unwrap();
+    tracon::mesh::enroll::post_direct(
+        &a.id,
+        a.client.hub_url(),
+        &b.id.node_id(),
+        &b.id.x25519_public(),
+        &handoff,
+    )
+    .await
+    .unwrap();
+    assert!(b.client.pull_once().await.unwrap() >= 1);
+    let mirrored = b.store.get_session("s1").unwrap().unwrap();
+    assert_eq!(mirrored.node_id, a.id.node_id());
+    assert_eq!(mirrored.channel, "personal");
+    assert_eq!(b.client.snapshot().held, 0);
+    // And applying it once is enough: a further pull is a no-op.
+    assert_eq!(b.client.pull_once().await.unwrap(), 0);
+}
+
+/// A member the hub has removed: its frames are refused where it can see the
+/// reason, nothing it says reaches the mesh, no further key reaches it, and the
+/// nodes that stay drop its channel grants rather than keeping a stale one.
+#[tokio::test]
+async fn a_removed_member_is_refused_visibly_and_is_handed_no_further_keys() {
+    state::isolate();
+    let (a, b, hub) = pair_managed().await;
+    let (ai, bi) = (a.id.node_id(), b.id.node_id());
+    // Before removal: B speaks and A hears it, and A records B's grants.
+    let row = support::rows::session_row("before", &bi, "personal");
+    b.store.insert_session(&row).unwrap();
+    b.client
+        .enqueue("personal", None, &Payload::Session(json!(row)))
+        .unwrap();
+    assert_eq!(b.client.drain_once().await.unwrap(), 1);
+    assert_eq!(a.client.pull_once().await.unwrap(), 1);
+    assert_eq!(a.client.refresh_members().await.unwrap(), 1);
+    assert_eq!(
+        a.store.node_channels(&bi).unwrap(),
+        vec!["@mesh", "personal", "secret"]
+    );
+
+    // The lost laptop is revoked on the hub.
+    assert!(hub.members.remove(&bi).unwrap());
+
+    // B's next frame is refused, in terms B's operator can read, and dropped
+    // rather than left to block everything behind it.
+    let after = support::rows::session_row("after", &bi, "personal");
+    b.client
+        .enqueue("personal", None, &Payload::Session(json!(after)))
+        .unwrap();
+    assert_eq!(b.client.drain_once().await.unwrap(), 0);
+    assert_eq!(b.client.snapshot().queued, 0);
+    let s = b.client.snapshot();
+    assert!(
+        s.last_refusal
+            .as_deref()
+            .unwrap()
+            .contains("not a member of this hub"),
+        "{s:?}"
+    );
+    assert_eq!(a.client.pull_once().await.unwrap(), 0);
+    assert!(a.store.get_session("after").unwrap().is_none());
+
+    // A key handed to it after the removal never reaches it: B holds the same
+    // `secret` keyring it started with, and its own pull is refused outright.
+    let before_keys = b.store.channel_get("secret").unwrap().unwrap().keyring;
+    let handoff = tracon::mesh::enroll::handoff_payload(
+        &a.store,
+        &a.id,
+        &b.id.x25519_public(),
+        &["secret".into()],
+    )
+    .unwrap();
+    tracon::mesh::enroll::post_direct(
+        &a.id,
+        a.client.hub_url(),
+        &bi,
+        &b.id.x25519_public(),
+        &handoff,
+    )
+    .await
+    .unwrap();
+    assert_eq!(b.client.pull_once().await.unwrap(), 0);
+    assert_eq!(
+        b.store.channel_get("secret").unwrap().unwrap().keyring,
+        before_keys
+    );
+
+    // And the member list is a snapshot, not an add list: A's record of what B
+    // may speak on is cleared, so no stale row outlives the revocation.
+    assert_eq!(a.client.refresh_members().await.unwrap(), 0);
+    assert!(a.store.node_channels(&bi).unwrap().is_empty());
+    assert!(a.client.peer_key(&bi).is_none());
+    let _ = ai;
+}
+
+/// A frame from a build on another wire version is refused by name. The hub
+/// never stores one; a node that is handed one anyway says why rather than
+/// opening it or holding it for a key.
+#[tokio::test]
+async fn a_frame_from_another_wire_version_is_refused_with_a_reason() {
+    state::isolate();
+    let (a, b, hub) = pair_managed().await;
+    let ring =
+        Keyring::from_bytes(&a.store.channel_get("personal").unwrap().unwrap().keyring).unwrap();
+    let row = support::rows::session_row("newer", &a.id.node_id(), "personal");
+    let mut env = Envelope::seal_channel(
+        &a.id,
+        "personal",
+        None,
+        &ring,
+        &Payload::Session(json!(row)),
+        now_ms(),
+    )
+    .unwrap();
+    env.v = proto::CONTRACT_VERSION + 1;
+
+    // The hub refuses to relay it, saying which versions disagree.
+    let (status, body) = post_frame(&a.id, a.client.hub_url(), &env).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("wire version"), "{body}");
+
+    // Planted past the hub, the reader refuses it too, and says so where the
+    // operator looks.
+    hub.frames
+        .append("personal", &serde_json::to_string(&env).unwrap(), now_ms())
+        .unwrap();
+    assert_eq!(b.client.pull_once().await.unwrap(), 0);
+    assert!(b.store.get_session("newer").unwrap().is_none());
+    let s = b.client.snapshot();
+    assert!(
+        s.last_refusal.as_deref().unwrap().contains("wire version"),
+        "{s:?}"
+    );
+    // Refused, not held: no key will ever make this frame readable.
+    assert_eq!(s.held, 0);
 }
