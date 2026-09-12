@@ -31,10 +31,55 @@ use crate::{
     store::{now_ms, UsageRow},
 };
 
-/// The beta flag Anthropic's subscription tokens are issued under. Unverified
-/// against a live token; kept as data
-/// so the next observation changes one line.
+/// The beta flag Anthropic's subscription tokens are issued under. Verified
+/// against a live token on 2026-09-12: necessary but not sufficient — see
+/// `CLAUDE_CODE_SYSTEM`.
 const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
+
+/// A subscription token is only honoured for requests whose system prompt
+/// opens with this sentence; anything else is answered `429
+/// rate_limit_error` with the message `Error`, indistinguishable from a real
+/// limit. Observed on 2026-09-12 against a live token through this gateway:
+/// the same token, same model, same message, 200 with the sentence, 429
+/// without it; the user-agent made no difference. A harness that knows it
+/// holds an OAuth token prepends this itself; through the gateway the harness
+/// believes it holds an API key, so the gateway does it.
+const CLAUDE_CODE_SYSTEM: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/// Rewrite an Anthropic Messages body so its system prompt opens with the
+/// sentence a subscription token demands. `None` when the body is not a JSON
+/// object, has no `messages`, or already opens with it — the body then goes
+/// through untouched.
+fn shaped_for_subscription(body: &[u8]) -> Option<Vec<u8>> {
+    let mut value: Value = serde_json::from_slice(body).ok()?;
+    let object = value.as_object_mut()?;
+    if !object.contains_key("messages") {
+        return None;
+    }
+    let prefix = json!({ "type": "text", "text": CLAUDE_CODE_SYSTEM });
+    let system = match object.remove("system") {
+        None | Some(Value::Null) => vec![prefix],
+        Some(Value::String(text)) => {
+            if text.starts_with(CLAUDE_CODE_SYSTEM) {
+                return None;
+            }
+            vec![prefix, json!({ "type": "text", "text": text })]
+        }
+        Some(Value::Array(blocks)) => {
+            if blocks
+                .first()
+                .and_then(|block| block["text"].as_str())
+                .is_some_and(|text| text.starts_with(CLAUDE_CODE_SYSTEM))
+            {
+                return None;
+            }
+            std::iter::once(prefix).chain(blocks).collect()
+        }
+        Some(other) => vec![prefix, other],
+    };
+    object.insert("system".into(), Value::Array(system));
+    serde_json::to_vec(&value).ok()
+}
 
 /// What a harness needs to reach the gateway: environment for the providers
 /// that honour one, and a `models.json` for the ones that only read a
@@ -220,6 +265,13 @@ pub async fn handle(
     let model = serde_json::from_slice::<Value>(&body)
         .ok()
         .and_then(|v| v["model"].as_str().map(str::to_string));
+    let body = if injection.oauth_beta && p.shape == SHAPE_ANTHROPIC {
+        shaped_for_subscription(&body)
+            .map(Bytes::from)
+            .unwrap_or(body)
+    } else {
+        body
+    };
     req = req.body(body);
 
     if let Some(session_id) = &session_id {
@@ -466,6 +518,42 @@ impl Drop for Counted {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn system_of(body: &[u8]) -> Value {
+        serde_json::from_slice::<Value>(body).unwrap()["system"].clone()
+    }
+
+    #[test]
+    fn a_subscription_request_opens_with_the_sentence_the_token_demands() {
+        let plain = br#"{"model":"m","messages":[],"system":"Be terse."}"#;
+        let shaped = shaped_for_subscription(plain).expect("rewritten");
+        let system = system_of(&shaped);
+        assert_eq!(system[0]["text"], CLAUDE_CODE_SYSTEM);
+        assert_eq!(system[1]["text"], "Be terse.");
+
+        let blocks =
+            br#"{"model":"m","messages":[],"system":[{"type":"text","text":"Be terse."}]}"#;
+        let system = system_of(&shaped_for_subscription(blocks).expect("rewritten"));
+        assert_eq!(system[0]["text"], CLAUDE_CODE_SYSTEM);
+        assert_eq!(system[1]["text"], "Be terse.");
+
+        let none = br#"{"model":"m","messages":[]}"#;
+        let system = system_of(&shaped_for_subscription(none).expect("rewritten"));
+        assert_eq!(system.as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn a_request_that_already_opens_with_it_or_is_not_a_messages_call_passes_untouched() {
+        let already =
+            format!(r#"{{"model":"m","messages":[],"system":"{CLAUDE_CODE_SYSTEM} More."}}"#);
+        assert!(shaped_for_subscription(already.as_bytes()).is_none());
+        let already_blocks = format!(
+            r#"{{"model":"m","messages":[],"system":[{{"type":"text","text":"{CLAUDE_CODE_SYSTEM}"}}]}}"#
+        );
+        assert!(shaped_for_subscription(already_blocks.as_bytes()).is_none());
+        assert!(shaped_for_subscription(br#"{"model":"m"}"#).is_none());
+        assert!(shaped_for_subscription(b"not json").is_none());
+    }
 
     #[test]
     fn wiring_puts_anthropic_in_env_and_openai_in_models_json() {
