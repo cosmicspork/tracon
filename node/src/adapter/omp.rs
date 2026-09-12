@@ -805,7 +805,8 @@ mod tests {
     #[test]
     fn every_provider_file_omp_may_read_carries_this_sessions_token() {
         let cfg = crate::config::Config::default();
-        let wiring = crate::gateway::model::harness_wiring(&cfg, "tracon-gw", "session-token");
+        let wiring =
+            crate::gateway::model::harness_wiring(&cfg, "tracon-gw", "session-token", |_, _| true);
         let files = OmpAdapter::new("18.0.4").scratch_files(&wiring);
         for name in ["agent/models.json", "agent/models.yml"] {
             let content = files

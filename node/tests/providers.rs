@@ -310,3 +310,63 @@ async fn a_cancelled_startup_cannot_remove_the_next_login_generation() {
     assert_eq!(pending["url"], second.url);
     p.disconnect("anthropic", &LoginOwner::Local).await.unwrap();
 }
+
+/// The catalogue a node with only a Codex subscription connected can offer:
+/// the providers it cannot spend on are never wired, and what the account
+/// refuses is never listed.
+#[test]
+fn only_a_connected_provider_is_wired_and_the_account_decides_the_rest() {
+    state::isolate();
+    let cfg = Config::default();
+    let shared = Broker::default().shared();
+    let mut codex = Credential {
+        kind: KIND_OAUTH.into(),
+        provider: Some("openai-codex".into()),
+        channels: vec!["work".into()],
+        nodes: vec!["n1".into()],
+        ..Default::default()
+    };
+    codex.env.insert("ACCESS_TOKEN".into(), "access".into());
+    codex
+        .env
+        .insert("CHATGPT_ACCOUNT_ID".into(), "acct-1".into());
+    shared.write().unwrap().put("openai-codex", codex);
+
+    let broker = shared.read().unwrap();
+    let wiring = tracon::gateway::model::harness_wiring(&cfg, "tracon-gw", "tok", |_, provider| {
+        broker
+            .inject_for_probe(&provider.credential, "n1", &provider.shape)
+            .is_ok()
+    });
+    let wired: serde_json::Value = serde_json::from_str(&wiring.models_json).unwrap();
+    assert_eq!(wired["providers"]["openai-codex"]["apiKey"], "tok");
+    // Wiring `openai` with no credential behind it is what put Codex models
+    // under that provider: the harness offers everything it is handed.
+    assert!(wired["providers"]["openai"].is_null());
+    assert!(!wiring
+        .env
+        .iter()
+        .any(|(key, _)| key.starts_with("ANTHROPIC_")));
+
+    let probed = ["gpt-5.3-codex-spark", "gpt-5.4", "gpt-daybreak-blue-latest"]
+        .map(|model| tracon::adapter::ModelOption {
+            value: format!("openai-codex/{model}"),
+            name: model.into(),
+        })
+        .to_vec();
+    let offered = tracon::gateway::model::offerable(&cfg, probed, |provider| {
+        broker
+            .model_credential_for(provider, "n1")
+            .is_some_and(|(_, credential)| credential.kind == KIND_OAUTH)
+    });
+    assert_eq!(
+        offered
+            .iter()
+            .map(|model| model.value.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "openai-codex/gpt-5.3-codex-spark",
+            "openai-codex/gpt-daybreak-blue-latest"
+        ]
+    );
+}

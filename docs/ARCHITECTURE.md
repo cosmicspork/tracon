@@ -109,7 +109,11 @@ gateway, which injects the real credential by header — no TLS interception, th
 harness's own request forwarded with its own shape, which is what subscription OAuth
 tokens require. The gateway is therefore the enforcement point for provider bindings
 (fail closed) and the counting point for per-channel ceilings: usage is measured
-where it happens, never reported by the harness.
+where it happens, never reported by the harness. What a harness is wired to is the
+same decision made early: only the providers that caller could actually spend on,
+because a harness offers the whole model catalogue of every provider it is handed,
+and a provider with no credential behind it fills the picker with models whose only
+possible answer is a refusal.
 
 **The node does not implement the vendors' OAuth.** Subscription flows are the
 harnesses' own clients — undocumented and churn-prone — so the node runs the
