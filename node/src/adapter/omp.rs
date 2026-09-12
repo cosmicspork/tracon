@@ -78,13 +78,20 @@ impl HarnessAdapter for OmpAdapter {
         &self.pinned
     }
 
-    /// omp reads two files from its state directory: the provider override
-    /// that points it at the gateway, and a config that turns its own memory
-    /// backend off — memory is the node's, and a harness backend would write
-    /// into state the node does not model.
+    /// omp reads its provider override from its state directory, and the
+    /// state directory is a volume shared by every harness this node runs —
+    /// including the model probe. omp 18 persists whatever provider config it
+    /// loaded as `agent/models.yml`, and reads that file in preference to
+    /// `models.json`, so a probe's placeholder token would otherwise outlive
+    /// the probe and be presented by the next session. Both files are
+    /// therefore pinned read-only to this session's own wiring; JSON is
+    /// valid YAML, so one document serves both. The config turns omp's own
+    /// memory backend off — memory is the node's, and a harness backend
+    /// would write into state the node does not model.
     fn scratch_files(&self, wiring: &crate::gateway::model::Wiring) -> Vec<(String, String)> {
         vec![
             ("agent/models.json".into(), wiring.models_json.clone()),
+            ("agent/models.yml".into(), wiring.models_json.clone()),
             (
                 "agent/config.yml".into(),
                 "memory:\n  backend: off\n".into(),
@@ -750,5 +757,30 @@ mod tests {
             ]
         );
         assert_eq!(cmd.argv, ["omp", "acp"]);
+    }
+
+    #[test]
+    fn every_provider_file_omp_may_read_carries_this_sessions_token() {
+        let cfg = crate::config::Config::default();
+        let wiring = crate::gateway::model::harness_wiring(&cfg, "tracon-gw", "session-token");
+        let files = OmpAdapter::new("18.0.4").scratch_files(&wiring);
+        for name in ["agent/models.json", "agent/models.yml"] {
+            let content = files
+                .iter()
+                .find(|(path, _)| path == name)
+                .map(|(_, content)| content.as_str())
+                .unwrap_or_else(|| panic!("{name} is pinned"));
+            assert!(content.contains("session-token"), "{name}: {content}");
+            assert!(
+                serde_yaml_like_parses(content),
+                "{name} must parse as the YAML omp reads"
+            );
+        }
+    }
+
+    /// omp's YAML reader accepts JSON (YAML 1.2 is a superset); the assertion
+    /// only needs the document to be well-formed JSON.
+    fn serde_yaml_like_parses(content: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(content).is_ok()
     }
 }
