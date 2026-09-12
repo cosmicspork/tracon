@@ -17,6 +17,54 @@
 * **continuity:** signed candidate/context transfer packages bound to their candidate's identity and file tree, single-import reservation with runtime-workspace reuse on retry, and opt-in, revocation-aware hub-side channel rollups
 * **qa:** deploy a candidate to an authorized QA target by exact commit SHA, verify it with a network-scoped headless browser, and build repository-derived prototypes
 
+## [0.15.0](https://github.com/cosmicspork/tracon/compare/v0.14.0...v0.15.0) (2026-09-12)
+
+
+### Features
+
+* **boundary:** images carry a definitions digest so stale ones rebuild ([2e32a59](https://github.com/cosmicspork/tracon/commit/2e32a5907d5624c55b991c9b171edc9cdbdb6ddc))
+* **boundary:** images carry a definitions digest so stale ones rebuild ([2a8afa3](https://github.com/cosmicspork/tracon/commit/2a8afa393b6bc15fd86adcbbb8a5ec4281502ccd))
+* candidate-bound QA verification and repository-derived prototypes ([#162](https://github.com/cosmicspork/tracon/issues/162)) ([d27c54d](https://github.com/cosmicspork/tracon/commit/d27c54d490f9056b737c50ec0ee2e4d594f614ca))
+* continuity transfers and optional hub rollups ([#161](https://github.com/cosmicspork/tracon/issues/161)) ([5d5bd52](https://github.com/cosmicspork/tracon/commit/5d5bd5278670db1be4252569de06c2301a8af60b))
+* **corpus:** add HTML documents and interactive previews ([fb68a63](https://github.com/cosmicspork/tracon/commit/fb68a634a25072b369d8e514f466406d6699c391))
+* **desktop:** after an app update the CLI and the service move to the new node ([b5f7b8b](https://github.com/cosmicspork/tracon/commit/b5f7b8bd250514feff847b2a1f28219cf4d9991a))
+* **desktop:** after an app update the CLI and the service move to the new node ([92391c1](https://github.com/cosmicspork/tracon/commit/92391c1e093b49ef37694aa8d7a61ef6094d62ed))
+* **desktop:** the node runs under the user service; the app installs and manages it ([9ddcd20](https://github.com/cosmicspork/tracon/commit/9ddcd206dc80c51c7d26d7c85a206cd337949e71))
+* **desktop:** the node runs under the user service; the app installs and manages it ([989d65e](https://github.com/cosmicspork/tracon/commit/989d65e5461a5aa75253a5c93c10f23696d2afae))
+* **docs:** archived documents ([e0ce6f9](https://github.com/cosmicspork/tracon/commit/e0ce6f9f27e63f2f99937317a60cc81563a7a017))
+* **docs:** archived documents ([92aea75](https://github.com/cosmicspork/tracon/commit/92aea7582af2c67091623d851ee0a6dd9a1adbfc))
+* **docs:** export the corpus to a directory on a timer ([fdcb458](https://github.com/cosmicspork/tracon/commit/fdcb458b5c12ffe82d1eb750c057f5c175afd06f))
+* **docs:** export the corpus to a directory on a timer ([12e3e43](https://github.com/cosmicspork/tracon/commit/12e3e4330fd65cfdd189f35a04ea9cfb3bbcce2f))
+* immutable candidate evidence for review ([#160](https://github.com/cosmicspork/tracon/issues/160)) ([4269178](https://github.com/cosmicspork/tracon/commit/426917819f3b30e9cdfc7320116e9a03b746ae1c))
+* **metrics:** measure time to verified work, setup failures, and waiting ([#155](https://github.com/cosmicspork/tracon/issues/155)) ([22d55a7](https://github.com/cosmicspork/tracon/commit/22d55a7ee94b8d7a996ad9982c5814c70af819ee))
+* **onboarding:** put local runtime readiness first ([#153](https://github.com/cosmicspork/tracon/issues/153)) ([fdc585e](https://github.com/cosmicspork/tracon/commit/fdc585e6806d50ad5740a6ac9aac9cf97b1b35f4))
+* operator intervention tools ([#154](https://github.com/cosmicspork/tracon/issues/154)) ([b42b5b6](https://github.com/cosmicspork/tracon/commit/b42b5b6adef035edc441041d7172bf681eb97429))
+* optional workflow and real pause/stop controls ([#159](https://github.com/cosmicspork/tracon/issues/159)) ([ae258ef](https://github.com/cosmicspork/tracon/commit/ae258ef921b8d8fbc5aec42d5be4ffe6e763a8a0))
+* **permissions:** edit a brokered tool call's arguments on its card ([08f1350](https://github.com/cosmicspork/tracon/commit/08f1350aa5755d93c4a4d3442a676b6fdaf430ad))
+* **permissions:** edit a brokered tool call's arguments on its card ([a3d26f3](https://github.com/cosmicspork/tracon/commit/a3d26f38d2def6563e373a59161e5ff8854a6d2b))
+* **policy:** argument-scoped allow rules; bundle v6 ([15427ce](https://github.com/cosmicspork/tracon/commit/15427ce807675bd68ecfe286f058fecb607097c3))
+* **policy:** argument-scoped allow rules; bundle v6 ([769bae7](https://github.com/cosmicspork/tracon/commit/769bae705f7eb39f6d319bf4bbb5ecf431deabab))
+* provenance-verified releases and paginated forge listings ([#157](https://github.com/cosmicspork/tracon/issues/157)) ([0f3bf6c](https://github.com/cosmicspork/tracon/commit/0f3bf6ca5d24674ddd28217bb7c4c38c87e9e37b))
+* **review:** an external harness submits its own worktree for review ([8a1cc42](https://github.com/cosmicspork/tracon/commit/8a1cc4245096a3ac908b9944413b35e27549bbca))
+* **review:** an external harness submits its own worktree for review ([b9f9b4d](https://github.com/cosmicspork/tracon/commit/b9f9b4da2c0926e6077a3f79b07aaeab3da9a71c))
+* runtime-owned workspaces without host bind mounts ([#158](https://github.com/cosmicspork/tracon/issues/158)) ([f02995d](https://github.com/cosmicspork/tracon/commit/f02995d80bb5047c9d1fc0f2fdae793fc7067eb0))
+* scoped authority grants for consequential actions ([#156](https://github.com/cosmicspork/tracon/issues/156)) ([88a6c72](https://github.com/cosmicspork/tracon/commit/88a6c7221cf70e3cc6cb04da637488249a0542a4))
+* **service:** the unit runs the binary that installed it; the node starts the podman machine ([fc2c579](https://github.com/cosmicspork/tracon/commit/fc2c579a14a808bfc61cff5f9755a24df784fe8b))
+* **service:** the unit runs the binary that installed it; the node starts the podman machine ([db637cb](https://github.com/cosmicspork/tracon/commit/db637cbd76b05757bb15b74399c1c8f40db42540))
+* **tools:** consulta profiles within a channel ([a7f707e](https://github.com/cosmicspork/tracon/commit/a7f707eb361798f8978436b1317fa85442022139))
+* **tools:** consulta profiles within a channel ([bbe7e74](https://github.com/cosmicspork/tracon/commit/bbe7e741e0e15abb38ad83d3fb4a1ec608d66cb7))
+* **tools:** github pr_status, pr_comment, run_status ([829b9cf](https://github.com/cosmicspork/tracon/commit/829b9cfec5edd4e9623e79cb2dd0946f23cd3d59))
+* **tools:** github pr_status, pr_comment, run_status ([7f43ff9](https://github.com/cosmicspork/tracon/commit/7f43ff92ad01c1a3c0e8273a2c50c39cd455d036))
+* **tools:** jira issue search and gitlab pipelines ([7660a03](https://github.com/cosmicspork/tracon/commit/7660a03bc489e4a9bad32a125eecb06fb9ae5439))
+* **tools:** jira issue search and gitlab pipelines ([115f9ab](https://github.com/cosmicspork/tracon/commit/115f9abfabbfc6261d153807404b43e0d39ecce0))
+
+
+### Bug Fixes
+
+* **ci:** release test database lock before await ([23e495b](https://github.com/cosmicspork/tracon/commit/23e495b82bd7fe31c0f5cd81a1dcf7e5f98fda51))
+* **gateway:** shape Anthropic subscription requests as the token demands ([#166](https://github.com/cosmicspork/tracon/issues/166)) ([cab972b](https://github.com/cosmicspork/tracon/commit/cab972bd818cf8d9ea129b4a108706327cdaaade))
+* **omp:** pin models.yml so a probe's token cannot shadow a session's ([#165](https://github.com/cosmicspork/tracon/issues/165)) ([3531835](https://github.com/cosmicspork/tracon/commit/3531835b87fc382e162d4f67dc5a6be7a0935837))
+
 ## [0.14.0](https://github.com/cosmicspork/tracon/compare/v0.13.1...v0.14.0) (2026-09-09)
 
 
