@@ -271,6 +271,42 @@ fn a_self_hosted_provider_is_openai_compatible_with_an_explicit_base_url() {
     );
 }
 
+/// **Finding 19, in the rendering.** The gateway URL has to be in `api` as
+/// well as in `options.baseURL`, in the provider entry and in the catalogue —
+/// provider and model both. The session path the adapter drives resolves a
+/// model's endpoint from the catalogue, and a provider carrying only
+/// `options.baseURL` was served from the provider's own default host with the
+/// gateway bypassed entirely. The live test that observed that needs the
+/// pinned binary; this one does not, so the regression cannot reach a machine
+/// that has no binary to catch it.
+#[test]
+fn the_gateway_url_is_in_every_field_a_base_url_is_resolved_from() {
+    let rendered = render(&every_shape());
+    for (name, npm) in [
+        ("anthropic", "@ai-sdk/anthropic"),
+        ("openai", "@ai-sdk/openai"),
+        ("openai-codex", "@ai-sdk/openai"),
+        ("local", "@ai-sdk/openai-compatible"),
+    ] {
+        let url = format!("http://tracon-gw:7421/model/{name}/v1");
+        let provider = &rendered.config["provider"][name];
+        assert_eq!(provider["options"]["baseURL"], url, "{name} config options");
+        assert_eq!(provider["api"], url, "{name} config api");
+        let catalogue = &rendered.catalogue[name];
+        assert_eq!(catalogue["api"], url, "{name} catalogue provider");
+        for (model, entry) in catalogue["models"].as_object().unwrap() {
+            assert_eq!(entry["provider"]["api"], url, "{name}/{model} catalogue");
+            assert_eq!(entry["provider"]["npm"], npm, "{name}/{model} catalogue");
+        }
+    }
+    // And no provider's own host appears anywhere in what the runner reads.
+    for written in [rendered.config.to_string(), rendered.catalogue.to_string()] {
+        assert!(!written.contains("api.anthropic.com"), "{written}");
+        assert!(!written.contains("api.openai.com"), "{written}");
+        assert!(!written.contains("chatgpt.com"), "{written}");
+    }
+}
+
 /// Everything this node does not serve is disabled by name as well as absent.
 /// `amazon-bedrock` is the one that matters most: its credential chain can
 /// reach the instance metadata service at 169.254.169.254 if any AWS variable
