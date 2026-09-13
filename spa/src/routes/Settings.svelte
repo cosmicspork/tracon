@@ -537,7 +537,7 @@
       {/each}
     </div>
     <div class="grid">
-      <label><span>Action</span><select bind:value={grant.action} disabled={!local}><option value="merge">merge</option><option value="publish">publish</option><option value="ticket_transition">ticket transition</option><option value="deploy">deploy</option></select></label>
+      <label><span>Action</span><select bind:value={grant.action} disabled={!local}><option value="merge">merge</option><option value="publish">publish</option><option value="ticket_transition">ticket transition</option><option value="deploy">deploy</option><option value="terminal">terminal</option></select></label>
       <label><span>Decision</span><select bind:value={grant.verdict} disabled={!local}><option value="allow">allow</option><option value="ask">ask</option><option value="deny">deny</option></select></label>
       <label><span>Canonical target</span><input bind:value={grant.target} disabled={!local} placeholder="github:owner/repo:pr:42" /></label>
       <label><span>Channel</span><input bind:value={grant.channel} disabled={!local} placeholder={store.node?.default_channel ?? 'personal'} /></label>
@@ -546,6 +546,9 @@
       <label><span>Expires at (optional)</span><input type="datetime-local" value={grant.expires_ms ? new Date(grant.expires_ms).toISOString().slice(0, 16) : ''} onchange={(e) => grant.expires_ms = e.currentTarget.value ? Date.parse(e.currentTarget.value) : null} disabled={!local} /></label>
       <label><span>Reason</span><input bind:value={grant.reason} disabled={!local} placeholder="why this precise action is permitted" /></label>
     </div>
+    {#if grant.action === 'terminal'}
+      <p class="why">A terminal grant opens an interactive shell inside one session's workspace. Target is <code>terminal:&lt;session id&gt;:&lt;workspace path&gt;</code> and the session field is required, because the grant is of a terminal in that directory. It is not a per-command ledger: everything typed at the prompt afterwards runs without a further decision and raises no tool call. The node records that a terminal was opened, with what shell and where, and how much traffic crossed it — not what was run in it.</p>
+    {/if}
     <div class="acts"><button class="btn p" onclick={saveGrant} disabled={!local || busy !== ''}>Add scoped grant</button></div>
     {#if authority.grants.length}
       <div class="credentials">

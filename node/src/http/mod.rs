@@ -236,6 +236,19 @@ pub fn router(state: AppState) -> Router {
         // deliberately: the same cookie, Origin and Host checks as every other
         // operator route answer first, and the harness credential is injected
         // on the node so the browser never holds it.
+        // The terminal's WebSocket, ahead of the catch-all because an upgrade
+        // has to be taken from the request before its body is, and the
+        // catch-all buffers the body. It re-asks everything the catch-all
+        // would have: the route table, the session, the capability — and then
+        // the ticket and the origin only an upgrade needs.
+        .route(
+            "/api/opencode/{session_id}/pty/{pty_id}/connect",
+            get(crate::gateway::pty::connect),
+        )
+        .route(
+            "/api/opencode/{session_id}/api/pty/{pty_id}/connect",
+            get(crate::gateway::pty::connect),
+        )
         .route(
             "/api/opencode/{session_id}/{*rest}",
             axum::routing::any(crate::gateway::opencode::handle),

@@ -72,6 +72,13 @@ sqlparser = "0.59"
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
+# The client half of the terminal proxy: the browser's WebSocket is axum's,
+# the harness's is this. No TLS features — the upstream is a loopback publish
+# or a pod address the node resolved itself, never a public endpoint.
+tokio-tungstenite = { version = "0.29", default-features = false, features = [
+    "connect",
+    "handshake",
+] }
 tokio-util.workspace = true
 toml.workspace = true
 tower-http.workspace = true
