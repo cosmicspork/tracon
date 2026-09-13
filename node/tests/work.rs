@@ -71,6 +71,7 @@ fn session_row(id: &str, item: Option<&str>) -> SessionRow {
         ended_mono_ms: None,
         updated_ms: now_ms(),
         archived_ms: None,
+        manifest_digest: None,
     }
 }
 

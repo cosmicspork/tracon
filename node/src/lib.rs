@@ -15,6 +15,7 @@ pub mod gateway;
 pub mod git_remote;
 pub mod git_tree;
 pub mod http;
+pub mod manifest;
 pub mod mcp;
 pub mod mesh;
 pub mod metrics;

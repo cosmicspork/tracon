@@ -4457,6 +4457,179 @@ pub async fn put_config(
     })))
 }
 
+/// The launch manifest an operator customizes a channel with, and what the
+/// next launch would build from it.
+///
+/// Two things are shown rather than one: the *effective selection* — what is
+/// in the store right now, with every warning the import recorded — and the
+/// manifest it builds into, with its revision and digest. When those cannot
+/// be reconciled the build error is shown in place of the manifest, because a
+/// manifest that will not build is a launch that will fail, and an operator
+/// should see that here rather than when a session refuses to start.
+pub async fn get_manifest(
+    State(s): State<AppState>,
+    Query(q): Query<ChannelQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let channel = q.channel();
+    let items = s.store().manifest_items(&channel)?;
+    let recorded = s.store().manifest_latest(&channel)?;
+    let built = build_manifest(&s, &channel);
+    Ok(Json(json!({
+        "channel": channel,
+        "items": items,
+        "recorded": recorded,
+        "next": built.as_ref().ok(),
+        "error": built.as_ref().err(),
+        // The image's side of the agreement, so the pane can say why a plugin
+        // name was refused without the operator having to read node.toml.
+        "baked_plugins": crate::adapter::baked_plugins(&s.cfg.harness.id),
+    })))
+}
+
+/// Build a channel's manifest the way a launch would, without launching. The
+/// provider set is the node's whole declaration rather than one session's
+/// wiring: a session narrows it to what its channel can spend on, and this
+/// pane is about the customization, not about one session's bindings.
+///
+/// The configuration read here is the *running* node's, not node.toml on disk.
+/// A launch builds its manifest from the Arc this node took at startup, so
+/// showing the file would show a manifest no session would get. An edit to
+/// `[launch]` therefore appears here after the restart `PUT /api/config`
+/// already says is owed, which is the same answer that endpoint gives.
+fn build_manifest(s: &AppState, channel: &str) -> Result<crate::manifest::LaunchManifest, String> {
+    let (skills, instructions, agents) = s
+        .store()
+        .manifest_contents(channel)
+        .map_err(|e| e.to_string())?;
+    let cfg = &s.cfg;
+    crate::manifest::build(crate::manifest::Inputs {
+        channel,
+        skills,
+        instructions,
+        agents,
+        plugins: &cfg.launch.plugins,
+        baked: &crate::adapter::baked_plugins(&cfg.harness.id),
+        lsp: crate::manifest::toolchain_lsp(&cfg.harness.id),
+        formatters: crate::manifest::toolchain_formatters(&cfg.harness.id),
+        providers: cfg.providers.keys().cloned().collect(),
+        policy_revision: s.manager.policy_version().to_string(),
+    })
+    .map_err(|e| e.to_string())
+}
+
+#[derive(Deserialize)]
+pub struct ChannelQuery {
+    pub channel: Option<String>,
+}
+
+impl ChannelQuery {
+    fn channel(&self) -> String {
+        self.channel
+            .clone()
+            .filter(|c| !c.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_CHANNELS[0].to_string())
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SkillImportBody {
+    /// A directory on the node's own machine, or `<directory>#<git-rev>`.
+    pub source: String,
+    pub channel: Option<String>,
+}
+
+/// Import a skill package. Loopback only, and for the reason `put_config` is:
+/// this reads a directory on the node's own machine and puts its contents
+/// where a harness will execute them.
+pub async fn post_skill(
+    _: super::auth::Loopback,
+    State(s): State<AppState>,
+    Json(body): Json<SkillImportBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let channel = body
+        .channel
+        .clone()
+        .filter(|c| !c.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CHANNELS[0].to_string());
+    let source = crate::manifest::parse_source(&body.source)
+        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    let entry = crate::manifest::read_package(&source)
+        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    // Refuse a name that already belongs to a *different* package before
+    // writing. Re-importing the same source is an operator updating a package
+    // they changed, and that is the only case where a name may be reused.
+    for existing in s.store().manifest_items(&channel)? {
+        if existing.kind == crate::store::KIND_SKILL
+            && existing.name == entry.name
+            && existing.source != entry.source
+        {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!(
+                    "`{}` is already imported on `{channel}` from {}. OpenCode resolves two \
+                     skills of one name by overwriting one of them nondeterministically, so \
+                     this node keeps one: remove it first, or rename this package.",
+                    entry.name, existing.source
+                ),
+            ));
+        }
+    }
+    s.store().manifest_put_skill(&channel, &entry)?;
+    Ok(Json(json!({
+        "channel": channel,
+        "name": entry.name,
+        "digest": entry.digest,
+        "source": entry.source,
+        "files": entry.files.iter().map(|f| &f.path).collect::<Vec<_>>(),
+        "warnings": entry.warnings,
+        // Nothing running changes: the next launch on this channel builds a
+        // new revision, and the sessions already up keep the one they staged.
+        "applies_at": "next launch",
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct ManifestTextBody {
+    pub kind: String,
+    pub name: String,
+    pub body: String,
+    pub channel: Option<String>,
+}
+
+/// Add or replace a standing instruction or an agent definition.
+pub async fn put_manifest_text(
+    _: super::auth::Loopback,
+    State(s): State<AppState>,
+    Json(body): Json<ManifestTextBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let channel = body
+        .channel
+        .clone()
+        .filter(|c| !c.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CHANNELS[0].to_string());
+    s.store()
+        .manifest_put_text(&channel, &body.kind, &body.name, &body.body)
+        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    Ok(Json(json!({ "channel": channel, "name": body.name })))
+}
+
+/// Remove one item from a channel's manifest.
+pub async fn delete_manifest_item(
+    _: super::auth::Loopback,
+    State(s): State<AppState>,
+    Path((kind, name)): Path<(String, String)>,
+    Query(q): Query<ChannelQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let channel = q.channel();
+    if !s.store().manifest_remove(&channel, &kind, &name)? {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("`{name}` is not a {kind} on `{channel}`"),
+        ));
+    }
+    Ok(Json(json!({ "channel": channel, "removed": name })))
+}
+
 #[derive(Deserialize)]
 pub struct HubBody {
     pub hub_url: String,

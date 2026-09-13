@@ -602,6 +602,7 @@ mod tests {
             ended_mono_ms: None,
             updated_ms: now_ms(),
             archived_ms: None,
+            manifest_digest: None,
         };
         row.id = id.into();
         store.insert_session(&row).unwrap();

@@ -8,6 +8,7 @@
   // the reason, never hidden.
   import { onMount } from 'svelte'
   import CredentialSettings from '../components/CredentialSettings.svelte'
+  import LaunchManifest from '../components/LaunchManifest.svelte'
   import ModelPicker from '../components/ModelPicker.svelte'
   import { api } from '../lib/api'
   import {
@@ -565,7 +566,10 @@
   {:else}<div class="empty">Reading signed policy and local grants…</div>{/if}
 </section>
 
-<!-- 4. The channels, what each runs, and which are still in use. -->
+<!-- 4. What its sessions are customized with, per channel. -->
+<LaunchManifest />
+
+<!-- 5. The channels, what each runs, and which are still in use. -->
 <section>
   <div class="h5">
     Channels <b>create channels, choose Plan and Execute defaults, and archive or restore them</b>
@@ -642,7 +646,7 @@
   {/if}
 </section>
 
-<!-- 5. Who may reach it. -->
+<!-- 6. Who may reach it. -->
 <section>
   <div class="h5">Access</div>
   <div class="field access-field">
@@ -691,7 +695,7 @@
   {/if}
 </section>
 
-<!-- 6. The hub: how this node and your others reach each other. -->
+<!-- 7. The hub: how this node and your others reach each other. -->
 <section id="mesh">
   <div class="h5">
     Hub <b>{hubState}</b>

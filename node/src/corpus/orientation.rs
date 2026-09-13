@@ -38,6 +38,12 @@ pub struct Facts<'a> {
     pub ready: &'a [WorkView],
     /// For a review session: the review to read.
     pub review: Option<&'a ReviewRow>,
+    /// The channel's launch manifest. Its instructions and agents are told to
+    /// the session here rather than written into the harness's own
+    /// `instructions` key: the node already has one place a session's
+    /// standing text goes, and instruction content grants no permission on
+    /// either path.
+    pub manifest: &'a crate::manifest::LaunchManifest,
 }
 
 /// A diff longer than this is cut; the reviewer has the worktree and git.
@@ -71,6 +77,14 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, bool)
             }
             out.push_str(&format!("### {} (`{}`)\n\n{}\n\n", g.title, g.slug, body));
         }
+    }
+
+    // 1b. What the operator customized this channel's launches with. After
+    //     the conventions and before the node's own facts: it is the
+    //     operator's standing text, and it is not about this node.
+    let customization = facts.manifest.orientation();
+    if !customization.is_empty() {
+        out.push_str(&customization);
     }
 
     // 2. This node.
@@ -310,6 +324,7 @@ mod tests {
             plan_body: None,
             ready: &[],
             review: None,
+            manifest: &crate::manifest::LaunchManifest::default(),
         };
         let (text, trimmed) = assemble(&store, &Policy::shipped(), &facts);
         assert!(!trimmed);
@@ -359,6 +374,7 @@ mod tests {
             plan_body: None,
             ready: &[],
             review: None,
+            manifest: &crate::manifest::LaunchManifest::default(),
         };
         let (text, trimmed) = assemble(&store, &Policy::default(), &facts);
         assert!(trimmed);

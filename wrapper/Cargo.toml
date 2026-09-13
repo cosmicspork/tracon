@@ -1,6 +1,13 @@
 # Its own workspace, deliberately: building this needs webkit2gtk and gtk
 # development headers, and the node and hub must stay buildable on a machine
 # that has neither. `cargo test` at the repo root never reaches here.
+#
+# The root manifest excludes `wrapper`, which settles it for a plain checkout.
+# It does not settle it for a git worktree made under the repo, where this path
+# is not the excluded one and cargo adopts the workspace above instead. Saying
+# it here makes the wrapper its own root wherever it is checked out.
+[workspace]
+
 [package]
 name = "tracon-wrapper"
 version = "0.15.1"

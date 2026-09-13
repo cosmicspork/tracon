@@ -16,7 +16,7 @@ use axum::{
     http::{HeaderName, HeaderValue},
     middleware::{self, Next},
     response::Response,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 use tower_http::trace::TraceLayer;
@@ -67,6 +67,17 @@ pub fn router(state: AppState) -> Router {
         .route("/api/boundary/check", post(api::recheck_boundary))
         .route("/api/boundary/setup", post(api::run_setup))
         .route("/api/config", get(api::get_config).put(api::put_config))
+        // The launch manifest: what an operator customizes a channel's
+        // sessions with. Reading it is an ordinary operator read; every write
+        // is loopback-only at the handler, because all three put code where a
+        // harness will run it.
+        .route("/api/manifest", get(api::get_manifest))
+        .route("/api/manifest/skills", post(api::post_skill))
+        .route("/api/manifest/text", put(api::put_manifest_text))
+        .route(
+            "/api/manifest/{kind}/{name}",
+            delete(api::delete_manifest_item),
+        )
         .route(
             "/api/authority/grants",
             get(api::list_authority_grants).post(api::create_authority_grant),

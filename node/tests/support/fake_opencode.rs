@@ -114,6 +114,11 @@ pub struct Fake {
     /// before listening. A client that does not read them is what proves the
     /// proxy's buffer bound.
     flood: Arc<AtomicUsize>,
+    /// How many `/config/providers` requests answer with an empty catalogue
+    /// before the real one appears. The pinned binary answers `/global/health`
+    /// before its providers have loaded, and a prompt sent in that window is
+    /// admitted and then never run.
+    catalogue_late: Arc<AtomicUsize>,
 }
 
 impl Fake {
@@ -133,12 +138,20 @@ impl Fake {
             messages: Arc::new(Mutex::new(Vec::new())),
             live_tickets: Arc::new(Mutex::new(Vec::new())),
             flood: Arc::new(AtomicUsize::new(0)),
+            catalogue_late: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     /// A terminal that produces output faster than any client reads it.
     pub fn flooding(self, frames: usize) -> Self {
         self.flood.store(frames, Ordering::SeqCst);
+        self
+    }
+
+    /// A server whose catalogue settles only after `requests` answers: the
+    /// shape the pinned binary actually has at startup.
+    pub fn catalogue_late(self, requests: usize) -> Self {
+        self.catalogue_late.store(requests, Ordering::SeqCst);
         self
     }
 
@@ -317,7 +330,15 @@ pub fn app(fake: Fake) -> Router {
         )
         .route(
             "/config/providers",
-            get(|State(_fake): State<Fake>| async move {
+            get(|State(fake): State<Fake>| async move {
+                // Count down rather than gate on a clock: the adapter polls,
+                // and a test that asserts on "it waited" must not depend on
+                // how fast the machine running it is.
+                let remaining = fake.catalogue_late.load(Ordering::SeqCst);
+                if remaining > 0 {
+                    fake.catalogue_late.store(remaining - 1, Ordering::SeqCst);
+                    return Json(json!({ "providers": [] }));
+                }
                 Json(json!({
                     "providers": [{
                         "id": "anthropic",
