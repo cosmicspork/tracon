@@ -190,7 +190,7 @@ Findings originate from review of `2e32a59`; revalidate against the implementati
 - [ ] Verify unsent-text durability and spending/usage accounting.
 - [ ] Exercise real Podman/Kubernetes project workflows; API fixtures and boundary probes alone are insufficient.
 - [ ] Preserve a usable direct-harness recovery path and portable corpus exports; vectors remain rebuildable derived data.
-- [ ] Pin harness versions and record per-session compatibility; reject unsupported protocol versions explicitly.
+- [x] Pin harness versions and record per-session compatibility; reject unsupported protocol versions explicitly.
 
 ## Deferred
 

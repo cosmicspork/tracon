@@ -7,8 +7,9 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    AdapterError, HarnessAdapter, HarnessEvent, HarnessHandle, HarnessVersion, LaunchSpec,
-    LiftedToken, LoginFlow, ModelOption, PermissionReply, PermissionRequest, TurnResult,
+    AdapterError, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle, HarnessVersion,
+    LaunchSpec, LiftedToken, LoginFlow, ModelOption, PermissionReply, PermissionRequest,
+    ProtocolSupport, TurnResult,
 };
 use crate::acp::{
     rpc::{Incoming, Peer},
@@ -25,6 +26,20 @@ pub struct OmpAdapter {
 
 impl OmpAdapter {
     pub const ID: &'static str = "omp";
+
+    /// The version this node's harness image installs, and therefore the
+    /// version the node drives unless the operator pins another one and builds
+    /// an image to match. `containers/harness/Containerfile` fetches exactly
+    /// this release at exactly one digest; `the_image_installs_the_pinned_omp`
+    /// keeps the two from drifting apart.
+    pub const PINNED_VERSION: &'static str = "18.0.4";
+
+    /// ACP, at the versions `crate::acp::types` was written against.
+    pub const PROTOCOL: ProtocolSupport = ProtocolSupport {
+        name: "acp",
+        min: crate::acp::types::PROTOCOL_MIN,
+        max: crate::acp::types::PROTOCOL_MAX,
+    };
 
     pub fn new(pinned: impl Into<String>) -> Self {
         Self {
@@ -109,6 +124,10 @@ impl HarnessAdapter for OmpAdapter {
 
     fn pinned_version(&self) -> &str {
         &self.pinned
+    }
+
+    fn protocol(&self) -> ProtocolSupport {
+        Self::PROTOCOL
     }
 
     /// omp reads its provider override from its state directory, and the
@@ -225,6 +244,7 @@ impl HarnessAdapter for OmpAdapter {
             peer,
             session_id: sid,
             barrier_tx,
+            compat: session.compat(&self.pinned),
         };
         tokio::spawn(session.pump(event_tx, barrier_rx));
         Ok((Box::new(handle), event_rx))
@@ -401,6 +421,10 @@ struct OmpSession {
     session_id: String,
     config_options: Vec<types::ConfigOption>,
     agent_version: Option<String>,
+    agent_name: Option<String>,
+    /// The version the agent answered `initialize` with, already checked
+    /// against `OmpAdapter::PROTOCOL`.
+    protocol_version: u32,
 }
 
 /// Await a handshake request while draining inbound traffic into `buffered`.
@@ -490,7 +514,22 @@ impl OmpSession {
             peer.request(methods::INITIALIZE, &types::InitializeParams::node()),
         )
         .await?;
-        let agent_version = init.agent_info.map(|a| a.version);
+        let (agent_name, agent_version) = match init.agent_info {
+            Some(info) => (Some(info.name), Some(info.version)),
+            None => (None, None),
+        };
+        // Before `session/new`, because every shape after this point — the
+        // session id, the updates, the permission requests — is protocol 1's.
+        // An agent that answered with another version is refused here rather
+        // than driven until something fails to decode mid-turn.
+        if !OmpAdapter::PROTOCOL.accepts(init.protocol_version) {
+            return Err(AdapterError::IncompatibleProtocol {
+                agent: agent_name.unwrap_or_else(|| OmpAdapter::ID.into()),
+                protocol: OmpAdapter::PROTOCOL.name,
+                found: init.protocol_version.to_string(),
+                supported: OmpAdapter::PROTOCOL.versions(),
+            });
+        }
 
         let new: types::NewSessionResult = drain_until(
             &mut incoming,
@@ -515,7 +554,23 @@ impl OmpSession {
             session_id: new.session_id,
             config_options: new.config_options,
             agent_version,
+            agent_name,
+            protocol_version: init.protocol_version,
         })
+    }
+
+    fn compat(&self, pinned: &str) -> HarnessCompat {
+        HarnessCompat {
+            agent: self
+                .agent_name
+                .clone()
+                .unwrap_or_else(|| OmpAdapter::ID.into()),
+            version: self
+                .agent_version
+                .clone()
+                .unwrap_or_else(|| pinned.to_string()),
+            protocol: OmpAdapter::PROTOCOL.tag(self.protocol_version),
+        }
     }
 
     fn model_options(&self) -> Vec<ModelOption> {
@@ -750,12 +805,17 @@ struct OmpHandle {
     peer: Peer,
     session_id: String,
     barrier_tx: mpsc::Sender<oneshot::Sender<()>>,
+    compat: HarnessCompat,
 }
 
 #[async_trait]
 impl HarnessHandle for OmpHandle {
     fn harness_session_id(&self) -> &str {
         &self.session_id
+    }
+
+    fn compat(&self) -> HarnessCompat {
+        self.compat.clone()
     }
 
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError> {

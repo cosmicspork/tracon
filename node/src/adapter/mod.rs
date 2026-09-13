@@ -54,14 +54,33 @@ const OMP_LAYOUT: Layout = Layout {
 /// node that will not start.
 pub fn adapter_for(cfg: &Config) -> Result<Arc<dyn HarnessAdapter>, AdapterError> {
     match cfg.harness.id.as_str() {
-        omp::OmpAdapter::ID => Ok(Arc::new(omp::OmpAdapter::new(cfg.harness.version.clone()))),
-        claude::ClaudeAdapter::ID => Ok(Arc::new(claude::ClaudeAdapter::new(
-            cfg.harness.version.clone(),
-        ))),
+        omp::OmpAdapter::ID => Ok(Arc::new(omp::OmpAdapter::new(pinned_version(cfg)))),
+        claude::ClaudeAdapter::ID => Ok(Arc::new(claude::ClaudeAdapter::new(pinned_version(cfg)))),
         other => Err(AdapterError::Protocol(format!(
             "no adapter for harness `{other}`; this node knows {}",
             KNOWN.join(", ")
         ))),
+    }
+}
+
+/// The version this node pins its harness to. An unset version is not "run
+/// whatever is on PATH": it is the version this node's own harness image
+/// installs, which is the same string the image build reads. Both are checked
+/// against what the harness reports, so an image built elsewhere still fails.
+pub fn pinned_version(cfg: &Config) -> String {
+    let configured = cfg.harness.version.trim();
+    if !configured.is_empty() {
+        return configured.to_string();
+    }
+    image_version(&cfg.harness.id).to_string()
+}
+
+/// The version the harness image for `harness_id` installs.
+pub fn image_version(harness_id: &str) -> &'static str {
+    if harness_id == claude::ClaudeAdapter::ID {
+        claude::ClaudeAdapter::PINNED_VERSION
+    } else {
+        omp::OmpAdapter::PINNED_VERSION
     }
 }
 
@@ -75,6 +94,55 @@ impl HarnessVersion {
     pub fn matches(&self) -> bool {
         self.found == self.pinned
     }
+}
+
+/// The wire protocol an adapter drives, and the versions of it it will drive.
+///
+/// A harness that answers the handshake with a version outside this range is
+/// refused rather than driven on the chance that the shapes still line up: the
+/// adapter's request and response types were read from one version of one
+/// protocol, and a session that proceeds on luck produces a transcript nobody
+/// can interpret afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtocolSupport {
+    /// What the protocol is called on the wire: `acp`, `claude-stream-json`.
+    pub name: &'static str,
+    pub min: u32,
+    pub max: u32,
+}
+
+impl ProtocolSupport {
+    pub fn accepts(&self, version: u32) -> bool {
+        version >= self.min && version <= self.max
+    }
+
+    /// The versions, for a message an operator reads: `1` or `1-3`.
+    pub fn versions(&self) -> String {
+        if self.min == self.max {
+            self.min.to_string()
+        } else {
+            format!("{}-{}", self.min, self.max)
+        }
+    }
+
+    /// `acp/1` — what a session records as the contract it ran under.
+    pub fn tag(&self, version: u32) -> String {
+        format!("{}/{version}", self.name)
+    }
+}
+
+/// What the harness said about itself in the handshake, as opposed to what the
+/// node expected. Recorded on the session row so a transcript read months
+/// later can be interpreted against the thing that produced it, and so a
+/// mismatch is diagnosable from the row rather than only from a log line.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HarnessCompat {
+    /// The name the harness calls itself: `oh-my-pi`, not the node's `omp`.
+    pub agent: String,
+    /// The version the harness reported, which the pin was checked against.
+    pub version: String,
+    /// The protocol and version this session negotiated: `acp/1`.
+    pub protocol: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -166,6 +234,13 @@ pub enum AdapterError {
     NoPipe,
     #[error("version mismatch: found {found}, pinned {pinned}")]
     VersionMismatch { found: String, pinned: String },
+    #[error("harness {agent} reports {protocol} protocol {found}; this node supports {supported}")]
+    IncompatibleProtocol {
+        agent: String,
+        protocol: &'static str,
+        found: String,
+        supported: String,
+    },
     #[error("model {0:?} is not offered by the harness")]
     UnknownModel(String),
     #[error("{0}")]
@@ -214,6 +289,9 @@ impl std::fmt::Debug for LiftedToken {
 pub trait HarnessAdapter: Send + Sync {
     fn id(&self) -> &'static str;
     fn pinned_version(&self) -> &str;
+
+    /// The protocol this adapter drives, and the versions of it it accepts.
+    fn protocol(&self) -> ProtocolSupport;
 
     /// Where this harness keeps its state, and what it calls that place.
     fn layout(&self) -> Layout {
@@ -273,6 +351,9 @@ pub trait HarnessAdapter: Send + Sync {
 #[async_trait]
 pub trait HarnessHandle: Send + Sync {
     fn harness_session_id(&self) -> &str;
+    /// What the handshake that produced this handle reported. Available only
+    /// once the handshake succeeded, which is the only time it is true.
+    fn compat(&self) -> HarnessCompat;
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError>;
     async fn cancel(&self) -> Result<(), AdapterError>;
     /// Establish an adapter-specific ordering barrier after a turn response.
@@ -314,6 +395,82 @@ mod tests {
         };
         assert!(err.contains("opencode"), "{err}");
         assert!(err.contains("omp"), "{err}");
+    }
+
+    /// The pin has to be one fact, not two that happen to agree today: the
+    /// node checks what the harness reports against this constant, and the
+    /// image build fetches a release by the `ARG` below. If they drift, a node
+    /// running its own image refuses every session, and the reason ("found X,
+    /// pinned Y") reads like a broken harness rather than a stale constant.
+    fn container_arg(containerfile: &str, arg: &str) -> String {
+        let prefix = format!("ARG {arg}=");
+        containerfile
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("{arg} is set in the Containerfile"))
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn the_image_installs_the_pinned_omp() {
+        assert_eq!(
+            container_arg(
+                include_str!("../../../containers/harness/Containerfile"),
+                "OMP_VERSION"
+            ),
+            omp::OmpAdapter::PINNED_VERSION
+        );
+    }
+
+    #[test]
+    fn the_image_installs_the_pinned_claude() {
+        assert_eq!(
+            container_arg(
+                include_str!("../../../containers/harness-claude/Containerfile"),
+                "CLAUDE_VERSION"
+            ),
+            claude::ClaudeAdapter::PINNED_VERSION
+        );
+    }
+
+    /// An unset version is the image's, not "whatever is on PATH": the check
+    /// still runs, against the version this node's own image installs.
+    #[test]
+    fn an_unset_version_pins_to_what_the_image_installs() {
+        let mut cfg = Config::default();
+        cfg.harness.version = String::new();
+        cfg.harness.id = "claude".into();
+        let Ok(a) = adapter_for(&cfg) else {
+            panic!("claude has an adapter")
+        };
+        assert_eq!(a.pinned_version(), claude::ClaudeAdapter::PINNED_VERSION);
+        cfg.harness.id = "omp".into();
+        let Ok(a) = adapter_for(&cfg) else {
+            panic!("omp has an adapter")
+        };
+        assert_eq!(a.pinned_version(), omp::OmpAdapter::PINNED_VERSION);
+    }
+
+    #[test]
+    fn a_protocol_range_reads_as_one_version_or_a_span() {
+        let one = ProtocolSupport {
+            name: "acp",
+            min: 1,
+            max: 1,
+        };
+        assert!(one.accepts(1));
+        assert!(!one.accepts(0));
+        assert!(!one.accepts(2));
+        assert_eq!(one.versions(), "1");
+        assert_eq!(one.tag(1), "acp/1");
+        let span = ProtocolSupport {
+            name: "acp",
+            min: 1,
+            max: 3,
+        };
+        assert!(span.accepts(2));
+        assert_eq!(span.versions(), "1-3");
     }
 
     #[test]

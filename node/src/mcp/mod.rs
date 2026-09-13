@@ -35,8 +35,18 @@ use crate::{
 /// substring of name-plus-arguments for deny.
 pub const TOOL_KIND: &str = "tool";
 
-/// The MCP protocol version the node speaks.
+/// The MCP protocol version the node speaks, and announces to a client that
+/// names none.
 const PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// The revisions this server will serve, newest first. Its whole surface is
+/// `initialize`, `tools/list`, `tools/call` and `ping`, which are unchanged
+/// across these, so an older client is answered in its own revision rather
+/// than being told a newer number it did not ask for. A revision that is not
+/// on this list is refused by name: the only client here is a harness the node
+/// launched, and one speaking an unknown MCP is a compatibility fault worth
+/// seeing rather than a handshake to muddle through.
+const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 pub struct Tools {
     pub broker: SharedBroker,
@@ -941,11 +951,14 @@ impl Tools {
         let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         let result = match method {
-            "initialize" => Ok(json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "tracon", "version": env!("CARGO_PKG_VERSION") },
-            })),
+            "initialize" => match negotiate_protocol(&params) {
+                Ok(version) => Ok(json!({
+                    "protocolVersion": version,
+                    "capabilities": { "tools": { "listChanged": false } },
+                    "serverInfo": { "name": "tracon", "version": env!("CARGO_PKG_VERSION") },
+                })),
+                Err(e) => Err(e),
+            },
             "tools/list" => Ok(json!({ "tools": self.list_offered(ctx) })),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
@@ -965,6 +978,21 @@ impl Tools {
             }
         })
     }
+}
+
+/// The revision an `initialize` asks for, refused by name when it is not one
+/// this server serves. A client that names none gets this server's own.
+fn negotiate_protocol(params: &Value) -> Result<String, String> {
+    let Some(asked) = params.get("protocolVersion").and_then(Value::as_str) else {
+        return Ok(PROTOCOL_VERSION.to_string());
+    };
+    if SUPPORTED_PROTOCOL_VERSIONS.contains(&asked) {
+        return Ok(asked.to_string());
+    }
+    Err(format!(
+        "client announces MCP protocol {asked}; this node supports {}",
+        SUPPORTED_PROTOCOL_VERSIONS.join(", ")
+    ))
 }
 
 /// Consequential verbs carry their scope in arguments. This parser is strict:
@@ -1273,6 +1301,46 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"query") && names.contains(&"describe"));
+    }
+
+    /// The only client here is a harness this node launched. One announcing
+    /// an MCP revision the node does not serve is a compatibility fault worth
+    /// seeing: it is refused by name rather than answered with a version
+    /// number it did not ask for and cannot read.
+    #[tokio::test]
+    async fn an_unsupported_mcp_revision_is_refused_by_name() {
+        let t = tools(STORE);
+        let res = t
+            .handle(
+                &ctx("work"),
+                &json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+                        "params":{"protocolVersion":"2099-01-01"}}),
+            )
+            .await
+            .unwrap();
+        assert!(res["result"].is_null(), "{res}");
+        let message = res["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("2099-01-01"), "{message}");
+        assert!(message.contains(PROTOCOL_VERSION), "{message}");
+    }
+
+    /// A revision this server does serve is answered in that revision: the
+    /// surface is identical across them, and telling a client a number it did
+    /// not ask for is what makes it give up.
+    #[tokio::test]
+    async fn a_supported_mcp_revision_is_answered_in_its_own_terms() {
+        let t = tools(STORE);
+        for asked in SUPPORTED_PROTOCOL_VERSIONS {
+            let res = t
+                .handle(
+                    &ctx("work"),
+                    &json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+                            "params":{"protocolVersion":asked}}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res["result"]["protocolVersion"], asked, "{res}");
+        }
     }
 
     #[tokio::test]

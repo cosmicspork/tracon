@@ -16,7 +16,9 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tower::ServiceExt;
 
 use tracon::{
-    adapter::{AdapterError, HarnessEvent, HarnessHandle, PermissionReply, TurnResult},
+    adapter::{
+        AdapterError, HarnessAdapter, HarnessEvent, HarnessHandle, PermissionReply, TurnResult,
+    },
     config::Config,
     http::api::AppState,
     runner::Runner,
@@ -541,6 +543,9 @@ fn insert_running_session(store: &Arc<Store>, budget: i64) -> String {
             branch: "feat/x".into(),
             harness_id: "fake".into(),
             harness_version: "1.0.0".into(),
+            harness_agent: None,
+            harness_found: None,
+            harness_protocol: None,
             harness_session_id: None,
             container_name: None,
             model: "m/a".into(),
@@ -969,6 +974,13 @@ impl HarnessHandle for BlockingHandle {
     fn harness_session_id(&self) -> &str {
         "blocking"
     }
+    fn compat(&self) -> tracon::adapter::HarnessCompat {
+        tracon::adapter::HarnessCompat {
+            agent: "blocking".into(),
+            version: "1.0.0".into(),
+            protocol: "fake/1".into(),
+        }
+    }
     async fn prompt(&self, _text: String) -> Result<TurnResult, AdapterError> {
         std::future::pending().await
     }
@@ -1220,6 +1232,9 @@ async fn reconcile_after_restart_closes_a_managed_pause_but_keeps_an_external_on
             branch: String::new(),
             harness_id: "external".into(),
             harness_version: String::new(),
+            harness_agent: None,
+            harness_found: None,
+            harness_protocol: None,
             harness_session_id: None,
             container_name: None,
             model: String::new(),
@@ -1733,6 +1748,12 @@ struct Orientation {
 }
 
 async fn orientation(tag: &str) -> Orientation {
+    orientation_with(tag, None).await
+}
+
+/// Same, but with the adapter the session is started against — for the cases
+/// where what is under test is a launch that must not succeed.
+async fn orientation_with(tag: &str, launch_with: Option<Arc<dyn HarnessAdapter>>) -> Orientation {
     state::isolate();
     let dir = state::scratch(&format!("orientation-{tag}"));
     let repo = dir.join("repo");
@@ -1852,7 +1873,7 @@ async fn orientation(tag: &str) -> Orientation {
                 base_sha: None,
                 workspace_id: None,
             },
-            adapter.clone(),
+            launch_with.unwrap_or_else(|| adapter.clone()),
         )
         .await
         .unwrap();
@@ -2024,6 +2045,13 @@ impl tracon::adapter::HarnessAdapter for StallingAdapter {
     }
     fn pinned_version(&self) -> &str {
         "1.0.0"
+    }
+    fn protocol(&self) -> tracon::adapter::ProtocolSupport {
+        tracon::adapter::ProtocolSupport {
+            name: "fake",
+            min: 1,
+            max: 1,
+        }
     }
     async fn version(
         &self,
@@ -2368,4 +2396,184 @@ async fn a_late_completion_never_resurrects_a_stopped_session() {
         "closed",
         "and leaves it exactly as it was"
     );
+}
+
+/// A transcript is only interpretable against the thing that produced it, and
+/// the row is where that has to live: what the node expected of the harness,
+/// what the harness turned out to be, and the protocol revision the session
+/// negotiated — on the row, in the start event, and out of the API.
+#[tokio::test]
+async fn a_started_session_records_what_the_harness_turned_out_to_be() {
+    state::isolate();
+    let Orientation {
+        store,
+        manager,
+        cfg,
+        adapter,
+        tools,
+        row,
+        ..
+    } = orientation("compat").await;
+    for _ in 0..300 {
+        if store
+            .get_session(&row.id)
+            .unwrap()
+            .unwrap()
+            .harness_protocol
+            .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let started = store.get_session(&row.id).unwrap().unwrap();
+    assert_eq!(started.harness_id, "fake", "what the node ran");
+    assert_eq!(
+        started.harness_version, "1.0.0",
+        "what the node expected of it"
+    );
+    assert_eq!(started.harness_agent.as_deref(), Some("fake"));
+    assert_eq!(started.harness_found.as_deref(), Some("1.0.0"));
+    assert_eq!(started.harness_protocol.as_deref(), Some("fake/1"));
+
+    let start_event = store
+        .events_after(&row.id, 0, 500)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "session_started")
+        .expect("a started session logs that it started");
+    assert_eq!(start_event.payload["harness_agent"], "fake");
+    assert_eq!(start_event.payload["harness_version"], "1.0.0");
+    assert_eq!(start_event.payload["harness_expected"], "1.0.0");
+    assert_eq!(start_event.payload["harness_protocol"], "fake/1");
+
+    let app = tracon::http::router(tracon::http::api::AppState {
+        manager: manager.clone(),
+        cfg: cfg.clone(),
+        adapter: adapter.clone(),
+        node_id: "n1".into(),
+        tools: tools.clone(),
+        mesh: None,
+        auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
+        enroll: Default::default(),
+    });
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/sessions/{}", row.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["session"]["harness_agent"], "fake");
+    assert_eq!(body["session"]["harness_found"], "1.0.0");
+    assert_eq!(body["session"]["harness_protocol"], "fake/1");
+
+    tracon::session::materialize::remove(&row.id);
+}
+
+/// A harness whose handshake names a protocol this node was not written
+/// against.
+struct IncompatibleAdapter;
+
+#[async_trait]
+impl HarnessAdapter for IncompatibleAdapter {
+    fn id(&self) -> &'static str {
+        "fake"
+    }
+    fn pinned_version(&self) -> &str {
+        "1.0.0"
+    }
+    fn protocol(&self) -> tracon::adapter::ProtocolSupport {
+        tracon::adapter::ProtocolSupport {
+            name: "acp",
+            min: 1,
+            max: 1,
+        }
+    }
+    async fn version(
+        &self,
+        _r: &dyn Runner,
+    ) -> Result<tracon::adapter::HarnessVersion, AdapterError> {
+        Ok(tracon::adapter::HarnessVersion {
+            found: "1.0.0".into(),
+            pinned: "1.0.0".into(),
+        })
+    }
+    async fn probe_models(
+        &self,
+        _r: &dyn Runner,
+        _env: Vec<(String, String)>,
+    ) -> Result<Vec<tracon::adapter::ModelOption>, AdapterError> {
+        Ok(Vec::new())
+    }
+    async fn launch(
+        &self,
+        _runner: &dyn Runner,
+        _spec: tracon::adapter::LaunchSpec,
+    ) -> Result<
+        (
+            Box<dyn HarnessHandle>,
+            mpsc::Receiver<tracon::adapter::HarnessEvent>,
+        ),
+        AdapterError,
+    > {
+        Err(AdapterError::IncompatibleProtocol {
+            agent: "oh-my-pi".into(),
+            protocol: "acp",
+            found: "2".into(),
+            supported: "1".into(),
+        })
+    }
+}
+
+/// A harness speaking a protocol this node does not is not a session that went
+/// wrong; it is an image that does not match the node. The row ends
+/// `incompatible` rather than the generic `error`, names both sides in
+/// `last_error`, and the reason reaches anyone watching as an event.
+#[tokio::test]
+async fn a_harness_speaking_an_unsupported_protocol_fails_the_session_with_the_reason() {
+    state::isolate();
+    let Orientation { store, row, .. } =
+        orientation_with("incompatible", Some(Arc::new(IncompatibleAdapter))).await;
+    let mut ended = None;
+    for _ in 0..300 {
+        let s = store.get_session(&row.id).unwrap().unwrap();
+        if s.state == "failed" {
+            ended = Some(s);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let ended = ended.expect("an incompatible harness must fail the session");
+    assert_eq!(ended.end_reason.as_deref(), Some("incompatible"));
+    assert_eq!(
+        ended.last_error.as_deref(),
+        Some("harness oh-my-pi reports acp protocol 2; this node supports 1"),
+        "the row says which harness, which protocol, and what this node speaks"
+    );
+    // Nothing to record about a handshake that never landed.
+    assert_eq!(ended.harness_protocol, None);
+    let errors: Vec<String> = store
+        .events_after(&row.id, 0, 500)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "error")
+        .map(|e| e.payload["error"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("reports acp protocol 2") && e.contains("supports 1")),
+        "and a client watching sees it: {errors:?}"
+    );
+
+    tracon::session::materialize::remove(&row.id);
 }

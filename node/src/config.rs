@@ -725,7 +725,10 @@ pub struct Harness {
     #[serde(default)]
     pub tools: Vec<String>,
     /// Exact version this node runs. Checked twice: `omp --version` in the
-    /// runner, and `initialize.agentInfo.version` at session start.
+    /// runner, and `initialize.agentInfo.version` at session start. Empty
+    /// means the version this node's harness image installs — never "whatever
+    /// the image happens to contain", since the same string is what the image
+    /// build fetches and what both checks compare against.
     pub version: String,
 }
 
@@ -928,8 +931,8 @@ impl Default for Config {
             docs: Docs::default(),
             qa: Qa::default(),
             harness: Harness {
-                id: "omp".into(),
-                version: "18.0.4".into(),
+                id: crate::adapter::omp::OmpAdapter::ID.into(),
+                version: crate::adapter::omp::OmpAdapter::PINNED_VERSION.into(),
                 // Empty: see the field's note. The surface a session actually
                 // runs against is bounded by the boundary and by policy, both
                 // of which hold whatever the harness offers.

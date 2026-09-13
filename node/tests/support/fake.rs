@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
 
 use tracon::adapter::{
-    AdapterError, HarnessAdapter, HarnessEvent, HarnessHandle, HarnessVersion, LaunchSpec,
-    ModelOption, TurnResult,
+    AdapterError, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle, HarnessVersion,
+    LaunchSpec, ModelOption, ProtocolSupport, TurnResult,
 };
 use tracon::runner::Runner;
 
@@ -32,6 +32,13 @@ pub struct FakeHandle {
 impl HarnessHandle for FakeHandle {
     fn harness_session_id(&self) -> &str {
         "fake"
+    }
+    fn compat(&self) -> HarnessCompat {
+        HarnessCompat {
+            agent: "fake".into(),
+            version: "1.0.0".into(),
+            protocol: "fake/1".into(),
+        }
     }
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError> {
         self.prompts.lock().await.push(text);
@@ -62,6 +69,13 @@ impl HarnessAdapter for FakeAdapter {
     }
     fn pinned_version(&self) -> &str {
         "1.0.0"
+    }
+    fn protocol(&self) -> ProtocolSupport {
+        ProtocolSupport {
+            name: "fake",
+            min: 1,
+            max: 1,
+        }
     }
     async fn version(&self, _r: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
         Ok(HarnessVersion {

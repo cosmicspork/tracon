@@ -257,3 +257,38 @@ async fn a_session_takes_more_than_one_turn() {
         assert_eq!(r.stop_reason, "end_turn");
     }
 }
+
+/// Claude Code's stream-json carries no version field today, so absence means
+/// the revision these shapes were read from. A CLI that starts naming another
+/// one is refused with both sides in the reason rather than decoded on the
+/// chance that nothing moved.
+#[tokio::test]
+async fn a_stream_json_revision_the_node_does_not_speak_refuses_to_launch() {
+    state::isolate();
+    let a = ClaudeAdapter::new("2.1.247");
+    let spec = spec_env(vec![("FAKE_CLAUDE_PROTOCOL".into(), "4".into())]);
+    let err = match a.launch(&FakeRunner, spec).await {
+        Ok(_) => panic!("an unsupported protocol must not launch"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, AdapterError::IncompatibleProtocol { .. }),
+        "{err}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "harness claude reports claude-stream-json protocol 4; this node supports 1"
+    );
+}
+
+/// What a compatible handshake leaves behind for the session row.
+#[tokio::test]
+async fn a_compatible_handshake_reports_what_it_ran() {
+    state::isolate();
+    let a = ClaudeAdapter::new("2.1.247");
+    let (handle, _rx) = a.launch(&FakeRunner, spec()).await.unwrap();
+    let compat = handle.compat();
+    assert_eq!(compat.agent, "claude");
+    assert_eq!(compat.version, "2.1.247");
+    assert_eq!(compat.protocol, "claude-stream-json/1");
+}
