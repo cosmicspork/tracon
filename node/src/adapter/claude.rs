@@ -930,6 +930,7 @@ impl HarnessAdapter for ClaudeAdapter {
             mut stdin,
             stdout,
             done,
+            endpoint: _,
         } = spawned;
         let output = Arc::new(Mutex::new(String::new()));
         let mut lines = BufReader::new(stdout).lines();
