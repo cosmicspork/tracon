@@ -90,11 +90,10 @@ on the machine.
 
 | Claim | Where | What was observed |
 |---|---|---|
-| Provider traffic reaches the gateway and nothing else | `every_provider_call_arrives_at_the_gateway_on_an_allowlisted_path` | `POST …/model/anthropic/v1/messages` and `POST …/model/local/v1/chat/completions`, both on the shape's allowlist; replaying the same call through the gateway forwards it and the credential is injected |
-| Header bytes, runner → gateway | same | the Anthropic shape sends `anthropic-version: 2023-06-01` and `anthropic-beta`, the OpenAI-compatible shape `POST /v1/chat/completions`, and **neither sends a credential** (see finding 19) — so §2.6's question about *which* header the ai-sdk packages put a key in stays open on this path, because on it they put none |
-| Header bytes, gateway → provider | same | `x-api-key` for the Anthropic shape, `Authorization: Bearer` for the OpenAI-compatible one, with the placeholder nowhere in the request |
+| Provider traffic reaches the gateway and nothing else | `every_provider_call_arrives_at_the_gateway_on_an_allowlisted_path` | `POST …/model/anthropic/v1/messages` and `POST …/model/local/v1/chat/completions`, both on the shape's allowlist, both forwarded to the provider by the gateway with the real credential injected. The harness's own call, end to end — nothing in the test composes a request |
+| Header bytes (§2.6, confirmed on the wire) | same, and `the_runner_presents_its_session_token_and_never_a_provider_key` | the binary puts the placeholder in `x-api-key` for the Anthropic shape and `Authorization: Bearer` for the OpenAI-compatible one — the header names §2.6 predicted, observed coming out of the binary — plus `anthropic-version: 2023-06-01` and the beta flags. The gateway swaps the placeholder for the credential under the same header, and the placeholder reaches no provider |
 | OpenCode's own `anthropic-beta` survives the subscription merge (#166) | `the_subscription_shaping_merges_with_the_flags_the_binary_sends` | the binary sends `interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14`; the gateway forwards `oauth-2025-04-20` first and both of the binary's flags after, with `CLAUDE_CODE_SYSTEM` prepended to the system prompt |
-| The runner holds no provider credential | `the_runner_sends_no_provider_credential_of_its_own` | on this session path the binary presents none at all; the gateway refuses an unauthenticated model call |
+| The only secret in the runner is its own session token | `the_runner_presents_its_session_token_and_never_a_provider_key` | what the binary presents is the placeholder and nothing else, in the header and in the body |
 | Bun honours `HTTP(S)_PROXY` for `fetch`, and `NO_PROXY` on the gateway host is load-bearing | `bun_honours_the_proxy_and_no_proxy_exempts_the_gateway` | without the exemption the provider call arrives at the CONNECT proxy in absolute form (`POST http://…/model/anthropic/v1/messages`) and never reaches the gateway; with it, the call goes direct. Also observed: the binary reaches for `registry.npmjs.org` at session start with `--pure` and the default plugins off (§1.2), which the proxy allowlist is what stops |
 | Non-zero gateway token counts for a self-hosted endpoint (finding 10) | `a_self_hosted_turn_is_counted_by_the_gateway` | a llama.cpp router, a real model, a real request composed by the binary: on one run 3057 prompt and 24 completion tokens counted by the gateway, equal to the figures the server itself reported |
 | A provider that omits usage is unmetered, not free | `a_provider_that_omits_usage_is_marked_unmetered_not_free`, `model_gateway.rs` | the requests are recorded beside the zero, so the turn settles `unmetered` rather than as one that cost nothing |
@@ -106,7 +105,7 @@ reaches the gateway over **plain HTTP** on the runner's private network, so no c
 authority is installed in the runner at all (`the_gateway_boundary_is_plain_http_so_the_runner_installs_no_ca`).
 If that boundary ever becomes TLS, that test is where the CA handling has to be proved.
 
-### Finding 19 — the session runner resolves its base URL from the catalogue, not from `options.baseURL`
+### Finding 19 — the session runner resolves its provider from the catalogue, not from `options.baseURL`
 
 Found by running the binary the way the adapter drives it (`POST /api/session/{id}/prompt`).
 That path resolves a model through the v2 catalogue and the protocol implementations in
@@ -118,21 +117,26 @@ base-URL template (§1.1) — is the field this path reads, from the provider en
 `models.<id>.provider.api` in the pinned catalogue. The adapter now writes the gateway URL
 into all three, and the test above fails if any of them is dropped.
 
-**Consequence for the plan.** §0's advice to "pin v1/ai-sdk behaviour" is not just about
-usage accounting: the two stacks disagree about where a provider's requests go, and the
-adapter drives the newer one. Two things follow, neither of them this row's to settle:
+The placeholder travelled with it: before the fix the request reached
+`api.anthropic.com` carrying no credential at all and was refused there
+(`x-api-key header is required`); with `api` written, the binary sends the placeholder
+under the header its shape uses and the gateway authenticates the session. So the whole
+chain works — harness to gateway to provider, credential swapped in the middle — and the
+tests above assert it end to end rather than by replaying a captured request.
 
-- **The runner has no way to present the placeholder on that path.** The v2 catalogue has
-  no field for a key, the v2 config shape is projected down to V1 and its `providers` key
-  discarded (`configuration compatibility diagnostic … Omitted native setting`), and the
-  credential store the path does read is the SQLite `credential` table (§2.1) or
-  `POST /api/integration/{id}/connect/key`. So the gateway currently refuses the binary's
-  model call as unauthenticated, and no OpenCode turn completes through it. Deciding
-  between "drive the v1 session surface" and "give the runner a v2 credential" is a Gate B
-  decision for the session-controller work, not a config-rendering one.
-- Until it is decided, the parts of this list that need a *completed* OpenCode turn —
-  reconciling OpenCode's per-message usage against the gateway's counts, and the hosted
-  and subscription end-to-end runs — cannot be closed.
+**Consequence for the plan.** §0's advice to "pin v1/ai-sdk behaviour" is sharper than it
+looked: the two stacks disagree about *where a provider's requests go*, not only about how
+usage is reported, and the adapter drives the newer one. Two things to carry forward,
+neither of them a config-rendering matter:
+
+- A release that changes which stack `POST /api/session/{id}/prompt` resolves through, or
+  what it resolves a base URL from, moves the gateway boundary silently. Diff this on every
+  upgrade alongside §2.4, and keep the live test above in the upgrade gate.
+- The catalogue is populated asynchronously while the server is already answering. A prompt
+  admitted before it settles is never run: the drain fails resolving the model and nothing
+  retries, leaving the session on `prompted` with no step. The tests wait for the model to
+  be listed (`GET /api/model`); the node's handshake does not, which is worth a look in the
+  session-controller work.
 
 ### Still the operator's (no credential for them exists on a test machine)
 

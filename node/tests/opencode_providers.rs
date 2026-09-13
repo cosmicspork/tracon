@@ -1221,17 +1221,12 @@ async fn every_provider_call_arrives_at_the_gateway_on_an_allowlisted_path() {
             allowed.contains(&tail),
             "{name}: {tail} is not on the gateway's allowlist for this shape"
         );
-        // The allowlist is not asserted from a list in this file: the same
-        // call is replayed through the gateway with the session's placeholder,
-        // and the gateway forwards it to the provider or it does not.
-        let (status, body) = node.through_the_gateway(&seen).await;
-        assert_eq!(
-            status, 200,
-            "{name}: the gateway refused its own harness's call: {body}"
-        );
+        // And the allowlist is not asserted from a list in this file: the
+        // gateway either forwarded the harness's own call to the provider or
+        // it did not.
         let upstream = node
             .upstream
-            .first(Duration::from_secs(5))
+            .first(Duration::from_secs(10))
             .await
             .unwrap_or_else(|| panic!("{name}: the gateway forwarded nothing"));
         // §2.6, confirmed on the wire: the real credential under the header
@@ -1257,40 +1252,62 @@ async fn every_provider_call_arrives_at_the_gateway_on_an_allowlisted_path() {
     }
 }
 
-/// **What the runner holds, observed.** The placeholder in the provider table
-/// is the session's token at the gateway, not a provider key — and on the
-/// session path this adapter drives, the binary sends no provider credential
-/// at all. Either way the property that matters is the same one: nothing
-/// leaves the runner that would authenticate anywhere but here.
+/// **What the runner presents, observed.** The placeholder in the provider
+/// table is the session's token at the gateway, not a provider key, and it is
+/// what each shape puts on the wire: `Authorization: Bearer` for the
+/// OpenAI-compatible one, `x-api-key` for the Anthropic one — the header
+/// names §2.6 predicted, now seen coming out of the binary rather than going
+/// into the provider. So the gateway authenticates the harness's own call and
+/// serves it: a turn completes through the gateway with no help from this
+/// test.
 ///
-/// The gateway's answer to a call with no credential is a refusal, which is
-/// the second half of this: an unauthenticated model call is not forwarded.
+/// The invariant the whole design rests on is the other half: the only secret
+/// that ever leaves the runner is one that names its own session.
 #[tokio::test]
-async fn the_runner_sends_no_provider_credential_of_its_own() {
+async fn the_runner_presents_its_session_token_and_never_a_provider_key() {
     if skip_no_binary() {
         return;
     }
-    let node = start_node(&[("anthropic", SHAPE_ANTHROPIC)], API_KEY, "127.0.0.1").await;
-    let live = launch(&node, "credential", "anthropic/test-model", Vec::new()).await;
-    one_turn(&node, &live, "say ok", LIVE_CALL_TIMEOUT).await;
-    let seen = node
-        .at_the_gateway(Duration::from_secs(5))
-        .await
-        .expect("no provider call reached the gateway");
-    live.shutdown().await;
+    for (name, shape, header) in [
+        ("local", SHAPE_COMPATIBLE, "authorization"),
+        ("anthropic", SHAPE_ANTHROPIC, "x-api-key"),
+    ] {
+        let node = start_node(&[(name, shape)], API_KEY, "127.0.0.1").await;
+        let live = launch(
+            &node,
+            &format!("credential-{name}"),
+            &format!("{name}/test-model"),
+            Vec::new(),
+        )
+        .await;
+        one_turn(&node, &live, "say ok", LIVE_CALL_TIMEOUT).await;
+        let seen = node
+            .at_the_gateway(Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|| panic!("{name}: no provider call reached the gateway"));
+        live.shutdown().await;
 
-    let presented = seen
-        .header("x-api-key")
-        .or_else(|| seen.header("authorization"))
-        .unwrap_or_default();
-    assert!(
-        presented.is_empty() || presented == node.token,
-        "the runner presented something that is neither nothing nor its own session token"
-    );
-    assert!(
-        !seen.body.contains("real-provider-key"),
-        "a provider key was in the runner's request body"
-    );
+        let presented = seen
+            .header(header)
+            .map(|value| value.trim_start_matches("Bearer ").to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            presented, node.token,
+            "{name}: the runner presented {presented:?} under {header} rather than its \
+             session token"
+        );
+        // And because it did, the gateway served the harness's own call:
+        // a turn reaches the provider through the gateway unaided.
+        let totals = node.store.usage_since(Some("work"), 0).unwrap();
+        assert!(
+            totals.iter().any(|row| row.requests > 0),
+            "{name}: the gateway did not serve the harness's own call"
+        );
+        assert!(
+            !seen.body.contains("real-provider-key"),
+            "{name}: a provider key was in the runner's request body"
+        );
+    }
 }
 
 /// **OpenCode's own request headers, observed**, which is what the gateway's
@@ -1323,13 +1340,11 @@ async fn the_subscription_shaping_merges_with_the_flags_the_binary_sends() {
         "the pinned binary no longer sends the beta flags the merge was written for: {sent:?}"
     );
 
-    // The same call, through the gateway, with the subscription credential
-    // bound to the session.
-    let (status, body) = node.through_the_gateway(&seen).await;
-    assert_eq!(status, 200, "{body}");
+    // And what the gateway made of it, with the subscription credential bound
+    // to the session: the harness's own call, forwarded.
     let upstream = node
         .upstream
-        .first(Duration::from_secs(5))
+        .first(Duration::from_secs(10))
         .await
         .expect("the gateway forwarded nothing");
     assert_eq!(
@@ -1588,6 +1603,8 @@ async fn a_provider_that_omits_usage_is_marked_unmetered_not_free() {
         .await
         .expect("no provider call reached the gateway");
     live.shutdown().await;
+    // The harness's own call and one replay of it, so the row is written
+    // whichever of the two the gateway served first.
     let (status, body) = node.through_the_gateway(&seen).await;
     assert_eq!(status, 200, "{body}");
 
@@ -1600,7 +1617,19 @@ async fn a_provider_that_omits_usage_is_marked_unmetered_not_free() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(counted.first().map(|row| row.requests), Some(1));
+    // More than one row only means the harness's call and the replay were
+    // both served; what matters is that requests were made and none of them
+    // could be counted.
+    assert!(
+        counted.iter().any(|row| row.requests > 0),
+        "no request was recorded at all: {counted:?}"
+    );
+    assert!(
+        counted
+            .iter()
+            .all(|row| row.input_tokens == 0 && row.output_tokens == 0),
+        "something was counted for a provider that reported nothing: {counted:?}"
+    );
     let settled = tracon::metrics::settle_turn(&node.store, "s-live", None, None);
     assert!(
         settled.unmetered(),
