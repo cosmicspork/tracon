@@ -5,6 +5,7 @@
   import TransferExport from '../components/TransferExport.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
+  import { desktopCanOpenOpencode, openOpencodeWindow } from '../lib/desktop-opencode'
   import { draftBox } from '../lib/draft'
   import { humanizeError } from '../lib/errors'
   import { formatAge, formatBudget, formatTokens } from '../lib/format'
@@ -209,6 +210,27 @@
   })
   // A prompt to an unreachable owner is queued on this node and sent when it
   // returns; the box stays open and says so.
+  // The desktop app only: OpenCode's own interface opens in a second window
+  // that holds none of this one's privileges. It is the session's own harness,
+  // so it is offered for an OpenCode session running on this machine and
+  // nowhere else.
+  const canOpenOpencode = $derived(
+    desktopCanOpenOpencode() && session?.harness_id === 'opencode' && !remote,
+  )
+  let openingOpencode = $state(false)
+  async function openOpencode() {
+    openingOpencode = true
+    error = null
+    try {
+      await openOpencodeWindow(id)
+    } catch (err) {
+      // A Tauri command rejects with the sentence the wrapper wrote.
+      error = err instanceof Error ? err.message : String(err)
+    } finally {
+      openingOpencode = false
+    }
+  }
+
   const placeholder = $derived(
     unreachable !== null
       ? `${unreachable} — the prompt is sent when it returns`
@@ -270,6 +292,15 @@
     {/if}
     {#if session.work_item_id}
       <a class="mono" href="/work/{session.work_item_id}">item {session.work_item_id.slice(0, 8)}</a>
+    {/if}
+    {#if canOpenOpencode}
+      <button
+        class="lnk"
+        onclick={() => void openOpencode()}
+        disabled={openingOpencode}
+        title="OpenCode's own interface, in a window that can reach nothing but that interface"
+        >OpenCode</button
+      >
     {/if}
     {#if !isTerminal(session.state)}
       {#if session.state === 'paused'}

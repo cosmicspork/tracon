@@ -9,12 +9,24 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "tracon",
         "url": "setup.html",
         "width": 1100,
         "height": 840,
         "resizable": true,
         "visible": false,
+        "backgroundColor": "#141517"
+      },
+      {
+        "label": "opencode",
+        "title": "OpenCode",
+        "create": false,
+        "width": 1280,
+        "height": 900,
+        "resizable": true,
+        "visible": false,
+        "dragDropEnabled": false,
         "backgroundColor": "#141517"
       }
     ],
