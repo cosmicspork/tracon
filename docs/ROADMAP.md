@@ -36,10 +36,12 @@ refer to that manifest's table.
       snapshot; server flags and startup egress verified live; provider, mutation-policy,
       and config matrices produced. Verdict: no stop condition.
 - [ ] **Gate B — owner-side policy, credentials, and convergence.**
-  - [ ] OpenCode adapter: one isolated `opencode serve` per session with the settled
+  - [x] OpenCode adapter: one isolated `opencode serve` per session with the settled
         launch environment, loopback bind, mDNS off, per-session HOME/XDG/DB, node-written
         read-only config, provider base URLs in config (finding 8), `OPENCODE_SERVER_PASSWORD`
-        asserted (finding 4).
+        asserted (finding 4). Verified against a fake server and live against the pinned
+        binary on a Linux host; the Podman and Kubernetes endpoint paths are exercised in
+        the real-workflow runs of Gate F.
   - [ ] Owner session controller and ingestion: durable identity mapping for session,
         message, part, permission, and PTY ids; reconciliation anchored on the per-session
         sequenced streams and snapshots (finding 6); uncertain-outcome handling for timed-out

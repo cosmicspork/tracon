@@ -837,6 +837,54 @@ pub struct Provider {
     /// not derived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price: Option<Price>,
+    /// The models this node declares under this provider, for a harness that
+    /// is told its catalogue rather than asked for one (OpenCode; see
+    /// `docs/reference/opencode-v1.18.30/providers.md` §7.4). A harness that
+    /// probes its own catalogue ignores this, so it is empty by default and
+    /// only the declaring harness is affected by leaving it so.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelDecl>,
+}
+
+/// One model this node declares under a provider. The picker offers exactly
+/// what is written here and the gateway serves exactly that, which is the
+/// whole point of declaring rather than probing: there is no catalogue to
+/// subtract a denylist from.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ModelDecl {
+    /// The provider's own model id, as the request carries it.
+    pub id: String,
+    /// What a person reads in the picker. Empty: the id.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// Context window, in tokens. Zero: the harness's own default.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub context: u64,
+    /// Maximum output, in tokens. Zero: the harness's own default.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub output: u64,
+    /// Whether the model reasons, so a harness shows thinking rather than
+    /// discarding it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reasoning: bool,
+    /// Whether it accepts attachments.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attachment: bool,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+impl ModelDecl {
+    /// What the picker shows for this model.
+    pub fn label(&self) -> &str {
+        if self.name.is_empty() {
+            &self.id
+        } else {
+            &self.name
+        }
+    }
 }
 
 /// Dollars per million tokens.
@@ -863,6 +911,7 @@ impl Default for Provider {
             device_login: None,
             requires_local_callback: false,
             price: None,
+            models: Vec::new(),
         }
     }
 }
@@ -879,6 +928,7 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 device_login: None,
                 requires_local_callback: true,
                 price: None,
+                models: Vec::new(),
             },
         ),
         (
@@ -891,6 +941,7 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 device_login: None,
                 requires_local_callback: false,
                 price: None,
+                models: Vec::new(),
             },
         ),
         (
@@ -903,6 +954,7 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 device_login: Some("openai-codex-device".into()),
                 requires_local_callback: false,
                 price: None,
+                models: Vec::new(),
             },
         ),
     ]

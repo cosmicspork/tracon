@@ -94,6 +94,8 @@ jobs:
             file: containers/harness/Containerfile
           - name: tracon-harness-claude
             file: containers/harness-claude/Containerfile
+          - name: tracon-harness-opencode
+            file: containers/harness-opencode/Containerfile
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

@@ -86,7 +86,7 @@ impl HarnessAdapter for FakeAdapter {
     async fn probe_models(
         &self,
         _r: &dyn Runner,
-        _env: Vec<(String, String)>,
+        _wiring: &tracon::gateway::model::Wiring,
     ) -> Result<Vec<ModelOption>, AdapterError> {
         Ok(vec![ModelOption {
             value: "m/a".into(),

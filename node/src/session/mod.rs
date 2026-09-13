@@ -1044,6 +1044,7 @@ impl Manager {
                     cwd_in_runner: "/work".into(),
                     model: spec.model.clone(),
                     container_name: container.clone(),
+                    harness_home: self.backend.harness_home(),
                     mcp_servers,
                     tools: self.cfg.harness.tools.clone(),
                     env: harness_env,

@@ -988,6 +988,7 @@ async fn run_browser_runtime(
             workdir: Some("/work".into()),
             name: id,
             image: Some(target.browser.image.clone()),
+            expose: None,
         })
         .await;
     drop(egress);

@@ -64,6 +64,19 @@ fn config_mounts(
 ) -> std::io::Result<Vec<Mount>> {
     let root = state_target(home, adapter.layout());
     let mut mounts = Vec::new();
+    // Directories the harness must be able to write, from this session's own
+    // scratch volume rather than the state volume every session shares: a
+    // harness whose home, caches and database are per-session keeps them
+    // somewhere that dies with the session.
+    for rel in adapter.scratch_dirs() {
+        std::fs::create_dir_all(dir.join("harness").join(&rel))?;
+        mounts.push(Mount::at(
+            volume,
+            format!("harness/{rel}"),
+            format!("{root}/{rel}"),
+            false,
+        ));
+    }
     for (rel, contents) in adapter.scratch_files(wiring) {
         let staged = dir.join("harness").join(&rel);
         if let Some(parent) = staged.parent() {

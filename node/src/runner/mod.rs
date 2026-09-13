@@ -57,6 +57,12 @@ pub struct RunnerCommand {
     /// bounded command. Long-lived harnesses leave this unset.
     pub image: Option<String>,
     pub name: String,
+    /// The port the process listens on inside the runner, for a harness that
+    /// is driven over HTTP rather than over stdio. The runner makes that port
+    /// reachable from the node and nowhere else — a loopback publish, or the
+    /// pod's own address on the cluster network — and reports where in
+    /// `Spawned::endpoint`. Unset for every stdio harness.
+    pub expose: Option<u16>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +82,19 @@ pub struct Spawned {
     /// Resolves with the exit status once the harness has ended. Awaiting it
     /// is also what reaps a child process.
     pub done: BoxFuture<'static, Result<i32, RunnerError>>,
+    /// Where the node reaches the port `RunnerCommand::expose` asked for, as
+    /// `host:port`. Never a public address: a loopback publish on this host,
+    /// or the harness pod's own address on the cluster network. `None` when
+    /// nothing was exposed.
+    pub endpoint: Option<String>,
+}
+
+/// A free TCP port on this host's loopback, for a harness the node drives over
+/// HTTP. The listener is closed before the port is handed out, so this is a
+/// hint rather than a reservation; the caller binds it immediately.
+pub fn free_loopback_port() -> Result<u16, RunnerError> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    Ok(listener.local_addr()?.port())
 }
 
 impl Spawned {
@@ -96,7 +115,14 @@ impl Spawned {
                 let status = child.wait().await?;
                 Ok(status.code().unwrap_or(-1))
             }),
+            endpoint: None,
         })
+    }
+
+    /// Where the node reaches this process's exposed port.
+    pub fn at(mut self, endpoint: Option<String>) -> Self {
+        self.endpoint = endpoint;
+        self
     }
 }
 
@@ -225,9 +251,13 @@ pub mod local {
             if let Some(w) = cmd.workdir {
                 c.current_dir(w);
             }
+            // The process binds the loopback port itself (the adapter picked
+            // it and passed it in argv); there is no boundary here to publish
+            // through, so the endpoint is that same loopback pair.
+            let endpoint = cmd.expose.map(|port| format!("127.0.0.1:{port}"));
             let child = c.spawn()?;
             remember(&name, child.id());
-            Spawned::from_child(child)
+            Ok(Spawned::from_child(child)?.at(endpoint))
         }
 
         async fn run_capture(

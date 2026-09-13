@@ -59,6 +59,7 @@ fn spec_env(env: Vec<(String, String)>) -> LaunchSpec {
         cwd_in_runner: "/work".into(),
         model: "opus".into(),
         container_name: "tracon-h-test".into(),
+        harness_home: "/root".into(),
         mcp_servers: vec![serde_json::json!({
             "type": "http",
             "name": "tracon",

@@ -5,6 +5,7 @@
 
 pub mod claude;
 pub mod omp;
+pub mod opencode;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -25,12 +26,15 @@ use crate::runner::Runner;
 pub struct Layout {
     /// Directory under the harness's home, including the leading dot.
     pub dir: &'static str,
-    /// The environment variable that names it.
+    /// The environment variable that names it. Empty when the harness has no
+    /// such variable — OpenCode decides where its state lives from `HOME` and
+    /// the XDG directories, which its adapter sets per session — and then the
+    /// runners set none rather than inventing one.
     pub env: &'static str,
 }
 
 /// The harness ids this node has an adapter for.
-pub const KNOWN: &[&str] = &["omp", "claude"];
+pub const KNOWN: &[&str] = &["omp", "claude", "opencode"];
 
 /// The layout for a harness id, for the few callers that have the config but
 /// not the adapter (the boundary preflight). An unknown id gets omp's, which
@@ -39,6 +43,9 @@ pub const KNOWN: &[&str] = &["omp", "claude"];
 pub fn layout(harness_id: &str) -> Layout {
     if harness_id == claude::ClaudeAdapter::ID {
         return claude::ClaudeAdapter::layout();
+    }
+    if harness_id == opencode::OpenCodeAdapter::ID {
+        return opencode::OpenCodeAdapter::layout();
     }
     OMP_LAYOUT
 }
@@ -56,6 +63,9 @@ pub fn adapter_for(cfg: &Config) -> Result<Arc<dyn HarnessAdapter>, AdapterError
     match cfg.harness.id.as_str() {
         omp::OmpAdapter::ID => Ok(Arc::new(omp::OmpAdapter::new(pinned_version(cfg)))),
         claude::ClaudeAdapter::ID => Ok(Arc::new(claude::ClaudeAdapter::new(pinned_version(cfg)))),
+        opencode::OpenCodeAdapter::ID => Ok(Arc::new(opencode::OpenCodeAdapter::new(
+            pinned_version(cfg),
+        ))),
         other => Err(AdapterError::Protocol(format!(
             "no adapter for harness `{other}`; this node knows {}",
             KNOWN.join(", ")
@@ -79,6 +89,8 @@ pub fn pinned_version(cfg: &Config) -> String {
 pub fn image_version(harness_id: &str) -> &'static str {
     if harness_id == claude::ClaudeAdapter::ID {
         claude::ClaudeAdapter::PINNED_VERSION
+    } else if harness_id == opencode::OpenCodeAdapter::ID {
+        opencode::OpenCodeAdapter::PINNED_VERSION
     } else {
         omp::OmpAdapter::PINNED_VERSION
     }
@@ -212,6 +224,11 @@ pub struct LaunchSpec {
     pub cwd_in_runner: String,
     pub model: String,
     pub container_name: String,
+    /// The harness user's home inside the runner. A harness whose state is a
+    /// per-session tree rather than a single directory (OpenCode's HOME and
+    /// four XDG dirs) needs to know where it may keep that tree; the stdio
+    /// harnesses ignore it.
+    pub harness_home: String,
     /// MCP servers offered to the harness at session start. The node's own
     /// tools reach it this way and no other.
     pub mcp_servers: Vec<Value>,
@@ -311,12 +328,24 @@ pub trait HarnessAdapter: Send + Sync {
         Vec::new()
     }
 
+    /// Directories inside the state directory the harness must be able to
+    /// write, as paths relative to it. They are mounted from this session's
+    /// own scratch volume, so a harness that keeps per-session state (a home,
+    /// XDG dirs, its database) writes it where it dies with the session
+    /// rather than into the state volume every session shares.
+    fn scratch_dirs(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError>;
-    /// List the models the harness offers, wired to the gateway by `env`.
+    /// The models this node can run through the harness: probed from it where
+    /// it keeps a catalogue, declared by the node where it does not. The
+    /// wiring is the whole answer for a declaring harness and the environment
+    /// for a probing one, so both get it rather than only the environment.
     async fn probe_models(
         &self,
         runner: &dyn Runner,
-        env: Vec<(String, String)>,
+        wiring: &Wiring,
     ) -> Result<Vec<ModelOption>, AdapterError>;
     async fn launch(
         &self,
@@ -393,13 +422,34 @@ mod tests {
     #[test]
     fn an_unknown_harness_is_refused_rather_than_guessed_at() {
         let mut cfg = Config::default();
-        cfg.harness.id = "opencode".into();
+        cfg.harness.id = "not-a-harness".into();
         let err = match adapter_for(&cfg) {
             Ok(_) => panic!("an unknown harness must not resolve"),
             Err(e) => e.to_string(),
         };
-        assert!(err.contains("opencode"), "{err}");
+        assert!(err.contains("not-a-harness"), "{err}");
         assert!(err.contains("omp"), "{err}");
+        assert!(err.contains("opencode"), "{err}");
+    }
+
+    /// The OpenCode adapter drives a server rather than stdio, and its state
+    /// is a per-session tree rather than one directory the runner can name.
+    #[test]
+    fn the_configured_opencode_harness_picks_its_own_adapter() {
+        let mut cfg = Config::default();
+        cfg.harness.id = "opencode".into();
+        cfg.harness.version = String::new();
+        let Ok(a) = adapter_for(&cfg) else {
+            panic!("opencode has an adapter")
+        };
+        assert_eq!(a.id(), "opencode");
+        assert_eq!(a.layout().dir, ".opencode");
+        assert_eq!(a.layout().env, "");
+        assert_eq!(
+            a.pinned_version(),
+            opencode::OpenCodeAdapter::PINNED_VERSION
+        );
+        assert_eq!(a.protocol().name, "opencode-http");
     }
 
     /// The pin has to be one fact, not two that happen to agree today: the
@@ -425,6 +475,17 @@ mod tests {
                 "OMP_VERSION"
             ),
             omp::OmpAdapter::PINNED_VERSION
+        );
+    }
+
+    #[test]
+    fn the_image_installs_the_pinned_opencode() {
+        assert_eq!(
+            container_arg(
+                include_str!("../../../containers/harness-opencode/Containerfile"),
+                "OPENCODE_VERSION"
+            ),
+            opencode::OpenCodeAdapter::PINNED_VERSION
         );
     }
 
