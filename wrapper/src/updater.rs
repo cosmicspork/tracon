@@ -59,7 +59,12 @@ const STAGED_MESSAGE: &str =
     "The downloaded app was not what the release describes; nothing was changed.";
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const PUBLISHER_MISMATCH_MESSAGE: &str =
-    "The downloaded app is not signed by this publisher; nothing was changed.";
+    "The downloaded app is not signed by the publisher of this install; nothing was changed.";
+/// A signature that claims a publisher but does not hold up is a different
+/// fault from one that was never there, and only this one is alarming.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const PUBLISHER_UNCHECKED_MESSAGE: &str =
+    "The downloaded app's code signature could not be checked; nothing was changed.";
 const PROVENANCE_MISMATCH_MESSAGE: &str =
     "The update provenance could not be verified; nothing was changed.";
 const RELEASE_REPOSITORY: &str = "cosmicspork/tracon";
@@ -994,16 +999,36 @@ async fn download_and_swap(
     Ok(())
 }
 
-/// A self-signed code signature can claim any team identifier. Gatekeeper must
-/// first assess each bundle against Apple's Developer ID policy; only then do
-/// self-updates preserve the authenticated bundle identifier and team.
+/// What authenticates a release is its build provenance, verified before the
+/// archive is unpacked. A Developer ID signature is the second, weaker claim:
+/// a self-signed one can name any team identifier, so it counts only once
+/// Gatekeeper has assessed it against Apple's policy. Releases the publisher
+/// builds without Apple credentials carry no such signature at all, and that
+/// is a supported install. What is refused is losing a guarantee an install
+/// already has — a Developer ID install never accepts a bundle signed by
+/// someone else, or by no one.
 #[cfg(target_os = "macos")]
 fn verify_same_publisher(installed: &Path, staged: &Path) -> Result<(), String> {
     let installed = publisher_identity(installed)?;
     let staged = publisher_identity(staged)?;
-    (installed == staged)
-        .then_some(())
-        .ok_or_else(|| PUBLISHER_MISMATCH_MESSAGE.to_string())
+    same_publisher(installed.as_ref(), staged.as_ref())
+}
+
+/// Whether a staged bundle may replace the installed one, given what each is
+/// signed by — `None` being unsigned or ad-hoc, which is what an unsigned
+/// release yields. An unsigned install takes either (provenance already
+/// authenticated the download, and there is no publisher to preserve); a
+/// Developer ID install takes only the same identifier and team.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn same_publisher(
+    installed: Option<&PublisherIdentity>,
+    staged: Option<&PublisherIdentity>,
+) -> Result<(), String> {
+    match (installed, staged) {
+        (None, _) => Ok(()),
+        (Some(installed), Some(staged)) if installed == staged => Ok(()),
+        _ => Err(PUBLISHER_MISMATCH_MESSAGE.to_string()),
+    }
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -1013,8 +1038,36 @@ struct PublisherIdentity {
     team: String,
 }
 
+/// The publisher a bundle is signed by: `Some` for a Developer ID signature
+/// Gatekeeper accepts, `None` for one that is unsigned or ad-hoc, an error for
+/// a signature that claims a publisher but does not verify.
 #[cfg(target_os = "macos")]
-fn publisher_identity(bundle: &Path) -> Result<PublisherIdentity, String> {
+fn publisher_identity(bundle: &Path) -> Result<Option<PublisherIdentity>, String> {
+    let details = Command::new("/usr/bin/codesign")
+        .args(["-dv", "--verbose=4"])
+        .arg(bundle)
+        .output()
+        .map_err(|_| PUBLISHER_UNCHECKED_MESSAGE.to_string())?;
+    let mut output = String::from_utf8_lossy(&details.stdout).into_owned();
+    output.push_str(&String::from_utf8_lossy(&details.stderr));
+    if !details.status.success() {
+        // The one failure that is a state rather than a fault: there was
+        // nothing to read because nothing was signed.
+        return if is_unsigned(&output) {
+            Ok(None)
+        } else {
+            Err(PUBLISHER_UNCHECKED_MESSAGE.to_string())
+        };
+    }
+    // An ad-hoc signature claims no publisher, so there is nothing here for
+    // Apple's policy to hold up and nothing for the swap to preserve. The
+    // bundle's integrity is not left unchecked by that: the archive it came
+    // out of was digest- and provenance-verified before tar saw it.
+    let Some(identity) = publisher_identity_from(&output) else {
+        return Ok(None);
+    };
+    // A claimed team is the one thing worth assessing, and only a claim needs
+    // Apple's policy behind it — spctl rejects an ad-hoc signature by design.
     let assessed = Command::new("/usr/sbin/spctl")
         .args([
             "--assess",
@@ -1025,31 +1078,31 @@ fn publisher_identity(bundle: &Path) -> Result<PublisherIdentity, String> {
         ])
         .arg(bundle)
         .status()
-        .map_err(|_| PUBLISHER_MISMATCH_MESSAGE.to_string())?;
+        .map_err(|_| PUBLISHER_UNCHECKED_MESSAGE.to_string())?;
     if !assessed.success() {
-        return Err(PUBLISHER_MISMATCH_MESSAGE.to_string());
+        return Err(PUBLISHER_UNCHECKED_MESSAGE.to_string());
     }
     let verified = Command::new("/usr/bin/codesign")
         .args(["--verify", "--deep", "--strict"])
         .arg(bundle)
         .status()
-        .map_err(|_| PUBLISHER_MISMATCH_MESSAGE.to_string())?;
+        .map_err(|_| PUBLISHER_UNCHECKED_MESSAGE.to_string())?;
     if !verified.success() {
-        return Err(PUBLISHER_MISMATCH_MESSAGE.to_string());
+        return Err(PUBLISHER_UNCHECKED_MESSAGE.to_string());
     }
-    let details = Command::new("/usr/bin/codesign")
-        .args(["-dv", "--verbose=4"])
-        .arg(bundle)
-        .output()
-        .map_err(|_| PUBLISHER_MISMATCH_MESSAGE.to_string())?;
-    if !details.status.success() {
-        return Err(PUBLISHER_MISMATCH_MESSAGE.to_string());
-    }
-    let mut output = String::from_utf8_lossy(&details.stdout).into_owned();
-    output.push_str(&String::from_utf8_lossy(&details.stderr));
-    publisher_identity_from(&output).ok_or_else(|| PUBLISHER_MISMATCH_MESSAGE.to_string())
+    Ok(Some(identity))
 }
 
+/// codesign's word for a bundle carrying no signature at all, as opposed to
+/// one whose signature it could not read.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn is_unsigned(details: &str) -> bool {
+    details.contains("code object is not signed at all")
+}
+
+/// `None` where the signature names no publisher to preserve: an ad-hoc one,
+/// which is what an unsigned Apple Silicon build gets, prints either
+/// `Signature=adhoc` or a team identifier that is `not set`.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn publisher_identity_from(details: &str) -> Option<PublisherIdentity> {
     let value = |key: &str| {
@@ -1059,6 +1112,9 @@ fn publisher_identity_from(details: &str) -> Option<PublisherIdentity> {
             .filter(|value| !value.is_empty() && *value != "not set")
             .map(str::to_string)
     };
+    if value("Signature=").as_deref() == Some("adhoc") {
+        return None;
+    }
     Some(PublisherIdentity {
         identifier: value("Identifier=")?,
         team: value("TeamIdentifier=")?,
@@ -1190,18 +1246,73 @@ mod tests {
     fn publisher_identity_requires_a_developer_team_and_bundle_identifier() {
         assert_eq!(
             publisher_identity_from(
-                "Identifier=com.cosmicspork.tracon\nTeamIdentifier=AB12C3D4E5\n"
+                "Identifier=com.cosmicspork.tracon\nSignature size=8973\nTeamIdentifier=AB12C3D4E5\n"
             ),
             Some(PublisherIdentity {
                 identifier: "com.cosmicspork.tracon".into(),
                 team: "AB12C3D4E5".into(),
             })
         );
+        assert!(publisher_identity_from("TeamIdentifier=AB12C3D4E5\n").is_none());
+    }
+
+    #[test]
+    fn an_ad_hoc_signature_names_no_publisher() {
+        // What a release built without Apple credentials looks like: Apple
+        // Silicon signs it ad-hoc, and neither form of that output may be
+        // read as a publisher to match against.
+        assert!(publisher_identity_from(
+            "Identifier=com.cosmicspork.tracon\nSignature=adhoc\nTeamIdentifier=AB12C3D4E5\n"
+        )
+        .is_none());
         assert!(publisher_identity_from(
             "Identifier=com.cosmicspork.tracon\nTeamIdentifier=not set\n"
         )
         .is_none());
-        assert!(publisher_identity_from("TeamIdentifier=AB12C3D4E5\n").is_none());
+    }
+
+    #[test]
+    fn a_bundle_with_no_signature_is_told_apart_from_one_that_cannot_be_read() {
+        assert!(is_unsigned(
+            "tracon.app: code object is not signed at all\n"
+        ));
+        assert!(!is_unsigned(
+            "tracon.app: invalid signature (code or signature have been modified)\n"
+        ));
+    }
+
+    fn identity(team: &str) -> PublisherIdentity {
+        PublisherIdentity {
+            identifier: "com.cosmicspork.tracon".into(),
+            team: team.into(),
+        }
+    }
+
+    #[test]
+    fn a_signed_install_only_takes_the_same_publisher() {
+        assert!(
+            same_publisher(Some(&identity("AB12C3D4E5")), Some(&identity("AB12C3D4E5"))).is_ok()
+        );
+        // Someone else's Developer ID, and no Developer ID at all, are the
+        // same refusal: the install would lose the publisher it has.
+        assert_eq!(
+            same_publisher(Some(&identity("AB12C3D4E5")), Some(&identity("ZZ98Y7X6W5"))),
+            Err(PUBLISHER_MISMATCH_MESSAGE.to_string())
+        );
+        assert_eq!(
+            same_publisher(Some(&identity("AB12C3D4E5")), None),
+            Err(PUBLISHER_MISMATCH_MESSAGE.to_string())
+        );
+    }
+
+    #[test]
+    fn an_unsigned_install_takes_either_kind_of_update() {
+        // The releases this repository publishes are unsigned, so this is the
+        // ordinary path, not an exception. Provenance was verified before the
+        // archive was unpacked; there is no publisher here to downgrade from,
+        // and a later signed release must not be refused as a change.
+        assert!(same_publisher(None, None).is_ok());
+        assert!(same_publisher(None, Some(&identity("AB12C3D4E5"))).is_ok());
     }
 
     fn release(tag_name: &str, assets: Vec<ReleaseAsset>) -> Release {

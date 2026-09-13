@@ -192,12 +192,15 @@ jobs:
 
   # The desktop app, with the node carried inside it as a sidecar so a single
   # download is a working install. macOS bundles are Developer ID signed and
-  # notarized; every desktop asset also carries GitHub build provenance.
+  # notarized when the publisher has Apple credentials, and unsigned when it
+  # does not; either way every desktop asset carries GitHub build provenance,
+  # which is what actually authenticates the publisher.
   gui:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     strategy:
-      # Missing Apple credentials must not cancel the independent AppImage.
+      # The two legs are independent artefacts: one failing must not cancel
+      # the other.
       fail-fast: false
       matrix:
         include:
@@ -216,8 +219,17 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.release-please.outputs.tag }}
-      - name: Import Apple Developer ID certificate
+      # An `if` cannot read `secrets`, so whether this build can sign becomes
+      # an output the signing steps branch on. No credentials is a supported
+      # state, not a failure: the bundle ships unsigned.
+      - name: Decide whether this build can sign
+        id: signing
         if: runner.os == 'macOS'
+        env:
+          HAS_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        run: echo "signing=$HAS_CERTIFICATE" >> "$GITHUB_OUTPUT"
+      - name: Import Apple Developer ID certificate
+        if: runner.os == 'macOS' && steps.signing.outputs.signing == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -226,6 +238,9 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
         run: |
+          # Having the certificate but not the rest is a misconfiguration, not
+          # a request for an unsigned build: fail rather than quietly drop to
+          # the fallback.
           test -n "${APPLE_CERTIFICATE:-}" || { echo "APPLE_CERTIFICATE is required"; exit 1; }
           test -n "${APPLE_CERTIFICATE_PASSWORD:-}" || { echo "APPLE_CERTIFICATE_PASSWORD is required"; exit 1; }
           test -n "${KEYCHAIN_PASSWORD:-}" || { echo "KEYCHAIN_PASSWORD is required"; exit 1; }
@@ -246,7 +261,14 @@ jobs:
           api_key="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
           printf '%s' "$APPLE_API_KEY_BASE64" | base64 -D > "$api_key"
           chmod 600 "$api_key"
+          # The whole signing environment is exported here and nowhere else.
+          # Tauri reads a set APPLE_SIGNING_IDENTITY as an identity to sign
+          # with, so an unsigned build must not see it set at all — not even
+          # to the empty string, which is what declaring it on the build step
+          # would do.
           echo "APPLE_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "APPLE_API_ISSUER=$APPLE_API_ISSUER" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY=$APPLE_API_KEY" >> "$GITHUB_ENV"
           echo "APPLE_API_KEY_PATH=$api_key" >> "$GITHUB_ENV"
       - if: runner.os == 'Linux'
         run: |
@@ -300,21 +322,20 @@ jobs:
             zip) unzip -q "$RUNNER_TEMP/$download" -d "$RUNNER_TEMP" ;;
           esac
           install -m 0755 "$RUNNER_TEMP/gh_${GH_VERSION}_${platform}/bin/gh" wrapper/binaries/gh
-      - name: Bundle signed and notarized macOS app
+      # Signed and notarized when the certificate import ran, ad-hoc signed —
+      # Tauri's default on Apple Silicon — when it did not. The difference is
+      # entirely in the job environment the import step wrote, so there is one
+      # build command either way.
+      - name: Bundle macOS app
         if: runner.os == 'macOS'
         working-directory: wrapper
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
         run: bunx @tauri-apps/cli@2.11.4 build --bundles ${{ matrix.bundles }} --config '{"bundle":{"externalBin":["binaries/tracon"],"resources":{"binaries/gh":"verifier/gh"}}}'
       - name: Bundle Linux desktop app
         if: runner.os == 'Linux'
         working-directory: wrapper
         run: bunx @tauri-apps/cli@2.11.4 build --bundles ${{ matrix.bundles }} --config '{"bundle":{"externalBin":["binaries/tracon"],"resources":{"binaries/gh":"verifier/gh"}}}'
       - name: Verify macOS publisher authentication
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.signing.outputs.signing == 'true'
         run: |
           codesign --verify --deep --strict --verbose=2 wrapper/target/release/bundle/macos/tracon.app
           spctl --assess --type execute --verbose=4 wrapper/target/release/bundle/macos/tracon.app
@@ -367,6 +388,36 @@ jobs:
           ls -R wrapper/target/release/bundle
           gh release upload "${{ needs.release-please.outputs.tag }}" \
             $(find wrapper/target/release/bundle -type f \( -name '*.AppImage' -o -name '*.dmg' -o -name '*.app.tar.gz' \)) --clobber
+      # An unsigned bundle is a fine thing to ship — provenance is the real
+      # publisher authentication — but Gatekeeper will stop it on first open,
+      # so whoever downloads it has to be told that here, not by a dead end.
+      - name: Note that the macOS bundle is unsigned
+        if: runner.os == 'macOS' && steps.signing.outputs.signing != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="${{ needs.release-please.outputs.tag }}"
+          marker="The macOS bundle in this release is unsigned"
+          note="### macOS
+
+          $marker: the publisher holds no Apple Developer ID. What authenticates
+          it is the GitHub build provenance attestation published beside it
+          (\`tracon_*_aarch64.provenance.jsonl\`), which the desktop app also
+          checks before it updates itself.
+
+          macOS will refuse to open it the first time. Either right-click the app
+          and choose Open, or run
+          \`xattr -d com.apple.quarantine /Applications/tracon.app\`."
+          printf '%s\n' "$note" >> "$GITHUB_STEP_SUMMARY"
+          body="$(gh release view "$tag" --json body --jq .body)"
+          # Re-runs attach artefacts to a release that may already carry the
+          # note; appending it twice would be noise.
+          case "$body" in
+            *"$marker"*) echo "release notes already carry the note"; exit 0 ;;
+          esac
+          printf '%s\n\n%s\n' "$body" "$note" > "$RUNNER_TEMP/notes.md"
+          gh release edit "$tag" --notes-file "$RUNNER_TEMP/notes.md"
 
   # One checksums.txt for install.sh, after every binary is attached.
   checksums:

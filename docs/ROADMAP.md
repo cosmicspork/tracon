@@ -112,9 +112,9 @@ declared `permission.ask` hook; an LSP status event.
 ## Current limitations
 
 - No real private-repository end-to-end run yet; see above.
-- Native macOS signing and notarization are not exercised: the release workflow requires
-  Apple Developer ID credentials that are not provisioned, and the macOS release leg
-  fails closed without them rather than shipping unsigned.
+- macOS releases are unsigned by choice — the publisher holds no Apple Developer ID —
+  and are authenticated by GitHub build provenance instead, so Gatekeeper asks once on
+  first open; the workflow still signs and notarizes if credentials are ever configured.
 - QA deployment and browser verification are implemented but not exercised against a
   real target.
 - The Kubernetes runtime backend has no scoped QA browser egress gateway;
