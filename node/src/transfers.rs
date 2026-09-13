@@ -505,6 +505,87 @@ pub async fn import_workspace(
     result
 }
 
+/// Read a package off disk without a node, a store, or a harness.
+///
+/// A package is the archive of a piece of work, and an archive nobody can open
+/// is not an archive. This is the offline reader: plain JSON in, plain records
+/// out, no database and no network.
+pub fn read_package(path: &Path) -> Result<SignedTransfer, TransferError> {
+    let bytes = fs::read(path)
+        .map_err(|error| TransferError::Invalid(format!("reading {}: {error}", path.display())))?;
+    if bytes.len() > MAX_TRANSFER_BYTES {
+        return Err(TransferError::TooLarge);
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// The package rendered as one JSON object per line, each tagged with a
+/// `kind`, in a fixed order: the manifest, the candidate, its evidence, the
+/// handoff note, the carried documents and memories, then one line per file.
+///
+/// File contents are left out and named by digest instead: a dump is for
+/// reading, and the bytes are recovered by importing the package or by
+/// decoding `content_b64` from the package itself. Every line is
+/// self-describing, so `grep`, `jq`, and a text editor are sufficient tools.
+pub fn package_jsonl(transfer: &SignedTransfer) -> Vec<Value> {
+    let verified = transfer.verify();
+    let payload = &transfer.payload;
+    let mut out = vec![serde_json::json!({
+        "kind": "package",
+        "id": transfer.sha256,
+        "version": payload.version,
+        "candidate_id": payload.candidate_id,
+        "channel": payload.channel,
+        "origin_node": payload.origin_node,
+        "target_node": payload.target_node,
+        "created_ms": payload.created_ms,
+        "files": payload.files.len(),
+        "documents": payload.context.documents.len(),
+        "memories": payload.context.memories.len(),
+        "verified": verified.is_ok(),
+        "verify_error": verified.err().map(|error| error.to_string()),
+    })];
+    out.push(serde_json::json!({ "kind": "candidate", "candidate": payload.candidate }));
+    out.push(serde_json::json!({ "kind": "evidence", "evidence": payload.evidence }));
+    if !payload.context.note.is_empty() {
+        out.push(serde_json::json!({ "kind": "note", "text": payload.context.note }));
+    }
+    for document in &payload.context.documents {
+        out.push(serde_json::json!({
+            "kind": "document",
+            "slug": document.slug,
+            "title": document.title,
+            "doc_kind": document.kind,
+            "format": document.format,
+            "updated_ms": document.updated_ms,
+            "body": document.body,
+        }));
+    }
+    for memory in &payload.context.memories {
+        out.push(serde_json::json!({
+            "kind": "memory",
+            "id": memory.id,
+            "memory_kind": memory.kind,
+            "scope": memory.scope,
+            "created_ms": memory.created_ms,
+            "body": memory.body,
+        }));
+    }
+    for file in &payload.files {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(file.content_b64.as_bytes())
+            .unwrap_or_default();
+        out.push(serde_json::json!({
+            "kind": "file",
+            "path": file.path,
+            "mode": format!("{:o}", file.mode),
+            "bytes": bytes.len(),
+            "sha256": hex::encode(Sha256::digest(&bytes)),
+        }));
+    }
+    out
+}
+
 pub fn validate_files(files: &[TransferFile]) -> Result<(), TransferError> {
     if files.len() > MAX_TRANSFER_FILES {
         return Err(TransferError::TooManyFiles);
@@ -620,6 +701,124 @@ mod tests {
         )
         .unwrap();
         transfer.verify().unwrap();
+    }
+
+    /// A package is the archive of a piece of work. If the only thing that can
+    /// open one is a running node with the right schema, it is not an archive
+    /// — so the file reads back with nothing but the binary and a filesystem,
+    /// and every record says what kind it is.
+    #[test]
+    fn a_package_reads_back_off_disk_without_a_node() {
+        let (store, identity, candidate_id) = setup();
+        store
+            .write_change(
+                "node",
+                "personal",
+                "document",
+                tracon_sync::ChangeOp::Upsert,
+                "doc-1",
+                json!({
+                    "channel": "personal",
+                    "slug": "guide-a",
+                    "kind": "guide",
+                    "title": "A",
+                    "body": "# A\n\nthe guide body",
+                    "hash": "hash",
+                    "created_ms": 1,
+                    "updated_ms": 1,
+                }),
+            )
+            .unwrap();
+        store
+            .write_change(
+                "node",
+                "personal",
+                "memory",
+                tracon_sync::ChangeOp::Upsert,
+                "mem-1",
+                json!({
+                    "channel": "personal",
+                    "scope": "global",
+                    "scope_ref": Value::Null,
+                    "kind": "directive",
+                    "body": "always run the checks",
+                    "source_session": Value::Null,
+                    "source_node": Value::Null,
+                    "confidence": 1.0,
+                    "state": "active",
+                    "created_ms": 1,
+                    "updated_ms": 1,
+                }),
+            )
+            .unwrap();
+        let transfer = export(
+            &store,
+            &identity,
+            &candidate_id,
+            ContextSelection {
+                documents: vec!["guide-a".into()],
+                memories: vec!["mem-1".into()],
+                note: "picked up after the node went down".into(),
+            },
+            None,
+        )
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("tracon-package-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("package.json");
+        std::fs::write(&path, serde_json::to_vec(&transfer).unwrap()).unwrap();
+
+        let read = read_package(&path).unwrap();
+        let records = package_jsonl(&read);
+        let kinds: Vec<&str> = records
+            .iter()
+            .map(|r| r["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "package",
+                "candidate",
+                "evidence",
+                "note",
+                "document",
+                "memory",
+                "file"
+            ]
+        );
+        assert_eq!(records[0]["verified"], json!(true));
+        assert_eq!(records[0]["verify_error"], Value::Null);
+        assert_eq!(records[0]["candidate_id"], json!(candidate_id));
+        assert_eq!(
+            records[3]["text"],
+            json!("picked up after the node went down")
+        );
+        assert_eq!(records[4]["slug"], json!("guide-a"));
+        assert_eq!(records[4]["body"], json!("# A\n\nthe guide body"));
+        assert_eq!(records[5]["body"], json!("always run the checks"));
+        assert_eq!(records[6]["path"], json!("hello.txt"));
+        assert_eq!(records[6]["bytes"], json!(6));
+        assert_eq!(
+            records[6]["sha256"],
+            json!(hex::encode(Sha256::digest(b"hello\n")))
+        );
+        // Every record is one line of JSON, which is the whole of the format.
+        for record in &records {
+            let line = record.to_string();
+            assert!(!line.contains('\n'), "{line}");
+        }
+
+        // A package that does not verify still reads: an archive that refuses
+        // to render is worse than one that says plainly it was tampered with.
+        let mut tampered = read;
+        tampered.payload.context.note = "not what was signed".into();
+        let records = package_jsonl(&tampered);
+        assert_eq!(records[0]["verified"], json!(false));
+        assert!(records[0]["verify_error"].is_string());
+        assert_eq!(records[3]["text"], json!("not what was signed"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

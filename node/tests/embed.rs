@@ -645,3 +645,90 @@ async fn no_key_file_sends_no_authorization() {
     e.embed_query("anything", "t").await.unwrap();
     assert_eq!(s.auth.lock().unwrap().last().unwrap().as_deref(), None);
 }
+
+/// Vectors are derived data, and the proof of that is that losing them costs
+/// nothing but the time to rebuild. Delete the index outright — the table and
+/// its metadata, as a corrupt or half-written file would — and `tracon doc
+/// reindex` puts the same answers back, from the corpus alone.
+#[tokio::test]
+async fn the_index_is_rebuilt_from_the_corpus_after_it_is_deleted() {
+    state::isolate();
+    let (_stub, base) = stub().await;
+    let (store, e) = setup(&base);
+    let d1 = doc(&store, "d1", "personal", "guide-testing", "Running the suite",
+        "# Running the suite\n\nRun pest to check the whole workspace before you push anything at all.\n");
+    let d2 = doc(
+        &store,
+        "d2",
+        "personal",
+        "guide-shipping",
+        "Shipping",
+        "# Shipping\n\nMerging to main deploys. A release goes out on every merge.\n",
+    );
+    memory(
+        &store,
+        "personal",
+        "m1",
+        "the corpus is recalled per document",
+    );
+    indexed(&e, &store).await;
+
+    let questions = [
+        "how do I run the check suite",
+        "what ships a release",
+        "recall",
+    ];
+    let mut before = Vec::new();
+    for q in questions {
+        let v = e.embed_query(q, "t").await.unwrap();
+        before.push(store.vec_search(Some("personal"), &v, 3).unwrap());
+    }
+    assert_eq!(before[0][0].source_id, d1);
+    assert_eq!(before[1][0].source_id, d2);
+    let indexed_chunks = store.vec_count().unwrap();
+    assert!(indexed_chunks >= 3);
+
+    // The index is gone: not stale, gone. The background sweep only fills in
+    // what is missing per record, so this is the case that needs a command.
+    store.vec_drop().unwrap();
+    assert_eq!(store.vec_count().unwrap(), 0);
+    let v = e.embed_query(questions[0], "t").await.unwrap();
+    assert!(store
+        .vec_search(Some("personal"), &v, 3)
+        .unwrap()
+        .is_empty());
+
+    let done = tracon::embed::rebuild(config(&base), store.clone(), reqwest::Client::new(), "t")
+        .await
+        .unwrap();
+    assert_eq!(done.records, 3, "two documents and one memory");
+    assert_eq!(done.chunks as i64, indexed_chunks);
+    assert_eq!(store.vec_count().unwrap(), indexed_chunks);
+
+    // Same query, same neighbours, in the same order.
+    for (q, was) in questions.iter().zip(&before) {
+        let v = e.embed_query(q, "t").await.unwrap();
+        let now = store.vec_search(Some("personal"), &v, 3).unwrap();
+        let ids = |hits: &Vec<tracon::store::vectors::Neighbour>| {
+            hits.iter()
+                .map(|h| (h.source_table.clone(), h.source_id.clone(), h.chunk_ix))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&now), ids(was), "{q}");
+    }
+}
+
+/// A node that does not embed has no index to rebuild, and says so rather than
+/// reporting a successful rebuild of nothing.
+#[tokio::test]
+async fn a_rebuild_on_a_node_that_does_not_embed_is_refused() {
+    state::isolate();
+    let (_stub, base) = stub().await;
+    let (store, _e) = setup(&base);
+    let mut cfg = Config::default();
+    cfg.embed.enabled = false;
+    let err = tracon::embed::rebuild(Arc::new(cfg), store.clone(), reqwest::Client::new(), "t")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("[embed] is off"), "{err}");
+}

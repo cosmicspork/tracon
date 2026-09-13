@@ -398,3 +398,172 @@ async fn an_archived_document_is_kept_but_out_of_the_list_and_search_until_asked
     let (_, list) = call_with(&h.operator, "GET", "/api/docs?channel=personal", None, &[]).await;
     assert_eq!(slugs(&list).len(), 2);
 }
+
+/// The documents `tracon doc export` writes, by the CLI's own route: GET the
+/// list, then GET each body. This breaks if the CLI's route breaks.
+async fn exported(app: &axum::Router, channel: &str) -> Vec<tracon::corpus::export::ExportDoc> {
+    let (st, list) = call_with(
+        app,
+        "GET",
+        &format!("/api/docs?channel={channel}&archived=true"),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{list}");
+    let mut out = Vec::new();
+    for d in list["docs"].as_array().cloned().unwrap_or_default() {
+        if d["format"].as_str() == Some("html") {
+            continue;
+        }
+        let slug = d["slug"].as_str().unwrap().to_string();
+        let (_, full) = call_with(
+            app,
+            "GET",
+            &format!("/api/docs/{channel}/{slug}"),
+            None,
+            &[],
+        )
+        .await;
+        out.push(tracon::corpus::export::ExportDoc {
+            slug,
+            body: full["body"].as_str().unwrap().to_string(),
+            archived: d["archived"].as_i64() == Some(1),
+        });
+    }
+    out
+}
+
+/// Every document on a channel, as an operator comparing two nodes would read
+/// it: the identity, the body, and the metadata hanging off it.
+async fn corpus_of(app: &axum::Router, channel: &str) -> Vec<Value> {
+    let (_, list) = call_with(
+        app,
+        "GET",
+        &format!("/api/docs?channel={channel}&archived=true"),
+        None,
+        &[],
+    )
+    .await;
+    let mut out = Vec::new();
+    for d in list["docs"].as_array().cloned().unwrap_or_default() {
+        let slug = d["slug"].as_str().unwrap().to_string();
+        let (_, full) = call_with(
+            app,
+            "GET",
+            &format!("/api/docs/{channel}/{slug}"),
+            None,
+            &[],
+        )
+        .await;
+        out.push(json!({
+            "slug": slug,
+            "kind": d["kind"],
+            "title": d["title"],
+            "format": d["format"],
+            "archived": d["archived"],
+            "hash": full["hash"],
+            "body": full["body"],
+        }));
+    }
+    out.sort_by(|a, b| a["slug"].as_str().unwrap().cmp(b["slug"].as_str().unwrap()));
+    out
+}
+
+/// The corpus is meant to outlive this binary, so its export has to be a
+/// complete, plain-file description of it: export to a directory, import that
+/// directory into a node that has never seen any of it, and the two corpora
+/// agree byte for byte — bodies, and the metadata (kind, title, archived
+/// state, content hash) derived from them.
+#[tokio::test]
+async fn a_document_export_imports_into_a_fresh_node_unchanged() {
+    let from = harness().await;
+    // Awkward on purpose: an archived document, a body with no heading, a slug
+    // with no kind prefix, trailing whitespace and a missing final newline,
+    // CRLF, and non-ASCII — each of which a format that normalised anything
+    // would quietly change.
+    let written: [(&str, &str, bool); 6] = [
+        (
+            "guide-workspace",
+            "# Workspace\n\nRun `just test`.\n",
+            false,
+        ),
+        ("note-odd", "no heading at all, and no final newline", false),
+        (
+            "ref-unicode",
+            "# Ünicode ✅\n\nnaïve — em dash, é.\n",
+            false,
+        ),
+        (
+            "plan-crlf",
+            "# Plan\r\n\r\ntrailing spaces here:   \n\n\n",
+            false,
+        ),
+        ("scratch", "# Scratch\n\nno kind prefix.\n", false),
+        ("meeting-old", "# Standup\n\nlast quarter.\n", true),
+    ];
+    for (slug, body, archived) in written {
+        let (st, v) = call_with(
+            &from.operator,
+            "PUT",
+            &format!("/api/docs/personal/{slug}"),
+            Some(json!({ "body": body, "archived": archived })),
+            &[],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{slug}: {v}");
+    }
+    let before = corpus_of(&from.operator, "personal").await;
+    assert_eq!(before.len(), written.len());
+
+    // Export: plain Markdown files, archived ones under archive/.
+    let dir = state::scratch("document-export-round-trip");
+    let docs = exported(&from.operator, "personal").await;
+    let report = tracon::corpus::export::sync_dir(&dir, &docs).unwrap();
+    assert_eq!(report.written, written.len());
+    // Nothing but `<slug>.md` and `archive/<slug>.md`: no sidecar, no
+    // manifest, no index. A directory of Markdown is the whole format.
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "archive",
+            "guide-workspace.md",
+            "note-odd.md",
+            "plan-crlf.md",
+            "ref-unicode.md",
+            "scratch.md",
+        ]
+    );
+    // The file on disk is the body and nothing else.
+    for (slug, body, archived) in written {
+        let path = if archived {
+            dir.join("archive").join(format!("{slug}.md"))
+        } else {
+            dir.join(format!("{slug}.md"))
+        };
+        assert_eq!(std::fs::read(&path).unwrap(), body.as_bytes(), "{slug}");
+    }
+
+    // Import into a node that has never held any of this, addressed only by
+    // filename: no ids, no channel, no origin node is needed to read it back.
+    let (imported, skipped) = tracon::corpus::import::read_dir(&dir).unwrap();
+    assert!(skipped.is_empty(), "{skipped:?}");
+    let into = harness().await;
+    for d in &imported {
+        let (st, v) = call_with(
+            &into.operator,
+            "PUT",
+            &format!("/api/docs/personal/{}", d.slug),
+            Some(json!({ "body": d.body, "archived": d.archived })),
+            &[],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}: {v}", d.slug);
+    }
+    assert_eq!(corpus_of(&into.operator, "personal").await, before);
+}
