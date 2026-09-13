@@ -83,6 +83,10 @@ pub struct Fake {
     /// well have taken it. This is the shape a mediated mutation's
     /// uncertainty actually has.
     prompt_times_out: Arc<AtomicBool>,
+    /// Take the permission reply and then never answer it: the harness has the
+    /// decision, the caller learns nothing. A mediated mutation's uncertainty
+    /// on the gateway's side has exactly this shape.
+    reply_hangs: Arc<AtomicBool>,
     /// Whether the server-wide stream raises the scripted permission ask.
     asks: Arc<AtomicBool>,
     /// Permission requests the harness reports as still pending.
@@ -102,6 +106,7 @@ impl Fake {
             replay_all: Arc::new(AtomicBool::new(false)),
             alive: Arc::new(AtomicBool::new(true)),
             prompt_times_out: Arc::new(AtomicBool::new(false)),
+            reply_hangs: Arc::new(AtomicBool::new(false)),
             asks: Arc::new(AtomicBool::new(true)),
             pending: Arc::new(Mutex::new(Vec::new())),
             messages: Arc::new(Mutex::new(Vec::new())),
@@ -135,6 +140,16 @@ impl Fake {
     /// It answers again.
     pub fn prompt_answers(&self) {
         self.prompt_times_out.store(false, Ordering::SeqCst);
+    }
+
+    /// The permission reply route takes the answer and then stops talking.
+    pub fn reply_hangs(&self) {
+        self.reply_hangs.store(true, Ordering::SeqCst);
+    }
+
+    /// It answers replies again.
+    pub fn reply_answers(&self) {
+        self.reply_hangs.store(false, Ordering::SeqCst);
     }
 
     /// Make the harness report `id` as a permission it is still blocked on.
@@ -415,6 +430,11 @@ pub fn app(fake: Fake) -> Router {
                         .lock()
                         .unwrap()
                         .retain(|p| p["id"].as_str() != Some(request.as_str()));
+                    if fake.reply_hangs.load(Ordering::SeqCst) {
+                        // Taken, never reported: the caller's timeout fires
+                        // over an answer the harness has already acted on.
+                        std::future::pending::<()>().await;
+                    }
                     StatusCode::NO_CONTENT
                 },
             ),

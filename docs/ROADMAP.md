@@ -80,8 +80,9 @@ refer to that manifest's table.
         owner-bound; Gate D) — the capability check point exists and the connect route
         answers 501 — and the native UI origin that will call this mount (Gate D). Child
         sessions (`fork`) and `init` are refused with a visible 403 until tracon registers
-        them; a mediated call that times out is recorded as uncertain and left for the
-        ingestion path to reconcile.
+        them; a mediated call writes its `opencode_intent` row before dispatch, so one that
+        times out is recorded as uncertain — on the intent and on the session — and left for
+        the ingestion path to settle.
   - [ ] Provider proofs on the pinned binary: hosted API keys, the self-hosted
         OpenAI-compatible endpoint with non-zero gateway counts (finding 10), Anthropic
         subscription via `claude setup-token` lifted into the broker, Codex subscription
@@ -118,9 +119,34 @@ refer to that manifest's table.
           server and a stub upstream, not yet against the pinned binary and a live provider;
           `cost` on the v2 surface is always zero upstream (§6.2), so a priced turn is only
           as good as the v1 numbers the adapter reads.
-  - [ ] Adversarial API run: permission escalation, foreign session ids, config and auth
+  - [x] Adversarial API run: permission escalation, foreign session ids, config and auth
         writes, share, revert, shell, child sessions; interrupted SSE and killed processes
         during mutations; two simultaneous sessions cannot read or migrate each other's state.
+        Every case asserts from both ends — what the client got back and what reached the
+        harness — in `node/tests/opencode_adversarial.rs`. Against the fake: an `always`
+        narrowed and recorded, `PATCH /session/{id}` and the saved-grant writes refused, a
+        reply aimed at another session's permission refused on the identity map (the v1
+        route names no session at all), every `{session}` route refused a foreign id, a
+        path that does not normalise refused before it is classified, every spelling of
+        `directory`/`cwd` replaced or refused, the config and credential routes refused
+        with nothing sent, share/fork/init/agent refused, a revert decided by policy and a
+        permitted one recording that the tree moved, a PTY default-denied, and a mediated
+        mutation that never reported left uncertain and settled by reconciliation without
+        a second answer being sent. Against the pinned binary: two sessions side by side
+        with distinct XDG trees and databases, neither server's session list holding the
+        other's and neither holding a lock on its own database (finding 17 observed, which
+        is why the node now fences); the gateway refusing one session's mount with the
+        other's id; stopping one leaving the other running; a refused PTY spawning nothing;
+        an auth store that stays empty and a `GET /config` that is the node's; and a killed
+        `opencode serve` leaving the mutation's intent uncertain with its reason rather than
+        lost. The node-owned single-writer fence over a session's state directory (row 6b —
+        upstream provides none) is built and covered.
+        - **Not exercisable model-free, so still the operator's live run:** that a second
+          identical tool call asks again after a gateway-mediated `once` (it needs a model
+          to call a tool at all — what is proved here is that no grant can be saved and the
+          ruleset stays all-`ask`); a subagent child session raised by the harness itself
+          (the ingestion path for it is covered against the fake); and killing the server
+          *after a tool call was recorded*, for the same reason.
 - [ ] **Gate C — customization and recovery.**
   - [ ] Launch manifest: skill, prompt, and agent snapshots with digests; duplicates rejected
         and URL sources forbidden at manifest build (finding 14); read-only mount outside the
