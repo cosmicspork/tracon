@@ -151,6 +151,11 @@ pub struct Manager {
     /// rather than opening a second one, so the home shows what is connected
     /// and not how many windows are open.
     external: Arc<Mutex<HashMap<String, external::Attachment>>>,
+    /// Session id → the running harness's own HTTP API, for the sessions
+    /// whose harness has one. Registered when the harness starts and dropped
+    /// when its supervisor ends, so the gateway can answer for exactly the
+    /// sessions that are live and for no other endpoint.
+    native: Arc<Mutex<HashMap<String, crate::adapter::NativeApi>>>,
     /// The node's own model probe presents this to the gateway; it may only
     /// read, and it names no channel.
     probe_token: String,
@@ -187,6 +192,7 @@ impl Manager {
             live: Arc::new(Mutex::new(HashMap::new())),
             tokens: Arc::new(Mutex::new(HashMap::new())),
             external: Arc::new(Mutex::new(HashMap::new())),
+            native: Arc::new(Mutex::new(HashMap::new())),
             probe_token: mint_token(),
             mesh: Arc::new(std::sync::OnceLock::new()),
             providers: Arc::new(std::sync::OnceLock::new()),
@@ -375,6 +381,32 @@ impl Manager {
     fn session_allows_work(&self, session_id: &str) -> bool {
         self.ensure_active(session_id).is_ok()
     }
+    /// The running harness's own HTTP API for a session, when it has one.
+    /// This is the only way the gateway learns an endpoint: a request cannot
+    /// name one, so no session's mount can reach another's server.
+    pub async fn native_api(&self, session_id: &str) -> Option<crate::adapter::NativeApi> {
+        self.native.lock().await.get(session_id).cloned()
+    }
+
+    /// Register a native API directly. Tests drive the gateway against a fake
+    /// harness server without starting one; sessions always go through
+    /// `start`.
+    #[doc(hidden)]
+    pub async fn register_native_api_for_test(
+        &self,
+        session_id: &str,
+        api: crate::adapter::NativeApi,
+    ) {
+        self.native.lock().await.insert(session_id.to_string(), api);
+    }
+
+    /// Whether a channel may run this `provider/model`: the check `create`
+    /// makes before a session starts, asked again by the gateway when a
+    /// native-UI model switch arrives mid-session.
+    pub fn model_authorized(&self, channel: &str, model: &str) -> bool {
+        self.model_usable(channel, model, &self.bindings(channel))
+    }
+
     pub fn probe_token(&self) -> &str {
         &self.probe_token
     }
@@ -1078,6 +1110,12 @@ impl Manager {
         // returned, so this records a session that is already known compatible
         // — for reading the transcript later against the build that produced it.
         let compat = handle.compat();
+        // What the policy-aware API gateway answers for. Registered before the
+        // session is announced as started, so the interface never has a
+        // running session whose native API it cannot reach.
+        if let Some(api) = handle.native_api() {
+            self.native.lock().await.insert(id.to_string(), api);
+        }
         self.store.update_session(
             id,
             SessionPatch {
@@ -1134,12 +1172,17 @@ impl Manager {
         );
         let live = self.live.clone();
         let tokens = self.tokens.clone();
+        let native = self.native.clone();
         let sid = id.to_string();
         tokio::spawn(async move {
             sup.run(events, cmd_rx).await;
             live.lock().await.remove(&sid);
             // The token dies with the session; a later call with it is refused.
             tokens.lock().await.remove(&sid);
+            // So does the gateway's route to its harness: the endpoint is
+            // gone, and a later request must not be forwarded to whatever
+            // took the port.
+            native.lock().await.remove(&sid);
             materialize::remove(&sid);
         });
         Ok(())

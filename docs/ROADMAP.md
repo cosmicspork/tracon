@@ -46,10 +46,27 @@ refer to that manifest's table.
         message, part, permission, and PTY ids; reconciliation anchored on the per-session
         sequenced streams and snapshots (finding 6); uncertain-outcome handling for timed-out
         mutations.
-  - [ ] Policy-aware API gateway: deny by default from the route matrix, directory pinned
+  - [x] Policy-aware API gateway: deny by default from the route matrix, directory pinned
         and bodies inspected (finding 5), all-`ask` ruleset with tracon deciding and replying
         `once`, every `always` rewritten and recorded, `PATCH /session/{id}` and the manifest's
-        deny list refused (findings 1, 2).
+        deny list refused (findings 1, 2). Mounted at `/api/opencode/{session_id}/…` on the
+        operator router, so the operator's own guard — loopback or cookie, `Host`, and
+        same-origin — answers first and the harness credential is injected on the node
+        (finding 4). Covered by tests against the fake server: a readable route forwarded
+        with Basic auth injected and no password reaching the client, every deny-list route
+        refused with a 403 naming method and path plus a `gateway_refused` event and nothing
+        sent, a foreign session id refused, the caller's `directory` replaced with the
+        workspace in query, header and body, `always` rewritten to `once` and both the
+        decision and the attempted broadening recorded, a prompt through the gateway running
+        through the session manager rather than being forwarded, an unauthenticated and a
+        cross-origin request refused before the gateway runs, and a PTY refused without an
+        explicitly granted `terminal` capability.
+        **Still to do here:** the PTY WebSocket ticket exchange (gateway-minted and
+        owner-bound; Gate D) — the capability check point exists and the connect route
+        answers 501 — and the native UI origin that will call this mount (Gate D). Child
+        sessions (`fork`) and `init` are refused with a visible 403 until tracon registers
+        them; a mediated call that times out is recorded as uncertain and left for the
+        ingestion path to reconcile.
   - [ ] Provider proofs on the pinned binary: hosted API keys, the self-hosted
         OpenAI-compatible endpoint with non-zero gateway counts (finding 10), Anthropic
         subscription via `claude setup-token` lifted into the broker, Codex subscription
