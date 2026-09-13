@@ -24,7 +24,7 @@ be rescued from a live harness:
 
 | | |
 |---|---|
-| the files | Workspaces → download, or `GET /api/workspaces/{id}/download` (a zip) |
+| the files | Workspaces → download, or `GET /api/workspaces/{id}/download` — a zip, and `{id}` may name the session instead |
 | the documents | `tracon doc export <dir>` — plain `<slug>.md`, archived ones under `archive/` |
 | an HTML document | Documents → download (the original file, or a ZIP of the bundle) |
 | a candidate and its evidence | a session's export: a signed package, readable offline (below) |
@@ -33,12 +33,13 @@ be rescued from a live harness:
 than a directory in the operator's home, so reach it through the runtime:
 
 ```sh
-podman volume export tracon-workspace-<session-or-workspace-id> -o work.tar
+podman volume export tracon-workspace-<workspace-id> -o work.tar
 ```
 
-On the Kubernetes backend it is the session's volume claim; on the local
-backend used by tests it is `local-runtime/tracon-workspace-<id>` under the
-state directory. The `[docs] export_dir` mirror, if it is configured, is
+The workspace id is the one the session row records, and `node.db` still has it
+with nothing running. On the Kubernetes backend the volume is the session's
+claim; on the local backend used by tests it is
+`local-runtime/tracon-workspace-<workspace-id>` under the state directory. The `[docs] export_dir` mirror, if it is configured, is
 already on disk and needs nothing running at all.
 
 Often the fastest answer is none of these: an execute session that submitted
