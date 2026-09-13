@@ -1,16 +1,10 @@
-//! A fake OpenCode server, speaking the pinned release's HTTP API.
+//! A fake OpenCode server speaking the pinned release's HTTP API.
 //!
-//! It is shared by the adapter tests (which are about driving a harness over a
-//! server rather than a pipe) and the ingestion tests (which are about what the
-//! node remembers across a disconnection). What it models is only what the node
-//! actually touches: the durable per-session stream with its aggregate
-//! sequence, the server-wide stream with no replay at all, the snapshot routes
-//! reconciliation reads, and the mutations it answers.
-//!
-//! Every knob on it exists because some failure is only reachable through the
-//! wire: a stream that cuts mid-turn, a server that re-delivers a sequence it
-//! already sent, a session that has vanished, a prompt whose answer never
-//! comes back.
+//! Shared by the adapter tests, which drive it through the adapter, and the
+//! gateway tests, which drive it through the operator router. It is the same
+//! server in both: the credential it demands, the directory it records, and
+//! the `reply` bodies it receives are what each side has to get right, and
+//! asserting on one fake keeps the two from disagreeing about the wire.
 
 #![allow(dead_code)]
 
@@ -33,13 +27,28 @@ pub const SESSION: &str = "ses_faketestsession0000000";
 pub const PERMISSION: &str = "per_fakepermission0000000";
 const PASSWORD_HEADER: &str = "authorization";
 
+/// One request as the fake saw it, so a gateway test can assert on what
+/// reached the harness rather than on what the node says it sent.
+#[derive(Clone, Debug)]
+pub struct Recorded {
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    /// The `Authorization` header, which is how a test sees the credential
+    /// being injected server-side.
+    pub authorization: Option<String>,
+    pub directory_header: Option<String>,
+    /// The operator's own cookie, which must never be forwarded.
+    pub cookie: Option<String>,
+}
+
 /// What the fake server was asked and what it was told, so a test can assert
 /// on the wire rather than on the adapter's own account of it.
 #[derive(Default)]
 pub struct Seen {
     /// Every `?after=` the durable stream was reconnected with.
     pub resumed_from: Vec<u64>,
-    /// Every `?after=` the history route was paged from.
+    /// Every `?after=` the durable history was paged from.
     pub history_from: Vec<u64>,
     /// Bodies posted to the permission reply route.
     pub replies: Vec<Value>,
@@ -49,19 +58,21 @@ pub struct Seen {
     pub unauthenticated: usize,
     pub prompts: Vec<String>,
     pub aborted: usize,
+    /// Every request that reached the fake, in order.
+    pub requests: Vec<Recorded>,
 }
 
 #[derive(Clone)]
 pub struct Fake {
     pub seen: Arc<Mutex<Seen>>,
-    version: String,
+    pub version: String,
     pub password: Arc<Mutex<String>>,
     /// How many durable frames to emit before dropping the connection, so a
     /// test can prove the stream resumes from the last sequence rather than
     /// replaying from the start or losing what it missed.
-    cut_after: usize,
+    pub cut_after: usize,
     /// Whether the prompt has been sent, which is what starts the script.
-    prompted: Arc<AtomicUsize>,
+    pub prompted: Arc<AtomicUsize>,
     /// Ignore `?after=` and send the whole script on every connection: a
     /// server that re-delivers what the node has already ingested.
     replay_all: Arc<AtomicBool>,
@@ -69,8 +80,8 @@ pub struct Fake {
     alive: Arc<AtomicBool>,
     /// Answer the prompt route with a gateway timeout *after* admitting the
     /// prompt: the dispatch reports no usable outcome, and the harness may
-    /// well have taken it. This is the shape a mediated mutation's uncertainty
-    /// actually has.
+    /// well have taken it. This is the shape a mediated mutation's
+    /// uncertainty actually has.
     prompt_times_out: Arc<AtomicBool>,
     /// Whether the server-wide stream raises the scripted permission ask.
     asks: Arc<AtomicBool>,
@@ -98,7 +109,7 @@ impl Fake {
     }
 
     /// A server that sends the whole script however far the node says it has
-    /// already got.
+    /// already got: a re-delivery the node has to recognise and drop.
     pub fn replaying_everything(self) -> Self {
         self.replay_all.store(true, Ordering::SeqCst);
         self
@@ -135,10 +146,6 @@ impl Fake {
             "resources": ["just test"],
             "source": { "type": "tool", "messageID": "msg_1", "callID": call },
         }));
-    }
-
-    pub fn clear_pending(&self) {
-        self.pending.lock().unwrap().clear();
     }
 
     /// Put a prompt in the snapshot as though the harness had admitted it,
@@ -241,7 +248,7 @@ fn authorized(fake: &Fake, headers: &HeaderMap) -> bool {
         .is_some_and(|value| value == expected)
 }
 
-/// Every route the node drives. A request without the credential is refused
+/// Every route the adapter drives. A request without the credential is refused
 /// exactly as the real server refuses one, and counted so a test can assert
 /// that the node never sends an unauthenticated request in the first place.
 pub fn app(fake: Fake) -> Router {
@@ -253,6 +260,7 @@ pub fn app(fake: Fake) -> Router {
         Some((StatusCode::UNAUTHORIZED, "unauthorized").into_response())
     }
 
+    let log = fake.seen.clone();
     Router::new()
         .route(
             "/global/health",
@@ -303,7 +311,40 @@ pub fn app(fake: Fake) -> Router {
                 },
             ),
         )
-        // The snapshot reconciliation anchors on: a session that is gone
+        .route(
+            "/api/session/{session}/prompt",
+            post(
+                |State(fake): State<Fake>,
+                 headers: HeaderMap,
+                 Path(session): Path<String>,
+                 Json(body): Json<Value>| async move {
+                    if let Some(refused) = guard(&fake, &headers).await {
+                        return refused;
+                    }
+                    let text = body["prompt"]["text"].as_str().unwrap_or("").to_string();
+                    fake.seen.lock().unwrap().prompts.push(text.clone());
+                    fake.prompted.fetch_add(1, Ordering::SeqCst);
+                    // Admitted whichever way this answers: that is the whole
+                    // point of an uncertain outcome.
+                    fake.admitted_prompt(&text);
+                    if fake.prompt_times_out.load(Ordering::SeqCst) {
+                        return (StatusCode::GATEWAY_TIMEOUT, "no answer").into_response();
+                    }
+                    Json(json!({
+                        "data": {
+                            "admittedSeq": 1,
+                            "id": "msg_1",
+                            "sessionID": session,
+                            "prompt": body["prompt"],
+                            "delivery": "steer",
+                            "timeCreated": 1,
+                        }
+                    }))
+                    .into_response()
+                },
+            ),
+        )
+        // The snapshots reconciliation anchors on. A session that is gone
         // answers 404, which is what moves it to a terminal state here.
         .route(
             "/api/session/{session}",
@@ -350,39 +391,6 @@ pub fn app(fake: Fake) -> Router {
                 Json(json!({ "data": data }))
             }),
         )
-        .route(
-            "/api/session/{session}/prompt",
-            post(
-                |State(fake): State<Fake>,
-                 headers: HeaderMap,
-                 Path(session): Path<String>,
-                 Json(body): Json<Value>| async move {
-                    if let Some(refused) = guard(&fake, &headers).await {
-                        return refused;
-                    }
-                    let text = body["prompt"]["text"].as_str().unwrap_or("").to_string();
-                    fake.seen.lock().unwrap().prompts.push(text.clone());
-                    fake.prompted.fetch_add(1, Ordering::SeqCst);
-                    // Admitted whichever way this answers: that is the whole
-                    // point of an uncertain outcome.
-                    fake.admitted_prompt(&text);
-                    if fake.prompt_times_out.load(Ordering::SeqCst) {
-                        return (StatusCode::GATEWAY_TIMEOUT, "no answer").into_response();
-                    }
-                    Json(json!({
-                        "data": {
-                            "admittedSeq": 1,
-                            "id": "msg_1",
-                            "sessionID": session,
-                            "prompt": body["prompt"],
-                            "delivery": "steer",
-                            "timeCreated": 1,
-                        }
-                    }))
-                    .into_response()
-                },
-            ),
-        )
         .route("/api/session/{session}/event", get(durable_stream))
         .route("/api/event", get(server_stream))
         .route(
@@ -422,12 +430,48 @@ pub fn app(fake: Fake) -> Router {
             "/instance/dispose",
             post(|State(_fake): State<Fake>| async move { Json(json!(true)) }),
         )
+        // A route the matrix classifies readable but the adapter never
+        // drives: the gateway test needs somewhere real to send one.
+        .fallback(|State(fake): State<Fake>, headers: HeaderMap| async move {
+            if !authorized(&fake, &headers) {
+                fake.seen.lock().unwrap().unauthenticated += 1;
+                return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+            }
+            Json(json!({ "ok": true })).into_response()
+        })
+        // Log every request before it is answered, so a test can assert on
+        // what reached the harness rather than on what the node says it sent.
+        .layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let seen = log.clone();
+                async move {
+                    {
+                        let headers = req.headers();
+                        let header = |name: &str| {
+                            headers
+                                .get(name)
+                                .and_then(|v| v.to_str().ok())
+                                .map(str::to_string)
+                        };
+                        seen.lock().unwrap().requests.push(Recorded {
+                            method: req.method().to_string(),
+                            path: req.uri().path().to_string(),
+                            query: req.uri().query().unwrap_or_default().to_string(),
+                            authorization: header("authorization"),
+                            directory_header: header("x-opencode-directory"),
+                            cookie: header("cookie"),
+                        });
+                    }
+                    next.run(req).await
+                }
+            },
+        ))
         .with_state(fake)
 }
 
 /// The durable per-session stream. It replays from `after`, and — when the
-/// fake was built to cut — closes the connection partway so the node has to
-/// reconnect from the last sequence it recorded.
+/// fake was built to cut — closes the connection partway so the adapter has to
+/// reconnect from the last sequence it saw.
 async fn durable_stream(
     State(fake): State<Fake>,
     headers: HeaderMap,

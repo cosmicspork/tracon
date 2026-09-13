@@ -431,9 +431,32 @@ pub trait HarnessAdapter: Send + Sync {
     }
 }
 
+/// A running harness's own HTTP API, as the gateway that mediates it needs to
+/// reach it. The credential stays on the node: the gateway injects it upstream
+/// and the browser never sees it (`docs/reference/opencode-v1.18.30/`,
+/// finding 4).
+#[derive(Debug, Clone)]
+pub struct NativeApi {
+    /// `http://host:port` — this session's server and no other's.
+    pub base: String,
+    /// The `Authorization` header value that endpoint demands.
+    pub authorization: String,
+    /// The workspace directory, in the runner's namespace, that every
+    /// forwarded request is pinned to.
+    pub directory: String,
+    /// The harness's own session id: the only one the gateway forwards.
+    pub session_id: String,
+}
+
 #[async_trait]
 pub trait HarnessHandle: Send + Sync {
     fn harness_session_id(&self) -> &str;
+    /// The harness's own HTTP API, when it has one worth mediating. A harness
+    /// driven over a pipe has none, and the gateway answers for no session it
+    /// cannot reach this way.
+    fn native_api(&self) -> Option<NativeApi> {
+        None
+    }
     /// What the handshake that produced this handle reported. Available only
     /// once the handshake succeeded, which is the only time it is true.
     fn compat(&self) -> HarnessCompat;

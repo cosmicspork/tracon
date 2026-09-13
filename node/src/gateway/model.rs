@@ -298,7 +298,7 @@ fn routes(shape: &str) -> &'static [Route] {
 
 /// A segment standing in for a model or response id: printable ASCII from a
 /// narrow set, so a matched path never needs re-encoding to be forwarded.
-fn is_opaque(segment: &str) -> bool {
+pub(crate) fn is_opaque(segment: &str) -> bool {
     !segment.is_empty()
         && segment.len() <= 128
         && segment
@@ -335,7 +335,7 @@ fn decode_segment(segment: &str) -> Option<String> {
 /// ambiguous after decoding — `..`, an encoded separator, a second layer of
 /// encoding — refused rather than resolved. Matching the decoded form and
 /// forwarding that same form is what keeps the two from disagreeing.
-fn normalised(raw: &str) -> Option<Vec<String>> {
+pub(crate) fn normalised(raw: &str) -> Option<Vec<String>> {
     let mut out = Vec::new();
     for segment in raw.split('/') {
         let decoded = decode_segment(segment)?;

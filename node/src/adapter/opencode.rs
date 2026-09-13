@@ -1465,6 +1465,19 @@ impl HarnessHandle for OpenCodeHandle {
         &self.session_id
     }
 
+    /// Where the policy-aware API gateway reaches this session's server, and
+    /// with what. Nothing here is ever handed to a client: the gateway resolves
+    /// it per request and injects the credential itself, so the operator's
+    /// browser holds a tracon cookie and never the server password (finding 4).
+    fn native_api(&self) -> Option<crate::adapter::NativeApi> {
+        Some(crate::adapter::NativeApi {
+            base: self.client.base.clone(),
+            authorization: self.client.authorization.clone(),
+            directory: self.client.directory.clone(),
+            session_id: self.session_id.clone(),
+        })
+    }
+
     fn compat(&self) -> HarnessCompat {
         self.compat.clone()
     }

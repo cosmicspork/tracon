@@ -15,7 +15,7 @@
 #[path = "support/mod.rs"]
 mod support;
 use support::events::{drain_until, DEADLINE};
-use support::opencode::{start, Fake, HttpApi, PERMISSION, SESSION};
+use support::fake_opencode::{start, Fake, HttpApi, PERMISSION, SESSION};
 use support::state;
 
 use std::sync::Arc;
@@ -93,7 +93,7 @@ fn kinds(store: &Store) -> Vec<String> {
 fn launch_spec(cursor: Arc<dyn DurableCursor>) -> LaunchSpec {
     LaunchSpec {
         cursor: Some(cursor),
-        ..support::opencode::spec()
+        ..support::fake_opencode::spec()
     }
 }
 
@@ -185,7 +185,7 @@ async fn a_restart_mid_turn_resumes_from_the_persisted_sequence() {
         for seq in 1..=2 {
             assert!(
                 before
-                    .admit(&support::opencode::durable(
+                    .admit(&support::fake_opencode::durable(
                         seq,
                         "session.next.text.ended",
                         json!({ "sessionID": SESSION, "text": "working on it" }),
@@ -243,7 +243,7 @@ async fn a_permission_pending_upstream_is_reraised_after_a_reconnect() {
     fake.pending_permission(PERMISSION, "call_1");
     let seen = fake.seen.clone();
     let password = fake.password.clone();
-    let addr = support::opencode::serve(fake).await;
+    let addr = support::fake_opencode::serve(fake).await;
     ingest.rebind(
         SESSION,
         HttpApi::connect(addr, &password.lock().unwrap().clone()),
@@ -264,7 +264,7 @@ async fn a_permission_pending_upstream_is_reraised_after_a_reconnect() {
         .unwrap();
 
     // The answer reaches the harness, and reaches it as `once`.
-    let replies = support::opencode::wait_for_reply(&seen).await;
+    let replies = support::fake_opencode::wait_for_reply(&seen).await;
     assert_eq!(replies[0]["id"], PERMISSION);
     assert_eq!(replies[0]["body"]["reply"], "once");
 
@@ -287,7 +287,7 @@ async fn a_permission_answered_here_but_pending_upstream_is_answered_again() {
     fake.pending_permission(PERMISSION, "call_1");
     let seen = fake.seen.clone();
     let password = fake.password.clone();
-    let addr = support::opencode::serve(fake).await;
+    let addr = support::fake_opencode::serve(fake).await;
     ingest.rebind(
         SESSION,
         HttpApi::connect(addr, &password.lock().unwrap().clone()),
@@ -452,7 +452,7 @@ async fn a_child_session_is_recorded_with_its_lineage_and_surfaced_as_untracked(
     );
 
     ingest
-        .admit(&support::opencode::durable(
+        .admit(&support::fake_opencode::durable(
             1,
             "session.created",
             json!({
@@ -479,7 +479,7 @@ async fn a_child_session_is_recorded_with_its_lineage_and_surfaced_as_untracked(
 
     // Told once, not on every replay of the same event.
     ingest
-        .admit(&support::opencode::durable(
+        .admit(&support::fake_opencode::durable(
             1,
             "session.created",
             json!({
@@ -507,7 +507,7 @@ async fn a_session_gone_upstream_becomes_terminal_with_the_reason() {
     let fake = Fake::new("1.18.30", usize::MAX);
     let peek = fake.clone();
     let password = fake.password.clone();
-    let addr = support::opencode::serve(fake).await;
+    let addr = support::fake_opencode::serve(fake).await;
     ingest.rebind(
         SESSION,
         HttpApi::connect(addr, &password.lock().unwrap().clone()),
@@ -559,7 +559,7 @@ async fn a_startup_reconciliation_ingests_the_missed_turn_exactly_once() {
     let (ingest, _commands) = ingest_for(&store);
     let fake = Fake::new("1.18.30", usize::MAX);
     let password = fake.password.clone();
-    let addr = support::opencode::serve(fake).await;
+    let addr = support::fake_opencode::serve(fake).await;
     ingest.rebind(
         SESSION,
         HttpApi::connect(addr, &password.lock().unwrap().clone()),

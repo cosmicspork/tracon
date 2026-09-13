@@ -12,6 +12,9 @@
 #[path = "support/mod.rs"]
 mod support;
 use support::events::{drain_until, next_permission};
+// The runner, the launch spec and the waits live beside the fake server in
+// `support/`, because the ingestion tests drive the same ones.
+use support::fake_opencode::{spec, start, wait_for_reply, Fake, PERMISSION, SESSION};
 use support::state;
 
 use std::sync::{Arc, Mutex};
@@ -22,15 +25,6 @@ use tracon::adapter::{
     PermissionReply,
 };
 use tracon::runner::{Runner, RunnerCommand, RunnerError, Spawned};
-
-// The fake OpenCode server lives in `support/` because ingestion drives the
-// same one: what a session remembers across a disconnection is only testable
-// against a server that can drop a stream, re-deliver a sequence and vanish.
-use support::opencode::{start, wait_for_reply, Fake, FakeRunner, PERMISSION, SESSION};
-
-fn spec() -> LaunchSpec {
-    support::opencode::spec()
-}
 
 #[tokio::test]
 async fn version_is_the_bare_string_the_runner_prints() {
@@ -200,7 +194,7 @@ async fn an_unauthenticated_request_is_refused_and_the_node_never_sends_one() {
     let fake = Fake::new("1.18.30", usize::MAX);
     let seen = fake.seen.clone();
     let password = fake.password.clone();
-    let addr = support::opencode::serve(fake).await;
+    let addr = support::fake_opencode::serve(fake).await;
     // The server has a password before anything connects, exactly as the real
     // one does when the node sets `OPENCODE_SERVER_PASSWORD`.
     *password.lock().unwrap() = "not-the-node's".into();
@@ -217,7 +211,7 @@ async fn an_unauthenticated_request_is_refused_and_the_node_never_sends_one() {
 
     // The adapter's own launch replaces the password with the one it minted,
     // and every request it makes carries it.
-    let runner = FakeRunner {
+    let runner = support::fake_opencode::FakeRunner {
         endpoint: addr,
         password,
         killed: Arc::new(Mutex::new(Vec::new())),
