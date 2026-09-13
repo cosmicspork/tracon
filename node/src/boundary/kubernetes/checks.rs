@@ -13,7 +13,7 @@ use kube::api::{DeleteParams, PostParams};
 use kube::Api;
 
 use super::KubeBackend;
-use crate::boundary::checks::{egress_script, egress_verdict, CheckId, CheckResult};
+use crate::boundary::checks::{egress_script, egress_verdict, CheckId, CheckResult, Denial};
 use crate::boundary::BoundaryReport;
 use crate::config::{Config, HarnessListen};
 use crate::runner::kube::{ROLE_LABEL, STATE_VOLUME};
@@ -459,7 +459,14 @@ async fn check_egress(cfg: &Config, runner: &crate::runner::kube::KubeRunner) ->
         ..Default::default()
     };
     match runner.run_capture(cmd).await {
-        Ok(out) => egress_verdict(&String::from_utf8_lossy(&out.stdout)),
+        // A NetworkPolicy drops; it has no reject verb, and no portable
+        // CNI option turns one into an RST or an ICMP unreachable. The
+        // measurement is still taken and still reported — it is the
+        // difference between a harness whose timeout-free download fails
+        // and one that hangs — but it is recorded as this runtime's
+        // limitation rather than as a failure of a node that never claimed
+        // the property.
+        Ok(out) => egress_verdict(&String::from_utf8_lossy(&out.stdout), Denial::Drops),
         Err(e) => CheckResult::fail(CheckId::Egress, format!("probe failed: {e}")),
     }
 }

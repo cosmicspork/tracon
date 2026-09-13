@@ -181,8 +181,20 @@ refer to that manifest's table.
   - [ ] Plugins and tools only from an image-baked cache; `.opencode/tool/` and project
         config suppressed (findings 12, 15); nested `AGENTS.md`/`CLAUDE.md` accepted and
         documented as matching today's harnesses (finding 13).
-  - [ ] LSP and formatters baked and named by absolute path; runner egress rejects rather
+        *Image half done:* the pinned `@opencode-ai/plugin` is baked and seeded into each
+        session's configuration directory and package cache before the harness starts, so
+        the install OpenCode runs regardless of `OPENCODE_PURE` short-circuits offline. The
+        configuration half (`.opencode/tool/`, project config, nested instruction files)
+        is still open.
+  - [x] LSP and formatters baked and named by absolute path; runner egress rejects rather
         than drops; PID namespace with an init reaps orphans (finding 16); status shown.
+        Profile revision 1 (`containers/harness-opencode/toolchain.json`): rust-analyzer
+        and rustfmt at the workspace's pinned toolchain, typescript-language-server with
+        TypeScript, and prettier; every other builtin server and both remaining
+        self-installing formatters disabled by name. Refusal is measured rather than
+        assumed, by `--deep` and by `node/tests/opencode_runtime.rs`, which also runs the
+        pinned binary's `touchFile` path with downloads deliberately re-enabled and proves
+        nothing of a killed container survives it. Kubernetes keeps the caveat below.
   - [ ] State: node-owned single-writer fencing per session DB, quiesced `VACUUM INTO`
         backups, a recorded state-schema generation gating restore, no downgrade promise
         (finding 17).
@@ -243,6 +255,20 @@ declared `permission.ask` hook; an LSP status event.
   real target.
 - The Kubernetes runtime backend has no scoped QA browser egress gateway;
   `scope_qa_egress` always refuses on that backend.
+- The Kubernetes runtime backend drops denied egress rather than refusing it. A
+  NetworkPolicy has no reject verb — it is a drop by construction — and no portable
+  CNI option turns one into an ICMP or RST refusal, so the property Podman gets from
+  having no route out has to come from the cluster there. Until a cluster that can
+  express it is configured, a harness pod's protection against the hang is the
+  download flag and the explicitly disabled server list alone, which cover OpenCode
+  but would not cover a future harness with its own timeout-free fetch. The node
+  states this rather than claiming the property: `check-boundary --deep` measures the
+  same bound on both backends and fails the Kubernetes one if it drops.
+- The OpenCode harness image is about 1 GB, of which roughly a third is the
+  `librustc_driver` and LLVM shared objects that rust-analyzer and rustfmt link
+  against. The dist channel publishes no self-contained build of either, and a
+  rustfmt from anywhere else formats differently from the workspace's pinned one, so
+  every edit would arrive with churn CI rejects.
 - Harness-specific surfaces that will be rewritten at cutover: the omp provider wiring,
   catalogue denylist, and built-in-provider disabling; the retry-notice recogniser; the
   20 s `review_status` wait cap sized for omp's MCP client.

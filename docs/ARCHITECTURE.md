@@ -100,6 +100,24 @@ Rules learned against real harnesses, kept as rules:
   visible prompt.
 - opencode's ACP mode starts an HTTP server and can advertise over mDNS: bind
   loopback, disable mDNS, and read the recorded cautions before adapting it.
+- **A harness's language tooling is part of its image, named by absolute path.**
+  Left to itself a harness downloads its language servers and formatters on first
+  use, from a network that is denied — and the three formatters that install
+  themselves have no flag that stops them, so naming the command is the only lever.
+  The image bakes a small, explicit profile (the languages this project's own work
+  uses), records it with digests at a fixed path, and the node renders the harness's
+  server and formatter configuration from the same committed profile, disabling by
+  name every builtin the image does not carry. Overriding a builtin's command
+  discards the builtin's initialization, so each override carries its own copy.
+  Anything a harness resolves for itself at run time — a plugin package, a search
+  binary — is pre-populated in the image and copied into the session's own tree
+  before the harness starts, so resolution succeeds offline instead of failing
+  slowly.
+- **Status is what can be observed, and no more.** OpenCode publishes no
+  language-server status and logs nothing when one fails to spawn, so a session
+  records what its configuration named and whether the image had it —
+  configured, unavailable, or disabled — and the header says that rather than
+  inventing a lifecycle. Anything richer is an upstream contribution.
 
 ### Model auth
 
@@ -156,11 +174,35 @@ Three things collapse the boundary and must be verified per environment:
    mounted.
 3. **Direct egress.** Image build may use network; execution may not.
 
+**Denied egress rejects; it does not drop.** A blackholed destination and a working
+but slow one are the same thing to a caller, and the harness has callers that never
+give up: OpenCode's language-server and npm installs pass no abort signal, and its
+`edit` and `write` tools await the language-server touch inline, so one dropped
+packet is an edit that never returns. Podman's internal network has no route out at
+all, so a denied connection fails at `connect(2)` and a denied name fails at
+resolution, both in milliseconds; the gateway refuses an unlisted host with a status
+rather than silence. `--deep` measures this rather than assuming it, and fails a
+boundary whose denials take longer than a few seconds. Kubernetes is the caveat: a
+NetworkPolicy drops by nature and there is no portable way to make it reject, so
+there the bound has to come from a cluster that can express one, and until it does
+that runtime is honest about it rather than claiming the property.
+
+**A harness container is a PID namespace with an init at its head.** Nothing in
+OpenCode reaps what it starts — `serve` installs no signal handler, so a stop runs
+no finalizer at all; its stop of a language server is a bare single-pid SIGTERM with
+no escalation and no wait; and even a clean exit calls `process.exit()` before
+pending finalizers run. So the runner stops the container rather than the process:
+the init takes the signal, the stop timeout bounds the wait, and tearing the
+namespace down is what actually collects the language servers and formatters. A pod
+gets the same number as its termination grace period and needs no shared process
+namespace, because the container carries its own init.
+
 **The checks verify what runs.** They render the same run specification a session
 uses onto a probe that is created but never started, so a mutating admission webhook
 that adds privilege fails the check rather than passing the rendering, and a second
 description of a session cannot drift from the first. `--deep` probes from inside:
-no direct egress, an allowlisted host reachable, an unlisted host refused.
+no direct egress, denials that are refusals rather than silence, an allowlisted host
+reachable, an unlisted host refused.
 
 Contact-derived rules that stay rules: a bind mount over a symlink does not mask it,
 so the harness state directory is built empty and only named files are mounted in —

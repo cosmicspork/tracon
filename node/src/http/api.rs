@@ -1300,12 +1300,21 @@ pub async fn get_session(
     let usage = crate::metrics::session_usage(s.store(), &id);
     let ceiling =
         crate::metrics::ceiling(s.store(), &s.manager.bindings(&row.channel), &row.channel);
+    // What the harness image could offer this session's languages, as it was
+    // at launch. Absent for a harness that has no such profile, and for every
+    // session that started before the node recorded one.
+    let toolchain = s
+        .store()
+        .first_event_payload(&id, crate::session::state::event_kind::SESSION_STARTED)?
+        .and_then(|payload| payload.get("toolchain").cloned())
+        .filter(|toolchain| !toolchain.is_null());
     Ok(Json(json!({
         "session": row,
         "waiting": waiting,
         "questions": questions,
         "usage": usage,
         "ceiling": ceiling,
+        "toolchain": toolchain,
     })))
 }
 

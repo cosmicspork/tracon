@@ -1,0 +1,9 @@
+{
+  "name": "opencode",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Seed for OpenCode's per-config-directory dependency install (config-state.md 4.3). Copied into $XDG_CONFIG_HOME/opencode at container start so `Npm.install` finds a node_modules tree and a lockfile that already declares @opencode-ai/plugin, and never reaches a registry.",
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.30"
+  }
+}

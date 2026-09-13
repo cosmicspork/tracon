@@ -21,6 +21,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{AttachParams, DeleteParams, LogParams, PostParams};
 use kube::{Api, Client};
 
+use super::toolchain::image_entrypoint;
 use super::{Mount, Runner, RunnerCommand, RunnerError, Spawned};
 use crate::config::Config;
 
@@ -82,6 +83,15 @@ pub struct KubeSpec {
     /// See `RunSpec::state_env`: the harness names its own state directory.
     pub state_env: &'static str,
     pub state_dir: &'static str,
+    /// The image's entrypoint, when it has one. Podman prefixes a container's
+    /// command with the image's `ENTRYPOINT`; a pod's `command` *replaces* it.
+    /// So an image whose entrypoint does real work — the OpenCode harness
+    /// seeds its package caches there — has to have it named here, or a pod
+    /// silently skips it.
+    pub entrypoint: Option<String>,
+    /// Seconds between the SIGTERM the kubelet sends and the SIGKILL that
+    /// follows. See `Boundary::stop_timeout_secs`.
+    pub stop_timeout_secs: u16,
 }
 
 impl KubeSpec {
@@ -101,6 +111,8 @@ impl KubeSpec {
             workdir: "/work".into(),
             state_env: layout.env,
             state_dir: layout.dir,
+            entrypoint: image_entrypoint(&cfg.harness.id),
+            stop_timeout_secs: cfg.boundary.stop_timeout_secs,
         }
     }
 
@@ -187,6 +199,16 @@ impl KubeSpec {
             },
             spec: Some(PodSpec {
                 restart_policy: Some("Never".into()),
+                // How long the kubelet waits between SIGTERM and SIGKILL. The
+                // harness image runs a real init as PID 1 of the container's
+                // own namespace, so `shareProcessNamespace` is not needed and
+                // is deliberately not set: sharing one would put the harness
+                // and any sidecar in the same namespace, which is a wider
+                // grant than reaping needs. The namespace teardown at the end
+                // of this window is what actually removes the LSP and
+                // formatter children OpenCode never reaps
+                // (`config-state.md` §6.7).
+                termination_grace_period_seconds: Some(i64::from(self.stop_timeout_secs)),
                 // No API token, no service env, no resolver: the harness has
                 // nothing to discover and no name to look up. The one name it
                 // needs resolves to the node's own pod.
@@ -241,7 +263,15 @@ impl KubeSpec {
                     name: "harness".into(),
                     image: Some(cmd.image.clone().unwrap_or_else(|| self.image.clone())),
                     image_pull_policy: Some("IfNotPresent".into()),
-                    command: Some(cmd.argv.clone()),
+                    // An image entrypoint is named rather than replaced: a pod
+                    // `command` overrides `ENTRYPOINT`, so an image that does
+                    // work before `exec`ing the harness would have that work
+                    // skipped here and nowhere else.
+                    command: Some(match &self.entrypoint {
+                        Some(entrypoint) => vec![entrypoint.clone()],
+                        None => cmd.argv.clone(),
+                    }),
+                    args: self.entrypoint.as_ref().map(|_| cmd.argv.clone()),
                     working_dir: Some(workdir),
                     stdin: Some(true),
                     stdin_once: Some(true),
@@ -681,6 +711,49 @@ mod tests {
         let mut c = cmd();
         c.mounts.push(Mount::volume("../host", "/x", true));
         assert!(spec().pod("p", &c, false).is_err());
+    }
+
+    /// A pod `command` replaces the image's `ENTRYPOINT`. The OpenCode image's
+    /// entrypoint seeds the package caches that keep the harness off a
+    /// registry, so a pod that skipped it would reach for one on a network
+    /// that refuses — a slower, noisier version of the same failure the seed
+    /// exists to prevent.
+    #[test]
+    fn the_opencode_image_entrypoint_is_named_rather_than_replaced() {
+        let mut cfg = Config::default();
+        cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+        cfg.harness.id = crate::adapter::opencode::OpenCodeAdapter::ID.into();
+        let spec = KubeSpec::from_config(
+            &cfg,
+            PodEnv {
+                namespace: "tracon-lab".into(),
+                pod_ip: "10.244.0.9".into(),
+                node_name: "general-1".into(),
+            },
+        );
+        let pod = spec.pod("tracon-h-1", &cmd(), false).unwrap();
+        let s = pod.spec.unwrap();
+        let c = &s.containers[0];
+        assert_eq!(
+            c.command,
+            Some(vec![crate::runner::toolchain::IMAGE_ENTRYPOINT.to_string()])
+        );
+        assert_eq!(c.args, Some(vec!["omp".into(), "acp".into()]));
+        // The grace period is the same number the Podman runner stops with,
+        // and the pod carries no shared process namespace: the container's own
+        // init is what reaps.
+        assert_eq!(s.termination_grace_period_seconds, Some(10));
+        assert!(s.share_process_namespace.is_none());
+    }
+
+    /// A harness image with no entrypoint keeps the previous shape exactly:
+    /// the command is the argv and there are no args.
+    #[test]
+    fn an_image_without_an_entrypoint_still_carries_its_argv_as_the_command() {
+        let pod = spec().pod("tracon-h-1", &cmd(), false).unwrap();
+        let c = &pod.spec.unwrap().containers[0];
+        assert_eq!(c.command, Some(vec!["omp".into(), "acp".into()]));
+        assert!(c.args.is_none());
     }
 
     #[test]

@@ -525,6 +525,27 @@ export interface SessionUsage {
   turns: TurnUsage[]
 }
 
+/** One language server or formatter the harness image was asked for.
+ *
+ *  Three states, not five: OpenCode publishes no LSP status events and logs
+ *  nothing when a server fails to spawn, so "starting", "running" and "failed"
+ *  are not observable. What is observable is what the node named at launch and
+ *  whether the image it launched from had it. */
+export interface ToolStatus {
+  id: string
+  kind: 'lsp' | 'formatter'
+  version: string
+  path: string
+  state: 'configured' | 'unavailable' | 'disabled'
+}
+
+export interface ToolchainStatus {
+  revision: string
+  /** What the image reported. Null when it carried no profile at all. */
+  image_revision: string | null
+  tools: ToolStatus[]
+}
+
 /** A browser this node pushes to, from `/api/push/subscriptions`. */
 export interface PushDevice {
   id: string

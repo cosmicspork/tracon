@@ -1149,6 +1149,16 @@ impl Manager {
         // returned, so this records a session that is already known compatible
         // — for reading the transcript later against the build that produced it.
         let compat = handle.compat();
+        // Which LSP servers and formatters the config this session was
+        // launched with names, and whether the image it launched from has
+        // them. OpenCode emits no status of its own for either — a server
+        // that fails to spawn is added to a `broken` set with no log line and
+        // no event (`config-state.md` §6.5) — so this is recorded at launch or
+        // it is not knowable at all.
+        let toolchain = match adapter.id() == crate::adapter::opencode::OpenCodeAdapter::ID {
+            true => Some(crate::runner::toolchain::probe(runner.as_ref()).await),
+            false => None,
+        };
         // What the policy-aware API gateway answers for. Registered before the
         // session is announced as started, so the interface never has a
         // running session whose native API it cannot reach.
@@ -1179,6 +1189,7 @@ impl Manager {
                 "harness_version": compat.version,
                 "harness_expected": adapter.pinned_version(),
                 "harness_protocol": compat.protocol,
+                "toolchain": toolchain,
             }),
             at_ms: now_ms(),
             mono_ms: started.elapsed().as_millis() as i64,

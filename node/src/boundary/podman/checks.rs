@@ -3,7 +3,7 @@
 //! that is created but never started.
 
 use super::{podman, podman_json};
-use crate::boundary::checks::{egress_script, egress_verdict, CheckId, CheckResult};
+use crate::boundary::checks::{egress_script, egress_verdict, CheckId, CheckResult, Denial};
 use crate::boundary::{BoundaryError, BoundaryReport};
 use crate::{
     config::Config,
@@ -316,7 +316,9 @@ async fn check_egress(cfg: &Config, selinux: bool) -> CheckResult {
     let args = spec.podman_args("tracon-egress-probe", &cmd, false);
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     match podman(&argv).await {
-        Ok(out) => egress_verdict(&out),
+        // The internal network has no route out at all, so a denied
+        // destination fails at `connect(2)`. The probe is what proves it.
+        Ok(out) => egress_verdict(&out, Denial::Rejects),
         Err(e) => CheckResult::fail(CheckId::Egress, format!("probe failed: {e}")),
     }
 }
