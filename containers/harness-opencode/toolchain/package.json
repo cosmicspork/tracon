@@ -1,0 +1,11 @@
+{
+  "name": "tracon-harness-toolchain",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The JavaScript half of the baked LSP and formatter profile. Installed with `npm ci --ignore-scripts` at image build time and never resolved at run time; the lockfile's integrity hashes are what pins it.",
+  "dependencies": {
+    "prettier": "3.9.6",
+    "typescript": "5.9.3",
+    "typescript-language-server": "6.0.0"
+  }
+}

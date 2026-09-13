@@ -763,6 +763,13 @@ pub struct Boundary {
     /// Nothing else starts it at login, and a node run by the service is up
     /// before any terminal is.
     pub start_machine: bool,
+    /// Seconds between the SIGTERM a stopped harness container's init receives
+    /// and the SIGKILL that follows. It bounds how long a stop can take, not
+    /// how thorough it is: the container's PID namespace goes either way, and
+    /// with it every LSP and formatter process the harness started
+    /// (`docs/reference/opencode-v1.18.30/config-state.md` §6.7). The same
+    /// number is the pod's `terminationGracePeriodSeconds`.
+    pub stop_timeout_secs: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1018,6 +1025,7 @@ impl Default for Config {
                 login_image: "localhost/tracon-harness-claude".into(),
                 selinux_label_disable: None,
                 start_machine: true,
+                stop_timeout_secs: 10,
             },
             gateway: Gateway {
                 allow_hosts: vec![

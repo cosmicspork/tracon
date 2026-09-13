@@ -1,0 +1,58 @@
+{
+  "revision": "1",
+  "profile": "rust+typescript",
+  "opencode_version": "1.18.30",
+  "node_version": "24.21.0",
+  "plugin": {
+    "package": "@opencode-ai/plugin",
+    "version": "1.18.30",
+    "config_seed": "/opt/tracon/seed/config",
+    "cache_seed": "/opt/tracon/seed/packages"
+  },
+  "lsp": [
+    {
+      "id": "rust",
+      "version": "1.98.1",
+      "command": ["/opt/tracon/lsp/rust-analyzer"],
+      "extensions": [".rs"],
+      "note": "The image carries no cargo, so rust-analyzer serves syntax-level diagnostics; loading a workspace through `cargo metadata` is not available to it."
+    },
+    {
+      "id": "typescript",
+      "version": "6.0.0",
+      "command": ["/opt/tracon/lsp/typescript-language-server", "--stdio"],
+      "extensions": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"],
+      "initialization": { "tsserver": { "path": "/opt/tracon/lsp/tsserver.js" } },
+      "note": "`initialization` is the builtin's, copied here because naming `command` discards it (config-state.md 6.4)."
+    }
+  ],
+  "formatter": [
+    {
+      "id": "rustfmt",
+      "version": "1.98.1",
+      "command": ["/opt/tracon/fmt/rustfmt", "$FILE"],
+      "extensions": [".rs"]
+    },
+    {
+      "id": "prettier",
+      "version": "3.9.6",
+      "command": ["/opt/tracon/fmt/prettier", "--write", "$FILE"],
+      "extensions": [
+        ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
+        ".html", ".htm", ".css", ".scss", ".less", ".vue",
+        ".json", ".jsonc", ".yaml", ".yml", ".md", ".mdx", ".graphql", ".gql"
+      ],
+      "environment": { "BUN_BE_BUN": "1" },
+      "note": "Deliberately narrower than the builtin's extension list, which also claims .sass, .toml, .xml and .svelte — parsers prettier core does not have."
+    }
+  ],
+  "disabled_formatter": ["oxfmt", "biome"],
+  "builtin_lsp": [
+    "deno", "typescript", "vue", "eslint", "oxlint", "biome", "gopls", "ruby-lsp",
+    "ty", "pyright", "elixir-ls", "zls", "csharp", "razor", "fsharp",
+    "sourcekit-lsp", "rust", "clangd", "svelte", "astro", "jdtls", "kotlin-ls",
+    "yaml-ls", "lua-ls", "php intelephense", "prisma", "dart", "ocaml-lsp",
+    "bash", "terraform", "texlab", "dockerfile", "gleam", "clojure-lsp", "nixd",
+    "tinymist", "haskell-language-server", "julials"
+  ]
+}

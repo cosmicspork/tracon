@@ -619,7 +619,11 @@ impl HarnessAdapter for OpenCodeAdapter {
     /// (OpenCode reads no base-URL environment variable — finding 8), the
     /// pinned catalogue, and an auth store with nothing in it.
     fn scratch_files(&self, wiring: &Wiring) -> Vec<(String, String)> {
-        let config = config_document(wiring, &[]);
+        let mut config = config_document(wiring, &[]);
+        // The `lsp` and `formatter` halves come from the image's toolchain
+        // profile, which is the runner's to own: it names absolute paths in
+        // an image this file knows nothing about.
+        crate::runner::toolchain::merge_into_config(&mut config);
         vec![
             (
                 Self::CONFIG_FILE.into(),
