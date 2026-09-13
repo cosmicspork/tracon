@@ -454,8 +454,14 @@ pub async fn build_prototype(
         .ok_or("repository-derived prototype builds are not configured")?;
     let id = uuid::Uuid::now_v7().to_string();
     let started_ms = crate::store::now_ms();
-    let source_snapshot = match access.manager.snapshot_workspace(&owner_session).await {
-        Ok(snapshot) => snapshot,
+    // The build runs on the candidate's own retained tree, never the owner
+    // session's live workspace. The row this produces is labelled with the
+    // candidate's head and capture facts, and the operator's required checks
+    // are verified against the same bytes below, so both have to describe a
+    // tree the agent can no longer change — exporting the workspace would
+    // attribute whatever it holds now to the candidate that was captured.
+    let staged = match candidate_source(access.store, &candidate, &id) {
+        Ok(staged) => staged,
         Err(error) => {
             return insert_failed_prototype(
                 access,
@@ -464,10 +470,11 @@ pub async fn build_prototype(
                 &id,
                 started_ms,
                 Value::Null,
-                format!("candidate has no prepared source snapshot: {error}"),
+                error,
             )
         }
     };
+    let source_snapshot = staged.root.clone();
     let backend = access.manager.backend();
     let workspace = match crate::workspace::from_snapshot(
         backend.as_ref(),
@@ -1186,6 +1193,30 @@ fn candidate_owner(candidate: &crate::store::CandidateRow) -> Result<String, Str
     } else {
         Ok(session.into())
     }
+}
+
+/// The immutable bytes a candidate-bound build runs against: the Git tree the
+/// node hashed and retained when it captured this candidate, materialized
+/// read-only into a node-owned directory that removes itself when the returned
+/// value is dropped. A candidate with nothing retained is refused rather than
+/// silently built from somewhere else.
+fn candidate_source(
+    store: &Store,
+    candidate: &crate::store::CandidateRow,
+    build_id: &str,
+) -> Result<crate::review::CandidateSnapshot, String> {
+    let files = store.candidate_files(&candidate.id).map_err(store_error)?;
+    if files.is_empty() {
+        return Err(
+            "candidate has no retained tree to build from; resubmit it for review first".into(),
+        );
+    }
+    crate::review::CandidateSnapshot::materialize(
+        crate::workspace::staging_path(&format!("candidate-source-{build_id}")),
+        candidate.tree_sha.clone().unwrap_or_default(),
+        files,
+    )
+    .map_err(|error| format!("could not stage the candidate tree: {error}"))
 }
 
 fn ensure_requester_scope(

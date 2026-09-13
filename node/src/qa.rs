@@ -523,6 +523,84 @@ mod tests {
         }
     }
 
+    fn deployment(identity: &str) -> QaDeploymentRow {
+        QaDeploymentRow {
+            id: format!("deploy-{identity}"),
+            candidate_id: "abc:work".into(),
+            channel: "work".into(),
+            target_id: "staging".into(),
+            build_id: format!("gitlab:p:1:2:{identity}"),
+            execution_image: "example.invalid/deploy@sha256:00".into(),
+            origin: "http://localhost:4000".into(),
+            environment_identity: Some(identity.into()),
+            identity_state: "fresh".into(),
+            observed_ms: 0,
+            started_ms: 0,
+            finished_ms: 0,
+            outcome: "succeeded".into(),
+            detail_json: "{}".into(),
+        }
+    }
+
+    fn browser_run(
+        deployment: &QaDeploymentRow,
+        before: Option<&str>,
+        after: Option<&str>,
+    ) -> BrowserRunRow {
+        BrowserRunRow {
+            id: "run".into(),
+            deployment_id: deployment.id.clone(),
+            candidate_id: deployment.candidate_id.clone(),
+            channel: deployment.channel.clone(),
+            target_id: deployment.target_id.clone(),
+            authorized_origins_json: "[]".into(),
+            test_credential: None,
+            assertions_json: "[]".into(),
+            outcome: "passed".into(),
+            environment_before: before.map(str::to_string),
+            environment_after: after.map(str::to_string),
+            evidence_state: "unknown".into(),
+            log_tail: String::new(),
+            started_ms: 0,
+            finished_ms: 0,
+        }
+    }
+
+    /// A passing browser proof is a claim about the build that was deployed,
+    /// not about the candidate forever: once the target serves a different
+    /// build, the same row must stop reading as current evidence.
+    #[test]
+    fn browser_evidence_stops_being_fresh_when_the_deployed_build_changes() {
+        let deployed = deployment("build-1");
+        let run = browser_run(&deployed, Some("build-1"), Some("build-1"));
+        assert_eq!(evidence_state(&deployed, &run, Some(&deployed)), "fresh");
+
+        // The target now answers with a different build identity.
+        let redeployed = deployment("build-2");
+        assert_eq!(evidence_state(&deployed, &run, Some(&redeployed)), "stale");
+
+        // A run that straddled a redeploy proves nothing about either build.
+        let straddled = browser_run(&deployed, Some("build-1"), Some("build-2"));
+        assert_eq!(
+            evidence_state(&deployed, &straddled, Some(&deployed)),
+            "unknown"
+        );
+
+        // An unobservable identity is never assumed to be the deployed one.
+        let unobserved = browser_run(&deployed, None, None);
+        assert_eq!(
+            evidence_state(&deployed, &unobserved, Some(&deployed)),
+            "unknown"
+        );
+        assert_eq!(evidence_state(&deployed, &run, None), "unknown");
+
+        // A deployment that never attested the candidate is not evidence at
+        // all, however fresh the identity around it looks.
+        let mut failed = deployment("build-1");
+        failed.outcome = "failed".into();
+        assert_eq!(evidence_state(&failed, &run, Some(&deployed)), "unknown");
+    }
+
     fn scenario(steps: Vec<BrowserStep>, assertions: Vec<BrowserAssertion>) -> BrowserScenario {
         BrowserScenario {
             start_path: "/".into(),

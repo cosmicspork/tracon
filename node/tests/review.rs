@@ -1078,6 +1078,224 @@ async fn candidate_controlled_check_file_cannot_replace_operator_required_checks
         .contains(&"candidate_verified".to_string()));
 }
 
+/// The worktree is the agent's and stays writable while a submission is being
+/// checked. What the checks run on has to be the tree the node captured, so a
+/// write that lands after (or during) the capture cannot become the thing that
+/// was verified — and the pass that tree earned cannot be carried over to the
+/// next one.
+#[tokio::test]
+async fn a_worktree_mutated_after_capture_is_not_what_the_checks_ran_on() {
+    state::isolate();
+    // The check prints the file it read, so what it saw is recoverable from
+    // the evidence rather than inferred from an exit code.
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.supervision.checks = vec!["cat marker.txt".into()];
+    })
+    .await;
+    let wt = std::path::Path::new(&f.worktree);
+    std::fs::write(wt.join("marker.txt"), "committed").unwrap();
+    sh(wt, "git add marker.txt && git commit -qm marker");
+    let captured_head = sh_out(wt, "git rev-parse HEAD");
+    let captured_tree = sh_out(wt, "git rev-parse HEAD^{tree}");
+
+    // The agent keeps writing. Only the committed tree is captured, so this
+    // is exactly the byte the check must not see.
+    std::fs::write(wt.join("marker.txt"), "mutated").unwrap();
+
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let first_review = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let first_candidate = v["candidate_id"].as_str().unwrap().to_string();
+    let r = f.store.get_review(&first_review).unwrap().unwrap();
+    let checks: Vec<Value> = serde_json::from_str(r.checks_json.as_deref().unwrap()).unwrap();
+    assert_eq!(checks[0]["tail"], "committed", "{checks:?}");
+    assert_eq!(checks[0]["ok"], true, "{checks:?}");
+    // The retained candidate is the same bytes the check saw: the evidence and
+    // the execution agree about what the candidate is.
+    let files = f.store.candidate_files(&first_candidate).unwrap();
+    let marker = files.iter().find(|f| f.path == "marker.txt").unwrap();
+    assert_eq!(String::from_utf8_lossy(&marker.content), "committed");
+
+    // Now commit the mutation. It is a different tree, so it is a different
+    // candidate, and the pass the old tree earned is not evidence about it.
+    sh(wt, "git commit -qam mutate");
+    let v = f
+        .tool(
+            "s1",
+            "submit_review",
+            json!({"title": "feat: the thing", "body": "why", "provider": "github",
+                   "project": "owner/name", "base": "main", "review_id": first_review}),
+        )
+        .await;
+    let second_candidate = v["candidate_id"].as_str().unwrap_or_else(|| panic!("{v}"));
+    assert_ne!(second_candidate, first_candidate);
+    assert_eq!(v["checks_reused"], false, "{v}");
+    let r = f.store.get_review(&first_review).unwrap().unwrap();
+    let checks: Vec<Value> = serde_json::from_str(r.checks_json.as_deref().unwrap()).unwrap();
+    assert_eq!(checks[0]["tail"], "mutated", "{checks:?}");
+    assert!(checks[0]["reused_from"].is_null(), "{checks:?}");
+
+    // Each execution record names the tree it ran against, and neither is a
+    // reuse of the other's.
+    for (candidate_id, tree_is_captured) in [
+        (&first_candidate, true),
+        (&second_candidate.to_string(), false),
+    ] {
+        let runs = f.store.check_runs_for_candidate(candidate_id).unwrap();
+        assert_eq!(runs.len(), 1, "{candidate_id}: {runs:?}");
+        assert_eq!(runs[0].outcome, "passed");
+        assert!(runs[0].reused_from_id.is_none());
+        let metadata: Value = serde_json::from_str(&runs[0].metadata_json).unwrap();
+        let stored = f.store.candidate(candidate_id).unwrap().unwrap();
+        assert_eq!(metadata["candidate_tree"], json!(stored.tree_sha));
+        assert_eq!(stored.head_sha == captured_head, tree_is_captured);
+        assert_eq!(
+            stored.tree_sha.as_deref() == Some(captured_tree.as_str()),
+            tree_is_captured,
+            "the captured tree is pinned to the candidate that was captured"
+        );
+    }
+}
+
+/// A prototype row is labelled with the candidate's head and capture facts,
+/// and the operator's required checks are verified inside the environment it
+/// prepares. Both are claims about the captured tree, so the build has to read
+/// that tree — never the owner session's workspace, which the agent is still
+/// free to write to after the capture.
+#[tokio::test]
+async fn a_prototype_builds_from_the_captured_candidate_not_the_live_workspace() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.qa.prototype = Some(tracon::config::PrototypeBuild {
+            image: "example.invalid/build@sha256:00".into(),
+            command: vec!["sh".into(), "-c".into(), "true".into()],
+            output_dir: "out".into(),
+            entry_path: "index.html".into(),
+            timeout_secs: 60,
+        });
+    })
+    .await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let candidate_id = v["candidate_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+
+    // A lockfile that exists only in the live workspace: never committed, so
+    // never part of the captured candidate. Environment inspection is the
+    // first thing the build does and it either finds a locked dependency
+    // input or refuses — which is what makes the bytes it read observable.
+    std::fs::write(
+        std::path::Path::new(&f.worktree).join("package-lock.json"),
+        "{}",
+    )
+    .unwrap();
+
+    let broker = tracon::broker::Broker::default().shared();
+    let policy = tracon::policy::Policy::shipped_shared();
+    let http = reqwest::Client::new();
+    let access = tracon::qa::service::QaAccess {
+        store: &f.store,
+        manager: &f.manager,
+        cfg: f.manager.cfg(),
+        broker: &broker,
+        http: &http,
+        policy: &policy,
+        node_id: "n1",
+        requester_session_id: Some("s1"),
+        requester_channel: Some("work"),
+    };
+    let row = tracon::qa::service::build_prototype(&access, &candidate_id)
+        .await
+        .unwrap();
+    assert_eq!(row.candidate_id, candidate_id);
+    assert_eq!(row.outcome, "failed");
+    assert!(
+        row.detail.contains("no supported locked dependency input"),
+        "the candidate tree has no lockfile: {}",
+        row.detail
+    );
+    assert!(
+        !row.detail.contains("could not prepare build environment"),
+        "the live workspace's lockfile is not what a candidate-bound build prepares from: {}",
+        row.detail
+    );
+}
+
+/// Which checks are required, what they run, and how long they get are the
+/// operator's. Nothing the agent can reach — a tool argument, a file it
+/// commits, a devcontainer or environment file — may remove one, weaken one,
+/// or supply its result.
+#[tokio::test]
+async fn an_agent_cannot_weaken_the_operators_required_checks() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.supervision.checks = vec!["test -f .tracon/allowed || (echo boom >&2; exit 3)".into()];
+        c.supervision.timeout_secs = 600;
+    })
+    .await;
+    let wt = std::path::Path::new(&f.worktree);
+    // Every repository-side place a check definition could plausibly be read
+    // from, committed so it is in the captured tree rather than merely on disk.
+    std::fs::create_dir_all(wt.join(".tracon")).unwrap();
+    std::fs::create_dir_all(wt.join(".devcontainer")).unwrap();
+    std::fs::write(wt.join(".tracon/checks"), "true\n").unwrap();
+    std::fs::write(
+        wt.join(".tracon/config.toml"),
+        "[supervision]\nchecks = []\ntimeout_secs = 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        wt.join("tracon.toml"),
+        "[supervision]\nchecks = [\"true\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        wt.join(".devcontainer/devcontainer.json"),
+        r#"{"image":"docker.io/library/busybox:latest","supervision":{"checks":[]}}"#,
+    )
+    .unwrap();
+    std::fs::write(wt.join(".env"), "TRACON_SUPERVISION_CHECKS=true\n").unwrap();
+    std::fs::write(wt.join(".envrc"), "export TRACON_SUPERVISION_CHECKS=true\n").unwrap();
+    sh(wt, "git add -A && git commit -qm plant-overrides");
+
+    // ...and every argument shape an agent might hope the tool accepts.
+    let v = f
+        .tool(
+            "s1",
+            "submit_review",
+            json!({
+                "title": "feat: the thing", "body": "why", "provider": "github",
+                "project": "owner/name", "base": "main",
+                "checks": [], "required_checks": [], "skip_checks": true,
+                "supervision": { "checks": [], "timeout_secs": 1 },
+                "timeout_secs": 1,
+                "check_results": [{"command": "test -f .tracon/allowed", "ok": true, "outcome": "passed"}],
+                "rerun_checks": true,
+            }),
+        )
+        .await;
+    let err = v["error"].as_str().unwrap_or_default().to_string();
+    assert!(err.contains("check failed"), "{v}");
+    assert!(err.contains("exit 3") && err.contains("boom"), "{v}");
+    assert!(f.store.open_reviews().unwrap().is_empty());
+
+    // Exactly the operator's list ran: nothing repo-derived was added to it,
+    // and nothing removed from it.
+    let candidate = tracon::store::candidate_id(&sh_out(wt, "git rev-parse HEAD"), "work");
+    let runs = f.store.check_runs_for_candidate(&candidate).unwrap();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0].outcome, "failed");
+    let definition: Value = serde_json::from_str(&runs[0].definition_json).unwrap();
+    assert_eq!(
+        definition["command"],
+        "test -f .tracon/allowed || (echo boom >&2; exit 3)"
+    );
+    assert_eq!(definition["timeout_secs"], 600, "the operator's timeout");
+}
+
 /// Evidence that names an image and an outcome but not what was run cannot be
 /// audited against the configuration that produced it: `command` is the check
 /// definition the reuse key is built from, so it belongs on the row.

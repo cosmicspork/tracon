@@ -192,6 +192,7 @@ pub async fn run_required(
                         "source_run_id": source.id,
                         "source_outcome": effective_outcome(&source),
                         "execution_backend": backend.kind(),
+                        "candidate_tree": candidate.tree_sha,
                     })
                     .to_string(),
                 })
@@ -256,7 +257,10 @@ pub async fn run_required(
                     None,
                     &message,
                     Some(0),
-                    &json!({ "execution_backend": backend.kind(), "workspace_error": error.to_string() }),
+                    &with_candidate_tree(
+                        candidate,
+                        json!({ "execution_backend": backend.kind(), "workspace_error": error.to_string() }),
+                    ),
                 )
                 .map_err(|error| error.to_string())?;
             results.push(CheckResult {
@@ -319,11 +323,14 @@ pub async fn run_required(
                 .cancel_running_check(
                     &run_id,
                     &format!("cancelled: {reason}"),
-                    &json!({
-                        "execution_backend": backend.kind(),
-                        "cancelled": reason,
-                        "killed": running_name,
-                    }),
+                    &with_candidate_tree(
+                        candidate,
+                        json!({
+                            "execution_backend": backend.kind(),
+                            "cancelled": reason,
+                            "killed": running_name,
+                        }),
+                    ),
                 )
                 .map_err(|error| error.to_string())?;
             results.push(cancelled_result(
@@ -377,7 +384,7 @@ pub async fn run_required(
                 exit.map(i64::from),
                 &tail_text,
                 Some(duration_ms),
-                &metadata,
+                &with_candidate_tree(candidate, metadata),
             )
             .map_err(|error| error.to_string())?;
         if !recorded {
@@ -428,6 +435,18 @@ pub async fn run_required(
         reused: any_reused,
         cancelled,
     })
+}
+
+/// Every record a check settles as names the tree it ran against. The row a
+/// check finishes as replaces the one it started as, so the candidate's tree is
+/// written again here: an outcome that does not say which bytes produced it
+/// cannot be audited against the candidate it is offered as evidence for.
+fn with_candidate_tree(
+    candidate: &CandidateRow,
+    mut metadata: serde_json::Value,
+) -> serde_json::Value {
+    metadata["candidate_tree"] = json!(candidate.tree_sha);
+    metadata
 }
 
 /// The result a cancelled execution contributes: never ok, never reusable,
