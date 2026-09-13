@@ -17,6 +17,23 @@
 * **continuity:** signed candidate/context transfer packages bound to their candidate's identity and file tree, single-import reservation with runtime-workspace reuse on retry, and opt-in, revocation-aware hub-side channel rollups
 * **qa:** deploy a candidate to an authorized QA target by exact commit SHA, verify it with a network-scoped headless browser, and build repository-derived prototypes
 
+## [0.15.1](https://github.com/cosmicspork/tracon/compare/v0.15.0...v0.15.1) (2026-09-13)
+
+
+### Bug Fixes
+
+* **adapter:** pin harness versions, record per-session compatibility, and refuse unsupported protocols ([#187](https://github.com/cosmicspork/tracon/issues/187)) ([0efd8e7](https://github.com/cosmicspork/tracon/commit/0efd8e79dc26e7785877ae381632b82f769bd09b))
+* **desktop:** verify process identity before adoption and signalling ([#177](https://github.com/cosmicspork/tracon/issues/177)) ([dff9689](https://github.com/cosmicspork/tracon/commit/dff968920cd75f315b9914ccddb5e7972283b534))
+* **enroll:** authenticate the signing and encryption key binding before handing off channel keys ([#179](https://github.com/cosmicspork/tracon/issues/179)) ([9162b21](https://github.com/cosmicspork/tracon/commit/9162b2194bca9f05debf8cbee82556791ce688dd))
+* **gateway:** allow only inference methods and paths through the credentialed proxy ([#182](https://github.com/cosmicspork/tracon/issues/182)) ([6babb42](https://github.com/cosmicspork/tracon/commit/6babb42069a0a3869bc78396dd3910d616c2ae3d))
+* **http:** reject null-origin operator requests and preflight explicit models on create ([#176](https://github.com/cosmicspork/tracon/issues/176)) ([ea0c0e1](https://github.com/cosmicspork/tracon/commit/ea0c0e149d5b1292a0a040d507bd94e678ad6f61))
+* **providers:** make the credential lift and callback listener tests deterministic ([#183](https://github.com/cosmicspork/tracon/issues/183)) ([b88c000](https://github.com/cosmicspork/tracon/commit/b88c000227db4c27ca2d05d0eff2c3cf8e547d3f))
+* **publish:** recover interrupted publication idempotently and broker every network git credential ([#184](https://github.com/cosmicspork/tracon/issues/184)) ([4d23054](https://github.com/cosmicspork/tracon/commit/4d23054c9a66fff4fae94c4b0970a3eb3061bb85))
+* **review:** bind prototype builds and every check record to the captured candidate tree ([#188](https://github.com/cosmicspork/tracon/issues/188)) ([74df5cc](https://github.com/cosmicspork/tracon/commit/74df5cc9cb4188c8bf805a651e3697a0ee2159b3))
+* **session:** guard terminal states against cancellation races, stalled startup, and late completions ([#185](https://github.com/cosmicspork/tracon/issues/185)) ([2b1baab](https://github.com/cosmicspork/tracon/commit/2b1baab09d449f6b5eb9adb984bd233a79351c6b))
+* **session:** surface repetition as a signal and keep reports and notifications from pausing or asking ([#186](https://github.com/cosmicspork/tracon/issues/186)) ([e95a62b](https://github.com/cosmicspork/tracon/commit/e95a62b8520b431324752532e221313a93863214))
+* **workspace:** harden Git metadata handling in captured and published trees ([#180](https://github.com/cosmicspork/tracon/issues/180)) ([aad3342](https://github.com/cosmicspork/tracon/commit/aad3342b3d0b7a5a8f7dff91a6f3dd112af4676c))
+
 ## [0.15.0](https://github.com/cosmicspork/tracon/compare/v0.14.0...v0.15.0) (2026-09-12)
 
 
