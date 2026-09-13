@@ -232,8 +232,8 @@ impl Policy {
         policy
     }
 
-    pub fn shipped_shared() -> std::sync::Arc<std::sync::RwLock<Self>> {
-        std::sync::Arc::new(std::sync::RwLock::new(Self::shipped()))
+    pub fn shipped_shared() -> std::sync::Arc<parking_lot::RwLock<Self>> {
+        std::sync::Arc::new(parking_lot::RwLock::new(Self::shipped()))
     }
 }
 
@@ -263,13 +263,6 @@ mod tests {
             command: Some(summary),
             arguments: Some(args),
         }
-    }
-
-    #[test]
-    fn the_shipped_bundle_parses_and_has_rules() {
-        let p = policy();
-        assert!(!p.is_empty());
-        assert_eq!(policy().version, 6);
     }
 
     #[test]

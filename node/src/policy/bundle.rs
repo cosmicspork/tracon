@@ -5,9 +5,11 @@
 //! disk into rules the gate will act on: an unsigned or badly signed bundle
 //! yields nothing, and nothing means every request is asked.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use sha2::{Digest, Sha256};
 
 use super::Policy;
 
@@ -29,6 +31,8 @@ pub enum BundleError {
     KeyMismatch,
     #[error("no policy key is installed here, and this bundle did not arrive through enrollment")]
     Untrusted,
+    #[error("a policy bundle or signing identity already exists; initialization never replaces custom policy or rotates keys")]
+    AlreadyConfigured,
 }
 
 /// Where the bundle, its signature, and the keys live.
@@ -66,12 +70,20 @@ pub fn write_key(signing: &SigningKey) -> Result<(), BundleError> {
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(Paths::signing_key(), hex::encode(signing.to_bytes()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(Paths::signing_key())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(Paths::signing_key(), std::fs::Permissions::from_mode(0o600))?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
+    file.write_all(hex::encode(signing.to_bytes()).as_bytes())?;
     std::fs::write(
         Paths::public_key(),
         hex::encode(signing.verifying_key().to_bytes()),
@@ -90,6 +102,129 @@ fn read_hex_key(path: &Path) -> Result<[u8; 32], BundleError> {
 pub fn sign(bundle: &str) -> Result<String, BundleError> {
     let key = SigningKey::from_bytes(&read_hex_key(&Paths::signing_key())?);
     Ok(hex::encode(key.sign(bundle.as_bytes()).to_bytes()))
+}
+
+/// The configured trust identity, never the signing secret.
+pub fn public_identity() -> Result<String, BundleError> {
+    Ok(hex::encode(read_hex_key(&Paths::public_key())?))
+}
+
+/// A verified immutable bundle. The signing key is deliberately not part of
+/// this shape: callers can preview and distribute a signature, never retrieve
+/// the key that made it.
+#[derive(Debug, Clone)]
+pub struct SignedBundle {
+    pub toml: String,
+    pub sig_hex: String,
+    pub pubkey_hex: String,
+    pub sha256: String,
+    pub policy: Policy,
+}
+
+pub fn sha256(bundle: &str) -> String {
+    hex::encode(Sha256::digest(bundle.as_bytes()))
+}
+
+/// Parse and sign an in-memory policy with this node's already configured key.
+/// It neither creates nor replaces a key or a bundle.
+pub fn preview(bundle: &str) -> Result<SignedBundle, BundleError> {
+    let mut policy: Policy =
+        toml::from_str(bundle).map_err(|e| BundleError::Parse(e.to_string()))?;
+    let public = read_hex_key(&Paths::public_key()).map_err(|e| match e {
+        BundleError::Io(_) => BundleError::NoKey,
+        other => other,
+    })?;
+    let signing =
+        SigningKey::from_bytes(&read_hex_key(&Paths::signing_key()).map_err(|e| match e {
+            BundleError::Io(_) => BundleError::NoKey,
+            other => other,
+        })?);
+    if signing.verifying_key().to_bytes() != public {
+        return Err(BundleError::KeyMismatch);
+    }
+    policy.trusted = true;
+    Ok(SignedBundle {
+        toml: bundle.to_string(),
+        sig_hex: hex::encode(signing.sign(bundle.as_bytes()).to_bytes()),
+        pubkey_hex: hex::encode(public),
+        sha256: sha256(bundle),
+        policy,
+    })
+}
+
+/// Create the initial local signing identity and shipped bundle, once.
+///
+/// This is deliberately an explicit, local operator action. Any pre-existing
+/// policy artifact — including a partial prior setup — is a refusal rather than
+/// a reason to replace an operator's custom policy or rotate its trust key.
+pub fn initialize_shipped() -> Result<SignedBundle, BundleError> {
+    let paths = [
+        Paths::bundle(),
+        Paths::signature(),
+        Paths::public_key(),
+        Paths::signing_key(),
+    ];
+    if paths.iter().any(|path| path.exists()) {
+        return Err(BundleError::AlreadyConfigured);
+    }
+    let state_dir = crate::config::Config::state_dir();
+    std::fs::create_dir_all(&state_dir)?;
+    let initialize_lock = state_dir.join(".policy-initialize.lock");
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&initialize_lock)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                BundleError::AlreadyConfigured
+            } else {
+                BundleError::Io(error)
+            }
+        })?;
+    drop(lock);
+    // Recheck after the cross-process reservation. A manually created artifact
+    // wins over setup; keeping the reservation means a later request cannot
+    // turn that partial situation into an overwrite.
+    if paths.iter().any(|path| path.exists()) {
+        return Err(BundleError::AlreadyConfigured);
+    }
+
+    let (signing, _) = generate_key();
+    write_key(&signing)?;
+    let signed = preview(super::WORKING_AGREEMENTS)?;
+    let write_atomic = |path: PathBuf, text: &str| -> Result<(), BundleError> {
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    };
+    write_atomic(Paths::signature(), &signed.sig_hex)?;
+    write_atomic(Paths::bundle(), &signed.toml)?;
+    std::fs::remove_file(initialize_lock)?;
+    Ok(signed)
+}
+
+/// Read the installed signed bundle as one immutable unit. A caller that wants
+/// to replace it must still call [`install`], which verifies before writing.
+pub fn current() -> Result<SignedBundle, BundleError> {
+    let toml = std::fs::read_to_string(Paths::bundle())?;
+    let sig_hex =
+        std::fs::read_to_string(Paths::signature()).map_err(|_| BundleError::NoSignature)?;
+    let public = read_hex_key(&Paths::public_key()).map_err(|e| match e {
+        BundleError::Io(_) => BundleError::NoKey,
+        other => other,
+    })?;
+    verify(&toml, sig_hex.trim(), &public)?;
+    let mut policy: Policy =
+        toml::from_str(&toml).map_err(|e| BundleError::Parse(e.to_string()))?;
+    policy.trusted = true;
+    Ok(SignedBundle {
+        sha256: sha256(&toml),
+        toml,
+        sig_hex: sig_hex.trim().to_string(),
+        pubkey_hex: hex::encode(public),
+        policy,
+    })
 }
 
 /// Load and verify. Every failure yields `Ok(None)` at the caller's level: the

@@ -245,7 +245,7 @@
 {:else}
   <header class="sess">
     <a class="lnk" href="/">‹ Queue</a>
-    <span class="model">{session.model}</span>
+    <span class="model">{session.harness_id === 'external' ? 'External agent' : session.model}</span>
     <span class="chip">{session.phase}</span>
     <span class="chip" class:self={owner?.is_self} class:off={unreachable !== null}
       >{chipLabel(store.nodes, session.node_id)}{unreachable !== null && owner?.last_seen_ms
@@ -265,19 +265,27 @@
         >{toolchainNote.text}</span
       >
     {/if}
-    <span class="mono">{session.worktree_path ?? session.repo_path}</span>
-    <span class="mono">{session.branch}</span>
-    <span class="sp"></span>
-    <span class="mono">{formatBudget(session.tokens_used, session.budget_tokens)} tok</span>
-    {#if usageNote}
-      <span class="mono" class:unsure={usageNote.warn} title={usageNote.title}>{usageNote.text}</span>
+    {#if session.harness_id !== 'external'}
+      <span class="mono">{session.worktree_path ?? session.repo_path}</span>
+      <span class="mono">{session.branch}</span>
+    {:else}
+      <span class="mono" title="The external host and its repository stay outside Tracon's supervision.">brokered external attachment</span>
     {/if}
-    {#if session.context_used != null && session.context_size != null}
+    <span class="sp"></span>
+    {#if session.harness_id === 'external'}
+      <span class="mono" title="External-agent model use happens outside Tracon's metered runtime.">usage outside Tracon · unknown</span>
+    {:else}
+      <span class="mono">{formatBudget(session.tokens_used, session.budget_tokens)} tok</span>
+      {#if usageNote}
+        <span class="mono" class:unsure={usageNote.warn} title={usageNote.title}>{usageNote.text}</span>
+      {/if}
+    {/if}
+    {#if session.harness_id !== 'external' && session.context_used != null && session.context_size != null}
       <span class="mono"
         >ctx {formatTokens(session.context_used)}/{formatTokens(session.context_size)}</span
       >
     {/if}
-    {#if session.cost_usd != null}
+    {#if session.harness_id !== 'external' && session.cost_usd != null}
       <span class="mono">${session.cost_usd.toFixed(2)}</span>
     {/if}
     {#if session.policy_version != null}
@@ -308,7 +316,9 @@
           >{session.harness_id === 'external' ? 'Resume broker access' : 'Resume'}</button
         >
       {:else if session.state !== 'starting'}
-        <button class="lnk" onclick={() => void control('pause')} disabled={unreachable !== null || controlling}>Pause</button>
+        <button class="lnk" onclick={() => void control('pause')} disabled={unreachable !== null || controlling}
+          >{session.harness_id === 'external' ? 'Pause broker access' : 'Pause'}</button
+        >
       {/if}
       <button class="lnk d" onclick={stop} disabled={unreachable !== null}
         >{confirmingKill
@@ -322,6 +332,10 @@
       {/if}
     {/if}
   </header>
+
+  {#if session.harness_id === 'external' && session.state !== 'paused' && !isTerminal(session.state)}
+    <div class="banner dim">external agent attached <b>· its host process, repository, prompts, and model usage stay outside Tracon; these controls only fence broker access</b></div>
+  {/if}
 
   {#if session.state === 'killed_budget'}
     <div class="banner crit">

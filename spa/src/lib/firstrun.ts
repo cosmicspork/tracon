@@ -1,8 +1,6 @@
-// What stands between this node and a session it can start, derived from
-// state the interface already holds. Not a history: the card comes back if a
-// provider is disconnected later, because the node cannot start a session then
-// either. A node with a hundred sessions and no credential needs this more
-// than a fresh one does.
+// What stands between this node itself and a session it can start. A ready
+// peer is a separate, valid task path and must not be hidden behind this local
+// setup state. The card comes back if a local provider is disconnected later.
 
 export interface SetupStep {
   href: string
@@ -13,27 +11,34 @@ export interface SetupStep {
 
 export function setupSteps(s: {
   anyProviderConnected: boolean
+  modelOffered: boolean
   anyChannel: boolean
   boundaryReady: boolean
 }): SetupStep[] | null {
-  if (s.boundaryReady && s.anyProviderConnected && s.anyChannel) return null
+  if (s.boundaryReady && s.anyProviderConnected && s.modelOffered && s.anyChannel) return null
   return [
     {
-      href: '/settings#boundary',
+      href: '/settings#maintenance',
       title: 'Prepare this node',
       detail: 'Start the isolated runtime and verify its boundary before connecting a model.',
       done: s.boundaryReady,
     },
     {
-      href: '/nodes',
+      href: '/settings#connections',
       title: 'Connect a provider',
-      detail: 'Sessions cannot start without a model credential.',
+      detail: 'Sessions run here need a model credential on this node.',
       done: s.anyProviderConnected,
     },
     {
-      href: '/settings',
+      href: '/settings#connections',
+      title: 'Offer a model',
+      detail: 'A connected provider must offer a model before this node can accept a task.',
+      done: s.modelOffered,
+    },
+    {
+      href: '/settings#channels',
       title: 'Name a channel',
-      detail: 'Work, credentials, and ceilings are scoped to it. One is plenty to start.',
+      detail: 'Work, credentials, and ceilings are scoped to it. One is enough to start.',
       done: s.anyChannel,
     },
   ]

@@ -48,7 +48,7 @@ pub struct QaAccess<'a> {
     pub cfg: &'a Config,
     pub broker: &'a crate::broker::SharedBroker,
     pub http: &'a reqwest::Client,
-    pub policy: &'a std::sync::RwLock<Policy>,
+    pub policy: &'a parking_lot::RwLock<Policy>,
     pub node_id: &'a str,
     /// Present for a harness-facing MCP call. Operator HTTP actions omit it,
     /// while a harness may operate only on its own candidate in its channel.
@@ -825,10 +825,7 @@ async fn launch_pipeline(
     // policy) can move during the pipeline lookups above, and playing the
     // job is not reversible.
     let recheck = || -> Result<(), String> {
-        let policy = access
-            .policy
-            .read()
-            .map_err(|_| "policy lock is unavailable")?;
+        let policy = access.policy.read();
         let decision = authority::decide(
             access.store,
             &policy,
@@ -1247,10 +1244,7 @@ fn authorize(
     revision: Option<&str>,
     evidence: &Value,
 ) -> Result<String, String> {
-    let policy = access
-        .policy
-        .read()
-        .map_err(|_| "policy lock is unavailable")?;
+    let policy = access.policy.read();
     let decision = authority::decide(
         access.store,
         &policy,

@@ -52,8 +52,15 @@ pub fn to_payloads(frame: &Frame, store: &Store, self_id: &str) -> Vec<(String, 
                 .map(|(c, rows)| (c, Payload::Queue { waiting: rows }))
                 .collect()
         }
-        Frame::Reviews { waiting } => {
-            let mine: Vec<&ReviewRow> = waiting.iter().filter(|r| r.node_id == self_id).collect();
+        Frame::Reviews { .. } => {
+            // The UI frame only lists waiting reviews. The mesh additionally
+            // carries acknowledged narrative reports, so a peer learns durable
+            // receipt without showing terminal reports in its operator queue.
+            let Ok(replicated) = store.mirrored_reviews() else {
+                return Vec::new();
+            };
+            let mine: Vec<&ReviewRow> =
+                replicated.iter().filter(|r| r.node_id == self_id).collect();
             let mut out = Vec::new();
             for c in store.node_channels(self_id).unwrap_or_default() {
                 let rows: Vec<Value> = mine
@@ -116,19 +123,29 @@ fn push_change_batch(
     ));
 }
 
-/// This node's full open state per member channel, for peers that connect
-/// late or resync after falling behind retention.
+/// This node's full mirrored review state and open session state per member
+/// channel, for peers that connect late or resync after falling behind
+/// retention. A terminal session accompanies any mirrored review that still
+/// references it, preserving the review row's foreign-key prerequisite without
+/// reopening that session.
 pub fn snapshots(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
     let sessions = store.sessions_of_node(self_id).unwrap_or_default();
     let waiting = store.open_permissions().unwrap_or_default();
-    let reviews = store.open_reviews().unwrap_or_default();
+    let reviews = store.mirrored_reviews().unwrap_or_default();
     let mut out = Vec::new();
     for c in store.node_channels(self_id).unwrap_or_default() {
+        let r: Vec<&ReviewRow> = reviews
+            .iter()
+            .filter(|r| r.node_id == self_id && r.channel == c)
+            .collect();
+        let review_session_ids: Vec<&str> =
+            r.iter().map(|review| review.session_id.as_str()).collect();
         let s: Vec<Value> = sessions
             .iter()
             .filter(|s| {
                 s.channel == c
-                    && !crate::session::state::SessionState::from_stored(&s.state).is_terminal()
+                    && (!crate::session::state::SessionState::from_stored(&s.state).is_terminal()
+                        || review_session_ids.contains(&s.id.as_str()))
             })
             .map(|s| json!(s))
             .collect();
@@ -142,17 +159,12 @@ pub fn snapshots(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
             .filter(|p| p.node_id == self_id && session_ids.contains(&p.session_id.as_str()))
             .map(|p| json!(p))
             .collect();
-        let r: Vec<Value> = reviews
-            .iter()
-            .filter(|r| r.node_id == self_id && r.channel == c)
-            .map(|r| json!(r))
-            .collect();
         out.push((
             c,
             Payload::Snapshot {
                 sessions: s,
                 waiting: w,
-                reviews: r,
+                reviews: r.into_iter().map(|review| json!(review)).collect(),
             },
         ));
     }

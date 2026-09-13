@@ -5,6 +5,7 @@
   // here showed two empty boxes above a wall of ended sessions — true, and no
   // use. Starting something is the first thing on the page instead.
   import Composer from '../components/Composer.svelte'
+  import FirstTaskGuide from '../components/FirstTaskGuide.svelte'
   import OperatorIssueCard from '../components/OperatorIssueCard.svelte'
   import OperatorQuestionCard from '../components/OperatorQuestionCard.svelte'
   import PermissionCard from '../components/PermissionCard.svelte'
@@ -13,7 +14,8 @@
   import SessionRow from '../components/SessionRow.svelte'
   import SetupCard from '../components/SetupCard.svelte'
   import { api } from '../lib/api'
-  import { setupSteps } from '../lib/firstrun'
+  import { defaultChannel, rememberedChannel } from '../lib/channel'
+  import { eligibleNodes, modelsForChannel } from '../lib/nodes'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { OperatorIssue, OperatorQuestion, Session, WorkView } from '../lib/types'
@@ -40,13 +42,56 @@
     const timer = setInterval(() => void refreshInterventions(), 2000)
     return () => clearInterval(timer)
   })
-  const ready = $derived(
-    setupSteps({
-      anyProviderConnected: store.providers.some((p) => p.state === 'connected'),
-      anyChannel: store.channels.some((c) => !c.archived),
-      boundaryReady: store.node?.state === 'ready',
-    }) === null,
+  // A browser can control a ready peer without configuring a local model.
+  // Eligibility includes channel membership and every node readiness guard.
+  const openChannels = $derived(store.channels.filter((channel) => !channel.archived))
+  const memberships = $derived(Object.fromEntries(store.channels.map((channel) => [channel.name, channel.nodes])))
+  const taskTargets = $derived.by(() => {
+    const preferredChannel = defaultChannel({
+      names: openChannels.map((channel) => channel.name),
+      remembered: rememberedChannel(),
+      nodeDefault: store.node?.default_channel,
+      sessions: [...store.sessions.values()].filter((session) => session.node_id === store.node?.id),
+    })
+    return openChannels
+      .flatMap((channel) =>
+        eligibleNodes(store.nodes, memberships, channel.name)
+          .filter((node) => modelsForChannel(node, channel.name, store.providers, channel.bindings).length > 0)
+          .map((node) => ({ node, channel: channel.name })),
+      )
+      .sort((a, b) => {
+        if (a.node.is_self !== b.node.is_self) return a.node.is_self ? -1 : 1
+        const byName = a.node.name.localeCompare(b.node.name)
+        if (byName !== 0) return byName
+        const aPreferred = a.channel === preferredChannel
+        const bPreferred = b.channel === preferredChannel
+        if (aPreferred !== bPreferred) return aPreferred ? -1 : 1
+        return a.channel.localeCompare(b.channel)
+      })
+  })
+  const localTaskTargets = $derived(taskTargets.filter((target) => target.node.is_self))
+  const peerTaskTargets = $derived(taskTargets.filter((target) => !target.node.is_self))
+  const fallbackTarget = $derived(localTaskTargets[0] ?? peerTaskTargets[0] ?? null)
+  let selectedNodeId = $state<string | null>(null)
+  let selectedChannel = $state<string | null>(null)
+  const selectedTarget = $derived(
+    selectedNodeId !== null && selectedChannel !== null
+      ? (taskTargets.find((target) => target.node.id === selectedNodeId && target.channel === selectedChannel) ?? null)
+      : fallbackTarget,
   )
+  const composerNodeId = $derived(selectedTarget?.node.id ?? null)
+  const composerChannel = $derived(selectedTarget?.channel ?? null)
+  const composerChannelInfo = $derived(store.channels.find((channel) => channel.name === composerChannel) ?? null)
+  const canCompose = $derived(taskTargets.length > 0)
+  function selectTask(nodeId: string, channel: string) {
+    selectedNodeId = nodeId
+    selectedChannel = channel
+  }
+  function syncComposerTarget(target: { nodeId: string | null; channel: string }) {
+    selectedNodeId = target.nodeId
+    selectedChannel = target.nodeId === null ? null : target.channel
+  }
+
 
   // Putting a session away leaves it whole; the stream carries the change
   // back, so nothing here has to guess what the list looks like afterwards.
@@ -83,9 +128,20 @@
   })
 </script>
 
-{#if ready}
+{#if canCompose}
+  {#if !itemId}
+    <FirstTaskGuide
+      local={store.node}
+      localChannels={localTaskTargets.map((target) => target.channel)}
+      peers={peerTaskTargets}
+      selectedNodeId={composerNodeId}
+      selectedChannel={composerChannel}
+      channel={composerChannelInfo}
+      onchoose={selectTask}
+    />
+  {/if}
   {#key itemId}
-    <Composer {item} {phase} />
+    <Composer {item} {phase} preferredNodeId={composerNodeId} preferredChannel={composerChannel} ontargetchange={syncComposerTarget} />
   {/key}
 {:else}
   <SetupCard />

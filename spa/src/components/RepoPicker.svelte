@@ -2,6 +2,7 @@
   // The node owns forge clones. Other source enters only as files explicitly
   // selected in the browser and copied into a managed workspace; no operator
   // machine path is ever sent to the node.
+  import { onDestroy } from 'svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
@@ -12,7 +13,15 @@
     value = $bindable(''),
     workspaceId = $bindable<string | null>(null),
     channel = '',
-  }: { value?: string; workspaceId?: string | null; channel?: string } = $props()
+    targetId = '',
+    onselect = undefined,
+  }: {
+    value?: string
+    workspaceId?: string | null
+    channel?: string
+    targetId?: string
+    onselect?: (selection: { targetId: string; channel: string; repo: string; workspaceId: string | null }) => void
+  } = $props()
 
   let recents = $state<RecentRepo[]>([])
   let managed = $state<ManagedRepo[]>([])
@@ -45,6 +54,30 @@
   // Not render state: it identifies the channel snapshot an async response is
   // allowed to install.
   let forgeGeneration = 0
+  let active = true
+  let selectionGeneration = 0
+  onDestroy(() => {
+    active = false
+    selectionGeneration += 1
+  })
+  // A picker result is valid only for the node and channel it started under.
+  // The parent destroys this component for a peer target, but an in-flight
+  // browser request can still settle afterwards.
+  $effect(() => {
+    void targetId
+    void channel
+    selectionGeneration += 1
+  })
+  function selectRepository(repo: string, selectedWorkspace: string | null) {
+    if (onselect) {
+      onselect({ targetId, channel, repo, workspaceId: selectedWorkspace })
+      return
+    }
+    value = repo
+    workspaceId = selectedWorkspace
+  }
+
+
   // Search is always available while more provider pages remain: a result may
   // be on the next bounded page even when the loaded rows do not match.
   const forgeCount = $derived((forges ?? []).reduce((n, f) => n + f.repos.length, 0))
@@ -120,18 +153,20 @@
 
   async function clone(forge: string, r: { host: string; owner: string; name: string; full_name: string }) {
     if (cloning) return
+    const selection = selectionGeneration
     cloning = r.full_name
     error = null
     try {
       const d = await api.cloneRepo({ channel, forge, host: r.host, owner: r.owner, name: r.name })
-      value = d.repo_path
-      workspaceId = null
+      if (!active || selection !== selectionGeneration) return
+      selectRepository(d.repo_path, null)
       browsing = false
       version += 1
     } catch (e) {
+      if (!active || selection !== selectionGeneration) return
       error = e instanceof Error ? e.message : String(e)
     } finally {
-      cloning = null
+      if (active && selection === selectionGeneration) cloning = null
     }
   }
 
@@ -139,18 +174,22 @@
   async function importFiles(event: Event) {
     const input = event.currentTarget as HTMLInputElement
     if (!input.files?.length || uploading) return
+    const selection = selectionGeneration
     uploading = true
     error = null
     try {
       const imported = await api.importWorkspace(input.files)
-      workspaceId = imported.workspace_id
-      value = ''
+      if (!active || selection !== selectionGeneration) return
+      selectRepository('', imported.workspace_id)
       browsing = false
     } catch (e) {
+      if (!active || selection !== selectionGeneration) return
       error = e instanceof Error ? e.message : String(e)
     } finally {
-      input.value = ''
-      uploading = false
+      if (active && selection === selectionGeneration) {
+        input.value = ''
+        uploading = false
+      }
     }
   }
 </script>
@@ -160,7 +199,7 @@
 {:else if forges !== null && forges.length === 0}
   <small>
     No forge credential is bound to {channel || 'this channel'}.
-    <a href="/settings#credentials">Add a GitHub or GitLab token in Settings.</a>
+    <a href="/settings#connections">Add a GitHub or GitLab token in Settings › Connections.</a>
     You can also pick a checkout this node already has below.
   </small>
 {:else if forges !== null}

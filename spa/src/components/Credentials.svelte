@@ -11,6 +11,7 @@
   let busy = $state<string | null>(null)
   let errors = $state<Record<string, string>>({})
   let shared = $state<Record<string, string>>({})
+  let confirming = $state<CredentialSummary | null>(null)
 
   let version = $state(0)
   $effect(() => {
@@ -22,6 +23,12 @@
   })
 
   const peers = $derived(store.nodes.filter((n) => !n.is_self && n.reachable))
+
+  function reviewShare(c: CredentialSummary) {
+    if (!to[c.name] || busy) return
+    errors = { ...errors, [c.name]: '' }
+    confirming = c
+  }
 
   async function share(c: CredentialSummary) {
     const target = to[c.name]
@@ -36,6 +43,7 @@
         ...shared,
         [c.name]: updating ? `updated copy on ${node}` : `handed to ${node}`,
       }
+      confirming = null
       version += 1
     } catch (e) {
       errors = { ...errors, [c.name]: e instanceof Error ? e.message : String(e) }
@@ -46,7 +54,7 @@
 </script>
 
 {#if creds.length > 0}
-  <div class="h4">Credentials <b>{creds.length} sealed</b></div>
+  <div class="h4">Sealed credential copies <b>{creds.length} held by the serving node</b></div>
   <div class="rows">
     {#each creds as c (c.name)}
       <div class="cred">
@@ -56,25 +64,30 @@
           <small>{c.kind}{c.provider ? ` · ${c.provider}` : ''}{c.identity ? ` · ${c.identity}` : ''}</small>
         </span>
         <span class="st">
-          <span
-            >{c.channels.length ? c.channels.join(', ') : 'no channel — unusable until bound'} ·
-            {c.nodes.length === 0
-              ? 'this node only'
-              : `${c.nodes.length} node${c.nodes.length === 1 ? '' : 's'}`} · {c.env_keys.join(', ')}</span
-          >
+          <span>
+            {c.channels.length ? c.channels.join(', ') : 'no channel — unusable until bound'} ·
+            {c.nodes.length === 0 ? 'serving node only' : `${c.nodes.length} peer cop${c.nodes.length === 1 ? 'y' : 'ies'}`} ·
+            {c.env_keys.join(', ')}
+          </span>
           {#if peers.length > 0}
+            {@const target = to[c.name]}
+            {@const targetName = peers.find((node) => node.id === target)?.name ?? target}
             <span class="share">
               <select bind:value={to[c.name]}>
-                <option value="" disabled selected>Share to…</option>
+                <option value="" disabled selected>Share sealed copy to…</option>
                 {#each peers as p (p.id)}
                   <option value={p.id}>{p.name}{c.nodes.includes(p.id) ? ' · has a copy' : ''}</option>
                 {/each}
               </select>
-              <button class="lnk" onclick={() => share(c)} disabled={busy === c.name || !to[c.name]}
-                >{busy === c.name
-                  ? c.nodes.includes(to[c.name]) ? 'Updating…' : 'Sharing…'
-                  : c.nodes.includes(to[c.name]) ? 'Update copy' : 'Share'}</button
-              >
+              {#if confirming?.name === c.name}
+                <span class="confirm">
+                  Send {c.name} sealed to {targetName}? {c.nodes.includes(target) ? 'It replaces that peer’s saved copy.' : 'It creates a new saved copy there.'} The serving-node source remains unchanged.
+                  <button class="btn p" onclick={() => share(c)} disabled={busy === c.name}>{busy === c.name ? 'Sending…' : 'Confirm sealed share'}</button>
+                  <button class="lnk" onclick={() => (confirming = null)} disabled={busy === c.name}>Cancel</button>
+                </span>
+              {:else}
+                <button class="lnk" onclick={() => reviewShare(c)} disabled={busy === c.name || !target}>Review share</button>
+              {/if}
               {#if shared[c.name]}<small class="ok">{shared[c.name]}</small>{/if}
             </span>
           {/if}
@@ -129,6 +142,14 @@
     color: var(--ink2);
     min-width: 0;
   }
+  .confirm {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    color: var(--ink2);
+    white-space: normal;
+  }
   .st > span {
     white-space: nowrap;
     overflow: hidden;
@@ -136,8 +157,10 @@
   }
   .share {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     align-items: center;
+    white-space: normal;
   }
   .share select {
     background: var(--s2);

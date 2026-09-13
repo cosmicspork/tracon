@@ -35,15 +35,18 @@
 </script>
 
 <div class="h4">
-  Metrics
+  Usage
   <b>last {days} days · as seen from {store.node?.name ?? 'this node'}</b>
   <span class="r">
-    {#each [7, 30, 90] as d (d)}<button class="lnk" class:on={days === d} onclick={() => (days = d)}>{d}d</button>{/each}
+    {#each [7, 30, 90] as d (d)}<button class="lnk" class:on={days === d} type="button" onclick={() => (days = d)}>{d}d</button>{/each}
   </span>
 </div>
+<p class="scope">{note || 'Grouped by channel; values are limited to activity this node can observe.'}</p>
 
 {#if error}
-  <div class="banner crit">metrics <b>· {error}</b></div>
+  <div class="banner crit">usage <b>· {error}</b></div>
+{:else if rows.length === 0}
+  <div class="empty">No usage is recorded for this window. <a class="lnk" href="/work">Open Work</a> to create a clear outcome, then start a session.</div>
 {:else}
   <div class="workflow">
     {#each rows as r (r.channel)}
@@ -82,8 +85,12 @@
       </tbody>
     </table>
   </div>
-  <p class="note">{note}. Time to verified work is the mean session creation→first candidate with all required checks passing; missing verification is not zero. Setup failures are recorded sessions that failed before their harness started. Interventions include permission answers, review decisions, answered questions and operator pause/resume. Request waiting adds each answered request's delay and review submission→decision; overlapping waits are additive, not human working hours. Tokens per accepted change cover the sessions behind accepted reviews. Cost is shown only for priced providers. Human time in the table uses request→answer and review claim→decision; agent time is session start→end.</p>
 {/if}
+
+<details class="methodology">
+  <summary>How Usage is calculated</summary>
+  <p>Time to verified work is the mean session creation→first candidate with all required checks passing; missing verification is not zero. Setup failures are recorded sessions that failed before their harness started. Interventions include permission answers, review decisions, answered questions and operator pause/resume. Request waiting adds each answered request's delay and review submission→decision; overlapping waits are additive, not human working hours. Tokens per accepted change cover the sessions behind accepted reviews. Cost is shown only for priced providers. Human time in the table uses request→answer and review claim→decision; agent time is session start→end.</p>
+</details>
 
 <style>
   .workflow {
@@ -159,10 +166,38 @@
   td.u {
     color: var(--dim);
   }
-  .note {
-    font-size: 12.5px;
+  .scope {
     color: var(--ink2);
+    font-size: 12.5px;
     max-width: 78ch;
+    margin: -10px 0 2px;
+  }
+  .methodology {
+    background: var(--s1);
+    border-radius: 6px;
+    color: var(--ink2);
+    font-size: 12.5px;
+    max-width: 78ch;
+    padding: 0 14px;
+  }
+  .methodology summary {
+    color: var(--ink);
+    cursor: pointer;
+    font: 600 12px var(--mono);
+    letter-spacing: 0.04em;
+    padding: 11px 0;
+  }
+  .methodology p {
     margin: 0;
+    padding: 0 0 14px;
+  }
+  @media (max-width: 700px) {
+    .h4 {
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .h4 .r {
+      margin-left: 0;
+    }
   }
 </style>

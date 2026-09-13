@@ -303,6 +303,27 @@ request is asked: the failure mode of broken policy is more questions, never few
 Bundles are signed with a key never present on the hub, so a compromised hub can
 serve stale policy but not new policy.
 
+**Administration is an explicit operator capability, not a loopback exemption.**
+Mesh admission, removal, and hub-key sharing accept authenticated administrators
+from the remote UI. Policy signing/install and host service actions additionally
+require loopback. Service actions name only the supported fixed supervisor,
+refuse active work or ambiguous process identity, and report scheduling rather
+than pretending a restart has already succeeded.
+
+**A policy preview is a signed artifact with a fixed baseline.** Application
+compares the preview's expected installed hash while holding the same policy lock
+used for disk installation, cache replacement, and provenance recording. Refresh
+cannot advance an old preview to a new baseline. Status reports verified installed
+files separately from the actual running policy; a disk read cannot establish a
+running hash. Initialization refuses any existing or partial signing installation.
+
+**Sending a policy is not installing it.** Durable rollout targets become applied
+only on an authenticated receipt matching sender, target, rollout, and exact
+bundle hash. Offline, sent, and legacy targets remain unconfirmed; retry uses the
+stored signed bytes. Optional application/wire/policy metadata is additive to
+node advertisements without changing the wire contract. Missing metadata stays
+unknown; neither a receipt nor an upgrade silently replaces a trust root.
+
 ### Authority grants
 
 A grant is a local operator decision layered under signed policy, not a
@@ -315,7 +336,7 @@ take effect immediately, never at the next poll. A grant is scoped to one target
 (a pull request, a merge request, an issue's exact transition, a deployment job)
 and, for merge, publish, and deploy, the one revision it covers; the target
 moving to a later sha drops the grant rather than carrying it forward silently.
-Grants are made and revoked one at a time from Settings' Authority panel.
+Grants are made and revoked one at a time in Settings → Permissions & policies.
 
 ### Review
 
@@ -337,6 +358,20 @@ says no at submission time. An operator's hand-edit travels back as a request fo
 changes: the agent applies it and resubmits, and **the agent remains the only
 writer to the worktree.** Every decision is recorded against the revision it
 decided, with the requirements pinned as they were at submission.
+
+**Narrative reports are not publication candidates.** `submit_report` creates an
+owner/channel/session-bound report without Git or a repository. Acknowledgement
+and requests for changes compare the inspected content hash atomically; mirrors
+cannot change ownership, channel, session, or review kind. An acknowledged report
+continues to replicate, while code publication and review-session creation reject
+report IDs. Notification delivery records only push-service acceptance, never
+human receipt; `report_status` exposes the separate operator decision.
+
+**Evidence reads preserve ownership.** Candidate lists and detail requests carry
+their runner/owner and ordinary channel. Mesh handlers authenticate both channel
+memberships, verify the candidate's actual channel and owner, refuse third-node
+relays, and bound responses. Peer UI detail is read-only; it never turns a remote
+ID into a local deploy, build, or browser action.
 
 **Publication is two side effects the node cannot take back, so it writes down
 what it is about to do before it does it.** Approval imports the candidate into a

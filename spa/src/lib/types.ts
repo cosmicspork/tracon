@@ -316,7 +316,7 @@ export interface Review {
   base_ref: string
   added: number
   removed: number
-  state: 'new' | 'claimed' | 'revising' | 'publishing' | 'approved' | 'rejected' | 'gone'
+  state: 'new' | 'claimed' | 'revising' | 'publishing' | 'approved' | 'acknowledged' | 'rejected' | 'gone'
   verdict_reason: string | null
   publish_result: string | null
   claimed_ms: number | null
@@ -941,6 +941,8 @@ export interface QaEvidence {
     channel: string
     head_sha: string
     owner_session_id: string
+    /** The node that captured every deployment and browser-proof row below. */
+    owner_node_id: string
     captured_ms: number
   }
   targets: QaTarget[]

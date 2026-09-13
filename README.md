@@ -86,20 +86,18 @@ starts the podman machine itself when it finds it stopped; create one once with
 `podman machine init`. After an upgrade, `tracon setup` rebuilds any image whose
 definitions changed, and the boundary check refuses until it has.
 
-Open `http://127.0.0.1:7420`. **Settings** covers the rest of the install from
-the interface: prove the boundary, run setup, choose the harness, import a
-credential, create a channel, bind a model to each phase, and issue the token a
-phone logs in with. What rewrites `node.toml` or picks the hub is done at the node
-itself and says so when you are somewhere else.
+Open `http://127.0.0.1:7420`. **Settings** groups configuration into Connections,
+Channels, Devices & notifications, Mesh, Permissions & policies, and Maintenance.
+**Nodes** compares connectivity, isolation, runtime, models, and compatibility;
+its management links open the relevant Settings section.
+Channel-scoped skills and instructions live under **Channels**; their launch
+manifests remain owned by the serving node.
 
-![Settings: the boundary, the harness, credentials, and the model each phase runs](docs/media/settings-desktop.png)
-
-Until the node can start a session, the home shows the remaining local prerequisites:
-**prepare this node** (verify the isolated runtime), **connect a provider** (the
-harness's own sign-in runs on the node; an API key also works), and **name a
-channel**. The default local channels already satisfy the last step. A refused
-boundary stays visible even if a provider is connected. Hub pairing is a separate
-optional Settings link, not a setup prerequisite.
+Home offers two paths: prepare this node, or use a ready peer on a shared channel.
+A local isolation failure or missing local provider does not block that peer.
+Choose the runner and channel first, then the repository, model, and optional
+session cap. Local setup shows the missing prerequisites; joining an existing
+mesh is separate from connecting a browser or registering it for notifications.
 
 A session runs one phase of an optional work item, or none at all: a *plan*
 session reads and ends by writing the plan; an *execute* session does the work and
@@ -162,7 +160,7 @@ Work starts by typing what needs doing. A plain prompt starts an execute session
 with no work item at all: the text is held as a durable draft and sent once the
 harness comes up, so a closed tab or a lost connection loses nothing. Turning that
 same prompt into a tracked work item — with a title, a plan phase, and a place other
-sessions can pick it up from — is explicit, through **Adjust**'s structured toggle
+sessions can pick it up from — is explicit, through **Adjust → Plan work item**
 or `/api/compose`. Either way nothing about the workflow is mandatory: the channel's
 phase bindings are presets, not requirements, supplying a model and budget only when
 the session does not name its own; if neither does, the node falls back to a model
@@ -170,6 +168,11 @@ already in its catalogue and records which source actually won as the session's
 `model_source`. **Adjust** opens repository, phase, model, and node as fields when a
 session needs something other than the usual. The session is killed at its budget,
 checked at each turn's end; a channel at its daily ceiling starts no session at all.
+
+The model picker uses the selected runner's connected, channel-bound providers.
+When a peer runs the task, enter a repository path on that peer: local clones and
+browser imports are not transferred. Changing runner or channel clears the old
+repository selection; changing model scope clears stale model and budget overrides.
 
 **Repositories can come from a forge.** Give the broker a `gh` or `glab` credential
 (the same one publishing uses) and the form lists your GitHub/GitLab repositories
@@ -224,6 +227,12 @@ it was submitted. A curated demonstration (a document with commands, output,
 and images) can be attached beside the authoritative record; it is linked and
 hashed, never executed, and flagged stale if the document changed since.
 
+**Work → Evidence** browses captured candidates without requiring an ID. Reviews,
+sessions, and work items link to the corresponding owner and channel. Peer detail
+shows that owner's recorded checks, deployments, and browser proof read-only;
+artifact downloads and new QA actions remain on the owner. A missing local
+candidate is not evidence that a peer has none.
+
 ### Asking, pinging, and complaining
 
 Three tools let an agent reach you without pretending a question is a permission.
@@ -238,6 +247,11 @@ it. `report_issue` drafts a bug report against tracon itself, with expected and
 actual behaviour, reproduction, versions, and attachments, secrets scrubbed; the
 draft sits in the queue for you to read before you authorize opening it on
 GitHub through the broker. None of the three pauses the session.
+
+**Devices & notifications** manages this browser's subscription and device tests.
+Shared channel notification rules live under **Channels** and have an explicit
+mesh scope. Push-service acceptance is not phone display or human acknowledgement.
+No registered devices means no device delivery can be demonstrated.
 
 ### Pause and stop
 
@@ -312,6 +326,14 @@ the change with the brokered credential, exactly as for a session it started.
 verb the policy does not name reaches your home as a card, exactly as it would
 from inside the boundary, and the call waits for you.
 
+For an investigation or handoff with no code to publish, use **`submit_report`**.
+It puts a narrative report in the operator queue and requests a notification,
+without a repository, candidate, push, or forge change. The operator can acknowledge
+it or request changes; **`report_status`** returns that feedback. Resubmit the same
+report ID to revise it. Decisions are tied to the inspected content, so stale
+acknowledgements cannot approve a newer report. Acknowledgement is a human action,
+independent of whether a push service accepted its notification.
+
 What it does not get is the boundary. That harness runs as you, on your
 machine: the promise here is that it never needs the credential and that every
 call it makes is decided by policy and written to a session log, not that it
@@ -337,9 +359,9 @@ tracon mesh init --hub https://hub.example.com
 tracon channel create personal
 ```
 
-Enrolling the next machine is one invitation and one pasted line. From the Nodes
-screen (or `tracon mesh invite`) create an invitation; it shows a QR, a code, and
-this line for the new machine:
+To enroll another machine, open **Settings → Mesh** (or use `tracon mesh invite`).
+Choose the existing channels to share and create an invitation. It includes a QR,
+code, and this line for the new machine:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | TRACON_ENROLL='<invitation url>' sh
@@ -349,13 +371,30 @@ That installs, enrolls (you confirm the fingerprints match — from the phone if
 is where you are), sets up the boundary, and installs the service. Paste it into a
 cloud console's user-data and a fresh VM comes up enrolled.
 
-**A new node is provisioned without touching its keyboard.** Every reachable node's
-provider cards render on the Nodes screen, wherever you are: connect its provider,
-paste the code back, disconnect — the command is sealed to that node and its login
-subprocess never leaves it. The Credentials list shows what the broker holds (names
-and bindings, never values) and shares one to a peer, sealed to that peer alone.
-Sessions on any node are started, prompted, reviewed, and killed from any other; a
-prompt to an unreachable node queues and sends when it returns.
+**Compare both fingerprints before admission.** Enrollment hands the new member
+the selected channel keys and signed policy, not the private signing key. Logging
+a browser into an existing node does not enroll another machine or grant it keys.
+
+**A reachable node can be configured remotely.** Open its management link from
+Nodes, then use **Settings → Connections** to connect a provider or share a
+credential. Provider login stays on the selected node; credential listings show
+names and bindings, never secret values. Sessions can be started, prompted,
+reviewed, and stopped from another channel member.
+
+Mesh invitations, admission, removal, and explicit hub channel sharing require
+administrator authentication, including on loopback, and work from an authenticated
+remote browser. **Maintenance** service changes additionally require local access,
+the fixed supported supervisor, and no active sessions. A scheduled restart is not
+a completed restart; unsupported or ambiguous service identities are refused.
+
+**Permissions & policies** separates verified installed files from the running
+process policy. On a managing node, initialize a missing policy, or preview and
+sign an edit with its existing key. Apply installs only those exact signed bytes
+against the preview's original baseline. It never rotates trust keys or overwrites
+a partial/custom installation during initialization. Selected peers remain
+unconfirmed until each returns a matching authenticated installation receipt;
+retry resends the stored bundle rather than silently resigning it. Legacy or
+missing compatibility metadata is unknown, not success.
 
 **Channels** are the isolation: a channel is a key, a node that was not handed the
 key cannot read that channel's work, and a meshed node refuses to start a session on
@@ -605,7 +644,7 @@ pipeline run, a document other than working notes.
 
 Merging, publishing, transitioning a ticket, and deploying are not something a
 policy rule's argument text matches unattended — they are scoped grants, made and
-revoked one at a time from Settings' Authority panel, beside the signed rules
+revoked one at a time in **Settings → Permissions & policies**, beside the signed rules
 they sit under. A grant names one target (a pull request, a merge request, an
 issue's exact transition, a deployment job) and, for merge, publish, and deploy,
 the one commit it covers; the branch moving to a later sha makes the grant no

@@ -58,36 +58,51 @@
 <div class="h4">
   Work
   <b>{items.length - closed.length} open on {channel || '…'}{closed.length ? ` · ${closed.length} closed` : ''}</b>
-  <button class="lnk r" onclick={() => (adding = !adding)}>{adding ? 'Cancel' : 'New item'}</button>
+  <button class="btn p r" type="button" aria-expanded={adding} onclick={() => (adding = !adding)}>{adding ? 'Close form' : 'New work item'}</button>
 </div>
 
 {#if channels.length > 1}
   <div class="bar">
-    <select bind:value={channel}>
-      {#each channels as c (c)}<option value={c}>{c}</option>{/each}
-    </select>
+    <label class="channel">
+      <span>Channel</span>
+      <select bind:value={channel}>
+        {#each channels as c (c)}<option value={c}>{c}</option>{/each}
+      </select>
+    </label>
   </div>
 {/if}
 
 {#if adding}
   <form class="new" onsubmit={add}>
-    <input placeholder="What needs doing" bind:value={title} />
-    <textarea placeholder="Requirements: what done looks like, what it must not touch" bind:value={body}></textarea>
+    <label class="field">
+      <span>Work title</span>
+      <input placeholder="What needs doing" bind:value={title} />
+    </label>
+    <label class="field">
+      <span>Requirements</span>
+      <textarea placeholder="What done looks like and what it must not touch" bind:value={body}></textarea>
+    </label>
     <div class="row2">
-      <label>Priority <input class="pri" bind:value={priority} inputmode="numeric" pattern="-?[0-9]*" /></label>
-      <button class="btn p" type="submit" disabled={busy || !title.trim()}>Add</button>
+      <label class="priority"><span>Priority</span><input class="pri" bind:value={priority} inputmode="numeric" pattern="-?[0-9]*" /><small>Higher numbers run first.</small></label>
+      <button class="btn p" type="submit" disabled={busy || !title.trim()}>Add work item</button>
       <small>Dependencies are set on the item afterwards.</small>
     </div>
   </form>
 {/if}
 
 {#if error}
-  <div class="banner crit">ledger <b>· {error}</b></div>
+  <div class="banner crit">Could not load work <b>· {error}</b></div>
 {/if}
 
-<div class="h5">Ready <b>{ready.length} · in the order the node computes</b></div>
+<div class="h5">Ready <b>{ready.length}</b></div>
 {#if ready.length === 0}
-  <div class="empty">Nothing is ready{blocked.length ? '; everything open is blocked' : ''}.</div>
+  {#if items.length === closed.length}
+    <div class="empty">No open work on {channel || 'this channel'} yet. <button class="lnk" type="button" onclick={() => (adding = true)}>Add a work item</button> to give a session a clear outcome.</div>
+  {:else if blocked.length}
+    <div class="empty">Every open item is blocked. Review each blocker below or <button class="lnk" type="button" onclick={() => (adding = true)}>add unblocked work</button>.</div>
+  {:else}
+    <div class="empty">An open session is already working. Follow it below or <button class="lnk" type="button" onclick={() => (adding = true)}>add another work item</button>.</div>
+  {/if}
 {:else}
   <div class="rows">
     {#each ready as v (v.id)}<WorkRow item={v} {titles} />{/each}
@@ -95,7 +110,7 @@
 {/if}
 
 {#if blocked.length}
-  <div class="h5">Blocked <b>{blocked.length} · shown with what blocks them</b></div>
+  <div class="h5">Blocked <b>{blocked.length}</b></div>
   <div class="rows">
     {#each blocked as v (v.id)}<WorkRow item={v} {titles} />{/each}
   </div>
@@ -127,10 +142,8 @@
     text-transform: none;
   }
   .h5 {
-    font: 11.5px var(--mono);
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--dim);
+    font: 600 14px var(--sans);
+    color: var(--ink2);
     margin: 14px 0 6px;
     display: flex;
     gap: 10px;
@@ -155,10 +168,26 @@
     padding: 8px 10px;
     font: 13.5px var(--sans);
   }
+  .bar .channel {
+    display: grid;
+    gap: 3px;
+  }
+  .bar .channel span,
+  .field > span,
+  .priority > span {
+    color: var(--ink2);
+    font: 11px var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
   .new {
     display: grid;
     gap: 8px;
     max-width: 640px;
+  }
+  .field {
+    display: grid;
+    gap: 3px;
   }
   .new textarea {
     min-height: 90px;
@@ -169,11 +198,7 @@
     gap: 12px;
     align-items: center;
   }
-  .row2 label {
-    font: 11px var(--mono);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--ink2);
+  .priority {
     display: flex;
     gap: 8px;
     align-items: center;
@@ -193,12 +218,22 @@
   /* Adding an item is directing work, so the phone gets it too: full-width
      fields, 16px inputs so iOS does not zoom the form. */
   @media (max-width: 700px) {
+    .h4 {
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .h4 .r {
+      margin-left: 0;
+    }
     .new input,
     .new textarea {
       font-size: 16px;
     }
     .row2 {
       flex-wrap: wrap;
+    }
+    .row2 .btn {
+      flex: 1;
     }
   }
 </style>

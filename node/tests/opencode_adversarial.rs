@@ -279,7 +279,7 @@ fn native_api(endpoint: SocketAddr) -> NativeApi {
 }
 
 fn allow(rig: &Rig, kind: &str, title: &str) {
-    rig.manager.policy().write().unwrap().rules.push(Rule {
+    rig.manager.policy().write().rules.push(Rule {
         id: format!("allow-{title}-for-this-test"),
         verdict: Verdict::Allow,
         reason: format!("the operator granted {title} on this channel"),
@@ -291,7 +291,7 @@ fn allow(rig: &Rig, kind: &str, title: &str) {
 }
 
 fn deny(rig: &Rig, kind: &str, title: &str) {
-    rig.manager.policy().write().unwrap().rules.push(Rule {
+    rig.manager.policy().write().rules.push(Rule {
         id: format!("deny-{title}-for-this-test"),
         verdict: Verdict::Deny,
         reason: format!("{title} is denied on this channel"),

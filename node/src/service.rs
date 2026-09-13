@@ -7,17 +7,20 @@
 //! because the node's state, credentials, and harness socket belong to the
 //! logged-in operator, and rootless podman needs their session.
 //!
-//! This is a host-side recipe and stays one: the CLI and the desktop app reach
-//! it, never a tool and never the node's HTTP API, so a session inside the
-//! boundary that breaks the build cannot restart, stop, or reconfigure the node
-//! that gates it. A harness outside the boundary runs as the operator and can
-//! do all three; `docs/reference/external-harness-notes.md` says so.
+//! This is primarily a host-side recipe: the CLI and desktop app are the
+//! preferred way to install and diagnose it. The operator API exposes only
+//! separately authenticated, loopback-only scheduling of these same fixed
+//! install, remove, and restart operations; it never accepts a command, path,
+//! or service name from a caller. A harness inside the boundary still cannot
+//! drive them.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use rust_embed::Embed;
+use serde::Serialize;
 
 #[derive(Embed)]
 #[folder = "../deploy"]
@@ -27,6 +30,54 @@ struct Units;
 
 const LINUX_UNIT: &str = "tracon.service";
 const MAC_LABEL: &str = "com.tracon.node";
+
+/// What the node can truthfully learn about the user service without exposing
+/// credentials, environment values, or supervisor output.
+#[derive(Debug, Clone, Serialize)]
+pub struct Diagnostics {
+    pub platform: &'static str,
+    pub supervisor: &'static str,
+    pub container: Option<&'static str>,
+    pub unit_path: Option<String>,
+    pub unit_installed: bool,
+    pub state: ServiceState,
+    pub restart: LifecycleCapability,
+    pub install: LifecycleCapability,
+    pub uninstall: LifecycleCapability,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceState {
+    /// `running`, `stopped`, or `unknown` when the supervisor cannot answer.
+    pub state: &'static str,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LifecycleCapability {
+    pub available: bool,
+    pub reason: String,
+    pub recovery: String,
+}
+
+/// The only service lifecycle actions the HTTP surface may schedule. No route
+/// accepts an executable, argument, unit name, or path from its caller.
+#[derive(Debug, Clone, Copy)]
+pub enum LifecycleAction {
+    Install,
+    Uninstall,
+    Restart,
+}
+
+impl LifecycleAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Uninstall => "uninstall",
+            Self::Restart => "restart",
+        }
+    }
+}
 
 fn home() -> Result<PathBuf> {
     std::env::var_os("HOME")
@@ -44,6 +95,312 @@ fn unit_path() -> Result<PathBuf> {
     } else {
         Ok(home.join(".config/systemd/user").join(LINUX_UNIT))
     }
+}
+
+fn container_kind() -> Option<&'static str> {
+    if std::path::Path::new("/run/.containerenv").exists() {
+        Some("podman container")
+    } else if std::path::Path::new("/.dockerenv").exists() {
+        Some("Docker container")
+    } else if std::env::var_os("container").is_some() {
+        Some("container")
+    } else {
+        None
+    }
+}
+
+fn host_preflight() -> Result<()> {
+    if let Some(kind) = container_kind() {
+        bail!("this node runs in a {kind}, so it cannot control the host user service");
+    }
+    Ok(())
+}
+
+/// The fixed unit is intentionally self-contained and does not copy process
+/// environment overrides. Managing it from an isolated/manual node would
+/// therefore operate a different state or configuration root.
+fn environment_overrides_preflight() -> Result<()> {
+    for name in ["TRACON_STATE_DIR", "TRACON_CONFIG_DIR"] {
+        if std::env::var_os(name).is_some_and(|value| !value.is_empty()) {
+            bail!(
+                "{name} is overridden for this serving process, but the fixed user-service unit does not preserve that override"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn supervisor_preflight() -> Result<()> {
+    let result = if cfg!(target_os = "macos") {
+        Command::new("launchctl")
+            .arg("version")
+            .output()
+            .map(|output| output.status)
+            .context("running launchctl version")
+    } else {
+        Command::new("systemctl")
+            .arg("--version")
+            .output()
+            .map(|output| output.status)
+            .context("running systemctl --version")
+    };
+    match result {
+        Ok(status) if status.success() => Ok(()),
+        Ok(_) => bail!("the fixed user-service supervisor is not available to this node"),
+        Err(error) => {
+            bail!("the fixed user-service supervisor is not available to this node: {error}")
+        }
+    }
+}
+
+fn environment_preflight() -> Result<()> {
+    host_preflight()?;
+    environment_overrides_preflight()?;
+    supervisor_preflight()
+}
+
+fn action_specific_preflight(action: LifecycleAction) -> Result<()> {
+    match action {
+        LifecycleAction::Install => {
+            let binary = std::env::current_exe().context("finding this node binary")?;
+            stable_binary(&binary)
+        }
+        LifecycleAction::Uninstall => home().map(|_| ()),
+        LifecycleAction::Restart => {
+            let path = unit_path()?;
+            if !path.exists() {
+                bail!(
+                    "not installed (no unit at {}); install the fixed user service first",
+                    path.display()
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn action_preflight(action: LifecycleAction) -> Result<()> {
+    environment_preflight()?;
+    action_specific_preflight(action)?;
+    service_target_preflight(supervisor_main_pid()?)
+}
+
+fn parse_systemd_main_pid(text: &str) -> Result<Option<u32>> {
+    let raw = text.trim();
+    if raw.is_empty() || raw == "0" {
+        return Ok(None);
+    }
+    let pid = raw
+        .parse::<u32>()
+        .context("systemd reported a malformed service MainPID")?;
+    Ok((pid != 0).then_some(pid))
+}
+
+fn parse_launchd_main_pid(text: &str) -> Result<Option<u32>> {
+    let running = text
+        .lines()
+        .map(str::trim)
+        .any(|line| line == "state = running");
+    if !running {
+        return Ok(None);
+    }
+    for line in text.lines().map(str::trim) {
+        if let Some(raw) = line.strip_prefix("pid = ") {
+            let pid = raw
+                .parse::<u32>()
+                .context("launchd reported a malformed service pid")?;
+            if pid != 0 {
+                return Ok(Some(pid));
+            }
+        }
+    }
+    bail!("launchd reports the fixed user service running but did not provide its pid");
+}
+
+/// The only fixed supervisor query that identifies a running service. A
+/// failure to identify an active launchd job is deliberately not guessed.
+fn supervisor_main_pid() -> Result<Option<u32>> {
+    let output = if cfg!(target_os = "macos") {
+        let target = format!("gui/{}/{MAC_LABEL}", uid()?);
+        Command::new("launchctl")
+            .args(["print", &target])
+            .output()
+            .context("running launchctl print")
+    } else {
+        Command::new("systemctl")
+            .args([
+                "--user",
+                "show",
+                LINUX_UNIT,
+                "--property=MainPID",
+                "--value",
+            ])
+            .output()
+            .context("reading systemd MainPID")
+    }?;
+    if !output.status.success() {
+        // A fixed unit that is absent or inactive has no process to protect.
+        return Ok(None);
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    if cfg!(target_os = "macos") {
+        parse_launchd_main_pid(&text)
+    } else {
+        parse_systemd_main_pid(&text)
+    }
+}
+
+fn service_target_preflight(main_pid: Option<u32>) -> Result<()> {
+    let current = std::process::id();
+    if let Some(main_pid) = main_pid.filter(|pid| *pid != current) {
+        bail!(
+            "the fixed user service is active as PID {main_pid}, not this serving process (PID {current}); refusing to change another node's service"
+        );
+    }
+    Ok(())
+}
+
+fn supervisor_state(
+    unit_installed: bool,
+    container: Option<&'static str>,
+    main_pid: &Result<Option<u32>>,
+) -> ServiceState {
+    if let Some(kind) = container {
+        return ServiceState {
+            state: "unknown",
+            detail: format!("{kind}; the node cannot inspect the host user service"),
+        };
+    }
+    match main_pid {
+        Ok(Some(pid)) if *pid == std::process::id() => ServiceState {
+            state: "running",
+            detail: format!("the fixed user service reports this serving process (PID {pid}) active"),
+        },
+        Ok(Some(pid)) => ServiceState {
+            state: "running",
+            detail: format!(
+                "the fixed user service targets PID {pid}, not this serving process (PID {}); lifecycle changes are refused",
+                std::process::id()
+            ),
+        },
+        Ok(None) => ServiceState {
+            state: "stopped",
+            detail: if unit_installed {
+                "the fixed user-service unit is installed but not active".into()
+            } else {
+                "no user-service unit is installed".into()
+            },
+        },
+        Err(error) => ServiceState {
+            state: "unknown",
+            detail: format!("the user supervisor target could not be verified: {error}"),
+        },
+    }
+}
+
+fn lifecycle_capability(
+    action: LifecycleAction,
+    environment: &Result<(), String>,
+    target: &Result<(), String>,
+) -> LifecycleCapability {
+    let (reason, recovery) = match action {
+        LifecycleAction::Install => (
+            "this node can install and start its fixed user-service unit after this response",
+            "The page disconnects while the service starts. Reconnect here after the node answers.",
+        ),
+        LifecycleAction::Uninstall => (
+            "this node can disable and remove its fixed user-service unit after this response",
+            "The page disconnects. Node state and credentials remain; start the node another supported way to return.",
+        ),
+        LifecycleAction::Restart => (
+            "this node can ask its own user supervisor to restart it after this response",
+            "The page disconnects while the node restarts; reconnect here after the service answers.",
+        ),
+    };
+    let check = match environment {
+        Ok(()) => match target {
+            Ok(()) => action_specific_preflight(action).map_err(|error| error.to_string()),
+            Err(error) => Err(error.clone()),
+        },
+        Err(error) => Err(error.clone()),
+    };
+    match check {
+        Ok(()) => LifecycleCapability {
+            available: true,
+            reason: reason.into(),
+            recovery: recovery.into(),
+        },
+        Err(error) => LifecycleCapability {
+            available: false,
+            reason: error,
+            recovery: "This node cannot safely operate that host service from here.".into(),
+        },
+    }
+}
+
+/// Safe diagnostics for the settings surface. Every supervisor invocation has
+/// fixed program and arguments; command output is intentionally not returned.
+pub fn diagnostics() -> Diagnostics {
+    let container = container_kind();
+    let unit_path = unit_path().ok();
+    let unit_installed = unit_path.as_ref().is_some_and(|path| path.exists());
+    // Read the fixed service target once for all capability rows. A unit that
+    // names another running process is visible but never changeable here.
+    let main_pid = if container.is_none() {
+        supervisor_main_pid()
+    } else {
+        Ok(None)
+    };
+    let target = match &main_pid {
+        Ok(pid) => service_target_preflight(*pid).map_err(|error| error.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    let environment = environment_preflight().map_err(|error| error.to_string());
+    Diagnostics {
+        platform: if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "linux"
+        },
+        supervisor: if cfg!(target_os = "macos") {
+            "launchd"
+        } else {
+            "systemd user service"
+        },
+        container,
+        unit_path: unit_path.map(|path| path.display().to_string()),
+        unit_installed,
+        state: supervisor_state(unit_installed, container, &main_pid),
+        install: lifecycle_capability(LifecycleAction::Install, &environment, &target),
+        uninstall: lifecycle_capability(LifecycleAction::Uninstall, &environment, &target),
+        restart: lifecycle_capability(LifecycleAction::Restart, &environment, &target),
+    }
+}
+
+/// Schedule one fixed service lifecycle operation after the HTTP response has
+/// had time to leave this process. Scheduling is the only success this caller
+/// can truthfully receive; a later diagnostic is the evidence of recovery.
+pub fn schedule(action: LifecycleAction) -> Result<()> {
+    action_preflight(action)?;
+    std::thread::Builder::new()
+        .name(format!("tracon-service-{}", action.label()))
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(350));
+            if let Err(error) = action_preflight(action) {
+                tracing::warn!(action = action.label(), %error, "scheduled user-service action refused after target changed");
+                return;
+            }
+            let result = match action {
+                LifecycleAction::Install => install(),
+                LifecycleAction::Uninstall => uninstall(),
+                LifecycleAction::Restart => restart(),
+            };
+            if let Err(error) = result {
+                tracing::error!(action = action.label(), %error, "scheduled user-service action failed");
+            }
+        })
+        .context("scheduling fixed user-service action")?;
+    Ok(())
 }
 
 /// The unit text, naming the binary that runs this command rather than a fixed
@@ -331,6 +688,24 @@ mod tests {
         ))
         .is_err());
         assert!(stable_binary(Path::new("/home/op/.local/bin/tracon")).is_ok());
+    }
+
+    #[test]
+    fn supervisor_pid_parsers_refuse_ambiguous_active_launchd_state() {
+        assert_eq!(parse_systemd_main_pid("0\n").unwrap(), None);
+        assert_eq!(parse_systemd_main_pid("4321\n").unwrap(), Some(4321));
+        assert_eq!(
+            parse_launchd_main_pid("state = running\npid = 4321\n").unwrap(),
+            Some(4321)
+        );
+        assert_eq!(parse_launchd_main_pid("state = waiting\n").unwrap(), None);
+        assert!(parse_launchd_main_pid("state = running\n").is_err());
+    }
+
+    #[test]
+    fn another_supervisor_pid_cannot_be_lifecycled() {
+        assert!(service_target_preflight(Some(std::process::id())).is_ok());
+        assert!(service_target_preflight(Some(std::process::id().saturating_add(1))).is_err());
     }
 
     #[test]
