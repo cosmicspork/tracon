@@ -223,7 +223,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/pause", post(api::pause))
         .route("/api/sessions/{id}/resume", post(api::resume))
         .route("/api/sessions/{id}/stop", post(api::stop))
-        .route("/api/sessions/{id}/draft", put(api::put_draft))
+        .route(
+            "/api/sessions/{id}/draft",
+            get(api::get_draft).put(api::put_draft),
+        )
         // The harness's own API, mediated per session. On the operator router
         // deliberately: the same cookie, Origin and Host checks as every other
         // operator route answer first, and the harness credential is injected

@@ -563,6 +563,14 @@ impl Ingest {
             return false;
         }
         let tokens = usage_of(&step["tokens"]) as i64;
+        // A turn recovered from the harness's own record is still two
+        // sources: what OpenCode says it spent, and what this node's gateway
+        // counted on the wire while it was running. The gap between them is
+        // no less worth knowing for having been noticed late — and the v2
+        // surface prices every step at zero (`providers.md` §6.2), so the
+        // cost is only carried when the step actually names one.
+        let cost = step["cost"].as_f64().filter(|c| *c > 0.0);
+        let usage = crate::metrics::settle_turn(&self.store, &self.session_id, Some(tokens), cost);
         let applied = self
             .store
             .update_session_unless(
@@ -570,7 +578,7 @@ impl Ingest {
                 SessionState::TERMINAL,
                 SessionPatch {
                     turn_active: Some(false),
-                    tokens_used: Some(session.tokens_used + tokens),
+                    tokens_used: Some(session.tokens_used + usage.charged),
                     ..Default::default()
                 },
             )
@@ -584,10 +592,14 @@ impl Ingest {
             json!({
                 "stop_reason": step["finish"].as_str().unwrap_or("end_turn"),
                 "usage": { "total_tokens": tokens },
+                "charged_tokens": usage.charged,
                 "source": "reconciled",
                 "reason": "the turn ended while the node was disconnected",
             }),
         );
+        if let Some(kind) = usage.event_kind() {
+            self.record(kind, None, usage.detail());
+        }
         self.publish_session();
         true
     }

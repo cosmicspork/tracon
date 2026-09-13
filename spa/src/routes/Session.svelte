@@ -5,21 +5,26 @@
   import TransferExport from '../components/TransferExport.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
+  import { draftBox } from '../lib/draft'
   import { humanizeError } from '../lib/errors'
   import { formatAge, formatBudget, formatTokens } from '../lib/format'
   import { repetitionHint } from '../lib/log'
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
-  import { isTerminal, type OperatorQuestion } from '../lib/types'
+  import { isTerminal, type CeilingInfo, type OperatorQuestion, type SessionUsage } from '../lib/types'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
 
   let { id }: { id: string } = $props()
 
   let draft = $state('')
-  let draftLoaded = $state(false)
+  /** Shown once, when text the operator typed elsewhere comes back from the node. */
+  let restored = $state(false)
   let sending = $state(false)
   let error = $state<string | null>(null)
-  let saveTimer: ReturnType<typeof setTimeout> | undefined
+  let usage = $state<SessionUsage | null>(null)
+  let ceiling = $state<CeilingInfo | null>(null)
+  // The box's timing rules live in lib/draft; the component only holds the text.
+  const box = draftBox((text) => api.saveDraft(id, text).catch(() => {}))
 
   const session = $derived(store.sessions.get(id))
   const waiting = $derived(store.waitingFor(id))
@@ -33,33 +38,40 @@
   async function refreshQuestions() {
     const result = await api.session(id)
     questions = result.questions
+    usage = result.usage
+    ceiling = result.ceiling
   }
   const unreachable = $derived(session ? unreachableReason(store.nodes, store.mesh, session.node_id) : null)
 
   $effect(() => {
     void store.open(id)
-    draftLoaded = false
+    restored = false
+    // The draft is asked for on its own: it is the one thing a reconnecting
+    // client cannot reconstruct, and it should not wait on the rest.
     api
-      .session(id)
+      .draft(id)
       .then((d) => {
-        if (!draftLoaded) draft = d.session.draft ?? ''
-        questions = d.questions
-        draftLoaded = true
+        const text = box.restore(d.text)
+        if (text !== null) {
+          draft = text
+          restored = true
+        }
       })
-      .catch(() => (draftLoaded = true))
+      .catch(() => {})
+    void refreshQuestions().catch(() => {})
     const timer = setInterval(() => void refreshQuestions().catch(() => {}), 2000)
     return () => {
       clearInterval(timer)
+      box.dispose()
       store.close()
     }
   })
 
   function onDraftInput() {
-    // Typing means this box is the operator's now: a late `api.session` fetch
-    // must not overwrite what they are writing.
-    draftLoaded = true
-    clearTimeout(saveTimer)
-    saveTimer = setTimeout(() => void api.saveDraft(id, draft).catch(() => {}), 500)
+    // Typing means this box is the operator's now: a late fetch must not
+    // overwrite what they are writing.
+    restored = false
+    box.typed(draft)
   }
 
   async function send(e?: SubmitEvent) {
@@ -68,9 +80,10 @@
     if (!text || sending) return
     sending = true
     error = null
-    // Cancel any pending draft save before the prompt clears it on the node; a
+    restored = false
+    // Drop any pending draft save before the prompt clears it on the node; a
     // save firing mid-request would resurrect the sent text into the box.
-    clearTimeout(saveTimer)
+    box.sent()
     try {
       await api.prompt(id, text)
       draft = ''
@@ -80,6 +93,28 @@
       sending = false
     }
   }
+
+  // Two sources, one ledger: the gateway's on-the-wire count is what the
+  // budget was charged, the harness's own number is shown beside it, and a
+  // turn that disagreed or could not be counted says so rather than reading
+  // as an ordinary one.
+  const usageNote = $derived.by(() => {
+    if (!usage || usage.state === null) return null
+    const both = `gw ${formatTokens(usage.gateway_tokens)} · harness ${formatTokens(usage.harness_tokens)}`
+    if (usage.unmetered_turns > 0)
+      return {
+        warn: true,
+        text: `${both} · ${usage.unmetered_turns} unmetered`,
+        title: `${usage.unmetered_turns} turn(s) spent tokens this node could not count: the provider returned no usage. Not zero — unknown.`,
+      }
+    if (usage.mismatched_turns > 0)
+      return {
+        warn: true,
+        text: `${both} · ${usage.mismatched_turns} mismatched`,
+        title: 'The gateway and the harness disagreed on a turn. The budget was charged the gateway count.',
+      }
+    return { warn: false, text: `${both} · reconciled`, title: 'The two usage sources agree within tolerance.' }
+  })
 
   let controlling = $state(false)
   let confirmingKill = $state(false)
@@ -173,6 +208,9 @@
     <span class="mono">{session.branch}</span>
     <span class="sp"></span>
     <span class="mono">{formatBudget(session.tokens_used, session.budget_tokens)} tok</span>
+    {#if usageNote}
+      <span class="mono" class:unsure={usageNote.warn} title={usageNote.title}>{usageNote.text}</span>
+    {/if}
     {#if session.context_used != null && session.context_size != null}
       <span class="mono"
         >ctx {formatTokens(session.context_used)}/{formatTokens(session.context_size)}</span
@@ -229,6 +267,19 @@
   {:else if session.end_reason === 'phase_done'}
     <div class="banner ok">{session.phase === 'plan' ? 'plan written' : 'verdict given'} <b>· this {session.phase} session is done</b></div>
   {/if}
+  <!-- Why a running session's turns are failing: the gateway refuses its model
+       calls once the channel's counted spend crosses the ceiling. -->
+  {#if ceiling?.state === 'at' && !isTerminal(session.state)}
+    <div class="banner crit">
+      {session.channel} is at its daily ceiling
+      <b
+        >· {formatTokens(ceiling.usage_today)} of {formatTokens(ceiling.ceiling ?? 0)} tokens{ceiling.unmetered_turns >
+        0
+          ? `, plus ${ceiling.unmetered_turns} unmetered`
+          : ''} · model calls are refused until local midnight or a higher ceiling</b
+      >
+    </div>
+  {/if}
   {#if repeating && !isTerminal(session.state) && session.state !== 'paused'}
     <div class="banner dim">{repeating} <b>· pause it yourself if it is stuck</b></div>
   {/if}
@@ -252,6 +303,10 @@
   {/if}
   {#if isTerminal(session.state) && session.draft}
     <div class="banner dim">unsent prompt retained <b>· copy it before starting another session</b><pre>{session.draft}</pre></div>
+  {/if}
+
+  {#if restored && !isTerminal(session.state)}
+    <div class="banner dim">draft restored <b>· the node kept what you typed; it was never sent</b></div>
   {/if}
 
   {#if !isTerminal(session.state)}
@@ -286,6 +341,11 @@
   .model {
     font: 600 15px var(--sans);
     color: var(--ink);
+  }
+  /* Usage that did not reconcile, or could not be counted at all. Marked, not
+     alarmed: the number is unknown, which is a thing to look at, not a fault. */
+  .unsure {
+    color: var(--wait);
   }
   .sp {
     flex: 1;

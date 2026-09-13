@@ -1,5 +1,13 @@
 <script lang="ts">
-  import { groupLog, groupOpen, groupSummary, providerErrorLine, repetitionLine } from '../lib/log'
+  import {
+    groupLog,
+    groupOpen,
+    groupSummary,
+    providerErrorLine,
+    repetitionLine,
+    usageMismatchLine,
+    usageUnmeteredLine,
+  } from '../lib/log'
   import { formatTokens } from '../lib/format'
   import type { Event } from '../lib/types'
 
@@ -107,6 +115,10 @@
         <div class="mark crit">model call refused · {e.payload.provider} · {e.payload.reason}</div>
       {:else if e.kind === 'ceiling'}
         <div class="mark crit">channel at its daily ceiling · {e.payload.usage_today} of {e.payload.ceiling} tokens · model calls refused</div>
+      {:else if e.kind === 'usage_mismatch'}
+        <div class="mark wait">{usageMismatchLine(e.payload)}</div>
+      {:else if e.kind === 'usage_unmetered'}
+        <div class="mark wait">{usageUnmeteredLine(e.payload)}</div>
       {:else if e.kind === 'orientation'}
         <details class="fold">
           <summary>orientation · {e.payload.chars} chars{e.payload.trimmed ? ' · trimmed' : ''}</summary>
