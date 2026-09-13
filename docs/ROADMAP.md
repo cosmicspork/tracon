@@ -57,9 +57,8 @@ refer to that manifest's table.
         prompt cleared without re-sending, a child session, a session gone upstream, and a
         startup replay that closes the missed turn with its usage.
         - **Still open under this item:** no route yet to register a child session, so a
-          fork or background subagent is only recorded and reported; usage reconciliation
-          against the gateway's counts is the next sub-item; PTY ids are mapped but nothing
-          creates one until Gate D; and the startup path is exercised by test rather than
+          fork or background subagent is only recorded and reported; PTY ids are mapped but
+          nothing creates one until Gate D; and the startup path is exercised by test rather than
           by a real restart against a surviving `opencode serve`, which dies with its
           container today.
   - [x] Policy-aware API gateway: deny by default from the route matrix, directory pinned
@@ -81,8 +80,9 @@ refer to that manifest's table.
         owner-bound; Gate D) — the capability check point exists and the connect route
         answers 501 — and the native UI origin that will call this mount (Gate D). Child
         sessions (`fork`) and `init` are refused with a visible 403 until tracon registers
-        them; a mediated call that times out is recorded as uncertain and left for the
-        ingestion path to reconcile.
+        them; a mediated call writes its `opencode_intent` row before dispatch, so one that
+        times out is recorded as uncertain — on the intent and on the session — and left for
+        the ingestion path to settle.
   - [ ] Provider proofs on the pinned binary: hosted API keys, the self-hosted
         OpenAI-compatible endpoint with non-zero gateway counts (finding 10), Anthropic
         subscription via `claude setup-token` lifted into the broker, Codex subscription
@@ -101,7 +101,7 @@ refer to that manifest's table.
           disabled and egress blackholed; the Codex `openai`-plus-OAuth trap foreclosed by
           construction; and, live against a llama.cpp router, non-zero gateway token counts
           for a self-hosted endpoint equal to the figures the server itself reported, with
-          a provider that omits usage marked unmetered rather than billed as zero.
+          a provider that omits usage settling as unmetered rather than billed as zero.
           `--use-system-ca` is not load-bearing: the gateway boundary is plain HTTP on the
           runner's private network, asserted as such.
         - **Found doing it, and blocking the rest** (manifest finding 19): the session path
@@ -110,10 +110,11 @@ refer to that manifest's table.
           `api.anthropic.com` with the gateway bypassed. The adapter now writes the gateway
           URL into the provider entry, the catalogue provider, and each catalogue model.
           The runner still has no way to present its placeholder on that path, so the
-          gateway refuses its model call and no OpenCode turn completes through it — which
-          leaves the hosted end-to-end runs and the usage reconciliation below waiting on a
-          decision between driving the v1 session surface and giving the runner a v2
-          credential.
+          gateway refuses its model call and **no OpenCode turn completes through it**:
+          the hosted end-to-end runs stay open, and the usage reconciliation below is
+          proven against the fake server rather than against a real turn. Closing it is a
+          choice between driving the v1 session surface and giving the runner a v2
+          credential, which belongs with the session controller rather than here.
         - The `claude setup-token` path is built and covered by tests: the Claude adapter
           runs it under a pty in a throwaway helper home, parses the sign-in URL out of the
           CLI's own screen, takes the pasted code, and lifts the printed `sk-ant-oat…` token
@@ -121,11 +122,58 @@ refer to that manifest's table.
           applies unchanged. The `anthropic` login now resolves to the Claude adapter
           whatever `[harness] id` names. **Still unproven live:** no real subscription has
           been signed in through it, so the proof itself remains the operator's.
-  - [ ] Usage and spending accounting reconciled between OpenCode's per-message usage and
-        the gateway's counts; unsent-text durability across disconnects.
-  - [ ] Adversarial API run: permission escalation, foreign session ids, config and auth
+  - [x] Usage and spending accounting reconciled between OpenCode's per-message usage and
+        the gateway's counts; unsent-text durability across disconnects. Every turn carries
+        both numbers in one ledger keyed on (session, turn): the gateway's on-the-wire count,
+        authoritative for budgets and ceilings, and the harness's own report
+        (`tokens.{input,output,reasoning,cache.read,cache.write}` and `cost` for OpenCode,
+        the ACP `usage` for omp/claude). At turn end they are reconciled — agreement within
+        tolerance is recorded as such, disagreement writes a `usage_mismatch` event carrying
+        both sides, and the harness's number can raise the charge but never lower it. A turn
+        whose calls the gateway could not count (finding 10: OpenCode reports omitted usage
+        as zero, and there is no estimator anywhere in the path) is marked `unmetered` and
+        recorded with a `usage_unmetered` event rather than being charged zero; the channel
+        ceiling reports those turns beside the day's counted spend instead of reading as a
+        quiet day. Both numbers and the verdict are on the session API and in the SPA's
+        session header. Unsent prompts are node-side per (session, operator), saved on a
+        debounce, restored into the composer with a "draft restored" hint, cleared only by
+        dispatching the prompt, and never delivered to the harness on their own. Covered by
+        tests: the two sources agreeing, a harness under-reporting, a provider reporting no
+        usage at all, gateway counts landing on the turn that made them, a ceiling enforced
+        from the wire while the harness claims almost nothing, an unmetered turn flagged
+        rather than passing silently, and a draft surviving a store reopen.
+        - **Still open under this item:** the reconciliation is proven against the fake
+          server and a stub upstream, not yet against the pinned binary and a live provider;
+          `cost` on the v2 surface is always zero upstream (§6.2), so a priced turn is only
+          as good as the v1 numbers the adapter reads.
+  - [x] Adversarial API run: permission escalation, foreign session ids, config and auth
         writes, share, revert, shell, child sessions; interrupted SSE and killed processes
         during mutations; two simultaneous sessions cannot read or migrate each other's state.
+        Every case asserts from both ends — what the client got back and what reached the
+        harness — in `node/tests/opencode_adversarial.rs`. Against the fake: an `always`
+        narrowed and recorded, `PATCH /session/{id}` and the saved-grant writes refused, a
+        reply aimed at another session's permission refused on the identity map (the v1
+        route names no session at all), every `{session}` route refused a foreign id, a
+        path that does not normalise refused before it is classified, every spelling of
+        `directory`/`cwd` replaced or refused, the config and credential routes refused
+        with nothing sent, share/fork/init/agent refused, a revert decided by policy and a
+        permitted one recording that the tree moved, a PTY default-denied, and a mediated
+        mutation that never reported left uncertain and settled by reconciliation without
+        a second answer being sent. Against the pinned binary: two sessions side by side
+        with distinct XDG trees and databases, neither server's session list holding the
+        other's and neither holding a lock on its own database (finding 17 observed, which
+        is why the node now fences); the gateway refusing one session's mount with the
+        other's id; stopping one leaving the other running; a refused PTY spawning nothing;
+        an auth store that stays empty and a `GET /config` that is the node's; and a killed
+        `opencode serve` leaving the mutation's intent uncertain with its reason rather than
+        lost. The node-owned single-writer fence over a session's state directory (row 6b —
+        upstream provides none) is built and covered.
+        - **Not exercisable model-free, so still the operator's live run:** that a second
+          identical tool call asks again after a gateway-mediated `once` (it needs a model
+          to call a tool at all — what is proved here is that no grant can be saved and the
+          ruleset stays all-`ask`); a subagent child session raised by the harness itself
+          (the ingestion path for it is covered against the fake); and killing the server
+          *after a tool call was recorded*, for the same reason.
 - [ ] **Gate C — customization and recovery.**
   - [ ] Launch manifest: skill, prompt, and agent snapshots with digests; duplicates rejected
         and URL sources forbidden at manifest build (finding 14); read-only mount outside the

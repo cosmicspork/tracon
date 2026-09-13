@@ -599,8 +599,6 @@ pub async fn handle(
         scanner: UsageScanner::new(),
         usage: usage.clone(),
         store: s.manager.store().clone(),
-        expect_usage: status.is_success(),
-        state: s.clone(),
         done: false,
     };
     out.body(Body::from_stream(counted))
@@ -629,35 +627,6 @@ fn note_refusal(s: &AppState, session_id: &str, provider: &str, method: &Method,
             "reason": reason,
             "attempt": attempt,
         }),
-    );
-}
-
-/// A provider answered without reporting what the call cost. The gateway
-/// counts on the wire, so what the upstream omits it cannot count — and the
-/// harness cannot either: OpenCode maps a missing `usage` to zero with no
-/// estimator anywhere in its accounting path (`providers.md` §6.3). Zero
-/// tokens and unknown tokens are different facts, and a budget stated against
-/// the first while the second is true is the failure that finding is about.
-/// So the session says so, once, rather than reading as a free model.
-fn note_unmetered(s: &AppState, row: &UsageRow) {
-    let Some(session_id) = &row.session_id else {
-        return;
-    };
-    if s.manager
-        .store()
-        .has_event(session_id, ek::UNMETERED)
-        .unwrap_or(true)
-    {
-        return;
-    }
-    tracing::warn!(
-        provider = %row.provider,
-        "provider reported no usage: this session is unmetered on it, not free"
-    );
-    s.manager.record_event(
-        session_id,
-        ek::UNMETERED,
-        json!({ "provider": row.provider, "model": row.model }),
     );
 }
 
@@ -803,9 +772,6 @@ struct UsageScanner {
     line: Vec<u8>,
     input: i64,
     output: i64,
-    /// Whether any `usage` the scanner understood went by. A response that
-    /// carried none is unmetered, which is not the same fact as zero tokens.
-    metered: bool,
 }
 
 impl UsageScanner {
@@ -814,7 +780,6 @@ impl UsageScanner {
             line: Vec::new(),
             input: 0,
             output: 0,
-            metered: false,
         }
     }
 
@@ -862,11 +827,9 @@ impl UsageScanner {
         // Cumulative in a stream (Anthropic's message_delta repeats the running
         // output count), so keep the largest seen.
         if let Some(i) = i {
-            self.metered = true;
             self.input = self.input.max(i);
         }
         if let Some(o) = o {
-            self.metered = true;
             self.output = self.output.max(o);
         }
     }
@@ -877,12 +840,6 @@ struct Counted {
     scanner: UsageScanner,
     usage: Arc<Mutex<UsageRow>>,
     store: Arc<crate::store::Store>,
-    /// The node, so a provider that reported nothing can be marked on the
-    /// session that called it rather than silently recorded as free.
-    state: AppState,
-    /// Whether an answer was expected to carry usage at all. An upstream error
-    /// carries none and is not evidence that the provider is unmetered.
-    expect_usage: bool,
     done: bool,
 }
 
@@ -896,9 +853,6 @@ impl Counted {
         let mut row = self.usage.lock().unwrap().clone();
         row.input_tokens = self.scanner.input;
         row.output_tokens = self.scanner.output;
-        if self.expect_usage && !self.scanner.metered {
-            note_unmetered(&self.state, &row);
-        }
         if let Err(e) = self.store.record_usage(&row) {
             tracing::warn!(error = %e, "usage not recorded");
         }
@@ -1219,23 +1173,24 @@ mod tests {
         s.feed(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":1}}}\n\n");
         s.feed(b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n");
         s.finish();
-        assert_eq!((s.input, s.output, s.metered), (7, 4, true));
+        assert_eq!((s.input, s.output), (7, 4));
 
         let mut s = UsageScanner::new();
         s.feed(b"{\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3}}");
         s.finish();
-        assert_eq!((s.input, s.output, s.metered), (10, 3, true));
+        assert_eq!((s.input, s.output), (10, 3));
         let mut s = UsageScanner::new();
         s.feed(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":5}}}\n");
         s.finish();
-        assert_eq!((s.input, s.output, s.metered), (12, 5, true));
+        assert_eq!((s.input, s.output), (12, 5));
     }
 
     /// A self-hosted OpenAI-compatible server is reached through a provider
     /// whose shape this build has no name for — it is wired as
     /// OpenAI-compatible and held to that surface — and it answers the
     /// chat-completions spelling. Reading the spelling per shape counted that
-    /// as zero; reading both counts it.
+    /// as zero, which is how a real turn against a local model became a free
+    /// one; reading both spellings for every shape counts it.
     #[test]
     fn a_shape_this_build_does_not_know_is_still_counted() {
         let mut s = UsageScanner::new();
@@ -1243,25 +1198,24 @@ mod tests {
         s.feed(b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":16,\"total_tokens\":58}}\n");
         s.feed(b"data: [DONE]\n");
         s.finish();
-        assert_eq!((s.input, s.output, s.metered), (42, 16, true));
+        assert_eq!((s.input, s.output), (42, 16));
     }
 
-    /// And a provider that reports nothing is unmetered, which is a different
-    /// fact from zero tokens: the row of zeroes is what a free model looks
-    /// like too, so the scanner keeps the distinction for the gateway to
-    /// record on the session.
+    /// A provider that reports nothing leaves the count at zero — and the
+    /// requests recorded beside it, which is what lets the reconciler call
+    /// that turn unmetered rather than free (`crate::metrics`).
     #[test]
-    fn a_provider_that_reports_nothing_is_unmetered_rather_than_zero() {
+    fn a_provider_that_reports_nothing_counts_nothing() {
         let mut s = UsageScanner::new();
         s.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n");
         s.feed(b"data: [DONE]\n");
         s.finish();
-        assert_eq!((s.input, s.output, s.metered), (0, 0, false));
+        assert_eq!((s.input, s.output), (0, 0));
         // A usage object with nothing the scanner understands in it says no
         // more than none at all.
         let mut s = UsageScanner::new();
         s.feed(b"data: {\"usage\":{\"tokens\":7}}\n");
         s.finish();
-        assert!(!s.metered);
+        assert_eq!((s.input, s.output), (0, 0));
     }
 }

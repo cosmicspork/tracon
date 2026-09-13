@@ -53,6 +53,12 @@ pub mod intent_kind {
     pub const PROMPT: &str = "prompt";
     pub const ABORT: &str = "abort";
     pub const PERMISSION_REPLY: &str = "permission_reply";
+    /// Any other mediated call the gateway forwards — a revert, a compact, a
+    /// model switch, a command. Its effect is observable in the session's own
+    /// state rather than in a snapshot of its own, so reconciliation settles
+    /// it without re-sending; the note the gateway wrote survives, because
+    /// settling never overwrites a note with an empty one.
+    pub const API: &str = "api";
 }
 
 /// How a mediated mutation ended.
@@ -334,6 +340,22 @@ impl Store {
             "SELECT * FROM opencode_object WHERE session_id=?1 AND kind=?2 AND upstream_id=?3",
             params![session_id, kind, upstream_id],
             OpenCodeObjectRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Which tracon session an upstream object belongs to, asked without
+    /// naming one. The gateway's mount is a tracon session, but OpenCode's own
+    /// v1 permission route (`POST /permission/{id}/reply`) names no session at
+    /// all, so the only way to see that a reply is aimed at another session's
+    /// request is to ask what this id was mapped to when it was raised.
+    pub fn opencode_object_owner(&self, kind: &str, upstream_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT session_id FROM opencode_object WHERE kind=?1 AND upstream_id=?2",
+            params![kind, upstream_id],
+            |r| r.get(0),
         )
         .optional()
         .map_err(Into::into)
@@ -637,6 +659,37 @@ mod tests {
         assert_eq!(row.ref_id.as_deref(), Some("e1"));
         assert_eq!(row.event_seq, Some(4));
         assert_eq!(row.seq, 5, "the latest sequence that touched it");
+    }
+
+    /// The gateway asks this about a permission id that names no session, so
+    /// an unmapped id has to answer "nobody knows" rather than "mine".
+    #[test]
+    fn an_upstream_object_says_which_session_it_belongs_to() {
+        let store = store_with_session("s1");
+        store.opencode_bind("s1", "ses_a", None).unwrap();
+        store
+            .opencode_map("s1", object_kind::PERMISSION, "per_1", Some("p1"), None, 1)
+            .unwrap();
+        assert_eq!(
+            store
+                .opencode_object_owner(object_kind::PERMISSION, "per_1")
+                .unwrap()
+                .as_deref(),
+            Some("s1")
+        );
+        assert_eq!(
+            store
+                .opencode_object_owner(object_kind::PERMISSION, "per_unknown")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .opencode_object_owner(object_kind::MESSAGE, "per_1")
+                .unwrap(),
+            None,
+            "the kind is part of the key"
+        );
     }
 
     #[test]

@@ -745,6 +745,10 @@ impl Manager {
                 .await
             {
                 tracing::error!(session = %id, error = %e, "session failed to start");
+                // Nothing is writing this session's state now, whatever the
+                // launch got as far as: the fence is given back here, because
+                // the supervisor that would have released it never ran.
+                materialize::release_state(&id);
                 // A stop can race startup before a supervisor exists. It is
                 // terminal by the time startup reports its cancellation and
                 // must not be overwritten as a failed launch.

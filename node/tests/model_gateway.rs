@@ -708,13 +708,14 @@ async fn a_channel_at_its_daily_ceiling_is_refused_and_told_once_per_session() {
     assert!(work["ceiling"]["usage_today"].as_i64().unwrap() >= 100);
 }
 
-/// Finding 10, from the gateway's side: a provider that answers without
-/// reporting usage is marked unmetered on the session rather than recorded as
-/// a turn that cost nothing. The row is still written — the request happened
-/// — but the zero in it is not evidence of a free model, and the session says
-/// which provider the figure is missing for.
+/// Finding 10, from the gateway's side. A provider that answers without
+/// reporting usage leaves the count at zero — there is nothing on the wire to
+/// count and no estimator anywhere — but the requests are recorded beside it,
+/// and that is what lets the turn be settled as *unmetered* rather than as a
+/// turn that cost nothing. The zero and the requests have to travel together
+/// or the distinction is lost here rather than later.
 #[tokio::test]
-async fn a_provider_that_reports_no_usage_marks_the_session_unmetered() {
+async fn a_provider_that_reports_no_usage_leaves_a_turn_that_settles_unmetered() {
     state::isolate();
     let h = harness(STORE, LOOPBACK).await;
     let sid = "s-unmetered";
@@ -734,24 +735,20 @@ async fn a_provider_that_reports_no_usage_marks_the_session_unmetered() {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
-    let unmetered: Vec<_> = h
-        .store
-        .events_after(sid, 0, 100)
-        .unwrap()
-        .into_iter()
-        .filter(|e| e.kind == "unmetered")
-        .collect();
-    assert_eq!(unmetered.len(), 1, "recorded once per session");
-    assert_eq!(unmetered[0].payload["provider"], "stub");
-    assert_eq!(unmetered[0].payload["model"], "claude-x");
-
-    // The requests are still counted; only the tokens are unknown.
     let totals = h.store.usage_since(Some("work"), 0).unwrap();
-    assert_eq!(totals[0].requests, 2);
-    assert_eq!((totals[0].input_tokens, totals[0].output_tokens), (0, 0));
+    assert_eq!(totals[0].requests, 2, "the requests happened");
+    assert_eq!(
+        (totals[0].input_tokens, totals[0].output_tokens),
+        (0, 0),
+        "and nothing on the wire said what they cost"
+    );
+    let settled = tracon::metrics::settle_turn(&h.store, sid, None, None);
+    assert!(
+        settled.unmetered(),
+        "a turn the gateway could not count was settled as {settled:?}"
+    );
 
-    // A provider that does report usage says nothing, and the session is not
-    // marked for the one that did.
+    // A provider that does report usage settles as an ordinary turn.
     *h.seen.no_usage.lock().unwrap() = false;
     let sid = "s-metered";
     running_session(&h.store, sid);
@@ -765,41 +762,6 @@ async fn a_provider_that_reports_no_usage_marks_the_session_unmetered() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!h
-        .store
-        .events_after(sid, 0, 100)
-        .unwrap()
-        .iter()
-        .any(|e| e.kind == "unmetered"));
-}
-
-/// An upstream that refused carries no usage either, and a refusal is not
-/// evidence about metering. The session learns it as a provider error, and
-/// nothing claims the provider is unmetered.
-#[tokio::test]
-async fn a_refused_call_is_not_mistaken_for_an_unmetered_provider() {
-    state::isolate();
-    let h = harness(STORE, LOOPBACK).await;
-    let sid = "s-429-unmetered";
-    running_session(&h.store, sid);
-    let token = h.manager.register_tool_token_for_test(sid, "work").await;
-    *h.seen.refuse.lock().unwrap() = Some(429);
-    let (status, _, _) = call(
-        &h.app,
-        "POST",
-        "/model/stub/v1/messages",
-        &token,
-        json!({"model": "claude-x", "messages": []}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    let kinds: Vec<String> = h
-        .store
-        .events_after(sid, 0, 100)
-        .unwrap()
-        .into_iter()
-        .map(|e| e.kind)
-        .collect();
-    assert!(kinds.contains(&"provider_error".to_string()), "{kinds:?}");
-    assert!(!kinds.contains(&"unmetered".to_string()), "{kinds:?}");
+    let settled = tracon::metrics::settle_turn(&h.store, sid, Some(14), None);
+    assert!(!settled.unmetered(), "{settled:?}");
 }

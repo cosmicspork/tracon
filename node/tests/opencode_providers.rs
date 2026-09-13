@@ -1540,22 +1540,19 @@ async fn a_provider_that_omits_usage_is_marked_unmetered_not_free() {
     assert_eq!(status, 200, "{body}");
 
     // The row is written when the response stream ends, not when it starts.
-    let mut marked = false;
+    let mut counted = Vec::new();
     for _ in 0..100 {
-        marked = node
-            .store
-            .events_after("s-live", 0, 200)
-            .unwrap()
-            .iter()
-            .any(|e| e.kind == "unmetered");
-        if marked {
+        counted = node.store.usage_since(Some("work"), 0).unwrap();
+        if !counted.is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    assert_eq!(counted.first().map(|row| row.requests), Some(1));
+    let settled = tracon::metrics::settle_turn(&node.store, "s-live", None, None);
     assert!(
-        marked,
-        "a provider that reported nothing was recorded as free"
+        settled.unmetered(),
+        "a provider that reported nothing settled as {settled:?} rather than unmetered"
     );
 }
 
@@ -1732,12 +1729,10 @@ async fn a_self_hosted_turn_is_counted_by_the_gateway() {
         counted.input_tokens > 0 && counted.output_tokens > 0,
         "{counted:?}"
     );
-    assert!(!node
-        .store
-        .events_after("s-live", 0, 500)
-        .unwrap()
-        .iter()
-        .any(|e| e.kind == "unmetered"));
+    assert!(
+        !tracon::metrics::settle_turn(&node.store, "s-live", None, None).unmetered(),
+        "a turn the gateway counted was settled as unmetered"
+    );
 
     // And the count is the server's own, not an approximation of it: the
     // figures the gateway recorded are the ones in the stream it passed

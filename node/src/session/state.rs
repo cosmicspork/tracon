@@ -105,6 +105,20 @@ pub mod event_kind {
     pub const TOOL_RESULT: &str = "tool_result";
     pub const PLAN: &str = "plan";
     pub const USAGE: &str = "usage";
+    /// The gateway's on-the-wire count for a turn and the harness's own
+    /// report disagreed beyond tolerance, or the harness reported nothing
+    /// while the gateway counted something (`turn`, `gateway`, `harness`,
+    /// `charged_tokens`). Both numbers are in the payload: a disagreement is
+    /// a fact with two sides, and the operator is the one who can say which
+    /// is wrong. The budget is charged the larger of the two, so a harness
+    /// that under-reports cannot buy itself more room.
+    pub const USAGE_MISMATCH: &str = "usage_mismatch";
+    /// Model calls went through for this turn and the gateway could count
+    /// none of them: the provider returned no usage and there is no
+    /// estimator, so the honest answer is "unknown", not zero. Recorded so an
+    /// unmetered turn is visible against a budget or a ceiling rather than
+    /// silently free.
+    pub const USAGE_UNMETERED: &str = "usage_unmetered";
     pub const TURN_END: &str = "turn_end";
     pub const PERMISSION_REQUEST: &str = "permission_request";
     pub const PERMISSION_ANSWER: &str = "permission_answer";
@@ -178,12 +192,13 @@ pub mod event_kind {
     /// because the method and path are not on the inference allowlist the
     /// credential is lent for (`provider`, `method`, `reason`, `attempt`).
     pub const GATEWAY_REFUSED: &str = "gateway_refused";
-    /// A provider answered a model call without reporting usage
-    /// (`provider`, `model`). The gateway counts on the wire, so a provider
-    /// that reports nothing is unmetered on this session rather than free —
-    /// a distinction neither the harness nor the row of zeroes preserves.
-    /// Recorded once per session, like the ceiling.
-    pub const UNMETERED: &str = "unmetered";
+    /// The harness's own API changed the workspace tree behind tracon's back —
+    /// a revert, an unrevert, a patch applied through the harness — with
+    /// tracon's permission (`action`, `method`, `path`). It is recorded
+    /// because a candidate review is bound to the tree that was captured
+    /// (#188): a tree that moved under a verified candidate has to be visible
+    /// to whatever decides whether that verification still holds.
+    pub const WORKSPACE_CHANGED: &str = "workspace_changed";
 }
 
 #[cfg(test)]

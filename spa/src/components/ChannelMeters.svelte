@@ -21,7 +21,14 @@
       <span class="v"
         >{formatTokens(c.ceiling.usage_today)}
         {#if c.ceiling.ceiling}<em>of {formatTokens(c.ceiling.ceiling)}{c.ceiling.state === 'near' ? ' · near' : c.ceiling.state === 'at' ? ' · at ceiling' : ''}</em
-          >{:else}<em>· no ceiling</em>{/if}</span
+          >{:else}<em>· no ceiling</em>{/if}
+        <!-- A meter that stopped measuring for part of the day says so, rather
+             than letting those turns read as a quiet afternoon. -->
+        {#if c.ceiling.unmetered_turns > 0}<em
+            class="unsure"
+            title="Turns today whose model calls this node could not count: the provider returned no usage. Not counted above — unknown, not free."
+            >· {c.ceiling.unmetered_turns} unmetered</em
+          >{/if}</span
       >
     </div>
   {/each}
@@ -85,6 +92,9 @@
   .v em {
     font-style: normal;
     color: var(--dim);
+  }
+  .v em.unsure {
+    color: var(--wait);
   }
   @media (max-width: 700px) {
     .meter {

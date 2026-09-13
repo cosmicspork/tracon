@@ -1,5 +1,14 @@
 import { expect, test } from 'bun:test'
-import { groupLog, groupOpen, groupSummary, providerErrorLine, repetitionHint, repetitionLine } from './log'
+import {
+  groupLog,
+  groupOpen,
+  groupSummary,
+  providerErrorLine,
+  repetitionHint,
+  repetitionLine,
+  usageMismatchLine,
+  usageUnmeteredLine,
+} from './log'
 import type { Event } from './types'
 
 let seq = 0
@@ -84,4 +93,25 @@ test('the repetition hint stands only until the harness moves on', () => {
   expect(repetitionHint([signal, ev('turn_end')])).toBeNull()
   expect(repetitionHint([signal, ev('session_paused')])).toBeNull()
   expect(repetitionHint([])).toBeNull()
+})
+
+test('a usage disagreement shows both numbers and what was charged', () => {
+  expect(
+    usageMismatchLine({
+      gateway: { tokens: 10000, requests: 4 },
+      harness: { tokens: 12 },
+      charged_tokens: 10000,
+    }),
+  ).toBe('usage disagrees · gateway 10k · harness 12 · charged 10k')
+  // A harness that said nothing is not a harness that said zero.
+  expect(usageMismatchLine({ gateway: { tokens: 50 }, harness: { tokens: null }, charged_tokens: 50 })).toBe(
+    'usage disagrees · gateway 50 · harness reported nothing · charged 50',
+  )
+})
+
+test('an unmetered turn is named as unknown, never as zero', () => {
+  const line = usageUnmeteredLine({ gateway: { tokens: 0, requests: 3 } })
+  expect(line).toContain('3 model calls')
+  expect(line).toContain('unknown rather than zero')
+  expect(usageUnmeteredLine({ gateway: { requests: 1 } })).toContain('1 model call')
 })

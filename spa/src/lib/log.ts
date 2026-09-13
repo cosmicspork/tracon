@@ -2,6 +2,7 @@
 // tool calls fold into one group, open while any of them lacks a result, and a
 // permission request breaks the group so it sits at its true position.
 
+import { formatTokens } from './format'
 import type { Event } from './types'
 
 export interface ToolEntry {
@@ -48,6 +49,32 @@ export function groupLog(events: Event[], progress: Map<string, string> = new Ma
     out.push({ kind: 'leaf', event: e })
   }
   return out
+}
+
+/// Both sides of a usage disagreement on one line: "usage disagrees · gateway
+/// 10.0k · harness 12 · charged 10.0k". Never one number: the operator is the
+/// one who can say which source is wrong, and they cannot do that from a
+/// figure that has already picked a winner.
+export function usageMismatchLine(payload: Record<string, unknown>): string {
+  const gateway = numberAt(payload, 'gateway', 'tokens')
+  const harness = numberAt(payload, 'harness', 'tokens')
+  const charged = typeof payload.charged_tokens === 'number' ? payload.charged_tokens : gateway
+  const said = harness === null ? 'harness reported nothing' : `harness ${formatTokens(harness)}`
+  return `usage disagrees · gateway ${formatTokens(gateway ?? 0)} · ${said} · charged ${formatTokens(charged ?? 0)}`
+}
+
+/// "usage unmetered · 3 calls · the provider returned no usage" — a turn that
+/// spent something nobody could count. Deliberately not phrased as zero.
+export function usageUnmeteredLine(payload: Record<string, unknown>): string {
+  const requests = numberAt(payload, 'gateway', 'requests') ?? 0
+  return `usage unmetered · ${requests} model ${requests === 1 ? 'call' : 'calls'} · the provider returned no usage, so this turn's cost is unknown rather than zero`
+}
+
+function numberAt(payload: Record<string, unknown>, group: string, field: string): number | null {
+  const inner = payload[group]
+  if (typeof inner !== 'object' || inner === null) return null
+  const value = (inner as Record<string, unknown>)[field]
+  return typeof value === 'number' ? value : null
 }
 
 /// "anthropic answered 429 · Error · harness retrying · attempt 2" — one line

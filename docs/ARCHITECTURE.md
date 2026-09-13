@@ -418,6 +418,18 @@ two points: session start is refused, and the gateway refuses the model calls of
 sessions already running, so a running session stops spending and the operator
 decides.
 
+There are two sources for that usage and they are kept side by side, per turn, in
+one ledger. The gateway counts every model call on the wire and that count is what
+budgets and ceilings are charged; the harness reports its own numbers and those are
+display until the two agree. At turn end they are reconciled: agreement within
+tolerance is recorded, disagreement writes a `usage_mismatch` event carrying both
+numbers, and the harness's figure may raise the charge but never lower it. A harness
+that saw no usage reports zero rather than "unknown" — so does the gateway, if the
+provider returned none — and a turn where calls went out and nothing could be counted
+is marked `unmetered` rather than charged zero. Unmetered is not free: it is an event,
+a flag on the turn, and a figure the channel's ceiling reports beside the day's
+counted spend, because a meter that has silently stopped is worse than one reading high.
+
 Anything checkable deterministically is checked deterministically, between phases,
 in a container with no credentials. Model supervision is reserved for judgment with
 no test: a cheap model watching an expensive one mostly pays twice to learn what
@@ -438,9 +450,11 @@ anyway.
 Every node serves the same embedded SPA; a client is a matter of shell.
 
 - **No session state in the shell.** Sessions live in the node; a client crash is a
-  reconnect, never lost work. Unsent prompt drafts are held by the node per session.
-  The one exception is an in-progress diff edit, confined to the desktop browser's
-  local storage — the surface least likely to be evicted.
+  reconnect, never lost work. Unsent prompt drafts are held by the node per session:
+  saved on a debounce, handed back to whichever screen next opens the session, cleared
+  by dispatching the prompt and by nothing else, and never delivered to the harness on
+  their own. The one exception is an in-progress diff edit, confined to the desktop
+  browser's local storage — the surface least likely to be evicted.
 - **The phone is not a node.** No replica, no keys at rest. It reaches a node
   directly over HTTPS with a session cookie; the hub never talks to a browser. A
   backgrounded PWA cannot hold a socket, so notifications are Web Push — sealed to
