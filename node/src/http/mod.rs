@@ -7,6 +7,7 @@ pub mod qa;
 pub mod settings;
 mod spa;
 mod stream;
+pub mod ui;
 
 use std::{net::SocketAddr, sync::Arc};
 
@@ -251,6 +252,11 @@ pub fn router(state: AppState) -> Router {
             "/api/opencode/{session_id}/{*rest}",
             axum::routing::any(crate::gateway::opencode::handle),
         )
+        // "Open in OpenCode": a single-use, 60-second capability for the
+        // native UI's own origin. Minted here, behind the operator guard,
+        // because only an operator may open one — and spent there, where no
+        // operator credential is valid at all (`http::ui`).
+        .route("/api/sessions/{id}/opencode-boot", post(ui::open))
         .route("/api/permissions/{id}/answer", post(api::answer_permission))
         .route("/api/operator/questions", get(api::operator_questions))
         .route(
@@ -660,6 +666,19 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             tracing::error!(%error, "HTML preview listener stopped");
         }
     });
+
+    // OpenCode's native interface, on an origin of its own: tracon serves the
+    // pinned bundle and answers its API calls through the mediated gateway, so
+    // the harness's own catch-all — and its fallback to `app.opencode.ai` —
+    // is never reached (finding 3).
+    {
+        let ui_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = ui::serve(ui_state, listen).await {
+                tracing::error!(%error, "OpenCode UI listener stopped");
+            }
+        });
+    }
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await

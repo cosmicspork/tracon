@@ -245,10 +245,37 @@ refer to that manifest's table.
         and rebuilt by `tracon doc reindex` returns the same top-k for the same queries; a
         session package reads back off disk with `tracon session show`, no node running.
 - [ ] **Gate D — browser, desktop, and installed mobile PWA.**
-  - [ ] Dedicated UI origin served by tracon from the pinned bundle, catch-all never proxied,
+  - [x] Dedicated UI origin served by tracon from the pinned bundle, catch-all never proxied,
         tracon CSP replacing `connect-src *` (finding 3); short-lived single-use bootstrap
         exchanged for an HttpOnly cookie; no password in the browser (finding 4); Origin/CSRF
         on mutations and WebSocket upgrades.
+        `[ui] opencode_listen`/`opencode_url` bind a second listener (`node/src/http/ui.rs`)
+        that serves the vendored bundle at `/` and routes the app's API calls into the #195
+        gateway for the one session its cookie names. The bundle is built by
+        `containers/opencode-ui/build.sh` from the pinned tag, is not in git, and is verified
+        against the tree digest in `containers/opencode-ui/DIGEST` over the bytes about to be
+        served — a tree that does not match is not served. "Open in OpenCode" mints a
+        single-use 60-second capability bound to (operator login, session, this origin) and
+        opens it in a **fragment**; an inline bootstrap tracon splices into `index.html`
+        strips the fragment, exchanges it at `POST /boot` for a host-only HttpOnly
+        `SameSite=Strict` cookie, and only then loads upstream's module — so no upstream code
+        ever sees the capability. The operator cookie is not read on this origin and the UI
+        cookie is not a credential on the operator's; both asserted. Every request re-reads
+        the session and the operator login, so ending either revokes the window.
+        **Proven in a browser** (`node/tests/opencode_ui.rs`, 18 cases plus a
+        `TRACON_UI_SMOKE=1` harness driven with headless Chromium over CDP): against the real
+        bundle and the pinned binary, the session page renders, **no request left the UI
+        origin**, **no request carried an `Authorization` header**, and `localStorage` holds
+        no password and no server record — which settles §8 #8's open question, that the app
+        is usable with `password: undefined`.
+        **Still to do here:** the PTY WebSocket upgrade is held to the same Origin rule but
+        the gateway's connect route still answers 501 (the ticket exchange is its own row);
+        `connect-src 'self'` will need the `wss://` form of this origin when it lands. The
+        SPA's "Open in OpenCode" control (#205) is desktop-only — it is gated on `isTauri()`
+        because opening a *window* is the wrapper's to do — so a browser has no way to reach
+        this origin yet. The mint route, `POST /api/sessions/{id}/opencode-boot`, is the same
+        one for both; a browser control would open the URL in a tab rather than invoking the
+        wrapper, and belongs with the mobile shell.
   - [x] Desktop: an unprivileged window with no node-management commands; navigation limited
         to the UI origin. A second window labelled `opencode`, declared in `tauri.conf.json`
         with `"create": false` and built on demand from a boot URL the node mints
@@ -279,9 +306,11 @@ refer to that manifest's table.
         off-origin `http` assignment both left the window on the UI origin, with the latter
         handed to the system browser; a real click on a `target=_blank` link opened the
         browser and no second window; a same-origin navigation went through.
-        **Still to do here:** the same against the real UI origin once it lands (the
-        wrapper's half is feature-detected until then), and the macOS leg — bundle, window
-        behaviour and the Edit menu — which is the operator's to run.
+        **Still to do here:** the same against the real UI origin, which lands in the row
+        above — the wrapper calls `POST /api/sessions/{id}/opencode-boot` and that route now
+        exists, so the feature detection should find it; an end-to-end run of the two
+        together is unexercised. And the macOS leg — bundle, window behaviour and the Edit
+        menu — which is the operator's to run.
   - [ ] Installed mobile PWA on the always-on node: in-scope shell, isolated native view,
         third-party storage blocked, background/resume recovery, notification deep links.
   - [ ] PTY only as an explicit workspace-scoped capability with a gateway-minted owner-bound

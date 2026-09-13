@@ -31,6 +31,7 @@ pub mod publication;
 pub mod qa;
 pub mod rollups;
 pub mod transfers;
+pub mod ui;
 pub mod vectors;
 pub use corpus::*;
 pub use evidence::*;
@@ -42,6 +43,7 @@ pub use publication::*;
 pub use qa::*;
 pub use records::*;
 pub use transfers::*;
+pub use ui::*;
 
 pub struct Store {
     conn: Mutex<Connection>,

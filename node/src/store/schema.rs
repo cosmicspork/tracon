@@ -960,6 +960,44 @@ const MIGRATIONS: &[&str] = &[
 
     ALTER TABLE session ADD COLUMN manifest_digest TEXT;
     "#,
+    // 38: what authorises a request on the native UI's own origin.
+    //
+    // The operator cookie does not: it is a credential for the whole node, and
+    // the origin it would have to travel to is one serving 34 MB of upstream
+    // JavaScript. So that origin gets a credential of its own, scoped to one
+    // session and useless anywhere else, and this table is what makes it
+    // checkable on every request rather than only at issue time.
+    //
+    // Two kinds share one table because they are two states of one capability.
+    // A `boot` row is the single-use, 60-second token the operator's interface
+    // hands to the browser in a URL fragment; exchanging it is a conditional
+    // UPDATE of `used_ms`, which is what makes "single use" a property of the
+    // database rather than of a code path. A `cookie` row is what the exchange
+    // returns, and it is looked up on every subsequent request — so ending the
+    // session or logging the operator out revokes it without anything having
+    // to remember to delete it.
+    //
+    // `audience` is the UI origin the grant was minted for. A token minted for
+    // one origin is refused on another, which is what stops a grant for a
+    // loopback development origin from being replayed against a published one.
+    //
+    // `operator` is the SHA-256 of the operator's own session cookie, or the
+    // empty string when the operator was on loopback and had none. It is the
+    // link that makes `tracon auth logout` revoke the UI's authority too.
+    r#"
+    CREATE TABLE ui_grant (
+        token_hash TEXT PRIMARY KEY,
+        kind       TEXT NOT NULL CHECK(kind IN ('boot','cookie')),
+        session_id TEXT NOT NULL REFERENCES session(id),
+        audience   TEXT NOT NULL,
+        operator   TEXT NOT NULL DEFAULT '',
+        created_ms INTEGER NOT NULL,
+        expires_ms INTEGER NOT NULL,
+        used_ms    INTEGER
+    );
+    CREATE INDEX ui_grant_session ON ui_grant(session_id, kind);
+    CREATE INDEX ui_grant_expiry ON ui_grant(expires_ms);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

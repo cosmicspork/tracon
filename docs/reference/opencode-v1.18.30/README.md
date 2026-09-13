@@ -18,6 +18,7 @@ mitigation, listed below with the evidence that settled it.
 | `opencode --version` | `1.18.30` (bare string); `GET /global/health` → `{"healthy":true,"version":"1.18.30"}` |
 | API snapshot | `openapi-v1.18.30.json` (`GET /doc`, 162 paths, 188 method/route pairs in `routes-v1.18.30.txt`) |
 | Environment variables | `env-vars.txt` (85 `OPENCODE_*` names found in `packages/{opencode,core,server}`) |
+| UI asset/build digest | `opencode-ui-v1.18.30`: tree digest sha256 `348cb604b71e6f4706f3c5ee43d0f2ff44f01fce9cd8c8623b1759d9334e5ae7`, 951 files, 36,049,284 bytes (sourcemaps dropped). Tarball `opencode-ui-v1.18.30.tar.gz` sha256 `782ca629c49b1e2b620460b90c4d8ec7b1a2ad9bdc9783ba9227ad626cfb6696`. Built with `bun install --frozen-lockfile --ignore-scripts` then `bun run --cwd packages/app build` (bun 1.3.14, vite 7.1.4) by `containers/opencode-ui/build.sh`; digest checked in at `containers/opencode-ui/DIGEST` and recomputed by the node over the bytes it serves |
 | Native UI route trace | to be captured in Gate D against the served bundle |
 | Provider support matrix | `providers.md` §8 |
 | Mutation-policy matrix | `api-ui.md` §2 |
