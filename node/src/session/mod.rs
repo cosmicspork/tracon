@@ -3,6 +3,7 @@
 
 pub mod chunks;
 pub mod external;
+pub mod ingest;
 pub mod materialize;
 pub mod state;
 pub mod supervisor;
@@ -181,6 +182,18 @@ impl Manager {
         policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
         backend: Arc<dyn crate::boundary::Backend>,
     ) -> Self {
+        // A mediated mutation this process did not dispatch was left in flight
+        // by one that is gone: nobody is waiting for its answer and nobody
+        // knows what it was. That is uncertain, and the session it belongs to
+        // refuses a new prompt until reconciliation settles it.
+        match store.opencode_reconcile_interrupted(crate::process::instance_id()) {
+            Ok(0) => {}
+            Ok(n) => tracing::warn!(
+                intents = n,
+                "the node restarted with harness mutations in flight; their sessions are uncertain"
+            ),
+            Err(e) => tracing::error!(error = %e, "failed to reconcile interrupted mutations"),
+        }
         Self {
             tools,
             policy,
@@ -1068,11 +1081,33 @@ impl Manager {
             ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
         ]);
 
+        // The supervisor's channel exists before the harness does, because the
+        // ingestion layer needs it: a permission reconciliation re-raises goes
+        // through the same queue as every other one, and reconciliation can
+        // begin the moment the stream does.
+        let (cmd_tx, cmd_rx) = mpsc::channel(16);
+        // Only a harness with a durable, sequenced stream has anything to
+        // ingest. For the others the adapter keeps its own position, which is
+        // all a stdio pipe can offer.
+        let ingest = (adapter.id() == crate::adapter::opencode::OpenCodeAdapter::ID).then(|| {
+            ingest::Ingest::new(
+                self.store.clone(),
+                self.bus.clone(),
+                self.node_id.clone(),
+                id.to_string(),
+                started,
+                cmd_tx.clone(),
+            )
+        });
+
         let launched = tokio::time::timeout(
             STARTUP_TIMEOUT,
             adapter.launch(
                 runner.as_ref(),
                 LaunchSpec {
+                    cursor: ingest
+                        .clone()
+                        .map(|i| i as Arc<dyn crate::adapter::DurableCursor>),
                     cwd_in_runner: "/work".into(),
                     model: spec.model.clone(),
                     container_name: container.clone(),
@@ -1145,7 +1180,6 @@ impl Manager {
             mono_ms: started.elapsed().as_millis() as i64,
         });
 
-        let (cmd_tx, cmd_rx) = mpsc::channel(16);
         let cmd_tx_for_turns = cmd_tx.clone();
         if let Some(text) = spec.initial_prompt.filter(|text| !text.trim().is_empty()) {
             let (ack, _wait) = oneshot::channel();
@@ -1170,6 +1204,10 @@ impl Manager {
             self.policy.clone(),
             spec.channel.clone(),
         );
+        let sup = match ingest {
+            Some(ingest) => sup.with_ingest(ingest),
+            None => sup,
+        };
         let live = self.live.clone();
         let tokens = self.tokens.clone();
         let native = self.native.clone();

@@ -529,6 +529,21 @@ impl Client {
     }
 }
 
+/// The snapshot and reply routes, lent to the ingestion layer. Nothing about
+/// the credential or the address leaves the adapter with it: the node's
+/// reconciliation says which path it wants, and this is what reaches the
+/// harness.
+#[async_trait]
+impl super::HarnessSnapshots for Client {
+    async fn get(&self, path: &str) -> Result<Value, AdapterError> {
+        self.get_json(path).await
+    }
+
+    async fn post(&self, path: &str, body: Value) -> Result<Value, AdapterError> {
+        self.post_json(path, body).await
+    }
+}
+
 async fn json_of(path: &str, response: reqwest::Response) -> Result<Value, AdapterError> {
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
@@ -685,11 +700,20 @@ impl HarnessAdapter for OpenCodeAdapter {
             }
         };
 
+        // The node's cursor learns which upstream session this is, and gets
+        // the client to reconcile against, before anything is streamed.
+        if let Some(cursor) = spec.cursor.clone() {
+            cursor
+                .bind(&started.session_id, Arc::new(client.clone()))
+                .await;
+        }
+
         let (tx, rx) = mpsc::channel(256);
         let turn = Arc::new(Mutex::new(None::<oneshot::Sender<TurnResult>>));
         let pump = Pump {
             client: client.clone(),
             session_id: started.session_id.clone(),
+            cursor: spec.cursor.clone(),
             turn: turn.clone(),
             // The context window as the harness itself reports this node's
             // declaration, so a turn can say how much of it was used.
@@ -965,6 +989,11 @@ async fn context_window(client: &Client, model: &str) -> Option<u64> {
 struct Pump {
     client: Client,
     session_id: String,
+    /// The node's own record of what has been ingested. It owns the sequence
+    /// the stream resumes from, so a restart resumes from the store rather
+    /// than from zero, and it is what decides whether an event that arrives
+    /// twice is translated twice.
+    cursor: Option<Arc<dyn crate::adapter::DurableCursor>>,
     turn: Arc<Mutex<Option<oneshot::Sender<TurnResult>>>>,
     /// The context window this node declared for the session's model, so a
     /// turn can report how much of it was used rather than only a token count.
@@ -979,9 +1008,18 @@ impl Pump {
     /// is anchored on the aggregate sequence and reconnects from the last one
     /// seen, so a dropped connection loses nothing (finding 6).
     async fn durable_stream(self, tx: mpsc::Sender<HarnessEvent>) {
-        let mut after: u64 = 0;
+        let mut after: u64 = match &self.cursor {
+            Some(cursor) => cursor.resume_from().await,
+            None => 0,
+        };
         let mut turn = TurnState::default();
         loop {
+            // The node's record wins over this loop's memory: reconciliation
+            // may have ingested from a snapshot while the stream was down, and
+            // asking again for what it already recorded would double it.
+            if let Some(cursor) = &self.cursor {
+                after = after.max(cursor.resume_from().await);
+            }
             let path = format!("/api/session/{}/event?after={after}", self.session_id);
             let response = self
                 .client
@@ -995,6 +1033,14 @@ impl Pump {
                     while let Some(event) = frames.next().await {
                         if let Some(seq) = event["durable"]["seq"].as_u64() {
                             after = after.max(seq);
+                        }
+                        // An event the node has already ingested is dropped
+                        // here rather than translated again: the resumed
+                        // stream and a reconciled snapshot overlap by design.
+                        if let Some(cursor) = &self.cursor {
+                            if !cursor.admit(&event).await {
+                                continue;
+                            }
                         }
                         if !self.on_durable(&event, &tx, &mut turn).await {
                             return;
@@ -1019,6 +1065,12 @@ impl Pump {
             }
             if tx.is_closed() {
                 return;
+            }
+            // Whatever the stream missed comes back when it resumes; what it
+            // cannot carry — a permission raised while it was down, a session
+            // that is gone — is the node's to reconcile.
+            if let Some(cursor) = &self.cursor {
+                cursor.reconnected().await;
             }
             tokio::time::sleep(RECONNECT_DELAY).await;
         }
@@ -1661,6 +1713,7 @@ mod tests {
             tools: Vec::new(),
             env: Vec::new(),
             system_prompt_file: None,
+            cursor: None,
         };
         let cmd = OpenCodeAdapter::serve_cmd(&spec, 41234, "pw");
         assert_eq!(

@@ -141,6 +141,14 @@ pub struct Supervisor {
     /// A fenced turn is still allowed to report completion, but resume waits
     /// for that exact receipt rather than trusting cancel's enqueue ack.
     paused_turn: Option<u64>,
+    /// The durable identity and history of this session's harness, for a
+    /// harness that has one. It owns the sequence the stream resumes from, and
+    /// it is what a mediated mutation's intent is written to before the
+    /// mutation is dispatched.
+    ingest: Option<Arc<crate::session::ingest::Ingest>>,
+    /// The intent of the prompt currently in flight, settled when the turn
+    /// reports and marked uncertain when it does not.
+    prompt_intent: Option<String>,
 }
 
 impl Supervisor {
@@ -169,6 +177,8 @@ impl Supervisor {
             last_tool_call: None,
             repeated_tool_calls: 0,
             paused_turn: None,
+            ingest: None,
+            prompt_intent: None,
             self_tx,
             runner,
             container,
@@ -182,6 +192,14 @@ impl Supervisor {
             open: Arc::new(Mutex::new(HashMap::new())),
             chunks: ChunkBuffer::default(),
         }
+    }
+
+    /// Give this session the ingestion layer that owns its harness's durable
+    /// identity. Set for a harness whose stream is sequenced and replayable;
+    /// a stdio harness has nothing to reconcile against and gets none.
+    pub fn with_ingest(mut self, ingest: Arc<crate::session::ingest::Ingest>) -> Self {
+        self.ingest = Some(ingest);
+        self
     }
 
     fn mono_ms(&self) -> i64 {
@@ -913,6 +931,18 @@ impl Supervisor {
         if s.state != SessionState::Running.as_str() {
             return Err(format!("session is {}", s.state));
         }
+        // A prompt depends on knowing whether the last one landed. While that
+        // is unknown, sending another could duplicate a turn that is already
+        // running upstream, so it is refused with the reason rather than
+        // guessed at. Reconciliation clears it; so can the operator.
+        if let Some(ingest) = &self.ingest {
+            if let Some(reason) = ingest.uncertain_reason() {
+                return Err(format!(
+                    "the outcome of the last mutation on this session is unknown ({reason}); \
+                     prompting again could duplicate a turn the harness may already be running"
+                ));
+            }
+        }
         self.next_turn = self.next_turn.wrapping_add(1);
         let turn_id = self.next_turn;
         self.active_turn = Some(turn_id);
@@ -924,6 +954,12 @@ impl Supervisor {
             },
         );
         let _ = self.store.set_draft(&self.session_id, None);
+        // Written down before the dispatch, not after: the gap between the
+        // two is exactly where an answer can be lost, and a row that says
+        // "this may have happened" is what makes asking possible.
+        self.prompt_intent = self.ingest.as_ref().map(|ingest| {
+            ingest.intent_begin(crate::store::intent_kind::PROMPT, None, Some(text.as_str()))
+        });
         self.record(ek::USER_PROMPT, None, json!({ "text": text }));
         self.publish_session();
 
@@ -985,6 +1021,7 @@ impl Supervisor {
     /// the outcome, and add the turn's tokens to the session's total.
     async fn on_turn_done(&mut self, kind: &'static str, payload: serde_json::Value, tokens: i64) {
         self.flush_chunks();
+        self.settle_prompt(kind, &payload);
         let previous = self
             .store
             .get_session(&self.session_id)
@@ -1012,6 +1049,28 @@ impl Supervisor {
         self.record(kind, None, payload);
         self.publish_session();
     }
+    /// What became of the prompt this turn was dispatched with.
+    ///
+    /// A turn that ended is proof the harness took it. A turn that timed out
+    /// is proof too — it ran long enough to be stopped. Anything else is a
+    /// dispatch that never reported: the POST may have been received and acted
+    /// on with only the answer lost, so the honest state is neither sent nor
+    /// unsent, and the session refuses a new prompt until reconciliation asks
+    /// the harness which it was.
+    fn settle_prompt(&mut self, kind: &'static str, payload: &serde_json::Value) {
+        let (Some(ingest), Some(intent)) = (self.ingest.as_ref(), self.prompt_intent.take()) else {
+            return;
+        };
+        if kind != ek::ERROR || payload["turn_timeout"] == true {
+            ingest.intent_settle(&intent, crate::store::intent_state::ADMITTED, None);
+            return;
+        }
+        let reason = payload["error"]
+            .as_str()
+            .unwrap_or("the prompt dispatch did not report an outcome");
+        ingest.mark_uncertain(&intent, reason);
+    }
+
     /// Budget is checked at turn end: the harness reports usage per turn, so a
     /// single long turn can overshoot. Enforced by ending the session.
     async fn check_budget(&mut self) -> bool {

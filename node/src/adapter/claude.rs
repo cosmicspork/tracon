@@ -797,6 +797,7 @@ impl HarnessAdapter for ClaudeAdapter {
             tools: Vec::new(),
             env: wiring.env.clone(),
             system_prompt_file: None,
+            cursor: None,
         };
         let session_id = uuid::Uuid::now_v7().to_string();
         let spawned = runner
@@ -1131,6 +1132,7 @@ mod tests {
                 "http://gw/model/anthropic".into(),
             )],
             system_prompt_file: Some("/root/.claude/orientation.md".into()),
+            cursor: None,
         }
     }
 

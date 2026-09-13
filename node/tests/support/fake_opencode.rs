@@ -9,9 +9,10 @@
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -19,6 +20,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
+use tracon::adapter::{AdapterError, HarnessSnapshots, LaunchSpec};
+use tracon::runner::{Runner, RunnerCommand, RunnerError, Spawned};
 
 pub const SESSION: &str = "ses_faketestsession0000000";
 pub const PERMISSION: &str = "per_fakepermission0000000";
@@ -45,6 +48,8 @@ pub struct Recorded {
 pub struct Seen {
     /// Every `?after=` the durable stream was reconnected with.
     pub resumed_from: Vec<u64>,
+    /// Every `?after=` the durable history was paged from.
+    pub history_from: Vec<u64>,
     /// Bodies posted to the permission reply route.
     pub replies: Vec<Value>,
     /// Directories a session was asked to open.
@@ -68,6 +73,22 @@ pub struct Fake {
     pub cut_after: usize,
     /// Whether the prompt has been sent, which is what starts the script.
     pub prompted: Arc<AtomicUsize>,
+    /// Ignore `?after=` and send the whole script on every connection: a
+    /// server that re-delivers what the node has already ingested.
+    replay_all: Arc<AtomicBool>,
+    /// Whether the harness still has this session.
+    alive: Arc<AtomicBool>,
+    /// Answer the prompt route with a gateway timeout *after* admitting the
+    /// prompt: the dispatch reports no usable outcome, and the harness may
+    /// well have taken it. This is the shape a mediated mutation's
+    /// uncertainty actually has.
+    prompt_times_out: Arc<AtomicBool>,
+    /// Whether the server-wide stream raises the scripted permission ask.
+    asks: Arc<AtomicBool>,
+    /// Permission requests the harness reports as still pending.
+    pending: Arc<Mutex<Vec<Value>>>,
+    /// The messages the session snapshot holds.
+    messages: Arc<Mutex<Vec<Value>>>,
 }
 
 impl Fake {
@@ -78,11 +99,70 @@ impl Fake {
             password: Arc::new(Mutex::new(String::new())),
             cut_after,
             prompted: Arc::new(AtomicUsize::new(0)),
+            replay_all: Arc::new(AtomicBool::new(false)),
+            alive: Arc::new(AtomicBool::new(true)),
+            prompt_times_out: Arc::new(AtomicBool::new(false)),
+            asks: Arc::new(AtomicBool::new(true)),
+            pending: Arc::new(Mutex::new(Vec::new())),
+            messages: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
+    /// A server that sends the whole script however far the node says it has
+    /// already got: a re-delivery the node has to recognise and drop.
+    pub fn replaying_everything(self) -> Self {
+        self.replay_all.store(true, Ordering::SeqCst);
+        self
+    }
+
+    /// A harness whose tools need no decision, for a test that is about
+    /// something other than the queue.
+    pub fn never_asks(self) -> Self {
+        self.asks.store(false, Ordering::SeqCst);
+        self
+    }
+
+    /// The harness no longer has this session.
+    pub fn gone(&self) {
+        self.alive.store(false, Ordering::SeqCst);
+    }
+
+    /// The prompt route admits the prompt and then fails to report.
+    pub fn prompt_times_out(&self) {
+        self.prompt_times_out.store(true, Ordering::SeqCst);
+    }
+
+    /// It answers again.
+    pub fn prompt_answers(&self) {
+        self.prompt_times_out.store(false, Ordering::SeqCst);
+    }
+
+    /// Make the harness report `id` as a permission it is still blocked on.
+    pub fn pending_permission(&self, id: &str, call: &str) {
+        self.pending.lock().unwrap().push(json!({
+            "id": id,
+            "sessionID": SESSION,
+            "action": "bash",
+            "resources": ["just test"],
+            "source": { "type": "tool", "messageID": "msg_1", "callID": call },
+        }));
+    }
+
+    /// Put a prompt in the snapshot as though the harness had admitted it,
+    /// without the node having seen a reply.
+    pub fn admitted_prompt(&self, text: &str) {
+        self.messages.lock().unwrap().push(json!({
+            "info": { "id": "msg_user", "role": "user", "sessionID": SESSION },
+            "parts": [{ "type": "text", "text": text }],
+        }));
+    }
+
+    pub fn prompt_count(&self) -> usize {
+        self.seen.lock().unwrap().prompts.len()
+    }
+
     /// The scripted turn, as durable events with their aggregate sequences.
-    fn script(&self) -> Vec<Value> {
+    pub fn script(&self) -> Vec<Value> {
         vec![
             durable(
                 1,
@@ -141,7 +221,7 @@ impl Fake {
     }
 }
 
-fn durable(seq: u64, kind: &str, data: Value) -> Value {
+pub fn durable(seq: u64, kind: &str, data: Value) -> Value {
     json!({
         "id": format!("evt_{seq}"),
         "type": kind,
@@ -241,12 +321,15 @@ pub fn app(fake: Fake) -> Router {
                     if let Some(refused) = guard(&fake, &headers).await {
                         return refused;
                     }
-                    fake.seen
-                        .lock()
-                        .unwrap()
-                        .prompts
-                        .push(body["prompt"]["text"].as_str().unwrap_or("").to_string());
+                    let text = body["prompt"]["text"].as_str().unwrap_or("").to_string();
+                    fake.seen.lock().unwrap().prompts.push(text.clone());
                     fake.prompted.fetch_add(1, Ordering::SeqCst);
+                    // Admitted whichever way this answers: that is the whole
+                    // point of an uncertain outcome.
+                    fake.admitted_prompt(&text);
+                    if fake.prompt_times_out.load(Ordering::SeqCst) {
+                        return (StatusCode::GATEWAY_TIMEOUT, "no answer").into_response();
+                    }
                     Json(json!({
                         "data": {
                             "admittedSeq": 1,
@@ -261,11 +344,61 @@ pub fn app(fake: Fake) -> Router {
                 },
             ),
         )
+        // The snapshots reconciliation anchors on. A session that is gone
+        // answers 404, which is what moves it to a terminal state here.
+        .route(
+            "/api/session/{session}",
+            get(
+                |State(fake): State<Fake>, Path(session): Path<String>| async move {
+                    if !fake.alive.load(Ordering::SeqCst) {
+                        return (StatusCode::NOT_FOUND, "no such session").into_response();
+                    }
+                    Json(json!({
+                        "data": {
+                            "id": session,
+                            "projectID": "p",
+                            "time": { "created": 1, "updated": 2 },
+                            "title": "t",
+                        }
+                    }))
+                    .into_response()
+                },
+            ),
+        )
+        .route(
+            "/api/session/{session}/history",
+            get(
+                |State(fake): State<Fake>,
+                 Query(query): Query<std::collections::HashMap<String, String>>| async move {
+                    let after: u64 = query
+                        .get("after")
+                        .and_then(|a| a.parse().ok())
+                        .unwrap_or_default();
+                    fake.seen.lock().unwrap().history_from.push(after);
+                    let data: Vec<Value> = fake
+                        .script()
+                        .into_iter()
+                        .filter(|e| e["durable"]["seq"].as_u64().unwrap_or(0) > after)
+                        .collect();
+                    Json(json!({ "data": data, "hasMore": false }))
+                },
+            ),
+        )
+        .route(
+            "/api/session/{session}/message",
+            get(|State(fake): State<Fake>| async move {
+                let data = fake.messages.lock().unwrap().clone();
+                Json(json!({ "data": data }))
+            }),
+        )
         .route("/api/session/{session}/event", get(durable_stream))
         .route("/api/event", get(server_stream))
         .route(
             "/api/session/{session}/permission",
-            get(|State(_fake): State<Fake>| async move { Json(json!({ "data": [] })) }),
+            get(|State(fake): State<Fake>| async move {
+                let data = fake.pending.lock().unwrap().clone();
+                Json(json!({ "data": data }))
+            }),
         )
         .route(
             "/api/session/{session}/permission/{request}/reply",
@@ -273,8 +406,15 @@ pub fn app(fake: Fake) -> Router {
                 |State(fake): State<Fake>,
                  Path((_session, request)): Path<(String, String)>,
                  Json(body): Json<Value>| async move {
-                    let mut seen = fake.seen.lock().unwrap();
-                    seen.replies.push(json!({ "id": request, "body": body }));
+                    {
+                        let mut seen = fake.seen.lock().unwrap();
+                        seen.replies.push(json!({ "id": request, "body": body }));
+                    }
+                    // Answering one is what stops the harness waiting on it.
+                    fake.pending
+                        .lock()
+                        .unwrap()
+                        .retain(|p| p["id"].as_str() != Some(request.as_str()));
                     StatusCode::NO_CONTENT
                 },
             ),
@@ -342,12 +482,17 @@ async fn durable_stream(
         fake.seen.lock().unwrap().unauthenticated += 1;
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
-    let after: u64 = query
+    let asked: u64 = query
         .get("after")
         .and_then(|a| a.parse().ok())
         .unwrap_or_default();
-    fake.seen.lock().unwrap().resumed_from.push(after);
-    let cut = if after == 0 {
+    fake.seen.lock().unwrap().resumed_from.push(asked);
+    let after = if fake.replay_all.load(Ordering::SeqCst) {
+        0
+    } else {
+        asked
+    };
+    let cut = if asked == 0 {
         fake.cut_after
     } else {
         usize::MAX
@@ -411,7 +556,10 @@ async fn server_stream(State(fake): State<Fake>, headers: HeaderMap) -> Response
     tokio::spawn(async move {
         let mut asked = false;
         loop {
-            if !asked && fake.prompted.load(Ordering::SeqCst) > 0 {
+            if !asked
+                && fake.asks.load(Ordering::SeqCst)
+                && fake.prompted.load(Ordering::SeqCst) > 0
+            {
                 asked = true;
                 let event = json!({
                     "id": "evt_perm",
@@ -458,4 +606,152 @@ pub async fn serve(fake: Fake) -> SocketAddr {
         let _ = axum::serve(listener, app).await;
     });
     addr
+}
+
+/// A runner that starts nothing: the fake server is already listening, and
+/// what is under test is the node's use of the endpoint the runner reports.
+pub struct FakeRunner {
+    pub endpoint: SocketAddr,
+    pub password: Arc<Mutex<String>>,
+    pub killed: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Runner for FakeRunner {
+    async fn spawn(&self, cmd: RunnerCommand) -> Result<Spawned, RunnerError> {
+        // The password the adapter minted for this launch is what the fake
+        // then demands, exactly as the real server reads it from its own
+        // environment.
+        if let Some((_, password)) = cmd
+            .env
+            .iter()
+            .find(|(name, _)| name == "OPENCODE_SERVER_PASSWORD")
+        {
+            *self.password.lock().unwrap() = password.clone();
+        }
+        Ok(Spawned {
+            stdin: Box::new(tokio::io::sink()),
+            stdout: Box::new(tokio::io::empty()),
+            done: Box::pin(std::future::pending()),
+            endpoint: Some(self.endpoint.to_string()),
+        })
+    }
+
+    async fn run_capture(&self, _cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
+        Ok(std::process::Output {
+            status: Default::default(),
+            stdout: b"1.18.30\n".to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+
+    async fn kill(&self, name: &str) -> Result<(), RunnerError> {
+        self.killed.lock().unwrap().push(name.to_string());
+        Ok(())
+    }
+}
+
+pub fn spec() -> LaunchSpec {
+    LaunchSpec {
+        cwd_in_runner: "/work".into(),
+        model: "anthropic/claude-x".into(),
+        container_name: "tracon-h-test".into(),
+        harness_home: "/root".into(),
+        mcp_servers: Vec::new(),
+        tools: Vec::new(),
+        env: Vec::new(),
+        system_prompt_file: None,
+        cursor: None,
+    }
+}
+
+pub async fn start(fake: Fake) -> (FakeRunner, Arc<Mutex<Seen>>) {
+    let seen = fake.seen.clone();
+    let password = fake.password.clone();
+    let addr = serve(fake).await;
+    (
+        FakeRunner {
+            endpoint: addr,
+            password,
+            killed: Arc::new(Mutex::new(Vec::new())),
+        },
+        seen,
+    )
+}
+
+/// The answer is posted from a task of its own, so that reading the stream is
+/// never blocked on the operator. Wait for it rather than racing it.
+pub async fn wait_for_reply(seen: &Arc<Mutex<Seen>>) -> Vec<Value> {
+    for _ in 0..200 {
+        let replies = seen.lock().unwrap().replies.clone();
+        if !replies.is_empty() {
+            return replies;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the permission was never answered on the wire");
+}
+
+/// The snapshot and reply routes as the ingestion layer sees them: the same
+/// credential, the same addresses, real HTTP. The adapter lends the node its
+/// own client in production; this is that client's shape, for a test that
+/// reconciles without a harness behind it.
+pub struct HttpApi {
+    http: reqwest::Client,
+    base: String,
+    authorization: String,
+}
+
+impl HttpApi {
+    pub fn connect(endpoint: SocketAddr, password: &str) -> Arc<dyn HarnessSnapshots> {
+        use base64::Engine;
+        let credential =
+            base64::engine::general_purpose::STANDARD.encode(format!("opencode:{password}"));
+        Arc::new(Self {
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            base: format!("http://{endpoint}"),
+            authorization: format!("Basic {credential}"),
+        })
+    }
+}
+
+#[async_trait]
+impl HarnessSnapshots for HttpApi {
+    async fn get(&self, path: &str) -> Result<Value, AdapterError> {
+        let response = self
+            .http
+            .get(format!("{}{path}", self.base))
+            .header(reqwest::header::AUTHORIZATION, &self.authorization)
+            .send()
+            .await
+            .map_err(|e| AdapterError::Protocol(format!("GET {path}: {e}")))?;
+        json_of(path, response).await
+    }
+
+    async fn post(&self, path: &str, body: Value) -> Result<Value, AdapterError> {
+        let response = self
+            .http
+            .post(format!("{}{path}", self.base))
+            .header(reqwest::header::AUTHORIZATION, &self.authorization)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AdapterError::Protocol(format!("POST {path}: {e}")))?;
+        json_of(path, response).await
+    }
+}
+
+async fn json_of(path: &str, response: reqwest::Response) -> Result<Value, AdapterError> {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(AdapterError::Protocol(format!(
+            "{path}: harness answered {status}"
+        )));
+    }
+    if body.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_str(&body)
+        .map_err(|e| AdapterError::Protocol(format!("{path}: harness answered non-JSON: {e}")))
 }

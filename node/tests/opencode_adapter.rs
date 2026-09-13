@@ -12,10 +12,11 @@
 #[path = "support/mod.rs"]
 mod support;
 use support::events::{drain_until, next_permission};
-use support::fake_opencode::{serve, Fake, Seen, PERMISSION, SESSION};
+// The runner, the launch spec and the waits live beside the fake server in
+// `support/`, because the ingestion tests drive the same ones.
+use support::fake_opencode::{spec, start, wait_for_reply, Fake, PERMISSION, SESSION};
 use support::state;
 
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -24,76 +25,6 @@ use tracon::adapter::{
     PermissionReply,
 };
 use tracon::runner::{Runner, RunnerCommand, RunnerError, Spawned};
-
-/// A runner that starts nothing: the fake server is already listening, and
-/// what is under test is the adapter's use of the endpoint the runner reports.
-struct FakeRunner {
-    endpoint: SocketAddr,
-    password: Arc<Mutex<String>>,
-    killed: Arc<Mutex<Vec<String>>>,
-}
-
-#[async_trait::async_trait]
-impl Runner for FakeRunner {
-    async fn spawn(&self, cmd: RunnerCommand) -> Result<Spawned, RunnerError> {
-        // The password the adapter minted for this launch is what the fake
-        // then demands, exactly as the real server reads it from its own
-        // environment.
-        if let Some((_, password)) = cmd
-            .env
-            .iter()
-            .find(|(name, _)| name == "OPENCODE_SERVER_PASSWORD")
-        {
-            *self.password.lock().unwrap() = password.clone();
-        }
-        Ok(Spawned {
-            stdin: Box::new(tokio::io::sink()),
-            stdout: Box::new(tokio::io::empty()),
-            done: Box::pin(std::future::pending()),
-            endpoint: Some(self.endpoint.to_string()),
-        })
-    }
-
-    async fn run_capture(&self, _cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
-        Ok(std::process::Output {
-            status: Default::default(),
-            stdout: b"1.18.30\n".to_vec(),
-            stderr: Vec::new(),
-        })
-    }
-
-    async fn kill(&self, name: &str) -> Result<(), RunnerError> {
-        self.killed.lock().unwrap().push(name.to_string());
-        Ok(())
-    }
-}
-
-fn spec() -> LaunchSpec {
-    LaunchSpec {
-        cwd_in_runner: "/work".into(),
-        model: "anthropic/claude-x".into(),
-        container_name: "tracon-h-test".into(),
-        harness_home: "/root".into(),
-        mcp_servers: Vec::new(),
-        tools: Vec::new(),
-        env: Vec::new(),
-        system_prompt_file: None,
-    }
-}
-
-async fn start(fake: Fake) -> (FakeRunner, Arc<Mutex<Seen>>) {
-    let seen = fake.seen.clone();
-    let password = fake.password.clone();
-    let addr = serve(fake).await;
-    (
-        FakeRunner {
-            endpoint: addr,
-            password,
-            killed: Arc::new(Mutex::new(Vec::new())),
-        },
-        seen,
-    )
-}
 
 #[tokio::test]
 async fn version_is_the_bare_string_the_runner_prints() {
@@ -184,19 +115,6 @@ async fn a_denied_permission_is_rejected_and_never_becomes_always() {
     assert_eq!(replies[0]["body"]["reply"], "reject", "{replies:?}");
 }
 
-/// The answer is posted from a task of its own, so that reading the stream is
-/// never blocked on the operator. Wait for it rather than racing it.
-async fn wait_for_reply(seen: &Arc<Mutex<Seen>>) -> Vec<Value> {
-    for _ in 0..200 {
-        let replies = seen.lock().unwrap().replies.clone();
-        if !replies.is_empty() {
-            return replies;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    panic!("the permission was never answered on the wire");
-}
-
 /// The durable stream is the one with replay, and this is why it is the one
 /// the adapter anchors on: a connection that drops mid-turn resumes from the
 /// last sequence, so nothing is replayed twice and nothing is lost.
@@ -276,7 +194,7 @@ async fn an_unauthenticated_request_is_refused_and_the_node_never_sends_one() {
     let fake = Fake::new("1.18.30", usize::MAX);
     let seen = fake.seen.clone();
     let password = fake.password.clone();
-    let addr = serve(fake).await;
+    let addr = support::fake_opencode::serve(fake).await;
     // The server has a password before anything connects, exactly as the real
     // one does when the node sets `OPENCODE_SERVER_PASSWORD`.
     *password.lock().unwrap() = "not-the-node's".into();
@@ -293,7 +211,7 @@ async fn an_unauthenticated_request_is_refused_and_the_node_never_sends_one() {
 
     // The adapter's own launch replaces the password with the one it minted,
     // and every request it makes carries it.
-    let runner = FakeRunner {
+    let runner = support::fake_opencode::FakeRunner {
         endpoint: addr,
         password,
         killed: Arc::new(Mutex::new(Vec::new())),
@@ -432,6 +350,7 @@ async fn the_pinned_binary_starts_sealed() {
         // environment below there is no startup egress to make anyway.
         env: Vec::new(),
         system_prompt_file: None,
+        cursor: None,
     };
     let started_at = std::time::Instant::now();
     let launched = adapter.launch(&runner, spec).await;
