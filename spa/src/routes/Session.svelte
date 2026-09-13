@@ -261,6 +261,13 @@
     {#if session.policy_version != null}
       <span class="mono">policy v{session.policy_version}</span>
     {/if}
+    {#if session.manifest_digest}
+      <span
+        class="mono"
+        title="the launch manifest this session was staged from — its skills, instructions, agents and approved plugins. A later revision is for the next session, not this one."
+        >manifest {session.manifest_digest.slice(0, 8)}</span
+      >
+    {/if}
     {#if session.work_item_id}
       <a class="mono" href="/work/{session.work_item_id}">item {session.work_item_id.slice(0, 8)}</a>
     {/if}

@@ -335,6 +335,7 @@ impl Manager {
                     ended_mono_ms: None,
                     updated_ms: now,
                     archived_ms: None,
+                    manifest_digest: None,
                 })
                 .expect("test session row");
         }
@@ -723,6 +724,7 @@ impl Manager {
             ended_mono_ms: None,
             updated_ms: now_ms(),
             archived_ms: None,
+            manifest_digest: None,
         };
         self.store.insert_session(&row)?;
         // A plain session has no work item to retain its first instruction.
@@ -952,6 +954,46 @@ impl Manager {
                 },
             )
         };
+        // The operator's customization for this channel, resolved against the
+        // provider set the wiring just settled and the policy the gate is
+        // running. Built and recorded here, before anything is staged: a
+        // manifest that would be refused — a duplicate skill name, a plugin
+        // the image did not bake — fails the launch rather than producing a
+        // session whose configuration is not the one anybody described.
+        //
+        // Recorded, not just built: the revision this returns is the one this
+        // session ran, and the next edit mints a different one that leaves
+        // this session alone.
+        let mut wiring = wiring;
+        let manifest = {
+            let (skills, instructions, agents) = self.store.manifest_contents(&spec.channel)?;
+            let built = crate::manifest::build(crate::manifest::Inputs {
+                channel: &spec.channel,
+                skills,
+                instructions,
+                agents,
+                plugins: &self.cfg.launch.plugins,
+                baked: &crate::adapter::baked_plugins(adapter.id()),
+                // The toolchain profile belongs to one image. A session on a
+                // harness that does not use it records no toolchain rather
+                // than a list of servers it never had.
+                lsp: crate::manifest::toolchain_lsp(adapter.id()),
+                formatters: crate::manifest::toolchain_formatters(adapter.id()),
+                providers: wiring.providers.iter().map(|p| p.name.clone()).collect(),
+                policy_revision: self.policy.read().unwrap().version.to_string(),
+            })
+            .map_err(|e| anyhow::anyhow!("the launch manifest for `{}`: {e}", spec.channel))?;
+            self.store.manifest_record(&built)?
+        };
+        self.store.update_session(
+            id,
+            SessionPatch {
+                manifest_digest: Some(manifest.digest.clone()),
+                ..Default::default()
+            },
+        )?;
+        wiring.manifest = manifest.clone();
+
         // What the session is told first: conventions from the corpus, this
         // node's facts, the channel's policy, and what is known. Recorded as
         // an event so the transcript shows what the agent was told.
@@ -1005,6 +1047,7 @@ impl Manager {
                     plan_body: plan_body.as_deref(),
                     ready: &ready,
                     review: review.as_ref(),
+                    manifest: &manifest,
                 },
             )
         };
@@ -1333,6 +1376,7 @@ impl Manager {
             ended_mono_ms: None,
             updated_ms: now_ms(),
             archived_ms: None,
+            manifest_digest: None,
         };
         self.store.insert_session(&row)?;
         self.bus.publish(Frame::Session(Box::new(row.clone())));
@@ -1731,6 +1775,13 @@ impl Manager {
         Ok(())
     }
 
+    /// The policy revision the gate is running, as a launch manifest records
+    /// it: a session's customization and the rules it ran under are one fact
+    /// about how that session was configured.
+    pub fn policy_version(&self) -> u32 {
+        self.policy.read().unwrap().version
+    }
+
     /// A channel's bindings as JSON (`{}` when unbound or standalone).
     pub fn bindings(&self, channel: &str) -> serde_json::Value {
         self.store
@@ -1893,9 +1944,18 @@ impl Manager {
             build_pinned: pinned.to_string(),
             generation: Vec::new(),
             generation_digest: String::new(),
-            // The launch manifest's digest is recorded by whoever builds it;
-            // until then the column says "not recorded" rather than a guess.
-            manifest_digest: None,
+            // The launch manifest is built and recorded on the session before
+            // anything is staged, so by the time the harness has said what it
+            // is, the digest is on the row. Read rather than passed down: this
+            // is the same fact, and two copies could disagree. Still nullable
+            // — a session on a harness with no manifest has none, and the
+            // column says "not recorded" rather than a guess.
+            manifest_digest: self
+                .store
+                .get_session(id)
+                .ok()
+                .flatten()
+                .and_then(|row| row.manifest_digest),
             state_volume: volume.clone(),
             state_path: materialize::HARNESS_TREE.to_string(),
             recorded_ms: now_ms(),

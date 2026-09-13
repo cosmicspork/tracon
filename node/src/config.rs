@@ -28,6 +28,9 @@ pub struct Config {
     pub embed: Embed,
     pub external: External,
     pub docs: Docs,
+    /// What an operator may customize a session's launch with, bounded by
+    /// what the harness image bakes.
+    pub launch: Launch,
     /// Explicit, fail-closed targets for candidate-bound QA and browser proof.
     pub qa: Qa,
 }
@@ -348,6 +351,29 @@ pub fn safe_relative_path(value: &str) -> bool {
         && value
             .split('/')
             .all(|part| !part.is_empty() && part != "." && part != ".." && !part.contains('\0'))
+}
+
+/// The operator's approvals for what a session's harness may load.
+///
+/// A skill is bytes the node copied and can stage anywhere. A plugin is not:
+/// OpenCode resolves one by a bare existence check at
+/// `$XDG_CACHE_HOME/opencode/packages/<pkg>@<ver>/node_modules/<pkg>`, with no
+/// version check and no registry contact (`config-state.md` §4.4), and it is
+/// then loaded into the server's own process with its credentials and a shell
+/// (§4.6). So what a plugin *is* comes entirely from what the harness image
+/// baked, and this list can only ever narrow that — a name the image's
+/// toolchain profile does not seed is refused when the manifest is built,
+/// with the cache path it would have needed.
+///
+/// Language servers and formatters are not here: the image's toolchain
+/// profile decides those, because the absolute paths they name only exist in
+/// the image.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Launch {
+    /// Plugin packages the operator approves, each as
+    /// `<package>@<exact-version>`.
+    pub plugins: Vec<String>,
 }
 
 /// The corpus written back out as files, on a timer, so a directory kept under
@@ -1005,6 +1031,7 @@ impl Default for Config {
             embed: Embed::default(),
             external: External::default(),
             docs: Docs::default(),
+            launch: Launch::default(),
             qa: Qa::default(),
             harness: Harness {
                 id: crate::adapter::omp::OmpAdapter::ID.into(),

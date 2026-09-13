@@ -255,6 +255,7 @@ mod tests {
                     ended_mono_ms: None,
                     updated_ms: now_ms(),
                     archived_ms: None,
+                    manifest_digest: None,
                 })
                 .unwrap();
         }

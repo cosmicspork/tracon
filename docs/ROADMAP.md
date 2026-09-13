@@ -175,17 +175,31 @@ refer to that manifest's table.
           (the ingestion path for it is covered against the fake); and killing the server
           *after a tool call was recorded*, for the same reason.
 - [ ] **Gate C — customization and recovery.**
-  - [ ] Launch manifest: skill, prompt, and agent snapshots with digests; duplicates rejected
-        and URL sources forbidden at manifest build (finding 14); read-only mount outside the
-        worktree; a new revision never changes a running session.
-  - [ ] Plugins and tools only from an image-baked cache; `.opencode/tool/` and project
-        config suppressed (findings 12, 15); nested `AGENTS.md`/`CLAUDE.md` accepted and
-        documented as matching today's harnesses (finding 13).
-        *Image half done:* the pinned `@opencode-ai/plugin` is baked and seeded into each
-        session's configuration directory and package cache before the harness starts, so
-        the install OpenCode runs regardless of `OPENCODE_PURE` short-circuits offline. The
-        configuration half (`.opencode/tool/`, project config, nested instruction files)
-        is still open.
+  - [x] Launch manifest: a node-owned `LaunchManifest` per channel — skills, instructions,
+        agents, the approved plugin list, the toolchain profile's LSP and formatter names,
+        the effective provider set and the policy revision — with a content digest and a
+        revision counting the times it changed, recorded on every session as
+        `session.manifest_digest` and shown on the session header. `tracon skill import
+        <dir|dir#git-rev>` and `/api/manifest` copy a package into node-owned storage and
+        record its source, digest and the warning that skill content is code (finding 14: a
+        body's shell interpolation is a slash command OpenCode executes). Duplicates refused
+        at manifest build, URL sources refused outright, absolute and `..` paths and symlinks
+        refused at import; `skills.paths` names one read-only root outside the worktree
+        through `{env:TRACON_SKILL_ROOT}` and `skills.urls` is never written. A new revision
+        never changes a running session: the files were staged at launch, and the digest
+        still resolves to them afterwards. In `node/src/manifest/` and
+        `node/tests/manifest.rs`.
+  - [x] Plugins and tools only from an image-baked cache: the manifest approves a plugin only
+        when the image's toolchain profile seeds it, and any other name is refused at build
+        naming the cache path it would have needed
+        (`$XDG_CACHE_HOME/opencode/packages/<pkg>@<ver>/node_modules/<pkg>`, §4.4). Against
+        the pinned binary, a planted `.claude/skills`, `.opencode/skills` and
+        `.opencode/tool` are absent from `GET /skill` and the tool listing while the
+        manifest's own skill is present (findings 12, 15). Nested `AGENTS.md`/`CLAUDE.md`
+        accepted and documented in `docs/ARCHITECTURE.md`, "The launch manifest"
+        (finding 13). *Image half:* the pinned `@opencode-ai/plugin` is baked and seeded into
+        each session's configuration directory and package cache before the harness starts,
+        so the install OpenCode runs regardless of `OPENCODE_PURE` short-circuits offline.
   - [x] LSP and formatters baked and named by absolute path; runner egress rejects rather
         than drops; PID namespace with an init reaps orphans (finding 16); status shown.
         Profile revision 1 (`containers/harness-opencode/toolchain.json`): rust-analyzer
