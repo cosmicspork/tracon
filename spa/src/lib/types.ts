@@ -491,6 +491,38 @@ export interface CeilingInfo {
   usage_today: number
   ceiling: number | null
   state: 'under' | 'near' | 'at' | 'none'
+  /** Turns today the gateway could not count. They add nothing to
+   *  `usage_today`, which is why they are shown next to it. */
+  unmetered_turns: number
+}
+
+/** The verdict on one turn's two usage sources. */
+export type UsageState = 'open' | 'reconciled' | 'mismatch' | 'unmetered'
+
+/** One turn as both sources saw it. `charged_tokens` is what the budget paid:
+ *  never less than the gateway counted on the wire. */
+export interface TurnUsage {
+  turn: number
+  gateway_input: number
+  gateway_output: number
+  gateway_requests: number
+  harness_tokens: number | null
+  harness_cost_usd: number | null
+  charged_tokens: number
+  state: UsageState
+  started_ms: number
+  settled_ms: number | null
+}
+
+export interface SessionUsage {
+  /** The last settled turn's verdict, or null before any turn has settled. */
+  state: UsageState | null
+  gateway_tokens: number
+  harness_tokens: number
+  charged_tokens: number
+  unmetered_turns: number
+  mismatched_turns: number
+  turns: TurnUsage[]
 }
 
 /** A browser this node pushes to, from `/api/push/subscriptions`. */

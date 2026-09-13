@@ -1295,9 +1295,18 @@ pub async fn get_session(
         .filter(|p| p.session_id == id)
         .collect();
     let questions = s.store().session_operator_questions(&id)?;
-    Ok(Json(
-        json!({ "session": row, "waiting": waiting, "questions": questions }),
-    ))
+    // Both usage sources and the verdict between them. The session row's
+    // `tokens_used` is the charge; this is how the charge was arrived at.
+    let usage = crate::metrics::session_usage(s.store(), &id);
+    let ceiling =
+        crate::metrics::ceiling(s.store(), &s.manager.bindings(&row.channel), &row.channel);
+    Ok(Json(json!({
+        "session": row,
+        "waiting": waiting,
+        "questions": questions,
+        "usage": usage,
+        "ceiling": ceiling,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -1429,15 +1438,43 @@ pub struct DraftBody {
 }
 
 /// The node holds unsent drafts, so a closed tab or an evicted phone loses
-/// nothing typed.
+/// nothing typed. One draft per session, which on a node is one draft per
+/// (session, operator): the operator token is one credential for one
+/// operator, and every client holding it is the same person at another
+/// screen — which is the point, since picking a half-typed prompt up on the
+/// phone is the behaviour being bought.
+///
+/// A draft is never dispatched. It exists only to be handed back to whoever
+/// typed it; the harness sees it when — and only when — it is sent as a
+/// prompt, and sending clears it.
 pub async fn put_draft(
     State(s): State<AppState>,
     Path(id): Path<String>,
     Json(b): Json<DraftBody>,
 ) -> ApiResult<StatusCode> {
+    if s.store().get_session(&id)?.is_none() {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such session".into()));
+    }
     let text = (!b.text.is_empty()).then_some(b.text);
     s.store().set_draft(&id, text.as_deref())?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The unsent prompt this session is holding. Separate from the session
+/// fetch so a client that has just reconnected can ask for the one thing it
+/// cannot reconstruct without waiting for anything else.
+pub async fn get_draft(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if s.store().get_session(&id)?.is_none() {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such session".into()));
+    }
+    let draft = s.store().get_draft(&id)?;
+    Ok(Json(json!({
+        "text": draft.as_ref().map(|(t, _)| t.as_str()).unwrap_or(""),
+        "updated_ms": draft.as_ref().map(|(_, at)| *at),
+    })))
 }
 
 #[derive(Deserialize)]

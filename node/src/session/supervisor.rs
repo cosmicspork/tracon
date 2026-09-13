@@ -132,6 +132,10 @@ pub struct Supervisor {
     /// this fences a cancelled turn from resurrecting a paused or stopped row.
     active_turn: Option<u64>,
     next_turn: u64,
+    /// The harness's running session cost when this turn was dispatched. What
+    /// the harness reports is cumulative, so the turn's own share is the
+    /// difference; `None` when the harness prices nothing.
+    turn_start_cost_usd: Option<f64>,
     consecutive_failures: u8,
     /// The signature of the last tool call this turn, and how many times it
     /// has arrived unchanged in a row. Surfaced as a signal; never a reason
@@ -173,6 +177,7 @@ impl Supervisor {
             end_after_turn: None,
             active_turn: None,
             next_turn: 0,
+            turn_start_cost_usd: None,
             consecutive_failures: 0,
             last_tool_call: None,
             repeated_tool_calls: 0,
@@ -953,7 +958,20 @@ impl Supervisor {
                 ..Default::default()
             },
         );
+        // Sent is sent: the operator's box is empty from here, and a draft
+        // save still in flight from the client must not resurrect it.
         let _ = self.store.set_draft(&self.session_id, None);
+        // Open the turn's usage ledger before anything can spend against it.
+        // The gateway attributes every model call to the session's current
+        // turn, so the row has to exist first or the first call of the turn
+        // would land on the previous one.
+        let _ = self.store.begin_turn(&self.session_id);
+        self.turn_start_cost_usd = self
+            .store
+            .get_session(&self.session_id)
+            .ok()
+            .flatten()
+            .and_then(|s| s.cost_usd);
         // Written down before the dispatch, not after: the gap between the
         // two is exactly where an answer can be lost, and a row that says
         // "this may have happened" is what makes asking possible.
@@ -1018,22 +1036,33 @@ impl Supervisor {
     }
 
     /// Record the end of a turn: flush whatever text was still streaming, log
-    /// the outcome, and add the turn's tokens to the session's total.
+    /// the outcome, reconcile the two usage sources, and charge the session.
     async fn on_turn_done(&mut self, kind: &'static str, payload: serde_json::Value, tokens: i64) {
         self.flush_chunks();
         self.settle_prompt(kind, &payload);
-        let previous = self
-            .store
-            .get_session(&self.session_id)
-            .ok()
-            .flatten()
-            .map(|s| s.tokens_used)
-            .unwrap_or(0);
+        let session = self.store.get_session(&self.session_id).ok().flatten();
+        let previous = session.as_ref().map(|s| s.tokens_used).unwrap_or(0);
+        // A turn that errored reports nothing rather than zero: there is a
+        // difference between a harness that said "no tokens" and one that
+        // never got to say anything, and only the first can agree with the
+        // gateway.
+        let harness_tokens = (kind != ek::ERROR).then_some(tokens);
+        let cost = match (
+            session.as_ref().and_then(|s| s.cost_usd),
+            self.turn_start_cost_usd,
+        ) {
+            (Some(now), Some(before)) => Some((now - before).max(0.0)),
+            (Some(now), None) => Some(now),
+            _ => None,
+        };
+        self.turn_start_cost_usd = None;
+        let usage =
+            crate::metrics::settle_turn(&self.store, &self.session_id, harness_tokens, cost);
         let _ = self.store.update_session(
             &self.session_id,
             SessionPatch {
                 turn_active: Some(false),
-                tokens_used: Some(previous + tokens),
+                tokens_used: Some(previous + usage.charged),
                 ..Default::default()
             },
         );
@@ -1047,6 +1076,11 @@ impl Supervisor {
         self.last_tool_call = None;
         self.repeated_tool_calls = 0;
         self.record(kind, None, payload);
+        // After the turn it is about, not before: a note on what a turn spent
+        // reads as nonsense above the line saying the turn ended.
+        if let Some(usage_kind) = usage.event_kind() {
+            self.record(usage_kind, None, usage.detail());
+        }
         self.publish_session();
     }
     /// What became of the prompt this turn was dispatched with.
