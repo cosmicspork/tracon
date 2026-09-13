@@ -7,6 +7,13 @@ node-image tag="dev":
     podman build -f Dockerfile.node -t ghcr.io/cosmicspork/tracon-node:{{tag}} .
     podman build -f containers/harness/Containerfile -t ghcr.io/cosmicspork/tracon-harness:{{tag}} containers/harness
     podman build -f containers/harness-claude/Containerfile -t ghcr.io/cosmicspork/tracon-harness-claude:{{tag}} containers/harness-claude
+    podman build -f containers/harness-opencode/Containerfile -t ghcr.io/cosmicspork/tracon-harness-opencode:{{tag}} containers/harness-opencode
+
+# The OpenCode harness image on its own, which is the slow one: it bakes the
+# language servers and formatters a session is allowed to use. Name it in
+# TRACON_OPENCODE_IMAGE to run node/tests/opencode_runtime.rs against it.
+harness-opencode-image tag="test":
+    podman build -f containers/harness-opencode/Containerfile -t localhost/tracon-harness-opencode-{{tag}} containers/harness-opencode
 
 # Build the SPA into spa/dist (embedded by the node at compile time).
 spa:

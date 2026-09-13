@@ -45,6 +45,7 @@ import type {
   Prototype,
   QaTarget,
   ManifestView,
+  ToolchainStatus,
 } from './types'
 
 import type { HtmlBundleSelection } from './html-bundle'
@@ -178,6 +179,7 @@ export const api = {
       questions: OperatorQuestion[]
       usage: SessionUsage
       ceiling: Ceiling
+      toolchain: ToolchainStatus | null
     }>('GET', `/api/sessions/${id}`),
   // Page through the whole history: a long session has more events than one
   // request returns, and stopping at a fixed cap would show the oldest events

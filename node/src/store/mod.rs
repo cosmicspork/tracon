@@ -824,6 +824,27 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// The payload of this session's first event of `kind`. Launch facts that
+    /// belong to the session rather than to the node — which toolchain the
+    /// image it started from actually had — are read back from where they
+    /// were recorded, so a session opened later, or mirrored from a peer,
+    /// still answers for its own launch rather than for this node's present.
+    pub fn first_event_payload(
+        &self,
+        session_id: &str,
+        kind: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let conn = self.conn.lock().unwrap();
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT payload FROM event WHERE session_id = ?1 AND kind = ?2 ORDER BY seq LIMIT 1",
+                rusqlite::params![session_id, kind],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(raw.and_then(|payload| serde_json::from_str(&payload).ok()))
+    }
+
     pub fn has_event(&self, session_id: &str, kind: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n: i64 = conn.query_row(

@@ -324,6 +324,7 @@ async fn a_package_that_links_out_of_itself_is_refused() {
 #[tokio::test]
 async fn a_plugin_outside_the_images_cache_makes_the_manifest_refuse_to_build() {
     let mut cfg = Config::default();
+    cfg.harness.id = "opencode".into();
     cfg.launch.plugins = vec!["@example/audit@1.0.0".into()];
     let n = node_with(cfg);
 
@@ -335,16 +336,47 @@ async fn a_plugin_outside_the_images_cache_makes_the_manifest_refuse_to_build() 
         error.contains("packages/@example/audit@1.0.0/node_modules/@example/audit"),
         "{error}"
     );
-    // The image's own list is shown beside it, so the reason is legible.
-    assert_eq!(v["baked_plugins"], json!([]));
+    // The image's own list is shown beside it, so the reason is legible — and
+    // it is what the harness image's toolchain profile actually seeds, not a
+    // second list that could disagree with the image.
+    let baked = tracon::adapter::baked_plugins("opencode");
+    assert!(!baked.is_empty(), "the image's profile seeds a plugin");
+    assert_eq!(v["baked_plugins"], json!(baked));
+
+    // And the one the image did bake is approvable.
+    let mut ok = Config::default();
+    ok.harness.id = "opencode".into();
+    ok.launch.plugins = baked.clone();
+    let good = node_with(ok);
+    let (_, v) = call(
+        &good,
+        "GET",
+        "/api/manifest?channel=work",
+        Some(LOCAL),
+        None,
+    )
+    .await;
+    assert!(v["error"].is_null(), "{v}");
+    assert_eq!(v["next"]["plugins"], json!(baked));
 }
 
-/// A formatter enabled without a command is the one shape that leaves
-/// OpenCode resolving the binary itself — and for three of them that is an
-/// install over a network the runner does not have.
+/// `[launch]` is an allowlist like the rest of the settings surface: the one
+/// key it writes round-trips, and anything else is refused by name rather
+/// than dropped.
 #[tokio::test]
-async fn a_formatter_without_a_command_is_refused_by_the_settings_allowlist() {
+async fn the_launch_settings_are_an_allowlist() {
     let n = node();
+    let (s, v) = call(
+        &n,
+        "PUT",
+        "/api/config",
+        Some(LOCAL),
+        Some(json!({ "launch": { "plugins": ["@example/audit@1.0.0"] } })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["changed"], json!(["launch.plugins"]));
+
     let (s, v) = call(
         &n,
         "PUT",
@@ -355,7 +387,7 @@ async fn a_formatter_without_a_command_is_refused_by_the_settings_allowlist() {
     .await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     let message = v["error"]["message"].as_str().unwrap_or_default();
-    assert!(message.contains("absolute command"), "{message}");
+    assert!(message.contains("launch.formatters"), "{message}");
 }
 
 // ---------------------------------------------------------------------------
@@ -393,8 +425,8 @@ fn built(store: &Store, channel: &str) -> manifest::LaunchManifest {
         agents,
         plugins: &[],
         baked: &[],
-        lsp: Vec::new(),
-        formatters: Vec::new(),
+        lsp: manifest::toolchain_lsp(),
+        formatters: manifest::toolchain_formatters(),
         providers: vec!["anthropic".into()],
         policy_revision: "1".into(),
     })
@@ -438,10 +470,12 @@ async fn the_rendered_config_points_at_one_skill_root_and_no_urls() {
         "{config}"
     );
     assert!(config["skills"]["urls"].is_null(), "{config}");
-    // Off by configuration rather than by a default that might change.
-    assert_eq!(config["lsp"], json!(false));
-    assert_eq!(config["formatter"], json!(false));
     assert!(config["plugin"].is_null(), "{config}");
+    // `lsp` and `formatter` come from the image's toolchain profile, merged
+    // in by `scratch_files`: records rather than booleans, so nothing the
+    // image did not bake can spawn or install itself.
+    assert!(config["lsp"].is_object(), "{config}");
+    assert!(config["formatter"].is_object(), "{config}");
 
     // The package itself is staged under that root, one directory per skill.
     assert!(
@@ -613,8 +647,8 @@ async fn the_manifests_skill_is_listed_and_the_projects_are_not() {
         agents: Vec::new(),
         plugins: &[],
         baked: &[],
-        lsp: Vec::new(),
-        formatters: Vec::new(),
+        lsp: manifest::toolchain_lsp(),
+        formatters: manifest::toolchain_formatters(),
         providers: vec!["anthropic".into()],
         policy_revision: "1".into(),
     })

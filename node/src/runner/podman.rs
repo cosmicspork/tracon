@@ -30,6 +30,8 @@ pub struct RunSpec {
     /// of the variable that says so is the harness's, not ours.
     pub state_env: &'static str,
     pub state_dir: &'static str,
+    /// Seconds a stopped container gets between SIGTERM and SIGKILL.
+    pub stop_timeout_secs: u16,
 }
 
 impl RunSpec {
@@ -48,6 +50,7 @@ impl RunSpec {
             home: crate::session::materialize::PODMAN_HARNESS_HOME.into(),
             state_env: layout.env,
             state_dir: layout.dir,
+            stop_timeout_secs: cfg.boundary.stop_timeout_secs,
         }
     }
 
@@ -82,6 +85,21 @@ impl RunSpec {
             // The gate: no capabilities, no way to gain any.
             "--cap-drop=ALL".into(),
             "--security-opt=no-new-privileges".into(),
+            // A real init as PID 1 of the container's own PID namespace, with
+            // the harness as its child. OpenCode's `serve` installs no signal
+            // handlers and its LSP children are spawned without `detached`, so
+            // nothing upstream reaps them (`config-state.md` §6.7): the
+            // namespace is what does, and the init is what keeps a
+            // double-forked formatter from being reparented to something
+            // outside it in the meantime.
+            "--init".into(),
+            // A stop is a SIGTERM to that init and a bounded wait, not an
+            // immediate SIGKILL: a harness that can flush gets the chance,
+            // and one that cannot is still gone when the wait runs out.
+            "--stop-signal".into(),
+            "SIGTERM".into(),
+            "--stop-timeout".into(),
+            self.stop_timeout_secs.to_string(),
         ];
         if create_only {
             // `--rm` with `create` would delete the container before it can be
@@ -228,7 +246,18 @@ impl Runner for PodmanRunner {
             .map_err(Into::into)
     }
 
+    /// Stop, then remove. `podman rm --force` on its own is a SIGKILL: the
+    /// container's processes are gone either way, but nothing gets to finish
+    /// writing. `stop` sends the container's stop signal to its init and waits
+    /// `--stop-timeout` before escalating, and the removal afterwards is what
+    /// tears the PID namespace down, so no harness, LSP or formatter process
+    /// can outlive this call whichever path it took.
     async fn kill(&self, name: &str) -> Result<(), RunnerError> {
+        let timeout = self.spec.stop_timeout_secs.to_string();
+        let _ = Command::new(&self.spec.podman_bin)
+            .args(["stop", "--time", &timeout, "--ignore", name])
+            .output()
+            .await;
         let _ = Command::new(&self.spec.podman_bin)
             .args(["rm", "-f", "-i", name])
             .output()
@@ -296,6 +325,11 @@ mod tests {
         let joined = args.join(" ");
         assert!(joined.contains("--cap-drop=ALL"));
         assert!(joined.contains("--security-opt=no-new-privileges"));
+        // A PID namespace with a real init at its head, and a stop that is a
+        // signal before it is a kill.
+        assert!(joined.contains("--init"));
+        assert!(joined.contains("--stop-signal SIGTERM"));
+        assert!(joined.contains("--stop-timeout 10"));
         assert!(joined.contains("--network tracon-int"));
         assert!(joined.contains("HTTPS_PROXY=http://tracon-gw:8888"));
         assert!(joined.contains("OMP_STATE_DIR=/root/.omp"));

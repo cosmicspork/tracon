@@ -145,20 +145,18 @@
     {#each warnings as w (w)}<small class="warn">{w}</small>{/each}
 
     <div class="image">
-      <span class="dim">From the harness image:</span>
+      <span class="dim">From the harness image, and not editable here:</span>
       <span class="mono"
         >plugins {view.baked_plugins.length ? view.baked_plugins.join(', ') : 'none baked'}</span
       >
       {#if view.next}
         <span class="mono"
-          >lsp {view.next.lsp.length
-            ? view.next.lsp.map((l) => l.name).join(', ')
-            : 'off'}</span
+          >lsp {view.next.lsp.length ? view.next.lsp.map((l) => l.name).join(', ') : 'none'}</span
         >
         <span class="mono"
           >formatters {view.next.formatters.length
             ? view.next.formatters.map((f) => f.name).join(', ')
-            : 'off'}</span
+            : 'none'}</span
         >
       {/if}
     </div>

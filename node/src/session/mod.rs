@@ -966,23 +966,15 @@ impl Manager {
         let mut wiring = wiring;
         let manifest = {
             let (skills, instructions, agents) = self.store.manifest_contents(&spec.channel)?;
-            let to_entries = |map: &std::collections::BTreeMap<String, Vec<String>>| {
-                map.iter()
-                    .map(|(name, command)| crate::manifest::ToolEntry {
-                        name: name.clone(),
-                        command: command.clone(),
-                    })
-                    .collect::<Vec<_>>()
-            };
             let built = crate::manifest::build(crate::manifest::Inputs {
                 channel: &spec.channel,
                 skills,
                 instructions,
                 agents,
                 plugins: &self.cfg.launch.plugins,
-                baked: crate::adapter::baked_plugins(adapter.id()),
-                lsp: to_entries(&self.cfg.launch.lsp),
-                formatters: to_entries(&self.cfg.launch.formatters),
+                baked: &crate::adapter::baked_plugins(adapter.id()),
+                lsp: crate::manifest::toolchain_lsp(),
+                formatters: crate::manifest::toolchain_formatters(),
                 providers: wiring.providers.iter().map(|p| p.name.clone()).collect(),
                 policy_revision: self.policy.read().unwrap().version.to_string(),
             })
@@ -1197,6 +1189,16 @@ impl Manager {
         // returned, so this records a session that is already known compatible
         // — for reading the transcript later against the build that produced it.
         let compat = handle.compat();
+        // Which LSP servers and formatters the config this session was
+        // launched with names, and whether the image it launched from has
+        // them. OpenCode emits no status of its own for either — a server
+        // that fails to spawn is added to a `broken` set with no log line and
+        // no event (`config-state.md` §6.5) — so this is recorded at launch or
+        // it is not knowable at all.
+        let toolchain = match adapter.id() == crate::adapter::opencode::OpenCodeAdapter::ID {
+            true => Some(crate::runner::toolchain::probe(runner.as_ref()).await),
+            false => None,
+        };
         // What the policy-aware API gateway answers for. Registered before the
         // session is announced as started, so the interface never has a
         // running session whose native API it cannot reach.
@@ -1227,6 +1229,7 @@ impl Manager {
                 "harness_version": compat.version,
                 "harness_expected": adapter.pinned_version(),
                 "harness_protocol": compat.protocol,
+                "toolchain": toolchain,
             }),
             at_ms: now_ms(),
             mono_ms: started.elapsed().as_millis() as i64,

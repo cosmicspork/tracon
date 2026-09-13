@@ -93,22 +93,21 @@ impl OpenCodeAdapter {
     };
 
     /// Plugin packages this node's harness image bakes into OpenCode's
-    /// offline package cache.
+    /// offline package cache, as `<package>@<version>`.
     ///
-    /// It is empty, and that is a position rather than a placeholder. A
-    /// plugin is loaded with a raw `await import()` into the server's own
+    /// Read from the image's own toolchain profile rather than written twice.
+    /// A plugin is loaded with a raw `await import()` into the server's
     /// process, holding the server's credentials and `Bun.$`
-    /// (`config-state.md` §4.6): there is no sandbox to put one behind, so
-    /// the only bounded question is which packages the *image* made
-    /// resolvable at all. Resolution is a bare existence check with no
-    /// integrity verification (§4.4), so this list and the image's cache are
-    /// one fact spelled twice, and the manifest refuses any name that is not
-    /// on it — naming the cache path it would have needed.
-    ///
-    /// Adding one means baking it in `containers/harness-opencode/Containerfile`
-    /// at `$XDG_CACHE_HOME/opencode/packages/<pkg>@<ver>/node_modules/<pkg>`
-    /// and adding the same `<pkg>@<ver>` here.
-    pub const BAKED_PLUGINS: &'static [&'static str] = &[];
+    /// (`config-state.md` §4.6), and resolution is a bare existence check in
+    /// that cache with no integrity verification (§4.4) — so the only bounded
+    /// question is which packages the *image* made resolvable at all, and the
+    /// profile the image was built from is the honest answer to it. A
+    /// manifest naming anything else is refused at build, with the cache path
+    /// it would have needed.
+    pub fn baked_plugins() -> Vec<String> {
+        let seed = &crate::runner::toolchain::profile().plugin;
+        vec![format!("{}@{}", seed.package, seed.version)]
+    }
 
     pub fn new(pinned: impl Into<String>) -> Self {
         Self {
@@ -347,10 +346,12 @@ fn config_document(wiring: &Wiring, mcp_servers: &[Value]) -> Value {
 ///   not have is not a warning — it is a plugin that silently is not there,
 ///   or a registry fetch in a runner with no network. The manifest refuses it
 ///   before the launch instead.
-/// * `lsp` and `formatter` are `false` rather than omitted when the manifest
-///   turns none on. Omitting leaves upstream's defaults, including three
-///   formatters that auto-install over a network `OPENCODE_DISABLE_LSP_DOWNLOAD`
-///   does not cover (§6.6).
+/// * `lsp` and `formatter` are not written here at all. The image's toolchain
+///   profile owns them — it names absolute paths in an image this file knows
+///   nothing about — and `scratch_files` merges that fragment in afterwards.
+///   The manifest still carries the profile's names, so the digest on a
+///   session says which toolchain it ran with, but rendering them twice would
+///   be two sources for one fact.
 fn manifest_document(manifest: &crate::manifest::LaunchManifest) -> Vec<(&'static str, Value)> {
     let mut keys: Vec<(&'static str, Value)> = Vec::new();
     if !manifest.skills.is_empty() {
@@ -362,22 +363,7 @@ fn manifest_document(manifest: &crate::manifest::LaunchManifest) -> Vec<(&'stati
     if !manifest.plugins.is_empty() {
         keys.push(("plugin", json!(manifest.plugins)));
     }
-    keys.push(("lsp", tool_map(&manifest.lsp)));
-    keys.push(("formatter", tool_map(&manifest.formatters)));
     keys
-}
-
-/// A `lsp`/`formatter` map, or the explicit `false` that turns the whole
-/// mechanism off. Both keys take `Boolean | Record<string, Entry>`.
-fn tool_map(entries: &[crate::manifest::ToolEntry]) -> Value {
-    if entries.is_empty() {
-        return json!(false);
-    }
-    let mut map = serde_json::Map::new();
-    for entry in entries {
-        map.insert(entry.name.clone(), json!({ "command": entry.command }));
-    }
-    Value::Object(map)
 }
 
 /// One declared model, in the shape the config merges over the catalogue.
@@ -706,7 +692,13 @@ impl HarnessAdapter for OpenCodeAdapter {
     /// (OpenCode reads no base-URL environment variable — finding 8), the
     /// pinned catalogue, and an auth store with nothing in it.
     fn scratch_files(&self, wiring: &Wiring) -> Vec<(String, String)> {
-        let config = config_document(wiring, &[]);
+        let mut config = config_document(wiring, &[]);
+        // The `lsp` and `formatter` halves come from the image's toolchain
+        // profile, which is the runner's to own: it names absolute paths in
+        // an image this file knows nothing about. The manifest records the
+        // same profile's names in its digest, so what a session ran with is
+        // readable from its row, but it does not render them a second time.
+        crate::runner::toolchain::merge_into_config(&mut config);
         let mut files = vec![
             (
                 Self::CONFIG_FILE.into(),
@@ -1901,11 +1893,12 @@ mod tests {
     /// entry would be fetched over plain HTTP before any interaction, with
     /// nothing that disables it.
     #[test]
-    fn the_manifest_renders_skills_plugins_and_an_explicit_lsp_off_switch() {
+    fn the_manifest_renders_skills_and_only_plugins_the_image_baked() {
         let files = vec![crate::manifest::ManifestFile {
             path: "SKILL.md".into(),
             text: "---\nname: notes\ndescription: d\n---\n\nbody\n".into(),
         }];
+        let baked = OpenCodeAdapter::baked_plugins();
         let manifest = crate::manifest::build(crate::manifest::Inputs {
             channel: "work",
             skills: vec![crate::manifest::SkillEntry {
@@ -1918,17 +1911,14 @@ mod tests {
             }],
             instructions: Vec::new(),
             agents: Vec::new(),
-            plugins: &["@example/audit@1.0.0".to_string()],
-            baked: &["@example/audit@1.0.0"],
-            lsp: vec![crate::manifest::ToolEntry {
-                name: "typescript".into(),
-                command: vec!["/usr/local/bin/typescript-language-server".into()],
-            }],
-            formatters: Vec::new(),
+            plugins: &baked,
+            baked: &baked,
+            lsp: crate::manifest::toolchain_lsp(),
+            formatters: crate::manifest::toolchain_formatters(),
             providers: vec!["anthropic".into()],
             policy_revision: "1".into(),
         })
-        .expect("a baked plugin builds");
+        .expect("the image's own plugin builds");
 
         let mut wired = wiring();
         wired.manifest = manifest;
@@ -1938,21 +1928,33 @@ mod tests {
             json!(["{env:TRACON_SKILL_ROOT}"])
         );
         assert!(document["skills"]["urls"].is_null(), "{document}");
-        assert_eq!(document["plugin"], json!(["@example/audit@1.0.0"]));
-        assert_eq!(
-            document["lsp"]["typescript"]["command"],
-            json!(["/usr/local/bin/typescript-language-server"])
-        );
-        // No formatter was enabled, so the mechanism is off by configuration.
-        // Omitting the key would leave three formatters that auto-install over
-        // a network `OPENCODE_DISABLE_LSP_DOWNLOAD` does not cover.
-        assert_eq!(document["formatter"], json!(false));
+        assert_eq!(document["plugin"], json!(baked));
+        // `lsp` and `formatter` are the toolchain profile's, merged in by
+        // `scratch_files`; the manifest renders neither, so one fact has one
+        // source.
+        assert!(document["lsp"].is_null(), "{document}");
+        assert!(document["formatter"].is_null(), "{document}");
 
         // And an empty manifest writes neither a skill root nor a plugin list.
         let bare = config_document(&wiring(), &[]);
         assert!(bare["skills"].is_null(), "{bare}");
         assert!(bare["plugin"].is_null(), "{bare}");
-        assert_eq!(bare["lsp"], json!(false));
+
+        // What a session actually gets does carry the toolchain, because
+        // `scratch_files` merges the profile in on the way out.
+        let mut wired = wiring();
+        wired.manifest = crate::manifest::LaunchManifest::default();
+        let staged = OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION).scratch_files(&wired);
+        let written: Value = serde_json::from_str(
+            &staged
+                .iter()
+                .find(|(name, _)| name == OpenCodeAdapter::CONFIG_FILE)
+                .expect("a config file is written")
+                .1,
+        )
+        .expect("the config is JSON");
+        assert!(written["lsp"].is_object(), "{written}");
+        assert!(written["formatter"].is_object(), "{written}");
     }
 
     /// The server is unauthenticated without a password, so a launch that

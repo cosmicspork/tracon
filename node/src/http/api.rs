@@ -1300,12 +1300,21 @@ pub async fn get_session(
     let usage = crate::metrics::session_usage(s.store(), &id);
     let ceiling =
         crate::metrics::ceiling(s.store(), &s.manager.bindings(&row.channel), &row.channel);
+    // What the harness image could offer this session's languages, as it was
+    // at launch. Absent for a harness that has no such profile, and for every
+    // session that started before the node recorded one.
+    let toolchain = s
+        .store()
+        .first_event_payload(&id, crate::session::state::event_kind::SESSION_STARTED)?
+        .and_then(|payload| payload.get("toolchain").cloned())
+        .filter(|toolchain| !toolchain.is_null());
     Ok(Json(json!({
         "session": row,
         "waiting": waiting,
         "questions": questions,
         "usage": usage,
         "ceiling": ceiling,
+        "toolchain": toolchain,
     })))
 }
 
@@ -4362,23 +4371,15 @@ fn build_manifest(s: &AppState, channel: &str) -> Result<crate::manifest::Launch
         .manifest_contents(channel)
         .map_err(|e| e.to_string())?;
     let cfg = &s.cfg;
-    let to_entries = |map: &std::collections::BTreeMap<String, Vec<String>>| {
-        map.iter()
-            .map(|(name, command)| crate::manifest::ToolEntry {
-                name: name.clone(),
-                command: command.clone(),
-            })
-            .collect::<Vec<_>>()
-    };
     crate::manifest::build(crate::manifest::Inputs {
         channel,
         skills,
         instructions,
         agents,
         plugins: &cfg.launch.plugins,
-        baked: crate::adapter::baked_plugins(&cfg.harness.id),
-        lsp: to_entries(&cfg.launch.lsp),
-        formatters: to_entries(&cfg.launch.formatters),
+        baked: &crate::adapter::baked_plugins(&cfg.harness.id),
+        lsp: crate::manifest::toolchain_lsp(),
+        formatters: crate::manifest::toolchain_formatters(),
         providers: cfg.providers.keys().cloned().collect(),
         policy_revision: s.manager.policy_version().to_string(),
     })

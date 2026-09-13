@@ -176,32 +176,39 @@ refer to that manifest's table.
           *after a tool call was recorded*, for the same reason.
 - [ ] **Gate C — customization and recovery.**
   - [x] Launch manifest: a node-owned `LaunchManifest` per channel — skills, instructions,
-        agents, the approved plugin list, the LSP and formatter names, the effective provider
-        set and the policy revision — with a content digest and a revision counting the times
-        it changed, recorded on every session as `session.manifest_digest` and shown on the
-        session header. `tracon skill import <dir|dir#git-rev>` and `/api/manifest` copy a
-        package into node-owned storage and record its source, digest and the warning that
-        skill content is code (finding 14: a body's shell interpolation is a slash command
-        OpenCode executes). Duplicates refused at manifest build, URL sources refused
-        outright, absolute and `..` paths and symlinks refused at import; `skills.paths` names
-        one read-only root outside the worktree through `{env:TRACON_SKILL_ROOT}` and
-        `skills.urls` is never written. A new revision never changes a running session: the
-        files were staged at launch, and the digest still resolves to them afterwards. In
-        `node/src/manifest/` and `node/tests/manifest.rs`.
-  - [x] Plugins and tools only from an image-baked cache: the manifest renders `plugin` only
-        for packages in `OpenCodeAdapter::BAKED_PLUGINS`, and any other name is refused at
-        build naming the cache path it would have needed
-        (`$XDG_CACHE_HOME/opencode/packages/<pkg>@<ver>/node_modules/<pkg>`, §4.4); `lsp` and
-        `formatter` are rendered `false` rather than omitted when none is enabled, because
-        omitting leaves three formatters that auto-install over a network
-        `OPENCODE_DISABLE_LSP_DOWNLOAD` does not cover. Against the pinned binary, a planted
-        `.claude/skills`, `.opencode/skills` and `.opencode/tool` are absent from `GET /skill`
-        and the tool listing while the manifest's own skill is present (findings 12, 15).
-        Nested `AGENTS.md`/`CLAUDE.md` accepted and documented in `docs/ARCHITECTURE.md`,
-        "The launch manifest" (finding 13). Baking a package into that cache is the
-        harness-image row's.
-  - [ ] LSP and formatters baked and named by absolute path; runner egress rejects rather
+        agents, the approved plugin list, the toolchain profile's LSP and formatter names,
+        the effective provider set and the policy revision — with a content digest and a
+        revision counting the times it changed, recorded on every session as
+        `session.manifest_digest` and shown on the session header. `tracon skill import
+        <dir|dir#git-rev>` and `/api/manifest` copy a package into node-owned storage and
+        record its source, digest and the warning that skill content is code (finding 14: a
+        body's shell interpolation is a slash command OpenCode executes). Duplicates refused
+        at manifest build, URL sources refused outright, absolute and `..` paths and symlinks
+        refused at import; `skills.paths` names one read-only root outside the worktree
+        through `{env:TRACON_SKILL_ROOT}` and `skills.urls` is never written. A new revision
+        never changes a running session: the files were staged at launch, and the digest
+        still resolves to them afterwards. In `node/src/manifest/` and
+        `node/tests/manifest.rs`.
+  - [x] Plugins and tools only from an image-baked cache: the manifest approves a plugin only
+        when the image's toolchain profile seeds it, and any other name is refused at build
+        naming the cache path it would have needed
+        (`$XDG_CACHE_HOME/opencode/packages/<pkg>@<ver>/node_modules/<pkg>`, §4.4). Against
+        the pinned binary, a planted `.claude/skills`, `.opencode/skills` and
+        `.opencode/tool` are absent from `GET /skill` and the tool listing while the
+        manifest's own skill is present (findings 12, 15). Nested `AGENTS.md`/`CLAUDE.md`
+        accepted and documented in `docs/ARCHITECTURE.md`, "The launch manifest"
+        (finding 13). *Image half:* the pinned `@opencode-ai/plugin` is baked and seeded into
+        each session's configuration directory and package cache before the harness starts,
+        so the install OpenCode runs regardless of `OPENCODE_PURE` short-circuits offline.
+  - [x] LSP and formatters baked and named by absolute path; runner egress rejects rather
         than drops; PID namespace with an init reaps orphans (finding 16); status shown.
+        Profile revision 1 (`containers/harness-opencode/toolchain.json`): rust-analyzer
+        and rustfmt at the workspace's pinned toolchain, typescript-language-server with
+        TypeScript, and prettier; every other builtin server and both remaining
+        self-installing formatters disabled by name. Refusal is measured rather than
+        assumed, by `--deep` and by `node/tests/opencode_runtime.rs`, which also runs the
+        pinned binary's `touchFile` path with downloads deliberately re-enabled and proves
+        nothing of a killed container survives it. Kubernetes keeps the caveat below.
   - [ ] State: node-owned single-writer fencing per session DB, quiesced `VACUUM INTO`
         backups, a recorded state-schema generation gating restore, no downgrade promise
         (finding 17).
@@ -262,6 +269,20 @@ declared `permission.ask` hook; an LSP status event.
   real target.
 - The Kubernetes runtime backend has no scoped QA browser egress gateway;
   `scope_qa_egress` always refuses on that backend.
+- The Kubernetes runtime backend drops denied egress rather than refusing it. A
+  NetworkPolicy has no reject verb — it is a drop by construction — and no portable
+  CNI option turns one into an ICMP or RST refusal, so the property Podman gets from
+  having no route out has to come from the cluster there. Until a cluster that can
+  express it is configured, a harness pod's protection against the hang is the
+  download flag and the explicitly disabled server list alone, which cover OpenCode
+  but would not cover a future harness with its own timeout-free fetch. The node
+  states this rather than claiming the property: `check-boundary --deep` measures the
+  same bound on both backends and fails the Kubernetes one if it drops.
+- The OpenCode harness image is about 1 GB, of which roughly a third is the
+  `librustc_driver` and LLVM shared objects that rust-analyzer and rustfmt link
+  against. The dist channel publishes no self-contained build of either, and a
+  rustfmt from anywhere else formats differently from the workspace's pinned one, so
+  every edit would arrive with churn CI rejects.
 - Harness-specific surfaces that will be rewritten at cutover: the omp provider wiring,
   catalogue denylist, and built-in-provider disabling; the retry-notice recogniser; the
   20 s `review_status` wait cap sized for omp's MCP client.

@@ -1,33 +1,167 @@
-# Harness runner: OpenCode at a pinned version, git, CA certificates, and
-# ripgrep. No network at run time; everything the harness reaches goes through
-# the tracon gateway, and the provider base URLs are in the config file the
-# node writes rather than in the environment — OpenCode reads no base-URL
-# environment variable (docs/reference/opencode-v1.18.30/providers.md §2.5).
+# Harness runner: OpenCode at a pinned version, git, CA certificates, ripgrep,
+# and the language toolchain the harness is allowed to use. No network at run
+# time; everything the harness reaches goes through the tracon gateway, and the
+# provider base URLs are in the config file the node writes rather than in the
+# environment — OpenCode reads no base-URL environment variable
+# (docs/reference/opencode-v1.18.30/providers.md §2.5).
 #
 # A third image rather than one image with every harness: a node runs one
 # harness, the version is pinned per node, and putting them all in a layer
 # means every node carries the ones it does not use.
-FROM docker.io/library/debian@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
-ARG OPENCODE_VERSION=1.18.30
-ARG OPENCODE_LINUX_ARM64_SHA256=4111a55c2a02c0fac314bd51e9a2330280e6d29d2b85b9554fff6d62612566ed
-ARG OPENCODE_LINUX_X64_SHA256=55007246858165496ff85ba1c2b648f7421e8e2013bf4189a680c9ff8e699d17
-ARG TARGETARCH
+#
+# Two stages. The builder holds a package manager and an archive extractor so
+# the final image does not: what ships is the installed tree, not the thing
+# that installed it.
+ARG DEBIAN_BASE=docker.io/library/debian@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+ARG DEBIAN_SNAPSHOT=20260901T000000Z
+
+FROM ${DEBIAN_BASE} AS base
+ARG DEBIAN_SNAPSHOT
 # CA certificates are needed before apt can reach the HTTPS snapshot below.
 # The base image's default sources are plain HTTP with Release signatures
 # verified against the pre-installed debian-archive-keyring, so bootstrapping
-# them needs no unverified transport.
-#
-# ripgrep is installed rather than left to the harness: OpenCode downloads `rg`
-# at first use with no flag to stop it (finding 8b of the manifest), and an
-# image that ships it is the only thing that prevents that call.
+# them needs no unverified transport. Pinning the snapshot is what makes two
+# builds of the same definitions install the same package versions.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -f /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' \
-      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
-      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
+      "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} bookworm main" \
+      "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT} bookworm-security main" \
       > /etc/apt/sources.list \
     && apt-get -o Acquire::Check-Valid-Until=false update \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Builder: everything that needs a compiler toolchain, an archive extractor or
+# a package manager happens here and is copied out as files.
+# ---------------------------------------------------------------------------
+FROM base AS toolchain
+ARG TARGETARCH
+# Node is the runtime for the TypeScript language server and for prettier; it
+# is pinned by the digest nodejs.org publishes rather than taken from the
+# distribution, because Debian bookworm carries Node 18 and
+# typescript-language-server 6 requires ≥ 22.22.2.
+ARG NODE_VERSION=24.21.0
+ARG NODE_LINUX_X64_SHA256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
+ARG NODE_LINUX_ARM64_SHA256=6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2
+# rust-analyzer and rustfmt come from the same dist channel as the workspace's
+# pinned toolchain (`rust-toolchain.toml`), at the same version, so the server
+# the harness runs is the one this repository's own checks run and a formatted
+# edit is one `cargo fmt --check` still accepts. A rustfmt from anywhere else
+# reformats differently, and every edit would then arrive with churn CI
+# rejects — the reason Debian's 1.5.1 was not taken instead.
+#
+# The price is `librustc_driver` and the LLVM it needs: both binaries are
+# component builds and link against them, and the dist channel publishes no
+# self-contained pair. They are the two largest files in this image, taken
+# from the `rustc` component of the same version and nothing else from it —
+# no compiler driver, no standard library, no cargo.
+ARG RUST_VERSION=1.98.1
+ARG RUST_ANALYZER_X64_SHA256=19beefa939b986be0086a36a24c540801ce849ee74f39ee933b60f947b0d4431
+ARG RUST_ANALYZER_ARM64_SHA256=a0fd960a9ab36193ae9ba4310e5f780f6ca38fa86160fae739be4ac541b6d10c
+ARG RUSTFMT_X64_SHA256=b29a1addcbf2aa8f5785075605700e63cbe131b08c8334b50c09cfca8bbc51dc
+ARG RUSTFMT_ARM64_SHA256=7d4c136278b61096d46ef23019c29acb7ee5a2a1412cbfee5050316110c6fd8c
+ARG RUSTC_X64_SHA256=e974f036b28565f37c0f3bd92ddefa809bee16c04f9dcf07b9ed96e05aaaf7c4
+ARG RUSTC_ARM64_SHA256=89fb83041993b48816514815606f53a5264729b8b449671a6b291e6f0ae74f40
+RUN apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends curl xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; case "${TARGETARCH}" in \
+      amd64) node_arch=x64;   node_digest="${NODE_LINUX_X64_SHA256}" ;; \
+      arm64) node_arch=arm64; node_digest="${NODE_LINUX_ARM64_SHA256}" ;; \
+      *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/node.tar.xz \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"; \
+    echo "${node_digest}  /tmp/node.tar.xz" | sha256sum -c -; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+      --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md; \
+    rm -f /tmp/node.tar.xz; \
+    node --version
+# The Rust dist tarballs are component archives: one `bin/` under a
+# `<component>-preview` directory, checked before anything is unpacked. Both
+# binaries carry `RUNPATH=$ORIGIN/../lib`, so bin/ and lib/ have to stay
+# siblings; the names under /opt/tracon/lsp and /opt/tracon/fmt are symlinks
+# into this tree rather than copies of it.
+RUN set -eu; case "${TARGETARCH}" in \
+      amd64) rust_target=x86_64-unknown-linux-gnu; ra_digest="${RUST_ANALYZER_X64_SHA256}"; fmt_digest="${RUSTFMT_X64_SHA256}"; rustc_digest="${RUSTC_X64_SHA256}" ;; \
+      arm64) rust_target=aarch64-unknown-linux-gnu; ra_digest="${RUST_ANALYZER_ARM64_SHA256}"; fmt_digest="${RUSTFMT_ARM64_SHA256}"; rustc_digest="${RUSTC_ARM64_SHA256}" ;; \
+      *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /opt/tracon/rust/bin /opt/tracon/rust/lib /tmp/rust; \
+    for component in rust-analyzer rustfmt rustc; do \
+      case "${component}" in \
+        rust-analyzer) digest="${ra_digest}" ;; \
+        rustfmt) digest="${fmt_digest}" ;; \
+        rustc) digest="${rustc_digest}" ;; \
+      esac; \
+      curl -fsSL -o "/tmp/${component}.tar.xz" \
+        "https://static.rust-lang.org/dist/${component}-${RUST_VERSION}-${rust_target}.tar.xz"; \
+      echo "${digest}  /tmp/${component}.tar.xz" | sha256sum -c -; \
+    done; \
+    tar -xJf /tmp/rust-analyzer.tar.xz -C /tmp/rust --strip-components=1; \
+    tar -xJf /tmp/rustfmt.tar.xz -C /tmp/rust --strip-components=1; \
+    # Only the shared objects the two binaries need, not the compiler.
+    tar -xJf /tmp/rustc.tar.xz -C /tmp/rust --strip-components=1 \
+      --wildcards '*/rustc/lib/librustc_driver-*.so' '*/rustc/lib/libLLVM*'; \
+    install -m 0755 /tmp/rust/rust-analyzer-preview/bin/rust-analyzer /opt/tracon/rust/bin/rust-analyzer; \
+    install -m 0755 /tmp/rust/rustfmt-preview/bin/rustfmt /opt/tracon/rust/bin/rustfmt; \
+    cp -a /tmp/rust/rustc/lib/. /opt/tracon/rust/lib/; \
+    mkdir -p /opt/tracon/lsp /opt/tracon/fmt; \
+    ln -s ../rust/bin/rust-analyzer /opt/tracon/lsp/rust-analyzer; \
+    ln -s ../rust/bin/rustfmt /opt/tracon/fmt/rustfmt; \
+    rm -rf /tmp/rust /tmp/rust-analyzer.tar.xz /tmp/rustfmt.tar.xz /tmp/rustc.tar.xz
+# The JavaScript half: `npm ci` against a committed lockfile, so the versions
+# and their integrity hashes are the repository's rather than whatever the
+# registry serves today, and `--ignore-scripts` so no package's install hook
+# runs during an image build.
+COPY toolchain/package.json toolchain/package-lock.json /opt/tracon/js/
+RUN set -eu; cd /opt/tracon/js; \
+    npm ci --ignore-scripts --omit=dev --no-audit --no-fund; \
+    npm cache clean --force
+# The plugin package OpenCode installs per configuration directory, resolved
+# once here so it never has to be resolved at run time. Two seeds: the
+# configuration-directory tree the background install inspects, and the cache
+# layout `Npm.add` resolves from (config-state.md §4.3, §4.4).
+COPY plugin-seed/package.json plugin-seed/package-lock.json /opt/tracon/seed/config/
+RUN set -eu; cd /opt/tracon/seed/config; \
+    npm ci --ignore-scripts --omit=dev --no-audit --no-fund; \
+    npm cache clean --force; \
+    # OpenCode writes this file into every configuration directory that lacks
+    # one; shipping it means it does not have to write into ours.
+    printf '%s\n' node_modules package.json package-lock.json bun.lock .gitignore \
+      > /opt/tracon/seed/config/.gitignore; \
+    plugin_dir=/opt/tracon/seed/packages/@opencode-ai/plugin@1.18.30/node_modules; \
+    mkdir -p "${plugin_dir}/@opencode-ai"; \
+    cp -a /opt/tracon/seed/config/node_modules/. "${plugin_dir}/"
+# Named entry points, so the config the node writes can hold absolute paths
+# that do not move when a dependency tree does.
+RUN set -eu; \
+    ln -s /opt/tracon/js/node_modules/typescript-language-server/lib/cli.mjs \
+      /opt/tracon/lsp/typescript-language-server; \
+    ln -s /opt/tracon/js/node_modules/typescript/lib/tsserver.js \
+      /opt/tracon/lsp/tsserver.js; \
+    ln -s /opt/tracon/js/node_modules/prettier/bin/prettier.cjs \
+      /opt/tracon/fmt/prettier; \
+    chmod -R a+rX /opt/tracon
+
+# ---------------------------------------------------------------------------
+# The image a session runs in.
+# ---------------------------------------------------------------------------
+FROM base AS runtime
+ARG OPENCODE_VERSION=1.18.30
+ARG OPENCODE_LINUX_ARM64_SHA256=4111a55c2a02c0fac314bd51e9a2330280e6d29d2b85b9554fff6d62612566ed
+ARG OPENCODE_LINUX_X64_SHA256=55007246858165496ff85ba1c2b648f7421e8e2013bf4189a680c9ff8e699d17
+ARG TARGETARCH
+# The revision of the baked language-toolchain profile. It is an ARG so a
+# rebuild of the same definitions carries the same number, and it is written
+# into /opt/tracon/toolchain.json, which is the file the node's manifest reads.
+ARG TRACON_TOOLCHAIN_REVISION=1
+# ripgrep is installed rather than left to the harness: OpenCode downloads `rg`
+# at first use with no flag to stop it (finding 8b of the manifest), and an
+# image that ships it is the only thing that prevents that call.
+RUN apt-get -o Acquire::Check-Valid-Until=false update \
     && apt-get install -y --no-install-recommends git curl ripgrep \
     && rm -rf /var/lib/apt/lists/*
 # The official release archive is checked before its binary is extracted; the
@@ -43,6 +177,36 @@ RUN set -eu; case "${TARGETARCH}" in \
     install -m 0755 /tmp/opencode /usr/local/bin/opencode; \
     rm -f /tmp/opencode.tar.gz /tmp/opencode; \
     /usr/local/bin/opencode --version
+# Node, and only node: the package manager that built the tree below stays in
+# the builder stage, so nothing in this image can install anything.
+COPY --from=toolchain /usr/local/bin/node /usr/local/bin/node
+COPY --from=toolchain /opt/tracon /opt/tracon
+COPY toolchain.json /opt/tracon/toolchain.json
+COPY manifest.js /opt/tracon/manifest.js
+COPY entrypoint.sh /opt/tracon/bin/harness-entrypoint
+# Every path the profile names must exist and be executable here, or the node
+# would render a config pointing at nothing and the failure would be a silent
+# skip at the first edit (config-state.md §6.5). The build is where that is
+# caught. The digests are then recorded, so the manifest describes the bytes
+# this image actually holds.
+RUN set -eu; \
+    chmod 0755 /opt/tracon/bin/harness-entrypoint; \
+    for tool in /opt/tracon/lsp/rust-analyzer \
+                /opt/tracon/lsp/typescript-language-server \
+                /opt/tracon/fmt/rustfmt \
+                /opt/tracon/fmt/prettier; do \
+      test -x "${tool}" || { echo "missing ${tool}" >&2; exit 1; }; \
+    done; \
+    test -f /opt/tracon/lsp/tsserver.js; \
+    test -d "/opt/tracon/seed/config/node_modules/@opencode-ai/plugin"; \
+    test -d "/opt/tracon/seed/packages/@opencode-ai/plugin@${OPENCODE_VERSION}/node_modules/@opencode-ai/plugin"; \
+    /opt/tracon/lsp/rust-analyzer --version; \
+    /opt/tracon/fmt/rustfmt --version; \
+    /opt/tracon/fmt/prettier --version; \
+    /opt/tracon/lsp/typescript-language-server --version; \
+    node -e "const m=require('/opt/tracon/toolchain.json'); const want='${TRACON_TOOLCHAIN_REVISION}'; if (m.revision !== want) { console.error('toolchain.json revision ' + m.revision + ' is not the build argument ' + want); process.exit(1) }"; \
+    node /opt/tracon/manifest.js; \
+    rm -f /opt/tracon/manifest.js
 # `/etc/opencode` is the one configuration source with no environment control
 # (manifest finding 12), so the claim "no ambient discovery" holds only for an
 # image that does not contain it. This asserts that, rather than assuming it.
@@ -55,3 +219,9 @@ RUN test ! -e /etc/opencode
 # and verifies what it chose.
 RUN mkdir -p /home/harness /work && chown 65532:65532 /home/harness /work
 WORKDIR /work
+# Everything the harness runs goes through the entrypoint, which seeds the
+# per-session package caches and then `exec`s, so the harness is the process
+# the container's init supervises and the process a stop signal reaches. The
+# Kubernetes runner names this path explicitly, because a pod `command`
+# replaces an image entrypoint rather than prefixing it.
+ENTRYPOINT ["/opt/tracon/bin/harness-entrypoint"]

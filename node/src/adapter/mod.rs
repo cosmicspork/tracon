@@ -89,11 +89,11 @@ pub fn pinned_version(cfg: &Config) -> String {
 /// package cache. A harness with no plugin mechanism has none, and a name
 /// outside this list is refused when a launch manifest is built rather than
 /// discovered as a missing module inside a runner with no network.
-pub fn baked_plugins(harness_id: &str) -> &'static [&'static str] {
+pub fn baked_plugins(harness_id: &str) -> Vec<String> {
     if harness_id == opencode::OpenCodeAdapter::ID {
-        opencode::OpenCodeAdapter::BAKED_PLUGINS
+        opencode::OpenCodeAdapter::baked_plugins()
     } else {
-        &[]
+        Vec::new()
     }
 }
 

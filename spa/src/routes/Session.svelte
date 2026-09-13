@@ -10,7 +10,13 @@
   import { formatAge, formatBudget, formatTokens } from '../lib/format'
   import { repetitionHint } from '../lib/log'
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
-  import { isTerminal, type CeilingInfo, type OperatorQuestion, type SessionUsage } from '../lib/types'
+  import {
+    isTerminal,
+    type CeilingInfo,
+    type OperatorQuestion,
+    type SessionUsage,
+    type ToolchainStatus,
+  } from '../lib/types'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
 
@@ -23,6 +29,7 @@
   let error = $state<string | null>(null)
   let usage = $state<SessionUsage | null>(null)
   let ceiling = $state<CeilingInfo | null>(null)
+  let toolchain = $state<ToolchainStatus | null>(null)
   // The box's timing rules live in lib/draft; the component only holds the text.
   const box = draftBox((text) => api.saveDraft(id, text).catch(() => {}))
 
@@ -40,7 +47,34 @@
     questions = result.questions
     usage = result.usage
     ceiling = result.ceiling
+    toolchain = result.toolchain
   }
+
+  /** What the header says about the baked language toolchain. Nothing at all
+   *  for a harness that has none; otherwise the languages this session could
+   *  actually get a server for, and — loudly — the ones it was promised and
+   *  the image did not have. */
+  const toolchainNote = $derived.by(() => {
+    if (!toolchain) return null
+    const named = toolchain.tools.filter((t) => t.state !== 'disabled')
+    if (named.length === 0) return null
+    const missing = named.filter((t) => t.state === 'unavailable')
+    const text = missing.length
+      ? `lsp/fmt · ${missing.length} missing`
+      : `lsp/fmt · ${named.length} ready`
+    return {
+      text,
+      warn: missing.length > 0,
+      title: named
+        .map((t) => `${t.kind} ${t.id} ${t.version} ${t.state} (${t.path})`)
+        .concat(
+          toolchain.image_revision === toolchain.revision
+            ? []
+            : [`image toolchain revision ${toolchain.image_revision ?? 'none'}, node expects ${toolchain.revision}`],
+        )
+        .join('\n'),
+    }
+  })
   const unreachable = $derived(session ? unreachableReason(store.nodes, store.mesh, session.node_id) : null)
 
   $effect(() => {
@@ -202,6 +236,11 @@
         title="the harness this session ran, and the protocol it negotiated (pinned {session.harness_version})"
         >{session.harness_agent ?? session.harness_id} {session.harness_found} ·
         {session.harness_protocol}</span
+      >
+    {/if}
+    {#if toolchainNote}
+      <span class="mono" class:unsure={toolchainNote.warn} title={toolchainNote.title}
+        >{toolchainNote.text}</span
       >
     {/if}
     <span class="mono">{session.worktree_path ?? session.repo_path}</span>

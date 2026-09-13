@@ -5,6 +5,7 @@
 
 pub mod kube;
 pub mod podman;
+pub mod toolchain;
 
 use async_trait::async_trait;
 use futures_core::future::BoxFuture;

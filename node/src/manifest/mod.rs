@@ -80,6 +80,37 @@ fn split_package(package: &str) -> Option<(&str, &str)> {
     Some((name, version))
 }
 
+/// The language servers the harness image's toolchain profile bakes, in the
+/// shape the manifest records them.
+///
+/// The manifest does not choose these and does not render them — the profile
+/// writes the harness's `lsp` key, because only the image knows the paths.
+/// What the manifest adds is memory: the names and commands go into the
+/// digest, so a session's row still says which toolchain produced its
+/// transcript after the profile has moved on.
+pub fn toolchain_lsp() -> Vec<ToolEntry> {
+    crate::runner::toolchain::profile()
+        .lsp
+        .iter()
+        .map(|tool| ToolEntry {
+            name: tool.id.clone(),
+            command: tool.command.clone(),
+        })
+        .collect()
+}
+
+/// The same for formatters.
+pub fn toolchain_formatters() -> Vec<ToolEntry> {
+    crate::runner::toolchain::profile()
+        .formatter
+        .iter()
+        .map(|tool| ToolEntry {
+            name: tool.id.clone(),
+            command: tool.command.clone(),
+        })
+        .collect()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
     /// Upstream warns and overwrites nondeterministically; the node refuses.
@@ -138,15 +169,14 @@ pub struct SkillEntry {
     pub files: Vec<ManifestFile>,
 }
 
-/// A language server or formatter the manifest turns on: OpenCode's own name
-/// for it, and the absolute command the image installed it at.
+/// A language server or formatter the image's toolchain profile bakes:
+/// OpenCode's own name for it, and the absolute command the image installed
+/// it at.
 ///
-/// The command is not optional decoration. OpenCode's config schema has no
-/// way to say "enable this builtin" — an entry is either `{disabled: true}`
-/// or a server with a `command` (`config-state.md` §6.4) — and for the three
-/// formatters that auto-install, naming the command is the only thing that
-/// stops a network fetch `OPENCODE_DISABLE_LSP_DOWNLOAD` does not cover
-/// (§6.6).
+/// The command travels with the name because it is what distinguishes two
+/// otherwise identical launches: the same `rust` server at another path is a
+/// different toolchain, and a digest that could not tell them apart would say
+/// less than it appears to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolEntry {
     pub name: String,
@@ -184,9 +214,10 @@ pub struct LaunchManifest {
     /// in the image's offline cache.
     #[serde(default)]
     pub plugins: Vec<String>,
-    /// Language servers the operator turned on. Empty renders `"lsp": false`
-    /// — off because the node said so, not because a default happened to
-    /// agree with it.
+    /// The language servers the harness image's toolchain profile bakes, as
+    /// this launch was configured with them. Recorded rather than rendered:
+    /// the profile writes the harness's `lsp` key, and this is what makes the
+    /// session's digest say which toolchain produced its transcript.
     #[serde(default)]
     pub lsp: Vec<ToolEntry>,
     #[serde(default)]
@@ -211,10 +242,10 @@ pub struct Inputs<'a> {
     pub agents: Vec<TextEntry>,
     /// Plugin packages the operator approved.
     pub plugins: &'a [String],
-    /// Packages the harness image's offline cache contains, from the
-    /// adapter's own constant. The image build is a sibling row's; this is
-    /// the one seam where the two have to agree.
-    pub baked: &'a [&'a str],
+    /// Packages the harness image's offline cache contains, read from the
+    /// image's own toolchain profile. The only seam where the node's approval
+    /// and the image's contents have to agree.
+    pub baked: &'a [String],
     pub lsp: Vec<ToolEntry>,
     pub formatters: Vec<ToolEntry>,
     pub providers: Vec<String>,
@@ -236,7 +267,7 @@ pub fn build(inputs: Inputs<'_>) -> Result<LaunchManifest, ManifestError> {
         }
     }
 
-    let baked: BTreeSet<&str> = inputs.baked.iter().copied().collect();
+    let baked: BTreeSet<&str> = inputs.baked.iter().map(String::as_str).collect();
     for plugin in inputs.plugins {
         if split_package(plugin).is_none() {
             return Err(ManifestError::UnpinnedPlugin(plugin.clone()));
@@ -500,7 +531,8 @@ mod tests {
 
         let mut good = inputs(Vec::new());
         good.plugins = &approved;
-        good.baked = &["@tracon/audit@1.0.0"];
+        let baked = ["@tracon/audit@1.0.0".to_string()];
+        good.baked = &baked;
         assert_eq!(build(good).unwrap().plugins, approved);
     }
 
@@ -509,7 +541,7 @@ mod tests {
         let approved = ["@tracon/audit".to_string()];
         let mut unpinned = inputs(Vec::new());
         unpinned.plugins = &approved;
-        unpinned.baked = &["@tracon/audit"];
+        unpinned.baked = &approved;
         let error = build(unpinned).expect_err("a bare name is not a pin");
         assert!(matches!(error, ManifestError::UnpinnedPlugin(_)), "{error}");
     }
