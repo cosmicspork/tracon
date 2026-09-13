@@ -18,6 +18,8 @@ use crate::{
 
 pub const SUBMIT: &str = "submit_review";
 pub const STATUS: &str = "review_status";
+pub const SUBMIT_REPORT: &str = "submit_report";
+pub const REPORT_STATUS: &str = "report_status";
 pub const VERDICT: &str = "review_verdict";
 
 /// The longest `review_status` will block inside a single call.
@@ -56,6 +58,23 @@ pub fn definitions() -> Vec<Value> {
             },
         }),
         json!({
+            "name": SUBMIT_REPORT,
+            "description": "Submit a standalone narrative report for an operator to acknowledge. \
+                            This is not a code review: it needs no repository, commit, diff, \
+                            provider, or project, and it can never publish to a forge. Call \
+                            report_status to wait for acknowledgement or requested changes. \
+                            Resubmit a corrected narrative with the same report_id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "A concise report title." },
+                    "body": { "type": "string", "description": "The complete narrative report, including observed evidence and recovery context." },
+                    "report_id": { "type": "string", "description": "Set after requested changes to replace this report's narrative." },
+                },
+                "required": ["title", "body"],
+            },
+        }),
+        json!({
             "name": STATUS,
             "description": "Wait for a review's verdict and return it. Blocks until the review is \
                             decided or the wait elapses, whichever comes first. The wait is capped \
@@ -71,6 +90,20 @@ pub fn definitions() -> Vec<Value> {
                     "wait_secs": { "type": "integer", "description": "How long to block, up to 20; larger values are capped at 20. Defaults to 20. 0 returns the current state." },
                 },
                 "required": ["review_id"],
+            },
+        }),
+        json!({
+            "name": REPORT_STATUS,
+            "description": "Wait for a standalone report's operator decision. It never publishes \
+                            code. An acknowledgement records receipt only; requested changes \
+                            returns notes for a new submit_report with the same report_id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "report_id": { "type": "string" },
+                    "wait_secs": { "type": "integer", "description": "How long to block, up to 20; larger values are capped at 20. Defaults to 20. 0 returns the current state." },
+                },
+                "required": ["report_id"],
             },
         }),
         json!({
@@ -113,6 +146,8 @@ pub async fn call(
     match name {
         SUBMIT => submit(store, manager, ctx, args).await,
         STATUS => status(store, ctx, args).await,
+        SUBMIT_REPORT => submit_report(store, manager, ctx, args).await,
+        REPORT_STATUS => report_status(store, ctx, args).await,
         VERDICT => verdict(store, manager, ctx, args).await,
         other => Err(format!("no tool named {other}")),
     }
@@ -189,6 +224,12 @@ async fn submit(
                 .ok_or("no review with that id")?;
             if !owns(store, ctx, &existing) {
                 return Err("that review belongs to another session".into());
+            }
+            if existing.kind == crate::store::reports::KIND {
+                return Err(
+                    "that id is a standalone narrative report; revise it with submit_report, never submit_review"
+                        .into(),
+                );
             }
             let was = serde_json::from_str::<Target>(&existing.target)
                 .ok()
@@ -445,6 +486,102 @@ async fn submit(
     }))
 }
 
+/// Submit a standalone report without touching a worktree, Git, a provider, or
+/// a candidate. The calling session and its channel are checked again here so a
+/// detached external attachment cannot name another session's report scope.
+async fn submit_report(
+    store: &Arc<Store>,
+    manager: &Manager,
+    ctx: &CallContext,
+    args: &Value,
+) -> Result<Value, String> {
+    let session = store
+        .get_session(&ctx.session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("this session is gone")?;
+    if session.channel != ctx.channel || session.node_id != ctx.node_id {
+        return Err("this session is not attached to the requested channel on this node".into());
+    }
+    let title = str_arg(args, "title")?.trim().to_string();
+    let body = str_arg(args, "body")?.trim().to_string();
+    review::report::validate(&title, &body)?;
+    let content_hash = review::report::content_hash(&title, &body);
+
+    if let Some(id) = args
+        .get("report_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+    {
+        let report = store
+            .get_review(id)
+            .map_err(|error| error.to_string())?
+            .ok_or("no report with that id")?;
+        if report.kind != crate::store::reports::KIND {
+            return Err("report_id names a code review; use submit_review for it".into());
+        }
+        if !owns(store, ctx, &report) || report.node_id != ctx.node_id {
+            return Err("that report belongs to another session, channel, or node".into());
+        }
+        if !store
+            .resubmit_report(id, &title, &body, &content_hash)
+            .map_err(|error| error.to_string())?
+        {
+            return Err(
+                "this report is no longer awaiting a revision; call report_status before submitting again"
+                    .into(),
+            );
+        }
+        manager.publish_queue().await;
+        return Ok(json!({
+            "report_id": id,
+            "state": "new",
+            "message": "Report resubmitted for acknowledgement. It has no code or publication path.",
+        }));
+    }
+
+    let id = uuid::Uuid::now_v7().to_string();
+    let now = now_ms();
+    let report = ReviewRow {
+        id: id.clone(),
+        session_id: ctx.session_id.clone(),
+        node_id: session.node_id,
+        channel: ctx.channel.clone(),
+        kind: crate::store::reports::KIND.into(),
+        title,
+        body,
+        edited_title: None,
+        edited_body: None,
+        provider: "none".into(),
+        target: json!({ "kind": "narrative_report", "session_id": ctx.session_id }).to_string(),
+        diff: String::new(),
+        files: "[]".into(),
+        head_sha: content_hash,
+        base_ref: "none".into(),
+        added: 0,
+        removed: 0,
+        state: "new".into(),
+        verdict_reason: None,
+        publish_result: None,
+        claimed_ms: None,
+        created_ms: now,
+        created_mono_ms: 0,
+        resolved_mono_ms: None,
+        updated_ms: now,
+        checks_json: None,
+        review_session_id: None,
+        ai_verdict_json: None,
+        revision_patch: None,
+    };
+    store
+        .insert_review(&report)
+        .map_err(|error| error.to_string())?;
+    manager.publish_queue().await;
+    Ok(json!({
+        "report_id": id,
+        "state": "new",
+        "message": "Submitted for operator acknowledgement. This standalone report has no Git, code-review, or forge-publication path.",
+    }))
+}
 /// Whose review this is. An attachment ends when it goes idle and the next
 /// call attaches a new one, so a review a harness the operator runs submitted
 /// belongs to the channel's attachments rather than to one of them.
@@ -722,6 +859,61 @@ async fn verdict(
     Ok(json!({ "review_id": review_id, "recorded": true }))
 }
 
+/// Poll a narrative report without implying that it could publish anything.
+async fn report_status(
+    store: &Arc<Store>,
+    ctx: &CallContext,
+    args: &Value,
+) -> Result<Value, String> {
+    let id = str_arg(args, "report_id")?;
+    let wait = wait_secs(args);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
+
+    loop {
+        let report = store
+            .get_review(&id)
+            .map_err(|e| e.to_string())?
+            .ok_or("no report with that id")?;
+        if !owns(store, ctx, &report) || report.node_id != ctx.node_id {
+            return Err("that report belongs to another session, channel, or node".into());
+        }
+        if report.kind != crate::store::reports::KIND {
+            return Err("report_id names a code review; call review_status instead".into());
+        }
+        match report.state.as_str() {
+            crate::store::reports::ACKNOWLEDGED => {
+                return Ok(json!({
+                    "report_id": report.id,
+                    "state": "acknowledged",
+                    "note": report.verdict_reason,
+                    "message": "The operator acknowledged this report. This records receipt only; no code was published.",
+                }));
+            }
+            "revising" => {
+                return Ok(json!({
+                    "report_id": report.id,
+                    "state": "changes_requested",
+                    "notes": report.verdict_reason,
+                    "message": "The operator requested changes. Revise the narrative and call submit_report with this report_id; do not submit code for publication.",
+                }));
+            }
+            _ if tokio::time::Instant::now() >= deadline => {
+                return Ok(json!({
+                    "report_id": report.id,
+                    "state": report.state,
+                    "still_waiting": true,
+                    "waited_secs": wait,
+                    "message": format!(
+                        "Still waiting on an operator acknowledgement. The wait is capped at \
+                         {MAX_WAIT_SECS} seconds; call report_status again with the same report_id."
+                    ),
+                }));
+            }
+            _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+        }
+    }
+}
+
 async fn status(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, String> {
     let id = str_arg(args, "review_id")?;
     let wait = wait_secs(args);
@@ -735,6 +927,11 @@ async fn status(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<V
             .ok_or("no review with that id")?;
         if !owns(store, ctx, &r) {
             return Err("that review belongs to another session".into());
+        }
+        if r.kind == crate::store::reports::KIND {
+            return Err(
+                "that id is a standalone narrative report; call report_status instead".into(),
+            );
         }
         match r.state.as_str() {
             "revising" => {

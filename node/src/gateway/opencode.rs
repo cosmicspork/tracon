@@ -877,7 +877,7 @@ async fn mediate(
 
         Mediation::Terminal => {
             let granted = {
-                let policy = s.manager.policy().read().unwrap();
+                let policy = s.manager.policy().read();
                 policy
                     .decide(&PolicyRequest {
                         channel,
@@ -1111,7 +1111,7 @@ async fn mediate(
 
         Mediation::Policy(action) => {
             let decision = {
-                let policy = s.manager.policy().read().unwrap();
+                let policy = s.manager.policy().read();
                 policy.decide(&PolicyRequest {
                     channel,
                     kind: Some(API_KIND),

@@ -144,8 +144,9 @@ pub struct TestBody {
     all: bool,
 }
 
-/// A push that says nothing but "this works", so the operator can tell a
-/// subscription that landed from one the phone silently dropped.
+/// Exercise the registered subscription and report only what this node
+/// observed: the push service's response. A successful response is not proof
+/// that the worker displayed a notification or that a person saw it.
 pub async fn test(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -162,8 +163,13 @@ pub async fn test(
     let n = notify::Notification::test();
     let mut results = Vec::new();
     for r in targets {
-        let outcome = notify::deliver(s.store(), &s.cfg, &r, &n, now_ms()).await;
-        results.push(json!({ "id": r.id, "outcome": format!("{outcome:?}") }));
+        let delivered = notify::deliver(s.store(), &s.cfg, &r, &n, now_ms()).await;
+        let (outcome, service_accepted) = notify::delivery_evidence(delivered);
+        results.push(json!({
+            "id": r.id,
+            "outcome": outcome,
+            "service_accepted": service_accepted,
+        }));
     }
     Ok(Json(json!({ "sent": results })))
 }

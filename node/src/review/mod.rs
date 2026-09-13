@@ -1,13 +1,15 @@
-//! Review capture and publication.
+//! Code-review capture and standalone narrative report invariants.
 //!
-//! The agent submits an intent; the node captures the diff itself from the
-//! worktree it created, and the node publishes the approved bytes. The agent
-//! never holds a forge token and never runs the publishing CLI, so "review
-//! before publish" is a property of the system rather than an instruction the
-//! agent may forget by hour two.
+//! A code-review agent submits an intent; the node captures the diff itself
+//! from the worktree it created, then publishes approved bytes. A narrative
+//! report is a separate queue item with no Git, candidate, or publication
+//! path. The agent never holds a forge token and never runs the publishing CLI,
+//! so "review before publish" is a property of the code flow rather than an
+//! instruction the agent may forget by hour two.
 
 pub mod checks;
 pub mod publish;
+pub mod report;
 
 use std::path::{Component, Path, PathBuf};
 

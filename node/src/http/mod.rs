@@ -1,6 +1,8 @@
+pub mod admin;
 pub mod api;
 pub mod auth;
 mod mcp;
+mod policy_admin;
 pub mod preview;
 pub mod push;
 pub mod qa;
@@ -78,6 +80,44 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/manifest/{kind}/{name}",
             delete(api::delete_manifest_item),
+        )
+        .route("/api/admin/access", get(admin::access))
+        .route("/api/admin/mesh", get(admin::mesh))
+        .route(
+            "/api/admin/mesh/invitations",
+            post(admin::create_invitation),
+        )
+        .route(
+            "/api/admin/mesh/invitations/{code}",
+            get(admin::poll_invitation).delete(admin::cancel_invitation),
+        )
+        .route(
+            "/api/admin/mesh/invitations/{code}/admit",
+            post(admin::admit_invitation),
+        )
+        .route(
+            "/api/admin/mesh/members/{id}",
+            axum::routing::delete(admin::remove_member),
+        )
+        .route("/api/admin/mesh/hub-share", post(admin::share_with_hub))
+        .route("/api/admin/maintenance", get(admin::maintenance))
+        .route(
+            "/api/admin/maintenance/boundary-check",
+            post(admin::boundary_check),
+        )
+        .route("/api/admin/maintenance/restart", post(admin::restart))
+        .route("/api/admin/maintenance/install", post(admin::install))
+        .route("/api/admin/maintenance/uninstall", post(admin::uninstall))
+        .route("/api/admin/policy", get(policy_admin::status))
+        .route(
+            "/api/admin/policy/initialize",
+            post(policy_admin::initialize),
+        )
+        .route("/api/admin/policy/preview", post(policy_admin::preview))
+        .route("/api/admin/policy/apply", post(policy_admin::apply))
+        .route(
+            "/api/admin/policy/rollouts/{id}/retry",
+            post(policy_admin::retry),
         )
         .route(
             "/api/authority/grants",
@@ -199,12 +239,6 @@ pub fn router(state: AppState) -> Router {
             "/api/channels",
             get(api::list_channels).post(api::create_channel),
         )
-        .route("/api/mesh/invite", post(api::open_invite))
-        .route(
-            "/api/mesh/invite/{code}",
-            get(api::poll_invite).delete(api::cancel_invite),
-        )
-        .route("/api/mesh/invite/{code}/admit", post(api::admit_invite))
         .route("/api/repos/recent", get(api::recent_repos))
         .route("/api/repos/clone", post(api::clone_repo))
         .route(
@@ -289,6 +323,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/reviews/{id}/file", get(api::review_file))
         .route("/api/reviews/{id}/verdict", post(api::decide_review))
         .route("/api/reviews/{id}/release", post(api::release_review))
+        .route("/api/evidence/candidates", get(qa::list_candidates))
         .route(
             "/api/evidence/candidates/by-commit/{head_sha}",
             get(api::candidate_by_commit),
@@ -430,7 +465,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     }
     // A bundle that cannot be verified yields no rules, and no rules means every
     // request is asked. The failure mode of broken policy is more questions.
-    let policy = Arc::new(std::sync::RwLock::new(
+    let policy = Arc::new(parking_lot::RwLock::new(
         match crate::policy::bundle::load() {
             Ok(p) => {
                 tracing::info!(rules = p.rules.len(), "policy bundle verified");
@@ -843,6 +878,7 @@ pub(crate) async fn verify_node(
         .and_then(|n| n.models_json.clone())
         .and_then(|j| serde_json::from_str(&j).ok())
         .unwrap_or_default();
+    let policy = crate::policy::bundle::current().ok();
 
     let row = NodeRow {
         id: id.to_string(),
@@ -853,6 +889,11 @@ pub(crate) async fn verify_node(
         last_seen_ms: Some(now_ms()),
         reachable: 1,
         providers_json: None,
+        app_version: Some(env!("CARGO_PKG_VERSION").into()),
+        wire_contract: Some(proto::CONTRACT_VERSION),
+        policy_identity: policy.as_ref().map(|bundle| bundle.pubkey_hex.clone()),
+        policy_sha256: policy.as_ref().map(|bundle| bundle.sha256.clone()),
+        policy_receipt_v1: Some(true),
         name: cfg.node_name.clone(),
         state: if ready { "ready" } else { "refused" }.into(),
         failed_check: failed.as_ref().map(|f| f.id.as_str().to_string()),

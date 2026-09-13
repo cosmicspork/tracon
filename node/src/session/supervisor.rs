@@ -124,7 +124,7 @@ pub struct Supervisor {
     /// left running holds the worktree and the credential mounts open.
     runner: Arc<dyn Runner>,
     container: String,
-    policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
+    policy: Arc<parking_lot::RwLock<crate::policy::Policy>>,
     channel: String,
     /// Set by `Command::EndAfterTurn` while a turn is running.
     end_after_turn: Option<EndReason>,
@@ -168,7 +168,7 @@ impl Supervisor {
         self_tx: mpsc::Sender<Command>,
         runner: Arc<dyn Runner>,
         container: String,
-        policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
+        policy: Arc<parking_lot::RwLock<crate::policy::Policy>>,
         channel: String,
     ) -> Self {
         Self {
@@ -780,7 +780,7 @@ impl Supervisor {
             let _ = reply.send(PermissionReply::Cancelled);
             return;
         }
-        let decision = self.policy.read().unwrap().decide(&crate::policy::Request {
+        let decision = self.policy.read().decide(&crate::policy::Request {
             channel: &self.channel,
             kind: request.kind.as_deref(),
             title: &request.title,

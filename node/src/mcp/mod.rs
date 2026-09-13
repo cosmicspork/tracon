@@ -55,7 +55,7 @@ pub struct Tools {
     /// bundle that answers the harness's own permission requests answers
     /// what the node will do on its behalf. A denied call returns the rule's
     /// reason; one the policy does not cover is put to the operator.
-    pub policy: Arc<std::sync::RwLock<Policy>>,
+    pub policy: Arc<parking_lot::RwLock<Policy>>,
     /// One client for the forge and tracker tools. Not proxied: the node
     /// reaches those hosts directly; the harness reaches only the node.
     pub http: reqwest::Client,
@@ -232,7 +232,7 @@ impl Tools {
             let (action, target, revision) = consequential(name, args)
                 .expect("consequential action record has canonical arguments");
             let summary = summarize(name, args);
-            let policy = self.policy.read().unwrap();
+            let policy = self.policy.read();
             let tool = policy.decide(&Request {
                 channel: &ctx.channel,
                 kind: Some(TOOL_KIND),
@@ -308,7 +308,11 @@ impl Tools {
                 )
                 .await
             }
-            review::SUBMIT | review::STATUS | review::VERDICT => {
+            review::SUBMIT
+            | review::STATUS
+            | review::SUBMIT_REPORT
+            | review::REPORT_STATUS
+            | review::VERDICT => {
                 let access = self
                     .session
                     .get()
@@ -391,6 +395,9 @@ impl Tools {
             .get_review(review_id)
             .map_err(|e| e.to_string())?
             .ok_or("review disappeared after capture")?;
+        if review.kind == crate::store::reports::KIND {
+            return Err("standalone narrative reports have no automatic publication path".into());
+        }
         // The revision the authority decision below is computed against.
         // Authority is granted for a revision, so the publication is bound to
         // that same one: a resubmission arriving while this runs does not
@@ -418,7 +425,7 @@ impl Tools {
         });
         let decision = crate::authority::decide(
             access.store.as_ref(),
-            &self.policy.read().unwrap(),
+            &self.policy.read(),
             &crate::authority::AuthorityQuery {
                 channel: &ctx.channel,
                 session_id: &ctx.session_id,
@@ -529,7 +536,7 @@ impl Tools {
         let recheck = || {
             let current = crate::authority::decide(
                 access.store.as_ref(),
-                &self.policy.read().unwrap(),
+                &self.policy.read(),
                 &crate::authority::AuthorityQuery {
                     channel: &ctx.channel,
                     session_id: &ctx.session_id,
@@ -743,7 +750,7 @@ impl Tools {
     }
 
     fn decide(&self, ctx: &CallContext, name: &str, summary: &str, args: &Value) -> Decision {
-        let tool = self.policy.read().unwrap().decide(&Request {
+        let tool = self.policy.read().decide(&Request {
             channel: &ctx.channel,
             kind: Some(TOOL_KIND),
             title: name,
@@ -763,7 +770,7 @@ impl Tools {
             };
             return crate::authority::decide(
                 access.store.as_ref(),
-                &self.policy.read().unwrap(),
+                &self.policy.read(),
                 &crate::authority::AuthorityQuery {
                     channel: &ctx.channel,
                     session_id: &ctx.session_id,
@@ -789,7 +796,7 @@ impl Tools {
         args: &Value,
     ) -> Result<(), String> {
         let summary = summarize(name, args);
-        let decision = self.policy.read().unwrap().decide(&Request {
+        let decision = self.policy.read().decide(&Request {
             channel: &ctx.channel,
             kind: Some(TOOL_KIND),
             title: name,
@@ -822,7 +829,7 @@ impl Tools {
                 .ok_or("authority requires a session")?
                 .store
                 .as_ref(),
-            &self.policy.read().unwrap(),
+            &self.policy.read(),
             &crate::authority::AuthorityQuery {
                 channel: &ctx.channel,
                 session_id: &ctx.session_id,
@@ -856,7 +863,7 @@ impl Tools {
         let access = self.session.get().ok_or("authority requires a session")?;
         let decision = crate::authority::decide(
             access.store.as_ref(),
-            &self.policy.read().unwrap(),
+            &self.policy.read(),
             &crate::authority::AuthorityQuery {
                 channel: &ctx.channel,
                 session_id: &ctx.session_id,
@@ -1249,17 +1256,17 @@ mod tests {
     #[tokio::test]
     async fn a_deny_rule_can_name_a_profile() {
         let mut t = tools(PROFILES);
-        t.policy = Arc::new(std::sync::RwLock::new(
+        t.policy = Arc::new(parking_lot::RwLock::new(
             toml::from_str(
                 r#"
-                version = 9
-                [[rule]]
-                id = "no-production"
-                verdict = "deny"
-                reason = "Production is read by hand."
-                kinds = ["tool"]
-                matches = ["profile=prd"]
-                "#,
+            version = 9
+            [[rule]]
+            id = "no-production"
+            verdict = "deny"
+            reason = "Production is read by hand."
+            kinds = ["tool"]
+            matches = ["profile=prd"]
+            "#,
             )
             .unwrap(),
         ));
@@ -1375,17 +1382,17 @@ mod tests {
     #[tokio::test]
     async fn a_tool_the_policy_denies_is_refused_with_the_reason() {
         let mut t = tools(STORE);
-        t.policy = Arc::new(std::sync::RwLock::new(
+        t.policy = Arc::new(parking_lot::RwLock::new(
             toml::from_str(
                 r#"
-                version = 9
-                [[rule]]
-                id = "no-warehouse"
-                verdict = "deny"
-                reason = "The warehouse is closed today."
-                kinds = ["tool"]
-                matches = ["query"]
-                "#,
+            version = 9
+            [[rule]]
+            id = "no-warehouse"
+            verdict = "deny"
+            reason = "The warehouse is closed today."
+            kinds = ["tool"]
+            matches = ["query"]
+            "#,
             )
             .unwrap(),
         ));

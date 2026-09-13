@@ -1,7 +1,6 @@
 <script lang="ts">
-  // Pushes from this node to this browser, and which channels send them.
-  // Lives on the self-node card: a subscription is a this-node, this-browser
-  // fact, and the phone is exactly where the toggle matters.
+  // A subscription belongs to this browser and the node serving this interface.
+  // Shared channel delivery belongs in Settings > Channels, never in this device list.
   import { onMount } from 'svelte'
   import { isTauri } from '@tauri-apps/api/core'
   import { api } from '../lib/api'
@@ -11,24 +10,16 @@
   import { store } from '../lib/store.svelte'
   import type { PushDevice } from '../lib/types'
 
+
   let devices = $state<PushDevice[]>([])
   let on = $state(false)
   let busy = $state(false)
   let note = $state('')
+  let testNote = $state('')
   const supported = push.supported()
   const needsInstall = push.needsInstall()
   const desktop = isTauri()
-  const channels = $derived(
-    store.channels.filter((c) => !c.archived && c.nodes.includes(store.node?.id ?? '')),
-  )
-
-  function notifies(bindings: Record<string, unknown>): boolean {
-    const n = (bindings.notify ?? {}) as Record<string, unknown>
-    if (typeof n.enabled === 'boolean') return n.enabled
-    // The Phase 6 shape: a named bridge meant push, the tray meant not the phone.
-    if (typeof n.sink === 'string') return n.sink !== 'tray'
-    return true
-  }
+  const servingNode = $derived(store.node?.name ?? 'the serving node')
 
   async function refresh() {
     try {
@@ -40,12 +31,12 @@
     }
   }
 
-  async function act(f: () => Promise<unknown>, done = '') {
+  async function act(f: () => Promise<unknown>, done: string | (() => string) = '') {
     busy = true
     note = ''
     try {
       await f()
-      note = done
+      note = typeof done === 'function' ? done() : done
     } catch (e) {
       note = e instanceof Error ? e.message : String(e)
     } finally {
@@ -54,20 +45,18 @@
     }
   }
 
-  const toggle = () => act(() => (on ? push.disable() : push.enable()), on ? '' : 'On. Send a test to be sure.')
+  const toggle = () => act(() => (on ? push.disable() : push.enable()), on ? '' : 'On. A test reports push-service acceptance, not device display.')
   const test = () =>
     act(async () => {
-      const r = await api.testPush()
-      if (!r.sent.length) throw new Error('no device registered for this login')
-      const bad = r.sent.filter((s) => s.outcome !== 'Sent')
-      if (bad.length) throw new Error(`push service answered ${bad.map((b) => b.outcome).join(', ')}`)
-    }, 'Sent. It should have buzzed.')
+      const attempts = (await api.testPush()).sent
+      const accepted = attempts.filter((attempt) => attempt.service_accepted)
+      if (!accepted.length) {
+        throw new Error(`The push service did not accept a request: ${attempts.map((attempt) => attempt.outcome).join(', ') || 'no registered devices'}`)
+      }
+      const refused = attempts.length - accepted.length
+      testNote = `Push service accepted ${accepted.length} request${accepted.length === 1 ? '' : 's'}${refused ? `; ${refused} were not accepted` : ''}. Phone display and person receipt are not confirmed; check the device directly.`
+    }, () => testNote)
   const forget = (d: PushDevice) => act(() => api.deletePushSubscription(d.id))
-  const setChannel = (name: string, v: boolean) =>
-    act(async () => {
-      await api.putChannelBindings(name, { 'notify.enabled': v })
-      await store.refetch()
-    })
 
   onMount(() => {
     void refresh()
@@ -76,16 +65,16 @@
 
 <div class="notif">
   <div class="row">
-    <span class="k">Notifications</span>
+    <span class="k">This device</span>
     <span class="v">
       {#if desktop}
-        <span class="dim">The desktop app notifies you from its tray.</span>
+        <span class="dim">The desktop app uses this device’s tray. Browser push subscriptions are managed by the serving node.</span>
       {:else if !supported}
-        <span class="dim">Not available in this browser.{#if needsInstall} Add tracon to the Home Screen first.{/if}</span>
+        <span class="dim">Push is not available in this browser.{#if needsInstall} On iOS, add tracon to the Home Screen first.{/if}</span>
       {:else}
         <label class="tgl">
           <input type="checkbox" checked={on} disabled={busy} onchange={toggle} />
-          Push to this device
+          Push from {servingNode} to this device
         </label>
         {#if on}
           <button class="lnk" onclick={test} disabled={busy}>Send a test</button>
@@ -94,33 +83,15 @@
       {#if note}<span class="note">{note}</span>{/if}
     </span>
   </div>
-  {#if channels.length}
-    <div class="row">
-      <span class="k">Channels</span>
-      <span class="v chans">
-        {#each channels as c (c.name)}
-          <label class="tgl">
-            <input
-              type="checkbox"
-              checked={notifies(c.bindings)}
-              disabled={busy}
-              onchange={(e) => setChannel(c.name, (e.currentTarget as HTMLInputElement).checked)}
-            />
-            {c.name}
-          </label>
-        {/each}
-      </span>
-    </div>
-  {/if}
-  {#if devices.length}
-    <div class="row">
-      <span class="k">Devices</span>
+  <div class="row">
+      <span class="k">Registered devices</span>
       <span class="v devs">
+        <small>These subscriptions are registered on {servingNode}. Forgetting one stops only that device’s subscription; it does not change any shared channel.</small>
         {#each devices as d (d.id)}
           <span class="dev" class:mine={d.mine}>
             <span class="ua">{d.user_agent ?? 'unknown browser'}{#if d.mine} · this browser{:else if d.local} · this machine{/if}</span>
             <span class="dim">
-              {#if d.last_ok_ms}last push {formatAge(d.last_ok_ms, clock.now)} ago{:else}never pushed{/if}{#if d.fail_count}
+              {#if d.last_ok_ms}service accepted {formatAge(d.last_ok_ms, clock.now)} ago{:else}no accepted push yet{/if}{#if d.fail_count}
                 · {d.fail_count} failing{/if}
             </span>
             <button class="lnk d" onclick={() => forget(d)} disabled={busy}>Forget</button>
@@ -128,18 +99,13 @@
         {/each}
       </span>
     </div>
-  {/if}
 </div>
 
 <style>
   .notif {
-    grid-column: 2 / -1;
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    margin-top: 8px;
-    padding-top: 8px;
-    border-top: 1px solid var(--rule);
+    gap: 10px;
     font: 12.5px var(--mono);
     color: var(--ink2);
   }
@@ -159,7 +125,6 @@
     gap: 6px 14px;
     min-width: 0;
   }
-  .chans,
   .devs {
     flex-direction: column;
     align-items: flex-start;
@@ -201,5 +166,11 @@
   .lnk:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+  @media (max-width: 700px) {
+    .row {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 4px;
+    }
   }
 </style>

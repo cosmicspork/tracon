@@ -451,7 +451,7 @@ async fn a_pty_needs_an_explicitly_granted_terminal_capability() {
 
     // Granted, the same call is forwarded — and the ticket exchange the
     // WebSocket needs is still Gate D's.
-    rig.manager.policy().write().unwrap().rules.push(Rule {
+    rig.manager.policy().write().rules.push(Rule {
         id: "terminal-for-this-test".into(),
         verdict: Verdict::Allow,
         reason: "the operator granted a terminal on this channel".into(),

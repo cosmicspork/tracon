@@ -396,6 +396,31 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// The current item with its original synchronization stamp. Only return
+    /// this node's own write: a forwarded Create cannot impersonate another site.
+    pub fn work_item_change(&self, site: &str, channel: &str, id: &str) -> Result<Option<Change>> {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT * FROM work_item WHERE id=?1 AND channel=?2 AND site=?3 AND deleted=0",
+            params![id, channel, site],
+            |row| {
+                let item = work_from_row(row)?;
+                Ok(Change {
+                    table: "work_item".into(),
+                    op: ChangeOp::Upsert,
+                    id: item.id.clone(),
+                    site: site.to_string(),
+                    site_seq: row.get("site_seq")?,
+                    hlc_ms: row.get("hlc_ms")?,
+                    hlc_ctr: row.get::<_, i64>("hlc_ctr")? as u32,
+                    row: work_change_row(&item),
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// Every live item on a channel (optionally one project), unordered.
     pub fn work_list(&self, channel: &str, project_id: Option<&str>) -> Result<Vec<WorkItem>> {
         let conn = self.conn.lock().unwrap();

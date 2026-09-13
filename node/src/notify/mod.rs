@@ -64,6 +64,7 @@ impl Default for Options {
 pub enum Kind {
     Permission,
     Review,
+    Report,
     Promotion,
     Operator,
 }
@@ -73,6 +74,7 @@ impl Kind {
         match self {
             Kind::Permission => "perm",
             Kind::Review => "review",
+            Kind::Report => "report",
             Kind::Promotion => "promo",
             Kind::Operator => "operator",
         }
@@ -85,6 +87,8 @@ impl Kind {
             (Kind::Permission, _) => "approvals",
             (Kind::Review, 1) => "review",
             (Kind::Review, _) => "reviews",
+            (Kind::Report, 1) => "narrative report",
+            (Kind::Report, _) => "narrative reports",
             (Kind::Promotion, 1) => "memory batch",
             (Kind::Promotion, _) => "memory batches",
             (Kind::Operator, 1) => "operator notification",
@@ -122,11 +126,11 @@ impl Notification {
         })
     }
 
-    /// An approval is worth nothing after it expires; a review keeps.
+    /// An approval is worth nothing after it expires; reports and reviews keep.
     fn ttl_secs(&self) -> u32 {
         match self.kind {
             Kind::Permission | Kind::Operator => TTL_ITEM_SECS,
-            Kind::Review | Kind::Promotion => TTL_REVIEW_SECS,
+            Kind::Review | Kind::Report | Kind::Promotion => TTL_REVIEW_SECS,
         }
     }
 
@@ -139,6 +143,17 @@ impl Notification {
             path: "/".into(),
             tag: "tracon-test".into(),
         }
+    }
+}
+/// Exact evidence available after attempting a push. `service_accepted` means
+/// only a 2xx response from the push service; neither value claims that a
+/// service worker displayed the notification or that a person saw it.
+pub fn delivery_evidence(outcome: webpush::Outcome) -> (String, bool) {
+    match outcome {
+        webpush::Outcome::Sent => ("accepted_by_push_service".into(), true),
+        webpush::Outcome::Gone => ("subscription_gone".into(), false),
+        webpush::Outcome::Refused(status) => (format!("push_service_refused:{status}"), false),
+        webpush::Outcome::Unreachable => ("push_service_unreachable".into(), false),
     }
 }
 
@@ -321,12 +336,27 @@ impl Notifier {
             // it and walked away: that returns it to `new` too.
             let fresh = r.state == "new" && matches!(was, None | Some("revising"));
             if fresh && self.gate.pushes(&r.channel) {
+                let (kind, title, body, tag) = if r.kind == crate::store::reports::KIND {
+                    (
+                        Kind::Report,
+                        format!("Report — {}", r.title),
+                        format!("Narrative report on {} · no code publication", r.channel),
+                        format!("tracon-report-{}", r.id),
+                    )
+                } else {
+                    (
+                        Kind::Review,
+                        format!("Review — {}", r.title),
+                        format!("+{} −{}", r.added, r.removed),
+                        format!("tracon-review-{}", r.id),
+                    )
+                };
                 self.pending.push(Notification {
-                    kind: Kind::Review,
-                    title: format!("Review — {}", r.title),
-                    body: format!("+{} −{}", r.added, r.removed),
+                    kind,
+                    title,
+                    body,
                     path: format!("/reviews/{}", r.id),
-                    tag: format!("tracon-review-{}", r.id),
+                    tag,
                 });
             }
         }
@@ -519,9 +549,9 @@ pub async fn send_operator(
         .into_iter()
         .filter(|d| device_ids.is_empty() || device_ids.contains(&d.id))
     {
-        let outcome = deliver(store, cfg, &device, &notification, now_ms()).await;
-        let _ =
-            store.record_notification_attempt(notification_id, &device.id, &format!("{outcome:?}"));
+        let delivered = deliver(store, cfg, &device, &notification, now_ms()).await;
+        let (outcome, _) = delivery_evidence(delivered);
+        let _ = store.record_notification_attempt(notification_id, &device.id, &outcome);
     }
     store
         .notification_attempts(notification_id)

@@ -23,6 +23,7 @@
   let sameHostBrowser = $state(false)
 
   const isSelf = $derived(nodeId === store.node?.id)
+  const nodeName = $derived(store.nodes.find((node) => node.id === nodeId)?.name ?? nodeId.slice(0, 8))
   const mayClaimBrowser = $derived(isSelf && !managedLocal && browserCanClaimNode())
   const shownState = $derived(justResult && p.state === 'disconnected' ? 'pending' : p.state)
   const shownUrl = $derived(p.url ?? justResult?.url ?? null)
@@ -110,12 +111,19 @@
     >
   </span>
   <span class="pst">
+    <span class="scope">
+      {#if isSelf}
+        Connection and credential state are held by the node serving this page.
+      {:else}
+        Remote node {nodeName}: commands are sealed to it. Its provider credential stays there and this browser cannot claim its local callback.
+      {/if}
+    </span>
     {#if p.state === 'connected'}
       <span class="l"><span class="chip">connected</span>{#if p.channels.length} · {p.channels.join(', ')}{/if}{#if expiry()} · {expiry()}{/if}</span>
       {#if isSelf}
         <span><button class="lnk d" onclick={disconnect} disabled={busy}>Disconnect</button></span>
       {:else}
-        <span class="l off">Manage on that node.</span>
+        <span><button class="lnk d" onclick={disconnect} disabled={busy}>Disconnect on {nodeName}</button></span>
       {/if}
     {:else if shownState === 'pending'}
       {#if shownUrl}
@@ -164,13 +172,15 @@
         {#if mayClaimBrowser}
           <label class="local-choice">
             <input type="checkbox" bind:checked={sameHostBrowser} />
-            This browser is on the node
+            This browser is physically on the serving node; use its local callback
           </label>
         {/if}
         <span><button class="lnk" onclick={connect} disabled={busy}>{p.state === 'failed' ? 'Try again' : 'Connect'}</button></span>
+      {:else if isSelf}
+        <span>API key only. Add it under <a class="lnk" href="/settings#connections">serving-node credentials</a>.</span>
       {:else}
-        <span>API key only. Add it in <a class="lnk" href="/settings#credentials">Settings</a>.</span>
-      {/if}
+        <span>API key only. Add the key while managing {nodeName}; it never crosses the mesh to this browser.</span>
+    {/if}
     {/if}
     {#if error}<span class="l bad" role="alert">{error}</span>{/if}
   </span>
@@ -212,6 +222,11 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .scope {
+    color: var(--dim);
+    font: 11.5px var(--mono);
+    white-space: normal;
   }
   .pst {
     display: flex;

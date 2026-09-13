@@ -68,17 +68,14 @@
   const nav = $derived(
     settings
       ? 'settings'
-      : router.path === '/nodes' || enroll || router.path === '/metrics'
+      : router.path === '/nodes' || enroll
         ? 'nodes'
-      : router.path.startsWith('/qa')
-        ? 'qa'
         : router.path.startsWith('/docs')
           ? 'docs'
-          : router.path.startsWith('/work')
+          : router.path.startsWith('/work') || router.path.startsWith('/sessions') ||
+              router.path.startsWith('/qa') || router.path === '/metrics'
             ? 'work'
-            : router.path === '/sessions'
-              ? 'sessions'
-              : 'home'
+            : 'home'
   )
   const hubDown = $derived(store.mesh?.hub.state === 'unreachable')
   /** No hub is a thing to do something about, so it links to doing it. */
@@ -119,10 +116,6 @@
       <svg viewBox="0 0 24 24"><path d="M5 7h3M5 12h3M5 17h3" /><path d="M11 7h8M11 12h8M11 17h5" /></svg>
       <span class="lbl">Work</span>
     </a>
-    <a href="/qa" class:on={nav === 'qa'}>
-      <svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z" /><path d="M8 9h8M8 13h5" /><path d="M16.5 17.5l2 2 3.5-4" /></svg>
-      <span class="lbl">QA</span>
-    </a>
     <a href="/docs" class:on={nav === 'docs'}>
       <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
       <span class="lbl">Documents</span>
@@ -150,20 +143,33 @@
   </nav>
 
   <main>
+    {#if nav === 'work'}
+      <nav class="work-nav" aria-label="Work navigation">
+        <a href="/work" class:on={router.path.startsWith('/work')}>Tasks</a>
+        <a href="/sessions" class:on={router.path.startsWith('/sessions')}>Sessions</a>
+        <a href="/qa" class:on={router.path.startsWith('/qa')}>Evidence</a>
+        <a href="/metrics" class:on={router.path === '/metrics'}>Usage</a>
+      </nav>
+    {/if}
     {#if !store.connected}
-      <div class="banner crit">node unreachable <b>· reconnecting; state lives on the node, nothing typed is lost</b></div>
+      <div class="banner crit">Connection lost <b>· reconnecting. Saved work remains on the node; keep this page open to preserve unsent text.</b></div>
     {/if}
     {#if store.node?.state === 'refused'}
       <div class="banner crit">
-        refusing to run harnesses <b>· {store.node.failed_check}: {store.node.failed_detail}</b>
-        <i>{remedy(store.node.failed_check)}</i>
+        Local tasks unavailable <b>· this node failed its isolation check.</b>
+        <a href="/settings#maintenance">Review setup</a>
+        <details>
+          <summary>Technical details</summary>
+          <p>{store.node.failed_check}: {store.node.failed_detail}</p>
+          <p>{remedy(store.node.failed_check)}</p>
+        </details>
       </div>
     {/if}
     <!-- Degraded is a state, not an error: quiet, persistent, not dismissable. -->
     {#if hubDown}
-      <div class="banner dim">hub unreachable <b>· local sessions continue; approvals will be delivered when it returns; search is text-only</b></div>
+      <div class="banner dim">Hub unavailable <b>· local sessions continue. Queued shared updates are not yet confirmed on peers.</b></div>
     {:else if store.reconnected !== null}
-      <div class="banner ok">hub reconnected <b>· {store.reconnected} item{store.reconnected === 1 ? '' : 's'} delivered</b></div>
+      <div class="banner ok">Hub reconnected <b>· {store.reconnected} queued update{store.reconnected === 1 ? '' : 's'} handed to the hub</b></div>
     {/if}
     {#if reviewId}
       <Approval id={reviewId} />
@@ -171,7 +177,7 @@
       <Promotion id={promotionId} />
     {:else if sessionId}
       <Session id={sessionId} />
-    {:else if nav === 'sessions'}
+    {:else if router.path === '/sessions'}
       <Sessions />
     {:else if enroll}
       <Enroll />
@@ -181,9 +187,9 @@
       <Nodes />
     {:else if workId}
       <WorkItem id={workId} />
-    {:else if nav === 'work'}
+    {:else if router.path === '/work'}
       <Work />
-    {:else if nav === 'qa'}
+    {:else if router.path === '/qa'}
       <Qa />
     {:else if docRef}
       <Doc channel={docRef[1]} slug={docRef[2]} edit={docEdit} />
@@ -196,8 +202,7 @@
     {/if}
   </main>
 
-  <!-- The phone navigates from the bottom, where a thumb is. Capability is
-       gated by surface, not by width: this is the same five destinations. -->
+  <!-- Bottom tabs keep every primary destination within thumb reach. -->
   <nav class="tabs">
     <a href="/" class:on={nav === 'home'}>
       <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
@@ -210,11 +215,7 @@
     </a>
     <a href="/docs" class:on={nav === 'docs'}>
       <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
-      <span>Docs</span>
-    </a>
-    <a href="/qa" class:on={nav === 'qa'}>
-      <svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z" /><path d="M8 9h8M8 13h5" /><path d="M16.5 17.5l2 2 3.5-4" /></svg>
-      <span>QA</span>
+      <span>Documents</span>
     </a>
     <a href="/nodes" class:on={nav === 'nodes'}>
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14.5v2.5" /></svg>
@@ -222,7 +223,7 @@
     </a>
     <a href="/settings" class:on={nav === 'settings'}>
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" /></svg>
-      <span>Setup</span>
+      <span>Settings</span>
     </a>
   </nav>
 </div>
@@ -257,14 +258,18 @@
   main { padding: 18px 22px 22px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
   /* Bottom tabs are the phone's navigation; the rail is the desktop's. */
   .tabs { display: none; }
+  .work-nav { display: flex; flex-wrap: wrap; gap: 4px; padding-bottom: 10px; border-bottom: 1px solid var(--rule); }
+  .work-nav a { display: inline-flex; align-items: center; min-height: 36px; padding: 6px 12px; border-radius: 4px; color: var(--ink2); text-decoration: none; font-weight: 500; }
+  .work-nav a.on { color: var(--ink); background: var(--s2); }
 
   @media (max-width: 700px) {
     .shell, .shell.narrow { grid-template-columns: minmax(0, 1fr); }
     .rail { display: none; }
     main { padding: 14px 12px calc(72px + env(safe-area-inset-bottom)); }
+    .work-nav a { min-height: 44px; }
     .tabs {
       display: grid;
-      grid-template-columns: repeat(6, 1fr);
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       position: fixed;
       inset: auto 0 0 0;
       background: var(--s1);
@@ -277,10 +282,11 @@
       flex-direction: column;
       align-items: center;
       gap: 3px;
-      padding: 9px 0 11px;
+      min-height: 56px;
+      padding: 6px 0 7px;
       color: var(--dim);
       text-decoration: none;
-      font: 500 11px var(--sans);
+      font: 500 11px/1.2 var(--sans);
       position: relative;
     }
     .tabs a.on { color: var(--ink); box-shadow: inset 0 2px 0 var(--acc); }

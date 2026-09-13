@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use rusqlite::{params, OptionalExtension, Row};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -240,6 +240,104 @@ pub struct CandidateEvidence {
     pub demonstrations: Vec<DemonstrationView>,
 }
 
+/// Pagination position for candidate evidence, ordered newest-first.
+///
+/// The id breaks ties when two candidates were captured in the same
+/// millisecond, so advancing a page neither repeats nor skips persisted rows.
+#[derive(Debug, Clone)]
+pub struct CandidateCursor {
+    pub captured_ms: i64,
+    pub id: String,
+}
+
+/// Bounded browse filters over persisted candidate evidence. Every relation is
+/// recorded by the node: a candidate's owner session, a review revision, or a
+/// work item linked through one of those records.
+#[derive(Debug, Clone, Default)]
+pub struct CandidateListFilter {
+    pub query: Option<String>,
+    pub channel: Option<String>,
+    pub session_id: Option<String>,
+    pub review_id: Option<String>,
+    pub work_item_id: Option<String>,
+    pub before: Option<CandidateCursor>,
+    pub limit: usize,
+}
+
+/// Candidate pages remain bounded even when one commit was resubmitted against
+/// many work items or reviews. An extra SQL row tells callers the links were
+/// truncated instead of silently allocating an unbounded response.
+const CANDIDATE_RELATION_LIMIT: usize = 12;
+
+/// A live work item directly related to a candidate. Removed items are left
+/// absent rather than returning a dead link.
+#[derive(Debug, Clone, Serialize)]
+pub struct CandidateWorkLink {
+    pub id: String,
+    pub title: String,
+    pub state: String,
+}
+
+/// A review whose persisted revision names this exact candidate.
+#[derive(Debug, Clone, Serialize)]
+pub struct CandidateReviewLink {
+    pub id: String,
+    pub title: String,
+    pub state: String,
+}
+
+/// Public candidate identity safe to browse. Capture provenance remains on the
+/// detailed evidence endpoint; it is not needed to choose a candidate.
+#[derive(Debug, Clone, Serialize)]
+pub struct CandidateSummary {
+    pub id: String,
+    pub head_sha: String,
+    pub channel: String,
+    pub owner_session_id: String,
+    /// The node that answered this browse page. Filled at the HTTP boundary,
+    /// never inferred from a candidate id shared across independent nodes.
+    pub owner_node_id: Option<String>,
+    pub source_kind: String,
+    pub captured_ms: i64,
+}
+
+impl From<&CandidateRow> for CandidateSummary {
+    fn from(candidate: &CandidateRow) -> Self {
+        Self {
+            id: candidate.id.clone(),
+            head_sha: candidate.head_sha.clone(),
+            channel: candidate.channel.clone(),
+            owner_session_id: candidate.owner_session_id.clone(),
+            owner_node_id: None,
+            source_kind: candidate.source_kind.clone(),
+            captured_ms: candidate.captured_ms,
+        }
+    }
+}
+
+/// One candidate and the task/review records that actually reference it.
+#[derive(Debug, Clone, Serialize)]
+pub struct CandidateListItem {
+    pub candidate: CandidateSummary,
+    pub work_items: Vec<CandidateWorkLink>,
+    pub more_work_items: bool,
+    pub reviews: Vec<CandidateReviewLink>,
+    pub more_reviews: bool,
+}
+
+fn like_pattern(query: &str) -> String {
+    let mut pattern = String::with_capacity(query.len() + 2);
+    pattern.push('%');
+    for character in query.chars() {
+        if matches!(character, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    pattern
+}
+
 impl Store {
     pub fn insert_candidate(&self, candidate: &CandidateRow) -> Result<bool> {
         let conn = self
@@ -373,6 +471,184 @@ impl Store {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    /// Browse persisted candidate evidence newest-first. The SQL only joins
+    /// relationships the node recorded: it never derives a task or review
+    /// from a mutable path, commit message, or client-provided label.
+    pub fn list_candidates(&self, filter: &CandidateListFilter) -> Result<Vec<CandidateListItem>> {
+        if filter.limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        let mut clauses = Vec::new();
+        let mut values = Vec::<SqlValue>::new();
+
+        if let Some(channel) = &filter.channel {
+            clauses.push("c.channel=?");
+            values.push(SqlValue::Text(channel.clone()));
+        }
+        if let Some(query) = &filter.query {
+            let pattern = like_pattern(query);
+            clauses.push(
+                r#"(
+                    EXISTS (
+                        SELECT 1
+                        FROM review_revision rr
+                        JOIN review r ON r.id=rr.review_id
+                        WHERE rr.candidate_id=c.id
+                          AND (COALESCE(r.edited_title, r.title) LIKE ? ESCAPE '\'
+                               OR rr.title LIKE ? ESCAPE '\')
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM session s
+                        JOIN work_item w ON w.id=s.work_item_id AND w.deleted=0
+                        WHERE s.id=c.owner_session_id AND w.title LIKE ? ESCAPE '\'
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM review_revision rr
+                        WHERE rr.candidate_id=c.id
+                          AND rr.requirements_title LIKE ? ESCAPE '\'
+                    )
+                )"#,
+            );
+            for _ in 0..4 {
+                values.push(SqlValue::Text(pattern.clone()));
+            }
+        }
+        if let Some(session_id) = &filter.session_id {
+            clauses.push(
+                "(
+                    c.owner_session_id=?
+                    OR EXISTS (
+                        SELECT 1
+                        FROM review_revision rr
+                        JOIN review r ON r.id=rr.review_id
+                        WHERE rr.candidate_id=c.id
+                          AND (r.session_id=? OR r.review_session_id=?)
+                    )
+                )",
+            );
+            values.push(SqlValue::Text(session_id.clone()));
+            values.push(SqlValue::Text(session_id.clone()));
+            values.push(SqlValue::Text(session_id.clone()));
+        }
+        if let Some(review_id) = &filter.review_id {
+            clauses.push(
+                "EXISTS (
+                    SELECT 1 FROM review_revision rr
+                    WHERE rr.candidate_id=c.id AND rr.review_id=?
+                )",
+            );
+            values.push(SqlValue::Text(review_id.clone()));
+        }
+        if let Some(work_item_id) = &filter.work_item_id {
+            clauses.push(
+                "(
+                    EXISTS (
+                        SELECT 1 FROM session s
+                        WHERE s.id=c.owner_session_id AND s.work_item_id=?
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM review_revision rr
+                        WHERE rr.candidate_id=c.id AND rr.requirements_work_item_id=?
+                    )
+                )",
+            );
+            values.push(SqlValue::Text(work_item_id.clone()));
+            values.push(SqlValue::Text(work_item_id.clone()));
+        }
+        if let Some(before) = &filter.before {
+            clauses.push("(c.captured_ms < ? OR (c.captured_ms = ? AND c.id < ?))");
+            values.push(SqlValue::Integer(before.captured_ms));
+            values.push(SqlValue::Integer(before.captured_ms));
+            values.push(SqlValue::Text(before.id.clone()));
+        }
+
+        let where_sql = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", clauses.join(" AND "))
+        };
+        let limit = i64::try_from(filter.limit)
+            .map_err(|_| StoreError::Invalid("candidate page limit is too large".into()))?;
+        values.push(SqlValue::Integer(limit));
+        let sql = format!(
+            "SELECT c.* FROM candidate c{where_sql}
+             ORDER BY c.captured_ms DESC, c.id DESC LIMIT ?"
+        );
+        let candidates = {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(values), CandidateRow::from_row)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        let mut work_stmt = conn.prepare(
+            "SELECT w.id, w.title, w.state
+             FROM work_item w
+             WHERE w.deleted=0
+               AND (
+                   w.id=(SELECT work_item_id FROM session WHERE id=?1)
+                   OR EXISTS (
+                       SELECT 1 FROM review_revision rr
+                       WHERE rr.candidate_id=?2 AND rr.requirements_work_item_id=w.id
+                   )
+               )
+             ORDER BY w.updated_ms DESC, w.id DESC
+             LIMIT 13",
+        )?;
+        let mut review_stmt = conn.prepare(
+            "SELECT r.id, COALESCE(r.edited_title, r.title), r.state
+             FROM review r
+             WHERE EXISTS (
+                 SELECT 1 FROM review_revision rr
+                 WHERE rr.candidate_id=?1 AND rr.review_id=r.id
+             )
+             ORDER BY r.updated_ms DESC, r.id DESC
+             LIMIT 13",
+        )?;
+        let mut items = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let mut work_items = work_stmt
+                .query_map(params![&candidate.owner_session_id, &candidate.id], |row| {
+                    Ok(CandidateWorkLink {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        state: row.get(2)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let more_work_items = work_items.len() > CANDIDATE_RELATION_LIMIT;
+            if more_work_items {
+                work_items.pop();
+            }
+            let mut reviews = review_stmt
+                .query_map(params![&candidate.id], |row| {
+                    Ok(CandidateReviewLink {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        state: row.get(2)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let more_reviews = reviews.len() > CANDIDATE_RELATION_LIMIT;
+            if more_reviews {
+                reviews.pop();
+            }
+            items.push(CandidateListItem {
+                candidate: CandidateSummary::from(&candidate),
+                work_items,
+                more_work_items,
+                reviews,
+                more_reviews,
+            });
+        }
+        Ok(items)
     }
 
     pub fn insert_check_run(&self, run: &CheckRunRow) -> Result<()> {

@@ -138,7 +138,7 @@ pub struct Manager {
     pub(crate) tools: Arc<crate::mcp::Tools>,
     /// Shared with every supervisor and the mesh client, which swaps in a
     /// bundle handed off by a peer.
-    policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
+    policy: Arc<parking_lot::RwLock<crate::policy::Policy>>,
     store: Arc<Store>,
     bus: Bus,
     cfg: Arc<Config>,
@@ -180,7 +180,7 @@ impl Manager {
         cfg: Arc<Config>,
         node_id: String,
         tools: Arc<crate::mcp::Tools>,
-        policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
+        policy: Arc<parking_lot::RwLock<crate::policy::Policy>>,
         backend: Arc<dyn crate::boundary::Backend>,
     ) -> Self {
         // A mediated mutation this process did not dispatch was left in flight
@@ -503,7 +503,7 @@ impl Manager {
         &self.node_id
     }
 
-    pub fn policy(&self) -> &Arc<std::sync::RwLock<crate::policy::Policy>> {
+    pub fn policy(&self) -> &Arc<parking_lot::RwLock<crate::policy::Policy>> {
         &self.policy
     }
 
@@ -515,6 +515,54 @@ impl Manager {
         if let Ok(reviews) = self.store.open_reviews() {
             self.bus.publish(Frame::Reviews { waiting: reviews });
         }
+    }
+
+    /// A review session may read only its owning node's code-review row. This
+    /// runs before any project/session/event side effect, so a peer or HTTP
+    /// caller cannot use a report ID to inject its narrative into an unrelated
+    /// session's orientation.
+    fn validate_review_context(&self, spec: &NewSession) -> Result<(), SessionError> {
+        let requested = spec.review_id.as_deref().map(str::trim);
+        if spec.phase != Phase::Review {
+            if requested.is_some() {
+                return Err(SessionError::Rejected(
+                    "review_id is only valid for a code-review session".into(),
+                ));
+            }
+            return Ok(());
+        }
+        let Some(id) = requested.filter(|id| !id.is_empty()) else {
+            return Err(SessionError::Rejected(
+                "a code-review session requires its review_id".into(),
+            ));
+        };
+        let review = self
+            .store
+            .get_review(id)?
+            .ok_or_else(|| SessionError::Rejected(format!("no code review {id}")))?;
+        if review.kind == crate::store::reports::KIND {
+            return Err(SessionError::Rejected(
+                "standalone narrative reports cannot start code-review sessions".into(),
+            ));
+        }
+        if !matches!(review.kind.as_str(), "pr" | "mr") {
+            return Err(SessionError::Rejected(format!(
+                "review {id} is not a supported code-review kind"
+            )));
+        }
+        if review.channel != spec.channel {
+            return Err(SessionError::Rejected(format!(
+                "review {id} belongs to channel {}",
+                review.channel
+            )));
+        }
+        if review.node_id != self.node_id {
+            return Err(SessionError::Rejected(format!(
+                "review {id} is owned by node {}",
+                review.node_id
+            )));
+        }
+        Ok(())
     }
 
     /// Validate, insert the row, and start the session in the background. The
@@ -530,11 +578,18 @@ impl Manager {
         if let Some(node) = spec.node_id.as_deref().filter(|n| *n != self.node_id) {
             let mut remote = spec.clone();
             remote.node_id = None;
+            let work_item = match remote.work_item_id.as_deref() {
+                Some(id) => self
+                    .store
+                    .work_item_change(&self.node_id, &remote.channel, id)?,
+                None => None,
+            };
             let v = self
                 .forward(
                     node,
                     proto::frame::Command::Create {
                         spec: json!(remote),
+                        work_item,
                     },
                     false,
                 )
@@ -547,6 +602,7 @@ impl Manager {
                 .publish_untapped(Frame::Session(Box::new(row.clone())));
             return Ok(row);
         }
+        self.validate_review_context(&spec)?;
         let bindings = self.bindings(&spec.channel);
         // An archived channel keeps everything it has and takes nothing new.
         if !bindings["archived"].is_null() {
@@ -706,7 +762,7 @@ impl Manager {
             model: spec.model.clone(),
             project_id: Some(project_id),
             phase: spec.phase.as_str().into(),
-            policy_version: Some(self.policy.read().unwrap().version as i64),
+            policy_version: Some(self.policy.read().version as i64),
             review_id: spec.review_id.clone(),
             budget_tokens: budget,
             tokens_used: 0,
@@ -980,7 +1036,7 @@ impl Manager {
                 lsp: crate::manifest::toolchain_lsp(adapter.id()),
                 formatters: crate::manifest::toolchain_formatters(adapter.id()),
                 providers: wiring.providers.iter().map(|p| p.name.clone()).collect(),
-                policy_revision: self.policy.read().unwrap().version.to_string(),
+                policy_revision: self.policy.read().version.to_string(),
             })
             .map_err(|e| anyhow::anyhow!("the launch manifest for `{}`: {e}", spec.channel))?;
             self.store.manifest_record(&built)?
@@ -1027,7 +1083,7 @@ impl Manager {
                 .iter()
                 .filter_map(|t| t["name"].as_str().map(str::to_string))
                 .collect();
-            let policy = self.policy.read().unwrap();
+            let policy = self.policy.read();
             crate::corpus::orientation::assemble(
                 &self.store,
                 &policy,
@@ -1236,7 +1292,7 @@ impl Manager {
                 "model": spec.model, "model_source": model_source,
                 "harness": adapter.id(), "phase": spec.phase.as_str(),
                 "work_item_id": spec.work_item_id,
-                "policy_version": self.policy.read().unwrap().version,
+                "policy_version": self.policy.read().version,
                 "harness_agent": compat.agent,
                 "harness_version": compat.version,
                 "harness_expected": adapter.pinned_version(),
@@ -1356,7 +1412,7 @@ impl Manager {
             model: String::new(),
             project_id: None,
             phase: Phase::Execute.as_str().into(),
-            policy_version: Some(self.policy.read().unwrap().version as i64),
+            policy_version: Some(self.policy.read().version as i64),
             review_id: None,
             // Recorded, never enforced: this node brokers no model call for an
             // external harness, so there is nothing here to count.
@@ -1388,7 +1444,7 @@ impl Manager {
             payload: json!({
                 "harness": external::HARNESS_ID,
                 "channel": channel,
-                "policy_version": self.policy.read().unwrap().version,
+                "policy_version": self.policy.read().version,
             }),
             at_ms: now_ms(),
             mono_ms: 0,
@@ -1779,7 +1835,7 @@ impl Manager {
     /// it: a session's customization and the rules it ran under are one fact
     /// about how that session was configured.
     pub fn policy_version(&self) -> u32 {
-        self.policy.read().unwrap().version
+        self.policy.read().version
     }
 
     /// A channel's bindings as JSON (`{}` when unbound or standalone).

@@ -193,18 +193,18 @@ async fn rig_with_bodies() -> (Tools, Seen, Bodies, String) {
 /// ask on. They are about what reaches Jira, so they run under a policy that
 /// allows the verbs outright; that comments and edits *do* ask is asserted
 /// separately, below.
-fn allowing(names: &str) -> std::sync::Arc<std::sync::RwLock<tracon::policy::Policy>> {
-    std::sync::Arc::new(std::sync::RwLock::new(
+fn allowing(names: &str) -> std::sync::Arc<parking_lot::RwLock<tracon::policy::Policy>> {
+    std::sync::Arc::new(parking_lot::RwLock::new(
         toml::from_str(&format!(
             r#"
-            version = 9
-            [[rule]]
-            id = "test-allow"
-            verdict = "allow"
-            reason = "Under test."
-            kinds = ["tool"]
-            matches = [{names}]
-            "#
+        version = 9
+        [[rule]]
+        id = "test-allow"
+        verdict = "allow"
+        reason = "Under test."
+        kinds = ["tool"]
+        matches = [{names}]
+        "#
         ))
         .unwrap(),
     ))

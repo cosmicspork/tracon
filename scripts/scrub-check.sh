@@ -4,7 +4,8 @@
 # domain. The list is the enforcement; CHANGELOG.md is generated and exempt.
 set -eu
 cd "$(dirname "$0")/.."
-pattern='homelab|pager|kritee|svastha|notebook|switchboard|dotfiles|0x69\.xyz|bazzite|digitalocean|do-nyc1|~/src/docs|/home/jd|joshbowen'
+# Match pager as a word, not across the Page/Request boundary in an identifier.
+pattern='homelab|(^|[^[:alnum:]_])pager([^[:alnum:]_]|$)|kritee|svastha|notebook|switchboard|dotfiles|0x69\.xyz|bazzite|digitalocean|do-nyc1|~/src/docs|/home/jd|joshbowen'
 hits="$(git grep -niIE "$pattern" -- . ':!CHANGELOG.md' ':!scripts/scrub-check.sh' | grep -vE -- '--no-pager' || true)"
 if [ -n "$hits" ]; then
   echo "scrub-check: references to other projects or personal hosts:" >&2
