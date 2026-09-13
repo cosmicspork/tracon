@@ -889,6 +889,38 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX opencode_intent_session ON opencode_intent(session_id, created_ms);
     CREATE INDEX opencode_intent_state ON opencode_intent(state, updated_ms);
     "#,
+    // 36: what a session's OpenCode state *is*. The harness database carries
+    // no version of its own — upstream's `migration` table is an applied-id
+    // ledger with no `user_version`, no maximum-known check and no error, so
+    // an older binary opening a newer database proceeds silently and can write
+    // to it (`config-state.md` §7.2, §9 row 7). Nothing in the file says which
+    // build made it, so the node writes that down beside the session.
+    //
+    // `generation_json` is the ordered list of applied migration ids read from
+    // the database itself, and `generation_digest` names that list. Together
+    // they are the node's substitute for the schema version upstream does not
+    // keep, and they are what a restore is gated on: a backup whose generation
+    // the restoring runtime does not cover is refused rather than opened.
+    //
+    // `manifest_digest` is nullable on purpose. Which launch manifest a session
+    // ran against is recorded elsewhere and may not be known here yet; a column
+    // that says "not recorded" is honest where a fabricated digest is not.
+    r#"
+    CREATE TABLE opencode_state (
+        session_id        TEXT PRIMARY KEY REFERENCES session(id),
+        build_version     TEXT NOT NULL,
+        build_pinned      TEXT NOT NULL,
+        generation_json   TEXT NOT NULL DEFAULT '[]',
+        generation_digest TEXT NOT NULL DEFAULT '',
+        manifest_digest   TEXT,
+        state_volume      TEXT NOT NULL,
+        state_path        TEXT NOT NULL,
+        recorded_ms       INTEGER NOT NULL,
+        updated_ms        INTEGER NOT NULL
+    );
+    CREATE INDEX opencode_state_build
+        ON opencode_state(build_version, updated_ms);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

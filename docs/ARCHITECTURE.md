@@ -557,6 +557,20 @@ running; the vector index is derived and is rebuilt rather than restored.
 `RECOVERY.md` is the operator's copy of this, including the way out through a
 harness run directly and what that costs.
 
+A harness session's own state is a separate lifecycle with its own three verbs,
+because the harness database carries no version and an older build opening a newer
+one writes to it silently. **Backup** refuses a live session unless `--quiesce`
+stops the harness through the supervisor, then checkpoints WAL, `VACUUM INTO`s a
+copy it verifies read-only, archives the rest of the state tree minus caches, and
+records the workspace's commit and dirty digest at the same instant. **Upgrade**
+never touches the original: it migrates a clone under the target build, refuses
+outright when that build is not on the host, and swaps the clone in only if its
+integrity check passes. **Restore** is bounded by what it can honestly put back —
+it refuses a build or a state-schema generation this node's runtime does not cover,
+refuses while the session runs or its state is claimed, and brings back the harness
+database and state tree but never the workspace or any side effect the session had
+outside its own state, which it says before it acts.
+
 ## Open questions
 
 1. **Retention and tombstone semantics.** Needs deciding before data accumulates.

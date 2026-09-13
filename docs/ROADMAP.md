@@ -195,9 +195,28 @@ refer to that manifest's table.
         assumed, by `--deep` and by `node/tests/opencode_runtime.rs`, which also runs the
         pinned binary's `touchFile` path with downloads deliberately re-enabled and proves
         nothing of a killed container survives it. Kubernetes keeps the caveat below.
-  - [ ] State: node-owned single-writer fencing per session DB, quiesced `VACUUM INTO`
+  - [x] State: node-owned single-writer fencing per session DB, quiesced `VACUUM INTO`
         backups, a recorded state-schema generation gating restore, no downgrade promise
         (finding 17).
+        - Every OpenCode launch records the state's identity in `opencode_state`: the build
+          the harness reported, the applied-migration ids read from the database's own
+          `migration` ledger and a digest of them, the launch manifest digest (nullable until
+          the manifest side records one), and where the state lives. `tracon session backup`
+          refuses a live session unless `--quiesce` stops the harness through the supervisor's
+          pause and stop — never a kill — then checkpoints WAL, `VACUUM INTO`s a copy,
+          verifies it read-only with `PRAGMA integrity_check`, archives the rest of the state
+          tree minus caches, and records a workspace commit/tree/dirty-digest checkpoint taken
+          at the same instant. `tracon session upgrade-state --to` refuses without a backup of
+          the current generation, refuses and changes nothing when the target build is not on
+          the host, and migrates a `VACUUM INTO` clone under the target binary, swapping it in
+          only if the clone's integrity check passes. `tracon session restore` refuses a newer
+          build or a generation this runtime does not cover (row 7 — the older binary would
+          proceed silently), refuses while the session runs or its fence is claimed, refuses a
+          backup that no longer matches its own manifest digest, prints what it preserves and
+          what it does not, and needs `--confirm` for a workspace that has moved since the
+          checkpoint. Covered against the real pinned binary for the generation and the
+          reopen, and against a stand-in build that wrecks the clone for "the original is
+          untouched".
   - [ ] Legacy transition: archive omp sessions read-only with harness identity, reopen
         retained workspaces as new sessions with lineage, retire omp credentials deliberately,
         verify the omp adapter can no longer launch.

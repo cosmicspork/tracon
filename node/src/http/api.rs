@@ -10,7 +10,7 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::{
     adapter::HarnessAdapter,
@@ -120,6 +120,26 @@ impl From<TransferError> for ApiError {
             | TransferError::MeshTooLarge
             | TransferError::Workspace(_) => StatusCode::CONFLICT,
             TransferError::Store(_) | TransferError::Json(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError::new(status, error.to_string())
+    }
+}
+
+impl From<crate::session::opencode_state::StateError> for ApiError {
+    fn from(error: crate::session::opencode_state::StateError) -> Self {
+        use crate::session::opencode_state::StateError as E;
+        let status = match &error {
+            E::NotFound(_) => StatusCode::NOT_FOUND,
+            // A live or claimed session, a missing backup and a missing target
+            // binary are all "not now", not "not ever": the request was
+            // well-formed and the node is refusing on state.
+            E::Running { .. } | E::Claimed(_) | E::NoBackup(_) | E::NoBinary(_) => {
+                StatusCode::CONFLICT
+            }
+            E::Rejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            E::Integrity { .. } | E::Io(_) | E::Sqlite(_) | E::Store(_) | E::Json(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         };
         ApiError::new(status, error.to_string())
     }
@@ -1400,6 +1420,102 @@ pub async fn stop(State(s): State<AppState>, Path(id): Path<String>) -> ApiResul
 pub async fn kill(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<StatusCode> {
     s.manager.kill(&id).await?;
     Ok(StatusCode::OK)
+}
+
+// ---- per-session OpenCode state ----
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct BackupBody {
+    /// Stop the harness first, through the supervisor. Without it a live
+    /// session is refused: a copy taken under a running writer is a file, not
+    /// a backup.
+    pub quiesce: bool,
+}
+
+#[derive(Deserialize)]
+pub struct UpgradeStateBody {
+    /// The OpenCode release to migrate the state onto.
+    pub to: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct RestoreStateBody {
+    /// A backup directory this node holds, by path or by its own name.
+    pub backup: String,
+    /// Accept a workspace that has moved since the checkpoint.
+    pub confirm: bool,
+}
+
+/// What this session's state is, and every backup of it this node holds.
+pub async fn session_state(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    use crate::session::opencode_state as state;
+    let identity = s.store().opencode_state_get(&id)?;
+    let backups: Vec<Value> = state::list_backups(&id)
+        .into_iter()
+        .map(|(path, manifest)| json!({ "path": path.to_string_lossy(), "manifest": manifest }))
+        .collect();
+    Ok(Json(json!({
+        "session_id": id,
+        "identity": identity,
+        "claimed": crate::session::materialize::state_claimed(&id),
+        "backups": backups,
+    })))
+}
+
+pub async fn backup_state(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<BackupBody>,
+) -> ApiResult<Json<Value>> {
+    let report = s.manager.backup_state(&id, body.quiesce).await?;
+    Ok(Json(json!(report)))
+}
+
+pub async fn upgrade_state(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<UpgradeStateBody>,
+) -> ApiResult<Json<Value>> {
+    let report = s.manager.upgrade_state(&id, body.to.trim()).await?;
+    Ok(Json(json!(report)))
+}
+
+pub async fn restore_state(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<RestoreStateBody>,
+) -> ApiResult<Json<Value>> {
+    use crate::session::opencode_state as state;
+    let named = body.backup.trim();
+    if named.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "name the backup to restore",
+        ));
+    }
+    // A bare name is resolved inside this session's own backup directory: the
+    // operator names a backup, and a path from a request never decides where
+    // the node reads from.
+    let candidate = std::path::Path::new(named);
+    let path = if candidate.components().count() == 1 {
+        state::backups_dir(&id).join(named)
+    } else {
+        let path = candidate.to_path_buf();
+        if !path.starts_with(state::backups_dir(&id)) {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("{named} is not a backup of session {id} this node holds"),
+            ));
+        }
+        path
+    };
+    let report = s.manager.restore_state(&id, &path, body.confirm).await?;
+    Ok(Json(json!(report)))
 }
 
 /// Put an ended session away, or bring it back. Presentation only: nothing
