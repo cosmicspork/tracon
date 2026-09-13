@@ -1004,7 +1004,7 @@ async fn a_harness_killed_under_a_mutation_leaves_the_intent_uncertain() {
         .await;
     assert!(
         status == StatusCode::BAD_GATEWAY || status == StatusCode::GATEWAY_TIMEOUT,
-        "{status}: {answer}"
+        "a mutation into a dead harness answered {status}: {answer}"
     );
 
     let unsettled = live
@@ -1197,6 +1197,26 @@ impl Live {
     /// this launch was remembered under, by pid, not by pattern.
     async fn kill(&self) {
         self.runner.kill(&self.container).await.unwrap();
+        // Wait until the endpoint really is dead before anything is asked of
+        // it. The port was an ephemeral one the launch picked by binding zero,
+        // so a test that asked the gateway on the assumption that a killed
+        // process leaves its port unanswered could be answered by whatever
+        // took the port next.
+        for _ in 0..200 {
+            let alive = self
+                .http
+                .get(format!("{}/global/health", self.api.base))
+                .header("authorization", &self.api.authorization)
+                .timeout(std::time::Duration::from_millis(500))
+                .send()
+                .await
+                .is_ok();
+            if !alive {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("the killed harness is still answering on {}", self.api.base);
     }
 
     fn upstream(&self) -> &str {
