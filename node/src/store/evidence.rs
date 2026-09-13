@@ -451,6 +451,22 @@ impl Store {
         self.finish_check_run(id, "cancelled", None, None, log, None, metadata)
     }
 
+    /// One execution record by id, for a caller that needs to read back what
+    /// a run actually settled as after losing the race to write it.
+    pub fn check_run(&self, id: &str) -> Result<Option<CheckRunRow>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        conn.query_row(
+            "SELECT * FROM check_run WHERE id=?1",
+            [id],
+            CheckRunRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// Only terminal, exactly identified runs can be reused. A reuse key is
     /// absent whenever the executing image was not immutable.
     pub fn latest_reusable_check(

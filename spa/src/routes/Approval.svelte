@@ -197,6 +197,10 @@
         // An edit is a request for changes, never an approval of something
         // the operator changed: the agent applies it and resubmits.
         patch: verdict === 'revise' && patch ? patch : undefined,
+        // What this screen is showing. If the agent resubmitted while the
+        // verdict was being written, the node refuses it rather than
+        // applying it to a diff that was never read.
+        head_sha: review.head_sha,
       })
       if (verdict !== 'approve') {
         try {

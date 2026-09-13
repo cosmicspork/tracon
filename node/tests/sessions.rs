@@ -1887,3 +1887,361 @@ async fn writing_the_plan_document_ends_the_plan_phase() {
     assert!(kinds.contains(&"plan_artifact".to_string()), "{kinds:?}");
     tracon::session::materialize::remove(&row.id);
 }
+
+/// A harness that starts and then never finishes its handshake, so what the
+/// test watches is the node's own startup bound and cleanup rather than an
+/// adapter's.
+struct StallingAdapter;
+
+#[async_trait]
+impl tracon::adapter::HarnessAdapter for StallingAdapter {
+    fn id(&self) -> &'static str {
+        "fake"
+    }
+    fn pinned_version(&self) -> &str {
+        "1.0.0"
+    }
+    async fn version(
+        &self,
+        _r: &dyn Runner,
+    ) -> Result<tracon::adapter::HarnessVersion, AdapterError> {
+        Ok(tracon::adapter::HarnessVersion {
+            found: "1.0.0".into(),
+            pinned: "1.0.0".into(),
+        })
+    }
+    async fn probe_models(
+        &self,
+        _r: &dyn Runner,
+        _env: Vec<(String, String)>,
+    ) -> Result<Vec<tracon::adapter::ModelOption>, AdapterError> {
+        Ok(Vec::new())
+    }
+    async fn launch(
+        &self,
+        _runner: &dyn Runner,
+        _spec: tracon::adapter::LaunchSpec,
+    ) -> Result<
+        (
+            Box<dyn HarnessHandle>,
+            mpsc::Receiver<tracon::adapter::HarnessEvent>,
+        ),
+        AdapterError,
+    > {
+        // Started, and then silent: the handshake never completes.
+        std::future::pending::<()>().await;
+        unreachable!("a stalled startup is never handed a session")
+    }
+}
+
+/// `LocalBackend`, with every `kill` the node asks for written down. The
+/// harness the node started is what has to be removed, and by the name the
+/// node recorded on the row.
+struct RecordingBackend {
+    inner: tracon::runner::local::LocalBackend,
+    killed: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+struct RecordingRunner {
+    inner: Arc<dyn Runner>,
+    killed: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Runner for RecordingRunner {
+    async fn spawn(
+        &self,
+        cmd: tracon::runner::RunnerCommand,
+    ) -> Result<tracon::runner::Spawned, tracon::runner::RunnerError> {
+        self.inner.spawn(cmd).await
+    }
+    async fn run_capture(
+        &self,
+        cmd: tracon::runner::RunnerCommand,
+    ) -> Result<std::process::Output, tracon::runner::RunnerError> {
+        self.inner.run_capture(cmd).await
+    }
+    async fn kill(&self, name: &str) -> Result<(), tracon::runner::RunnerError> {
+        self.killed.lock().unwrap().push(name.to_string());
+        self.inner.kill(name).await
+    }
+}
+
+#[async_trait]
+impl tracon::boundary::Backend for RecordingBackend {
+    fn kind(&self) -> &'static str {
+        self.inner.kind()
+    }
+    async fn setup(
+        &self,
+        cfg: &Config,
+        rebuild: bool,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.inner.setup(cfg, rebuild).await
+    }
+    async fn check_all(&self, cfg: &Config, deep: bool) -> tracon::boundary::BoundaryReport {
+        self.inner.check_all(cfg, deep).await
+    }
+    fn runner(&self, extra: Vec<tracon::runner::Mount>) -> Arc<dyn Runner> {
+        Arc::new(RecordingRunner {
+            inner: self.inner.runner(extra),
+            killed: self.killed.clone(),
+        })
+    }
+    async fn import_volume(
+        &self,
+        volume: &str,
+        source: &std::path::Path,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.inner.import_volume(volume, source).await
+    }
+    async fn export_volume(
+        &self,
+        volume: &str,
+        destination: &std::path::Path,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.inner.export_volume(volume, destination).await
+    }
+    fn harness_host(&self) -> String {
+        self.inner.harness_host()
+    }
+    fn harness_home(&self) -> String {
+        self.inner.harness_home()
+    }
+    async fn reconcile(&self, names: &[String]) {
+        self.inner.reconcile(names).await
+    }
+}
+
+/// Poll until `f` holds, bounded by *real* time. This test pauses the clock so
+/// the node's own 90-second startup bound fires without waiting for it, which
+/// means a virtual sleep is no bound at all — while the setting up around it
+/// (git, an imported workspace) takes real milliseconds.
+async fn until_really(secs: u64, mut f: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        if f() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    f()
+}
+
+/// A harness that starts but never completes its handshake.
+///
+/// Startup is bounded rather than leaving a half-live session: the row ends
+/// `failed` with a reason the operator can read on the session, and the
+/// runtime is told to remove the harness the node started rather than leaving
+/// it holding the worktree and the credential mounts. The clock is paused, so
+/// the wait is the node's bound rather than the test's patience.
+#[tokio::test(start_paused = true)]
+async fn a_harness_that_never_starts_fails_the_session_visibly_and_removes_the_harness() {
+    state::isolate();
+    let dir = state::scratch("stalled-startup");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "t@t"],
+        vec!["config", "user.name", "t"],
+        vec!["config", "commit.gpgsign", "false"],
+        vec!["commit", "-q", "--allow-empty", "-m", "init"],
+        vec![
+            "clone",
+            "-q",
+            "--bare",
+            ".",
+            dir.join("origin.git").to_str().unwrap(),
+        ],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            dir.join("origin.git").to_str().unwrap(),
+        ],
+        vec!["fetch", "-q", "origin"],
+    ] {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(&args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    store
+        .put_node(&NodeRow {
+            id: "n1".into(),
+            name: "t".into(),
+            state: "ready".into(),
+            failed_check: None,
+            failed_detail: None,
+            harness_id: "fake".into(),
+            harness_pinned: "1.0.0".into(),
+            harness_found: Some("1.0.0".into()),
+            models_json: Some(r#"[{"value":"m/a","name":"A"}]"#.into()),
+            checked_at_ms: Some(now_ms()),
+            is_self: 1,
+            x25519_pub: None,
+            last_seen_ms: None,
+            reachable: 1,
+            providers_json: None,
+        })
+        .unwrap();
+    let mut cfg = Config::default();
+    cfg.session.worktree_root = dir.join("worktrees");
+    let cfg = Arc::new(cfg);
+    let tools = Arc::new(tracon::mcp::Tools {
+        broker: Arc::new(Default::default()),
+        cfg: cfg.clone(),
+        policy: tracon::policy::Policy::shipped_shared(),
+        http: reqwest::Client::new(),
+        session: Default::default(),
+    });
+    let killed: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let manager = Manager::new(
+        store.clone(),
+        Bus::new(),
+        cfg.clone(),
+        "n1".into(),
+        tools.clone(),
+        tracon::policy::Policy::shipped_shared(),
+        Arc::new(RecordingBackend {
+            inner: tracon::runner::local::LocalBackend,
+            killed: killed.clone(),
+        }),
+    );
+    let row = manager
+        .create(
+            tracon::session::NewSession {
+                channel: "personal".into(),
+                repo_path: repo.to_string_lossy().into_owned(),
+                branch: None,
+                work_item_id: None,
+                model: "m/a".into(),
+                budget_tokens: Some(1000),
+                initial_prompt: None,
+                node_id: None,
+                phase: tracon::session::Phase::Execute,
+                review_id: None,
+                base_sha: None,
+                workspace_id: None,
+            },
+            Arc::new(StallingAdapter),
+        )
+        .await
+        .unwrap();
+
+    // Startup is bounded, and what it leaves behind says why.
+    assert!(
+        until_really(60, || store.get_session(&row.id).unwrap().unwrap().state
+            == "failed")
+        .await,
+        "a stalled startup must not leave the row {:?} forever",
+        store.get_session(&row.id).unwrap().unwrap().state
+    );
+    let ended = store.get_session(&row.id).unwrap().unwrap();
+    assert_eq!(ended.end_reason.as_deref(), Some("error"));
+    let reason = ended.last_error.unwrap_or_default();
+    assert!(
+        reason.contains("startup timed out"),
+        "the operator can read why: {reason:?}"
+    );
+    let kinds: Vec<String> = store
+        .events_after(&row.id, 0, 500)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    assert!(
+        kinds.contains(&"error".to_string()),
+        "and sees it on the session: {kinds:?}"
+    );
+
+    // The harness the node started is removed, by the name the row carries —
+    // a launch the node has given up on must not leave a process behind.
+    let container = ended
+        .container_name
+        .expect("the container name is recorded before the harness starts");
+    assert!(
+        killed.lock().unwrap().contains(&container),
+        "the stalled harness was never removed: {:?}",
+        killed.lock().unwrap()
+    );
+
+    // And a handshake that finally arrives finds nothing to resurrect: the
+    // row is terminal, which is the only state a startup handoff may claim
+    // from.
+    assert!(
+        !store
+            .update_session_if(
+                &row.id,
+                "starting",
+                tracon::store::SessionPatch::state("running"),
+            )
+            .unwrap(),
+        "a late startup handoff must not claim a row that already failed"
+    );
+    tracon::session::materialize::remove(&row.id);
+}
+
+/// Work that arrives for a session the operator already stopped.
+///
+/// Every writer outside the supervisor goes through the same fence, so a
+/// check finishing, a permission arriving, or a state the caller still held
+/// cannot put a terminal row back into active work — and the refusal is
+/// written down rather than silently dropped.
+#[tokio::test]
+async fn a_late_completion_never_resurrects_a_stopped_session() {
+    state::isolate();
+    let h = Harness::new(10_000).await;
+    let id = insert_running_session(&h.store, 10_000);
+    h.store
+        .update_session(&id, tracon::store::SessionPatch::state("waiting_on_check"))
+        .unwrap();
+
+    // The operator stops it while a check is still executing.
+    h.manager.stop(&id).await.unwrap();
+    let stopped = h.store.get_session(&id).unwrap().unwrap();
+    assert_eq!(stopped.state, "closed");
+
+    // The check finishes afterwards and reports itself back to running.
+    h.manager.set_checking(&id, false);
+    let after = h.store.get_session(&id).unwrap().unwrap();
+    assert_eq!(
+        after.state, "closed",
+        "a check finishing after the stop must not reopen the session"
+    );
+    assert_eq!(after.end_reason.as_deref(), Some("killed_user"));
+    let kinds: Vec<String> = h
+        .store
+        .events_after(&id, 0, 500)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    assert!(
+        kinds.contains(&"late_refused".to_string()),
+        "the refusal is recorded: {kinds:?}"
+    );
+
+    // The same fence in the store itself: no patch reaches a terminal row.
+    assert!(
+        !h.store
+            .update_session_unless(
+                &id,
+                tracon::session::state::SessionState::TERMINAL,
+                tracon::store::SessionPatch::state("running"),
+            )
+            .unwrap(),
+        "the guarded write refuses a terminal row"
+    );
+    assert_eq!(
+        h.store.get_session(&id).unwrap().unwrap().state,
+        "closed",
+        "and leaves it exactly as it was"
+    );
+}

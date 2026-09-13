@@ -1472,6 +1472,13 @@ pub struct VerdictBody {
     /// rather than an approval of something the operator changed.
     #[serde(default)]
     pub patch: Option<String>,
+    /// The commit the operator was looking at when they decided. A verdict is
+    /// about particular bytes, so when this is sent and the review has since
+    /// moved to a new revision, the verdict is refused rather than applied to
+    /// a diff nobody read. Optional for compatibility with a caller that
+    /// cannot name one; the interface always sends it.
+    #[serde(default)]
+    pub head_sha: Option<String>,
 }
 
 pub async fn get_review(
@@ -1777,6 +1784,7 @@ pub async fn decide_review(
                     title: b.title.clone(),
                     body: b.body.clone(),
                     patch: b.patch.clone(),
+                    head_sha: b.head_sha.clone(),
                 },
                 timeout,
             )
@@ -1810,6 +1818,22 @@ pub(crate) async fn decide_local(
             StatusCode::CONFLICT,
             format!("this review was already {}", r.state),
         ));
+    }
+    // A verdict is about the bytes the operator read. If they named the
+    // commit they were looking at and the review has moved on since — the
+    // agent resubmitted while they were deciding — the verdict is refused,
+    // not carried over to a revision nobody reviewed.
+    if let Some(seen) = b.head_sha.as_deref().filter(|seen| !seen.is_empty()) {
+        if seen != r.head_sha {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!(
+                    "this review moved to a new revision ({}) while it was being decided; \
+                     reload it and decide again",
+                    &r.head_sha[..12.min(r.head_sha.len())]
+                ),
+            ));
+        }
     }
     // Bound once, here: every branch below records its decision against
     // exactly the revision the operator saw when the verdict was decided,
@@ -1914,6 +1938,10 @@ pub(crate) async fn decide_local(
                     body: &body,
                     require_evidence: false,
                     recheck_authority: None,
+                    // What the operator decided on, read above: a resubmit
+                    // landing from here on loses, rather than having its
+                    // bytes published under this approval.
+                    decided_revision_id: revision.as_ref().map(|revision| revision.id.as_str()),
                 },
             )
             .await
@@ -3925,6 +3953,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 title,
                 body,
                 patch,
+                head_sha,
             } => {
                 decide_local(
                     self,
@@ -3935,6 +3964,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                         title,
                         body,
                         patch,
+                        head_sha,
                     },
                 )
                 .await

@@ -381,6 +381,15 @@ impl Tools {
             .get_review(review_id)
             .map_err(|e| e.to_string())?
             .ok_or("review disappeared after capture")?;
+        // The revision the authority decision below is computed against.
+        // Authority is granted for a revision, so the publication is bound to
+        // that same one: a resubmission arriving while this runs does not
+        // inherit the grant.
+        let decided_revision = access
+            .store
+            .latest_review_revision(review_id)
+            .map_err(|e| e.to_string())?
+            .map(|revision| revision.id);
         let target: crate::review::publish::Target =
             serde_json::from_str(&review.target).map_err(|e| e.to_string())?;
         let prose = crate::corpus::hash_body(&format!(
@@ -542,6 +551,7 @@ impl Tools {
                 body: review.approved_body(),
                 require_evidence: true,
                 recheck_authority: Some(&recheck),
+                decided_revision_id: decided_revision.as_deref(),
             },
         )
         .await

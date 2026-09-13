@@ -179,6 +179,13 @@ pub struct PublishRequest<'a> {
     pub body: &'a str,
     pub require_evidence: bool,
     pub recheck_authority: Option<&'a (dyn Fn() -> Result<(), String> + Send + Sync)>,
+    /// The revision this approval was given for, as the deciding caller read
+    /// it. An approval is of a particular set of bytes, not of a review id:
+    /// when the agent resubmits between the operator reading the diff and
+    /// this call, the approval belongs to what they read, so it is refused
+    /// rather than transferred to bytes nobody looked at. `None` means the
+    /// caller has no earlier reading to bind to and takes the latest.
+    pub decided_revision_id: Option<&'a str>,
 }
 
 /// The publication record, as `review::publish` needs to speak to it: each
@@ -255,7 +262,26 @@ pub async fn publish_review(
         body,
         require_evidence,
         recheck_authority,
+        decided_revision_id,
     } = request;
+    // Before anything is read from the worktree or the forge: if a newer
+    // revision landed after the decision was made, this approval is for bytes
+    // that are no longer what the review holds. Refuse it here, where the
+    // message can say so, rather than letting the claim fail opaquely later.
+    if let Some(decided) = decided_revision_id {
+        let current = ctx
+            .store
+            .latest_review_revision(&review.id)
+            .map_err(|e| PublishError::External(e.to_string()))?
+            .map(|revision| revision.id);
+        if current.as_deref() != Some(decided) {
+            return Err(PublishError::Conflict(
+                "a newer revision was submitted after this approval was decided; \
+                 review the new one before publishing"
+                    .into(),
+            ));
+        }
+    }
     if let Ok(Some(session)) = ctx.store.get_session(&review.session_id) {
         if session.node_id == ctx.node_id
             && session.harness_id != crate::session::external::HARNESS_ID
@@ -305,12 +331,17 @@ pub async fn publish_review(
     }
     // Bind the revision this call validated immediately before claiming the
     // publish, so a resubmit racing in between loses the atomic claim rather
-    // than having its bytes silently attributed to this approval.
-    let revision_id = ctx
-        .store
-        .latest_review_revision(&review.id)
-        .map_err(|e| PublishError::External(e.to_string()))?
-        .map(|revision| revision.id);
+    // than having its bytes silently attributed to this approval. When the
+    // caller decided against a particular revision, that one is what is
+    // claimed — never one that arrived since.
+    let revision_id = match decided_revision_id {
+        Some(decided) => Some(decided.to_string()),
+        None => ctx
+            .store
+            .latest_review_revision(&review.id)
+            .map_err(|e| PublishError::External(e.to_string()))?
+            .map(|revision| revision.id),
+    };
     let target: crate::review::publish::Target =
         serde_json::from_str(&review.target).map_err(|e| PublishError::External(e.to_string()))?;
     // The tree the node hashed out of the candidate when it captured this

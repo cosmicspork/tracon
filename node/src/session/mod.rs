@@ -1426,25 +1426,48 @@ impl Manager {
 
     /// Mark a session as waiting on deterministic checks (or back to running)
     /// and tell the interface. Called from the submit tool, inside a turn.
+    /// A check can outlive the session that asked for it, so both ends of
+    /// this are fenced in the UPDATE itself rather than by a read first: a
+    /// pause or a stop landing mid-check wins, and the check finishing
+    /// afterwards must not put the row back into `running`.
     pub fn set_checking(&self, id: &str, checking: bool) {
-        let Ok(Some(current)) = self.store.get_session(id) else {
-            return;
-        };
-        let current_state = SessionState::from_stored(&current.state);
-        if current_state == SessionState::Paused || current_state.is_terminal() {
-            return;
-        }
         let state = if checking {
             SessionState::WaitingOnCheck
         } else {
             SessionState::Running
         };
-        let _ = self
+        let mut fenced: Vec<&str> = SessionState::TERMINAL.to_vec();
+        fenced.push(SessionState::Paused.as_str());
+        match self
             .store
-            .update_session(id, SessionPatch::state(state.as_str()));
+            .update_session_unless(id, &fenced, SessionPatch::state(state.as_str()))
+        {
+            Ok(true) => {}
+            _ => {
+                self.refused_transition(id, "set_checking", json!({ "attempted": state.as_str() }));
+                return;
+            }
+        }
         if let Ok(Some(row)) = self.store.get_session(id) {
             self.bus.publish(Frame::Session(Box::new(row)));
         }
+    }
+
+    /// Record a transition refused because the session had already ended or
+    /// been fenced. The same shape the supervisor writes, for the writers
+    /// that live outside it.
+    pub fn refused_transition(&self, id: &str, what: &str, mut detail: serde_json::Value) {
+        let state = self
+            .store
+            .get_session(id)
+            .ok()
+            .flatten()
+            .map(|row| row.state)
+            .unwrap_or_else(|| "gone".into());
+        detail["what"] = json!(what);
+        detail["state"] = json!(state);
+        tracing::warn!(session = %id, %what, %state, "refused a late transition");
+        self.record_event(id, ek::LATE_REFUSED, detail);
     }
 
     /// Record an event on a session from outside the supervisor.

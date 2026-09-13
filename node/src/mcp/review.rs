@@ -287,6 +287,7 @@ async fn submit(
             required_count: 0,
             all_required_passed: true,
             reused: false,
+            cancelled: None,
         }
     } else {
         run_checks(
@@ -461,6 +462,32 @@ fn owns(store: &Store, ctx: &CallContext, r: &ReviewRow) -> bool {
     r.channel == ctx.channel && external(&ctx.session_id) && external(&r.session_id)
 }
 
+/// The session that asked for these checks, as the authority on whether they
+/// should still be running. A check is minutes of subprocess inside the
+/// boundary: the operator can pause or stop the session while one is
+/// executing, and when they do, the execution stops rather than running to
+/// completion and reporting a verdict nobody is waiting for.
+struct SessionStillWants {
+    store: Arc<Store>,
+    session_id: String,
+}
+
+impl review::checks::Cancel for SessionStillWants {
+    fn cancelled(&self) -> Option<String> {
+        let row = self.store.get_session(&self.session_id).ok().flatten()?;
+        let state = crate::session::state::SessionState::from_stored(&row.state);
+        // `waiting_on_check` is what a checking session sits in; anything
+        // fenced or ended withdraws the request.
+        if state == crate::session::state::SessionState::Paused {
+            return Some("the session was paused".into());
+        }
+        if state.is_terminal() {
+            return Some(format!("the session ended ({})", row.state));
+        }
+        None
+    }
+}
+
 /// Required checks against the immutable candidate snapshot. The candidate
 /// owner receives the verification milestone even if a later prose-only
 /// revision is submitted by another attached session.
@@ -491,6 +518,10 @@ async fn run_checks(
         candidate,
         snapshot,
         force_rerun,
+        &SessionStillWants {
+            store: store.clone(),
+            session_id: ctx.session_id.clone(),
+        },
     )
     .await;
     manager.set_checking(&ctx.session_id, false);
@@ -510,6 +541,24 @@ async fn run_checks(
                 "reused_from": result.reused_from,
             }),
         );
+    }
+    // A cancelled run is not a failed candidate and not a passed one: the
+    // operator withdrew the session while it was executing. Nothing is
+    // verified, nothing is rejected, and the submission stops here rather
+    // than opening a review on evidence that was never finished.
+    if let Some(reason) = &report.cancelled {
+        manager.record_event(
+            &ctx.session_id,
+            ek::CHECK_CANCELLED,
+            json!({
+                "candidate_id": candidate.id,
+                "head_sha": candidate.head_sha,
+                "reason": reason,
+            }),
+        );
+        return Err(format!(
+            "checks were cancelled: {reason}. Nothing was verified and no review was opened."
+        ));
     }
     if report.all_required_passed {
         manager.record_event(
@@ -640,7 +689,28 @@ async fn verdict(
         .set_ai_verdict(&review_id, &v.to_string())
         .map_err(|e| e.to_string())?
     {
-        return Err("the review is gone".into());
+        let state = store
+            .get_review(&review_id)
+            .map_err(|e| e.to_string())?
+            .map(|review| review.state);
+        manager.record_event(
+            &ctx.session_id,
+            ek::LATE_REFUSED,
+            json!({
+                "what": "review_verdict",
+                "review_id": review_id,
+                "state": state,
+                "verdict": verdict,
+            }),
+        );
+        manager.phase_done(&ctx.session_id).await;
+        return Err(match state {
+            Some(state) => format!(
+                "this review was already decided ({state}); a verdict now would be about a \
+                 decision that has already been made"
+            ),
+            None => "the review is gone".into(),
+        });
     }
     manager.record_event(
         &ctx.session_id,

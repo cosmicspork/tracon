@@ -18,6 +18,32 @@ use crate::{
 /// How much of a check's combined output stays in its authoritative record.
 const TAIL_BYTES: usize = 4096;
 
+/// How often a running check asks whether it should still be running. A check
+/// is a subprocess in another namespace, so there is nothing to await on the
+/// cancellation itself; the session row is the authority and this is how
+/// often it is consulted.
+const CANCEL_POLL: Duration = Duration::from_millis(100);
+
+/// Whether the work these checks were started for is still wanted.
+///
+/// Checks outlive the call that asked for them — they are minutes of
+/// subprocess, and the operator can pause or stop the session, or decide the
+/// review, at any point during them. The runner cannot be asked politely, so
+/// the authority is consulted on a poll and the process is killed.
+pub trait Cancel: Send + Sync {
+    /// Why the run must stop now, or `None` to carry on.
+    fn cancelled(&self) -> Option<String>;
+}
+
+/// Never cancelled: for callers with nothing that can withdraw the request.
+pub struct RunToCompletion;
+
+impl Cancel for RunToCompletion {
+    fn cancelled(&self) -> Option<String> {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CheckResult {
     pub command: String,
@@ -39,6 +65,10 @@ pub struct CheckReport {
     pub required_count: usize,
     pub all_required_passed: bool,
     pub reused: bool,
+    /// Why the run stopped early, when it did. A cancelled run has no verdict
+    /// to give: it is neither a pass nor a failure of the candidate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancelled: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,6 +99,7 @@ pub async fn run_required(
     candidate: &CandidateRow,
     snapshot: &Path,
     force_rerun: bool,
+    cancel: &dyn Cancel,
 ) -> Result<CheckReport, String> {
     let commands = required_definitions(cfg);
     let raw_image = execution_image(cfg);
@@ -86,8 +117,15 @@ pub async fn run_required(
     let timeout = Duration::from_secs(cfg.supervision.timeout_secs.max(1));
     let mut results = Vec::with_capacity(commands.len());
     let mut any_reused = false;
+    let mut cancelled = None;
 
     for (index, command) in commands.iter().enumerate() {
+        // Nothing new is started for work that has been withdrawn.
+        if let Some(reason) = cancel.cancelled() {
+            results.push(cancelled_result(command, &reason, 0));
+            cancelled = Some(reason);
+            break;
+        }
         let definition = CheckDefinition {
             command: command.clone(),
             timeout_secs: timeout.as_secs(),
@@ -235,6 +273,10 @@ pub async fn run_required(
         let mount = Mount::volume(scratch_volume, "/work", false);
         let started = std::time::Instant::now();
         let runner_name = format!("tracon-c-{index}-{}", &hash(&run_id)[..12]);
+        // What the runner will actually call this execution, not what it was
+        // asked to: a kill has to name the same thing the runtime named, or
+        // it stops nothing at all.
+        let running_name = runner.capture_name(&runner_name);
         let cmd = RunnerCommand {
             argv: vec!["sh".into(), "-lc".into(), command.clone()],
             env: Vec::new(),
@@ -243,12 +285,56 @@ pub async fn run_required(
             name: runner_name.clone(),
             image: None,
         };
-        let (outcome, exit, tail_text, metadata) = match tokio::time::timeout(
-            timeout,
-            runner.run_capture(cmd),
-        )
-        .await
-        {
+        // Both ways an execution can be stopped kill the runtime *while the
+        // capture is still held*: an identity released first could be reused
+        // by the runtime before the kill names it.
+        let deadline = tokio::time::Instant::now() + timeout;
+        let finished = async {
+            let capture = runner.run_capture(cmd);
+            tokio::pin!(capture);
+            let mut poll = tokio::time::interval(CANCEL_POLL);
+            poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    finished = &mut capture => return Ok(finished),
+                    _ = tokio::time::sleep_until(deadline) => {
+                        let _ = runner.kill(&running_name).await;
+                        return Err(None);
+                    }
+                    _ = poll.tick() => {
+                        if let Some(reason) = cancel.cancelled() {
+                            let _ = runner.kill(&running_name).await;
+                            return Err(Some(reason));
+                        }
+                    }
+                }
+            }
+        }
+        .await;
+        // Cancelled: the runtime is stopped before anything is written down,
+        // so the record is never ahead of what is actually running.
+        if let Err(Some(reason)) = finished {
+            let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+            store
+                .cancel_running_check(
+                    &run_id,
+                    &format!("cancelled: {reason}"),
+                    &json!({
+                        "execution_backend": backend.kind(),
+                        "cancelled": reason,
+                        "killed": running_name,
+                    }),
+                )
+                .map_err(|error| error.to_string())?;
+            results.push(cancelled_result(
+                command,
+                &reason,
+                duration_ms.max(0) as u64,
+            ));
+            cancelled = Some(reason);
+            break;
+        }
+        let (outcome, exit, tail_text, metadata) = match finished {
             Ok(Ok(output)) => {
                 let mut output_text = String::from_utf8_lossy(&output.stdout).into_owned();
                 output_text.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -270,22 +356,20 @@ pub async fn run_required(
                 format!("could not run: {error}"),
                 json!({ "execution_backend": backend.kind(), "runner_error": error.to_string() }),
             ),
-            Err(_) => {
-                let _ = runner.kill(&runner_name).await;
-                (
-                    "interrupted",
-                    None,
-                    format!("timed out after {}s", timeout.as_secs()),
-                    json!({
-                        "execution_backend": backend.kind(),
-                        "timeout_secs": timeout.as_secs(),
-                        "interrupted": "timeout",
-                    }),
-                )
-            }
+            // The deadline arm above already killed the runtime.
+            Err(_) => (
+                "interrupted",
+                None,
+                format!("timed out after {}s", timeout.as_secs()),
+                json!({
+                    "execution_backend": backend.kind(),
+                    "timeout_secs": timeout.as_secs(),
+                    "interrupted": "timeout",
+                }),
+            ),
         };
         let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-        store
+        let recorded = store
             .finish_check_run(
                 &run_id,
                 outcome,
@@ -296,6 +380,28 @@ pub async fn run_required(
                 &metadata,
             )
             .map_err(|error| error.to_string())?;
+        if !recorded {
+            // The row left `running` while this execution was in flight —
+            // cancelled by the controller between the process exiting and
+            // this write. What was written down first stands; a late result
+            // never becomes the outcome, and never a pass.
+            let settled = store
+                .check_run(&run_id)
+                .map_err(|error| error.to_string())?
+                .map(|run| run.outcome)
+                .unwrap_or_else(|| "cancelled".into());
+            tracing::warn!(
+                run = %run_id, %outcome, %settled,
+                "dropped a check result that arrived after the run was settled"
+            );
+            results.push(cancelled_result(
+                command,
+                &format!("result arrived after the run was recorded {settled}"),
+                duration_ms.max(0) as u64,
+            ));
+            cancelled = Some(settled);
+            break;
+        }
         let ok = outcome == "passed";
         results.push(CheckResult {
             command: command.clone(),
@@ -310,13 +416,32 @@ pub async fn run_required(
 
     Ok(CheckReport {
         candidate_id: candidate.id.clone(),
-        all_required_passed: !commands.is_empty()
+        // A cancelled run verifies nothing: it is neither the candidate's
+        // pass nor its failure, and `results` is deliberately short of
+        // `commands` so no later reader can mistake it for a complete one.
+        all_required_passed: cancelled.is_none()
+            && !commands.is_empty()
             && results.len() == commands.len()
             && results.iter().all(|result| result.ok),
         required_count: commands.len(),
         results,
         reused: any_reused,
+        cancelled,
     })
+}
+
+/// The result a cancelled execution contributes: never ok, never reusable,
+/// and carrying the reason the operator will read.
+fn cancelled_result(command: &str, reason: &str, ms: u64) -> CheckResult {
+    CheckResult {
+        command: command.to_string(),
+        ok: false,
+        exit: None,
+        outcome: "cancelled".into(),
+        tail: format!("cancelled: {reason}"),
+        ms,
+        reused_from: None,
+    }
 }
 
 /// Revalidate a review immediately before a consequential dispatch. It is the
@@ -586,18 +711,34 @@ mod tests {
         cfg.supervision.checks = vec!["true".into()];
         let backend = FakeBackend;
 
-        let first = run_required(&backend, &cfg, &store, &candidate, &snapshot, false)
-            .await
-            .unwrap();
+        let first = run_required(
+            &backend,
+            &cfg,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
         assert!(first.all_required_passed);
         assert!(
             !first.reused,
             "the first run has no prior evidence to reuse"
         );
 
-        let second = run_required(&backend, &cfg, &store, &candidate, &snapshot, false)
-            .await
-            .unwrap();
+        let second = run_required(
+            &backend,
+            &cfg,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
         assert!(
             second.reused,
             "the backend confirmed the same pinned identity across both runs"
@@ -647,13 +788,29 @@ mod tests {
         cfg.supervision.checks = vec!["true".into()];
         let backend = crate::runner::local::LocalBackend;
 
-        let first = run_required(&backend, &cfg, &store, &candidate, &snapshot, false)
-            .await
-            .unwrap();
+        let first = run_required(
+            &backend,
+            &cfg,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
         assert!(first.all_required_passed);
-        let second = run_required(&backend, &cfg, &store, &candidate, &snapshot, false)
-            .await
-            .unwrap();
+        let second = run_required(
+            &backend,
+            &cfg,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
         assert!(
             !second.reused,
             "a backend with no confirmed image identity must never be treated as pinned"

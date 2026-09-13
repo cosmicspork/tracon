@@ -37,6 +37,12 @@ impl SessionState {
         matches!(self, Self::Closed | Self::KilledBudget | Self::Failed)
     }
 
+    /// The stored spellings of the states a session never leaves, for the
+    /// guarded writes that refuse to resurrect one. Kept beside
+    /// `is_terminal`, and tested against it, so a new terminal state cannot
+    /// be added to one and forgotten in the other.
+    pub const TERMINAL: &'static [&'static str] = &["closed", "killed_budget", "failed"];
+
     /// Prompts are only accepted while the harness is idle and waiting on the
     /// operator for input rather than for a decision.
     pub fn accepts_prompt(&self) -> bool {
@@ -129,6 +135,17 @@ pub mod event_kind {
     /// given up. Recorded by the gateway, which sees the upstream answer, and
     /// by the supervisor when the harness says so itself.
     pub const PROVIDER_ERROR: &str = "provider_error";
+    /// Something arrived for a session that had already ended (or been
+    /// fenced) and was refused rather than applied: a harness event, a check
+    /// result, a startup handoff, a state transition a writer still held.
+    /// `what` names the writer and `state` the row it was refused against.
+    /// Recorded, never silent: a refusal the operator cannot see is
+    /// indistinguishable from a race that was never noticed.
+    pub const LATE_REFUSED: &str = "late_refused";
+    /// A deterministic check was stopped mid-execution because the session
+    /// was paused or ended (`candidate_id`, `head_sha`, `reason`). Its
+    /// evidence row is `cancelled`, which is never reusable and never a pass.
+    pub const CHECK_CANCELLED: &str = "check_cancelled";
     /// The gateway refused a model call before it reached the provider,
     /// because the method and path are not on the inference allowlist the
     /// credential is lent for (`provider`, `method`, `reason`, `attempt`).
@@ -153,6 +170,29 @@ mod tests {
         ] {
             assert!(!s.accepts_prompt());
             assert!(s.is_terminal());
+        }
+    }
+
+    /// The guarded writes exclude states by their stored spelling, so the
+    /// list has to say exactly what `is_terminal` says.
+    #[test]
+    fn the_terminal_list_matches_the_predicate() {
+        for state in [
+            SessionState::Starting,
+            SessionState::Running,
+            SessionState::Paused,
+            SessionState::WaitingOnYou,
+            SessionState::WaitingOnCheck,
+            SessionState::Closed,
+            SessionState::KilledBudget,
+            SessionState::Failed,
+        ] {
+            assert_eq!(
+                SessionState::TERMINAL.contains(&state.as_str()),
+                state.is_terminal(),
+                "{} is listed differently from what is_terminal says",
+                state.as_str()
+            );
         }
     }
 }

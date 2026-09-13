@@ -438,11 +438,7 @@ impl Runner for KubeRunner {
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
         use std::os::unix::process::ExitStatusExt;
         self.ensure_mount_roots(&cmd).await?;
-        let name = format!(
-            "{}-{}",
-            Self::name_for(&cmd, "tracon-x"),
-            std::process::id()
-        );
+        let name = self.capture_name(&Self::name_for(&cmd, "tracon-x"));
         let mut pod = self.spec.pod(&name, &cmd, false)?;
         if let Some(c) = pod.spec.as_mut().and_then(|s| s.containers.first_mut()) {
             c.stdin = None;
@@ -490,6 +486,16 @@ impl Runner for KubeRunner {
     async fn kill(&self, name: &str) -> Result<(), RunnerError> {
         self.remove(name).await;
         Ok(())
+    }
+
+    /// Two node processes can share a namespace, so a capture's pod carries
+    /// this process's id. `kill` has to be given the same name back.
+    fn capture_name(&self, name: &str) -> String {
+        format!(
+            "{}-{}",
+            if name.is_empty() { "tracon-x" } else { name },
+            std::process::id()
+        )
     }
 
     /// The kubelet's `imageID` for the most recent `run_capture`, when one
