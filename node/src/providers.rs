@@ -21,7 +21,7 @@ use self::callback::{
     CallbackCapture, CallbackError, CallbackOutcome, CallbackTarget, CaptureEvent, CaptureReply,
 };
 use crate::{
-    adapter::{HarnessAdapter, LiftedToken},
+    adapter::{claude::ClaudeAdapter, HarnessAdapter, LiftedToken},
     boundary::Backend,
     broker::{Credential, SharedBroker, KIND_OAUTH},
     config::Config,
@@ -35,6 +35,64 @@ const REFRESH_AHEAD_MS: i64 = 30 * 60 * 1000;
 pub const REFRESH_TICK_SECS: u64 = 5 * 60;
 const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 const MAX_MANUAL_INPUT: usize = 8 * 1024;
+
+/// The provider state for a credential that can only be replaced by signing in
+/// again. Not "failed": nothing went wrong and nothing is going to be retried,
+/// the operator simply has to reconnect.
+const NEEDS_RECONNECT: &str = "needs_reconnect";
+
+/// Which adapter runs which provider's login.
+///
+/// The login client and the session harness are independent. Only Claude Code
+/// can mint an Anthropic subscription token — `claude setup-token` is the whole
+/// of that path — so the `anthropic` login resolves to the Claude adapter
+/// whatever `[harness] id` names, while every other login stays with the
+/// harness the node runs sessions with, which is what still brokers Codex.
+///
+/// The table also decides who lifts: `setup-token` prints its token once and
+/// leaves nothing in a store directory, so the instance that ran the login is
+/// the only place the token exists until the broker has it. Login and lift
+/// must therefore reach the same `Arc`, which is why this is held rather than
+/// rebuilt per call.
+pub struct LoginAdapters {
+    session: Arc<dyn HarnessAdapter>,
+    per_provider: HashMap<String, Arc<dyn HarnessAdapter>>,
+}
+
+impl LoginAdapters {
+    /// The table a node runs with.
+    pub fn for_node(cfg: &Config, session: Arc<dyn HarnessAdapter>, backend: &dyn Backend) -> Self {
+        let mut per_provider = HashMap::new();
+        if session.id() != ClaudeAdapter::ID {
+            let claude = ClaudeAdapter::new(crate::adapter::image_version(ClaudeAdapter::ID))
+                .with_login_image(backend.login_image());
+            per_provider.insert(
+                ClaudeAdapter::LOGIN_PROVIDER.to_string(),
+                Arc::new(claude) as Arc<dyn HarnessAdapter>,
+            );
+        }
+        // Named so an unconfigured provider cannot silently acquire a login
+        // client it was never meant to have.
+        per_provider.retain(|name, _| cfg.providers.contains_key(name));
+        Self {
+            session,
+            per_provider,
+        }
+    }
+
+    /// Every login through one adapter: what a node whose harness brokers all
+    /// of its own logins uses, and what the tests drive.
+    pub fn all(session: Arc<dyn HarnessAdapter>) -> Self {
+        Self {
+            session,
+            per_provider: HashMap::new(),
+        }
+    }
+
+    pub fn get(&self, provider: &str) -> &Arc<dyn HarnessAdapter> {
+        self.per_provider.get(provider).unwrap_or(&self.session)
+    }
+}
 
 type Stdin = Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>>;
 
@@ -105,7 +163,7 @@ pub struct Providers {
     cfg: Arc<Config>,
     broker: SharedBroker,
     store_key: DataKey,
-    adapter: Arc<dyn HarnessAdapter>,
+    logins: LoginAdapters,
     backend: Arc<dyn Backend>,
     node_id: String,
     bus: Bus,
@@ -135,6 +193,9 @@ pub enum ProviderError {
     RemoteDisconnect,
     #[error("{0}")]
     Failed(String),
+    /// The credential has run out and nothing can renew it: connect again.
+    #[error("{0}")]
+    ReconnectRequired(String),
 }
 
 impl Providers {
@@ -148,12 +209,13 @@ impl Providers {
         node_id: String,
         bus: Bus,
     ) -> Arc<Self> {
+        let logins = LoginAdapters::for_node(&cfg, adapter, backend.as_ref());
         Self::new_in(
             Self::store_root(),
             cfg,
             broker,
             store_key,
-            adapter,
+            logins,
             backend,
             node_id,
             bus,
@@ -166,7 +228,7 @@ impl Providers {
         cfg: Arc<Config>,
         broker: SharedBroker,
         store_key: DataKey,
-        adapter: Arc<dyn HarnessAdapter>,
+        logins: LoginAdapters,
         backend: Arc<dyn Backend>,
         node_id: String,
         bus: Bus,
@@ -175,7 +237,7 @@ impl Providers {
             cfg,
             broker,
             store_key,
-            adapter,
+            logins,
             backend,
             node_id,
             bus,
@@ -265,6 +327,19 @@ impl Providers {
                         InflightState::Pending(pending) => Some(pending.result.clone()),
                     };
                     ("pending", result, None, Some(slot.started_ms))
+                // A credential that can no longer be renewed is still in the
+                // broker, so this has to come before "connected" or the
+                // interface would keep calling it healthy until a request
+                // failed.
+                } else if let Some(note) =
+                    notes.get(name).filter(|note| note.state == NEEDS_RECONNECT)
+                {
+                    (
+                        note.state,
+                        None,
+                        private.then(|| note.error.clone()).flatten(),
+                        Some(note.updated_ms),
+                    )
                 } else if let Some((_, credential)) = cred {
                     ("connected", None, None, credential.expires_ms)
                 } else if let Some(note) = notes.get(name) {
@@ -370,9 +445,14 @@ impl Providers {
     }
 
     fn runner_for(&self, provider: &str) -> std::io::Result<Arc<dyn crate::runner::Runner>> {
+        // The layout is the login client's, not the session harness's: a login
+        // run by another adapter keeps its state where that adapter looks.
         Ok(self.backend.runner(vec![Mount::volume(
             self.state_volume(provider),
-            state_target(&self.backend.harness_home(), self.adapter.layout()),
+            state_target(
+                &self.backend.harness_home(),
+                self.logins.get(provider).layout(),
+            ),
             false,
         )]))
     }
@@ -421,7 +501,8 @@ impl Providers {
             }
         };
         let flow = match self
-            .adapter
+            .logins
+            .get(name)
             .login(runner.as_ref(), &login, &login_process)
             .await
         {
@@ -797,7 +878,7 @@ impl Providers {
                 .await
                 .map_err(|error| ProviderError::Failed(error.to_string()))?;
         }
-        let lifted = self.adapter.lift(&state, login).await;
+        let lifted = self.logins.get(name).lift(&state, login).await;
         let _ = std::fs::remove_dir_all(&state);
         let token: LiftedToken =
             lifted.map_err(|error| ProviderError::Failed(error.to_string()))?;
@@ -854,10 +935,16 @@ impl Providers {
         let runner = self
             .runner_for(name)
             .map_err(|error| ProviderError::Failed(error.to_string()))?;
-        self.adapter
+        self.logins
+            .get(name)
             .refresh(runner.as_ref(), &login, &format!("tracon-refresh-{name}"))
             .await
-            .map_err(|error| ProviderError::Failed(error.to_string()))?;
+            .map_err(|error| match error {
+                crate::adapter::AdapterError::ReconnectRequired(reason) => {
+                    ProviderError::ReconnectRequired(reason)
+                }
+                other => ProviderError::Failed(other.to_string()),
+            })?;
         self.lift(name, &login, Vec::new(), LiftKind::Refresh)
             .await?;
         self.publish();
@@ -866,10 +953,19 @@ impl Providers {
 
     pub fn due_for_refresh(&self, now: i64) -> Vec<String> {
         let broker = self.broker.read().unwrap();
+        let notes = self.notes.lock();
         self.cfg
             .providers
             .iter()
             .filter(|(_, provider)| provider.login.is_some())
+            // A credential whose adapter has already said it cannot be renewed
+            // is not due for anything: asking again every tick would be a loop
+            // that only stops when the operator reconnects.
+            .filter(|(name, _)| {
+                notes
+                    .get(name.as_str())
+                    .is_none_or(|note| note.state != NEEDS_RECONNECT)
+            })
             .filter(|(name, _)| {
                 broker
                     .model_credential_for(name, &self.node_id)
@@ -893,6 +989,14 @@ impl Providers {
             for name in self.due_for_refresh(now_ms()) {
                 match self.refresh(&name).await {
                     Ok(()) => tracing::info!(provider = %name, "token refreshed"),
+                    // Nothing went wrong and nothing will change on its own:
+                    // the note is what stops this being asked again, and it is
+                    // cleared by the next successful connect.
+                    Err(ProviderError::ReconnectRequired(reason)) => {
+                        tracing::warn!(provider = %name, reason = %reason, "token needs a new sign-in");
+                        self.note(&name, NEEDS_RECONNECT, Some(reason));
+                        self.publish();
+                    }
                     Err(error) => {
                         tracing::warn!(provider = %name, error = %error, "token refresh failed");
                         self.note(&name, "failed", Some(format!("refresh failed: {error}")));

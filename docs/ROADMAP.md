@@ -53,6 +53,13 @@ refer to that manifest's table.
         subscription via `claude setup-token` lifted into the broker, Codex subscription
         through the gateway with the `openai`-plus-OAuth trap asserted by test (finding 9),
         Bun proxy handling and ai-sdk header bytes observed.
+        - The `claude setup-token` path is built and covered by tests: the Claude adapter
+          runs it under a pty in a throwaway helper home, parses the sign-in URL out of the
+          CLI's own screen, takes the pasted code, and lifts the printed `sk-ant-oat…` token
+          as an `oauth` credential, so the gateway's existing subscription shaping (#166)
+          applies unchanged. The `anthropic` login now resolves to the Claude adapter
+          whatever `[harness] id` names. **Still unproven live:** no real subscription has
+          been signed in through it, so the proof itself remains the operator's.
   - [ ] Usage and spending accounting reconciled between OpenCode's per-message usage and
         the gateway's counts; unsent-text durability across disconnects.
   - [ ] Adversarial API run: permission escalation, foreign session ids, config and auth

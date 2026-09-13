@@ -6,7 +6,7 @@
 
 use std::path::Path;
 use std::sync::{
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 
@@ -29,6 +29,10 @@ pub struct LoginFake {
     pub account_id: Arc<Mutex<Option<String>>>,
     pub login_delay_ms: AtomicU64,
     pub login_calls: AtomicUsize,
+    /// Milliseconds from now that a lifted token expires. Default: two hours.
+    pub expires_in_ms: Arc<Mutex<Option<i64>>>,
+    /// Answer a refresh the way a harness with no refresh token does.
+    pub reconnect_required: AtomicBool,
 }
 
 #[async_trait]
@@ -108,6 +112,11 @@ impl HarnessAdapter for LoginFake {
         _name: &str,
     ) -> Result<(), AdapterError> {
         *self.refreshed.lock().unwrap() += 1;
+        if self.reconnect_required.load(Ordering::SeqCst) {
+            return Err(AdapterError::ReconnectRequired(
+                "this token can only be replaced by signing in again".into(),
+            ));
+        }
         if let Some(s) = self.stored.lock().unwrap().as_mut() {
             s.push_str("+r");
         }
@@ -123,7 +132,14 @@ impl HarnessAdapter for LoginFake {
         Ok(LiftedToken {
             access,
             refresh: Some("rt".into()),
-            expires_ms: Some(tracon::store::now_ms() + 2 * 3600 * 1000),
+            expires_ms: Some(
+                tracon::store::now_ms()
+                    + self
+                        .expires_in_ms
+                        .lock()
+                        .unwrap()
+                        .unwrap_or(2 * 3600 * 1000),
+            ),
             identity: Some("op@example".into()),
             account_id: self.account_id.lock().unwrap().clone(),
         })
