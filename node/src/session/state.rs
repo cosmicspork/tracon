@@ -178,6 +178,12 @@ pub mod event_kind {
     /// because the method and path are not on the inference allowlist the
     /// credential is lent for (`provider`, `method`, `reason`, `attempt`).
     pub const GATEWAY_REFUSED: &str = "gateway_refused";
+    /// A provider answered a model call without reporting usage
+    /// (`provider`, `model`). The gateway counts on the wire, so a provider
+    /// that reports nothing is unmetered on this session rather than free —
+    /// a distinction neither the harness nor the row of zeroes preserves.
+    /// Recorded once per session, like the ceiling.
+    pub const UNMETERED: &str = "unmetered";
 }
 
 #[cfg(test)]

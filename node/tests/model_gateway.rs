@@ -36,6 +36,9 @@ struct Seen {
     /// When set, the stub answers this status with a provider-shaped error
     /// body instead of the usual stream — a live provider's 429.
     refuse: Arc<Mutex<Option<u16>>>,
+    /// When set, the stub streams an answer carrying no `usage` at all — a
+    /// self-hosted server that reports nothing.
+    no_usage: Arc<Mutex<bool>>,
 }
 
 /// A provider stub that records every request and answers a two-event stream
@@ -66,8 +69,13 @@ async fn start_upstream(seen: Seen) -> u16 {
                     )
                         .into_response();
                 }
-                let sse = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\n\
-                           event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n";
+                let sse = if *seen.no_usage.lock().unwrap() {
+                    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n\
+                     event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+                } else {
+                    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\n\
+                     event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n"
+                };
                 (
                     [("content-type", "text/event-stream"), ("x-upstream", "stub")],
                     sse,
@@ -698,4 +706,100 @@ async fn a_channel_at_its_daily_ceiling_is_refused_and_told_once_per_session() {
     assert_eq!(work["ceiling"]["state"], "at");
     assert_eq!(work["ceiling"]["ceiling"], 100);
     assert!(work["ceiling"]["usage_today"].as_i64().unwrap() >= 100);
+}
+
+/// Finding 10, from the gateway's side: a provider that answers without
+/// reporting usage is marked unmetered on the session rather than recorded as
+/// a turn that cost nothing. The row is still written — the request happened
+/// — but the zero in it is not evidence of a free model, and the session says
+/// which provider the figure is missing for.
+#[tokio::test]
+async fn a_provider_that_reports_no_usage_marks_the_session_unmetered() {
+    state::isolate();
+    let h = harness(STORE, LOOPBACK).await;
+    let sid = "s-unmetered";
+    running_session(&h.store, sid);
+    let token = h.manager.register_tool_token_for_test(sid, "work").await;
+    *h.seen.no_usage.lock().unwrap() = true;
+
+    for _ in 0..2 {
+        let (status, _, body) = call(
+            &h.app,
+            "POST",
+            "/model/stub/v1/messages",
+            &token,
+            json!({"model": "claude-x", "messages": []}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    let unmetered: Vec<_> = h
+        .store
+        .events_after(sid, 0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "unmetered")
+        .collect();
+    assert_eq!(unmetered.len(), 1, "recorded once per session");
+    assert_eq!(unmetered[0].payload["provider"], "stub");
+    assert_eq!(unmetered[0].payload["model"], "claude-x");
+
+    // The requests are still counted; only the tokens are unknown.
+    let totals = h.store.usage_since(Some("work"), 0).unwrap();
+    assert_eq!(totals[0].requests, 2);
+    assert_eq!((totals[0].input_tokens, totals[0].output_tokens), (0, 0));
+
+    // A provider that does report usage says nothing, and the session is not
+    // marked for the one that did.
+    *h.seen.no_usage.lock().unwrap() = false;
+    let sid = "s-metered";
+    running_session(&h.store, sid);
+    let token = h.manager.register_tool_token_for_test(sid, "work").await;
+    let (status, _, _) = call(
+        &h.app,
+        "POST",
+        "/model/stub/v1/messages",
+        &token,
+        json!({"model": "claude-x", "messages": []}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!h
+        .store
+        .events_after(sid, 0, 100)
+        .unwrap()
+        .iter()
+        .any(|e| e.kind == "unmetered"));
+}
+
+/// An upstream that refused carries no usage either, and a refusal is not
+/// evidence about metering. The session learns it as a provider error, and
+/// nothing claims the provider is unmetered.
+#[tokio::test]
+async fn a_refused_call_is_not_mistaken_for_an_unmetered_provider() {
+    state::isolate();
+    let h = harness(STORE, LOOPBACK).await;
+    let sid = "s-429-unmetered";
+    running_session(&h.store, sid);
+    let token = h.manager.register_tool_token_for_test(sid, "work").await;
+    *h.seen.refuse.lock().unwrap() = Some(429);
+    let (status, _, _) = call(
+        &h.app,
+        "POST",
+        "/model/stub/v1/messages",
+        &token,
+        json!({"model": "claude-x", "messages": []}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let kinds: Vec<String> = h
+        .store
+        .events_after(sid, 0, 100)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    assert!(kinds.contains(&"provider_error".to_string()), "{kinds:?}");
+    assert!(!kinds.contains(&"unmetered".to_string()), "{kinds:?}");
 }

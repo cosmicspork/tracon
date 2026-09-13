@@ -82,15 +82,70 @@ terminal capability is granted.
 
 ## What Gate B must prove live (not by reading source)
 
-- Bun's `HTTP(S)_PROXY`/`NO_PROXY` handling and `--use-system-ca` against the gateway's
-  CONNECT proxy.
-- Non-zero gateway token counts for the self-hosted OpenAI-compatible endpoint.
-- The ChatGPT backend accepts a Codex request whose system prompt stays in the message
-  array.
-- Header bytes the bundled ai-sdk providers actually send (`x-api-key`, `Authorization`).
-- `OPENCODE_SERVER_PASSWORD` set and an unauthenticated request refused.
-- `claude setup-token` output lifts into the broker and the gateway's subscription
-  shaping serves an OpenCode `anthropic` provider unchanged.
+The provider half of this list is settled. `node/tests/opencode_providers.rs` holds each
+item below; the live cases run the pinned binary and skip with a message when it is not
+on the machine.
+
+### Proven against the pinned binary on this host
+
+| Claim | Where | What was observed |
+|---|---|---|
+| Provider traffic reaches the gateway and nothing else | `every_provider_call_arrives_at_the_gateway_on_an_allowlisted_path` | `POST …/model/anthropic/v1/messages` and `POST …/model/local/v1/chat/completions`, both on the shape's allowlist; replaying the same call through the gateway forwards it and the credential is injected |
+| Header bytes, runner → gateway | same | the Anthropic shape sends `anthropic-version: 2023-06-01` and `anthropic-beta`, the OpenAI-compatible shape `POST /v1/chat/completions`, and **neither sends a credential** (see finding 19) — so §2.6's question about *which* header the ai-sdk packages put a key in stays open on this path, because on it they put none |
+| Header bytes, gateway → provider | same | `x-api-key` for the Anthropic shape, `Authorization: Bearer` for the OpenAI-compatible one, with the placeholder nowhere in the request |
+| OpenCode's own `anthropic-beta` survives the subscription merge (#166) | `the_subscription_shaping_merges_with_the_flags_the_binary_sends` | the binary sends `interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14`; the gateway forwards `oauth-2025-04-20` first and both of the binary's flags after, with `CLAUDE_CODE_SYSTEM` prepended to the system prompt |
+| The runner holds no provider credential | `the_runner_sends_no_provider_credential_of_its_own` | on this session path the binary presents none at all; the gateway refuses an unauthenticated model call |
+| Bun honours `HTTP(S)_PROXY` for `fetch`, and `NO_PROXY` on the gateway host is load-bearing | `bun_honours_the_proxy_and_no_proxy_exempts_the_gateway` | without the exemption the provider call arrives at the CONNECT proxy in absolute form (`POST http://…/model/anthropic/v1/messages`) and never reaches the gateway; with it, the call goes direct. Also observed: the binary reaches for `registry.npmjs.org` at session start with `--pure` and the default plugins off (§1.2), which the proxy allowlist is what stops |
+| Non-zero gateway token counts for a self-hosted endpoint (finding 10) | `a_self_hosted_turn_is_counted_by_the_gateway` | a llama.cpp router, a real model, a real request composed by the binary: on one run 3057 prompt and 24 completion tokens counted by the gateway, equal to the figures the server itself reported |
+| A provider that omits usage is unmetered, not free | `a_provider_that_omits_usage_is_marked_unmetered_not_free`, `model_gateway.rs` | the session records an `unmetered` event once rather than a turn that cost nothing |
+| The declared catalogue is the whole catalogue | `the_binary_offers_exactly_the_declared_catalogue_with_egress_blocked` | with `OPENCODE_DISABLE_MODELS_FETCH`, `OPENCODE_MODELS_PATH`, and every route out pointed at a dead port, `GET /config/providers` offers exactly the declared models |
+| The Codex trap is foreclosed by construction (finding 9) | `the_codex_shape_keeps_its_own_provider_id_and_arms_no_oauth_loader` | the provider id stays `openai-codex`, no provider named `openai` carries a Codex model, and the auth store holds no `oauth` record |
+
+`--use-system-ca` / `NODE_EXTRA_CA_CERTS` turned out not to be load-bearing: the harness
+reaches the gateway over **plain HTTP** on the runner's private network, so no certificate
+authority is installed in the runner at all (`the_gateway_boundary_is_plain_http_so_the_runner_installs_no_ca`).
+If that boundary ever becomes TLS, that test is where the CA handling has to be proved.
+
+### Finding 19 — the session runner resolves its base URL from the catalogue, not from `options.baseURL`
+
+Found by running the binary the way the adapter drives it (`POST /api/session/{id}/prompt`).
+That path resolves a model through the v2 catalogue and the protocol implementations in
+`packages/llm`, not through the ai-sdk provider table §2.4 describes. A provider entry that
+named the gateway only in `options.baseURL` was served from the **provider's own default
+host**: a real `POST https://api.anthropic.com/v1/messages`, with the gateway, its
+allowlist, its ceiling and its counting bypassed and no error anywhere. `api` — the
+base-URL template (§1.1) — is the field this path reads, from the provider entry and from
+`models.<id>.provider.api` in the pinned catalogue. The adapter now writes the gateway URL
+into all three, and the test above fails if any of them is dropped.
+
+**Consequence for the plan.** §0's advice to "pin v1/ai-sdk behaviour" is not just about
+usage accounting: the two stacks disagree about where a provider's requests go, and the
+adapter drives the newer one. Two things follow, neither of them this row's to settle:
+
+- **The runner has no way to present the placeholder on that path.** The v2 catalogue has
+  no field for a key, the v2 config shape is projected down to V1 and its `providers` key
+  discarded (`configuration compatibility diagnostic … Omitted native setting`), and the
+  credential store the path does read is the SQLite `credential` table (§2.1) or
+  `POST /api/integration/{id}/connect/key`. So the gateway currently refuses the binary's
+  model call as unauthenticated, and no OpenCode turn completes through it. Deciding
+  between "drive the v1 session surface" and "give the runner a v2 credential" is a Gate B
+  decision for the session-controller work, not a config-rendering one.
+- Until it is decided, the parts of this list that need a *completed* OpenCode turn —
+  reconciling OpenCode's per-message usage against the gateway's counts, and the hosted
+  and subscription end-to-end runs — cannot be closed.
+
+### Still the operator's (no credential for them exists on a test machine)
+
+- Hosted Anthropic and OpenAI API keys end to end.
+- The Anthropic subscription: `claude setup-token` output lifted into the broker, and the
+  gateway's shaping serving an OpenCode `anthropic` provider unchanged. The shaping itself
+  is proven above against a broker credential of `oauth` kind; what is unproven is a real
+  subscription token.
+- The Codex subscription, and with it whether the ChatGPT backend accepts a Codex request
+  whose system prompt stays in the message array.
+- `OPENCODE_SERVER_PASSWORD` set and an unauthenticated request refused — the adapter sets
+  it and the API-gateway tests cover the refusal; a live unauthenticated probe of a running
+  session server belongs with the adversarial run.
 
 ## Files
 
