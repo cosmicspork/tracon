@@ -15,6 +15,12 @@ node-image tag="dev":
 harness-opencode-image tag="test":
     podman build -f containers/harness-opencode/Containerfile -t localhost/tracon-harness-opencode-{{tag}} containers/harness-opencode
 
+# Build OpenCode's native UI from a pinned checkout and vendor it where the node
+# serves it from. Not embedded in the binary: 34 MiB, verified by the tree digest
+# in containers/opencode-ui/DIGEST. See containers/opencode-ui/README.md.
+opencode-ui src:
+    ./containers/opencode-ui/build.sh --src {{src}}
+
 # Build the SPA into spa/dist (embedded by the node at compile time).
 spa:
     cd spa && bun install --frozen-lockfile && bun run build

@@ -231,10 +231,34 @@ refer to that manifest's table.
         and rebuilt by `tracon doc reindex` returns the same top-k for the same queries; a
         session package reads back off disk with `tracon session show`, no node running.
 - [ ] **Gate D — browser, desktop, and installed mobile PWA.**
-  - [ ] Dedicated UI origin served by tracon from the pinned bundle, catch-all never proxied,
+  - [x] Dedicated UI origin served by tracon from the pinned bundle, catch-all never proxied,
         tracon CSP replacing `connect-src *` (finding 3); short-lived single-use bootstrap
         exchanged for an HttpOnly cookie; no password in the browser (finding 4); Origin/CSRF
         on mutations and WebSocket upgrades.
+        `[ui] opencode_listen`/`opencode_url` bind a second listener (`node/src/http/ui.rs`)
+        that serves the vendored bundle at `/` and routes the app's API calls into the #195
+        gateway for the one session its cookie names. The bundle is built by
+        `containers/opencode-ui/build.sh` from the pinned tag, is not in git, and is verified
+        against the tree digest in `containers/opencode-ui/DIGEST` over the bytes about to be
+        served — a tree that does not match is not served. "Open in OpenCode" mints a
+        single-use 60-second capability bound to (operator login, session, this origin) and
+        opens it in a **fragment**; an inline bootstrap tracon splices into `index.html`
+        strips the fragment, exchanges it at `POST /boot` for a host-only HttpOnly
+        `SameSite=Strict` cookie, and only then loads upstream's module — so no upstream code
+        ever sees the capability. The operator cookie is not read on this origin and the UI
+        cookie is not a credential on the operator's; both asserted. Every request re-reads
+        the session and the operator login, so ending either revokes the window.
+        **Proven in a browser** (`node/tests/opencode_ui.rs`, 18 cases plus a
+        `TRACON_UI_SMOKE=1` harness driven with headless Chromium over CDP): against the real
+        bundle and the pinned binary, the session page renders, **no request left the UI
+        origin**, **no request carried an `Authorization` header**, and `localStorage` holds
+        no password and no server record — which settles §8 #8's open question, that the app
+        is usable with `password: undefined`.
+        **Still to do here:** the PTY WebSocket upgrade is held to the same Origin rule but
+        the gateway's connect route still answers 501 (the ticket exchange is its own row);
+        `connect-src 'self'` will need the `wss://` form of this origin when it lands. The
+        SPA has no "Open in OpenCode" control yet — the route (`POST
+        /api/sessions/{id}/opencode-ui`) is what the shell and the desktop window call.
   - [ ] Desktop: an unprivileged window with no node-management commands; navigation limited
         to the UI origin.
   - [ ] Installed mobile PWA on the always-on node: in-scope shell, isolated native view,

@@ -525,6 +525,33 @@ fn classify(method: &Method, path: &[String]) -> (Class, &'static [&'static str]
     (Class::Forbidden("not a route this gateway mediates"), &[])
 }
 
+/// Whether a first path segment is one the route matrix knows about at all.
+///
+/// Added for the native UI's origin (`http::ui`), which serves a static bundle
+/// at `/` and has to decide, for a path that is not in that bundle, whether it
+/// is an API call the app is making or a path nobody owns. "Is it on the
+/// matrix" is the only honest way to ask that, and this is the matrix. The
+/// answer is deliberately coarse — a `true` here means only that `classify`
+/// gets to see the request, and `classify` refuses everything it does not
+/// recognise. A `false` is a 404 on that origin, which is what keeps the UI
+/// origin from being a catch-all proxy into the harness (finding 3).
+pub fn is_api_root(segment: &str) -> bool {
+    if ROUTES
+        .iter()
+        .any(|(_, pattern, _)| pattern.first().is_some_and(|first| *first == segment))
+    {
+        return true;
+    }
+    // The deny list is not in `ROUTES`; `forbidden_tree` names whole subtrees.
+    // They belong here too, or the UI origin would answer 404 for a route the
+    // gateway has a reason for — and "nobody owns this path" and "this is
+    // refused because it would re-point the harness" are different answers.
+    // Observed: the app calls `GET /experimental/resource` at startup, and a
+    // bare 404 told the operator nothing.
+    forbidden_tree(&Method::GET, &[segment.to_string(), "probe".to_string()]).is_some()
+        || forbidden_tree(&Method::POST, &[segment.to_string(), "probe".to_string()]).is_some()
+}
+
 /// A session id in the path that is not this session's. One Basic credential
 /// is authority over every session on the server (finding 5), so the path is
 /// the only thing that keeps one session's UI out of another's transcript.
