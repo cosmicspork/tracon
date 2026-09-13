@@ -36,6 +36,9 @@ struct Seen {
     /// When set, the stub answers this status with a provider-shaped error
     /// body instead of the usual stream — a live provider's 429.
     refuse: Arc<Mutex<Option<u16>>>,
+    /// When set, the stub streams an answer carrying no `usage` at all — a
+    /// self-hosted server that reports nothing.
+    no_usage: Arc<Mutex<bool>>,
 }
 
 /// A provider stub that records every request and answers a two-event stream
@@ -66,8 +69,13 @@ async fn start_upstream(seen: Seen) -> u16 {
                     )
                         .into_response();
                 }
-                let sse = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\n\
-                           event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n";
+                let sse = if *seen.no_usage.lock().unwrap() {
+                    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n\
+                     event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+                } else {
+                    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\n\
+                     event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n"
+                };
                 (
                     [("content-type", "text/event-stream"), ("x-upstream", "stub")],
                     sse,
@@ -698,4 +706,62 @@ async fn a_channel_at_its_daily_ceiling_is_refused_and_told_once_per_session() {
     assert_eq!(work["ceiling"]["state"], "at");
     assert_eq!(work["ceiling"]["ceiling"], 100);
     assert!(work["ceiling"]["usage_today"].as_i64().unwrap() >= 100);
+}
+
+/// Finding 10, from the gateway's side. A provider that answers without
+/// reporting usage leaves the count at zero — there is nothing on the wire to
+/// count and no estimator anywhere — but the requests are recorded beside it,
+/// and that is what lets the turn be settled as *unmetered* rather than as a
+/// turn that cost nothing. The zero and the requests have to travel together
+/// or the distinction is lost here rather than later.
+#[tokio::test]
+async fn a_provider_that_reports_no_usage_leaves_a_turn_that_settles_unmetered() {
+    state::isolate();
+    let h = harness(STORE, LOOPBACK).await;
+    let sid = "s-unmetered";
+    running_session(&h.store, sid);
+    let token = h.manager.register_tool_token_for_test(sid, "work").await;
+    *h.seen.no_usage.lock().unwrap() = true;
+
+    for _ in 0..2 {
+        let (status, _, body) = call(
+            &h.app,
+            "POST",
+            "/model/stub/v1/messages",
+            &token,
+            json!({"model": "claude-x", "messages": []}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    let totals = h.store.usage_since(Some("work"), 0).unwrap();
+    assert_eq!(totals[0].requests, 2, "the requests happened");
+    assert_eq!(
+        (totals[0].input_tokens, totals[0].output_tokens),
+        (0, 0),
+        "and nothing on the wire said what they cost"
+    );
+    let settled = tracon::metrics::settle_turn(&h.store, sid, None, None);
+    assert!(
+        settled.unmetered(),
+        "a turn the gateway could not count was settled as {settled:?}"
+    );
+
+    // A provider that does report usage settles as an ordinary turn.
+    *h.seen.no_usage.lock().unwrap() = false;
+    let sid = "s-metered";
+    running_session(&h.store, sid);
+    let token = h.manager.register_tool_token_for_test(sid, "work").await;
+    let (status, _, _) = call(
+        &h.app,
+        "POST",
+        "/model/stub/v1/messages",
+        &token,
+        json!({"model": "claude-x", "messages": []}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let settled = tracon::metrics::settle_turn(&h.store, sid, Some(14), None);
+    assert!(!settled.unmetered(), "{settled:?}");
 }

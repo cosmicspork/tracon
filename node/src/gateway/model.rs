@@ -32,7 +32,7 @@ use crate::session::state::event_kind as ek;
 
 use crate::{
     broker::Injection,
-    config::{Config, Provider, SHAPE_ANTHROPIC, SHAPE_OPENAI, SHAPE_OPENAI_CODEX},
+    config::{Config, Provider, SHAPE_ANTHROPIC, SHAPE_OPENAI_CODEX},
     http::api::AppState,
     store::{now_ms, UsageRow},
 };
@@ -596,7 +596,7 @@ pub async fn handle(
         };
     let counted = Counted {
         inner,
-        scanner: UsageScanner::new(&p.shape),
+        scanner: UsageScanner::new(),
         usage: usage.clone(),
         store: s.manager.store().clone(),
         done: false,
@@ -759,18 +759,24 @@ impl Injection {
 }
 
 /// Pulls token counts out of the response as it streams by, from the `usage`
-/// objects both shapes emit; the body itself passes through untouched.
+/// objects every shape emits; the body itself passes through untouched.
+///
+/// Both spellings are read for every shape rather than one per shape. The
+/// shape names the *request* surface, not the dialect of the answer: an
+/// OpenAI-compatible server reached through a provider whose shape this build
+/// does not recognise still answers `prompt_tokens`/`completion_tokens`, and a
+/// scanner that only looked for `input_tokens` would count it as zero — which
+/// is the failure `docs/reference/opencode-v1.18.30/providers.md` §6.3 names,
+/// arrived at from the gateway's side instead of the harness's.
 struct UsageScanner {
-    shape: String,
     line: Vec<u8>,
     input: i64,
     output: i64,
 }
 
 impl UsageScanner {
-    fn new(shape: &str) -> Self {
+    fn new() -> Self {
         Self {
-            shape: shape.to_string(),
             line: Vec::new(),
             input: 0,
             output: 0,
@@ -812,21 +818,12 @@ impl UsageScanner {
         } else {
             return;
         };
-        let (i, o) = if matches!(self.shape.as_str(), SHAPE_OPENAI | SHAPE_OPENAI_CODEX) {
-            (
-                usage["input_tokens"]
-                    .as_i64()
-                    .or_else(|| usage["prompt_tokens"].as_i64()),
-                usage["output_tokens"]
-                    .as_i64()
-                    .or_else(|| usage["completion_tokens"].as_i64()),
-            )
-        } else {
-            (
-                usage["input_tokens"].as_i64(),
-                usage["output_tokens"].as_i64(),
-            )
-        };
+        let i = usage["input_tokens"]
+            .as_i64()
+            .or_else(|| usage["prompt_tokens"].as_i64());
+        let o = usage["output_tokens"]
+            .as_i64()
+            .or_else(|| usage["completion_tokens"].as_i64());
         // Cumulative in a stream (Anthropic's message_delta repeats the running
         // output count), so keep the largest seen.
         if let Some(i) = i {
@@ -893,6 +890,7 @@ impl Drop for Counted {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SHAPE_OPENAI;
 
     fn system_of(body: &[u8]) -> Value {
         serde_json::from_slice::<Value>(body).unwrap()["system"].clone()
@@ -1171,23 +1169,55 @@ mod tests {
 
     #[test]
     fn the_scanner_reads_both_shapes_and_keeps_the_running_maximum() {
-        let mut s = UsageScanner::new(SHAPE_ANTHROPIC);
+        let mut s = UsageScanner::new();
         s.feed(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":1}}}\n\n");
         s.feed(b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n");
         s.finish();
         assert_eq!((s.input, s.output), (7, 4));
 
-        let mut s = UsageScanner::new(SHAPE_OPENAI);
+        let mut s = UsageScanner::new();
         s.feed(b"{\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3}}");
         s.finish();
         assert_eq!((s.input, s.output), (10, 3));
-        let mut s = UsageScanner::new(SHAPE_OPENAI);
+        let mut s = UsageScanner::new();
         s.feed(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":5}}}\n");
         s.finish();
         assert_eq!((s.input, s.output), (12, 5));
-        let mut s = UsageScanner::new(SHAPE_OPENAI_CODEX);
-        s.feed(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":2}}}\n");
+    }
+
+    /// A self-hosted OpenAI-compatible server is reached through a provider
+    /// whose shape this build has no name for — it is wired as
+    /// OpenAI-compatible and held to that surface — and it answers the
+    /// chat-completions spelling. Reading the spelling per shape counted that
+    /// as zero, which is how a real turn against a local model became a free
+    /// one; reading both spellings for every shape counts it.
+    #[test]
+    fn a_shape_this_build_does_not_know_is_still_counted() {
+        let mut s = UsageScanner::new();
+        s.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}],\"usage\":null}\n");
+        s.feed(b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":16,\"total_tokens\":58}}\n");
+        s.feed(b"data: [DONE]\n");
         s.finish();
-        assert_eq!((s.input, s.output), (9, 2));
+        assert_eq!((s.input, s.output), (42, 16));
+    }
+
+    /// A provider that reports nothing leaves the count at zero — and the
+    /// requests recorded beside it, which is what lets the reconciler call
+    /// that turn unmetered rather than free (`crate::metrics`).
+    #[test]
+    fn a_provider_that_reports_nothing_counts_nothing() {
+        let mut s = UsageScanner::new();
+        s.feed(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n",
+        );
+        s.feed(b"data: [DONE]\n");
+        s.finish();
+        assert_eq!((s.input, s.output), (0, 0));
+        // A usage object with nothing the scanner understands in it says no
+        // more than none at all.
+        let mut s = UsageScanner::new();
+        s.feed(b"data: {\"usage\":{\"tokens\":7}}\n");
+        s.finish();
+        assert_eq!((s.input, s.output), (0, 0));
     }
 }

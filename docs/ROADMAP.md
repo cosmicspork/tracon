@@ -88,6 +88,33 @@ refer to that manifest's table.
         subscription via `claude setup-token` lifted into the broker, Codex subscription
         through the gateway with the `openai`-plus-OAuth trap asserted by test (finding 9),
         Bun proxy handling and ai-sdk header bytes observed.
+        - **Proven on the pinned binary** (`node/tests/opencode_providers.rs`, live cases
+          skipped with a message where the binary or the local model server is absent):
+          provider traffic reaches the gateway and only the gateway, on a path the shape's
+          allowlist names; the header bytes on both legs (`anthropic-version` and
+          `anthropic-beta` from the binary, `x-api-key` or `Authorization: Bearer` from the
+          gateway, the placeholder in neither); the binary's own `anthropic-beta`
+          flags surviving the subscription merge with `oauth-2025-04-20` first and the
+          `CLAUDE_CODE_SYSTEM` prompt shaping applied; Bun honouring `HTTP(S)_PROXY` for
+          `fetch` and `NO_PROXY` on the gateway host being load-bearing rather than
+          decorative; the declared catalogue being the whole catalogue with the fetch
+          disabled and egress blackholed; the Codex `openai`-plus-OAuth trap foreclosed by
+          construction; and, live against a llama.cpp router, non-zero gateway token counts
+          for a self-hosted endpoint equal to the figures the server itself reported, with
+          a provider that omits usage settling as unmetered rather than billed as zero.
+          `--use-system-ca` is not load-bearing: the gateway boundary is plain HTTP on the
+          runner's private network, asserted as such.
+        - **Found doing it, and blocking the rest** (manifest finding 19): the session path
+          the adapter drives resolves a model's base URL from the catalogue rather than
+          from `options.baseURL`, so a provider entry without `api` was served from
+          `api.anthropic.com` with the gateway bypassed. The adapter now writes the gateway
+          URL into the provider entry, the catalogue provider, and each catalogue model.
+          The runner still has no way to present its placeholder on that path, so the
+          gateway refuses its model call and **no OpenCode turn completes through it**:
+          the hosted end-to-end runs stay open, and the usage reconciliation below is
+          proven against the fake server rather than against a real turn. Closing it is a
+          choice between driving the v1 session surface and giving the runner a v2
+          credential, which belongs with the session controller rather than here.
         - The `claude setup-token` path is built and covered by tests: the Claude adapter
           runs it under a pty in a throwaway helper home, parses the sign-in URL out of the
           CLI's own screen, takes the pasted code, and lifts the printed `sk-ant-oat…` token

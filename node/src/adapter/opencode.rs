@@ -251,6 +251,16 @@ fn config_document(wiring: &Wiring, mcp_servers: &[Value]) -> Value {
             json!({
                 "npm": npm_for(&provider.shape),
                 "name": format!("{} (tracon)", provider.name),
+                // Both spellings of the same fact, because two code paths in
+                // this binary read different ones: the ai-sdk session builds
+                // its client from `options.baseURL`, and the newer session
+                // runner resolves a base URL from `api` by way of the
+                // catalogue. A provider that carries only `options.baseURL`
+                // is served by the second path from the *provider's own*
+                // default host — `api.anthropic.com` — with the gateway
+                // bypassed and no error anywhere. Observed against the pinned
+                // binary; `node/tests/opencode_providers.rs` holds it.
+                "api": provider_base_url(&provider.base_url),
                 "options": {
                     "baseURL": provider_base_url(&provider.base_url),
                     // A placeholder: the real credential is attached by the
@@ -372,6 +382,13 @@ fn catalogue_document(wiring: &Wiring) -> Value {
             entry["cost"] = json!({ "input": 0, "output": 0 });
             entry["modalities"] = json!({ "input": ["text"], "output": ["text"] });
             entry["status"] = json!("active");
+            // Per model as well as per provider: this is the field the
+            // session runner reads a base URL from, and a model without one
+            // falls back to the provider package's own default host.
+            entry["provider"] = json!({
+                "npm": npm_for(&provider.shape),
+                "api": provider_base_url(&provider.base_url),
+            });
             models.insert(model.id.clone(), entry);
         }
         catalogue.insert(
@@ -380,6 +397,10 @@ fn catalogue_document(wiring: &Wiring) -> Value {
                 "id": provider.name,
                 "name": format!("{} (tracon)", provider.name),
                 "npm": npm_for(&provider.shape),
+                // The gateway, not the provider. The catalogue is what the
+                // session runner resolves a model's endpoint from, so leaving
+                // this out is not "unset" — it is the provider's own host.
+                "api": provider_base_url(&provider.base_url),
                 // No environment variable supplies a key: the placeholder is
                 // in the config and the real credential is the gateway's.
                 "env": Vec::<String>::new(),
