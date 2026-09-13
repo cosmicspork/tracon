@@ -21,8 +21,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    AdapterError, HarnessAdapter, HarnessEvent, HarnessHandle, HarnessVersion, LaunchSpec, Layout,
-    ModelOption, PermissionReply, PermissionRequest, TurnResult,
+    AdapterError, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle, HarnessVersion,
+    LaunchSpec, Layout, ModelOption, PermissionReply, PermissionRequest, ProtocolSupport,
+    TurnResult,
 };
 use crate::acp::types::{self, PermissionOption, ToolCall, ToolCallUpdate, Usage};
 use crate::runner::{Runner, RunnerCommand, RunnerError, Spawned};
@@ -43,6 +44,26 @@ pub struct ClaudeAdapter {
 
 impl ClaudeAdapter {
     pub const ID: &'static str = "claude";
+
+    /// The version this node's harness image installs.
+    /// `containers/harness-claude/Containerfile` fetches exactly this release
+    /// at exactly one digest; `the_image_installs_the_pinned_claude` keeps the
+    /// two from drifting apart.
+    pub const PINNED_VERSION: &'static str = "2.1.247";
+
+    /// Claude Code does not speak ACP; its contract is the stream-json control
+    /// protocol, which carries no version field of its own. Every shape this
+    /// adapter drives was read from one revision of it, and 1 is the name
+    /// given to that revision here. A `system/init` frame that grows a version
+    /// and names something outside this range is refused; an init frame with
+    /// no version at all is the revision these shapes came from, so absence is
+    /// 1 rather than a refusal — unlike the harness version, which the CLI
+    /// always reports and which therefore fails closed when it is missing.
+    pub const PROTOCOL: ProtocolSupport = ProtocolSupport {
+        name: "claude-stream-json",
+        min: 1,
+        max: 1,
+    };
 
     pub fn new(pinned: impl Into<String>) -> Self {
         Self {
@@ -136,6 +157,17 @@ fn mcp_config(servers: &[Value]) -> Value {
     json!({ "mcpServers": Value::Object(map) })
 }
 
+/// The stream-json revision a `system/init` frame names, defaulting to the one
+/// these shapes were read from when it names none. Both spellings are accepted
+/// because the frame is camelCase in places and snake_case in others.
+fn init_protocol(init: &Value) -> u32 {
+    init.get("protocol_version")
+        .or_else(|| init.get("protocolVersion"))
+        .and_then(Value::as_u64)
+        .map(|v| v.try_into().unwrap_or(u32::MAX))
+        .unwrap_or(ClaudeAdapter::PROTOCOL.min)
+}
+
 fn parse_version(out: &str) -> String {
     // "2.1.247 (Claude Code)"
     out.split_whitespace()
@@ -198,12 +230,17 @@ pub struct ClaudeHandle {
     writer: Writer,
     session_id: String,
     turn: Arc<Mutex<Option<oneshot::Sender<TurnResult>>>>,
+    compat: HarnessCompat,
 }
 
 #[async_trait]
 impl HarnessHandle for ClaudeHandle {
     fn harness_session_id(&self) -> &str {
         &self.session_id
+    }
+
+    fn compat(&self) -> HarnessCompat {
+        self.compat.clone()
     }
 
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError> {
@@ -528,6 +565,10 @@ impl HarnessAdapter for ClaudeAdapter {
         &self.pinned
     }
 
+    fn protocol(&self) -> ProtocolSupport {
+        Self::PROTOCOL
+    }
+
     fn layout(&self) -> Layout {
         Self::layout()
     }
@@ -616,6 +657,17 @@ impl HarnessAdapter for ClaudeAdapter {
                 pinned: self.pinned.clone(),
             });
         }
+        // Everything below decodes stream-json frames of one revision. A CLI
+        // that starts naming another one is refused rather than driven.
+        let protocol = init_protocol(&init);
+        if !Self::PROTOCOL.accepts(protocol) {
+            return Err(AdapterError::IncompatibleProtocol {
+                agent: Self::ID.into(),
+                protocol: Self::PROTOCOL.name,
+                found: protocol.to_string(),
+                supported: Self::PROTOCOL.versions(),
+            });
+        }
         // A server the harness could not reach means the session has no tools
         // and would fail in a way that looks like the model being unhelpful.
         for s in init["mcp_servers"].as_array().into_iter().flatten() {
@@ -637,6 +689,11 @@ impl HarnessAdapter for ClaudeAdapter {
                 .unwrap_or(&session_id)
                 .to_string(),
             turn: turn.clone(),
+            compat: HarnessCompat {
+                agent: Self::ID.into(),
+                version: found.to_string(),
+                protocol: Self::PROTOCOL.tag(protocol),
+            },
         };
         tokio::spawn(
             Pump {

@@ -289,6 +289,9 @@ impl Manager {
                     branch: String::new(),
                     harness_id: "fake".into(),
                     harness_version: String::new(),
+                    harness_agent: None,
+                    harness_found: None,
+                    harness_protocol: None,
                     harness_session_id: None,
                     container_name: None,
                     model: String::new(),
@@ -648,6 +651,9 @@ impl Manager {
             branch: branch.clone(),
             harness_id: adapter.id().to_string(),
             harness_version: adapter.pinned_version().to_string(),
+            harness_agent: None,
+            harness_found: None,
+            harness_protocol: None,
             harness_session_id: None,
             container_name: None,
             model: spec.model.clone(),
@@ -709,11 +715,22 @@ impl Manager {
                 }
                 // A session that never started holds no capability.
                 this.tokens.lock().await.remove(&id);
+                // A harness that is not the one this node drives is a fact
+                // about the image, not about this session: every session here
+                // ends the same way until the image or the pin changes, and
+                // the row says so rather than reading as one bad start.
+                let reason = match e.downcast_ref::<crate::adapter::AdapterError>() {
+                    Some(
+                        crate::adapter::AdapterError::IncompatibleProtocol { .. }
+                        | crate::adapter::AdapterError::VersionMismatch { .. },
+                    ) => EndReason::Incompatible,
+                    _ => EndReason::Error,
+                };
                 let _ = this.store.update_session(
                     &id,
                     SessionPatch {
                         state: Some(SessionState::Failed.as_str().into()),
-                        end_reason: Some(EndReason::Error.as_str().into()),
+                        end_reason: Some(reason.as_str().into()),
                         last_error: Some(e.to_string()),
                         ended_mono_ms: Some(started.elapsed().as_millis() as i64),
                         ..Default::default()
@@ -1055,10 +1072,18 @@ impl Manager {
             self.tokens.lock().await.remove(id);
             return Ok(());
         }
+        // What the harness turned out to be, next to what this node expected of
+        // it. The pin and the protocol were both checked before the handshake
+        // returned, so this records a session that is already known compatible
+        // — for reading the transcript later against the build that produced it.
+        let compat = handle.compat();
         self.store.update_session(
             id,
             SessionPatch {
                 harness_session_id: Some(handle.harness_session_id().to_string()),
+                harness_agent: Some(compat.agent.clone()),
+                harness_found: Some(compat.version.clone()),
+                harness_protocol: Some(compat.protocol.clone()),
                 ..Default::default()
             },
         )?;
@@ -1072,6 +1097,10 @@ impl Manager {
                 "harness": adapter.id(), "phase": spec.phase.as_str(),
                 "work_item_id": spec.work_item_id,
                 "policy_version": self.policy.read().unwrap().version,
+                "harness_agent": compat.agent,
+                "harness_version": compat.version,
+                "harness_expected": adapter.pinned_version(),
+                "harness_protocol": compat.protocol,
             }),
             at_ms: now_ms(),
             mono_ms: started.elapsed().as_millis() as i64,
@@ -1170,6 +1199,9 @@ impl Manager {
             branch: String::new(),
             harness_id: external::HARNESS_ID.into(),
             harness_version: String::new(),
+            harness_agent: None,
+            harness_found: None,
+            harness_protocol: None,
             harness_session_id: None,
             container_name: None,
             model: String::new(),

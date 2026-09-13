@@ -15,6 +15,17 @@ fn send(out: &mut impl Write, v: &Value) {
     out.flush().unwrap();
 }
 
+fn env_str(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_u32(key: &str, default: u32) -> u32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 fn main() {
     // One locked reader for the whole process: nesting `stdin().lock()` inside the
     // read loop deadlocks, and the permission answer has to be read mid-turn.
@@ -36,11 +47,17 @@ fn main() {
         let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
         match method {
+            // `FAKE_ACP_PROTOCOL` and `FAKE_ACP_VERSION` let a test drive the
+            // compatibility paths: an agent speaking a protocol revision this
+            // node was not written against, or a build other than the pin.
             "initialize" => send(
                 &mut stdout,
                 &json!({"jsonrpc":"2.0","id":id,"result":{
-                    "protocolVersion":1,
-                    "agentInfo":{"name":"fake","version":"18.0.4"}
+                    "protocolVersion": env_u32("FAKE_ACP_PROTOCOL", 1),
+                    "agentInfo":{
+                        "name": env_str("FAKE_ACP_NAME", "fake"),
+                        "version": env_str("FAKE_ACP_VERSION", "18.0.4"),
+                    }
                 }}),
             ),
             "session/new" => send(

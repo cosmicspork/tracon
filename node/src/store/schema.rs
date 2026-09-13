@@ -752,6 +752,18 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX publication_review ON publication(review_id, created_ms);
     CREATE INDEX publication_state ON publication(state, updated_ms);
     "#,
+    // 32: what the harness actually was, per session, as against
+    // `harness_version`, which is what the node expected of it. A transcript
+    // read later is only interpretable against the agent, build and protocol
+    // revision that produced it, and a compatibility failure is only
+    // diagnosable from the row if the row holds both sides. NULL on rows
+    // written before the column, and on a session whose handshake never
+    // landed.
+    r#"
+    ALTER TABLE session ADD COLUMN harness_agent TEXT;
+    ALTER TABLE session ADD COLUMN harness_found TEXT;
+    ALTER TABLE session ADD COLUMN harness_protocol TEXT;
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

@@ -37,7 +37,14 @@ fn main() {
         std::env::var("FAKE_CLAUDE_MCP_STATUS").unwrap_or_else(|_| "connected".to_string());
     let has_mcp = args.iter().any(|a| a == "--mcp-config");
 
-    emit(serde_json::json!({
+    // The stream-json revision this fake claims to speak. Absent by default,
+    // which is what the shipped CLI's init frame looks like; a test sets it to
+    // drive the adapter's protocol check.
+    let protocol = std::env::var("FAKE_CLAUDE_PROTOCOL")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
+
+    let mut init = serde_json::json!({
         "type": "system",
         "subtype": "init",
         "session_id": session_id,
@@ -51,7 +58,11 @@ fn main() {
             serde_json::json!([])
         },
         "capabilities": ["interrupt_receipt_v1"],
-    }));
+    });
+    if let Some(protocol) = protocol {
+        init["protocol_version"] = serde_json::json!(protocol);
+    }
+    emit(init);
 
     // One turn per user message on stdin, and the process stays alive between
     // them: that is what makes a session multi-turn rather than one shot.

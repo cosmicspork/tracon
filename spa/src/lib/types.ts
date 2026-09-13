@@ -215,7 +215,13 @@ export interface Session {
   worktree_path: string | null
   branch: string
   harness_id: string
+  /** What the node expected of the harness: the version it is pinned to. */
   harness_version: string
+  /** What the harness reported at the handshake, and the protocol revision
+   * this session negotiated. Null until it starts, and on older rows. */
+  harness_agent: string | null
+  harness_found: string | null
+  harness_protocol: string | null
   model: string
   phase: 'plan' | 'execute' | 'review'
   policy_version: number | null

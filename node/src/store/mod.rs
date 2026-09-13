@@ -204,9 +204,10 @@ impl Store {
                 branch, harness_id, harness_version, harness_session_id, container_name, model,
                 budget_tokens, tokens_used, cost_usd, context_used, context_size, state, end_reason,
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
-                ended_mono_ms, updated_ms, project_id, phase, policy_version, review_id)
+                ended_mono_ms, updated_ms, project_id, phase, policy_version, review_id,
+                harness_agent, harness_found, harness_protocol)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-                ?23,?24,?25,?26,?27,?28,?29,?30,?31)",
+                ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34)",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -238,7 +239,10 @@ impl Store {
                 s.project_id,
                 s.phase,
                 s.policy_version,
-                s.review_id
+                s.review_id,
+                s.harness_agent,
+                s.harness_found,
+                s.harness_protocol
             ],
         )?;
         Ok(())
@@ -973,16 +977,18 @@ impl Store {
                 branch, harness_id, harness_version, harness_session_id, container_name, model,
                 budget_tokens, tokens_used, cost_usd, context_used, context_size, state, end_reason,
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
-                ended_mono_ms, updated_ms, project_id, phase, policy_version, review_id)
+                ended_mono_ms, updated_ms, project_id, phase, policy_version, review_id,
+                harness_agent, harness_found, harness_protocol)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,NULL,
-                NULL,?22,?23,?24,?25,?26,?27,?28,?29)
+                NULL,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32)
              ON CONFLICT(id) DO UPDATE SET node_id=?2, channel=?3, work_item_id=?4, repo_path=?5,
                 worktree_path=?6, branch=?7, harness_id=?8, harness_version=?9,
                 harness_session_id=?10, container_name=?11, model=?12, budget_tokens=?13,
                 tokens_used=?14, cost_usd=?15, context_used=?16, context_size=?17, state=?18,
                 end_reason=?19, last_error=?20, turn_active=?21, created_ms=?22,
                 started_mono_ms=?23, ended_mono_ms=?24, updated_ms=?25, project_id=?26,
-                phase=?27, policy_version=?28, review_id=?29",
+                phase=?27, policy_version=?28, review_id=?29, harness_agent=?30,
+                harness_found=?31, harness_protocol=?32",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -1012,7 +1018,10 @@ impl Store {
                 s.project_id,
                 s.phase,
                 s.policy_version,
-                s.review_id
+                s.review_id,
+                s.harness_agent,
+                s.harness_found,
+                s.harness_protocol
             ],
         )?;
         Ok(())
@@ -1466,7 +1475,17 @@ mod records {
         pub worktree_path: Option<String>,
         pub branch: String,
         pub harness_id: String,
+        /// What the node expected of the harness: the version it is pinned to.
         pub harness_version: String,
+        /// What the harness said it was in its handshake, and the protocol
+        /// revision this session negotiated. NULL until the handshake lands,
+        /// and on rows written before these columns existed.
+        #[serde(default)]
+        pub harness_agent: Option<String>,
+        #[serde(default)]
+        pub harness_found: Option<String>,
+        #[serde(default)]
+        pub harness_protocol: Option<String>,
         pub harness_session_id: Option<String>,
         pub container_name: Option<String>,
         pub model: String,
@@ -1519,6 +1538,9 @@ mod records {
                 branch: r.get("branch")?,
                 harness_id: r.get("harness_id")?,
                 harness_version: r.get("harness_version")?,
+                harness_agent: r.get("harness_agent")?,
+                harness_found: r.get("harness_found")?,
+                harness_protocol: r.get("harness_protocol")?,
                 harness_session_id: r.get("harness_session_id")?,
                 container_name: r.get("container_name")?,
                 model: r.get("model")?,
@@ -1726,6 +1748,9 @@ mod records {
         pub last_error: Option<String>,
         pub worktree_path: Option<String>,
         pub harness_session_id: Option<String>,
+        pub harness_agent: Option<String>,
+        pub harness_found: Option<String>,
+        pub harness_protocol: Option<String>,
         pub container_name: Option<String>,
         pub turn_active: Option<bool>,
         pub tokens_used: Option<i64>,
@@ -1760,6 +1785,9 @@ mod records {
             push!("last_error", self.last_error);
             push!("worktree_path", self.worktree_path);
             push!("harness_session_id", self.harness_session_id);
+            push!("harness_agent", self.harness_agent);
+            push!("harness_found", self.harness_found);
+            push!("harness_protocol", self.harness_protocol);
             push!("container_name", self.container_name);
             push!("turn_active", self.turn_active.map(|b| b as i64));
             push!("tokens_used", self.tokens_used);
@@ -2406,6 +2434,9 @@ mod tests {
                 branch: "feat/x".into(),
                 harness_id: "omp".into(),
                 harness_version: "18.0.4".into(),
+                harness_agent: None,
+                harness_found: None,
+                harness_protocol: None,
                 harness_session_id: None,
                 container_name: None,
                 model: "m".into(),

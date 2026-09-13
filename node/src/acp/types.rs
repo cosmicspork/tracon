@@ -33,12 +33,19 @@ pub struct FsCapabilities {
     pub write_text_file: bool,
 }
 
+/// The ACP protocol versions this client speaks. Every shape in this module
+/// was read from protocol 1, so 1 is both the floor and the ceiling: the node
+/// announces the ceiling in `initialize` and refuses an agent that answers
+/// with anything outside the range.
+pub const PROTOCOL_MIN: u32 = 1;
+pub const PROTOCOL_MAX: u32 = 1;
+
 impl InitializeParams {
     /// What the node declares: no client filesystem, no client terminal. The
     /// harness reads and runs inside its own runner.
     pub fn node() -> Self {
         Self {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_MAX,
             client_capabilities: ClientCapabilities {
                 fs: FsCapabilities {
                     read_text_file: false,

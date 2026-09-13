@@ -281,3 +281,96 @@ async fn a_harness_that_never_handshakes_times_out_and_leaves_nothing_listening(
         "a late handshake must find the node's side of the harness closed"
     );
 }
+
+/// The shapes this adapter decodes were read from one revision of ACP. An
+/// agent that answers `initialize` with another one is refused by name, with
+/// both sides in the reason, rather than driven until a field fails to decode
+/// in the middle of a turn.
+#[tokio::test]
+async fn an_agent_speaking_an_unsupported_acp_protocol_is_refused() {
+    state::isolate();
+    let error = OmpAdapter::new("18.0.4")
+        .launch(
+            &FakeRunner,
+            LaunchSpec {
+                cwd_in_runner: "/work".into(),
+                model: "m/a".into(),
+                container_name: "t".into(),
+                mcp_servers: Vec::new(),
+                tools: Vec::new(),
+                env: vec![
+                    ("FAKE_ACP_PROTOCOL".into(), "2".into()),
+                    ("FAKE_ACP_NAME".into(), "oh-my-pi".into()),
+                ],
+                system_prompt_file: None,
+            },
+        )
+        .await
+        .err()
+        .expect("an unsupported protocol must not become a session");
+    let reason = error.to_string();
+    assert!(
+        matches!(error, AdapterError::IncompatibleProtocol { .. }),
+        "{reason}"
+    );
+    assert_eq!(
+        reason, "harness oh-my-pi reports acp protocol 2; this node supports 1",
+        "the reason names the harness, what it speaks, and what this node speaks"
+    );
+}
+
+/// The `--version` check and the handshake check are two different moments and
+/// can disagree — the image the probe ran against need not be the image the
+/// session runs in. The handshake is the one that decides.
+#[tokio::test]
+async fn an_agent_reporting_a_version_other_than_the_pin_is_refused() {
+    state::isolate();
+    let error = OmpAdapter::new("18.0.4")
+        .launch(
+            &FakeRunner,
+            LaunchSpec {
+                cwd_in_runner: "/work".into(),
+                model: "m/a".into(),
+                container_name: "t".into(),
+                mcp_servers: Vec::new(),
+                tools: Vec::new(),
+                env: vec![("FAKE_ACP_VERSION".into(), "18.0.5".into())],
+                system_prompt_file: None,
+            },
+        )
+        .await
+        .err()
+        .expect("a harness outside the pin must not become a session");
+    assert!(
+        matches!(&error, AdapterError::VersionMismatch { found, pinned }
+            if found == "18.0.5" && pinned == "18.0.4"),
+        "{error}"
+    );
+}
+
+/// What a compatible handshake leaves behind: the agent's own name, the build
+/// it reported, and the protocol revision the session negotiated.
+#[tokio::test]
+async fn a_compatible_handshake_reports_what_it_ran() {
+    state::isolate();
+    let (handle, _rx) = OmpAdapter::new("18.0.4")
+        .launch(
+            &FakeRunner,
+            LaunchSpec {
+                cwd_in_runner: "/work".into(),
+                model: "m/a".into(),
+                container_name: "t".into(),
+                mcp_servers: Vec::new(),
+                tools: Vec::new(),
+                env: vec![("FAKE_ACP_NAME".into(), "oh-my-pi".into())],
+                system_prompt_file: None,
+            },
+        )
+        .await
+        .expect("a matching harness starts");
+    let compat = handle.compat();
+    assert_eq!(compat.agent, "oh-my-pi");
+    assert_eq!(compat.version, "18.0.4");
+    assert_eq!(compat.protocol, "acp/1");
+    handle.close().await.ok();
+}

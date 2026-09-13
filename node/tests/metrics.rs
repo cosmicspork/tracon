@@ -35,6 +35,9 @@ fn session(id: &str, channel: &str, phase: &str, item: Option<&str>) -> SessionR
         branch: "feat/x".into(),
         harness_id: "fake".into(),
         harness_version: "1".into(),
+        harness_agent: None,
+        harness_found: None,
+        harness_protocol: None,
         harness_session_id: None,
         container_name: None,
         model: if phase == "review" {

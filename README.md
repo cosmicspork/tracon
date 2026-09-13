@@ -425,7 +425,11 @@ node_name = "<hostname>"            # how this node is named in the mesh
 
 [harness]
 id = "omp"                          # "omp" or "claude"; an unknown id refuses to start
-version = "18.0.4"                  # pinned; checked against the image and the host
+version = "18.0.4"                  # pinned; empty means the version this node's harness image
+                                    # installs. Checked twice — `--version` in the runner, and the
+                                    # handshake's own report — and a session whose harness reports
+                                    # another version, or a protocol revision this node was not
+                                    # written against, fails with that reason rather than running.
 tools = []                          # the only tools a session may use; empty is the harness's own set
                                     # (a list without omp's shell leaves nothing to commit, so nothing to review)
 

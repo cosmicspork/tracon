@@ -63,6 +63,12 @@ pub enum EndReason {
     /// An externally attached harness went quiet for the idle timeout, or the
     /// operator detached it. Nothing failed; nothing is running.
     Detached,
+    /// The harness was not the one this node is built to drive: a version
+    /// outside the pin, or a protocol revision the adapter does not speak.
+    /// Distinct from `Error` because it is a fact about the image rather than
+    /// about this session, and every session on this node will end the same
+    /// way until the image or the pin changes.
+    Incompatible,
     Error,
 }
 
@@ -75,6 +81,7 @@ impl EndReason {
             Self::ItemClose => "item_close",
             Self::PhaseDone => "phase_done",
             Self::Detached => "detached",
+            Self::Incompatible => "incompatible",
             Self::Error => "error",
         }
     }

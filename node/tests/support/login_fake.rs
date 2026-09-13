@@ -39,6 +39,13 @@ impl HarnessAdapter for LoginFake {
     fn pinned_version(&self) -> &str {
         "1"
     }
+    fn protocol(&self) -> tracon::adapter::ProtocolSupport {
+        tracon::adapter::ProtocolSupport {
+            name: "fake",
+            min: 1,
+            max: 1,
+        }
+    }
     async fn version(&self, _r: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
         Ok(HarnessVersion {
             found: "1".into(),

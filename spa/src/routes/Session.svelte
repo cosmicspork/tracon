@@ -161,6 +161,14 @@
         ? ` · last seen ${formatAge(owner.last_seen_ms, clock.now)}`
         : ''}</span
     >
+    {#if session.harness_found}
+      <span
+        class="mono"
+        title="the harness this session ran, and the protocol it negotiated (pinned {session.harness_version})"
+        >{session.harness_agent ?? session.harness_id} {session.harness_found} ·
+        {session.harness_protocol}</span
+      >
+    {/if}
     <span class="mono">{session.worktree_path ?? session.repo_path}</span>
     <span class="mono">{session.branch}</span>
     <span class="sp"></span>
