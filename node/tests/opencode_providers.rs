@@ -618,7 +618,10 @@ async fn start_upstream(upstream: Upstream) -> u16 {
             });
             let usage = !*upstream.silent.lock().unwrap();
             if path.ends_with("/models") {
-                return ([("content-type", "application/json")], json!({"data": []}).to_string())
+                return (
+                    [("content-type", "application/json")],
+                    json!({"data": []}).to_string(),
+                )
                     .into_response();
             }
             let stream = if path.ends_with("/messages") {
@@ -813,7 +816,9 @@ async fn record_at_the_gateway(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let (parts, body) = request.into_parts();
-    let body = axum::body::to_bytes(body, 1 << 22).await.unwrap_or_default();
+    let body = axum::body::to_bytes(body, 1 << 22)
+        .await
+        .unwrap_or_default();
     seen.lock().unwrap().push(Recorded {
         method: parts.method.to_string(),
         uri: parts
@@ -828,8 +833,7 @@ async fn record_at_the_gateway(
             .collect(),
         body: String::from_utf8_lossy(&body).into_owned(),
     });
-    next.run(Request::from_parts(parts, Body::from(body)))
-        .await
+    next.run(Request::from_parts(parts, Body::from(body))).await
 }
 
 const API_KEY: &str = r#"
@@ -979,8 +983,8 @@ impl Launched {
     /// the node's own client does it.
     async fn ask(&self, path: &str) -> Value {
         use base64::Engine;
-        let credential = base64::engine::general_purpose::STANDARD
-            .encode(format!("opencode:{}", self.password));
+        let credential =
+            base64::engine::general_purpose::STANDARD.encode(format!("opencode:{}", self.password));
         let work = self.root.join("work");
         reqwest::Client::builder()
             .no_proxy()
@@ -1060,7 +1064,11 @@ async fn one_turn(node: &Node, live: &Launched, text: &str, within: Duration) {
     }
     // What the gateway made of it, so a failure says why rather than only
     // that nothing arrived.
-    for event in node.store.events_after("s-live", 0, 200).unwrap_or_default() {
+    for event in node
+        .store
+        .events_after("s-live", 0, 200)
+        .unwrap_or_default()
+    {
         if matches!(
             event.kind.as_str(),
             "gateway_refused" | "provider_error" | "unmetered"
@@ -1085,8 +1093,7 @@ async fn launch(node: &Node, name: &str, model: &str, env: Vec<(String, String)>
     let wiring = harness_wiring(&node.cfg, &node.host, &node.token, |_, _| true);
     let state_dir = root.join(".opencode");
     std::fs::create_dir_all(state_dir.join("run")).unwrap();
-    for (file, body) in
-        OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION).scratch_files(&wiring)
+    for (file, body) in OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION).scratch_files(&wiring)
     {
         std::fs::write(state_dir.join(&file), body).unwrap();
     }
@@ -1182,7 +1189,10 @@ async fn every_provider_call_arrives_at_the_gateway_on_an_allowlisted_path() {
         // call is replayed through the gateway with the session's placeholder,
         // and the gateway forwards it to the provider or it does not.
         let (status, body) = node.through_the_gateway(&seen).await;
-        assert_eq!(status, 200, "{name}: the gateway refused its own harness's call: {body}");
+        assert_eq!(
+            status, 200,
+            "{name}: the gateway refused its own harness's call: {body}"
+        );
         let upstream = node
             .upstream
             .first(Duration::from_secs(5))
@@ -1268,7 +1278,10 @@ async fn the_subscription_shaping_merges_with_the_flags_the_binary_sends() {
         .expect("no provider call reached the gateway");
     live.shutdown().await;
 
-    let sent = seen.header("anthropic-beta").unwrap_or_default().to_string();
+    let sent = seen
+        .header("anthropic-beta")
+        .unwrap_or_default()
+        .to_string();
     assert!(
         sent.contains("interleaved-thinking-2025-05-14"),
         "the pinned binary no longer sends the beta flags the merge was written for: {sent:?}"
@@ -1375,7 +1388,10 @@ async fn bun_honours_the_proxy_and_no_proxy_exempts_the_gateway() {
     one_turn(&node, &live, "say ok", LIVE_CALL_TIMEOUT).await;
     let seen = node.at_the_gateway(Duration::from_secs(5)).await;
     live.shutdown().await;
-    assert!(seen.is_some(), "the exempted call did not reach the gateway");
+    assert!(
+        seen.is_some(),
+        "the exempted call did not reach the gateway"
+    );
     assert_eq!(
         proxy.model_calls().len(),
         before,
@@ -1739,10 +1755,14 @@ async fn a_self_hosted_turn_is_counted_by_the_gateway() {
     // through, which is what makes it the budget rather than a guess.
     let reported = body
         .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line.trim_start_matches("data:").trim()).ok())
+        .filter_map(|line| {
+            serde_json::from_str::<Value>(line.trim_start_matches("data:").trim()).ok()
+        })
         .filter_map(|event| {
             let usage = &event["usage"];
-            let input = usage["prompt_tokens"].as_i64().or(usage["input_tokens"].as_i64())?;
+            let input = usage["prompt_tokens"]
+                .as_i64()
+                .or(usage["input_tokens"].as_i64())?;
             let output = usage["completion_tokens"]
                 .as_i64()
                 .or(usage["output_tokens"].as_i64())?;

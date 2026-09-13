@@ -1207,7 +1207,9 @@ mod tests {
     #[test]
     fn a_provider_that_reports_nothing_counts_nothing() {
         let mut s = UsageScanner::new();
-        s.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n");
+        s.feed(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n",
+        );
         s.feed(b"data: [DONE]\n");
         s.finish();
         assert_eq!((s.input, s.output), (0, 0));
