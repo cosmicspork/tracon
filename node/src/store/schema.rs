@@ -889,6 +889,45 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX opencode_intent_session ON opencode_intent(session_id, created_ms);
     CREATE INDEX opencode_intent_state ON opencode_intent(state, updated_ms);
     "#,
+    // 36: the launch manifest. What an operator customized a channel with —
+    // skills, standing instructions, agents, approved plugins, the language
+    // servers and formatters they turned on — plus the two facts a launch
+    // settles, the effective provider set and the policy revision.
+    //
+    // Two tables because they answer two questions. `manifest_item` is the
+    // editable state: one row per imported thing, replaced in place, keyed by
+    // channel and name so a duplicate cannot exist to be resolved later.
+    // `launch_manifest` is the history: one row per *distinct* digest, with a
+    // revision number counting them, so that a session's recorded
+    // `manifest_digest` still resolves to what it launched with after the
+    // operator has changed the manifest six times. Nothing is ever rewritten
+    // there; a rebuild that digests the same mints no revision.
+    r#"
+    CREATE TABLE manifest_item (
+        channel     TEXT NOT NULL,
+        -- skill | instruction | agent
+        kind        TEXT NOT NULL,
+        name        TEXT NOT NULL,
+        source      TEXT NOT NULL,
+        digest      TEXT NOT NULL,
+        body        TEXT NOT NULL,
+        warnings    TEXT NOT NULL DEFAULT '[]',
+        imported_ms INTEGER NOT NULL,
+        PRIMARY KEY (channel, kind, name)
+    );
+
+    CREATE TABLE launch_manifest (
+        channel    TEXT NOT NULL,
+        revision   INTEGER NOT NULL,
+        digest     TEXT NOT NULL,
+        body       TEXT NOT NULL,
+        created_ms INTEGER NOT NULL,
+        PRIMARY KEY (channel, revision)
+    );
+    CREATE INDEX launch_manifest_digest ON launch_manifest(digest);
+
+    ALTER TABLE session ADD COLUMN manifest_digest TEXT;
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

@@ -92,6 +92,24 @@ impl OpenCodeAdapter {
         max: 1,
     };
 
+    /// Plugin packages this node's harness image bakes into OpenCode's
+    /// offline package cache.
+    ///
+    /// It is empty, and that is a position rather than a placeholder. A
+    /// plugin is loaded with a raw `await import()` into the server's own
+    /// process, holding the server's credentials and `Bun.$`
+    /// (`config-state.md` §4.6): there is no sandbox to put one behind, so
+    /// the only bounded question is which packages the *image* made
+    /// resolvable at all. Resolution is a bare existence check with no
+    /// integrity verification (§4.4), so this list and the image's cache are
+    /// one fact spelled twice, and the manifest refuses any name that is not
+    /// on it — naming the cache path it would have needed.
+    ///
+    /// Adding one means baking it in `containers/harness-opencode/Containerfile`
+    /// at `$XDG_CACHE_HOME/opencode/packages/<pkg>@<ver>/node_modules/<pkg>`
+    /// and adding the same `<pkg>@<ver>` here.
+    pub const BAKED_PLUGINS: &'static [&'static str] = &[];
+
     pub fn new(pinned: impl Into<String>) -> Self {
         Self {
             pinned: pinned.into(),
@@ -148,6 +166,17 @@ impl OpenCodeAdapter {
             ("OPENCODE_DB", format!("{run}/state/opencode.db")),
             // The one file it may read, mounted read-only outside the worktree.
             ("OPENCODE_CONFIG", format!("{state}/{}", Self::CONFIG_FILE)),
+            // Where the launch manifest's skills are mounted. The config file
+            // is written before the node knows this path, so it names the
+            // variable instead and `{env:…}` substitution resolves it when
+            // the file is loaded (`config-state.md` §1.5). Set even when the
+            // manifest has no skills: the directory then does not exist and
+            // OpenCode logs a missing skill path, which is the honest state
+            // and not an error.
+            (
+                crate::manifest::SKILL_ROOT_ENV,
+                format!("{state}/{}", crate::manifest::SKILL_DIR),
+            ),
             // The catalogue is declared, not fetched. Both are needed: the
             // path alone leaves an hourly refresh running, the flag alone
             // falls back to a build-time snapshot this node did not choose.
@@ -290,7 +319,65 @@ fn config_document(wiring: &Wiring, mcp_servers: &[Value]) -> Value {
     if let Some(mcp) = mcp_document(mcp_servers) {
         document["mcp"] = mcp;
     }
+    for (key, value) in manifest_document(&wiring.manifest) {
+        document[key] = value;
+    }
     document
+}
+
+/// The operator's half of the same document: the launch manifest rendered
+/// into the keys OpenCode reads.
+///
+/// Four decisions are visible here and each is a refusal of an upstream
+/// default:
+///
+/// * `skills.paths` names one directory and `skills.urls` is never written.
+///   Upstream discovers skills from six places and fetches the URL list over
+///   plain HTTP before any interaction, with nothing that disables it
+///   (`config-state.md` §3.2, §3.6). The three `OPENCODE_DISABLE_*` variables
+///   in `launch_env` close the other five paths; not writing `urls` closes the
+///   sixth, and it is a config control rather than a capability one, which is
+///   why the runner also has no egress.
+/// * The path is `{env:…}`, not a literal. A relative `skills.paths` entry is
+///   resolved against the *worktree* (§3.2 #5), which is the one directory a
+///   session can write; the variable resolves to an absolute path outside it
+///   that the launch environment supplies.
+/// * `plugin` carries only packages the image baked. Resolution is a bare
+///   existence check in the offline cache (§4.4), so a name the image does
+///   not have is not a warning — it is a plugin that silently is not there,
+///   or a registry fetch in a runner with no network. The manifest refuses it
+///   before the launch instead.
+/// * `lsp` and `formatter` are `false` rather than omitted when the manifest
+///   turns none on. Omitting leaves upstream's defaults, including three
+///   formatters that auto-install over a network `OPENCODE_DISABLE_LSP_DOWNLOAD`
+///   does not cover (§6.6).
+fn manifest_document(manifest: &crate::manifest::LaunchManifest) -> Vec<(&'static str, Value)> {
+    let mut keys: Vec<(&'static str, Value)> = Vec::new();
+    if !manifest.skills.is_empty() {
+        keys.push((
+            "skills",
+            json!({ "paths": [format!("{{env:{}}}", crate::manifest::SKILL_ROOT_ENV)] }),
+        ));
+    }
+    if !manifest.plugins.is_empty() {
+        keys.push(("plugin", json!(manifest.plugins)));
+    }
+    keys.push(("lsp", tool_map(&manifest.lsp)));
+    keys.push(("formatter", tool_map(&manifest.formatters)));
+    keys
+}
+
+/// A `lsp`/`formatter` map, or the explicit `false` that turns the whole
+/// mechanism off. Both keys take `Boolean | Record<string, Entry>`.
+fn tool_map(entries: &[crate::manifest::ToolEntry]) -> Value {
+    if entries.is_empty() {
+        return json!(false);
+    }
+    let mut map = serde_json::Map::new();
+    for entry in entries {
+        map.insert(entry.name.clone(), json!({ "command": entry.command }));
+    }
+    Value::Object(map)
 }
 
 /// One declared model, in the shape the config merges over the catalogue.
@@ -620,7 +707,7 @@ impl HarnessAdapter for OpenCodeAdapter {
     /// pinned catalogue, and an auth store with nothing in it.
     fn scratch_files(&self, wiring: &Wiring) -> Vec<(String, String)> {
         let config = config_document(wiring, &[]);
-        vec![
+        let mut files = vec![
             (
                 Self::CONFIG_FILE.into(),
                 serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".into()),
@@ -631,7 +718,12 @@ impl HarnessAdapter for OpenCodeAdapter {
                     .unwrap_or_else(|_| "{}".into()),
             ),
             (Self::AUTH_FILE.into(), empty_auth_store()),
-        ]
+        ];
+        // The manifest's skill packages, staged beside the config and mounted
+        // read-only like it — one directory per skill under a root the
+        // worktree cannot reach and OpenCode does not discover on its own.
+        files.extend(wiring.manifest.skill_files());
+        files
     }
 
     fn scratch_dirs(&self) -> Vec<String> {
@@ -701,9 +793,14 @@ impl HarnessAdapter for OpenCodeAdapter {
         tokio::spawn(drain_logs(spawned.stdout, logs.clone()));
         let done = spawned.done;
 
+        // What the handshake was waiting for when it was cut off. Two very
+        // different failures share this timeout — a server that never came up
+        // and a catalogue that never settled — and the second is invisible
+        // without this.
+        let stage = Arc::new(Mutex::new(String::from("waiting for the server to answer")));
         let started = match tokio::time::timeout(
             START_TIMEOUT,
-            handshake(&client, &self.pinned, &spec),
+            handshake(&client, &self.pinned, &spec, &stage),
         )
         .await
         {
@@ -715,7 +812,9 @@ impl HarnessAdapter for OpenCodeAdapter {
             Err(_) => {
                 let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container)).await;
                 return Err(AdapterError::Protocol(format!(
-                    "OpenCode harness startup timed out; it last said: {}",
+                    "OpenCode harness startup timed out after {}s while {}; it last said: {}",
+                    START_TIMEOUT.as_secs(),
+                    stage.lock().unwrap(),
                     last_log(&logs)
                 )));
             }
@@ -910,6 +1009,7 @@ async fn handshake(
     client: &Client,
     pinned: &str,
     spec: &LaunchSpec,
+    stage: &Arc<Mutex<String>>,
 ) -> Result<Started, AdapterError> {
     loop {
         match client.get_json("/global/health").await {
@@ -922,6 +1022,10 @@ async fn handshake(
                     });
                 }
                 let (provider, model) = split_model(&spec.model)?;
+                // The catalogue is not ready when health is. See
+                // `catalogue_settled`: a session created before it settles
+                // accepts a prompt and then never runs it.
+                catalogue_settled(client, &provider, &model, stage).await?;
                 let created = client
                     .post_json(
                         "/api/session",
@@ -969,6 +1073,66 @@ async fn handshake(
             Err(_) => {}
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// How often the catalogue is re-asked while it settles.
+const CATALOGUE_POLL: Duration = Duration::from_millis(100);
+
+/// Wait until the model this session will run is actually in the harness's
+/// catalogue.
+///
+/// `serve` answers `/global/health` before its provider catalogue has loaded,
+/// and the two are not ordered. A prompt admitted in that window is accepted
+/// and then never run: resolving the model fails inside the drain, nothing
+/// retries it, and the session sits waiting on a turn that will not happen —
+/// with no error anywhere, which is the part that makes it expensive. It was
+/// observed intermittently against the pinned binary while the provider
+/// proofs were being written, where the test harness had to wait for the
+/// catalogue itself because the node's handshake did not.
+///
+/// So the handshake waits here instead, before the session exists. The caller
+/// runs the whole handshake under `START_TIMEOUT`; a catalogue that never
+/// settles therefore fails the launch visibly rather than producing a session
+/// whose first prompt disappears. `/config/providers` is the route the
+/// adapter already reads a context window from, so this asks nothing new of
+/// the server.
+async fn catalogue_settled(
+    client: &Client,
+    provider: &str,
+    model: &str,
+    stage: &Arc<Mutex<String>>,
+) -> Result<(), AdapterError> {
+    let mut last;
+    loop {
+        match client.get_json(&client.scoped("/config/providers")).await {
+            Ok(listed) => {
+                let entries = listed["providers"].as_array().cloned().unwrap_or_default();
+                if entries
+                    .iter()
+                    .filter(|entry| entry["id"].as_str() == Some(provider))
+                    .any(|entry| entry["models"].get(model).is_some())
+                {
+                    return Ok(());
+                }
+                let offered: Vec<String> = entries
+                    .iter()
+                    .filter_map(|entry| entry["id"].as_str().map(str::to_string))
+                    .collect();
+                last = if offered.is_empty() {
+                    "it listed no providers at all".to_string()
+                } else {
+                    format!("it listed {}", offered.join(", "))
+                };
+            }
+            Err(e) => last = e.to_string(),
+        }
+        *stage.lock().unwrap() =
+            format!("waiting for {provider}/{model} to appear in the catalogue ({last})");
+        // The caller's timeout is the bound. Failing here on a slow catalogue
+        // would trade a silent hang for a flaky launch; the stage note above
+        // is what makes that timeout say which of the two it was.
+        tokio::time::sleep(CATALOGUE_POLL).await;
     }
 }
 
@@ -1719,6 +1883,76 @@ mod tests {
         assert_eq!(env["OPENCODE_SERVER_USERNAME"], "opencode");
         // Per-session state is never the volume every session shares.
         assert!(!env["HOME"].ends_with("/.opencode"));
+        // The launch manifest's skill root: absolute, beside the read-only
+        // config rather than inside the worktree, and outside every directory
+        // OpenCode discovers on its own. This is the value `{env:…}` in the
+        // config resolves to — a relative `skills.paths` entry would be
+        // resolved against the worktree, which is the one place a session can
+        // write.
+        assert_eq!(
+            env[crate::manifest::SKILL_ROOT_ENV],
+            "/root/.opencode/skills"
+        );
+        assert!(!env[crate::manifest::SKILL_ROOT_ENV].starts_with(&env["HOME"]));
+    }
+
+    /// The manifest renders into the keys OpenCode reads, and the ones it
+    /// leaves out are as load-bearing as the ones it writes: a `skills.urls`
+    /// entry would be fetched over plain HTTP before any interaction, with
+    /// nothing that disables it.
+    #[test]
+    fn the_manifest_renders_skills_plugins_and_an_explicit_lsp_off_switch() {
+        let files = vec![crate::manifest::ManifestFile {
+            path: "SKILL.md".into(),
+            text: "---\nname: notes\ndescription: d\n---\n\nbody\n".into(),
+        }];
+        let manifest = crate::manifest::build(crate::manifest::Inputs {
+            channel: "work",
+            skills: vec![crate::manifest::SkillEntry {
+                name: "notes".into(),
+                description: "d".into(),
+                source: "dir:/srv/notes".into(),
+                digest: crate::manifest::skill::digest_of(&files),
+                warnings: Vec::new(),
+                files,
+            }],
+            instructions: Vec::new(),
+            agents: Vec::new(),
+            plugins: &["@example/audit@1.0.0".to_string()],
+            baked: &["@example/audit@1.0.0"],
+            lsp: vec![crate::manifest::ToolEntry {
+                name: "typescript".into(),
+                command: vec!["/usr/local/bin/typescript-language-server".into()],
+            }],
+            formatters: Vec::new(),
+            providers: vec!["anthropic".into()],
+            policy_revision: "1".into(),
+        })
+        .expect("a baked plugin builds");
+
+        let mut wired = wiring();
+        wired.manifest = manifest;
+        let document = config_document(&wired, &[]);
+        assert_eq!(
+            document["skills"]["paths"],
+            json!(["{env:TRACON_SKILL_ROOT}"])
+        );
+        assert!(document["skills"]["urls"].is_null(), "{document}");
+        assert_eq!(document["plugin"], json!(["@example/audit@1.0.0"]));
+        assert_eq!(
+            document["lsp"]["typescript"]["command"],
+            json!(["/usr/local/bin/typescript-language-server"])
+        );
+        // No formatter was enabled, so the mechanism is off by configuration.
+        // Omitting the key would leave three formatters that auto-install over
+        // a network `OPENCODE_DISABLE_LSP_DOWNLOAD` does not cover.
+        assert_eq!(document["formatter"], json!(false));
+
+        // And an empty manifest writes neither a skill root nor a plugin list.
+        let bare = config_document(&wiring(), &[]);
+        assert!(bare["skills"].is_null(), "{bare}");
+        assert!(bare["plugin"].is_null(), "{bare}");
+        assert_eq!(bare["lsp"], json!(false));
     }
 
     /// The server is unauthenticated without a password, so a launch that

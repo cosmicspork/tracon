@@ -93,6 +93,11 @@ pub struct Fake {
     pending: Arc<Mutex<Vec<Value>>>,
     /// The messages the session snapshot holds.
     messages: Arc<Mutex<Vec<Value>>>,
+    /// How many `/config/providers` requests answer with an empty catalogue
+    /// before the real one appears. The pinned binary answers `/global/health`
+    /// before its providers have loaded, and a prompt sent in that window is
+    /// admitted and then never run.
+    catalogue_late: Arc<AtomicUsize>,
 }
 
 impl Fake {
@@ -110,7 +115,15 @@ impl Fake {
             asks: Arc::new(AtomicBool::new(true)),
             pending: Arc::new(Mutex::new(Vec::new())),
             messages: Arc::new(Mutex::new(Vec::new())),
+            catalogue_late: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// A server whose catalogue settles only after `requests` answers: the
+    /// shape the pinned binary actually has at startup.
+    pub fn catalogue_late(self, requests: usize) -> Self {
+        self.catalogue_late.store(requests, Ordering::SeqCst);
+        self
     }
 
     /// A server that sends the whole script however far the node says it has
@@ -288,7 +301,15 @@ pub fn app(fake: Fake) -> Router {
         )
         .route(
             "/config/providers",
-            get(|State(_fake): State<Fake>| async move {
+            get(|State(fake): State<Fake>| async move {
+                // Count down rather than gate on a clock: the adapter polls,
+                // and a test that asserts on "it waited" must not depend on
+                // how fast the machine running it is.
+                let remaining = fake.catalogue_late.load(Ordering::SeqCst);
+                if remaining > 0 {
+                    fake.catalogue_late.store(remaining - 1, Ordering::SeqCst);
+                    return Json(json!({ "providers": [] }));
+                }
                 Json(json!({
                     "providers": [{
                         "id": "anthropic",

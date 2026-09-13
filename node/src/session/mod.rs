@@ -334,6 +334,7 @@ impl Manager {
                     ended_mono_ms: None,
                     updated_ms: now,
                     archived_ms: None,
+                    manifest_digest: None,
                 })
                 .expect("test session row");
         }
@@ -722,6 +723,7 @@ impl Manager {
             ended_mono_ms: None,
             updated_ms: now_ms(),
             archived_ms: None,
+            manifest_digest: None,
         };
         self.store.insert_session(&row)?;
         // A plain session has no work item to retain its first instruction.
@@ -951,6 +953,51 @@ impl Manager {
                 },
             )
         };
+        // The operator's customization for this channel, resolved against the
+        // provider set the wiring just settled and the policy the gate is
+        // running. Built and recorded here, before anything is staged: a
+        // manifest that would be refused — a duplicate skill name, a plugin
+        // the image did not bake — fails the launch rather than producing a
+        // session whose configuration is not the one anybody described.
+        //
+        // Recorded, not just built: the revision this returns is the one this
+        // session ran, and the next edit mints a different one that leaves
+        // this session alone.
+        let mut wiring = wiring;
+        let manifest = {
+            let (skills, instructions, agents) = self.store.manifest_contents(&spec.channel)?;
+            let to_entries = |map: &std::collections::BTreeMap<String, Vec<String>>| {
+                map.iter()
+                    .map(|(name, command)| crate::manifest::ToolEntry {
+                        name: name.clone(),
+                        command: command.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let built = crate::manifest::build(crate::manifest::Inputs {
+                channel: &spec.channel,
+                skills,
+                instructions,
+                agents,
+                plugins: &self.cfg.launch.plugins,
+                baked: crate::adapter::baked_plugins(adapter.id()),
+                lsp: to_entries(&self.cfg.launch.lsp),
+                formatters: to_entries(&self.cfg.launch.formatters),
+                providers: wiring.providers.iter().map(|p| p.name.clone()).collect(),
+                policy_revision: self.policy.read().unwrap().version.to_string(),
+            })
+            .map_err(|e| anyhow::anyhow!("the launch manifest for `{}`: {e}", spec.channel))?;
+            self.store.manifest_record(&built)?
+        };
+        self.store.update_session(
+            id,
+            SessionPatch {
+                manifest_digest: Some(manifest.digest.clone()),
+                ..Default::default()
+            },
+        )?;
+        wiring.manifest = manifest.clone();
+
         // What the session is told first: conventions from the corpus, this
         // node's facts, the channel's policy, and what is known. Recorded as
         // an event so the transcript shows what the agent was told.
@@ -1004,6 +1051,7 @@ impl Manager {
                     plan_body: plan_body.as_deref(),
                     ready: &ready,
                     review: review.as_ref(),
+                    manifest: &manifest,
                 },
             )
         };
@@ -1313,6 +1361,7 @@ impl Manager {
             ended_mono_ms: None,
             updated_ms: now_ms(),
             archived_ms: None,
+            manifest_digest: None,
         };
         self.store.insert_session(&row)?;
         self.bus.publish(Frame::Session(Box::new(row.clone())));
@@ -1709,6 +1758,13 @@ impl Manager {
         }
         self.resolve_model(spec, &bindings)?;
         Ok(())
+    }
+
+    /// The policy revision the gate is running, as a launch manifest records
+    /// it: a session's customization and the rules it ran under are one fact
+    /// about how that session was configured.
+    pub fn policy_version(&self) -> u32 {
+        self.policy.read().unwrap().version
     }
 
     /// A channel's bindings as JSON (`{}` when unbound or standalone).

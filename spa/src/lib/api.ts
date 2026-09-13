@@ -44,6 +44,7 @@ import type {
   QaAsset,
   Prototype,
   QaTarget,
+  ManifestView,
 } from './types'
 
 import type { HtmlBundleSelection } from './html-bundle'
@@ -374,6 +375,28 @@ export const api = {
   config: () => call<NodeConfig>('GET', '/api/config'),
   putConfig: (patch: unknown) =>
     call<{ changed: string[]; restart_required: boolean }>('PUT', '/api/config', patch),
+  manifest: (channel: string) =>
+    call<ManifestView>('GET', `/api/manifest?channel=${encodeURIComponent(channel)}`),
+  importSkill: (channel: string, source: string) =>
+    call<{
+      name: string
+      digest: string
+      source: string
+      files: string[]
+      warnings: string[]
+    }>('POST', '/api/manifest/skills', { channel, source }),
+  putManifestText: (channel: string, kind: string, name: string, body: string) =>
+    call<{ channel: string; name: string }>('PUT', '/api/manifest/text', {
+      channel,
+      kind,
+      name,
+      body,
+    }),
+  removeManifestItem: (channel: string, kind: string, name: string) =>
+    call<{ removed: string }>(
+      'DELETE',
+      `/api/manifest/${kind}/${encodeURIComponent(name)}?channel=${encodeURIComponent(channel)}`,
+    ),
   qr: (text: string) => call<{ svg: string }>('POST', '/api/auth/qr', { text }),
   setToken: (tokenHash: string) =>
     call<{ ok: boolean }>('POST', '/api/auth/token', { token_hash: tokenHash }),

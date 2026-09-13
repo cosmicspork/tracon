@@ -37,6 +37,14 @@ pub fn config_view(cfg: &Config) -> Value {
             "enabled": cfg.external.enabled,
             "idle_timeout_secs": cfg.external.idle_timeout_secs,
         },
+        // The image-dependent half of the launch manifest. The content half —
+        // skills, instructions, agents — is per channel and lives in the
+        // store, behind `/api/manifest`.
+        "launch": {
+            "plugins": cfg.launch.plugins,
+            "lsp": cfg.launch.lsp,
+            "formatters": cfg.launch.formatters,
+        },
         "supervision": {
             "checks": cfg.supervision.checks,
             "timeout_secs": cfg.supervision.timeout_secs,
@@ -221,6 +229,34 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
                     }
                 }
             }
+            "launch" => {
+                for (k, v) in object(value, "launch")? {
+                    match k.as_str() {
+                        "plugins" => {
+                            let plugins = string_list(v, "launch.plugins")?;
+                            if cfg.launch.plugins != plugins {
+                                cfg.launch.plugins = plugins;
+                                changed.push("launch.plugins".into());
+                            }
+                        }
+                        "lsp" => {
+                            let servers = argv_map(v, "launch.lsp")?;
+                            if cfg.launch.lsp != servers {
+                                cfg.launch.lsp = servers;
+                                changed.push("launch.lsp".into());
+                            }
+                        }
+                        "formatters" => {
+                            let formatters = argv_map(v, "launch.formatters")?;
+                            if cfg.launch.formatters != formatters {
+                                cfg.launch.formatters = formatters;
+                                changed.push("launch.formatters".into());
+                            }
+                        }
+                        other => return Err(unknown(&format!("launch.{other}"))),
+                    }
+                }
+            }
             other => return Err(unknown(other)),
         }
     }
@@ -276,6 +312,31 @@ fn string_map(v: &Value, key: &str) -> Result<std::collections::BTreeMap<String,
                 .ok_or_else(|| format!("`{key}` expects string values"))
         })
         .collect()
+}
+
+/// A map of name to command line: what `[launch] lsp` and `[launch]
+/// formatters` hold. An empty command is refused rather than stored — it is
+/// the one shape that would leave OpenCode resolving the binary itself, which
+/// for three of the formatters means an install over a network the runner
+/// does not have.
+fn argv_map(
+    v: &Value,
+    key: &str,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for (name, value) in object(v, key)? {
+        let argv = string_list(value, &format!("{key}.{name}"))?;
+        if argv.is_empty() || argv[0].trim().is_empty() {
+            return Err(format!(
+                "`{key}.{name}` needs the absolute command the image installed it at; \
+                 without one OpenCode resolves the binary itself, and for prettier, \
+                 oxfmt and biome that is an install over a network the runner does \
+                 not have"
+            ));
+        }
+        out.insert(name.clone(), argv);
+    }
+    Ok(out)
 }
 
 fn set_string(
@@ -355,6 +416,7 @@ mod tests {
                 "external",
                 "gateway",
                 "harness",
+                "launch",
                 "node_name",
                 "publish",
                 "readonly",

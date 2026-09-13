@@ -57,6 +57,9 @@ enum Command {
     /// Documents on the running node's corpus (talks to `tracon serve`).
     #[command(subcommand)]
     Doc(DocCommand),
+    /// Skills in a channel's launch manifest (talks to `tracon serve`).
+    #[command(subcommand)]
+    Skill(SkillCommand),
     /// Sessions: reading a portable package this machine already holds.
     #[command(subcommand)]
     Session(SessionCommand),
@@ -89,6 +92,33 @@ enum Command {
     },
     /// The trail behind a commit: model, prompts, approval, policy version.
     Provenance { sha: String },
+}
+
+#[derive(Subcommand)]
+enum SkillCommand {
+    /// Copy a skill package into the node's own storage and put it in a
+    /// channel's launch manifest. `<dir>` is a directory holding a SKILL.md;
+    /// `<dir>#<git-rev>` imports it as that revision recorded it. A URL is
+    /// refused: the node stages bytes it has read, never a fetch the harness
+    /// performs.
+    Import {
+        source: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
+    /// Show a channel's effective selection: what is imported, what the next
+    /// launch would build from it, and what the sessions running now have.
+    Ls {
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
+    /// Remove a skill from a channel's manifest. Running sessions keep the
+    /// manifest they launched with.
+    Rm {
+        name: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -408,6 +438,7 @@ async fn main() -> Result<()> {
         }
         Command::Credential(cmd) => credential_command(cmd).await,
         Command::Doc(cmd) => doc_command(cmd).await,
+        Command::Skill(cmd) => skill_command(cmd).await,
         Command::Session(cmd) => session_command(cmd),
         Command::Memory(cmd) => memory_command(cmd).await,
         Command::Work(cmd) => work_command(cmd).await,
@@ -1110,6 +1141,101 @@ async fn push_command(cmd: PushCommand) -> Result<()> {
                     r["outcome"].as_str().unwrap_or("")
                 );
             }
+            Ok(())
+        }
+    }
+}
+
+/// Skills go through the running node rather than the store, for the reason
+/// `doc import` does: one place decides what a name means, hashes the bytes
+/// and refuses a duplicate, and it is the place a session will read them from.
+async fn skill_command(cmd: SkillCommand) -> Result<()> {
+    use reqwest::Method;
+    match cmd {
+        SkillCommand::Import { source, channel } => {
+            // An absolute path, because the node reads it: the CLI may be run
+            // from anywhere, and the node's working directory is its own.
+            let resolved = match source.split_once('#') {
+                Some((path, rev)) => format!(
+                    "{}#{rev}",
+                    std::path::Path::new(path)
+                        .canonicalize()
+                        .unwrap_or_else(|_| path.into())
+                        .display()
+                ),
+                None => std::path::Path::new(&source)
+                    .canonicalize()
+                    .unwrap_or_else(|_| (&source).into())
+                    .display()
+                    .to_string(),
+            };
+            let v = node_call(
+                Method::POST,
+                "/api/manifest/skills",
+                Some(serde_json::json!({ "source": resolved, "channel": channel })),
+                None,
+            )
+            .await?;
+            println!(
+                "{} imported into {channel} ({}…)",
+                v["name"].as_str().unwrap_or("?"),
+                &v["digest"].as_str().unwrap_or("")
+                    [..8.min(v["digest"].as_str().unwrap_or("").len())]
+            );
+            for file in v["files"].as_array().into_iter().flatten() {
+                println!("  {}", file.as_str().unwrap_or(""));
+            }
+            // Warnings are printed after the file list, and never suppressed:
+            // a skill's scripts run in the runner and its body is a slash
+            // command OpenCode shell-interpolates.
+            for warning in v["warnings"].as_array().into_iter().flatten() {
+                println!("! {}", warning.as_str().unwrap_or(""));
+            }
+            println!("Applies at the next launch on {channel}; running sessions keep theirs.");
+            Ok(())
+        }
+        SkillCommand::Ls { channel } => {
+            let v = node_call(
+                Method::GET,
+                &format!("/api/manifest?channel={channel}"),
+                None,
+                None,
+            )
+            .await?;
+            for item in v["items"].as_array().into_iter().flatten() {
+                println!(
+                    "{:<12} {:<24} {}",
+                    item["kind"].as_str().unwrap_or(""),
+                    item["name"].as_str().unwrap_or(""),
+                    item["source"].as_str().unwrap_or("")
+                );
+            }
+            match (v["next"].as_object(), v["error"].as_str()) {
+                (_, Some(error)) => println!("\nthis manifest will not build: {error}"),
+                (Some(next), _) => println!(
+                    "\nnext launch: revision {} ({}…), {} skill(s), {} plugin(s)",
+                    next["revision"],
+                    &next["digest"].as_str().unwrap_or("")
+                        [..8.min(next["digest"].as_str().unwrap_or("").len())],
+                    next["skills"].as_array().map(Vec::len).unwrap_or(0),
+                    next["plugins"].as_array().map(Vec::len).unwrap_or(0),
+                ),
+                _ => {}
+            }
+            if let Some(recorded) = v["recorded"].as_object() {
+                println!("last recorded: revision {}", recorded["revision"]);
+            }
+            Ok(())
+        }
+        SkillCommand::Rm { name, channel } => {
+            node_call(
+                Method::DELETE,
+                &format!("/api/manifest/skill/{name}?channel={channel}"),
+                None,
+                None,
+            )
+            .await?;
+            println!("{name} removed from {channel}");
             Ok(())
         }
     }

@@ -28,6 +28,9 @@ pub struct Config {
     pub embed: Embed,
     pub external: External,
     pub docs: Docs,
+    /// What an operator may customize a session's launch with, bounded by
+    /// what the harness image bakes.
+    pub launch: Launch,
     /// Explicit, fail-closed targets for candidate-bound QA and browser proof.
     pub qa: Qa,
 }
@@ -348,6 +351,43 @@ pub fn safe_relative_path(value: &str) -> bool {
         && value
             .split('/')
             .all(|part| !part.is_empty() && part != "." && part != ".." && !part.contains('\0'))
+}
+
+/// The image-dependent half of the launch manifest.
+///
+/// A skill is bytes the node copied and can stage anywhere. A plugin is not:
+/// OpenCode resolves one by a bare existence check at
+/// `$XDG_CACHE_HOME/opencode/packages/<pkg>@<ver>/node_modules/<pkg>`, with no
+/// version check and no registry contact (`config-state.md` §4.4), so what a
+/// plugin *is* comes entirely from what the harness image baked. Same for a
+/// language server or a formatter: the manifest turns one on by name, and the
+/// absolute command it runs is the image's.
+///
+/// So this is the node's copy of the agreement with its own image. A manifest
+/// may approve only names listed here, and a name here that the image does
+/// not actually bake fails at launch rather than silently doing nothing —
+/// which is why the list is written, reviewed and shipped beside the image
+/// rather than inferred from the runner.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Launch {
+    /// Plugin packages the operator approves, each as
+    /// `<package>@<exact-version>`. A name the harness image did not bake is
+    /// refused when the manifest is built, so this list can only ever narrow
+    /// what the image made resolvable.
+    pub plugins: Vec<String>,
+    /// Language servers to enable, by OpenCode's own name for the server,
+    /// each with the absolute command the image installed it at. Both halves
+    /// are needed: re-declaring a builtin id with a `command` replaces its
+    /// spawn and bypasses the download path entirely, and a server named
+    /// without one cannot be expressed in OpenCode's config schema at all.
+    /// Empty renders `"lsp": false` — off by configuration, not by default.
+    pub lsp: std::collections::BTreeMap<String, Vec<String>>,
+    /// Formatters to enable, same shape. `prettier`, `oxfmt` and
+    /// `@biomejs/biome` auto-install from the network when enabled without a
+    /// command, and `OPENCODE_DISABLE_LSP_DOWNLOAD` does not cover them
+    /// (`config-state.md` §6.6) — the command is what stops that.
+    pub formatters: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// The corpus written back out as files, on a timer, so a directory kept under
@@ -998,6 +1038,7 @@ impl Default for Config {
             embed: Embed::default(),
             external: External::default(),
             docs: Docs::default(),
+            launch: Launch::default(),
             qa: Qa::default(),
             harness: Harness {
                 id: crate::adapter::omp::OmpAdapter::ID.into(),

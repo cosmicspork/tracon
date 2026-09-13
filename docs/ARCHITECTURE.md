@@ -101,6 +101,39 @@ Rules learned against real harnesses, kept as rules:
 - opencode's ACP mode starts an HTTP server and can advertise over mDNS: bind
   loopback, disable mDNS, and read the recorded cautions before adapting it.
 
+### The launch manifest
+
+**Customization is a node-owned object, not a directory the harness discovers.**
+Skills, standing instructions, agents, the approved plugin list, the language
+servers and formatters turned on, the effective provider set and the policy
+revision are built into one per-channel manifest with a content digest and a
+revision number, and every session records the digest it launched under. A new
+revision never changes a running session: the files were staged at launch, and
+the next launch is what picks the change up. The node builds the manifest rather
+than letting the harness resolve one because upstream's own resolution is not
+safe to inherit — a duplicate skill name is resolved by overwriting one of them
+nondeterministically, a `skills.urls` entry is fetched over plain HTTP before any
+interaction with nothing that disables it, and a plugin resolves by a bare
+existence check with no integrity verification. So duplicates are refused at
+build, URL sources are refused outright, paths are validated and symlinks are
+never followed, and a plugin name the harness *image* did not bake is refused
+with the cache path it would have needed. Skill content is treated as code: a
+`SKILL.md` body is also registered as a slash command whose template is
+shell-interpolated, so an import records that plainly rather than implying the
+package is inert data.
+
+**Nested `AGENTS.md` and `CLAUDE.md` are read, and that is accepted.** OpenCode's
+`read` tool attaches instruction files it encounters anywhere under the worktree,
+with no flag that gates it — `OPENCODE_DISABLE_PROJECT_CONFIG` covers the project
+config, the project's `.opencode/` directories and the top-level `AGENTS.md` used
+for the system prompt, but not this. It matches what today's harnesses already
+do: they read the repository, and the repository is allowed to contain
+instructions about itself. The position that makes it safe is the one that has
+always applied here — instruction content grants no permission. Every tool class
+is `ask`, policy runs on the node, and a file in the worktree can ask for
+something but cannot approve it. Nothing about the manifest, the orientation, or
+the gate changes if a repository adds one.
+
 ### Model auth
 
 **Model credentials are brokered like every other credential.** The harness holds
