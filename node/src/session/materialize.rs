@@ -139,6 +139,77 @@ pub fn holds_state(session_id: &str) -> bool {
     leases().lock().unwrap().contains_key(session_id)
 }
 
+/// Whether *anyone* holds the fence — this process or another. `holds_state`
+/// answers only for this process's own leases, and a backup or a restore has
+/// to know whether some other node process is writing the state it is about to
+/// copy or overwrite. A `flock` lives on the open file description, so a second
+/// descriptor on the same file is refused even from inside this process, which
+/// is what makes the probe answer for both cases at once.
+///
+/// Probed rather than claimed: the answer is wanted without taking the fence,
+/// and a claim taken to ask a question would have to be given back — which,
+/// between the release and the caller's real claim, is a window the thing this
+/// fence exists to prevent could slip through.
+pub fn state_claimed(session_id: &str) -> bool {
+    if holds_state(session_id) {
+        return true;
+    }
+    let path = state_lock_path(session_id);
+    let Ok(file) = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+    else {
+        // No lock file that can be opened is no fence being held.
+        return false;
+    };
+    // The same brief retry `claim_state` uses, for the same reason: a `fork`
+    // that has not reached its `exec` still carries a duplicate of a live
+    // descriptor, and one instant's refusal is not a second writer.
+    for attempt in 0..CLAIM_ATTEMPTS {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+            return false;
+        }
+        if attempt + 1 < CLAIM_ATTEMPTS {
+            std::thread::sleep(CLAIM_WAIT);
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Where a session's harness state sits inside its scratch volume
+// ---------------------------------------------------------------------------
+//
+// `config_mounts` stages every adapter-declared directory under `harness/` in
+// the session's own scratch volume and mounts it at the harness's state
+// directory. Backup, upgrade and restore all work on the volume rather than on
+// a container path, so they need the volume-relative spelling — and they must
+// not re-derive it from an adapter they were not launched with.
+
+/// The volume-relative root of the staged harness state tree: everything the
+/// harness has under its own state directory, config files included.
+pub const HARNESS_TREE: &str = "harness";
+
+/// The volume-relative per-session writable tree for OpenCode. The adapter
+/// declares `run` as its one scratch directory and puts `HOME` and all four
+/// XDG directories inside it; `opencode_state_tree_matches_the_adapter` keeps
+/// this from drifting away from that declaration.
+pub const OPENCODE_RUN: &str = "harness/run";
+
+/// The volume-relative OpenCode database, the path `OPENCODE_DB` names inside
+/// the runner.
+pub const OPENCODE_DB: &str = "harness/run/state/opencode.db";
+
+/// The volume-relative cache tree. Excluded from a backup: it is a download
+/// cache (ripgrep, npm packages, URL skills) that the image or the next launch
+/// re-establishes, and copying it makes a backup large without making it more
+/// restorable.
+pub const OPENCODE_CACHE: &str = "harness/run/cache";
+
 pub struct Scratch {
     /// Node-only staging path. It is copied into `volume` before a runner sees
     /// it and never appears in a mount specification.
@@ -355,6 +426,57 @@ mod tests {
         assert!(!holds_state(session));
         claim_state(session).expect("a released fence can be taken again");
         release_state(session);
+    }
+
+    /// A probe answers for every process, not just this one, and answers
+    /// without taking the fence it is asking about.
+    #[test]
+    fn the_fence_can_be_asked_about_without_being_taken() {
+        let session = "test-fence-probe";
+        release_state(session);
+        assert!(!state_claimed(session));
+        claim_state(session).expect("the probe left it takeable");
+        assert!(state_claimed(session));
+        release_state(session);
+        assert!(!state_claimed(session));
+        // And asking twice in a row does not leave it held by the asker.
+        assert!(!state_claimed(session));
+        claim_state(session).expect("still takeable after two probes");
+        release_state(session);
+    }
+
+    /// The volume-relative paths backup and restore work on are the ones
+    /// staging actually produces for OpenCode. The adapter declares the tree;
+    /// this asserts the spelling here did not drift away from that.
+    #[test]
+    fn the_opencode_state_tree_matches_the_adapter() {
+        let adapter = crate::adapter::opencode::OpenCodeAdapter::new("1.18.30");
+        assert_eq!(adapter.scratch_dirs(), vec!["run".to_string()]);
+        assert_eq!(OPENCODE_RUN, format!("{HARNESS_TREE}/run"));
+        assert_eq!(OPENCODE_DB, format!("{OPENCODE_RUN}/state/opencode.db"));
+        assert_eq!(OPENCODE_CACHE, format!("{OPENCODE_RUN}/cache"));
+
+        let session = "test-state-tree";
+        release_state(session);
+        let scratch = scratch_for(
+            session,
+            Path::new("/ignored"),
+            Path::new("/ignored"),
+            PODMAN_HARNESS_HOME,
+            &adapter,
+            &Wiring::default(),
+            "# Orientation",
+        )
+        .unwrap();
+        assert!(
+            scratch
+                .mounts
+                .iter()
+                .any(|m| m.sub_path == OPENCODE_RUN && m.volume == scratch.volume),
+            "the run tree is mounted from the session's own scratch volume"
+        );
+        assert!(scratch.dir.join(OPENCODE_RUN).is_dir());
+        remove(session);
     }
 
     /// Staging a session's files takes the fence, and removing them gives it

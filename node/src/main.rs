@@ -60,7 +60,8 @@ enum Command {
     /// Skills in a channel's launch manifest (talks to `tracon serve`).
     #[command(subcommand)]
     Skill(SkillCommand),
-    /// Sessions: reading a portable package this machine already holds.
+    /// Sessions: a portable package this machine already holds, and a
+    /// session's own harness state.
     #[command(subcommand)]
     Session(SessionCommand),
     /// Memories on the running node's corpus (talks to `tracon serve`).
@@ -178,6 +179,35 @@ enum SessionCommand {
         /// One JSON object per line, each with a `kind`.
         #[arg(long)]
         jsonl: bool,
+    },
+
+    /// What a session's harness state is, and every backup of it held here.
+    State { id: String },
+    /// Copy a session's harness state, verified, with a manifest.
+    Backup {
+        id: String,
+        /// Stop a live session first, through the supervisor's pause and stop.
+        /// Without it a running session is refused rather than copied out from
+        /// under its own harness.
+        #[arg(long)]
+        quiesce: bool,
+    },
+    /// Migrate a session's state onto another OpenCode release, on a clone.
+    /// The original is untouched unless the clone comes back intact.
+    UpgradeState {
+        id: String,
+        /// The release to migrate onto. It has to be on this host.
+        #[arg(long)]
+        to: String,
+    },
+    /// Put a backup back, if this node's runtime can read it.
+    Restore {
+        id: String,
+        /// A backup this node holds: its directory name, or its full path.
+        backup: String,
+        /// Accept a workspace that has moved since the backup's checkpoint.
+        #[arg(long)]
+        confirm: bool,
     },
 }
 
@@ -439,7 +469,7 @@ async fn main() -> Result<()> {
         Command::Credential(cmd) => credential_command(cmd).await,
         Command::Doc(cmd) => doc_command(cmd).await,
         Command::Skill(cmd) => skill_command(cmd).await,
-        Command::Session(cmd) => session_command(cmd),
+        Command::Session(cmd) => session_command(cmd).await,
         Command::Memory(cmd) => memory_command(cmd).await,
         Command::Work(cmd) => work_command(cmd).await,
         Command::Auth(cmd) => auth_command(cmd).await,
@@ -942,6 +972,217 @@ async fn node_call(
     Ok(v)
 }
 
+/// Two different things live here, and the difference is the point.
+///
+/// `show` reads a portable package and talks to nothing: an archive stays
+/// readable when there is nothing left running. The state commands are the
+/// opposite — every one of them goes through the running node, because the
+/// node owns the fence, the runtime volume and the store, and a CLI that
+/// reached around it would be the second writer the fence exists to refuse.
+async fn session_command(cmd: SessionCommand) -> Result<()> {
+    use reqwest::Method;
+    match cmd {
+        SessionCommand::Show { package, jsonl } => {
+            let transfer = tracon::transfers::read_package(&package)?;
+            let records = tracon::transfers::package_jsonl(&transfer);
+            if jsonl {
+                for record in &records {
+                    println!("{record}");
+                }
+                return Ok(());
+            }
+            for record in &records {
+                let kind = record["kind"].as_str().unwrap_or("");
+                match kind {
+                    "package" => {
+                        println!("package     {}", record["id"].as_str().unwrap_or(""));
+                        println!(
+                            "candidate   {}",
+                            record["candidate_id"].as_str().unwrap_or("")
+                        );
+                        println!("channel     {}", record["channel"].as_str().unwrap_or(""));
+                        println!(
+                            "origin      {}",
+                            record["origin_node"].as_str().unwrap_or("")
+                        );
+                        println!(
+                            "signature   {}",
+                            match record["verify_error"].as_str() {
+                                None => "verified".to_string(),
+                                Some(error) => format!("DOES NOT VERIFY: {error}"),
+                            }
+                        );
+                    }
+                    "note" => println!("note        {}", record["text"].as_str().unwrap_or("")),
+                    "document" => println!(
+                        "document    {:<32} {}",
+                        record["slug"].as_str().unwrap_or(""),
+                        record["title"].as_str().unwrap_or("")
+                    ),
+                    "memory" => println!(
+                        "memory      {:<32} {}",
+                        record["memory_kind"].as_str().unwrap_or(""),
+                        record["body"].as_str().unwrap_or("")
+                    ),
+                    "file" => println!(
+                        "file        {:<32} {} bytes",
+                        record["path"].as_str().unwrap_or(""),
+                        record["bytes"].as_i64().unwrap_or_default()
+                    ),
+                    _ => {}
+                }
+            }
+            println!("\n`--jsonl` prints every record, evidence included.");
+            Ok(())
+        }
+        SessionCommand::State { id } => {
+            let v = node_call(
+                Method::GET,
+                &format!("/api/sessions/{id}/state"),
+                None,
+                None,
+            )
+            .await?;
+            match &v["identity"] {
+                serde_json::Value::Null => println!("no OpenCode state recorded for {id}"),
+                identity => {
+                    println!(
+                        "build    {} (this node pins {})",
+                        identity["build_version"].as_str().unwrap_or("?"),
+                        identity["build_pinned"].as_str().unwrap_or("?")
+                    );
+                    let generation = identity["generation"].as_array().map(Vec::len).unwrap_or(0);
+                    let digest = identity["generation_digest"].as_str().unwrap_or("");
+                    println!(
+                        "state    generation {} migration(s){}",
+                        generation,
+                        if digest.is_empty() {
+                            ", not yet read — the first backup settles it".to_string()
+                        } else {
+                            format!(", digest {}", &digest[..digest.len().min(12)])
+                        }
+                    );
+                    println!(
+                        "manifest {}",
+                        identity["manifest_digest"]
+                            .as_str()
+                            .unwrap_or("not recorded")
+                    );
+                    println!(
+                        "where    {} in {}",
+                        identity["state_path"].as_str().unwrap_or("?"),
+                        identity["state_volume"].as_str().unwrap_or("?")
+                    );
+                }
+            }
+            if v["claimed"] == true {
+                println!("writer   the state is claimed; something is writing it now");
+            }
+            let backups = v["backups"].as_array().cloned().unwrap_or_default();
+            if backups.is_empty() {
+                println!("backups  none");
+            }
+            for backup in backups {
+                let m = &backup["manifest"];
+                println!(
+                    "backup   {}  {} migration(s)  integrity {}  {}",
+                    backup["path"].as_str().unwrap_or(""),
+                    m["generation"].as_array().map(Vec::len).unwrap_or(0),
+                    m["integrity"].as_str().unwrap_or("?"),
+                    if m["quiesced"] == true {
+                        "quiesced"
+                    } else {
+                        "at rest"
+                    }
+                );
+            }
+            Ok(())
+        }
+        SessionCommand::Backup { id, quiesce } => {
+            let v = node_call(
+                Method::POST,
+                &format!("/api/sessions/{id}/state/backup"),
+                Some(serde_json::json!({ "quiesce": quiesce })),
+                None,
+            )
+            .await?;
+            let m = &v["manifest"];
+            println!("backed up to {}", v["path"].as_str().unwrap_or(""));
+            println!(
+                "  database   {} bytes, integrity {}, sha256 {}",
+                m["db_bytes"].as_u64().unwrap_or(0),
+                m["integrity"].as_str().unwrap_or("?"),
+                m["db_sha256"]
+                    .as_str()
+                    .map(|s| &s[..s.len().min(12)])
+                    .unwrap_or("?")
+            );
+            println!(
+                "  generation {} migration(s), digest {}",
+                m["generation"].as_array().map(Vec::len).unwrap_or(0),
+                m["generation_digest"]
+                    .as_str()
+                    .map(|s| &s[..s.len().min(12)])
+                    .unwrap_or("?")
+            );
+            match m["workspace"]["commit"].as_str() {
+                Some(commit) => println!("  workspace  checkpointed at {commit}"),
+                None => println!(
+                    "  workspace  {}",
+                    m["workspace"]["unavailable"]
+                        .as_str()
+                        .unwrap_or("not readable")
+                ),
+            }
+            Ok(())
+        }
+        SessionCommand::UpgradeState { id, to } => {
+            let v = node_call(
+                Method::POST,
+                &format!("/api/sessions/{id}/state/upgrade"),
+                Some(serde_json::json!({ "to": to })),
+                None,
+            )
+            .await?;
+            println!(
+                "migrated {} from {} to {}",
+                id,
+                v["from_version"].as_str().unwrap_or("?"),
+                v["to_version"].as_str().unwrap_or("?")
+            );
+            let applied = v["applied"].as_array().cloned().unwrap_or_default();
+            println!("  {} migration(s) applied on the clone", applied.len());
+            for id in applied.iter().take(10) {
+                println!("    {}", id.as_str().unwrap_or(""));
+            }
+            Ok(())
+        }
+        SessionCommand::Restore {
+            id,
+            backup,
+            confirm,
+        } => {
+            let v = node_call(
+                Method::POST,
+                &format!("/api/sessions/{id}/state/restore"),
+                Some(serde_json::json!({ "backup": backup, "confirm": confirm })),
+                None,
+            )
+            .await?;
+            println!("restored {id} from {}", v["backup"].as_str().unwrap_or(""));
+            println!("preserves:");
+            for line in v["preserves"].as_array().cloned().unwrap_or_default() {
+                println!("  - {}", line.as_str().unwrap_or(""));
+            }
+            println!("does not:");
+            for line in v["loses"].as_array().cloned().unwrap_or_default() {
+                println!("  - {}", line.as_str().unwrap_or(""));
+            }
+            Ok(())
+        }
+    }
+}
+
 async fn external_command(cmd: ExternalCommand) -> Result<()> {
     use reqwest::Method;
     let v = node_call(Method::GET, "/api/external", None, None).await?;
@@ -1380,66 +1621,6 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
                 v["model"].as_str().unwrap_or(""),
                 v["dim"].as_i64().unwrap_or_default(),
             );
-            Ok(())
-        }
-    }
-}
-
-/// Reading a portable package. Nothing here talks to a node: the whole point
-/// is that an archive stays readable when there is nothing left running.
-fn session_command(cmd: SessionCommand) -> Result<()> {
-    match cmd {
-        SessionCommand::Show { package, jsonl } => {
-            let transfer = tracon::transfers::read_package(&package)?;
-            let records = tracon::transfers::package_jsonl(&transfer);
-            if jsonl {
-                for record in &records {
-                    println!("{record}");
-                }
-                return Ok(());
-            }
-            for record in &records {
-                let kind = record["kind"].as_str().unwrap_or("");
-                match kind {
-                    "package" => {
-                        println!("package     {}", record["id"].as_str().unwrap_or(""));
-                        println!(
-                            "candidate   {}",
-                            record["candidate_id"].as_str().unwrap_or("")
-                        );
-                        println!("channel     {}", record["channel"].as_str().unwrap_or(""));
-                        println!(
-                            "origin      {}",
-                            record["origin_node"].as_str().unwrap_or("")
-                        );
-                        println!(
-                            "signature   {}",
-                            match record["verify_error"].as_str() {
-                                None => "verified".to_string(),
-                                Some(error) => format!("DOES NOT VERIFY: {error}"),
-                            }
-                        );
-                    }
-                    "note" => println!("note        {}", record["text"].as_str().unwrap_or("")),
-                    "document" => println!(
-                        "document    {:<32} {}",
-                        record["slug"].as_str().unwrap_or(""),
-                        record["title"].as_str().unwrap_or("")
-                    ),
-                    "memory" => println!(
-                        "memory      {:<32} {}",
-                        record["memory_kind"].as_str().unwrap_or(""),
-                        record["body"].as_str().unwrap_or("")
-                    ),
-                    "file" => println!(
-                        "file        {:<32} {} bytes",
-                        record["path"].as_str().unwrap_or(""),
-                        record["bytes"].as_i64().unwrap_or_default()
-                    ),
-                    _ => {}
-                }
-            }
-            println!("\n`--jsonl` prints every record, evidence included.");
             Ok(())
         }
     }

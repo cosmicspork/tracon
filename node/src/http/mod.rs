@@ -235,6 +235,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/pause", post(api::pause))
         .route("/api/sessions/{id}/resume", post(api::resume))
         .route("/api/sessions/{id}/stop", post(api::stop))
+        .route("/api/sessions/{id}/state", get(api::session_state))
+        .route("/api/sessions/{id}/state/backup", post(api::backup_state))
+        .route("/api/sessions/{id}/state/upgrade", post(api::upgrade_state))
+        .route("/api/sessions/{id}/state/restore", post(api::restore_state))
         .route(
             "/api/sessions/{id}/draft",
             get(api::get_draft).put(api::put_draft),

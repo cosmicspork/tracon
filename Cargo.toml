@@ -27,6 +27,9 @@ dirs = "6"
 mime_guess = "2"
 rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 sqlite-vec = "0.1"
+# Pure Rust: the archive half of a state backup, with no C to break the static
+# musl build.
+tar = "0.4"
 rust-embed = { version = "8", features = ["include-exclude"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

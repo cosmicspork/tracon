@@ -5,6 +5,7 @@ pub mod chunks;
 pub mod external;
 pub mod ingest;
 pub mod materialize;
+pub mod opencode_state;
 pub mod state;
 pub mod supervisor;
 
@@ -1218,6 +1219,14 @@ impl Manager {
                 ..Default::default()
             },
         )?;
+        // What this session's state *is*, recorded next to the session the
+        // moment the harness that made it has said what it is. The database
+        // itself carries no version (`config-state.md` §7.2), so a backup taken
+        // later would otherwise have nothing to name the schema it copied — and
+        // a restore nothing to be gated on.
+        if adapter.id() == crate::adapter::opencode::OpenCodeAdapter::ID {
+            self.record_state_identity(id, &compat.version, adapter.pinned_version());
+        }
         self.record(NewEvent {
             session_id: id.to_string(),
             work_item_id: None,
@@ -1915,6 +1924,118 @@ impl Manager {
         self.terminate(id, true).await
     }
 
+    // ---- per-session OpenCode state ----
+
+    /// Write down what this session's OpenCode state is, the moment the
+    /// harness has said what it is.
+    ///
+    /// The build identity and the layout are known here and written straight
+    /// away. The *generation* — the applied migration ids — is only in the
+    /// database, and the database is at that instant being written by the
+    /// harness through a runtime volume; reading it means copying the volume,
+    /// which does not belong on a launch path. So it is read behind the
+    /// launch, best-effort, and settled for certain by the first quiesced
+    /// backup, which is the first moment anything can read it truthfully.
+    fn record_state_identity(&self, id: &str, found: &str, pinned: &str) {
+        let volume = crate::workspace::scratch_volume_name(id);
+        let row = crate::store::OpenCodeStateRow {
+            session_id: id.to_string(),
+            build_version: found.to_string(),
+            build_pinned: pinned.to_string(),
+            generation: Vec::new(),
+            generation_digest: String::new(),
+            // The launch manifest is built and recorded on the session before
+            // anything is staged, so by the time the harness has said what it
+            // is, the digest is on the row. Read rather than passed down: this
+            // is the same fact, and two copies could disagree. Still nullable
+            // — a session on a harness with no manifest has none, and the
+            // column says "not recorded" rather than a guess.
+            manifest_digest: self
+                .store
+                .get_session(id)
+                .ok()
+                .flatten()
+                .and_then(|row| row.manifest_digest),
+            state_volume: volume.clone(),
+            state_path: materialize::HARNESS_TREE.to_string(),
+            recorded_ms: now_ms(),
+            updated_ms: now_ms(),
+        };
+        if let Err(error) = self.store.opencode_state_put(&row) {
+            tracing::warn!(session = %id, %error, "could not record the OpenCode state identity");
+            return;
+        }
+        let store = self.store.clone();
+        let backend = self.backend.clone();
+        let id = id.to_string();
+        tokio::spawn(async move {
+            let staging = Config::state_dir()
+                .join("opencode-state-work")
+                .join(&id)
+                .join("generation");
+            let _ = std::fs::remove_dir_all(&staging);
+            {
+                let lock = crate::workspace::volume_lock(&volume);
+                let _guard = lock.lock().await;
+                if backend.export_volume(&volume, &staging).await.is_err() {
+                    return;
+                }
+            }
+            let db = staging.join(materialize::OPENCODE_DB);
+            match opencode_state::read_generation(&db) {
+                Ok(ids) if !ids.is_empty() => {
+                    let _ = store.opencode_state_set_generation(&id, &ids);
+                }
+                Ok(_) => {}
+                Err(error) => tracing::debug!(
+                    session = %id, %error,
+                    "the state generation could not be read behind the launch; \
+                     the first backup will settle it"
+                ),
+            }
+            let _ = std::fs::remove_dir_all(&staging);
+        });
+    }
+
+    /// A quiesced backup of one session's OpenCode state. `quiesce` is the
+    /// operator's `--quiesce`: without it a live session is refused rather
+    /// than copied out from under its own harness.
+    pub async fn backup_state(
+        &self,
+        id: &str,
+        quiesce: bool,
+    ) -> Result<opencode_state::BackupReport, opencode_state::StateError> {
+        let quiescer: Option<&dyn opencode_state::Quiesce> = quiesce.then_some(self);
+        opencode_state::backup(&self.store, self.backend.as_ref(), quiescer, id).await
+    }
+
+    /// Migrate one session's state onto another OpenCode release, on a clone.
+    pub async fn upgrade_state(
+        &self,
+        id: &str,
+        to: &str,
+    ) -> Result<opencode_state::UpgradeReport, opencode_state::StateError> {
+        opencode_state::upgrade_state(&self.store, self.backend.as_ref(), id, to).await
+    }
+
+    /// Put a verified backup back, if this node's runtime can read it.
+    pub async fn restore_state(
+        &self,
+        id: &str,
+        backup: &std::path::Path,
+        confirm: bool,
+    ) -> Result<opencode_state::RestoreReport, opencode_state::StateError> {
+        opencode_state::restore(
+            &self.store,
+            self.backend.as_ref(),
+            &self.cfg,
+            id,
+            backup,
+            confirm,
+        )
+        .await
+    }
+
     /// End one session without touching a channel-wide fence. An external
     /// harness's next call reattaches fresh; a managed session's row closes
     /// exactly as `stop` leaves it. Used where ending this attachment, not
@@ -2063,6 +2184,27 @@ impl Manager {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         tracing::warn!("some sessions did not stop in time");
+    }
+}
+
+/// Stopping a session so its state can be copied.
+///
+/// A pause first, so the running turn is quiesced rather than cut in half, and
+/// only then a stop. Never `kill`: killing the harness leaves its WAL exactly
+/// as unquiesced as taking no quiesce at all would have, which is the one thing
+/// `--quiesce` exists to avoid. A pause that is refused because the session has
+/// already gone terminal is not a failure — the writer is gone either way, and
+/// that is all the backup needs.
+#[async_trait::async_trait]
+impl opencode_state::Quiesce for Manager {
+    async fn quiesce(&self, session_id: &str) -> Result<(), String> {
+        let _ = self
+            .pause(
+                session_id,
+                "operator asked for a quiesced backup of this session's state".into(),
+            )
+            .await;
+        self.stop(session_id).await.map_err(|e| e.to_string())
     }
 }
 
