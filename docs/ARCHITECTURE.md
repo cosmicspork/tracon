@@ -509,7 +509,11 @@ Encrypted snapshots of the hub's volume to object storage, with a restore path t
 has been exercised — hub failure without a tested restore costs years of context.
 Retention per kind and a real delete that propagates; tombstone semantics are
 decided before there is data. Plain-text export for every kind: no format readable
-only by this binary.
+only by this binary. Documents export as plain Markdown and import back by filename
+alone; a session package is JSON that `tracon session show` renders with nothing
+running; the vector index is derived and is rebuilt rather than restored.
+`RECOVERY.md` is the operator's copy of this, including the way out through a
+harness run directly and what that costs.
 
 ## Open questions
 

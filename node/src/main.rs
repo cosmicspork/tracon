@@ -57,6 +57,9 @@ enum Command {
     /// Documents on the running node's corpus (talks to `tracon serve`).
     #[command(subcommand)]
     Doc(DocCommand),
+    /// Sessions: reading a portable package this machine already holds.
+    #[command(subcommand)]
+    Session(SessionCommand),
     /// Memories on the running node's corpus (talks to `tracon serve`).
     #[command(subcommand)]
     Memory(MemoryCommand),
@@ -128,6 +131,23 @@ enum DocCommand {
         dir: std::path::PathBuf,
         #[arg(long, default_value = "personal")]
         channel: String,
+    },
+    /// Throw this node's vector index away and build it again from the corpus.
+    /// Vectors are derived data: never backed up, never replicated, and always
+    /// reconstructible from the documents and memories this node holds.
+    Reindex,
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// Read a portable session package (the file a session export downloads)
+    /// without a node, a store, or a harness: a summary, or `--jsonl` for one
+    /// tagged JSON record per line.
+    Show {
+        package: std::path::PathBuf,
+        /// One JSON object per line, each with a `kind`.
+        #[arg(long)]
+        jsonl: bool,
     },
 }
 
@@ -388,6 +408,7 @@ async fn main() -> Result<()> {
         }
         Command::Credential(cmd) => credential_command(cmd).await,
         Command::Doc(cmd) => doc_command(cmd).await,
+        Command::Session(cmd) => session_command(cmd),
         Command::Memory(cmd) => memory_command(cmd).await,
         Command::Work(cmd) => work_command(cmd).await,
         Command::Auth(cmd) => auth_command(cmd).await,
@@ -1222,6 +1243,77 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
                 r.removed,
                 skipped_html,
             );
+            Ok(())
+        }
+        DocCommand::Reindex => {
+            let v = node_call(Method::POST, "/api/docs/reindex", None, None).await?;
+            println!(
+                "rebuilt {} chunks from {} records with {} at dim {}",
+                v["chunks"].as_i64().unwrap_or_default(),
+                v["records"].as_i64().unwrap_or_default(),
+                v["model"].as_str().unwrap_or(""),
+                v["dim"].as_i64().unwrap_or_default(),
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Reading a portable package. Nothing here talks to a node: the whole point
+/// is that an archive stays readable when there is nothing left running.
+fn session_command(cmd: SessionCommand) -> Result<()> {
+    match cmd {
+        SessionCommand::Show { package, jsonl } => {
+            let transfer = tracon::transfers::read_package(&package)?;
+            let records = tracon::transfers::package_jsonl(&transfer);
+            if jsonl {
+                for record in &records {
+                    println!("{record}");
+                }
+                return Ok(());
+            }
+            for record in &records {
+                let kind = record["kind"].as_str().unwrap_or("");
+                match kind {
+                    "package" => {
+                        println!("package     {}", record["id"].as_str().unwrap_or(""));
+                        println!(
+                            "candidate   {}",
+                            record["candidate_id"].as_str().unwrap_or("")
+                        );
+                        println!("channel     {}", record["channel"].as_str().unwrap_or(""));
+                        println!(
+                            "origin      {}",
+                            record["origin_node"].as_str().unwrap_or("")
+                        );
+                        println!(
+                            "signature   {}",
+                            match record["verify_error"].as_str() {
+                                None => "verified".to_string(),
+                                Some(error) => format!("DOES NOT VERIFY: {error}"),
+                            }
+                        );
+                    }
+                    "note" => println!("note        {}", record["text"].as_str().unwrap_or("")),
+                    "document" => println!(
+                        "document    {:<32} {}",
+                        record["slug"].as_str().unwrap_or(""),
+                        record["title"].as_str().unwrap_or("")
+                    ),
+                    "memory" => println!(
+                        "memory      {:<32} {}",
+                        record["memory_kind"].as_str().unwrap_or(""),
+                        record["body"].as_str().unwrap_or("")
+                    ),
+                    "file" => println!(
+                        "file        {:<32} {} bytes",
+                        record["path"].as_str().unwrap_or(""),
+                        record["bytes"].as_i64().unwrap_or_default()
+                    ),
+                    _ => {}
+                }
+            }
+            println!("\n`--jsonl` prints every record, evidence included.");
             Ok(())
         }
     }

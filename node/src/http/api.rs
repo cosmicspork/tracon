@@ -2347,6 +2347,31 @@ pub struct DocQuery {
     pub archived: bool,
 }
 
+/// `POST /api/docs/reindex`: throw this node's vector index away and build it
+/// again from the corpus it holds.
+///
+/// Vectors are derived data — node-local, unreplicated, and reconstructible
+/// from the documents and memories alone — so this is the whole of their
+/// backup story. It runs inline rather than in the background because the
+/// operator asking for it is waiting to hear whether the embedding endpoint
+/// answered.
+pub async fn reindex_docs(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let done = crate::embed::rebuild(
+        s.cfg.clone(),
+        s.store().clone(),
+        s.tools.http.clone(),
+        s.manager.probe_token(),
+    )
+    .await
+    .map_err(|error| ApiError(StatusCode::BAD_GATEWAY, error.to_string()))?;
+    Ok(Json(json!({
+        "records": done.records,
+        "chunks": done.chunks,
+        "model": s.cfg.embed.model,
+        "dim": s.cfg.embed.dim,
+    })))
+}
+
 /// `GET /api/docs?channel=&q=&kind=&archived=`: the list (no bodies), or
 /// search hits.
 pub async fn list_docs(

@@ -97,6 +97,17 @@ impl Store {
         ))
     }
 
+    /// Throw the whole index away: the vector table and the metadata rows that
+    /// point into it. Nothing in the corpus is touched, because nothing here is
+    /// a source — this is what makes "delete it and rebuild it" a real answer
+    /// to a corrupt index, a half-written file, or a changed chunker.
+    pub fn vec_drop(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(&format!(
+            "DROP TABLE IF EXISTS {VEC_TABLE}; DELETE FROM embedding;"
+        ))
+    }
+
     /// Store one chunk's vector, replacing whatever was there for that chunk.
     pub fn vec_put(&self, v: &Vector, embedding: &[f32]) -> Result<()> {
         let normalized = normalize(embedding);

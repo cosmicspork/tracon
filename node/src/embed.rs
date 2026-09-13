@@ -52,6 +52,8 @@ pub enum EmbedError {
     Dim { want: usize, got: usize },
     #[error(transparent)]
     Store(#[from] rusqlite::Error),
+    #[error(transparent)]
+    Corpus(#[from] crate::store::StoreError),
 }
 
 impl Embedder {
@@ -252,6 +254,53 @@ pub struct Neighbours {
     pub hits: Vec<crate::store::vectors::Neighbour>,
     /// This node embeds, but the endpoint could not be reached for this query.
     pub degraded: bool,
+}
+
+/// What a rebuild did, for the operator who asked for it.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Rebuilt {
+    /// Corpus records walked: documents and memories.
+    pub records: usize,
+    /// Chunks embedded and written.
+    pub chunks: usize,
+}
+
+/// Throw the vector index away and build it again from the corpus.
+///
+/// This is the command behind "vectors are derived data". The background
+/// sweep only fills in what is missing or stale, which cannot help an index
+/// that is present but wrong — a half-written file, a changed chunker, a model
+/// swapped underneath the same `dim`. Dropping first makes the rebuild
+/// unconditional.
+///
+/// Unlike the sweep, a failure here is returned rather than logged: someone is
+/// waiting on the answer, and an index silently left half-built is worse than
+/// an error that says the endpoint is down.
+pub async fn rebuild(
+    cfg: Arc<Config>,
+    store: Arc<Store>,
+    http: reqwest::Client,
+    token: &str,
+) -> Result<Rebuilt, EmbedError> {
+    if !cfg.embed.enabled {
+        return Err(EmbedError::Http(
+            "[embed] is off on this node; retrieval is text-only and there is no index to build"
+                .into(),
+        ));
+    }
+    let dim = cfg.embed.dim;
+    store.vec_drop()?;
+    store.vec_ensure(dim)?;
+    let e = Embedder::new(cfg, store, http);
+    let rows = e.store.rows_to_embed()?;
+    let mut done = Rebuilt {
+        records: rows.len(),
+        chunks: 0,
+    };
+    for (table, id, channel, body) in rows {
+        done.chunks += e.index_record(&table, &id, &channel, &body, token).await?;
+    }
+    Ok(done)
 }
 
 /// Walk the corpus and embed whatever is missing or stale. Runs at startup and

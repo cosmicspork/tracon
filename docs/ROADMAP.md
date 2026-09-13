@@ -189,8 +189,16 @@ refer to that manifest's table.
   - [ ] Legacy transition: archive omp sessions read-only with harness identity, reopen
         retained workspaces as new sessions with lineage, retire omp credentials deliberately,
         verify the omp adapter can no longer launch.
-  - [ ] Direct-harness recovery route documented for both harnesses; corpus export stays
-        portable and vectors rebuildable.
+  - [x] Direct-harness recovery route documented for both harnesses; corpus export stays
+        portable and vectors rebuildable. `docs/RECOVERY.md`: get the work out, run `claude`
+        or `opencode` yourself, import back as a session — with what is lost (audit, budget,
+        review evidence for anything done outside) stated plainly, and stated as a recovery
+        route rather than a second supported managed harness. Node state recovery names the
+        seed, the sealed broker, the policy bundle, and what a fresh node needs. Proved:
+        a document export imports into a node that has never seen it, bodies byte for byte
+        and kind, title, archived state and hash unchanged; the vector index deleted outright
+        and rebuilt by `tracon doc reindex` returns the same top-k for the same queries; a
+        session package reads back off disk with `tracon session show`, no node running.
 - [ ] **Gate D — browser, desktop, and installed mobile PWA.**
   - [ ] Dedicated UI origin served by tracon from the pinned bundle, catch-all never proxied,
         tracon CSP replacing `connect-src *` (finding 3); short-lived single-use bootstrap

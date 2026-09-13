@@ -409,7 +409,8 @@ and revoked the moment the hub loses that key.
 | `tracon mesh id\|init\|invite\|members\|remove\|admit`, `enroll` | the mesh |
 | `tracon channel create\|list\|bind\|share` | channels and their bindings |
 | `tracon credential import\|ls\|rm\|share` | what the broker holds (import is also on Settings) |
-| `tracon doc import\|ls\|get\|put\|rm\|export` | Markdown documents; import, preview, replace, download, archive, and delete HTML bundles in Documents |
+| `tracon doc import\|ls\|get\|put\|rm\|export\|reindex` | Markdown documents, and rebuilding the vector index from them; import, preview, replace, download, archive, and delete HTML bundles in Documents |
+| `tracon session show <package> [--jsonl]` | read a session package offline, with no node running |
 | `tracon memory ls\|add\|rm\|recall\|batch` | memories, and the promotion batch on demand |
 | `tracon work add\|ls\|ready\|show\|close\|dep\|rm` | the ledger |
 | `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |
@@ -418,8 +419,8 @@ and revoked the moment the hub loses that key.
 Most commands talk to the running node over its API, and `TRACON_URL` and
 `TRACON_TOKEN` point them at a remote node. The ones that act on this machine itself
 ignore both: `setup`, `check-boundary`, `service`, `enroll`, `mesh id`,
-`credential import|ls|rm`, and `policy keygen|init|sign|show`. `--help` on any of
-them says more.
+`credential import|ls|rm`, `policy keygen|init|sign|show`, and `session show`,
+which reads a file and needs no node at all. `--help` on any of them says more.
 
 ### Configuration
 
@@ -678,11 +679,25 @@ omp     # or claude: the harness, unsupervised, in any checkout
 git worktree add /tmp/<slug> -b <branch> origin/main
 ```
 
+Recovering a workspace tracon was managing works the same way, in three steps:
+download the workspace (or `podman volume export` it, with the node down), run
+`claude` or `opencode` against it yourself, then import the result back as a new
+session and submit through the gate. What you give up while you work that way is
+the boundary, the gateway, policy, and the record — the audit trail, the budget,
+and the check evidence for anything done outside — and none of it can be
+back-filled afterwards. It is a recovery route, deliberately not a second
+supported managed harness. The node's own state recovers from `node-identity.seed`
+and `node.db`; the corpus exports as plain Markdown and re-imports by filename;
+vectors are derived and rebuild with `tracon doc reindex`; and a session package
+reads offline with `tracon session show`. [docs/RECOVERY.md](docs/RECOVERY.md) has
+the whole of it.
+
 ## Reading
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the rules: commitments, invariants, boundaries.
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what is to be built, and what deliberately is not.
 - [docs/DESIGN.md](docs/DESIGN.md) — the interface: principles, jobs, states.
+- [docs/RECOVERY.md](docs/RECOVERY.md) — working outside tracon when it is down, and rebuilding a node.
 - [docs/reference/external-harness-notes.md](docs/reference/external-harness-notes.md) — the external harness trust boundary and operating guidance.
 
 Contributions are welcome — open an issue or a PR.
