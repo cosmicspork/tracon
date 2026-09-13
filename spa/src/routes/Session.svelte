@@ -7,6 +7,7 @@
   import { clock } from '../lib/clock.svelte'
   import { humanizeError } from '../lib/errors'
   import { formatAge, formatBudget, formatTokens } from '../lib/format'
+  import { repetitionHint } from '../lib/log'
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
   import { isTerminal, type OperatorQuestion } from '../lib/types'
   import { store } from '../lib/store.svelte'
@@ -25,6 +26,9 @@
   const busy = $derived(session?.turn_active === 1)
   const owner = $derived(session ? nodeById(store.nodes, session.node_id) : undefined)
   const remote = $derived(owner !== undefined && !owner.is_self)
+  // A hint, deliberately not a banner state: the session is still running and
+  // nothing has been decided for the operator.
+  const repeating = $derived(repetitionHint(store.events))
   let questions = $state<OperatorQuestion[]>([])
   async function refreshQuestions() {
     const result = await api.session(id)
@@ -216,6 +220,9 @@
     <div class="banner ok">ended at item close <b>· the work item is closed{session.work_item_id ? ` · ${session.work_item_id.slice(0, 8)}` : ''}</b></div>
   {:else if session.end_reason === 'phase_done'}
     <div class="banner ok">{session.phase === 'plan' ? 'plan written' : 'verdict given'} <b>· this {session.phase} session is done</b></div>
+  {/if}
+  {#if repeating && !isTerminal(session.state) && session.state !== 'paused'}
+    <div class="banner dim">{repeating} <b>· pause it yourself if it is stuck</b></div>
   {/if}
   {#if remote && unreachable !== null}
     <div class="banner dim">{unreachable} <b>· the log resumes when {owner?.name ?? 'it'} returns</b></div>

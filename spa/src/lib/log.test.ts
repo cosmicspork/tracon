@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { groupLog, groupOpen, groupSummary, providerErrorLine } from './log'
+import { groupLog, groupOpen, groupSummary, providerErrorLine, repetitionHint, repetitionLine } from './log'
 import type { Event } from './types'
 
 let seq = 0
@@ -66,4 +66,22 @@ test('a provider error reads as a retry in progress', () => {
     'anthropic answered 429 · harness retrying',
   )
   expect(providerErrorLine({})).toBe('the provider refused the call · harness retrying')
+})
+
+test('repetition reads as a signal to look at, not as a verdict', () => {
+  expect(repetitionLine({ count: 3, title: 'run just test' })).toBe(
+    'same call 3× in a row · run just test · recorded, not paused',
+  )
+  expect(repetitionLine({})).toBe('same call 0× in a row · the same tool call · recorded, not paused')
+})
+
+test('the repetition hint stands only until the harness moves on', () => {
+  const signal = ev('repetition', null, { count: 3, title: 'run just test' })
+  expect(repetitionHint([ev('tool_call'), signal])).toBe(
+    'same call 3× in a row · run just test · recorded, not paused',
+  )
+  // A turn ending, a pause or a resume all end the run it was describing.
+  expect(repetitionHint([signal, ev('turn_end')])).toBeNull()
+  expect(repetitionHint([signal, ev('session_paused')])).toBeNull()
+  expect(repetitionHint([])).toBeNull()
 })

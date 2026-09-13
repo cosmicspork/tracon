@@ -135,6 +135,13 @@ pub mod event_kind {
     /// given up. Recorded by the gateway, which sees the upstream answer, and
     /// by the supervisor when the harness says so itself.
     pub const PROVIDER_ERROR: &str = "provider_error";
+    /// The harness issued the same tool call, unchanged, several times in a
+    /// row within one turn (`what`, `count`, `title`, `kind`). Recorded and
+    /// surfaced, never acted on: repeating a command is also what a great
+    /// deal of legitimate work looks like, so this is a signal for the
+    /// operator to weigh, not a measure of progress. Only repeated *failure*
+    /// pauses a session.
+    pub const REPETITION: &str = "repetition";
     /// Something arrived for a session that had already ended (or been
     /// fenced) and was refused rather than applied: a harness event, a check
     /// result, a startup handoff, a state transition a writer still held.
