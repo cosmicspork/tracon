@@ -57,9 +57,8 @@ refer to that manifest's table.
         prompt cleared without re-sending, a child session, a session gone upstream, and a
         startup replay that closes the missed turn with its usage.
         - **Still open under this item:** no route yet to register a child session, so a
-          fork or background subagent is only recorded and reported; usage reconciliation
-          against the gateway's counts is the next sub-item; PTY ids are mapped but nothing
-          creates one until Gate D; and the startup path is exercised by test rather than
+          fork or background subagent is only recorded and reported; PTY ids are mapped but
+          nothing creates one until Gate D; and the startup path is exercised by test rather than
           by a real restart against a surviving `opencode serve`, which dies with its
           container today.
   - [x] Policy-aware API gateway: deny by default from the route matrix, directory pinned
@@ -96,8 +95,30 @@ refer to that manifest's table.
           applies unchanged. The `anthropic` login now resolves to the Claude adapter
           whatever `[harness] id` names. **Still unproven live:** no real subscription has
           been signed in through it, so the proof itself remains the operator's.
-  - [ ] Usage and spending accounting reconciled between OpenCode's per-message usage and
-        the gateway's counts; unsent-text durability across disconnects.
+  - [x] Usage and spending accounting reconciled between OpenCode's per-message usage and
+        the gateway's counts; unsent-text durability across disconnects. Every turn carries
+        both numbers in one ledger keyed on (session, turn): the gateway's on-the-wire count,
+        authoritative for budgets and ceilings, and the harness's own report
+        (`tokens.{input,output,reasoning,cache.read,cache.write}` and `cost` for OpenCode,
+        the ACP `usage` for omp/claude). At turn end they are reconciled — agreement within
+        tolerance is recorded as such, disagreement writes a `usage_mismatch` event carrying
+        both sides, and the harness's number can raise the charge but never lower it. A turn
+        whose calls the gateway could not count (finding 10: OpenCode reports omitted usage
+        as zero, and there is no estimator anywhere in the path) is marked `unmetered` and
+        recorded with a `usage_unmetered` event rather than being charged zero; the channel
+        ceiling reports those turns beside the day's counted spend instead of reading as a
+        quiet day. Both numbers and the verdict are on the session API and in the SPA's
+        session header. Unsent prompts are node-side per (session, operator), saved on a
+        debounce, restored into the composer with a "draft restored" hint, cleared only by
+        dispatching the prompt, and never delivered to the harness on their own. Covered by
+        tests: the two sources agreeing, a harness under-reporting, a provider reporting no
+        usage at all, gateway counts landing on the turn that made them, a ceiling enforced
+        from the wire while the harness claims almost nothing, an unmetered turn flagged
+        rather than passing silently, and a draft surviving a store reopen.
+        - **Still open under this item:** the reconciliation is proven against the fake
+          server and a stub upstream, not yet against the pinned binary and a live provider;
+          `cost` on the v2 surface is always zero upstream (§6.2), so a priced turn is only
+          as good as the v1 numbers the adapter reads.
   - [x] Adversarial API run: permission escalation, foreign session ids, config and auth
         writes, share, revert, shell, child sessions; interrupted SSE and killed processes
         during mutations; two simultaneous sessions cannot read or migrate each other's state.

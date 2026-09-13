@@ -826,8 +826,42 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX opencode_intent_session ON opencode_intent(session_id, created_ms);
     CREATE INDEX opencode_intent_state ON opencode_intent(state, updated_ms);
     "#,
-    // The API gateway mediates mutations the session manager never sees — a
-    // revert, a compact, a model switch, a terminal — and one of those whose
+    // 34: one ledger, two usage sources. The gateway counts on the wire and
+    // that count is authoritative for budgets and ceilings; the harness
+    // reports its own numbers and they are display until they agree. Both are
+    // kept per turn so a disagreement is a fact with two sides rather than a
+    // number nobody can check.
+    //
+    // `session.turn` is the durable turn counter — the supervisor's own is in
+    // memory and does not survive a restart — and `model_usage.turn` carries
+    // it so a gateway count made mid-turn is attributable to that turn
+    // without guessing from timestamps. Rows written before this column
+    // belong to turn 0, which no settled turn ever claims.
+    r#"
+    ALTER TABLE session ADD COLUMN turn INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE model_usage ADD COLUMN turn INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX model_usage_turn ON model_usage(session_id, turn);
+
+    CREATE TABLE turn_usage (
+        session_id       TEXT NOT NULL REFERENCES session(id),
+        turn             INTEGER NOT NULL,
+        channel          TEXT NOT NULL,
+        gateway_input    INTEGER NOT NULL DEFAULT 0,
+        gateway_output   INTEGER NOT NULL DEFAULT 0,
+        gateway_requests INTEGER NOT NULL DEFAULT 0,
+        harness_tokens   INTEGER,
+        harness_cost_usd REAL,
+        charged_tokens   INTEGER NOT NULL DEFAULT 0,
+        -- open | reconciled | mismatch | unmetered
+        state            TEXT NOT NULL DEFAULT 'open',
+        started_ms       INTEGER NOT NULL,
+        settled_ms       INTEGER,
+        PRIMARY KEY (session_id, turn)
+    );
+    CREATE INDEX turn_usage_channel ON turn_usage(channel, state, settled_ms);
+    "#,
+    // 35: the API gateway mediates mutations the session manager never sees —
+    // a revert, a compact, a model switch, a terminal — and one of those whose
     // answer never comes back is exactly as uncertain as a prompt's. It needs
     // an intent row of its own, so the kind is widened. Nothing references
     // this table, so the rebuild is the plain one.

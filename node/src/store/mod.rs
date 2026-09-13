@@ -428,6 +428,21 @@ impl Store {
         Ok(())
     }
 
+    /// The unsent prompt this session is holding, and when it was last
+    /// written. `None` for a session that has none — or none any more,
+    /// because the prompt was sent.
+    pub fn get_draft(&self, id: &str) -> Result<Option<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT draft, COALESCE(draft_updated_ms, updated_ms) FROM session WHERE id=?1",
+                rusqlite::params![id],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        Ok(row.and_then(|(text, at)| text.map(|t| (t, at))))
+    }
+
     // ---- event ----
 
     /// Appends an event and returns its assigned `seq` (also the SSE id).
@@ -558,11 +573,16 @@ impl Store {
 
     // ---- model usage ----
 
+    /// The turn a call belongs to is resolved here rather than passed in: the
+    /// gateway knows the session that made the call, and the session row is
+    /// the only durable record of which turn is open. A call from outside a
+    /// session (a probe) lands on turn 0, which no settled turn claims.
     pub fn record_usage(&self, u: &UsageRow) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO model_usage (channel, node_id, session_id, provider, model, at_ms, input_tokens, output_tokens, requests)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO model_usage (channel, node_id, session_id, provider, model, at_ms, input_tokens, output_tokens, requests, turn)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                     COALESCE((SELECT turn FROM session WHERE id = ?3), 0))",
             rusqlite::params![
                 u.channel,
                 u.node_id,
@@ -576,6 +596,139 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    // ---- the per-turn usage ledger ----
+
+    /// Open a turn: bump the session's durable turn counter and write the
+    /// ledger row the gateway's counts will accumulate against. Returns the
+    /// turn number, which is what `model_usage.turn` will carry from here
+    /// until the next turn opens.
+    pub fn begin_turn(&self, session_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE session SET turn = turn + 1 WHERE id = ?1",
+            rusqlite::params![session_id],
+        )?;
+        let (turn, channel): (i64, String) = conn.query_row(
+            "SELECT turn, channel FROM session WHERE id = ?1",
+            rusqlite::params![session_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO turn_usage (session_id, turn, channel, state, started_ms)
+             VALUES (?1, ?2, ?3, 'open', ?4)",
+            rusqlite::params![session_id, turn, channel, now_ms()],
+        )?;
+        Ok(turn)
+    }
+
+    /// The turn currently open on a session, or the last one that was.
+    pub fn current_turn(&self, session_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT turn FROM session WHERE id = ?1",
+                rusqlite::params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+
+    /// What the gateway counted on the wire for one turn: `(input, output,
+    /// requests)`. Requests is the part that distinguishes "nothing was
+    /// spent" from "something was spent and could not be counted".
+    pub fn turn_gateway_counts(&self, session_id: &str, turn: i64) -> Result<(i64, i64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(requests), 0)
+             FROM model_usage WHERE session_id = ?1 AND turn = ?2",
+            rusqlite::params![session_id, turn],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Close a turn's ledger row with both sources and the verdict between
+    /// them. The row is written whether or not `begin_turn` ran, so a turn
+    /// closed by reconciliation after a restart still lands.
+    #[allow(clippy::too_many_arguments)]
+    pub fn settle_turn(
+        &self,
+        session_id: &str,
+        turn: i64,
+        gateway: (i64, i64, i64),
+        harness_tokens: Option<i64>,
+        harness_cost_usd: Option<f64>,
+        charged: i64,
+        state: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO turn_usage
+                (session_id, turn, channel, gateway_input, gateway_output, gateway_requests,
+                 harness_tokens, harness_cost_usd, charged_tokens, state, started_ms, settled_ms)
+             VALUES (?1, ?2, COALESCE((SELECT channel FROM session WHERE id = ?1), ''),
+                     ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+             ON CONFLICT(session_id, turn) DO UPDATE SET
+                gateway_input=?3, gateway_output=?4, gateway_requests=?5, harness_tokens=?6,
+                harness_cost_usd=?7, charged_tokens=?8, state=?9, settled_ms=?10",
+            rusqlite::params![
+                session_id,
+                turn,
+                gateway.0,
+                gateway.1,
+                gateway.2,
+                harness_tokens,
+                harness_cost_usd,
+                charged,
+                state,
+                now_ms(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The session's turns, newest first, for the session API.
+    pub fn turn_ledger(&self, session_id: &str, limit: i64) -> Result<Vec<TurnUsageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT turn, gateway_input, gateway_output, gateway_requests, harness_tokens,
+                    harness_cost_usd, charged_tokens, state, started_ms, settled_ms
+             FROM turn_usage WHERE session_id = ?1 ORDER BY turn DESC LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![session_id, limit], |r| {
+                Ok(TurnUsageRow {
+                    turn: r.get(0)?,
+                    gateway_input: r.get(1)?,
+                    gateway_output: r.get(2)?,
+                    gateway_requests: r.get(3)?,
+                    harness_tokens: r.get(4)?,
+                    harness_cost_usd: r.get(5)?,
+                    charged_tokens: r.get(6)?,
+                    state: r.get(7)?,
+                    started_ms: r.get(8)?,
+                    settled_ms: r.get(9)?,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Turns on a channel the gateway could not count, since `since_ms`. What
+    /// keeps an unmetered turn from reading as a free one against a ceiling.
+    pub fn unmetered_turns_since(&self, channel: &str, since_ms: i64) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM turn_usage
+             WHERE channel = ?1 AND state = 'unmetered' AND COALESCE(settled_ms, started_ms) >= ?2",
+            rusqlite::params![channel, since_ms],
+            |r| r.get(0),
+        )
+        .map_err(Into::into)
     }
 
     /// Tokens (input + output) a channel spent since `since_ms`, as the
@@ -1250,6 +1403,29 @@ pub struct UsageRow {
 
 /// `(session_id, provider, input_tokens, output_tokens, requests)`.
 pub type SessionUsage = (String, String, i64, i64, i64);
+
+/// One turn's ledger: what the gateway counted on the wire, what the harness
+/// said it spent, what the budget was actually charged, and the verdict
+/// between the two sources.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TurnUsageRow {
+    pub turn: i64,
+    pub gateway_input: i64,
+    pub gateway_output: i64,
+    pub gateway_requests: i64,
+    pub harness_tokens: Option<i64>,
+    pub harness_cost_usd: Option<f64>,
+    pub charged_tokens: i64,
+    pub state: String,
+    pub started_ms: i64,
+    pub settled_ms: Option<i64>,
+}
+
+impl TurnUsageRow {
+    pub fn gateway_tokens(&self) -> i64 {
+        self.gateway_input + self.gateway_output
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageTotal {

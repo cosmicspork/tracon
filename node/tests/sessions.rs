@@ -444,6 +444,95 @@ async fn drafts_survive_a_lost_client() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (_, body) = h.call("GET", &format!("/api/sessions/{id}"), None).await;
     assert_eq!(body["session"]["draft"], "half a thought");
+
+    // And on its own route, which is what a reconnecting client asks for: it
+    // needs the one thing it cannot rebuild, not the whole session.
+    let (status, draft) = h
+        .call("GET", &format!("/api/sessions/{id}/draft"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(draft["text"], "half a thought");
+    assert!(draft["updated_ms"].as_i64().unwrap() > 0);
+
+    // Emptying the box on the node is how a client says "nothing typed".
+    let (status, _) = h
+        .call(
+            "PUT",
+            &format!("/api/sessions/{id}/draft"),
+            Some(json!({ "text": "" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, draft) = h
+        .call("GET", &format!("/api/sessions/{id}/draft"), None)
+        .await;
+    assert_eq!(draft["text"], "");
+    assert_eq!(draft["updated_ms"], Value::Null);
+}
+
+/// A draft is the operator's, not a message: it lives in the node's database,
+/// so it outlives the tab that typed it *and* the process that received it.
+#[tokio::test]
+async fn a_draft_survives_the_node_restarting() {
+    state::isolate();
+    let path = state::scratch("draft-restart").join("node.db");
+    let id = {
+        let store = Arc::new(Store::open(&path).unwrap());
+        store
+            .put_node(&NodeRow {
+                id: "n1".into(),
+                name: "t".into(),
+                state: "ready".into(),
+                failed_check: None,
+                failed_detail: None,
+                harness_id: "fake".into(),
+                harness_pinned: "1.0.0".into(),
+                harness_found: Some("1.0.0".into()),
+                models_json: None,
+                checked_at_ms: Some(now_ms()),
+                is_self: 1,
+                x25519_pub: None,
+                last_seen_ms: None,
+                reachable: 1,
+                providers_json: None,
+            })
+            .unwrap();
+        let id = insert_running_session(&store, 1000);
+        store
+            .set_draft(&id, Some("the thought I had not finished"))
+            .unwrap();
+        id
+    };
+    // A new process, the same database.
+    let store = Arc::new(Store::open(&path).unwrap());
+    let (text, at) = store
+        .get_draft(&id)
+        .unwrap()
+        .expect("the draft is still there");
+    assert_eq!(text, "the thought I had not finished");
+    assert!(at > 0);
+
+    // And sending is what clears it — nothing else does.
+    store.set_draft(&id, None).unwrap();
+    assert_eq!(store.get_draft(&id).unwrap(), None);
+}
+
+/// A draft on a session that does not exist is a 404 rather than a silent
+/// write nobody can read back.
+#[tokio::test]
+async fn a_draft_needs_a_session_to_belong_to() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    let (status, _) = h
+        .call(
+            "PUT",
+            "/api/sessions/nope/draft",
+            Some(json!({ "text": "x" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = h.call("GET", "/api/sessions/nope/draft", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1450,6 +1539,219 @@ async fn a_session_over_budget_is_killed_at_turn_end() {
     assert_eq!(s.tokens_used, 1500);
     assert_eq!(s.end_reason.as_deref(), Some("budget"));
     assert_eq!(s.turn_active, 0);
+}
+
+// ---- two usage sources, reconciled at turn end ----------------------------
+//
+// The gateway counts on the wire; the harness reports its own numbers. Driven
+// through the supervisor here, with the gateway's counts written straight into
+// the ledger the way a model call through `/model/...` writes them (the
+// end-to-end path is `node/tests/opencode_usage.rs`).
+
+impl Rig {
+    /// One model call as the gateway counted it, attributed to the turn the
+    /// session currently has open.
+    fn gateway_counted(&self, input: i64, output: i64) {
+        self.store
+            .record_usage(&tracon::store::UsageRow {
+                channel: "personal".into(),
+                node_id: "n1".into(),
+                session_id: Some(self.session_id.clone()),
+                provider: "stub".into(),
+                model: None,
+                at_ms: now_ms(),
+                input_tokens: input,
+                output_tokens: output,
+                requests: 1,
+            })
+            .unwrap();
+    }
+
+    /// Dispatch a prompt to a handle whose turn never resolves on its own, so
+    /// the test owns the whole turn.
+    async fn open_turn(&self) {
+        let (ack, done) = oneshot::channel();
+        self.commands
+            .send(Command::Prompt {
+                text: "do the thing".into(),
+                ack,
+            })
+            .await
+            .unwrap();
+        assert_eq!(done.await.unwrap(), Ok(()));
+    }
+
+    /// Close the open turn with what the harness says it spent.
+    async fn close_turn(&self, harness_tokens: i64) {
+        self.commands
+            .send(Command::TurnDone {
+                turn_id: 1,
+                kind: "turn_end",
+                payload: json!({ "stop_reason": "end_turn" }),
+                tokens: harness_tokens,
+            })
+            .await
+            .unwrap();
+    }
+
+    fn ledger(&self) -> Vec<tracon::store::TurnUsageRow> {
+        self.store.turn_ledger(&self.session_id, 10).unwrap()
+    }
+}
+
+#[tokio::test]
+async fn a_turn_whose_two_sources_agree_is_recorded_reconciled_and_says_nothing() {
+    state::isolate();
+    let rig =
+        Rig::start_with_handle(100_000, Duration::from_secs(60), Arc::new(BlockingHandle)).await;
+    rig.open_turn().await;
+    rig.gateway_counted(900, 100);
+    rig.close_turn(1000).await;
+
+    assert!(rig.await_events("turn_end", 1).await);
+    let s = rig.store.get_session(&rig.session_id).unwrap().unwrap();
+    assert_eq!(s.tokens_used, 1000);
+    let ledger = rig.ledger();
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0].state, "reconciled");
+    assert_eq!(ledger[0].gateway_tokens(), 1000);
+    assert_eq!(ledger[0].harness_tokens, Some(1000));
+    let kinds = rig.kinds();
+    assert!(
+        !kinds.iter().any(|k| k.starts_with("usage_")),
+        "agreement is the ordinary case and is not worth an event: {kinds:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_harness_under_reporting_a_turn_is_told_on_and_charged_the_wire() {
+    state::isolate();
+    let rig =
+        Rig::start_with_handle(100_000, Duration::from_secs(60), Arc::new(BlockingHandle)).await;
+    rig.open_turn().await;
+    rig.gateway_counted(8_000, 2_000);
+    rig.close_turn(12).await;
+
+    assert!(
+        rig.await_events("usage_mismatch", 1).await,
+        "{:?}",
+        rig.kinds()
+    );
+    let event = rig
+        .store
+        .events_after(&rig.session_id, 0, 200)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "usage_mismatch")
+        .unwrap();
+    assert_eq!(event.payload["gateway"]["tokens"], 10_000);
+    assert_eq!(event.payload["harness"]["tokens"], 12);
+    assert_eq!(event.payload["charged_tokens"], 10_000);
+
+    let s = rig.store.get_session(&rig.session_id).unwrap().unwrap();
+    assert_eq!(
+        s.tokens_used, 10_000,
+        "the harness's number never lowers what the budget is charged"
+    );
+    assert_eq!(rig.ledger()[0].state, "mismatch");
+}
+
+#[tokio::test]
+async fn a_ceiling_bites_from_the_gateway_count_even_when_the_harness_says_nothing_was_spent() {
+    state::isolate();
+    // A budget the harness's own number would never reach, and a wire count
+    // that clears it in one turn.
+    let rig =
+        Rig::start_with_handle(5_000, Duration::from_secs(60), Arc::new(BlockingHandle)).await;
+    rig.open_turn().await;
+    rig.gateway_counted(6_000, 500);
+    rig.close_turn(3).await;
+
+    assert!(rig.await_state("killed_budget").await);
+    let s = rig.store.get_session(&rig.session_id).unwrap().unwrap();
+    assert_eq!(s.tokens_used, 6_500);
+    assert_eq!(s.end_reason.as_deref(), Some("budget"));
+}
+
+#[tokio::test]
+async fn a_turn_the_gateway_could_not_count_is_flagged_rather_than_charged_zero() {
+    state::isolate();
+    let rig =
+        Rig::start_with_handle(100_000, Duration::from_secs(60), Arc::new(BlockingHandle)).await;
+    rig.open_turn().await;
+    // Calls went out; the provider returned no usage, so neither source has a
+    // number. Zero would be a lie the budget would happily believe.
+    rig.gateway_counted(0, 0);
+    rig.gateway_counted(0, 0);
+    rig.close_turn(0).await;
+
+    assert!(
+        rig.await_events("usage_unmetered", 1).await,
+        "{:?}",
+        rig.kinds()
+    );
+    let event = rig
+        .store
+        .events_after(&rig.session_id, 0, 200)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "usage_unmetered")
+        .unwrap();
+    assert_eq!(event.payload["gateway"]["requests"], 2);
+    assert_eq!(event.payload["gateway"]["tokens"], 0);
+    assert_eq!(rig.ledger()[0].state, "unmetered");
+    assert_eq!(
+        rig.store.unmetered_turns_since("personal", 0).unwrap(),
+        1,
+        "the channel's day knows it stopped measuring"
+    );
+}
+
+/// A turn that failed is not a turn that spent nothing: the harness never got
+/// to say, which is a different thing from saying zero.
+#[tokio::test]
+async fn a_failed_turn_reports_no_harness_usage_rather_than_zero() {
+    state::isolate();
+    let rig =
+        Rig::start_with_handle(100_000, Duration::from_secs(60), Arc::new(BlockingHandle)).await;
+    rig.open_turn().await;
+    rig.gateway_counted(400, 100);
+    rig.commands
+        .send(Command::TurnDone {
+            turn_id: 1,
+            kind: "error",
+            payload: json!({ "error": "the harness stopped" }),
+            tokens: 0,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        rig.await_events("usage_mismatch", 1).await,
+        "{:?}",
+        rig.kinds()
+    );
+    let ledger = rig.ledger();
+    assert_eq!(ledger[0].harness_tokens, None, "nothing was reported");
+    assert_eq!(
+        ledger[0].charged_tokens, 500,
+        "what went over the wire still cost"
+    );
+}
+
+/// Sending is the only thing that clears the box, and it clears it on the node
+/// before the harness is even asked — so a client that dies mid-prompt does
+/// not come back to the text it already sent.
+#[tokio::test]
+async fn dispatching_a_prompt_clears_the_draft_on_the_node() {
+    state::isolate();
+    let rig =
+        Rig::start_with_handle(100_000, Duration::from_secs(60), Arc::new(BlockingHandle)).await;
+    rig.store
+        .set_draft(&rig.session_id, Some("half a thought"))
+        .unwrap();
+    rig.open_turn().await;
+    assert_eq!(rig.store.get_draft(&rig.session_id).unwrap(), None);
 }
 
 #[tokio::test]

@@ -8,6 +8,7 @@ import type {
   ChannelInfo,
   ChannelMetrics,
   CandidateTransfer,
+  CeilingInfo as Ceiling,
   CredentialSummary,
   Document,
   EnrollStatus,
@@ -30,6 +31,7 @@ import type {
   RecallHit,
   RecentRepo,
   Session,
+  SessionUsage,
   ReviewDetails,
   TransferImport,
   TransferInboxItem,
@@ -169,7 +171,13 @@ export const api = {
   exportWorkspace: (id: string) => call<{ workspace_id: string; exported: boolean }>('POST', `/api/workspaces/${id}/export`),
   sessions: () => call<Session[]>('GET', '/api/sessions'),
   session: (id: string) =>
-    call<{ session: Session; waiting: unknown[]; questions: OperatorQuestion[] }>('GET', `/api/sessions/${id}`),
+    call<{
+      session: Session
+      waiting: unknown[]
+      questions: OperatorQuestion[]
+      usage: SessionUsage
+      ceiling: Ceiling
+    }>('GET', `/api/sessions/${id}`),
   // Page through the whole history: a long session has more events than one
   // request returns, and stopping at a fixed cap would show the oldest events
   // with a gap before the live tail.
@@ -228,6 +236,9 @@ export const api = {
   stop: (id: string) => call<void>('POST', `/api/sessions/${id}/stop`),
   kill: (id: string) => call<void>('POST', `/api/sessions/${id}/kill`),
   saveDraft: (id: string, text: string) => call<void>('PUT', `/api/sessions/${id}/draft`, { text }),
+  /** The unsent prompt the node is holding for this session. */
+  draft: (id: string) =>
+    call<{ text: string; updated_ms: number | null }>('GET', `/api/sessions/${id}/draft`),
   review: (id: string) => call<ReviewDetails>('GET', `/api/reviews/${id}`),
   /** One reviewed file as it was submitted, for the diff editor. */
   reviewFile: (id: string, path: string) =>
