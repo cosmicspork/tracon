@@ -88,7 +88,10 @@ fn split_package(package: &str) -> Option<(&str, &str)> {
 /// What the manifest adds is memory: the names and commands go into the
 /// digest, so a session's row still says which toolchain produced its
 /// transcript after the profile has moved on.
-pub fn toolchain_lsp() -> Vec<ToolEntry> {
+pub fn toolchain_lsp(harness_id: &str) -> Vec<ToolEntry> {
+    if harness_id != crate::adapter::opencode::OpenCodeAdapter::ID {
+        return Vec::new();
+    }
     crate::runner::toolchain::profile()
         .lsp
         .iter()
@@ -100,7 +103,10 @@ pub fn toolchain_lsp() -> Vec<ToolEntry> {
 }
 
 /// The same for formatters.
-pub fn toolchain_formatters() -> Vec<ToolEntry> {
+pub fn toolchain_formatters(harness_id: &str) -> Vec<ToolEntry> {
+    if harness_id != crate::adapter::opencode::OpenCodeAdapter::ID {
+        return Vec::new();
+    }
     crate::runner::toolchain::profile()
         .formatter
         .iter()

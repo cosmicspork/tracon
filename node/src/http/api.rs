@@ -4378,8 +4378,8 @@ fn build_manifest(s: &AppState, channel: &str) -> Result<crate::manifest::Launch
         agents,
         plugins: &cfg.launch.plugins,
         baked: &crate::adapter::baked_plugins(&cfg.harness.id),
-        lsp: crate::manifest::toolchain_lsp(),
-        formatters: crate::manifest::toolchain_formatters(),
+        lsp: crate::manifest::toolchain_lsp(&cfg.harness.id),
+        formatters: crate::manifest::toolchain_formatters(&cfg.harness.id),
         providers: cfg.providers.keys().cloned().collect(),
         policy_revision: s.manager.policy_version().to_string(),
     })

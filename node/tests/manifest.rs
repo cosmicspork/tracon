@@ -425,8 +425,8 @@ fn built(store: &Store, channel: &str) -> manifest::LaunchManifest {
         agents,
         plugins: &[],
         baked: &[],
-        lsp: manifest::toolchain_lsp(),
-        formatters: manifest::toolchain_formatters(),
+        lsp: manifest::toolchain_lsp(OpenCodeAdapter::ID),
+        formatters: manifest::toolchain_formatters(OpenCodeAdapter::ID),
         providers: vec!["anthropic".into()],
         policy_revision: "1".into(),
     })
@@ -647,8 +647,8 @@ async fn the_manifests_skill_is_listed_and_the_projects_are_not() {
         agents: Vec::new(),
         plugins: &[],
         baked: &[],
-        lsp: manifest::toolchain_lsp(),
-        formatters: manifest::toolchain_formatters(),
+        lsp: manifest::toolchain_lsp(OpenCodeAdapter::ID),
+        formatters: manifest::toolchain_formatters(OpenCodeAdapter::ID),
         providers: vec!["anthropic".into()],
         policy_revision: "1".into(),
     })

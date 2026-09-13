@@ -973,8 +973,11 @@ impl Manager {
                 agents,
                 plugins: &self.cfg.launch.plugins,
                 baked: &crate::adapter::baked_plugins(adapter.id()),
-                lsp: crate::manifest::toolchain_lsp(),
-                formatters: crate::manifest::toolchain_formatters(),
+                // The toolchain profile belongs to one image. A session on a
+                // harness that does not use it records no toolchain rather
+                // than a list of servers it never had.
+                lsp: crate::manifest::toolchain_lsp(adapter.id()),
+                formatters: crate::manifest::toolchain_formatters(adapter.id()),
                 providers: wiring.providers.iter().map(|p| p.name.clone()).collect(),
                 policy_revision: self.policy.read().unwrap().version.to_string(),
             })

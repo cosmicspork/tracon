@@ -1913,8 +1913,8 @@ mod tests {
             agents: Vec::new(),
             plugins: &baked,
             baked: &baked,
-            lsp: crate::manifest::toolchain_lsp(),
-            formatters: crate::manifest::toolchain_formatters(),
+            lsp: crate::manifest::toolchain_lsp(OpenCodeAdapter::ID),
+            formatters: crate::manifest::toolchain_formatters(OpenCodeAdapter::ID),
             providers: vec!["anthropic".into()],
             policy_revision: "1".into(),
         })
