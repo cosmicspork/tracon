@@ -509,6 +509,23 @@ Every node serves the same embedded SPA; a client is a matter of shell.
   the CLI the unit runs, and after an update moves both onto the version it carries
   once no session is running. A node an earlier version spawned as its child is
   stopped once, before the service takes the port.
+- **Two windows, and only one of them is privileged.** The main window is the node's
+  own interface, and it holds the commands that install the CLI, install updates and
+  restart the node — commands the node itself must never have, because a session
+  inside the boundary would then hold them too. OpenCode's native UI is third-party
+  code driven by an agent, so it gets a second window and its own capability, and
+  that capability grants nothing: no `remote` section, so the origin loaded there can
+  invoke no command at all, of this app's or of any plugin's. The window is created
+  on demand on a boot URL the node mints, never at launch; it may navigate only to
+  the node's OpenCode UI origin, which is a distinct origin from the node's own —
+  same-origin with the operator API is a page that drives the node with no credential
+  — and the app refuses a boot URL that would collapse the two. An `http(s)` link off
+  that origin is handed to the system browser by the app's own navigation handler, in
+  Rust, so reaching the browser is not a capability the window holds; any other scheme
+  is refused. The boot token rides in the URL fragment, which is not sent in requests
+  and is stripped from anything the app logs. Nothing about this depends on the page
+  behaving; it is the window's grants and its navigation handler, both asserted by
+  test against the manifest.
 - The interface talks only to the node that served it; that node mirrors peers and
   forwards commands to owners. A verdict executes on the owner, because staleness
   and publishing need the owner's worktree and broker.

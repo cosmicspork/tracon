@@ -235,8 +235,39 @@ refer to that manifest's table.
         tracon CSP replacing `connect-src *` (finding 3); short-lived single-use bootstrap
         exchanged for an HttpOnly cookie; no password in the browser (finding 4); Origin/CSRF
         on mutations and WebSocket upgrades.
-  - [ ] Desktop: an unprivileged window with no node-management commands; navigation limited
-        to the UI origin.
+  - [x] Desktop: an unprivileged window with no node-management commands; navigation limited
+        to the UI origin. A second window labelled `opencode`, declared in `tauri.conf.json`
+        with `"create": false` and built on demand from a boot URL the node mints
+        (`POST /api/sessions/{id}/opencode-boot`, feature-detected: a node without it answers
+        404 and the operator is told the node does not serve that interface, rather than the
+        call failing). Its capability (`wrapper/capabilities/opencode-window.json`) carries no
+        `remote` section, so the UI origin it loads can invoke nothing at all — not this app's
+        commands, not a plugin's — and holds only four local `core:window` controls.
+        `wrapper/src/opencode.rs` decides every navigation in Rust: the UI origin is allowed,
+        an `http(s)` link off it is handed to the system browser and refused in the window
+        (so reaching the browser is not a capability the window holds), every other scheme is
+        refused, and `on_new_window` denies a second window either way. The boot token travels
+        in the URL fragment; a boot URL carrying one in the query, or sharing the node's own
+        origin, is refused before the window exists, and the one line logged is redacted of
+        query and fragment. Clipboard and `<input type=file>` need no plugin and none is added;
+        the macOS Edit menu that makes copy and paste work is already installed app-wide.
+        Covered by tests: the routing and boot-URL rules as unit tests, and a manifest test
+        that parses `tauri.conf.json` and every capability file and asserts the `opencode`
+        window is granted no `allow-desktop-*` command, that no other capability names it,
+        that the opener is granted once and to the main window only, that every granted
+        `allow-desktop-*` names a command `build.rs` declares, and that no `dangerous*` escape
+        (`dangerousRemoteDomainIpcAccess`, `dangerousDisableAssetCspModification`) is set, so
+        the CSP the window sees is the one the UI origin serves.
+        Exercised live on Linux (webkit2gtk, offscreen X): the app launched against a
+        stand-in node and a stand-in UI origin opened the window on the boot URL with the
+        fragment intact and logged the URL without it; the page there was refused
+        `desktop_restart_node` by Tauri's own permission check; a `file:` assignment and an
+        off-origin `http` assignment both left the window on the UI origin, with the latter
+        handed to the system browser; a real click on a `target=_blank` link opened the
+        browser and no second window; a same-origin navigation went through.
+        **Still to do here:** the same against the real UI origin once it lands (the
+        wrapper's half is feature-detected until then), and the macOS leg — bundle, window
+        behaviour and the Edit menu — which is the operator's to run.
   - [ ] Installed mobile PWA on the always-on node: in-scope shell, isolated native view,
         third-party storage blocked, background/resume recovery, notification deep links.
   - [ ] PTY only as an explicit workspace-scoped capability with a gateway-minted owner-bound
