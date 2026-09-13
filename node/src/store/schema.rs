@@ -764,6 +764,68 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE session ADD COLUMN harness_found TEXT;
     ALTER TABLE session ADD COLUMN harness_protocol TEXT;
     "#,
+    // 33: the OpenCode identity map. A session, message, part, permission,
+    // question or PTY is named by the harness, not by the node, and the two
+    // namespaces have to stay tied together across a restart: the durable
+    // sequence a stream resumes from is only meaningful next to the session it
+    // belongs to, and a re-delivered event is only recognisable as a duplicate
+    // if what it already produced is written down.
+    //
+    // `opencode_session` is keyed by the harness's own `ses_` id rather than by
+    // the tracon session, because a child session OpenCode makes for itself has
+    // no tracon session to key on — it is recorded `untracked` and surfaced,
+    // never driven.
+    //
+    // A tool call has no OpenCode id at all: its `callID` is provider-supplied
+    // text (`api-ui.md` §3), so it is keyed by the assistant message it belongs
+    // to and mapped, never adopted as an identity.
+    r#"
+    CREATE TABLE opencode_session (
+        upstream_id      TEXT PRIMARY KEY,
+        session_id       TEXT REFERENCES session(id),
+        parent_id        TEXT,
+        untracked        INTEGER NOT NULL DEFAULT 0,
+        last_seq         INTEGER NOT NULL DEFAULT 0,
+        uncertain        INTEGER NOT NULL DEFAULT 0,
+        uncertain_reason TEXT,
+        gone             INTEGER NOT NULL DEFAULT 0,
+        created_ms       INTEGER NOT NULL,
+        updated_ms       INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX opencode_session_tracon
+        ON opencode_session(session_id) WHERE session_id IS NOT NULL;
+    CREATE INDEX opencode_session_parent ON opencode_session(parent_id);
+
+    CREATE TABLE opencode_object (
+        session_id  TEXT NOT NULL REFERENCES session(id),
+        kind        TEXT NOT NULL CHECK(kind IN
+            ('message','part','permission','question','pty','tool_call')),
+        upstream_id TEXT NOT NULL,
+        ref_id      TEXT,
+        event_seq   INTEGER,
+        seq         INTEGER NOT NULL DEFAULT 0,
+        state       TEXT,
+        created_ms  INTEGER NOT NULL,
+        updated_ms  INTEGER NOT NULL,
+        PRIMARY KEY (session_id, kind, upstream_id)
+    );
+
+    CREATE TABLE opencode_intent (
+        id         TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES session(id),
+        kind       TEXT NOT NULL CHECK(kind IN ('prompt','abort','permission_reply')),
+        target     TEXT,
+        detail     TEXT,
+        state      TEXT NOT NULL CHECK(state IN
+            ('dispatched','admitted','failed','uncertain')),
+        note       TEXT,
+        instance   TEXT NOT NULL,
+        created_ms INTEGER NOT NULL,
+        updated_ms INTEGER NOT NULL
+    );
+    CREATE INDEX opencode_intent_session ON opencode_intent(session_id, created_ms);
+    CREATE INDEX opencode_intent_state ON opencode_intent(state, updated_ms);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

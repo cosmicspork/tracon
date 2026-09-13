@@ -10,5 +10,6 @@ pub mod harness;
 pub mod http;
 pub mod login_fake;
 pub mod mesh;
+pub mod opencode;
 pub mod rows;
 pub mod state;

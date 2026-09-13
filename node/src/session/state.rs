@@ -160,6 +160,20 @@ pub mod event_kind {
     /// was paused or ended (`candidate_id`, `head_sha`, `reason`). Its
     /// evidence row is `cancelled`, which is never reusable and never a pass.
     pub const CHECK_CANCELLED: &str = "check_cancelled";
+    /// A mediated mutation's outcome could not be determined — a prompt whose
+    /// dispatch never reported, a node that restarted with one in flight — or
+    /// has since been established (`reason`, `intent`, `refusing`, or
+    /// `cleared`). While it stands, operations that depend on the unknown
+    /// answer are refused: a second prompt would duplicate a turn that may
+    /// already be running. Never presented as success or failure.
+    pub const UNCERTAIN: &str = "uncertain";
+    /// The harness created a session of its own — a fork, a background
+    /// subagent — naming one of this node's as its parent (`child`, `parent`,
+    /// `untracked`). Recorded with its lineage and surfaced; never driven,
+    /// because there is no route to register a child session yet and an
+    /// untracked worker the node cannot supervise is worse than a visible
+    /// refusal.
+    pub const CHILD_SESSION: &str = "child_session";
     /// The gateway refused a model call before it reached the provider,
     /// because the method and path are not on the inference allowlist the
     /// credential is lent for (`provider`, `method`, `reason`, `attempt`).

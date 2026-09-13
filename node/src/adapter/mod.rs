@@ -239,6 +239,55 @@ pub struct LaunchSpec {
     /// A file inside the runner appended to the harness's system prompt: the
     /// session's orientation.
     pub system_prompt_file: Option<String>,
+    /// Where the harness's durable event stream resumes from, and what has
+    /// already been ingested. `None` leaves the adapter to keep the sequence
+    /// in its own memory, which is all a stdio harness can do; a harness with
+    /// a durable, sequenced stream is given the node's own cursor so a restart
+    /// resumes where the store says rather than where the process forgot.
+    pub cursor: Option<Arc<dyn DurableCursor>>,
+}
+
+/// The harness's own HTTP surface, narrowed to what reconciliation needs: ask
+/// it something, tell it something. The adapter implements this over the
+/// client it already holds — the credential, the base address and the pinned
+/// directory stay behind it — so the ingestion layer can drive the snapshot
+/// and reply routes without owning a second connection to the harness or a
+/// second copy of its credential.
+#[async_trait]
+pub trait HarnessSnapshots: Send + Sync {
+    async fn get(&self, path: &str) -> Result<Value, AdapterError>;
+    async fn post(&self, path: &str, body: Value) -> Result<Value, AdapterError>;
+}
+
+/// The node's ownership of a durable stream's position.
+///
+/// OpenCode's per-session stream is the only one with replay, and it is
+/// anchored on an aggregate sequence (`api-ui.md` §3, finding 6). Which
+/// sequence to resume from is a durable fact about the session, not a variable
+/// in the adapter's loop: a node that restarts mid-turn has to ask the store,
+/// or it either replays a turn it already recorded or loses one it never did.
+/// So the adapter asks this, and admits each event through it.
+#[async_trait]
+pub trait DurableCursor: Send + Sync {
+    /// The upstream session the handshake created, and the client to reconcile
+    /// against. Called once the adapter knows both, before the stream opens.
+    async fn bind(&self, upstream_session_id: &str, api: Arc<dyn HarnessSnapshots>);
+
+    /// The durable sequence to resume from — the `?after=` of the next
+    /// connection.
+    async fn resume_from(&self) -> u64;
+
+    /// Admit one durable event. `false` means it has already been ingested (a
+    /// reconnect overlap, a restart replay, a snapshot that got there first),
+    /// and the adapter must not translate it into a harness event a second
+    /// time.
+    async fn admit(&self, event: &Value) -> bool;
+
+    /// The stream dropped and is about to be reopened. What was missed comes
+    /// back through the resumed stream itself; this is where anything the
+    /// stream cannot carry — a permission raised while it was down, a session
+    /// that no longer exists — is reconciled.
+    async fn reconnected(&self);
 }
 
 #[derive(Debug, thiserror::Error)]

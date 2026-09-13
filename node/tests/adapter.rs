@@ -86,6 +86,7 @@ async fn unknown_model_is_refused_before_prompting() {
                 tools: Vec::new(),
                 env: Vec::new(),
                 system_prompt_file: None,
+                cursor: None,
             },
         )
         .await
@@ -109,6 +110,7 @@ async fn launch_prompt_permission_and_turn_result() {
                 tools: Vec::new(),
                 env: Vec::new(),
                 system_prompt_file: None,
+                cursor: None,
             },
         )
         .await
@@ -162,6 +164,7 @@ async fn denying_a_permission_fails_the_tool_call() {
                 tools: Vec::new(),
                 env: Vec::new(),
                 system_prompt_file: None,
+                cursor: None,
             },
         )
         .await
@@ -250,6 +253,7 @@ async fn a_harness_that_never_handshakes_times_out_and_leaves_nothing_listening(
                 tools: Vec::new(),
                 env: Vec::new(),
                 system_prompt_file: None,
+                cursor: None,
             },
         )
         .await
@@ -309,6 +313,7 @@ async fn an_agent_speaking_an_unsupported_acp_protocol_is_refused() {
                     ("FAKE_ACP_NAME".into(), "oh-my-pi".into()),
                 ],
                 system_prompt_file: None,
+                cursor: None,
             },
         )
         .await
@@ -343,6 +348,7 @@ async fn an_agent_reporting_a_version_other_than_the_pin_is_refused() {
                 tools: Vec::new(),
                 env: vec![("FAKE_ACP_VERSION".into(), "18.0.5".into())],
                 system_prompt_file: None,
+                cursor: None,
             },
         )
         .await
@@ -372,6 +378,7 @@ async fn a_compatible_handshake_reports_what_it_ran() {
                 tools: Vec::new(),
                 env: vec![("FAKE_ACP_NAME".into(), "oh-my-pi".into())],
                 system_prompt_file: None,
+                cursor: None,
             },
         )
         .await

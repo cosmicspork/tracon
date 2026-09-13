@@ -42,10 +42,26 @@ refer to that manifest's table.
         asserted (finding 4). Verified against a fake server and live against the pinned
         binary on a Linux host; the Podman and Kubernetes endpoint paths are exercised in
         the real-workflow runs of Gate F.
-  - [ ] Owner session controller and ingestion: durable identity mapping for session,
+  - [x] Owner session controller and ingestion: durable identity mapping for session,
         message, part, permission, and PTY ids; reconciliation anchored on the per-session
         sequenced streams and snapshots (finding 6); uncertain-outcome handling for timed-out
-        mutations.
+        mutations. The node owns the durable sequence rather than the adapter's memory, so
+        ingestion is keyed on (session, seq) and a re-delivered event — reconnect overlap,
+        restart replay, snapshot race — produces no second tracon event; a child session
+        the harness makes for itself is recorded with its lineage and surfaced as
+        `untracked` rather than driven; a mediated mutation's intent is written before
+        dispatch, a prompt that does not report leaves the session `uncertain` and refuses
+        the next prompt until a snapshot settles it, and a permission reply is re-sent
+        rather than asked about. Covered by tests against the fake server: duplicate
+        delivery, restart mid-turn, a permission re-raised and one re-sent, a timed-out
+        prompt cleared without re-sending, a child session, a session gone upstream, and a
+        startup replay that closes the missed turn with its usage.
+        - **Still open under this item:** no route yet to register a child session, so a
+          fork or background subagent is only recorded and reported; usage reconciliation
+          against the gateway's counts is the next sub-item; PTY ids are mapped but nothing
+          creates one until Gate D; and the startup path is exercised by test rather than
+          by a real restart against a surviving `opencode serve`, which dies with its
+          container today.
   - [ ] Policy-aware API gateway: deny by default from the route matrix, directory pinned
         and bodies inspected (finding 5), all-`ask` ruleset with tracon deciding and replying
         `once`, every `always` rewritten and recorded, `PATCH /session/{id}` and the manifest's
