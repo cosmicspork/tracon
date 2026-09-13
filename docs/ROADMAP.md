@@ -104,17 +104,17 @@ refer to that manifest's table.
           a provider that omits usage settling as unmetered rather than billed as zero.
           `--use-system-ca` is not load-bearing: the gateway boundary is plain HTTP on the
           runner's private network, asserted as such.
-        - **Found doing it, and blocking the rest** (manifest finding 19): the session path
-          the adapter drives resolves a model's base URL from the catalogue rather than
-          from `options.baseURL`, so a provider entry without `api` was served from
-          `api.anthropic.com` with the gateway bypassed. The adapter now writes the gateway
-          URL into the provider entry, the catalogue provider, and each catalogue model.
-          The runner still has no way to present its placeholder on that path, so the
-          gateway refuses its model call and **no OpenCode turn completes through it**:
-          the hosted end-to-end runs stay open, and the usage reconciliation below is
-          proven against the fake server rather than against a real turn. Closing it is a
-          choice between driving the v1 session surface and giving the runner a v2
-          credential, which belongs with the session controller rather than here.
+        - **Found doing it** (manifest finding 19): the session path the adapter drives
+          resolves a model's provider from the catalogue rather than from
+          `options.baseURL`, so a provider entry without `api` was served from
+          `api.anthropic.com` — with the gateway bypassed and without the placeholder,
+          which is how a runner with no credential made a real request to a provider's own
+          host. The adapter now writes the gateway URL into the provider entry, the
+          catalogue provider, and each catalogue model, and both halves follow: the call
+          arrives at the gateway carrying the session's placeholder. Carry forward that a
+          release changing which stack that route resolves through moves the gateway
+          boundary silently, and that the catalogue settles asynchronously — a prompt
+          admitted before it does is never run, and the node's handshake does not wait.
         - The `claude setup-token` path is built and covered by tests: the Claude adapter
           runs it under a pty in a throwaway helper home, parses the sign-in URL out of the
           CLI's own screen, takes the pasted code, and lifts the printed `sk-ant-oat…` token
