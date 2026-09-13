@@ -129,9 +129,9 @@ Stop broken execution without requiring an invented token budget for every task.
 - [x] Provide explicit pause/stop controls that actually prevent new agent work while preserving workspace and evidence.
 - [x] Bound retries, recovery attempts, handshakes, and tool/process timeouts.
 - [x] Pause and explain repeated failures instead of automatically restarting the same loop.
-- [ ] Treat repetition as a signal, not a universal measure of progress.
+- [x] Treat repetition as a signal, not a universal measure of progress.
 - [x] Retain watchdogs for failures the agent cannot report; keep token/spending limits optional.
-- [ ] Do not automatically pause on issue reports or treat notifications as questions.
+- [x] Do not automatically pause on issue reports or treat notifications as questions.
 
 ### Local-first onboarding and README
 

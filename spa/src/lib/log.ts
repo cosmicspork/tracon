@@ -62,6 +62,28 @@ export function providerErrorLine(payload: Record<string, unknown>): string {
   return [`${provider} ${status}`, message, 'harness retrying', attempt].filter(Boolean).join(' · ')
 }
 
+/// "same call 3× in a row · run just test · still running" — the repetition
+/// signal. It reads as something to look at, not as a verdict: the node does
+/// not pause on repetition, because repeating a command is also what a fix-
+/// then-test loop looks like.
+export function repetitionLine(payload: Record<string, unknown>): string {
+  const count = typeof payload.count === 'number' ? payload.count : 0
+  const title = typeof payload.title === 'string' && payload.title ? payload.title : 'the same tool call'
+  return `same call ${count}× in a row · ${title} · recorded, not paused`
+}
+
+/// The most recent repetition signal of the current turn, if the harness has
+/// not moved on from it. Anything else since — a turn ending, a pause, a
+/// resume — means the run is over and the hint has nothing left to say.
+export function repetitionHint(events: Event[]): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const kind = events[i].kind
+    if (kind === 'repetition') return repetitionLine(events[i].payload)
+    if (kind === 'turn_end' || kind === 'session_paused' || kind === 'session_resumed') return null
+  }
+  return null
+}
+
 export function groupOpen(tools: ToolEntry[]): boolean {
   return tools.some((t) => !t.result)
 }

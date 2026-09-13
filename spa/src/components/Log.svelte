@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { groupLog, groupOpen, groupSummary, providerErrorLine } from '../lib/log'
+  import { groupLog, groupOpen, groupSummary, providerErrorLine, repetitionLine } from '../lib/log'
   import { formatTokens } from '../lib/format'
   import type { Event } from '../lib/types'
 
@@ -89,6 +89,8 @@
         </details>
       {:else if e.kind === 'check_cancelled'}
         <div class="mark crit">checks cancelled · {e.payload.reason} · nothing was verified</div>
+      {:else if e.kind === 'repetition'}
+        <div class="mark wait">{repetitionLine(e.payload)}</div>
       {:else if e.kind === 'late_refused'}
         <div class="sys">refused · {e.payload.what} arrived after the session was {e.payload.state}</div>
       {:else if e.kind === 'review_rejected'}

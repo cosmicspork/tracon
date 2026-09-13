@@ -34,6 +34,12 @@ const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 const PAUSE_QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
 const WATCHDOG_FAILURE_LIMIT: u8 = 3;
 
+/// How many times the same tool call has to arrive back to back before the
+/// run is worth saying out loud. Only an unchanged call repeated with nothing
+/// in between counts: a fix-then-test loop reruns the same command all day
+/// with edits between the runs, and that is work, not a runaway.
+const REPETITION_RUN: u32 = 3;
+
 /// Commands the HTTP layer sends to a running session.
 #[derive(Debug)]
 pub enum Command {
@@ -127,6 +133,11 @@ pub struct Supervisor {
     active_turn: Option<u64>,
     next_turn: u64,
     consecutive_failures: u8,
+    /// The signature of the last tool call this turn, and how many times it
+    /// has arrived unchanged in a row. Surfaced as a signal; never a reason
+    /// to pause.
+    last_tool_call: Option<String>,
+    repeated_tool_calls: u32,
     /// A fenced turn is still allowed to report completion, but resume waits
     /// for that exact receipt rather than trusting cancel's enqueue ack.
     paused_turn: Option<u64>,
@@ -155,6 +166,8 @@ impl Supervisor {
             active_turn: None,
             next_turn: 0,
             consecutive_failures: 0,
+            last_tool_call: None,
+            repeated_tool_calls: 0,
             paused_turn: None,
             self_tx,
             runner,
@@ -534,12 +547,51 @@ impl Supervisor {
         if self.consecutive_failures < WATCHDOG_FAILURE_LIMIT || self.is_paused() {
             return false;
         }
+        // Repeated failure is a signal the operator is owed, not a verdict on
+        // how much progress was made, so the reason says what repeated and
+        // what was done about it rather than reading as a scoreboard.
         let reason = format!(
-            "watchdog paused after {} consecutive harness failures",
+            "the same failure repeated {} times in a row; paused on that signal so you can look",
             self.consecutive_failures
         );
         let _ = self.pause(PauseSource::Watchdog, &reason).await;
         true
+    }
+
+    /// Record a run of identical tool calls. This never pauses and never
+    /// touches the session's state: a repeated call is evidence for the
+    /// operator to read, and repetition on its own does not distinguish a
+    /// stuck agent from an agent doing repetitive work. Only repeated
+    /// failure, counted separately, is allowed to fence a session.
+    fn note_repetition(&mut self, call: &crate::acp::types::ToolCall) {
+        let signature = json!({
+            "title": call.title, "kind": call.kind, "raw_input": call.raw_input,
+        })
+        .to_string();
+        if self.last_tool_call.as_deref() != Some(signature.as_str()) {
+            self.last_tool_call = Some(signature);
+            self.repeated_tool_calls = 1;
+            return;
+        }
+        self.repeated_tool_calls = self.repeated_tool_calls.saturating_add(1);
+        let count = self.repeated_tool_calls;
+        // Said once when the run reaches the threshold, then once per further
+        // run of the same length: a loop of fifty calls is one situation, not
+        // forty-eight of them.
+        if count < REPETITION_RUN || !count.is_multiple_of(REPETITION_RUN) {
+            return;
+        }
+        self.record(
+            ek::REPETITION,
+            None,
+            json!({
+                "what": "tool_call",
+                "count": count,
+                "title": call.title,
+                "kind": call.kind,
+                "paused": false,
+            }),
+        );
     }
 
     async fn on_harness_event(&mut self, ev: HarnessEvent) -> bool {
@@ -600,6 +652,7 @@ impl Supervisor {
                         "raw_input": t.raw_input, "locations": t.locations
                     }),
                 );
+                self.note_repetition(&t);
             }
             HarnessEvent::ToolCallUpdate(t) => {
                 // Updates are cumulative; only the terminal one is worth keeping.
@@ -952,6 +1005,10 @@ impl Supervisor {
         } else {
             self.consecutive_failures = 0;
         }
+        // A run of identical calls is only meaningful inside the turn that
+        // made it; the next turn starts from a different prompt.
+        self.last_tool_call = None;
+        self.repeated_tool_calls = 0;
         self.record(kind, None, payload);
         self.publish_session();
     }

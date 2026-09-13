@@ -703,6 +703,17 @@ impl Rig {
         false
     }
 
+    /// Wait until the log carries at least `n` events of `kind`.
+    async fn await_events(&self, kind: &str, n: usize) -> bool {
+        for _ in 0..200 {
+            if self.kinds().iter().filter(|k| *k == kind).count() >= n {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
     fn kinds(&self) -> Vec<String> {
         self.store
             .events_after(&self.session_id, 0, 500)
@@ -1282,13 +1293,126 @@ async fn repeated_harness_failures_pause_the_session_before_more_work() {
     assert_eq!(retries[0].payload["provider"], "anthropic");
     assert_eq!(retries[0].payload["status"], 429);
     assert_eq!(retries[2].payload["attempt"], 3);
+    // The reason reads as a signal the operator is owed — what repeated, and
+    // that the repetition is why it stopped — rather than as a progress score.
     assert!(events.iter().any(|event| {
         event.kind == "session_paused"
             && event.payload["source"] == "watchdog"
-            && event.payload["reason"]
-                .as_str()
-                .is_some_and(|reason| reason.contains("3 consecutive"))
+            && event.payload["reason"].as_str().is_some_and(|reason| {
+                reason.contains("repeated 3 times in a row") && reason.contains("signal")
+            })
     }));
+}
+
+/// Repetition is recorded and surfaced; it is never acted on. A harness that
+/// issues the same call over and over is worth the operator's attention, but
+/// repeating a command is also how a great deal of legitimate work gets done,
+/// so nothing about the session changes.
+#[tokio::test]
+async fn identical_tool_calls_in_a_row_are_recorded_without_pausing() {
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    for i in 0..6 {
+        rig.events
+            .send(HarnessEvent::ToolCall(tracon::acp::types::ToolCall {
+                tool_call_id: format!("call-{i}"),
+                title: "run just test".into(),
+                kind: Some("execute".into()),
+                status: Some("pending".into()),
+                raw_input: Some(json!({ "command": "just test" })),
+                content: vec![],
+                locations: vec![],
+            }))
+            .await
+            .unwrap();
+    }
+    assert!(
+        rig.await_events("repetition", 2).await,
+        "a run of identical tool calls must reach the transcript"
+    );
+    let events = rig.store.events_after(&rig.session_id, 0, 200).unwrap();
+    let signals: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "repetition")
+        .collect();
+    // Said once at the threshold and once per further run of that length, not
+    // once per repeated call: fifty identical calls are one situation.
+    assert_eq!(signals.len(), 2, "{signals:?}");
+    assert_eq!(signals[0].payload["count"], 3);
+    assert_eq!(signals[0].payload["what"], "tool_call");
+    assert_eq!(signals[0].payload["title"], "run just test");
+    assert_eq!(signals[0].payload["paused"], false);
+    assert_eq!(signals[1].payload["count"], 6);
+    assert!(
+        !events.iter().any(|event| event.kind == "session_paused"),
+        "repetition on its own must not fence the session: {events:?}"
+    );
+    // The only state written is the startup claim; repetition writes none.
+    let states: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "state")
+        .map(|event| event.payload["state"].clone())
+        .collect();
+    assert_eq!(states, vec![json!("running")], "{states:?}");
+    assert_eq!(
+        rig.store
+            .get_session(&rig.session_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "running"
+    );
+}
+
+/// The same tool with different arguments, and the same command with other
+/// work between the runs, are both ordinary. Only an unchanged call repeated
+/// back to back counts, so a fix-then-test loop stays quiet.
+#[tokio::test]
+async fn varied_and_interleaved_tool_calls_are_not_repetition() {
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    for i in 0..6 {
+        // test, edit, test, edit, ... — the same command five times over, but
+        // never twice without a change between.
+        let call = if i % 2 == 0 {
+            tracon::acp::types::ToolCall {
+                tool_call_id: format!("call-{i}"),
+                title: "run just test".into(),
+                kind: Some("execute".into()),
+                status: Some("pending".into()),
+                raw_input: Some(json!({ "command": "just test" })),
+                content: vec![],
+                locations: vec![],
+            }
+        } else {
+            tracon::acp::types::ToolCall {
+                tool_call_id: format!("call-{i}"),
+                title: "edit src/lib.rs".into(),
+                kind: Some("edit".into()),
+                status: Some("pending".into()),
+                raw_input: Some(json!({ "path": "src/lib.rs", "attempt": i })),
+                content: vec![],
+                locations: vec![],
+            }
+        };
+        rig.events.send(HarnessEvent::ToolCall(call)).await.unwrap();
+    }
+    assert!(
+        rig.await_events("tool_call", 6).await,
+        "the calls themselves are still logged"
+    );
+    let events = rig.store.events_after(&rig.session_id, 0, 200).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "tool_call")
+            .count(),
+        6
+    );
+    assert!(
+        !events.iter().any(|event| event.kind == "repetition"),
+        "repetitive work is not a runaway: {events:?}"
+    );
 }
 
 #[tokio::test]

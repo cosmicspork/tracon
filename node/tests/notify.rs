@@ -672,3 +672,47 @@ async fn no_devices_means_no_pushes_and_no_fuss() {
     quiet().await;
     assert_eq!(store.open_permissions().unwrap().len(), 1);
 }
+
+/// A notification is a ping with a link; a question is a structured request
+/// that blocks on a reply. The agent's own words reach the phone verbatim,
+/// tagged as an operator notification, and nothing about it asks for an
+/// answer or joins the queue of things that do.
+#[tokio::test]
+async fn an_operator_notification_is_a_ping_not_a_question() {
+    state::isolate();
+    let (svc, base) = push_service(StatusCode::CREATED).await;
+    let store = store_with_channel("{}");
+    session(&store, "s1");
+    svc.subscribe(&store, &base, "phone", None);
+    let mut cfg = Config::default();
+    cfg.notify.contact = Some("mailto:ops@tracon.example".into());
+
+    let attempts = tracon::notify::send_operator(
+        &store,
+        &cfg,
+        "n1-note",
+        "checks are green".into(),
+        "the branch is ready whenever you are".into(),
+        "/sessions/s1".into(),
+        &[],
+    )
+    .await;
+    assert_eq!(attempts.len(), 1, "the attempt is recorded: {attempts:?}");
+
+    let sent = svc.wait(1, 2_000).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let payload = &sent[0].payload;
+    assert_eq!(payload["title"], "checks are green");
+    assert_eq!(payload["body"], "the branch is ready whenever you are");
+    assert_eq!(payload["path"], "/sessions/s1");
+    assert_eq!(payload["kind"], "operator");
+    let text = payload.to_string().to_lowercase();
+    for phrasing in ["answer", "question", "reply", "waiting on you"] {
+        assert!(
+            !text.contains(phrasing),
+            "a notification must not be phrased as something to answer: {payload}"
+        );
+    }
+    // And it is nowhere near the queue of things that do block on a reply.
+    assert!(store.open_operator_questions().unwrap().is_empty());
+}
