@@ -826,6 +826,35 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX opencode_intent_session ON opencode_intent(session_id, created_ms);
     CREATE INDEX opencode_intent_state ON opencode_intent(state, updated_ms);
     "#,
+    // The API gateway mediates mutations the session manager never sees — a
+    // revert, a compact, a model switch, a terminal — and one of those whose
+    // answer never comes back is exactly as uncertain as a prompt's. It needs
+    // an intent row of its own, so the kind is widened. Nothing references
+    // this table, so the rebuild is the plain one.
+    r#"
+    CREATE TABLE opencode_intent_new (
+        id         TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES session(id),
+        kind       TEXT NOT NULL CHECK(kind IN
+            ('prompt','abort','permission_reply','api')),
+        target     TEXT,
+        detail     TEXT,
+        state      TEXT NOT NULL CHECK(state IN
+            ('dispatched','admitted','failed','uncertain')),
+        note       TEXT,
+        instance   TEXT NOT NULL,
+        created_ms INTEGER NOT NULL,
+        updated_ms INTEGER NOT NULL
+    );
+    INSERT INTO opencode_intent_new
+        SELECT id, session_id, kind, target, detail, state, note, instance,
+               created_ms, updated_ms
+          FROM opencode_intent;
+    DROP TABLE opencode_intent;
+    ALTER TABLE opencode_intent_new RENAME TO opencode_intent;
+    CREATE INDEX opencode_intent_session ON opencode_intent(session_id, created_ms);
+    CREATE INDEX opencode_intent_state ON opencode_intent(state, updated_ms);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

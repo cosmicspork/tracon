@@ -28,6 +28,13 @@
 //! session's workspace as `?directory=`, `location[directory]`, and
 //! `x-opencode-directory`, overwriting whatever the caller sent, and a body
 //! that names a different directory is refused rather than rewritten.
+//!
+//! And one rule about what is left behind. **A mutation is written down
+//! before it is dispatched.** Every mediated call the gateway forwards writes
+//! an `opencode_intent` row first, so a call whose answer never comes back is
+//! neither reported as done nor as refused: the row is marked uncertain, the
+//! session with it, and the ingestion path settles it against the harness's
+//! own durable record (`session/ingest.rs`, `store/opencode.rs`).
 
 use std::{sync::OnceLock, time::Duration};
 
@@ -44,15 +51,24 @@ use crate::{
     http::api::AppState,
     policy::{Request as PolicyRequest, Verdict},
     session::state::event_kind as ek,
+    store::{intent_kind, intent_state, object_kind},
 };
 
 /// The prefix this gateway is mounted at on the operator router.
 const MOUNT: &str = "/api/opencode/";
 
-/// How long a forwarded call may take. A mediated call that outlives this is
-/// recorded as uncertain: the harness may or may not have done it, and the
-/// ingestion path reconciles against the durable stream rather than guessing.
+/// How long a forwarded call may take when the node's configuration names
+/// nothing. A mediated call that outlives this is recorded as uncertain: the
+/// harness may or may not have done it, and the ingestion path reconciles
+/// against the durable stream rather than guessing.
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn forward_timeout(s: &AppState) -> Duration {
+    match s.cfg.session.harness_api_timeout_secs {
+        0 => FORWARD_TIMEOUT,
+        secs => Duration::from_secs(secs),
+    }
+}
 
 /// At most this many gateway refusals recorded per turn. A native UI that
 /// retries a forbidden route would otherwise fill the transcript; the
@@ -878,6 +894,14 @@ async fn mediate(
                 None,
                 None,
             );
+            let mediated = begin_intent(
+                s,
+                session_id,
+                TERMINAL_CAPABILITY,
+                intent_kind::API,
+                Some(joined),
+                None,
+            );
             forward(
                 s,
                 session_id,
@@ -888,7 +912,7 @@ async fn mediate(
                 headers,
                 body,
                 false,
-                Some(TERMINAL_CAPABILITY),
+                Some(mediated),
             )
             .await
         }
@@ -946,6 +970,14 @@ async fn mediate(
                 None,
                 Some(&model),
             );
+            let mediated = begin_intent(
+                s,
+                session_id,
+                "model",
+                intent_kind::API,
+                Some(joined),
+                Some(&model),
+            );
             forward(
                 s,
                 session_id,
@@ -956,7 +988,7 @@ async fn mediate(
                 headers,
                 body,
                 false,
-                Some("model"),
+                Some(mediated),
             )
             .await
         }
@@ -970,6 +1002,28 @@ async fn mediate(
                 .unwrap_or("unknown")
                 .to_string();
             let upstream_id = permission_id(joined);
+            // The v1 route (`POST /permission/{id}/reply`) names no session at
+            // all, so the mount alone cannot tell whose request is being
+            // answered. The identity map can: a permission this node raised
+            // for another session is refused here rather than decided on that
+            // session's behalf (finding 5, in the one place the path does not
+            // carry a session id).
+            if let Ok(Some(owner)) = s
+                .store()
+                .opencode_object_owner(object_kind::PERMISSION, &upstream_id)
+            {
+                if owner != session_id {
+                    return refuse(
+                        s,
+                        session_id,
+                        method,
+                        joined,
+                        &format!(
+                            "{upstream_id} is a permission request belonging to session {owner}"
+                        ),
+                    );
+                }
+            }
             if broadened {
                 // An `always` persists a grant inside the harness — in memory
                 // in v1, a project-scoped DB row in v2 — that tracon never
@@ -996,6 +1050,22 @@ async fn mediate(
                     "broadening_refused": broadened,
                 }),
             );
+            // Recorded in the option vocabulary the ingestion path re-sends
+            // from, not OpenCode's: a reply this gateway could not confirm is
+            // sent again by reconciliation, and it has to be the same answer.
+            let option = if reply == "once" {
+                crate::acp::types::OPTION_ALLOW_ONCE
+            } else {
+                crate::acp::types::OPTION_REJECT_ONCE
+            };
+            let mediated = begin_intent(
+                s,
+                session_id,
+                "permission_reply",
+                intent_kind::PERMISSION_REPLY,
+                Some(&upstream_id),
+                Some(option),
+            );
             let rewritten = Bytes::from(value.to_string());
             forward(
                 s,
@@ -1007,7 +1077,7 @@ async fn mediate(
                 headers,
                 rewritten,
                 false,
-                Some("permission_reply"),
+                Some(mediated),
             )
             .await
         }
@@ -1055,7 +1125,13 @@ async fn mediate(
                 decision.rule_id.as_deref(),
                 decision.reason.as_deref(),
             );
-            forward(
+            let kind = if action == "abort" {
+                intent_kind::ABORT
+            } else {
+                intent_kind::API
+            };
+            let mediated = begin_intent(s, session_id, action, kind, Some(joined), None);
+            let response = forward(
                 s,
                 session_id,
                 api,
@@ -1065,11 +1141,125 @@ async fn mediate(
                 headers,
                 body,
                 false,
-                Some(action),
+                Some(mediated),
             )
-            .await
+            .await;
+            // A revert rewrites the working tree, and a candidate review is
+            // bound to the tree that was captured (#188). tracon cannot see
+            // that happen from the outside, so the one place that knows says
+            // so on the session's own log.
+            if TREE_CHANGING.contains(&action) && response.status().is_success() {
+                s.manager.record_event(
+                    session_id,
+                    ek::WORKSPACE_CHANGED,
+                    json!({
+                        "gateway": "opencode",
+                        "action": action,
+                        "method": method.as_str(),
+                        "path": format!("/{joined}"),
+                        "reason": "the harness's own API changed the workspace tree",
+                    }),
+                );
+            }
+            response
         }
     }
+}
+
+/// Mediated actions that move the working tree, and so invalidate anything
+/// bound to the tree as it was (#188).
+const TREE_CHANGING: &[&str] = &["revert", "vcs_apply"];
+
+// ---------------------------------------------------------------------------
+// What a mediated mutation leaves behind
+// ---------------------------------------------------------------------------
+
+/// A call tracon decided to make, and the `opencode_intent` row written before
+/// it was dispatched.
+///
+/// The ordering is the point. A mutation whose answer never comes back is
+/// neither sent nor not-sent, and the row written *first* is what makes the
+/// honest third answer expressible: the session is marked `uncertain`, the
+/// next prompt is refused with the reason, and the ingestion path asks the
+/// harness what actually happened rather than guessing (`session/ingest.rs`).
+/// Without the row, a timed-out revert is simply forgotten.
+struct Mediated {
+    /// What the call was decided as, for the record.
+    action: String,
+    /// The intent row's id.
+    intent: String,
+}
+
+/// Write the intent down, before anything is sent.
+fn begin_intent(
+    s: &AppState,
+    session_id: &str,
+    action: &str,
+    kind: &str,
+    target: Option<&str>,
+    detail: Option<&str>,
+) -> Mediated {
+    let intent = uuid::Uuid::now_v7().to_string();
+    if let Err(e) = s
+        .store()
+        .opencode_intent_begin(&intent, session_id, kind, target, detail)
+    {
+        // Not fatal: the call is still decided and still recorded as an event.
+        // What is lost is the ability to ask about it afterwards, so it is an
+        // error rather than a warning.
+        tracing::error!(error = %e, session = session_id, "the OpenCode gateway could not record a mutation's intent");
+    }
+    Mediated {
+        action: action.to_string(),
+        intent,
+    }
+}
+
+/// The harness answered, so the outcome is known. A refusal is `failed` —
+/// nothing changed upstream — and anything else is `admitted`.
+fn settle_intent(s: &AppState, mediated: &Mediated, status: StatusCode) {
+    let (state, note) = if status.is_success() {
+        (
+            intent_state::ADMITTED,
+            format!("the harness answered {status}"),
+        )
+    } else {
+        (
+            intent_state::FAILED,
+            format!("the harness refused it with {status}; nothing changed upstream"),
+        )
+    };
+    let _ = s
+        .store()
+        .opencode_intent_settle(&mediated.intent, state, Some(&note));
+}
+
+/// The harness did not answer. The intent stays on the record as uncertain,
+/// the session is marked so a prompt is refused rather than duplicated, and
+/// the operator sees why.
+fn uncertain_intent(
+    s: &AppState,
+    session_id: &str,
+    mediated: &Mediated,
+    method: &Method,
+    joined: &str,
+    reason: &str,
+) {
+    let note = format!("{method} /{joined}: {reason}");
+    let store = s.store();
+    let _ = store.opencode_intent_settle(&mediated.intent, intent_state::UNCERTAIN, Some(&note));
+    let _ = store.opencode_set_uncertain(session_id, &note);
+    s.manager.record_event(
+        session_id,
+        ek::UNCERTAIN,
+        json!({
+            "gateway": "opencode",
+            "action": mediated.action,
+            "intent": mediated.intent,
+            "reason": note,
+            "refusing": "prompt",
+        }),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1214,7 +1404,7 @@ async fn forward(
     headers: &HeaderMap,
     body: Bytes,
     stream: bool,
-    mediated: Option<&str>,
+    mediated: Option<Mediated>,
 ) -> Response {
     let query = pinned_query(uri.query(), &api.directory);
     let target = format!("{}/{joined}{query}", api.base.trim_end_matches('/'));
@@ -1238,29 +1428,36 @@ async fn forward(
         req = req.body(body);
     }
     if !stream {
-        req = req.timeout(FORWARD_TIMEOUT);
+        req = req.timeout(forward_timeout(s));
     }
 
     let upstream = match req.send().await {
         Ok(response) => response,
         Err(e) => {
-            if let Some(action) = mediated {
+            if let Some(mediated) = &mediated {
                 // Whether the harness did it is unknown: the request may have
-                // been received and answered late. Record the intent and the
-                // uncertainty; reconciliation is the ingestion path's, off
-                // the durable stream.
+                // been received and answered late. The intent written before
+                // dispatch is marked uncertain, so reconciliation can settle
+                // it against the durable stream rather than guessing.
+                let reason = if e.is_timeout() {
+                    "the harness did not answer in time"
+                } else {
+                    "the harness was unreachable"
+                };
                 s.manager.record_event(
                     session_id,
                     ek::ERROR,
                     json!({
                         "gateway": "opencode",
-                        "action": action,
+                        "action": mediated.action,
                         "method": method.as_str(),
                         "path": format!("/{joined}"),
                         "outcome": "uncertain",
-                        "reason": if e.is_timeout() { "the harness did not answer in time" } else { "the harness was unreachable" },
+                        "intent": mediated.intent,
+                        "reason": reason,
                     }),
                 );
+                uncertain_intent(s, session_id, mediated, method, joined, reason);
             }
             tracing::warn!(session = session_id, error = %e, path = joined, "the OpenCode gateway could not reach the harness");
             return answer(
@@ -1273,6 +1470,10 @@ async fn forward(
             );
         }
     };
+
+    if let Some(mediated) = &mediated {
+        settle_intent(s, mediated, upstream.status());
+    }
 
     let mut out = Response::builder().status(upstream.status().as_u16());
     for (name, value) in upstream.headers() {

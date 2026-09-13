@@ -178,6 +178,13 @@ pub mod event_kind {
     /// because the method and path are not on the inference allowlist the
     /// credential is lent for (`provider`, `method`, `reason`, `attempt`).
     pub const GATEWAY_REFUSED: &str = "gateway_refused";
+    /// The harness's own API changed the workspace tree behind tracon's back —
+    /// a revert, an unrevert, a patch applied through the harness — with
+    /// tracon's permission (`action`, `method`, `path`). It is recorded
+    /// because a candidate review is bound to the tree that was captured
+    /// (#188): a tree that moved under a verified candidate has to be visible
+    /// to whatever decides whether that verification still holds.
+    pub const WORKSPACE_CHANGED: &str = "workspace_changed";
 }
 
 #[cfg(test)]
