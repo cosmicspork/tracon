@@ -29,6 +29,7 @@
 * **models:** filter channel choices by the connected provider that owns each model, including legacy peers without provider-scope metadata
 * **notifications:** distinguish browser subscriptions, shared channel rules, push-service acceptance, and operator acknowledgement
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
+* **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
 ## [0.15.1](https://github.com/cosmicspork/tracon/compare/v0.15.0...v0.15.1) (2026-09-13)
 
