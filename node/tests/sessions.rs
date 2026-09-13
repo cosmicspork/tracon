@@ -2065,7 +2065,7 @@ impl tracon::adapter::HarnessAdapter for StallingAdapter {
     async fn probe_models(
         &self,
         _r: &dyn Runner,
-        _env: Vec<(String, String)>,
+        _wiring: &tracon::gateway::model::Wiring,
     ) -> Result<Vec<tracon::adapter::ModelOption>, AdapterError> {
         Ok(Vec::new())
     }
@@ -2510,7 +2510,7 @@ impl HarnessAdapter for IncompatibleAdapter {
     async fn probe_models(
         &self,
         _r: &dyn Runner,
-        _env: Vec<(String, String)>,
+        _wiring: &tracon::gateway::model::Wiring,
     ) -> Result<Vec<tracon::adapter::ModelOption>, AdapterError> {
         Ok(Vec::new())
     }

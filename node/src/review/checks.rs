@@ -288,6 +288,7 @@ pub async fn run_required(
             workdir: Some("/work".into()),
             name: runner_name.clone(),
             image: None,
+            expose: None,
         };
         // Both ways an execution can be stopped kill the runtime *while the
         // capture is still held*: an identity released first could be reused

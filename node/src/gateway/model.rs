@@ -87,13 +87,40 @@ fn shaped_for_subscription(body: &[u8]) -> Option<Vec<u8>> {
     serde_json::to_vec(&value).ok()
 }
 
+/// One provider as this session may reach it: where the gateway serves it and
+/// which models this node declares under it.
+///
+/// A harness that reads no base-URL environment variable (OpenCode; see
+/// `docs/reference/opencode-v1.18.30/providers.md` §2.5) cannot be wired by
+/// `env` at all, and one that declares its catalogue rather than probing it
+/// needs the model list before it starts. Both come from here, so neither is
+/// reconstructed from `models_json` by string surgery.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProviderWiring {
+    /// The provider's name in this node's configuration, which is also the
+    /// name the gateway routes by and the harness's provider id.
+    pub name: String,
+    /// `anthropic`, `openai`, `openai-codex`: which request shape it is.
+    pub shape: String,
+    /// The gateway base URL for it, without a version suffix.
+    pub base_url: String,
+    /// The models this node declares under it. Empty means none were declared
+    /// — a harness that probes its own catalogue is unaffected.
+    pub models: Vec<crate::config::ModelDecl>,
+}
+
 /// What a harness needs to reach the gateway: environment for the providers
-/// that honour one, and a `models.json` for the ones that only read a
-/// provider override (omp's `openai`).
+/// that honour one, a `models.json` for the ones that only read a provider
+/// override (omp's `openai`), and the same wiring in structured form for the
+/// ones whose entire provider table is a file this node writes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Wiring {
     pub env: Vec<(String, String)>,
     pub models_json: String,
+    pub providers: Vec<ProviderWiring>,
+    /// The placeholder key every provider entry carries, which is also this
+    /// session's token at the gateway.
+    pub token: String,
 }
 
 /// The base URL for one provider as the harness sees it.
@@ -122,11 +149,18 @@ pub fn harness_wiring(
 ) -> Wiring {
     let mut env = Vec::new();
     let mut providers = serde_json::Map::new();
+    let mut wired = Vec::new();
     for (name, provider) in &cfg.providers {
         if !servable(name, provider) {
             continue;
         }
         let base = base_url(host, cfg.gateway.forward_port, name);
+        wired.push(ProviderWiring {
+            name: name.clone(),
+            shape: provider.shape.clone(),
+            base_url: base.clone(),
+            models: provider.models.clone(),
+        });
         match provider.shape.as_str() {
             SHAPE_ANTHROPIC => {
                 env.push(("ANTHROPIC_BASE_URL".to_string(), base));
@@ -146,7 +180,12 @@ pub fn harness_wiring(
     }
     let models_json = serde_json::to_string_pretty(&json!({ "providers": providers }))
         .unwrap_or_else(|_| "{}".into());
-    Wiring { env, models_json }
+    Wiring {
+        env,
+        models_json,
+        providers: wired,
+        token: token.to_string(),
+    }
 }
 
 /// Models a Codex provider offers that a ChatGPT subscription cannot run: the

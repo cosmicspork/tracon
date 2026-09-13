@@ -526,6 +526,7 @@ async fn read_init(spawned: Spawned) -> Result<Started, AdapterError> {
         stdin,
         stdout,
         done,
+        ..
     } = spawned;
     let writer = Writer::spawn(stdin);
     let mut reader = BufReader::new(stdout);
@@ -593,15 +594,16 @@ impl HarnessAdapter for ClaudeAdapter {
     async fn probe_models(
         &self,
         runner: &dyn Runner,
-        env: Vec<(String, String)>,
+        wiring: &crate::gateway::model::Wiring,
     ) -> Result<Vec<ModelOption>, AdapterError> {
         let spec = LaunchSpec {
             cwd_in_runner: "/".into(),
             model: "sonnet".into(),
             container_name: "claude-probe".into(),
+            harness_home: String::new(),
             mcp_servers: Vec::new(),
             tools: Vec::new(),
-            env,
+            env: wiring.env.clone(),
             system_prompt_file: None,
         };
         let session_id = uuid::Uuid::now_v7().to_string();
@@ -718,6 +720,7 @@ mod tests {
             cwd_in_runner: "/work".into(),
             model: "opus".into(),
             container_name: "c".into(),
+            harness_home: "/root".into(),
             mcp_servers: vec![json!({
                 "type": "http",
                 "name": "tracon",

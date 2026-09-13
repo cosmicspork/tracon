@@ -62,7 +62,7 @@ async fn version_is_parsed_from_the_runner() {
 async fn probe_models_lists_what_the_harness_offers() {
     state::isolate();
     let models = OmpAdapter::new("18.0.4")
-        .probe_models(&FakeRunner, Vec::new())
+        .probe_models(&FakeRunner, &Default::default())
         .await
         .unwrap();
     assert_eq!(
@@ -81,6 +81,7 @@ async fn unknown_model_is_refused_before_prompting() {
                 cwd_in_runner: "/work".into(),
                 model: "m/nope".into(),
                 container_name: "t".into(),
+                harness_home: "/root".into(),
                 mcp_servers: Vec::new(),
                 tools: Vec::new(),
                 env: Vec::new(),
@@ -103,6 +104,7 @@ async fn launch_prompt_permission_and_turn_result() {
                 cwd_in_runner: "/work".into(),
                 model: "m/b".into(),
                 container_name: "t".into(),
+                harness_home: "/root".into(),
                 mcp_servers: Vec::new(),
                 tools: Vec::new(),
                 env: Vec::new(),
@@ -155,6 +157,7 @@ async fn denying_a_permission_fails_the_tool_call() {
                 cwd_in_runner: "/work".into(),
                 model: "m/a".into(),
                 container_name: "t".into(),
+                harness_home: "/root".into(),
                 mcp_servers: Vec::new(),
                 tools: Vec::new(),
                 env: Vec::new(),
@@ -200,6 +203,7 @@ impl Runner for SilentRunner {
             stdout: Box::new(harness_side),
             // A process that is still running: nothing ever reports an exit.
             done: Box::pin(std::future::pending()),
+            endpoint: None,
         })
     }
 
@@ -241,6 +245,7 @@ async fn a_harness_that_never_handshakes_times_out_and_leaves_nothing_listening(
                 cwd_in_runner: "/work".into(),
                 model: "m/a".into(),
                 container_name: "tracon-h-silent".into(),
+                harness_home: "/root".into(),
                 mcp_servers: Vec::new(),
                 tools: Vec::new(),
                 env: Vec::new(),
@@ -296,6 +301,7 @@ async fn an_agent_speaking_an_unsupported_acp_protocol_is_refused() {
                 cwd_in_runner: "/work".into(),
                 model: "m/a".into(),
                 container_name: "t".into(),
+                harness_home: "/root".into(),
                 mcp_servers: Vec::new(),
                 tools: Vec::new(),
                 env: vec![
@@ -332,6 +338,7 @@ async fn an_agent_reporting_a_version_other_than_the_pin_is_refused() {
                 cwd_in_runner: "/work".into(),
                 model: "m/a".into(),
                 container_name: "t".into(),
+                harness_home: "/root".into(),
                 mcp_servers: Vec::new(),
                 tools: Vec::new(),
                 env: vec![("FAKE_ACP_VERSION".into(), "18.0.5".into())],
@@ -360,6 +367,7 @@ async fn a_compatible_handshake_reports_what_it_ran() {
                 cwd_in_runner: "/work".into(),
                 model: "m/a".into(),
                 container_name: "t".into(),
+                harness_home: "/root".into(),
                 mcp_servers: Vec::new(),
                 tools: Vec::new(),
                 env: vec![("FAKE_ACP_NAME".into(), "oh-my-pi".into())],

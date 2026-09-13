@@ -3672,7 +3672,7 @@ pub async fn probe_models_into_store(
     let runner = backend.runner(scratch.mounts);
     let models = s
         .adapter
-        .probe_models(runner.as_ref(), wiring.env)
+        .probe_models(runner.as_ref(), &wiring)
         .await
         .map_err(|e| e.to_string())?;
     // What a subscription refuses is not in the harness's list, so the node

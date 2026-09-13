@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EnvVar, HostAlias, PersistentVolumeClaimVolumeSource, Pod,
-    PodDNSConfig, PodSchedulingGate, PodSecurityContext, PodSpec, SeccompProfile, SecurityContext,
-    Volume, VolumeMount,
+    Capabilities, Container, ContainerPort, EnvVar, HostAlias, PersistentVolumeClaimVolumeSource,
+    Pod, PodDNSConfig, PodSchedulingGate, PodSecurityContext, PodSpec, SeccompProfile,
+    SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{AttachParams, DeleteParams, LogParams, PostParams};
@@ -158,6 +158,11 @@ impl KubeSpec {
             (self.state_env, state),
         ]
         .into_iter()
+        // A harness that names no state-directory variable (OpenCode decides
+        // by HOME and XDG, which its adapter sets) gets none invented for it,
+        // and a value the command sets itself is not also set here: two
+        // entries for one name is a rule about ordering rather than a choice.
+        .filter(|(k, _)| !k.is_empty() && !cmd.env.iter().any(|(name, _)| name == k))
         .map(|(k, v)| EnvVar {
             name: k.into(),
             value: Some(v),
@@ -240,6 +245,19 @@ impl KubeSpec {
                     working_dir: Some(workdir),
                     stdin: Some(true),
                     stdin_once: Some(true),
+                    // A harness driven over HTTP is reached at the pod's own
+                    // address on the cluster network: no Service, no NodePort,
+                    // nothing named that anything else could resolve. The
+                    // declared port is documentation for whoever reads the
+                    // pod; the listener is what actually opens it.
+                    ports: cmd.expose.map(|port| {
+                        vec![ContainerPort {
+                            container_port: i32::from(port),
+                            name: Some("harness".into()),
+                            protocol: Some("TCP".into()),
+                            ..Default::default()
+                        }]
+                    }),
                     env: Some(env),
                     volume_mounts: Some(self.volume_mounts(cmd)?),
                     // The gate: no capabilities, no way to gain any.
@@ -350,6 +368,34 @@ impl KubeRunner {
         }
     }
 
+    /// The pod's own address on the cluster network. Nothing is published and
+    /// no Service is created: the node reaches a harness pod directly, which
+    /// is also why the deployment's NetworkPolicies have to allow that one
+    /// direction (node pod → harness pod) and nothing else.
+    async fn pod_ip(&self, name: &str, timeout: Duration) -> Result<String, RunnerError> {
+        let pods = self.pods();
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let ip = pods
+                .get(name)
+                .await
+                .ok()
+                .and_then(|pod| pod.status)
+                .and_then(|status| status.pod_ip)
+                .filter(|ip| !ip.is_empty());
+            if let Some(ip) = ip {
+                return Ok(ip);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(RunnerError::Other(format!(
+                    "pod {name} reported no address in {}s",
+                    timeout.as_secs()
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     async fn remove(&self, name: &str) {
         let _ = self
             .pods()
@@ -386,6 +432,19 @@ impl Runner for KubeRunner {
             self.remove(&name).await;
             return Err(e);
         }
+        // The address the node dials for an HTTP-driven harness. A pod that is
+        // Running has an IP, but the status can be read a moment before the
+        // kubelet records it, so this waits rather than failing the launch.
+        let endpoint = match cmd.expose {
+            Some(port) => match self.pod_ip(&name, Duration::from_secs(30)).await {
+                Ok(ip) => Some(format!("{ip}:{port}")),
+                Err(e) => {
+                    self.remove(&name).await;
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
         let mut attached = match pods
             .attach(
                 &name,
@@ -414,6 +473,7 @@ impl Runner for KubeRunner {
         Ok(Spawned {
             stdin: Box::new(stdin),
             stdout: Box::new(stdout),
+            endpoint,
             done: Box::pin(async move {
                 let _ = attached.join().await;
                 let code = pods_for_exit

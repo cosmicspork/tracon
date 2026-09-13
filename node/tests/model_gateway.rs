@@ -108,6 +108,7 @@ async fn harness(broker_toml: &str, allow: &[&str]) -> Harness {
             device_login: None,
             requires_local_callback: false,
             price: None,
+            models: Vec::new(),
         },
     );
     cfg.providers.insert(
@@ -120,6 +121,7 @@ async fn harness(broker_toml: &str, allow: &[&str]) -> Harness {
             device_login: None,
             requires_local_callback: false,
             price: None,
+            models: Vec::new(),
         },
     );
     let cfg = Arc::new(cfg);

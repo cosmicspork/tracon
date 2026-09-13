@@ -54,6 +54,20 @@ impl RunSpec {
     /// The argv for `podman run`, minus the trailing command. `detached_probe`
     /// creates the container without starting it, for inspection.
     pub fn podman_args(&self, name: &str, cmd: &RunnerCommand, create_only: bool) -> Vec<String> {
+        self.podman_args_publishing(name, cmd, create_only, None)
+    }
+
+    /// As `podman_args`, publishing the command's exposed port at
+    /// `127.0.0.1:<host_port>`. The bind address is not configurable on
+    /// purpose: a harness server is reachable by this node and by nothing
+    /// else on the network, whatever the container's own network is.
+    pub fn podman_args_publishing(
+        &self,
+        name: &str,
+        cmd: &RunnerCommand,
+        create_only: bool,
+        host_port: Option<u16>,
+    ) -> Vec<String> {
         let proxy = format!("http://{}:{}", self.gateway_host, self.proxy_port);
         let mut a: Vec<String> = vec![
             if create_only { "create" } else { "run" }.into(),
@@ -78,8 +92,14 @@ impl RunSpec {
             a.push("--security-opt".into());
             a.push("label=disable".into());
         }
+        if let (Some(container_port), Some(host_port)) = (cmd.expose, host_port) {
+            a.push("--publish".into());
+            a.push(format!("127.0.0.1:{host_port}:{container_port}"));
+        }
         // The state dir is explicit even though the image sets it: the mount
-        // target and the harness's idea of its state directory must agree.
+        // target and the harness's idea of its state directory must agree. A
+        // harness that names no such variable (OpenCode decides by HOME and
+        // XDG, which its adapter sets) gets none invented for it.
         let state = format!("{}/{}", self.home, self.state_dir);
         for (k, v) in [
             ("HTTPS_PROXY", proxy.as_str()),
@@ -87,6 +107,12 @@ impl RunSpec {
             ("NO_PROXY", self.gateway_host.as_str()),
             (self.state_env, state.as_str()),
         ] {
+            // A value the command sets itself is not also set here: two `-e`
+            // entries for one name is a rule about ordering rather than a
+            // choice.
+            if k.is_empty() || cmd.env.iter().any(|(name, _)| name == k) {
+                continue;
+            }
             a.push("-e".into());
             a.push(format!("{k}={v}"));
         }
@@ -170,7 +196,16 @@ impl Runner for PodmanRunner {
         } else {
             cmd.name.clone()
         };
-        let args = self.spec.podman_args(&name, &cmd, false);
+        // A harness driven over HTTP gets its port published to this host's
+        // loopback and nowhere else. The port is picked here rather than in
+        // the adapter because it is the host's, not the container's.
+        let host_port = match cmd.expose {
+            Some(_) => Some(super::free_loopback_port()?),
+            None => None,
+        };
+        let args = self
+            .spec
+            .podman_args_publishing(&name, &cmd, false, host_port);
         tracing::debug!(container = %name, "podman run");
         let child = Command::new(&self.spec.podman_bin)
             .args(&args)
@@ -179,7 +214,7 @@ impl Runner for PodmanRunner {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()?;
-        Spawned::from_child(child)
+        Ok(Spawned::from_child(child)?.at(host_port.map(|port| format!("127.0.0.1:{port}"))))
     }
 
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {

@@ -18,13 +18,13 @@ struct Containers;
 /// from, so a node on a newer binary can tell its images are stale.
 pub const DEFINITIONS_LABEL: &str = "io.tracon.definitions";
 
-/// The directory the harness image is built from. The claude harness has its
-/// own definitions; the omp ones under its tag would run the wrong CLI.
+/// The directory the harness image is built from. Each harness has its own
+/// definitions; another harness's under this one's tag would run the wrong CLI.
 pub fn harness_dir(cfg: &Config) -> &'static str {
-    if cfg.harness.id == "claude" {
-        "harness-claude"
-    } else {
-        "harness"
+    match cfg.harness.id.as_str() {
+        "claude" => "harness-claude",
+        "opencode" => "harness-opencode",
+        _ => "harness",
     }
 }
 

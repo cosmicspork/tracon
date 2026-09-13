@@ -170,10 +170,10 @@ impl HarnessAdapter for OmpAdapter {
     async fn probe_models(
         &self,
         runner: &dyn Runner,
-        env: Vec<(String, String)>,
+        wiring: &crate::gateway::model::Wiring,
     ) -> Result<Vec<ModelOption>, AdapterError> {
         let child = runner
-            .spawn(Self::acp_cmd_with("omp-probe", &[], env))
+            .spawn(Self::acp_cmd_with("omp-probe", &[], wiring.env.clone()))
             .await?;
         let mut session = match tokio::time::timeout(START_TIMEOUT, OmpSession::start(child)).await
         {
