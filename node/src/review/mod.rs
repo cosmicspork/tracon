@@ -308,6 +308,28 @@ pub struct CandidateSnapshot {
     pub files: Vec<crate::store::CandidateFile>,
 }
 
+impl CandidateSnapshot {
+    /// The same materialized source, rebuilt from the files the evidence store
+    /// retained at capture time rather than from a Git repository. This is how
+    /// anything later — a build, a demonstration — runs on the candidate's own
+    /// immutable tree instead of the owner session's still-mutable workspace.
+    pub fn materialize(
+        root: PathBuf,
+        tree_sha: String,
+        files: Vec<crate::store::CandidateFile>,
+    ) -> Result<Self, ReviewError> {
+        // Constructed before the files are written: a partial tree is removed
+        // by `Drop` rather than left behind for the next caller to find.
+        let snapshot = Self {
+            root,
+            tree_sha,
+            files,
+        };
+        materialize_candidate_files(&snapshot.root, &snapshot.files)?;
+        Ok(snapshot)
+    }
+}
+
 impl Drop for CandidateSnapshot {
     fn drop(&mut self) {
         make_tree_writable(&self.root);
