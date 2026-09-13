@@ -12,7 +12,7 @@ use std::sync::{atomic::Ordering, Arc};
 use tracon::{
     broker::{Broker, Credential, KIND_OAUTH},
     config::Config,
-    providers::{LoginCompletion, LoginOwner, Providers},
+    providers::{LoginAdapters, LoginCompletion, LoginOwner, Providers},
     runner::local::LocalBackend,
     stream::Bus,
 };
@@ -29,7 +29,7 @@ fn providers(
         cfg,
         broker.clone(),
         proto::envelope::DataKey::from_bytes([9u8; 32]),
-        fake,
+        LoginAdapters::all(fake),
         Arc::new(LocalBackend),
         "n1".into(),
         bus.clone(),
@@ -309,6 +309,95 @@ async fn a_cancelled_startup_cannot_remove_the_next_login_generation() {
     assert_eq!(pending["state"], "pending");
     assert_eq!(pending["url"], second.url);
     p.disconnect("anthropic", &LoginOwner::Local).await.unwrap();
+}
+
+/// The login client and the session harness are independent now. Only Claude
+/// Code can mint an Anthropic subscription token, so that login goes through
+/// the Claude adapter even on a node whose sessions run omp — and the Codex
+/// login, which omp does broker, stays where it was.
+#[test]
+fn the_anthropic_login_runs_through_claude_whatever_harness_runs_sessions() {
+    state::isolate();
+    let mut cfg = Config::default();
+    cfg.harness.id = "omp".into();
+    let omp: Arc<dyn tracon::adapter::HarnessAdapter> =
+        Arc::new(tracon::adapter::omp::OmpAdapter::new("18.0.4"));
+    let logins = LoginAdapters::for_node(&cfg, omp.clone(), &LocalBackend);
+    assert_eq!(logins.get("anthropic").id(), "claude");
+    assert_eq!(logins.get("openai-codex").id(), "omp");
+    assert!(Arc::ptr_eq(logins.get("openai-codex"), &omp));
+    // The login client's own state layout comes with it, not the harness's.
+    assert_eq!(logins.get("anthropic").layout().env, "CLAUDE_CONFIG_DIR");
+
+    // A node already running Claude Code signs in with the harness it has:
+    // the same instance, because `setup-token` leaves its token in the
+    // adapter that ran the login and nowhere else.
+    cfg.harness.id = "claude".into();
+    let claude: Arc<dyn tracon::adapter::HarnessAdapter> =
+        Arc::new(tracon::adapter::claude::ClaudeAdapter::new("2.1.247"));
+    let logins = LoginAdapters::for_node(&cfg, claude.clone(), &LocalBackend);
+    assert!(Arc::ptr_eq(logins.get("anthropic"), &claude));
+}
+
+/// A credential nothing can renew must stop the refresh loop rather than be
+/// retried every five minutes for the rest of the node's life, and it must not
+/// go on reading as connected while it cannot be used.
+#[tokio::test]
+async fn a_credential_that_cannot_be_renewed_asks_for_a_new_sign_in() {
+    state::isolate();
+    let fake = Arc::new(LoginFake::default());
+    // Already inside the refresh-ahead window, so the loop acts on its first
+    // tick rather than in half an hour.
+    *fake.expires_in_ms.lock().unwrap() = Some(60 * 1000);
+    let (p, broker, _bus) = providers("needs_reconnect", fake.clone());
+
+    p.connect("anthropic", vec!["work".into()], LoginOwner::Local, true)
+        .await
+        .unwrap();
+    p.code("anthropic", "the-code", &LoginOwner::Local)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while broker.read().unwrap().get("anthropic").is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("credential lifted");
+    assert!(p
+        .due_for_refresh(tracon::store::now_ms())
+        .contains(&"anthropic".to_string()));
+
+    fake.reconnect_required.store(true, Ordering::SeqCst);
+    let loop_task = tokio::spawn(p.clone().refresh_loop());
+    let state = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let listed = p
+                .list_private()
+                .into_iter()
+                .find(|value| value["name"] == "anthropic")
+                .unwrap();
+            if listed["state"] != "connected" {
+                return listed;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the loop noticed");
+    loop_task.abort();
+
+    assert_eq!(state["state"], "needs_reconnect");
+    assert!(state["error"]
+        .as_str()
+        .unwrap()
+        .contains("signing in again"));
+    // Asked once, and never again until the operator reconnects.
+    assert_eq!(*fake.refreshed.lock().unwrap(), 1);
+    assert!(p.due_for_refresh(tracon::store::now_ms()).is_empty());
+    // Nothing was thrown away: the token is still there, it just cannot be
+    // renewed, and the operator decides what to do about that.
+    assert!(broker.read().unwrap().get("anthropic").is_some());
 }
 
 /// The catalogue a node with only a Codex subscription connected can offer:

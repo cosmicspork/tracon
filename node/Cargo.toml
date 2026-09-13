@@ -25,6 +25,10 @@ path = "tests/support/fake_agent.rs"
 name = "fake_claude"
 path = "tests/support/fake_claude.rs"
 
+[[bin]]
+name = "fake_setup_token"
+path = "tests/support/fake_setup_token.rs"
+
 [dependencies]
 anyhow.workspace = true
 tracon-proto.workspace = true

@@ -11,6 +11,7 @@ mod support;
 use support::events::{drain_until, next_permission};
 use support::state;
 
+use tokio::io::AsyncWriteExt;
 use tracon::adapter::{
     claude::ClaudeAdapter, AdapterError, HarnessAdapter, HarnessEvent, LaunchSpec, PermissionReply,
 };
@@ -291,4 +292,185 @@ async fn a_compatible_handshake_reports_what_it_ran() {
     assert_eq!(compat.agent, "claude");
     assert_eq!(compat.version, "2.1.247");
     assert_eq!(compat.protocol, "claude-stream-json/1");
+}
+
+/// The login runner. `claude setup-token` is spawned inside `script(1)` for a
+/// pty, which no test can rely on being spelled the same way on every host, so
+/// the fake stands in for the whole wrapper — and the command the adapter
+/// actually built is kept, because what is in it is half of what is under test.
+#[derive(Default)]
+struct LoginRunner {
+    spawned: std::sync::Mutex<Option<RunnerCommand>>,
+}
+
+#[async_trait::async_trait]
+impl Runner for LoginRunner {
+    async fn spawn(
+        &self,
+        cmd: RunnerCommand,
+    ) -> Result<tracon::runner::Spawned, tracon::runner::RunnerError> {
+        *self.spawned.lock().unwrap() = Some(cmd.clone());
+        LocalRunner
+            .spawn(RunnerCommand {
+                argv: vec![env!("CARGO_BIN_EXE_fake_setup_token").to_string()],
+                env: cmd.env,
+                name: cmd.name,
+                ..Default::default()
+            })
+            .await
+    }
+
+    async fn run_capture(
+        &self,
+        _cmd: RunnerCommand,
+    ) -> Result<std::process::Output, tracon::runner::RunnerError> {
+        Err(tracon::runner::RunnerError::Other("not used".into()))
+    }
+
+    async fn kill(&self, _name: &str) -> Result<(), tracon::runner::RunnerError> {
+        Ok(())
+    }
+}
+
+impl LoginRunner {
+    fn command(&self) -> RunnerCommand {
+        self.spawned.lock().unwrap().clone().expect("a login ran")
+    }
+}
+
+fn env_of(cmd: &RunnerCommand, key: &str) -> String {
+    cmd.env
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| panic!("{key} is set on the login command"))
+}
+
+/// The whole subscription login: a URL for the operator, a code pasted back,
+/// and a token the broker can be given. What `lift` returns is what the CLI
+/// printed — there is no store behind it.
+#[tokio::test]
+async fn setup_token_mints_a_subscription_token_from_a_pasted_code() {
+    state::isolate();
+    let adapter = ClaudeAdapter::new("2.1.247");
+    let runner = LoginRunner::default();
+    let mut flow = adapter
+        .login(&runner, "anthropic", "tracon-login-anthropic-1")
+        .await
+        .unwrap();
+    assert!(
+        flow.url
+            .starts_with("https://claude.com/cai/oauth/authorize?code=true"),
+        "{}",
+        flow.url
+    );
+    // The redirect is a hosted callback, not localhost: there is nothing for a
+    // local listener to catch and no device code to show, so `connect` falls
+    // back to the paste-back — which is this login's only completion.
+    assert!(flow.device_code.is_none());
+    assert!(
+        tracon::providers::callback::CallbackTarget::parse(&flow.url).is_err(),
+        "{} looked like a loopback callback",
+        flow.url
+    );
+
+    // Exactly what `Providers::submit` writes, newline and all.
+    flow.stdin.write_all(b"the-code\n").await.unwrap();
+    flow.stdin.flush().await.unwrap();
+    let exit = tokio::time::timeout(std::time::Duration::from_secs(30), flow.done)
+        .await
+        .expect("the login ended")
+        .unwrap();
+    assert_eq!(exit, 0);
+
+    let before = tracon::store::now_ms();
+    let token = adapter
+        .lift(std::path::Path::new("/nonexistent"), "anthropic")
+        .await
+        .unwrap();
+    assert_eq!(token.access, "sk-ant-oat01-the-code");
+    assert!(token.refresh.is_none());
+    let expires = token.expires_ms.expect("a lifetime was recorded");
+    assert!(expires > before, "{expires} is not in the future");
+    // 364 days, as the CLI said — not the assumed year.
+    assert!(expires < before + 365 * 24 * 60 * 60 * 1000, "{expires}");
+
+    // Printed once and stored nowhere: a second lift has nothing to give.
+    assert!(adapter
+        .lift(std::path::Path::new("/nonexistent"), "anthropic")
+        .await
+        .is_err());
+}
+
+/// The login helper is a throwaway. It must never be pointed at the state a
+/// session mounts: that directory is shared by every harness this node runs,
+/// and a half-finished sign-in has no business in it.
+#[tokio::test]
+async fn the_login_helper_keeps_its_state_out_of_any_session_directory() {
+    state::isolate();
+    let adapter = ClaudeAdapter::new("2.1.247").with_login_image(Some("localhost/claude".into()));
+    let runner = LoginRunner::default();
+    let flow = adapter
+        .login(&runner, "anthropic", "tracon-login-anthropic-1")
+        .await
+        .unwrap();
+    drop(flow);
+
+    let cmd = runner.command();
+    let home = env_of(&cmd, "HOME");
+    let config = env_of(&cmd, "CLAUDE_CONFIG_DIR");
+    assert!(home.starts_with("/tmp/tracon-setup-token-"), "{home}");
+    assert!(config.starts_with(&home), "{config} is not under {home}");
+    for harness_home in ["/root", "/home/harness"] {
+        let session =
+            tracon::session::materialize::state_target(harness_home, ClaudeAdapter::layout());
+        assert_ne!(config, session);
+        assert_ne!(home, session);
+    }
+
+    // A pty, wide enough that the URL is printed on one line, and the image
+    // that carries the CLI when the node's own harness is something else.
+    let argv = cmd.argv.join(" ");
+    assert!(argv.starts_with("script -q -e -c "), "{argv}");
+    assert!(argv.contains("stty cols"), "{argv}");
+    assert!(argv.contains("claude setup-token"), "{argv}");
+    assert_eq!(cmd.image.as_deref(), Some("localhost/claude"));
+}
+
+/// A `setup-token` token has no refresh token behind it. Saying so as its own
+/// error is what stops the refresh loop asking forever.
+#[tokio::test]
+async fn a_setup_token_credential_can_only_be_replaced_by_signing_in_again() {
+    state::isolate();
+    let adapter = ClaudeAdapter::new("2.1.247");
+    let err = adapter
+        .refresh(
+            &LoginRunner::default(),
+            "anthropic",
+            "tracon-refresh-anthropic",
+        )
+        .await
+        .expect_err("there is nothing to refresh");
+    assert!(matches!(err, AdapterError::ReconnectRequired(_)), "{err:?}");
+    assert!(
+        err.to_string().contains("connect the provider again"),
+        "{err}"
+    );
+}
+
+/// Claude Code mints an Anthropic subscription token and nothing else; asking
+/// it for another provider's login must fail rather than run the command and
+/// store whatever came back under the wrong name.
+#[tokio::test]
+async fn the_claude_login_refuses_a_provider_it_cannot_sign_in_to() {
+    state::isolate();
+    let adapter = ClaudeAdapter::new("2.1.247");
+    let err = match adapter
+        .login(&LoginRunner::default(), "openai-codex", "tracon-login-x")
+        .await
+    {
+        Ok(_) => panic!("Claude Code signs in to anthropic and nothing else"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("openai-codex"), "{err}");
 }

@@ -441,11 +441,18 @@ gateway_ip = "10.89.0.2"
 gateway_container = "tracon-gw"
 gateway_image = "localhost/tracon-gateway"
 harness_image = "localhost/tracon-harness"  # "localhost/tracon-harness-claude" with [harness] id = "claude"
+login_image = "localhost/tracon-harness-claude"  # the Anthropic subscription login runs `claude
+                                    # setup-token`, which only this image carries; `tracon setup`
+                                    # builds it alongside the harness image. Set it to the same
+                                    # string as harness_image (or empty) when they are one image.
 start_machine = true                # macOS: start the podman machine when it is stopped
 # selinux_label_disable = true      # only if the boundary check says the labels fight you
 
 [gateway]
-allow_hosts = ['^api\.anthropic\.com$', '^api\.openai\.com$', '^chatgpt\.com$', '^auth\.openai\.com$']
+allow_hosts = ['^api\.anthropic\.com$', '^platform\.claude\.com$', '^claude\.ai$',
+               '^api\.openai\.com$', '^chatgpt\.com$', '^auth\.openai\.com$']
+                                    # platform.claude.com and claude.ai are the subscription
+                                    # login's own endpoints, not the model API's
 proxy_port = 8888
 forward_port = 7421
 # harness_listen = "127.0.0.1:7421" # or a socket path; the platform default is right

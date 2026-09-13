@@ -29,11 +29,21 @@ pub fn harness_dir(cfg: &Config) -> &'static str {
 }
 
 /// Each image the node runs, with the directory it is built from.
-pub fn images(cfg: &Config) -> [(&str, &'static str); 2] {
-    [
+pub fn images(cfg: &Config) -> Vec<(&str, &'static str)> {
+    let mut images = vec![
         (cfg.boundary.gateway_image.as_str(), "gateway"),
         (cfg.boundary.harness_image.as_str(), harness_dir(cfg)),
-    ]
+    ];
+    // The Anthropic subscription login runs `claude setup-token`, which only
+    // the Claude Code image carries. A node whose sessions run another harness
+    // still has to be able to sign in, so the image is built alongside rather
+    // than only when it is also the session harness.
+    if crate::boundary::login_image(&cfg.boundary.login_image, &cfg.boundary.harness_image)
+        .is_some()
+    {
+        images.push((cfg.boundary.login_image.as_str(), "harness-claude"));
+    }
+    images
 }
 
 /// A digest of one image's embedded definitions: every file under `dir`, in

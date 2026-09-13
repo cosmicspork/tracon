@@ -92,6 +92,13 @@ pub trait Backend: Send + Sync {
     /// The harness user's home inside its runner; state and gitconfig are
     /// mounted under it.
     fn harness_home(&self) -> String;
+    /// The image a provider login helper runs in, when that helper is not the
+    /// harness this node runs sessions with. `None` means the runner's own
+    /// harness image already carries it — or that this backend runs no images
+    /// at all, which is the test backend's answer.
+    fn login_image(&self) -> Option<String> {
+        None
+    }
     /// The port the node itself serves the CONNECT allowlist proxy on, when
     /// no gateway container carries it.
     fn proxy_port(&self) -> Option<u16> {
@@ -120,6 +127,13 @@ pub trait Backend: Send + Sync {
     }
     /// Remove harnesses left over from a previous run, by name.
     async fn reconcile(&self, names: &[String]);
+}
+
+/// A configured login image, once it is worth naming: an image equal to the
+/// harness image is not a second image, and an empty one was turned off.
+pub fn login_image(configured: &str, harness_image: &str) -> Option<String> {
+    let configured = configured.trim();
+    (!configured.is_empty() && configured != harness_image.trim()).then(|| configured.to_string())
 }
 
 /// The backend `[runtime] kind` selects. Detection that needs the host (the
