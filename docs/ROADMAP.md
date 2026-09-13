@@ -8,195 +8,126 @@
 - Prefer useful environments, clear evidence, and human intervention over more machinery.
 - Record scoped decisions and supersede them explicitly; keep harnesses replaceable.
 
+Completed items are removed from this file when they land; the changelog and the
+reference documents under `docs/reference/` carry the history.
+
 ## Planned
 
-### Grantable authority and optional workflow
+### OpenCode as the primary harness
 
-Start a session in a workspace with permissions, without prescribing how work is organized.
+**Decision (2026-09-13):** OpenCode becomes the primary managed harness, driven through
+its native server API, with its native web UI offered as an optional advanced interface.
+Claude Code is retained as a second supported harness and as the Anthropic subscription
+login client (`claude setup-token`); it has no native UI, so the advanced-view, PTY, and
+remote-stream work is OpenCode-only. omp is removed at cutover: its adapter, image,
+provider wiring, and catalogue workarounds. No new agent loop; the isolated execution
+boundary stays. Planned flexibility must not weaken isolation.
 
-- [x] Offer scoped allow/ask/deny for merging, publishing, ticket transitions, and deployments.
-- [x] Bind grants to targets and revisions where appropriate; revalidate before acting.
-- [x] Execute consequential actions through the broker without exposing credentials.
-- [x] Make work items, plan/execute phases, explicit model selection, and review optional.
-- [x] Inherit sensible model defaults and record the actual model used.
-- [x] Keep structured workflows as presets; require review only when policy requires it.
-- [x] Record candidate, authority, evidence, and outcome even for automatically authorized actions.
-- [x] Expose policy and grant management in the interface, preserving signing-key and trust-root boundaries.
-- [x] Reconcile README, architecture, design, and shipped policy as behavior changes.
+**Release condition:** one real session per harness remains correctly supervised when
+operated from either tracon or the OpenCode UI, in a browser and inside the desktop
+app, locally and through the remote-node access path. A failed gate means no cutover.
 
-### Managed workspaces and separate publication
+Pinned candidate: OpenCode v1.18.30, inventoried in `docs/reference/opencode-v1.18.30/`
+(compatibility manifest, route matrix, provider matrix, config and state findings, the
+minimum launch environment, and the gateway deny list). The findings numbered below
+refer to that manifest's table.
 
-Work on independent repositories without host bind mounts.
+- [x] **Gate A — candidate inventory and contract.** Release pinned with checksums; API
+      snapshot; server flags and startup egress verified live; provider, mutation-policy,
+      and config matrices produced. Verdict: no stop condition.
+- [ ] **Gate B — owner-side policy, credentials, and convergence.**
+  - [ ] OpenCode adapter: one isolated `opencode serve` per session with the settled
+        launch environment, loopback bind, mDNS off, per-session HOME/XDG/DB, node-written
+        read-only config, provider base URLs in config (finding 8), `OPENCODE_SERVER_PASSWORD`
+        asserted (finding 4).
+  - [ ] Owner session controller and ingestion: durable identity mapping for session,
+        message, part, permission, and PTY ids; reconciliation anchored on the per-session
+        sequenced streams and snapshots (finding 6); uncertain-outcome handling for timed-out
+        mutations.
+  - [ ] Policy-aware API gateway: deny by default from the route matrix, directory pinned
+        and bodies inspected (finding 5), all-`ask` ruleset with tracon deciding and replying
+        `once`, every `always` rewritten and recorded, `PATCH /session/{id}` and the manifest's
+        deny list refused (findings 1, 2).
+  - [ ] Provider proofs on the pinned binary: hosted API keys, the self-hosted
+        OpenAI-compatible endpoint with non-zero gateway counts (finding 10), Anthropic
+        subscription via `claude setup-token` lifted into the broker, Codex subscription
+        through the gateway with the `openai`-plus-OAuth trap asserted by test (finding 9),
+        Bun proxy handling and ai-sdk header bytes observed.
+  - [ ] Usage and spending accounting reconciled between OpenCode's per-message usage and
+        the gateway's counts; unsent-text durability across disconnects.
+  - [ ] Adversarial API run: permission escalation, foreign session ids, config and auth
+        writes, share, revert, shell, child sessions; interrupted SSE and killed processes
+        during mutations; two simultaneous sessions cannot read or migrate each other's state.
+- [ ] **Gate C — customization and recovery.**
+  - [ ] Launch manifest: skill, prompt, and agent snapshots with digests; duplicates rejected
+        and URL sources forbidden at manifest build (finding 14); read-only mount outside the
+        worktree; a new revision never changes a running session.
+  - [ ] Plugins and tools only from an image-baked cache; `.opencode/tool/` and project
+        config suppressed (findings 12, 15); nested `AGENTS.md`/`CLAUDE.md` accepted and
+        documented as matching today's harnesses (finding 13).
+  - [ ] LSP and formatters baked and named by absolute path; runner egress rejects rather
+        than drops; PID namespace with an init reaps orphans (finding 16); status shown.
+  - [ ] State: node-owned single-writer fencing per session DB, quiesced `VACUUM INTO`
+        backups, a recorded state-schema generation gating restore, no downgrade promise
+        (finding 17).
+  - [ ] Legacy transition: archive omp sessions read-only with harness identity, reopen
+        retained workspaces as new sessions with lineage, retire omp credentials deliberately,
+        verify the omp adapter can no longer launch.
+  - [ ] Direct-harness recovery route documented for both harnesses; corpus export stays
+        portable and vectors rebuildable.
+- [ ] **Gate D — browser, desktop, and installed mobile PWA.**
+  - [ ] Dedicated UI origin served by tracon from the pinned bundle, catch-all never proxied,
+        tracon CSP replacing `connect-src *` (finding 3); short-lived single-use bootstrap
+        exchanged for an HttpOnly cookie; no password in the browser (finding 4); Origin/CSRF
+        on mutations and WebSocket upgrades.
+  - [ ] Desktop: an unprivileged window with no node-management commands; navigation limited
+        to the UI origin.
+  - [ ] Installed mobile PWA on the always-on node: in-scope shell, isolated native view,
+        third-party storage blocked, background/resume recovery, notification deep links.
+  - [ ] PTY only as an explicit workspace-scoped capability with a gateway-minted owner-bound
+        ticket (finding 7).
+  - [ ] Native UI route trace captured and unknown mutations shown to fail closed.
+- [ ] **Gate E — remote-node parity.** Bounded encrypted owner streams over the hub for
+      HTTP, SSE, and PTY: authenticated stream ids, owner binding, flow control, reconnect
+      without replaying input, revocation, protocol mismatch refused; hub sees ciphertext and
+      routing metadata only.
+- [ ] **Gate F — release and clean cutover.** Real Podman and Kubernetes project workflows
+      on both harnesses; compatibility manifest promoted through a tracon release; omp
+      removed; README, architecture, and design reconciled (harness sections, optionality of
+      work items, phases, review, memory, remote access, and mesh); the migration plan archived.
 
-- [x] Remove bind mounts entirely; persist sessions in runtime-owned storage.
-- [x] Copy explicitly selected files/folders rather than granting ongoing host access.
-- [x] Import selected uncommitted work without activating host Git configuration, hooks, or credentials.
-- [x] Reject symlink escapes; never silently write back to the selected source.
-- [x] Resume tracon-owned workspaces and provide explicit export/download.
-- [x] Broker private source fetches without giving the agent forge credentials.
-- [x] Transfer an immutable candidate into a separate publisher-controlled repository with trusted configuration and targets.
-- [x] Never run credential-bearing host Git in the agent-owned clone.
+**Upstream contributions worth a bounded PR** (not blockers): a flag that turns the
+web-UI fallback into a 404; a flag check on nested instruction attachment; invoking the
+declared `permission.ask` hook; an LSP status event.
 
-### Prepared execution environments
+### Still waiting on a real run
 
-Run real project workflows on a fresh node without manual environment repair.
-
-- [x] Separate dependency preparation, restricted execution, and candidate verification.
-- [x] Reuse project toolchain/devcontainer conventions where safe; reject privileged settings, host mounts, sockets, and unsafe setup configuration.
-- [x] Identify approved images, dependency inputs, and isolated caches without requiring a new repo format.
-- [ ] Exercise a real private repository through preparation, agent work, checks, and authorized publication. (Needs a model credential and a private repository on the node; not yet run.)
-
-**Dependencies:** managed workspace and publication boundaries for the complete workflow.
-
-### Reusable check evidence
-
-Attach evidence to immutable candidates, not mutable worktrees or review submissions.
-
-- [x] Separate candidates, check runs, review revisions, and decisions in storage.
-- [x] Run checks against isolated candidate snapshots with operator-controlled required checks.
-- [x] Key reuse on source revision, check definition, execution image, and relevant configuration/dependency inputs.
-- [x] Retain successes, failures, input identities, logs, execution metadata, and explicit reruns.
-- [x] Reuse unchanged code evidence for MR-title/description or Jira-prose revisions.
-- [x] Show changed inputs and reused evidence; keep prose authorization separate from code checks.
-- [x] Migrate existing `head_sha`, `checks_json`, and check-result events into the evidence trail.
-
-**Open question:** tree-hash reuse for checks proven independent of commit history; start with commit identity.
-
-### Review context and demonstrations
-
-Make evidence understandable without turning tracon into an IDE.
-
-- [x] Present requirements, relevant surrounding code, check output, and runtime evidence beside the diff.
-- [x] Support phone review without hiding missing context or stale evidence.
-- [x] Keep authoritative execution records separate from curated demonstrations.
-- [x] Evaluate [Showboat](https://github.com/simonw/showboat) for documents combining commands, captured output, and images. Decision: such documents are executable Markdown; a review links and hashes them as demonstrations and never executes them.
-
-### QA deployment and browser verification
-
-Demonstrate that the candidate works in the intended QA environment.
-
-- [x] Deploy an identified candidate to an explicitly authorized QA target.
-- [x] Run browser verification with scoped browsing and test-account authority.
-- [x] Link candidate → deployed build → QA target → browser run → evidence.
-- [x] Record environment identity and time; invalidate evidence when the deployment changes.
-- [x] Attach assertions, logs, screenshots, and demonstrations to the candidate.
-- [x] Keep deployment and browser permissions separate; neither grants production access or treats QA writes as harmless reads.
-- [ ] Exercise QA deploy and browser verification against a real target. (Needs a `glab` credential and a configured QA target; not yet run. The Kubernetes backend also has no scoped QA egress gateway yet — deploy/browser verification is Podman-only until it does.)
-
-**Dependencies:** capable execution environments and candidate-bound evidence.
-
-### Repository-derived prototypes
-
-Use real application components and styles in interactive design artifacts.
-
-- [x] Build previews inside the execution environment and export versioned HTML/asset bundles with source revision and build metadata.
-- [x] Render through the same sandboxed artifact viewer, without host file serving or bind-mount exceptions.
-
-**Dependencies:** a suitable project build environment; use the existing HTML bundle importer and sandboxed viewer.
-
-### Ask the operator
-
-Provide a real question/answer tool, not an Allow/Deny permission workaround.
-
-- [x] Accept free-text questions and optional choices; return structured answers to the originating call.
-- [x] Persist questions and answers through client disconnection; surface them in the queue and session.
-- [x] Allow asking for help without approval; silence is not consent and answers do not widen permissions.
-- [x] Define unanswered-question behavior separately from permission expiry.
-
-### Notify the operator
-
-Intentionally request an OS/PWA ping, not merely a transcript update.
-
-- [x] Include a title, message, and session/artifact/question link.
-- [x] Route through configured nodes/devices with rate limits and deduplication.
-- [x] Record delivery attempts without claiming the human saw a delivered notification.
-
-### Report an issue
-
-Lodge complaints about tracon, environments, tools, or harness integration.
-
-- [x] Capture expected/actual behavior, reproduction, versions, relevant errors, and attempted recovery.
-- [x] Distinguish observed evidence from the agent's diagnosis.
-- [x] Support opening an issue in tracon's repository through the broker with operator authorization.
-- [x] Make proposed issue text and attachments inspectable before publication.
-- [x] Exclude secrets and private project material; reporting permission does not authorize wholesale transcript/repository uploads.
-- [x] Keep reporting separate from declaring work blocked or pausing execution.
-
-### Pause controls and runaway protection
-
-Stop broken execution without requiring an invented token budget for every task.
-
-- [x] Provide explicit pause/stop controls that actually prevent new agent work while preserving workspace and evidence.
-- [x] Bound retries, recovery attempts, handshakes, and tool/process timeouts.
-- [x] Pause and explain repeated failures instead of automatically restarting the same loop.
-- [x] Treat repetition as a signal, not a universal measure of progress.
-- [x] Retain watchdogs for failures the agent cannot report; keep token/spending limits optional.
-- [x] Do not automatically pause on issue reports or treat notifications as questions.
-
-### Local-first onboarding and README
-
-Explain the job and make one-node use complete.
-
-- [x] Lead the README with the personal workflow, authority, evidence, and interventions rather than topology.
-- [ ] Present work items, phases, review, memory, remote access, and mesh as optional.
-- [x] Explain the agent-built project as a demonstration of design judgment and decision-making, not hand-written coding.
-- [x] Reduce setup burden and keep the hub out of required first-run steps.
-- [x] Measure time to useful verified work, setup failures, human interventions/waiting, and tokens per accepted change.
-- [x] Document current limitations and reconcile superseded decisions when changes land.
-
-### Other backlog
-
-- [x] Continue work on another node using explicit candidate/context transfer and a new session, without mandatory work items/phases or live-harness migration.
-- [x] Add optional hub-side rollups without making local use depend on them.
-- [x] Sign desktop releases and pin mutable build inputs for reproducibility; checksums alone are not independent publisher authentication.
-- [x] Paginate forge repository listings.
+- [ ] Exercise a real private repository through preparation, agent work, checks, and
+      authorized publication. (Needs a model credential and a private repository on the
+      node; folds into Gate B's real coding task.)
+- [ ] Exercise QA deploy and browser verification against a real target. (Needs a
+      `glab` credential and a configured QA target. The Kubernetes backend has no scoped QA
+      egress gateway yet, so this is Podman-only until it does.)
 
 ## Current limitations
 
-- No real private-repository end-to-end run: preparation, agent work, checks, and
-  authorized publication against a private repo need a model credential and a
-  private repository configured on the node, neither exercised here.
-- Native macOS signing and notarization are not exercised in this environment:
-  the release workflow requires Apple Developer ID credentials that are not
-  provisioned, and the macOS release leg fails closed without them rather than
-  shipping unsigned.
-- QA deployment and browser verification are implemented but not exercised
-  against a real target: no `glab` credential and QA target are configured here.
+- No real private-repository end-to-end run yet; see above.
+- Native macOS signing and notarization are not exercised: the release workflow requires
+  Apple Developer ID credentials that are not provisioned, and the macOS release leg
+  fails closed without them rather than shipping unsigned.
+- QA deployment and browser verification are implemented but not exercised against a
+  real target.
 - The Kubernetes runtime backend has no scoped QA browser egress gateway;
-  `scope_qa_egress` always refuses on that backend, so QA browser verification
-  is Podman-only until Kubernetes gets one.
-
-## Hardening
-
-Findings originate from review of `2e32a59`; revalidate against the implementation revision. Planned policy flexibility must not weaken isolation.
-
-### Reproduced paths
-
-- [x] Disable Git replacement/graft interpretation across capture, provenance, and publication; verify reviewed bytes match the pushed candidate.
-- [x] Authenticate enrollment's signing/encryption key binding before handing off channel keys.
-- [x] Eliminate executable agent-controlled Git metadata, including `config.worktree`. Git-side execution was reproduced; a full container escape was not exercised.
-- [x] Restrict credentialed model proxy methods/paths to granted capabilities, not arbitrary provider-account operations.
-- [x] Fix mutable-worktree checks and agent-controlled required-check overrides through candidate-bound verification.
-- [x] Reject inappropriate `Origin: null` operator requests; verify browser defenses as well as the reproduced middleware behavior.
-
-### Recovery and boundary verification
-
-- [x] Recover interrupted publication honestly and idempotently, including crashes after external side effects.
-- [x] Verify private HTTPS pushes use brokered authentication rather than ambient host helpers.
-- [x] Verify desktop process identity before adoption/signaling, including stale handoff records and PID reuse.
-- [x] Exercise cancellation during checks, stalled harness startup, and resubmission racing approval; reject late completions that resurrect terminal sessions.
-- [x] Exercise delayed mesh keys, member removal/key revocation, restart recovery, and wire-version mismatches with visible refusals.
-- [x] Verify hub outages preserve local work and never silently widen authority.
-- [ ] Verify unsent-text durability and spending/usage accounting.
-- [ ] Exercise real Podman/Kubernetes project workflows; API fixtures and boundary probes alone are insufficient.
-- [ ] Preserve a usable direct-harness recovery path and portable corpus exports; vectors remain rebuildable derived data.
-- [x] Pin harness versions and record per-session compatibility; reject unsupported protocol versions explicitly.
+  `scope_qa_egress` always refuses on that backend.
+- Harness-specific surfaces that will be rewritten at cutover: the omp provider wiring,
+  catalogue denylist, and built-in-provider disabling; the retry-notice recogniser; the
+  20 s `review_status` wait cap sized for omp's MCP client.
 
 ## Deferred
 
-- **Third harness adapter (`opencode`):** when a real task requires it; bind HTTP to loopback and disable mDNS discovery before enabling.
 - **Retrieval reranker:** when existing retrieval proves insufficient.
-- **Client terminal:** only for a concrete task the existing interface cannot support.
+- **Client terminal:** superseded by the OpenCode PTY capability in Gate D; no separate
+  tracon terminal.
 - **`cr-sqlite`:** only if real multi-writer convergence requires it.
 - **Stacked MR automation:** decide whether stacks are preferable to feature flags first.
 
@@ -204,7 +135,11 @@ Findings originate from review of `2e32a59`; revalidate against the implementati
 
 - Multi-user tenancy or a team product.
 - A model/agent loop inside the node.
+- A general-purpose multi-harness framework: two concrete adapters behind one trait,
+  not a plugin system for harnesses.
+- Forking and maintaining the OpenCode UI.
 - Required tracon configuration files installed into project repositories.
 - A full IDE, general file editor, or per-project editor configuration.
 - Business-domain features such as invoicing and billing.
-- Arbitrary host execution through the node API. Service/CLI installation and node restarts remain explicit desktop/CLI operations; file imports use a picker/upload flow.
+- Arbitrary host execution through the node API. Service/CLI installation and node
+  restarts remain explicit desktop/CLI operations; file imports use a picker/upload flow.
