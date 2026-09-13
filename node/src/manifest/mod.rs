@@ -361,15 +361,6 @@ impl LaunchManifest {
         hex::encode(hasher.finalize())
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.skills.is_empty()
-            && self.instructions.is_empty()
-            && self.agents.is_empty()
-            && self.plugins.is_empty()
-            && self.lsp.is_empty()
-            && self.formatters.is_empty()
-    }
-
     /// The skill packages as files to stage, relative to the harness's state
     /// directory. Each one is mounted read-only; the harness reads them and
     /// writes nothing back (`config-state.md` §3.5 — loading is glob, read,
@@ -595,7 +586,7 @@ mod tests {
     #[test]
     fn an_empty_manifest_renders_nothing() {
         let manifest = build(inputs(Vec::new())).unwrap();
-        assert!(manifest.is_empty());
+        assert!(manifest.skills.is_empty());
         assert!(manifest.skill_files().is_empty());
         assert!(manifest.orientation().is_empty());
         // It still has a digest: "nothing customized" is a fact worth
