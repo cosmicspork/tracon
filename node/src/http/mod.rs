@@ -224,6 +224,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/resume", post(api::resume))
         .route("/api/sessions/{id}/stop", post(api::stop))
         .route("/api/sessions/{id}/draft", put(api::put_draft))
+        // The harness's own API, mediated per session. On the operator router
+        // deliberately: the same cookie, Origin and Host checks as every other
+        // operator route answer first, and the harness credential is injected
+        // on the node so the browser never holds it.
+        .route(
+            "/api/opencode/{session_id}/{*rest}",
+            axum::routing::any(crate::gateway::opencode::handle),
+        )
         .route("/api/permissions/{id}/answer", post(api::answer_permission))
         .route("/api/operator/questions", get(api::operator_questions))
         .route(
