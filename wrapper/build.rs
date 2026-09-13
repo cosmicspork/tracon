@@ -10,6 +10,7 @@ fn main() {
             "desktop_install_cli",
             "desktop_restart_node",
             "desktop_open_node",
+            "desktop_open_opencode",
         ]),
     ))
     .expect("building Tauri permissions");

@@ -66,6 +66,7 @@ fn session(id: &str, channel: &str, phase: &str, item: Option<&str>) -> SessionR
         ended_mono_ms: Some(120_000),
         updated_ms: now_ms(),
         archived_ms: None,
+        manifest_digest: None,
     }
 }
 

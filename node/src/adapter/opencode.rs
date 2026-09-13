@@ -92,6 +92,23 @@ impl OpenCodeAdapter {
         max: 1,
     };
 
+    /// Plugin packages this node's harness image bakes into OpenCode's
+    /// offline package cache, as `<package>@<version>`.
+    ///
+    /// Read from the image's own toolchain profile rather than written twice.
+    /// A plugin is loaded with a raw `await import()` into the server's
+    /// process, holding the server's credentials and `Bun.$`
+    /// (`config-state.md` §4.6), and resolution is a bare existence check in
+    /// that cache with no integrity verification (§4.4) — so the only bounded
+    /// question is which packages the *image* made resolvable at all, and the
+    /// profile the image was built from is the honest answer to it. A
+    /// manifest naming anything else is refused at build, with the cache path
+    /// it would have needed.
+    pub fn baked_plugins() -> Vec<String> {
+        let seed = &crate::runner::toolchain::profile().plugin;
+        vec![format!("{}@{}", seed.package, seed.version)]
+    }
+
     pub fn new(pinned: impl Into<String>) -> Self {
         Self {
             pinned: pinned.into(),
@@ -148,6 +165,17 @@ impl OpenCodeAdapter {
             ("OPENCODE_DB", format!("{run}/state/opencode.db")),
             // The one file it may read, mounted read-only outside the worktree.
             ("OPENCODE_CONFIG", format!("{state}/{}", Self::CONFIG_FILE)),
+            // Where the launch manifest's skills are mounted. The config file
+            // is written before the node knows this path, so it names the
+            // variable instead and `{env:…}` substitution resolves it when
+            // the file is loaded (`config-state.md` §1.5). Set even when the
+            // manifest has no skills: the directory then does not exist and
+            // OpenCode logs a missing skill path, which is the honest state
+            // and not an error.
+            (
+                crate::manifest::SKILL_ROOT_ENV,
+                format!("{state}/{}", crate::manifest::SKILL_DIR),
+            ),
             // The catalogue is declared, not fetched. Both are needed: the
             // path alone leaves an hourly refresh running, the flag alone
             // falls back to a build-time snapshot this node did not choose.
@@ -290,7 +318,52 @@ fn config_document(wiring: &Wiring, mcp_servers: &[Value]) -> Value {
     if let Some(mcp) = mcp_document(mcp_servers) {
         document["mcp"] = mcp;
     }
+    for (key, value) in manifest_document(&wiring.manifest) {
+        document[key] = value;
+    }
     document
+}
+
+/// The operator's half of the same document: the launch manifest rendered
+/// into the keys OpenCode reads.
+///
+/// Four decisions are visible here and each is a refusal of an upstream
+/// default:
+///
+/// * `skills.paths` names one directory and `skills.urls` is never written.
+///   Upstream discovers skills from six places and fetches the URL list over
+///   plain HTTP before any interaction, with nothing that disables it
+///   (`config-state.md` §3.2, §3.6). The three `OPENCODE_DISABLE_*` variables
+///   in `launch_env` close the other five paths; not writing `urls` closes the
+///   sixth, and it is a config control rather than a capability one, which is
+///   why the runner also has no egress.
+/// * The path is `{env:…}`, not a literal. A relative `skills.paths` entry is
+///   resolved against the *worktree* (§3.2 #5), which is the one directory a
+///   session can write; the variable resolves to an absolute path outside it
+///   that the launch environment supplies.
+/// * `plugin` carries only packages the image baked. Resolution is a bare
+///   existence check in the offline cache (§4.4), so a name the image does
+///   not have is not a warning — it is a plugin that silently is not there,
+///   or a registry fetch in a runner with no network. The manifest refuses it
+///   before the launch instead.
+/// * `lsp` and `formatter` are not written here at all. The image's toolchain
+///   profile owns them — it names absolute paths in an image this file knows
+///   nothing about — and `scratch_files` merges that fragment in afterwards.
+///   The manifest still carries the profile's names, so the digest on a
+///   session says which toolchain it ran with, but rendering them twice would
+///   be two sources for one fact.
+fn manifest_document(manifest: &crate::manifest::LaunchManifest) -> Vec<(&'static str, Value)> {
+    let mut keys: Vec<(&'static str, Value)> = Vec::new();
+    if !manifest.skills.is_empty() {
+        keys.push((
+            "skills",
+            json!({ "paths": [format!("{{env:{}}}", crate::manifest::SKILL_ROOT_ENV)] }),
+        ));
+    }
+    if !manifest.plugins.is_empty() {
+        keys.push(("plugin", json!(manifest.plugins)));
+    }
+    keys
 }
 
 /// One declared model, in the shape the config merges over the catalogue.
@@ -622,9 +695,11 @@ impl HarnessAdapter for OpenCodeAdapter {
         let mut config = config_document(wiring, &[]);
         // The `lsp` and `formatter` halves come from the image's toolchain
         // profile, which is the runner's to own: it names absolute paths in
-        // an image this file knows nothing about.
+        // an image this file knows nothing about. The manifest records the
+        // same profile's names in its digest, so what a session ran with is
+        // readable from its row, but it does not render them a second time.
         crate::runner::toolchain::merge_into_config(&mut config);
-        vec![
+        let mut files = vec![
             (
                 Self::CONFIG_FILE.into(),
                 serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".into()),
@@ -635,7 +710,12 @@ impl HarnessAdapter for OpenCodeAdapter {
                     .unwrap_or_else(|_| "{}".into()),
             ),
             (Self::AUTH_FILE.into(), empty_auth_store()),
-        ]
+        ];
+        // The manifest's skill packages, staged beside the config and mounted
+        // read-only like it — one directory per skill under a root the
+        // worktree cannot reach and OpenCode does not discover on its own.
+        files.extend(wiring.manifest.skill_files());
+        files
     }
 
     fn scratch_dirs(&self) -> Vec<String> {
@@ -705,9 +785,14 @@ impl HarnessAdapter for OpenCodeAdapter {
         tokio::spawn(drain_logs(spawned.stdout, logs.clone()));
         let done = spawned.done;
 
+        // What the handshake was waiting for when it was cut off. Two very
+        // different failures share this timeout — a server that never came up
+        // and a catalogue that never settled — and the second is invisible
+        // without this.
+        let stage = Arc::new(Mutex::new(String::from("waiting for the server to answer")));
         let started = match tokio::time::timeout(
             START_TIMEOUT,
-            handshake(&client, &self.pinned, &spec),
+            handshake(&client, &self.pinned, &spec, &stage),
         )
         .await
         {
@@ -719,7 +804,9 @@ impl HarnessAdapter for OpenCodeAdapter {
             Err(_) => {
                 let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container)).await;
                 return Err(AdapterError::Protocol(format!(
-                    "OpenCode harness startup timed out; it last said: {}",
+                    "OpenCode harness startup timed out after {}s while {}; it last said: {}",
+                    START_TIMEOUT.as_secs(),
+                    stage.lock().unwrap(),
                     last_log(&logs)
                 )));
             }
@@ -914,6 +1001,7 @@ async fn handshake(
     client: &Client,
     pinned: &str,
     spec: &LaunchSpec,
+    stage: &Arc<Mutex<String>>,
 ) -> Result<Started, AdapterError> {
     loop {
         match client.get_json("/global/health").await {
@@ -926,6 +1014,10 @@ async fn handshake(
                     });
                 }
                 let (provider, model) = split_model(&spec.model)?;
+                // The catalogue is not ready when health is. See
+                // `catalogue_settled`: a session created before it settles
+                // accepts a prompt and then never runs it.
+                catalogue_settled(client, &provider, &model, stage).await?;
                 let created = client
                     .post_json(
                         "/api/session",
@@ -973,6 +1065,66 @@ async fn handshake(
             Err(_) => {}
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// How often the catalogue is re-asked while it settles.
+const CATALOGUE_POLL: Duration = Duration::from_millis(100);
+
+/// Wait until the model this session will run is actually in the harness's
+/// catalogue.
+///
+/// `serve` answers `/global/health` before its provider catalogue has loaded,
+/// and the two are not ordered. A prompt admitted in that window is accepted
+/// and then never run: resolving the model fails inside the drain, nothing
+/// retries it, and the session sits waiting on a turn that will not happen —
+/// with no error anywhere, which is the part that makes it expensive. It was
+/// observed intermittently against the pinned binary while the provider
+/// proofs were being written, where the test harness had to wait for the
+/// catalogue itself because the node's handshake did not.
+///
+/// So the handshake waits here instead, before the session exists. The caller
+/// runs the whole handshake under `START_TIMEOUT`; a catalogue that never
+/// settles therefore fails the launch visibly rather than producing a session
+/// whose first prompt disappears. `/config/providers` is the route the
+/// adapter already reads a context window from, so this asks nothing new of
+/// the server.
+async fn catalogue_settled(
+    client: &Client,
+    provider: &str,
+    model: &str,
+    stage: &Arc<Mutex<String>>,
+) -> Result<(), AdapterError> {
+    let mut last;
+    loop {
+        match client.get_json(&client.scoped("/config/providers")).await {
+            Ok(listed) => {
+                let entries = listed["providers"].as_array().cloned().unwrap_or_default();
+                if entries
+                    .iter()
+                    .filter(|entry| entry["id"].as_str() == Some(provider))
+                    .any(|entry| entry["models"].get(model).is_some())
+                {
+                    return Ok(());
+                }
+                let offered: Vec<String> = entries
+                    .iter()
+                    .filter_map(|entry| entry["id"].as_str().map(str::to_string))
+                    .collect();
+                last = if offered.is_empty() {
+                    "it listed no providers at all".to_string()
+                } else {
+                    format!("it listed {}", offered.join(", "))
+                };
+            }
+            Err(e) => last = e.to_string(),
+        }
+        *stage.lock().unwrap() =
+            format!("waiting for {provider}/{model} to appear in the catalogue ({last})");
+        // The caller's timeout is the bound. Failing here on a slow catalogue
+        // would trade a silent hang for a flaky launch; the stage note above
+        // is what makes that timeout say which of the two it was.
+        tokio::time::sleep(CATALOGUE_POLL).await;
     }
 }
 
@@ -1723,6 +1875,86 @@ mod tests {
         assert_eq!(env["OPENCODE_SERVER_USERNAME"], "opencode");
         // Per-session state is never the volume every session shares.
         assert!(!env["HOME"].ends_with("/.opencode"));
+        // The launch manifest's skill root: absolute, beside the read-only
+        // config rather than inside the worktree, and outside every directory
+        // OpenCode discovers on its own. This is the value `{env:…}` in the
+        // config resolves to — a relative `skills.paths` entry would be
+        // resolved against the worktree, which is the one place a session can
+        // write.
+        assert_eq!(
+            env[crate::manifest::SKILL_ROOT_ENV],
+            "/root/.opencode/skills"
+        );
+        assert!(!env[crate::manifest::SKILL_ROOT_ENV].starts_with(&env["HOME"]));
+    }
+
+    /// The manifest renders into the keys OpenCode reads, and the ones it
+    /// leaves out are as load-bearing as the ones it writes: a `skills.urls`
+    /// entry would be fetched over plain HTTP before any interaction, with
+    /// nothing that disables it.
+    #[test]
+    fn the_manifest_renders_skills_and_only_plugins_the_image_baked() {
+        let files = vec![crate::manifest::ManifestFile {
+            path: "SKILL.md".into(),
+            text: "---\nname: notes\ndescription: d\n---\n\nbody\n".into(),
+        }];
+        let baked = OpenCodeAdapter::baked_plugins();
+        let manifest = crate::manifest::build(crate::manifest::Inputs {
+            channel: "work",
+            skills: vec![crate::manifest::SkillEntry {
+                name: "notes".into(),
+                description: "d".into(),
+                source: "dir:/srv/notes".into(),
+                digest: crate::manifest::skill::digest_of(&files),
+                warnings: Vec::new(),
+                files,
+            }],
+            instructions: Vec::new(),
+            agents: Vec::new(),
+            plugins: &baked,
+            baked: &baked,
+            lsp: crate::manifest::toolchain_lsp(OpenCodeAdapter::ID),
+            formatters: crate::manifest::toolchain_formatters(OpenCodeAdapter::ID),
+            providers: vec!["anthropic".into()],
+            policy_revision: "1".into(),
+        })
+        .expect("the image's own plugin builds");
+
+        let mut wired = wiring();
+        wired.manifest = manifest;
+        let document = config_document(&wired, &[]);
+        assert_eq!(
+            document["skills"]["paths"],
+            json!(["{env:TRACON_SKILL_ROOT}"])
+        );
+        assert!(document["skills"]["urls"].is_null(), "{document}");
+        assert_eq!(document["plugin"], json!(baked));
+        // `lsp` and `formatter` are the toolchain profile's, merged in by
+        // `scratch_files`; the manifest renders neither, so one fact has one
+        // source.
+        assert!(document["lsp"].is_null(), "{document}");
+        assert!(document["formatter"].is_null(), "{document}");
+
+        // And an empty manifest writes neither a skill root nor a plugin list.
+        let bare = config_document(&wiring(), &[]);
+        assert!(bare["skills"].is_null(), "{bare}");
+        assert!(bare["plugin"].is_null(), "{bare}");
+
+        // What a session actually gets does carry the toolchain, because
+        // `scratch_files` merges the profile in on the way out.
+        let mut wired = wiring();
+        wired.manifest = crate::manifest::LaunchManifest::default();
+        let staged = OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION).scratch_files(&wired);
+        let written: Value = serde_json::from_str(
+            &staged
+                .iter()
+                .find(|(name, _)| name == OpenCodeAdapter::CONFIG_FILE)
+                .expect("a config file is written")
+                .1,
+        )
+        .expect("the config is JSON");
+        assert!(written["lsp"].is_object(), "{written}");
+        assert!(written["formatter"].is_object(), "{written}");
     }
 
     /// The server is unauthenticated without a password, so a launch that

@@ -121,6 +121,17 @@ pub struct Wiring {
     /// The placeholder key every provider entry carries, which is also this
     /// session's token at the gateway.
     pub token: String,
+    /// The operator's half of the same file: skills, standing instructions,
+    /// agents, approved plugins and the language servers turned on for this
+    /// channel.
+    ///
+    /// It rides here because the two halves are rendered together — an
+    /// adapter writes one configuration document, not two — and because what
+    /// a manifest may name is bounded by what this wiring already settled:
+    /// the provider set is part of the manifest's digest. Empty is the
+    /// default and renders nothing, which is what a probe and every harness
+    /// but OpenCode get.
+    pub manifest: crate::manifest::LaunchManifest,
 }
 
 /// The base URL for one provider as the harness sees it.
@@ -185,6 +196,7 @@ pub fn harness_wiring(
         models_json,
         providers: wired,
         token: token.to_string(),
+        manifest: crate::manifest::LaunchManifest::default(),
     }
 }
 

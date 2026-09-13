@@ -22,6 +22,7 @@ pub mod authority;
 pub use authority::*;
 pub mod corpus;
 pub mod evidence;
+pub mod manifest;
 pub mod metrics;
 pub mod opencode;
 pub mod opencode_state;
@@ -34,6 +35,7 @@ pub mod ui;
 pub mod vectors;
 pub use corpus::*;
 pub use evidence::*;
+pub use manifest::*;
 pub use opencode::*;
 pub use opencode_state::*;
 pub use operator::*;
@@ -1723,6 +1725,14 @@ mod records {
         /// history changes. NULL means it is still on the home.
         #[serde(default)]
         pub archived_ms: Option<i64>,
+        /// The launch manifest this session was staged from: the operator's
+        /// skills, instructions, agents, approved plugins and the provider
+        /// set and policy revision the launch settled, as one digest. Written
+        /// once, at launch, and never afterwards — a later revision is for
+        /// the next session, not this one. NULL on a session from a node that
+        /// has no manifest, and on rows written before the column.
+        #[serde(default)]
+        pub manifest_digest: Option<String>,
     }
 
     fn default_phase() -> String {
@@ -1767,6 +1777,7 @@ mod records {
                 ended_mono_ms: r.get("ended_mono_ms")?,
                 updated_ms: r.get("updated_ms")?,
                 archived_ms: r.get("archived_ms")?,
+                manifest_digest: r.get("manifest_digest")?,
             })
         }
     }
@@ -1962,6 +1973,9 @@ mod records {
         pub context_size: Option<i64>,
         pub started_mono_ms: Option<i64>,
         pub ended_mono_ms: Option<i64>,
+        /// Written once, at launch, when the manifest the session was staged
+        /// from is known.
+        pub manifest_digest: Option<String>,
     }
 
     impl SessionPatch {
@@ -1999,6 +2013,7 @@ mod records {
             push!("context_size", self.context_size);
             push!("started_mono_ms", self.started_mono_ms);
             push!("ended_mono_ms", self.ended_mono_ms);
+            push!("manifest_digest", self.manifest_digest);
             (sets, vals)
         }
 
@@ -2663,6 +2678,7 @@ mod tests {
                 ended_mono_ms: None,
                 updated_ms: now_ms(),
                 archived_ms: None,
+                manifest_digest: None,
             })
             .unwrap();
     }

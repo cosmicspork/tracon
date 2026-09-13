@@ -393,6 +393,7 @@ async fn the_config_is_readable_and_carries_no_secrets() {
             "external",
             "gateway",
             "harness",
+            "launch",
             "node_name",
             "publish",
             "readonly",
@@ -562,6 +563,7 @@ fn session_on(id: &str, channel: &str, state: &str) -> tracon::store::SessionRow
         ended_mono_ms: None,
         updated_ms: 1,
         archived_ms: None,
+        manifest_digest: None,
     }
 }
 

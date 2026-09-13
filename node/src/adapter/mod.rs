@@ -85,6 +85,18 @@ pub fn pinned_version(cfg: &Config) -> String {
     image_version(&cfg.harness.id).to_string()
 }
 
+/// Plugin packages the harness image for `harness_id` bakes into its offline
+/// package cache. A harness with no plugin mechanism has none, and a name
+/// outside this list is refused when a launch manifest is built rather than
+/// discovered as a missing module inside a runner with no network.
+pub fn baked_plugins(harness_id: &str) -> Vec<String> {
+    if harness_id == opencode::OpenCodeAdapter::ID {
+        opencode::OpenCodeAdapter::baked_plugins()
+    } else {
+        Vec::new()
+    }
+}
+
 /// The version the harness image for `harness_id` installs.
 pub fn image_version(harness_id: &str) -> &'static str {
     if harness_id == claude::ClaudeAdapter::ID {

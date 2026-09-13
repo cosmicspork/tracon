@@ -145,7 +145,7 @@ impl Rig {
         let (status, _, body) = self
             .operator_call(
                 "POST",
-                &format!("/api/sessions/{session}/opencode-ui"),
+                &format!("/api/sessions/{session}/opencode-boot"),
                 None,
                 &[],
             )
@@ -809,7 +809,7 @@ async fn logging_the_operator_out_revokes_the_capability() {
     let (status, _, body) = rig
         .operator_call(
             "POST",
-            &format!("/api/sessions/{TRACON_SESSION}/opencode-ui"),
+            &format!("/api/sessions/{TRACON_SESSION}/opencode-boot"),
             None,
             &[
                 ("cookie", &format!("tracon_session={operator}")),

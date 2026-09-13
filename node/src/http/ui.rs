@@ -1009,7 +1009,7 @@ async fn to_gateway(
 // Minting, from the operator's own interface
 // ---------------------------------------------------------------------------
 
-/// `POST /api/sessions/{id}/opencode-ui` on the **operator** router: "Open in
+/// `POST /api/sessions/{id}/opencode-boot` on the **operator** router: "Open in
 /// OpenCode".
 ///
 /// Behind the operator guard like every other route there, so the caller is

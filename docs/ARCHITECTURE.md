@@ -119,6 +119,39 @@ Rules learned against real harnesses, kept as rules:
   configured, unavailable, or disabled — and the header says that rather than
   inventing a lifecycle. Anything richer is an upstream contribution.
 
+### The launch manifest
+
+**Customization is a node-owned object, not a directory the harness discovers.**
+Skills, standing instructions, agents, the approved plugin list, the language
+servers and formatters turned on, the effective provider set and the policy
+revision are built into one per-channel manifest with a content digest and a
+revision number, and every session records the digest it launched under. A new
+revision never changes a running session: the files were staged at launch, and
+the next launch is what picks the change up. The node builds the manifest rather
+than letting the harness resolve one because upstream's own resolution is not
+safe to inherit — a duplicate skill name is resolved by overwriting one of them
+nondeterministically, a `skills.urls` entry is fetched over plain HTTP before any
+interaction with nothing that disables it, and a plugin resolves by a bare
+existence check with no integrity verification. So duplicates are refused at
+build, URL sources are refused outright, paths are validated and symlinks are
+never followed, and a plugin name the harness *image* did not bake is refused
+with the cache path it would have needed. Skill content is treated as code: a
+`SKILL.md` body is also registered as a slash command whose template is
+shell-interpolated, so an import records that plainly rather than implying the
+package is inert data.
+
+**Nested `AGENTS.md` and `CLAUDE.md` are read, and that is accepted.** OpenCode's
+`read` tool attaches instruction files it encounters anywhere under the worktree,
+with no flag that gates it — `OPENCODE_DISABLE_PROJECT_CONFIG` covers the project
+config, the project's `.opencode/` directories and the top-level `AGENTS.md` used
+for the system prompt, but not this. It matches what today's harnesses already
+do: they read the repository, and the repository is allowed to contain
+instructions about itself. The position that makes it safe is the one that has
+always applied here — instruction content grants no permission. Every tool class
+is `ask`, policy runs on the node, and a file in the worktree can ask for
+something but cannot approve it. Nothing about the manifest, the orientation, or
+the gate changes if a repository adds one.
+
 ### Model auth
 
 **Model credentials are brokered like every other credential.** The harness holds
@@ -509,6 +542,23 @@ Every node serves the same embedded SPA; a client is a matter of shell.
   the CLI the unit runs, and after an update moves both onto the version it carries
   once no session is running. A node an earlier version spawned as its child is
   stopped once, before the service takes the port.
+- **Two windows, and only one of them is privileged.** The main window is the node's
+  own interface, and it holds the commands that install the CLI, install updates and
+  restart the node — commands the node itself must never have, because a session
+  inside the boundary would then hold them too. OpenCode's native UI is third-party
+  code driven by an agent, so it gets a second window and its own capability, and
+  that capability grants nothing: no `remote` section, so the origin loaded there can
+  invoke no command at all, of this app's or of any plugin's. The window is created
+  on demand on a boot URL the node mints, never at launch; it may navigate only to
+  the node's OpenCode UI origin, which is a distinct origin from the node's own —
+  same-origin with the operator API is a page that drives the node with no credential
+  — and the app refuses a boot URL that would collapse the two. An `http(s)` link off
+  that origin is handed to the system browser by the app's own navigation handler, in
+  Rust, so reaching the browser is not a capability the window holds; any other scheme
+  is refused. The boot token rides in the URL fragment, which is not sent in requests
+  and is stripped from anything the app logs. Nothing about this depends on the page
+  behaving; it is the window's grants and its navigation handler, both asserted by
+  test against the manifest.
 - The interface talks only to the node that served it; that node mirrors peers and
   forwards commands to owners. A verdict executes on the owner, because staleness
   and publishing need the owner's worktree and broker.

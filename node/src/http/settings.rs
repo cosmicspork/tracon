@@ -37,6 +37,10 @@ pub fn config_view(cfg: &Config) -> Value {
             "enabled": cfg.external.enabled,
             "idle_timeout_secs": cfg.external.idle_timeout_secs,
         },
+        // What a session's harness may load, beyond what the node decides.
+        // The per-channel half — skills, instructions, agents — lives in the
+        // store, behind `/api/manifest`.
+        "launch": { "plugins": cfg.launch.plugins },
         "supervision": {
             "checks": cfg.supervision.checks,
             "timeout_secs": cfg.supervision.timeout_secs,
@@ -221,6 +225,20 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
                     }
                 }
             }
+            "launch" => {
+                for (k, v) in object(value, "launch")? {
+                    match k.as_str() {
+                        "plugins" => {
+                            let plugins = string_list(v, "launch.plugins")?;
+                            if cfg.launch.plugins != plugins {
+                                cfg.launch.plugins = plugins;
+                                changed.push("launch.plugins".into());
+                            }
+                        }
+                        other => return Err(unknown(&format!("launch.{other}"))),
+                    }
+                }
+            }
             other => return Err(unknown(other)),
         }
     }
@@ -355,6 +373,7 @@ mod tests {
                 "external",
                 "gateway",
                 "harness",
+                "launch",
                 "node_name",
                 "publish",
                 "readonly",

@@ -46,7 +46,11 @@ the agent runs inside; on a Mac that is `brew install podman`, then
 `podman machine init` once — and then, with one button, installs the `tracon`
 command in `~/.local/bin` and a user service (launchd, or systemd --user) that runs
 the node whether or not the app is open. From then on the window is the node's own
-interface.
+interface. An OpenCode session can also open that harness's own interface, in a
+second window that holds none of the first one's privileges: it is granted no IPC
+at all, it can navigate only to the node's OpenCode UI origin, a link off that
+origin opens in your browser instead, and the boot token that gets it in travels
+in the URL fragment, which no request carries.
 
 The app keeps itself and the node current. It checks GitHub Releases at launch and
 replaces itself from Settings or the tray only after a verifier it carries has

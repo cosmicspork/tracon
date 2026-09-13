@@ -240,6 +240,42 @@ async fn a_cancel_aborts_the_harness_session() {
     assert_eq!(seen.lock().unwrap().aborted, 1);
 }
 
+/// The launch waits for the catalogue, not just for health.
+///
+/// `serve` answers `/global/health` before its providers have loaded, and the
+/// two are not ordered. A session created in that window accepts a prompt and
+/// then never runs it: resolving the model fails inside the drain, nothing
+/// retries, and the session waits on a turn that will not happen — with no
+/// error anywhere, which is what makes it expensive. It was seen
+/// intermittently against the pinned binary, where the *test* harness had to
+/// wait for the catalogue because the adapter did not.
+///
+/// Here the catalogue is empty for the first few asks. The launch has to
+/// absorb that and the first prompt has to run.
+#[tokio::test]
+async fn a_launch_waits_for_the_catalogue_before_the_first_prompt_can_be_lost() {
+    state::isolate();
+    let (runner, seen) = start(Fake::new("1.18.30", usize::MAX).catalogue_late(3)).await;
+    let (handle, mut rx) = OpenCodeAdapter::new("1.18.30")
+        .launch(&runner, spec())
+        .await
+        .expect("the harness starts even though its catalogue was late");
+
+    let turn = tokio::spawn(async move { handle.prompt("fix the validation".into()).await });
+    let mut labels = Vec::new();
+    let permission = next_permission(&mut rx, &mut labels).await;
+    let HarnessEvent::Permission { request: _, reply } = permission else {
+        panic!("expected a permission request")
+    };
+    reply
+        .send(PermissionReply::Selected("allow_once".into()))
+        .unwrap();
+    let result = turn.await.unwrap().expect("the first turn runs");
+    assert_eq!(result.stop_reason, "end_turn");
+    // The prompt was not merely accepted — it reached the harness.
+    assert_eq!(seen.lock().unwrap().prompts.len(), 1);
+}
+
 /// The models are the node's declaration, not a probe: nothing is asked of the
 /// harness, and a node that declared none is told so rather than starting a
 /// session against an empty picker.

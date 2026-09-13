@@ -241,6 +241,9 @@ export interface Session {
   updated_ms: number
   /** Put away: kept in full, just not listed on the home. */
   archived_ms?: number | null
+  /** The launch manifest this session was staged from. Written once, at
+   * launch: a later revision is for the next session, not this one. */
+  manifest_digest?: string | null
 }
 
 export interface Event {
@@ -796,8 +799,49 @@ export interface NodeConfig {
   publish: { gh: string; glab: string; git: string }
   boundary: { podman: string }
   external: { enabled: boolean; idle_timeout_secs: number }
+  launch: { plugins: string[] }
   readonly: { hub_url: string | null; runtime: string; config_path: string }
   running: { harness_id: string; harness_version: string; node_name: string }
+}
+
+/** One thing an operator put in a channel's launch manifest. */
+export interface ManifestItem {
+  channel: string
+  kind: 'skill' | 'instruction' | 'agent'
+  name: string
+  source: string
+  digest: string
+  body: string
+  warnings: string[]
+  imported_ms: number
+}
+
+/** A built manifest: what a launch on this channel would stage. */
+export interface LaunchManifest {
+  channel: string
+  revision: number
+  digest: string
+  skills: { name: string; description: string; source: string; digest: string }[]
+  instructions: { name: string; body: string }[]
+  agents: { name: string; body: string }[]
+  plugins: string[]
+  lsp: { name: string; command: string[] }[]
+  formatters: { name: string; command: string[] }[]
+  providers: string[]
+  policy_revision: string
+}
+
+export interface ManifestView {
+  channel: string
+  items: ManifestItem[]
+  /** The latest revision this node recorded, which running sessions may hold. */
+  recorded: LaunchManifest | null
+  /** What the next launch would build. Null when it would be refused. */
+  next: LaunchManifest | null
+  /** Why it would be refused, when it would. */
+  error: string | null
+  /** Plugin packages the harness image bakes; nothing else may be approved. */
+  baked_plugins: string[]
 }
 
 export interface EnrollStatus {

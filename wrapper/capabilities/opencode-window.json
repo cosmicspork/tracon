@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "opencode-window",
+  "description": "The advanced OpenCode window, and the least this app can give it. The window holds the node's OpenCode UI origin, which is remote content built by a third party and driven by an agent, so it is granted no IPC at all: there is no `remote` section here, which is what decides that the origin loaded in this window can invoke nothing. The four window commands below are `local` only, reachable from a page this app itself serves into the window and from nowhere else. Nothing that manages the node appears here, and no plugin does either: a link off the UI origin is opened in the system browser by this app's own navigation handler, in Rust, never by a command this window could call.",
+  "windows": ["opencode"],
+  "platforms": ["linux", "macOS"],
+  "local": true,
+  "permissions": [
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-unminimize",
+    "core:window:allow-set-size"
+  ]
+}
