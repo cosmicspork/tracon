@@ -211,26 +211,25 @@ impl CallbackCapture {
         target: CallbackTarget,
     ) -> Result<(Self, mpsc::UnboundedReceiver<CaptureEvent>), CallbackError> {
         let port = target.port();
-        let ipv4 = bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)), port).await?;
-        let ipv6 = match bind_ipv6(port) {
-            Ok(listener) => Some(listener),
-            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                drop(ipv4);
-                return Err(CallbackError::AddrInUse(port));
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::AddrNotAvailable | io::ErrorKind::Unsupported
-                ) =>
-            {
-                None
-            }
-            Err(_) => {
-                drop(ipv4);
-                return Err(CallbackError::Listener);
-            }
-        };
+        let ipv4 = std::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+            .map_err(|error| listener_error(&error, port))?;
+        let (ipv4, ipv6) = bind_ipv6_beside(ipv4, port)?;
+        Self::serve(target, ipv4, ipv6)
+    }
+
+    /// Serve a callback on loopback listeners that are already bound.
+    ///
+    /// Binding is a separate step from serving so a caller that does not have
+    /// a port in mind binds port 0 once and hands the listener over, instead
+    /// of asking the kernel for a free port, closing it, and naming it again a
+    /// moment later — a gap in which anything else on the host can take it.
+    fn serve(
+        target: CallbackTarget,
+        ipv4: std::net::TcpListener,
+        ipv6: Option<std::net::TcpListener>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<CaptureEvent>), CallbackError> {
+        let ipv4 = into_tokio(ipv4)?;
+        let ipv6 = ipv6.map(into_tokio).transpose()?;
 
         let cancel = CancellationToken::new();
         let (tx, rx) = mpsc::unbounded_channel();
@@ -246,24 +245,60 @@ impl CallbackCapture {
     }
 }
 
-async fn bind(address: SocketAddr, port: u16) -> Result<TcpListener, CallbackError> {
-    TcpListener::bind(address).await.map_err(|error| {
-        if error.kind() == io::ErrorKind::AddrInUse {
-            CallbackError::AddrInUse(port)
-        } else {
-            CallbackError::Listener
+/// Bind the IPv6 half of the callback beside an IPv4 half already bound to
+/// `port`, and release the IPv4 half if the IPv6 half cannot be had.
+///
+/// The IPv4 listener is taken by value: on every failing path this function
+/// holds the only handle to it, so the port cannot stay bound behind a login
+/// that never started.
+fn bind_ipv6_beside(
+    ipv4: std::net::TcpListener,
+    port: u16,
+) -> Result<(std::net::TcpListener, Option<std::net::TcpListener>), CallbackError> {
+    match bind_ipv6(port) {
+        Ok(listener) => Ok((ipv4, Some(listener))),
+        Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+            drop(ipv4);
+            Err(CallbackError::AddrInUse(port))
         }
-    })
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::AddrNotAvailable | io::ErrorKind::Unsupported
+            ) =>
+        {
+            Ok((ipv4, None))
+        }
+        Err(_) => {
+            drop(ipv4);
+            Err(CallbackError::Listener)
+        }
+    }
 }
 
-fn bind_ipv6(port: u16) -> io::Result<TcpListener> {
+fn listener_error(error: &io::Error, port: u16) -> CallbackError {
+    if error.kind() == io::ErrorKind::AddrInUse {
+        CallbackError::AddrInUse(port)
+    } else {
+        CallbackError::Listener
+    }
+}
+
+fn bind_ipv6(port: u16) -> io::Result<std::net::TcpListener> {
     let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
     socket.set_only_v6(true)?;
-    socket.set_nonblocking(true)?;
     socket.bind(&SocketAddr::from((Ipv6Addr::LOCALHOST, port)).into())?;
     socket.listen(1024)?;
-    TcpListener::from_std(socket.into())
+    Ok(socket.into())
 }
+
+fn into_tokio(listener: std::net::TcpListener) -> Result<TcpListener, CallbackError> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|_| CallbackError::Listener)?;
+    TcpListener::from_std(listener).map_err(|_| CallbackError::Listener)
+}
+
 fn spawn_listener(
     listener: TcpListener,
     target: Arc<CallbackTarget>,
@@ -359,6 +394,20 @@ mod tests {
         .unwrap()
     }
 
+    /// Bind an IPv4 loopback listener and name it in a target, in that order.
+    ///
+    /// Every unit test in this crate runs in one process, so a port learned
+    /// from a listener that was then closed is not the test's to keep: the
+    /// kernel hands the same ephemeral port to the next socket that asks, and
+    /// on a busy runner that is another test, not this one. The listener is
+    /// returned still bound so the caller passes it to
+    /// [`CallbackCapture::serve`] rather than asking for the port again.
+    fn bound_loopback_target() -> (std::net::TcpListener, CallbackTarget, u16) {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, target_at(port), port)
+    }
+
     #[test]
     fn parses_only_strict_loopback_targets() {
         assert_eq!(target().port(), 18443);
@@ -440,10 +489,8 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_state_does_not_consume_the_listener_and_success_is_fixed() {
-        let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-        let (capture, mut events) = CallbackCapture::start(target_at(port)).await.unwrap();
+        let (listener, target, port) = bound_loopback_target();
+        let (capture, mut events) = CallbackCapture::serve(target, listener, None).unwrap();
 
         let rejected = reqwest::get(format!(
             "http://127.0.0.1:{port}/oauth/callback?code=nope&state=wrong"
@@ -488,10 +535,8 @@ mod tests {
 
     #[tokio::test]
     async fn denial_response_is_redacted() {
-        let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-        let (capture, mut events) = CallbackCapture::start(target_at(port)).await.unwrap();
+        let (listener, target, port) = bound_loopback_target();
+        let (capture, mut events) = CallbackCapture::serve(target, listener, None).unwrap();
         let request = tokio::spawn(async move {
             reqwest::get(format!(
                 "http://127.0.0.1:{port}/oauth/callback?error=provider_secret_reason&state=secret"
@@ -520,27 +565,42 @@ mod tests {
         capture.stop();
     }
 
-    /// Hold `[::1]:port` for a port that is free on both loopback families,
-    /// for the collision test below. `None` when this machine has no IPv6
+    /// The fixed loopback range the collision test reserves a port in, and the
+    /// lock that makes it one test's at a time.
+    ///
+    /// The collision test is the one test here that cannot work from an
+    /// already-bound port alone: proving the IPv4 half was *released* means
+    /// binding it again afterwards, and between the release and that rebind
+    /// the port is genuinely free. Two things close that window. The range is
+    /// below both platforms' ephemeral ranges (macOS 49152-65535, Linux
+    /// 32768-60999), so no `bind(port 0)` anywhere on the host is ever handed
+    /// one of these ports; and the lock keeps any other test that reserves
+    /// from this range out while one holds it. Every unit test in this crate
+    /// runs in one process, so a fixed range is shared state — but it is one
+    /// narrow resource, and the lock is over it, not over the test binary.
+    ///
+    /// Any future test that wants a known-free fixed port belongs on this
+    /// lock and this range.
+    static FIXED_LOOPBACK_RANGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const FIXED_LOOPBACK_PORTS: std::ops::Range<u16> = 19_500..19_600;
+
+    /// Reserve a port in [`FIXED_LOOPBACK_PORTS`] that is free on both
+    /// loopback families, holding *both* halves: a v6-only occupier on
+    /// `[::1]:port`, and an IPv4 listener on `127.0.0.1:port` for the caller
+    /// to hand to the code under test. `None` when this machine has no IPv6
     /// loopback to collide on.
     ///
-    /// The port comes from a fixed range rather than an ephemeral bind, and
-    /// the IPv6 half stays held for the whole test. An ephemeral port would
-    /// make the test racy in a way that shows on macOS: IPv4 and IPv6 binds
-    /// to *distinct* loopback addresses do not conflict with each other, so
-    /// reserving `[::1]:port` leaves `127.0.0.1:port` free for the kernel to
-    /// hand to any other socket in this binary — every unit test runs in one
-    /// process — in the window between `CallbackCapture::start` releasing it
-    /// and the test taking it back. Ports below 32768 are outside both
-    /// platforms' ephemeral ranges (macOS 49152-65535, Linux 32768-60999), so
-    /// nothing is ever assigned one by accident.
+    /// Returning the IPv4 listener bound rather than probing it and closing
+    /// it is the point: the port is this test's without interruption from the
+    /// moment it is chosen until the code under test is given it, so the only
+    /// thing that can free it afterwards is that code.
     ///
     /// The occupier is v6-only on purpose: the collision under test is an
     /// IPv6-loopback collision, and leaving `IPV6_V6ONLY` at the platform
     /// default would make the precondition depend on `net.inet6.ip6.v6only`
     /// (macOS) or `net.ipv6.bindv6only` (Linux).
-    fn occupied_ipv6_loopback() -> Option<(std::net::TcpListener, u16)> {
-        for port in 19_500..19_600u16 {
+    fn reserved_collision_port() -> Option<(std::net::TcpListener, std::net::TcpListener, u16)> {
+        for port in FIXED_LOOPBACK_PORTS {
             let Ok(socket) = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP)) else {
                 return None;
             };
@@ -557,24 +617,30 @@ mod tests {
             let Ok(ipv4) = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)) else {
                 continue;
             };
-            drop(ipv4);
-            return Some((socket.into(), port));
+            return Some((socket.into(), ipv4, port));
         }
         None
     }
 
-    #[tokio::test]
-    async fn an_ipv6_collision_releases_the_ipv4_listener() {
-        let Some((occupied, port)) = occupied_ipv6_loopback() else {
+    #[test]
+    fn an_ipv6_collision_releases_the_ipv4_listener() {
+        let _range = FIXED_LOOPBACK_RANGE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some((occupied, ipv4, port)) = reserved_collision_port() else {
             return;
         };
-        match CallbackCapture::start(target_at(port)).await {
+        // `bind_ipv6_beside` is the whole of the release logic; `start` is it
+        // plus the IPv4 bind this test has already done.
+        match bind_ipv6_beside(ipv4, port) {
             Err(CallbackError::AddrInUse(value)) if value == port => {}
             Err(other) => panic!("expected the IPv6 collision on {port}, got {other}"),
             Ok(_) => panic!("the occupied IPv6 loopback on {port} did not collide"),
         }
-        // `occupied` still holds the IPv6 half, so nothing but a listener the
-        // capture failed to release can be holding the IPv4 half.
+        // `occupied` still holds the IPv6 half, and this test held the IPv4
+        // half from the moment it chose the port until it handed that very
+        // listener over, so the port being free now means the capture closed
+        // it and nothing else could have taken it in between.
         std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .expect("partial IPv4 listener was released");
         drop(occupied);
