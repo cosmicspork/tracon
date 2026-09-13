@@ -55,6 +55,13 @@ refer to that manifest's table.
         subscription via `claude setup-token` lifted into the broker, Codex subscription
         through the gateway with the `openai`-plus-OAuth trap asserted by test (finding 9),
         Bun proxy handling and ai-sdk header bytes observed.
+        - The `claude setup-token` path is built and covered by tests: the Claude adapter
+          runs it under a pty in a throwaway helper home, parses the sign-in URL out of the
+          CLI's own screen, takes the pasted code, and lifts the printed `sk-ant-oat…` token
+          as an `oauth` credential, so the gateway's existing subscription shaping (#166)
+          applies unchanged. The `anthropic` login now resolves to the Claude adapter
+          whatever `[harness] id` names. **Still unproven live:** no real subscription has
+          been signed in through it, so the proof itself remains the operator's.
   - [ ] Usage and spending accounting reconciled between OpenCode's per-message usage and
         the gateway's counts; unsent-text durability across disconnects.
   - [ ] Adversarial API run: permission escalation, foreign session ids, config and auth
@@ -114,9 +121,9 @@ declared `permission.ask` hook; an LSP status event.
 ## Current limitations
 
 - No real private-repository end-to-end run yet; see above.
-- Native macOS signing and notarization are not exercised: the release workflow requires
-  Apple Developer ID credentials that are not provisioned, and the macOS release leg
-  fails closed without them rather than shipping unsigned.
+- macOS releases are unsigned by choice — the publisher holds no Apple Developer ID —
+  and are authenticated by GitHub build provenance instead, so Gatekeeper asks once on
+  first open; the workflow still signs and notarizes if credentials are ever configured.
 - QA deployment and browser verification are implemented but not exercised against a
   real target.
 - The Kubernetes runtime backend has no scoped QA browser egress gateway;

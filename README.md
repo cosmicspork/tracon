@@ -34,9 +34,13 @@ no editor, no terminal.
 **On a laptop, the desktop app is the whole install.** Take the `.dmg` (macOS on
 Apple Silicon) or the `.AppImage` (Linux x86_64) from the
 [latest release](https://github.com/cosmicspork/tracon/releases/latest). The
-macOS bundle is Developer ID signed and notarized once the publisher's Apple
-credentials are configured in the release workflow; a release built without them
-has no macOS desktop leg at all rather than an unsigned one. The app opens on a
+macOS bundle is unsigned: the publisher holds no Apple Developer ID, so what
+authenticates every desktop asset is its GitHub build provenance attestation,
+published beside it and checked by the app itself before any self-update. The
+cost is that Gatekeeper asks once — right-click the app and choose Open, or
+`xattr -d com.apple.quarantine /Applications/tracon.app`, and it never asks
+again. (The release workflow signs and notarizes instead whenever Apple
+credentials are configured for it.) The app opens on a
 setup page that looks for rootless Podman — the boundary
 the agent runs inside; on a Mac that is `brew install podman`, then
 `podman machine init` once — and then, with one button, installs the `tracon`
@@ -47,9 +51,10 @@ interface.
 The app keeps itself and the node current. It checks GitHub Releases at launch and
 replaces itself from Settings or the tray only after a verifier it carries has
 checked the download's GitHub build provenance against this repository and its
-release workflow, and — on macOS — that the new bundle is signed by the same
-publisher as the installed one; an update it fetches itself is never quarantined,
-so macOS does not ask again. On the
+release workflow, and — on macOS — that the update never costs the install a
+guarantee it had: an unsigned install accepts an unsigned or a signed bundle,
+while a Developer ID signed one accepts only the same publisher. An update it
+fetches itself is never quarantined, so macOS does not ask again. On the
 next launch it moves the CLI and the service onto the node it now carries —
 restarting the node only once no session is running, and saying so in the tray
 while it waits — and rebuilds the boundary images if their definitions changed.
@@ -441,11 +446,18 @@ gateway_ip = "10.89.0.2"
 gateway_container = "tracon-gw"
 gateway_image = "localhost/tracon-gateway"
 harness_image = "localhost/tracon-harness"  # "localhost/tracon-harness-claude" with [harness] id = "claude"
+login_image = "localhost/tracon-harness-claude"  # the Anthropic subscription login runs `claude
+                                    # setup-token`, which only this image carries; `tracon setup`
+                                    # builds it alongside the harness image. Set it to the same
+                                    # string as harness_image (or empty) when they are one image.
 start_machine = true                # macOS: start the podman machine when it is stopped
 # selinux_label_disable = true      # only if the boundary check says the labels fight you
 
 [gateway]
-allow_hosts = ['^api\.anthropic\.com$', '^api\.openai\.com$', '^chatgpt\.com$', '^auth\.openai\.com$']
+allow_hosts = ['^api\.anthropic\.com$', '^platform\.claude\.com$', '^claude\.ai$',
+               '^api\.openai\.com$', '^chatgpt\.com$', '^auth\.openai\.com$']
+                                    # platform.claude.com and claude.ai are the subscription
+                                    # login's own endpoints, not the model API's
 proxy_port = 8888
 forward_port = 7421
 # harness_listen = "127.0.0.1:7421" # or a socket path; the platform default is right

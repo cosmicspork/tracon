@@ -602,6 +602,9 @@ pub struct Kubernetes {
     /// Namespace for harness pods. Empty: the pod's own.
     pub namespace: String,
     pub harness_image: String,
+    /// The image a provider login helper runs in when the session harness
+    /// cannot run it; see `Boundary::login_image`.
+    pub login_image: String,
     /// The PersistentVolumeClaim both the node and every harness mount.
     pub state_claim: String,
     /// Where that claim is mounted, in the node and in every harness pod —
@@ -623,6 +626,10 @@ impl Default for Kubernetes {
             namespace: String::new(),
             harness_image: format!(
                 "ghcr.io/cosmicspork/tracon-harness:{}",
+                env!("CARGO_PKG_VERSION")
+            ),
+            login_image: format!(
+                "ghcr.io/cosmicspork/tracon-harness-claude:{}",
                 env!("CARGO_PKG_VERSION")
             ),
             state_claim: "tracon-state".into(),
@@ -745,6 +752,11 @@ pub struct Boundary {
     pub gateway_container: String,
     pub gateway_image: String,
     pub harness_image: String,
+    /// The image a provider login helper runs in when the session harness
+    /// cannot run it: only Claude Code mints an Anthropic subscription token,
+    /// so a node whose sessions run another harness still needs this one.
+    /// Equal to `harness_image` (or empty) means there is no second image.
+    pub login_image: String,
     /// Podman needs `label=disable` for bind mounts on SELinux hosts.
     pub selinux_label_disable: Option<bool>,
     /// macOS: start the podman machine when the boundary finds it stopped.
@@ -998,12 +1010,19 @@ impl Default for Config {
                 gateway_container: "tracon-gw".into(),
                 gateway_image: "localhost/tracon-gateway".into(),
                 harness_image: "localhost/tracon-harness".into(),
+                login_image: "localhost/tracon-harness-claude".into(),
                 selinux_label_disable: None,
                 start_machine: true,
             },
             gateway: Gateway {
                 allow_hosts: vec![
                     r"^api\.anthropic\.com$".into(),
+                    // `claude setup-token` exchanges the pasted code at
+                    // `platform.claude.com/v1/oauth/token` and reads its
+                    // client metadata from `claude.ai`; the authorize page
+                    // itself opens in the operator's own browser, never here.
+                    r"^platform\.claude\.com$".into(),
+                    r"^claude\.ai$".into(),
                     r"^api\.openai\.com$".into(),
                     r"^chatgpt\.com$".into(),
                     r"^auth\.openai\.com$".into(),

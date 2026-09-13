@@ -3173,7 +3173,10 @@ fn provider_err(e: crate::providers::ProviderError) -> ApiError {
         | NotPending(_)
         | Busy(_)
         | WrongOwner
-        | RemoteDisconnect => StatusCode::CONFLICT,
+        | RemoteDisconnect
+        // The node did what it could; the credential simply cannot be renewed
+        // without the operator signing in again.
+        | ReconnectRequired(_) => StatusCode::CONFLICT,
         Failed(_) => StatusCode::BAD_GATEWAY,
     };
     ApiError(status, e.to_string())

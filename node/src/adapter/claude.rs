@@ -13,17 +13,19 @@
 //! control protocol nor `--permission-prompt-tool`.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
     AdapterError, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle, HarnessVersion,
-    LaunchSpec, Layout, ModelOption, PermissionReply, PermissionRequest, ProtocolSupport,
-    TurnResult,
+    LaunchSpec, Layout, LiftedToken, LoginFlow, ModelOption, PermissionReply, PermissionRequest,
+    ProtocolSupport, TurnResult,
 };
 use crate::acp::types::{self, PermissionOption, ToolCall, ToolCallUpdate, Usage};
 use crate::runner::{Runner, RunnerCommand, RunnerError, Spawned};
@@ -38,12 +40,51 @@ const INIT_TIMEOUT_SECS: u64 = 60;
 /// also what keeps a pinned node from silently following a model change.
 const ALIASES: &[&str] = &["opus", "sonnet", "haiku"];
 
+/// How long to wait for `claude setup-token` to print its sign-in URL.
+const LOGIN_URL_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// How long the login is given to end on its own once the token is in hand.
+const LOGIN_EXIT_GRACE: Duration = Duration::from_secs(10);
+
+/// The width the login's pty is set to before the CLI starts. At the default
+/// 80 the sign-in URL is wrapped across rows by cursor moves and no line
+/// contains it whole; wide enough, it is printed once, on one line.
+const LOGIN_COLUMNS: u16 = 400;
+
+/// What a `claude setup-token` token looks like. Long-lived subscription
+/// tokens carry this prefix, which is what distinguishes the token from every
+/// other string on the login's screen.
+const TOKEN_PREFIX: &str = "sk-ant-oat";
+
+/// The lifetime assumed when the CLI does not say. `setup-token` calls itself
+/// a "long-lived (1-year)" token in its own banner, and the node only uses
+/// this to decide when to warn; the real expiry is the API's.
+const DEFAULT_TOKEN_DAYS: i64 = 365;
+
+const MS_PER_DAY: i64 = 24 * 60 * 60 * 1000;
+
 pub struct ClaudeAdapter {
     pinned: String,
+    /// The image `claude setup-token` runs in when the node's own harness is
+    /// not Claude Code. `None` leaves the runner's harness image, which is
+    /// right when this adapter is also the session harness.
+    login_image: Option<String>,
+    /// What a completed login printed, by provider.
+    ///
+    /// `setup-token` prints its token once and stores nothing: its own screen
+    /// says "you won't be able to see it again". So unlike every other lift
+    /// there is no store directory to read afterwards, and the adapter
+    /// instance that ran the login is the only place the token exists until
+    /// the broker has it. Taken by `lift`, so it is not held any longer.
+    minted: Arc<Mutex<HashMap<String, LiftedToken>>>,
 }
 
 impl ClaudeAdapter {
     pub const ID: &'static str = "claude";
+
+    /// The one provider this harness can log in to. Claude Code mints an
+    /// Anthropic subscription token and nothing else.
+    pub const LOGIN_PROVIDER: &'static str = "anthropic";
 
     /// The version this node's harness image installs.
     /// `containers/harness-claude/Containerfile` fetches exactly this release
@@ -68,7 +109,17 @@ impl ClaudeAdapter {
     pub fn new(pinned: impl Into<String>) -> Self {
         Self {
             pinned: pinned.into(),
+            login_image: None,
+            minted: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Run the login helper in `image` rather than in whatever harness image
+    /// the runner carries. This is what lets a node whose sessions run another
+    /// harness still sign in to an Anthropic subscription.
+    pub fn with_login_image(mut self, image: Option<String>) -> Self {
+        self.login_image = image;
+        self
     }
 
     pub const fn layout() -> Layout {
@@ -129,6 +180,147 @@ impl ClaudeAdapter {
             ..Default::default()
         }
     }
+
+    /// `claude setup-token`, under a pty, in a directory of its own.
+    ///
+    /// The pty is not a nicety. With plain pipes the command prints nothing at
+    /// all — it is an Ink UI, and it reads its keystrokes from `/dev/tty`
+    /// rather than from stdin — so a login spawned the way a session is
+    /// spawned would hang with no URL and no way to answer it. `script(1)`
+    /// (bsdutils, part of the image's Debian base) gives it one and forwards
+    /// this process's stdin into it, which is what carries the paste-back.
+    ///
+    /// `HOME` and the state directory are a throwaway path under `/tmp`, never
+    /// the state a session mounts: the login is a helper that runs for a
+    /// couple of minutes and leaves nothing behind, and its token is read off
+    /// its own output rather than out of a store.
+    fn setup_token_cmd(&self, name: &str, helper_home: &str) -> RunnerCommand {
+        let config_dir = format!("{helper_home}{}", Self::CONFIG_SUBDIR);
+        let script = format!(
+            "mkdir -p {config_dir} && stty cols {LOGIN_COLUMNS} && exec claude setup-token"
+        );
+        RunnerCommand {
+            argv: vec![
+                "script".into(),
+                // Quiet, and exit with the command's own status rather than
+                // always zero, so a login that failed reads as failed.
+                "-q".into(),
+                "-e".into(),
+                "-c".into(),
+                script,
+                "/dev/null".into(),
+            ],
+            env: vec![
+                ("HOME".into(), helper_home.into()),
+                (Self::layout().env.into(), config_dir),
+                // Nothing in the runner can open a browser, and the CLI prints
+                // the URL either way; this keeps it from waiting on a spawn
+                // that would fail.
+                ("BROWSER".into(), "/bin/true".into()),
+                ("DISABLE_AUTOUPDATER".into(), "1".into()),
+                ("DISABLE_TELEMETRY".into(), "1".into()),
+            ],
+            image: self.login_image.clone(),
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    /// A directory for one login helper, under `/tmp` so that it is gone with
+    /// the container and can never be a session's state directory.
+    fn helper_home() -> String {
+        format!("/tmp/tracon-setup-token-{}", uuid::Uuid::now_v7())
+    }
+
+    const CONFIG_SUBDIR: &'static str = "/.claude";
+}
+
+/// Everything a terminal wrote to position, colour, or hyperlink the text,
+/// removed: CSI sequences, OSC strings (which is how the CLI wraps the sign-in
+/// URL in a clickable link), and the odd two-byte escape. What is left is what
+/// an operator would have read on the screen.
+fn plain(line: &str) -> String {
+    let bytes: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != '\u{1b}' {
+            if bytes[i] != '\r' && bytes[i] != '\u{7}' {
+                out.push(bytes[i]);
+            }
+            i += 1;
+            continue;
+        }
+        i += 1;
+        match bytes.get(i) {
+            // CSI: parameters, then one final byte in @..~.
+            Some('[') => {
+                i += 1;
+                while i < bytes.len() && !('\u{40}'..='\u{7e}').contains(&bytes[i]) {
+                    i += 1;
+                }
+                i += 1;
+            }
+            // OSC: runs to BEL or ST. Its payload (a hyperlink target) is not
+            // what the operator read, so it goes with the sequence.
+            Some(']') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != '\u{7}' {
+                    if bytes[i] == '\u{1b}' && bytes.get(i + 1) == Some(&'\\') {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            // Two-byte escapes: charset selection, save/restore cursor, ...
+            Some(_) => i += 1,
+            None => break,
+        }
+    }
+    out
+}
+
+/// The sign-in URL on a line of the login's screen, if it is there whole.
+///
+/// The authorize page is on Anthropic's own host and its redirect goes to a
+/// hosted callback, not to localhost: there is no local listener to catch, so
+/// the code comes back to the operator and is pasted in.
+fn sign_in_url(line: &str) -> Option<String> {
+    plain(line)
+        .split_whitespace()
+        .find(|token| token.starts_with("https://"))
+        .map(|token| token.trim_end_matches(['.', ',']).to_string())
+}
+
+/// The minted token on a line of the login's screen.
+fn minted_token(line: &str) -> Option<String> {
+    plain(line)
+        .split_whitespace()
+        .find(|token| token.starts_with(TOKEN_PREFIX))
+        .map(str::to_string)
+}
+
+/// How long the CLI says the token it just printed is good for, in
+/// milliseconds. `Your OAuth token (valid for 364 days):` and the like; a
+/// line that says nothing about a lifetime gives `None`, and the caller
+/// falls back to the one the CLI's own banner promises.
+fn stated_lifetime_ms(line: &str) -> Option<i64> {
+    let plain = plain(line);
+    let rest = plain.split("valid for").nth(1)?;
+    let mut words = rest.split_whitespace();
+    let count: i64 = words.next()?.parse().ok()?;
+    let unit = words.next()?.trim_end_matches([')', ':', ',', '.']);
+    let ms = match unit.trim_end_matches('s') {
+        "day" => count * MS_PER_DAY,
+        "week" => count * 7 * MS_PER_DAY,
+        "month" => count * 30 * MS_PER_DAY,
+        "year" => count * DEFAULT_TOKEN_DAYS * MS_PER_DAY,
+        "hour" => count * 60 * 60 * 1000,
+        _ => return None,
+    };
+    (ms > 0).then_some(ms)
 }
 
 /// The node builds one neutral MCP descriptor; Claude Code wants a map keyed
@@ -709,6 +901,211 @@ impl HarnessAdapter for ClaudeAdapter {
         );
         Ok((Box::new(handle), rx))
     }
+
+    /// `claude setup-token`: the operator signs in in their own browser and
+    /// pastes the code back, and the CLI prints a long-lived subscription
+    /// token.
+    ///
+    /// The redirect goes to a hosted callback on Anthropic's own site rather
+    /// than to localhost, so there is no local listener to intercept and no
+    /// device code to show: the paste-back is the whole completion. The token
+    /// is read off the CLI's own output, because it is printed once and
+    /// stored nowhere a `lift` could go looking for it.
+    async fn login(
+        &self,
+        runner: &dyn Runner,
+        provider: &str,
+        name: &str,
+    ) -> Result<LoginFlow, AdapterError> {
+        if provider != Self::LOGIN_PROVIDER {
+            return Err(AdapterError::Protocol(format!(
+                "Claude Code signs in to an Anthropic subscription, not to {provider}"
+            )));
+        }
+        let helper_home = Self::helper_home();
+        let spawned = runner
+            .spawn(self.setup_token_cmd(name, &helper_home))
+            .await?;
+        let Spawned {
+            mut stdin,
+            stdout,
+            done,
+        } = spawned;
+        let output = Arc::new(Mutex::new(String::new()));
+        let mut lines = BufReader::new(stdout).lines();
+
+        let url = tokio::time::timeout(LOGIN_URL_TIMEOUT, async {
+            while let Ok(Some(line)) = lines.next_line().await {
+                record(&output, &line);
+                if let Some(url) = sign_in_url(&line) {
+                    return Some(url);
+                }
+            }
+            None
+        })
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
+            AdapterError::Protocol("`claude setup-token` printed no sign-in URL".into())
+        })?;
+
+        // Two listeners for the one event: the writer, which answers the
+        // CLI's last screen, and the exit future, which stops waiting on it.
+        let (captured_for_writer, writer_signal) = oneshot::channel::<()>();
+        let (captured_for_exit, exit_signal) = oneshot::channel::<()>();
+
+        let minted = self.minted.clone();
+        let provider_key = provider.to_string();
+        let drained = output.clone();
+        tokio::spawn(async move {
+            let mut signals = vec![captured_for_writer, captured_for_exit];
+            let mut lifetime_ms = None;
+            while let Ok(Some(line)) = lines.next_line().await {
+                record(&drained, &line);
+                if lifetime_ms.is_none() {
+                    // Printed on the line above the token, so it is known by
+                    // the time the token itself is read.
+                    lifetime_ms = stated_lifetime_ms(&line);
+                }
+                if signals.is_empty() {
+                    continue;
+                }
+                let Some(access) = minted_token(&line) else {
+                    continue;
+                };
+                minted.lock().unwrap().insert(
+                    provider_key.clone(),
+                    LiftedToken {
+                        access,
+                        refresh: None,
+                        expires_ms: Some(
+                            crate::store::now_ms()
+                                + lifetime_ms.unwrap_or(DEFAULT_TOKEN_DAYS * MS_PER_DAY),
+                        ),
+                        // `setup-token` names no account: it prints a token and
+                        // nothing else, and the helper's home is thrown away
+                        // with the container, so there is nothing to ask.
+                        identity: None,
+                        account_id: None,
+                    },
+                );
+                for signal in signals.drain(..) {
+                    let _ = signal.send(());
+                }
+            }
+        });
+
+        // The node's side of the paste-back. It goes through a pipe of the
+        // adapter's own rather than straight to the process, because what the
+        // node writes is a line ending in LF and what a pty in raw mode
+        // delivers as Enter is CR — the CLI's input would take an LF as one
+        // more character of the code and never submit it.
+        let (client, mut server) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let mut captured = writer_signal;
+            let mut armed = true;
+            loop {
+                tokio::select! {
+                    read = server.read(&mut buf) => {
+                        let Ok(n) = read else { break };
+                        if n == 0 {
+                            break;
+                        }
+                        let mut chunk = buf[..n].to_vec();
+                        for byte in chunk.iter_mut() {
+                            if *byte == b'\n' {
+                                *byte = b'\r';
+                            }
+                        }
+                        if stdin.write_all(&chunk).await.is_err() || stdin.flush().await.is_err() {
+                            break;
+                        }
+                    }
+                    signal = &mut captured, if armed => {
+                        armed = false;
+                        if signal.is_ok() {
+                            // The token has been read off the screen. The CLI's
+                            // last frame waits on a keypress that is never
+                            // coming inside a container; this is it.
+                            let _ = stdin.write_all(b"\r").await;
+                            let _ = stdin.flush().await;
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let done: futures_core::future::BoxFuture<'static, Result<i32, RunnerError>> =
+            Box::pin(async move {
+                let mut exit = done;
+                tokio::select! {
+                    status = &mut exit => status,
+                    signal = exit_signal => {
+                        if signal.is_err() {
+                            return (&mut exit).await;
+                        }
+                        // The token is what the login was for. Give the CLI a
+                        // moment to end on its own so the container is reaped,
+                        // then call it done however its last screen behaves.
+                        let _ = tokio::time::timeout(LOGIN_EXIT_GRACE, &mut exit).await;
+                        Ok(0)
+                    }
+                }
+            });
+
+        Ok(LoginFlow {
+            url,
+            device_code: None,
+            stdin: Box::new(client),
+            done,
+            output,
+        })
+    }
+
+    /// There is nothing to refresh. A `setup-token` token is long-lived and
+    /// has no refresh token behind it: when it runs out, the only way to get
+    /// another is to sign in again. Saying so as its own error is what keeps
+    /// the refresh loop from asking every five minutes for the rest of the
+    /// node's life.
+    async fn refresh(
+        &self,
+        _runner: &dyn Runner,
+        provider: &str,
+        _name: &str,
+    ) -> Result<(), AdapterError> {
+        Err(AdapterError::ReconnectRequired(format!(
+            "the {provider} subscription token was minted by `claude setup-token` and cannot be \
+             renewed in place; connect the provider again to mint a new one"
+        )))
+    }
+
+    /// What the login printed. There is no store to read: see `minted`.
+    async fn lift(&self, _store_dir: &Path, provider: &str) -> Result<LiftedToken, AdapterError> {
+        self.minted.lock().unwrap().remove(provider).ok_or_else(|| {
+            AdapterError::Protocol(format!(
+                "`claude setup-token` printed no {provider} token; sign in again"
+            ))
+        })
+    }
+}
+
+/// Keep what a login said, for the reason when it fails, bounded so a chatty
+/// UI cannot grow it without limit.
+fn record(output: &Arc<Mutex<String>>, line: &str) {
+    let mut held = output.lock().unwrap();
+    held.push_str(&plain(line));
+    held.push('\n');
+    if held.len() > 64 * 1024 {
+        // On a character boundary: the login's screen is not ASCII, and
+        // `drain` panics in the middle of one.
+        let cut = (held.len() - 32 * 1024..held.len())
+            .find(|at| held.is_char_boundary(*at))
+            .unwrap_or(0);
+        held.drain(..cut);
+    }
 }
 
 #[cfg(test)]
@@ -832,5 +1229,71 @@ mod tests {
         let l = ClaudeAdapter::layout();
         assert_eq!(l.dir, ".claude");
         assert_eq!(l.env, "CLAUDE_CONFIG_DIR");
+    }
+
+    /// The login's screen is a terminal UI, so the URL and the token arrive
+    /// inside colour, cursor moves and an OSC 8 hyperlink. What the node reads
+    /// has to be what the operator would have read.
+    #[test]
+    fn the_screen_is_read_the_way_an_operator_would_read_it() {
+        let url = "https://claude.com/cai/oauth/authorize?code=true&state=abc";
+        let line = format!(
+            "\u{1b}]8;id=1t7is4t;{url}\u{7}\u{1b}[38;2;153;153;153m{url}\u{1b}[39m\u{1b}]8;;\u{7}\r"
+        );
+        assert_eq!(plain(&line), url);
+        assert_eq!(sign_in_url(&line).as_deref(), Some(url));
+        // The hyperlink target is not text the operator read, so a line whose
+        // only URL is inside one yields nothing.
+        assert_eq!(
+            sign_in_url("\u{1b}]8;;https://elsewhere\u{7}\u{1b}]8;;\u{7}"),
+            None
+        );
+        assert_eq!(sign_in_url("\u{1b}[2GPaste code here if prompted > "), None);
+    }
+
+    #[test]
+    fn the_minted_token_is_picked_out_of_its_own_frame() {
+        assert_eq!(
+            minted_token("\u{1b}[1msk-ant-oat01-abc123\u{1b}[22m\r").as_deref(),
+            Some("sk-ant-oat01-abc123")
+        );
+        // An API key is not a subscription token and must not be mistaken for
+        // one: only the long-lived prefix counts.
+        assert_eq!(minted_token("sk-ant-api03-abc123"), None);
+        assert_eq!(minted_token("Store this token securely."), None);
+    }
+
+    #[test]
+    fn a_stated_lifetime_is_preferred_to_the_assumed_one() {
+        assert_eq!(
+            stated_lifetime_ms("Your OAuth token (valid for 364 days):"),
+            Some(364 * MS_PER_DAY)
+        );
+        assert_eq!(
+            stated_lifetime_ms("Your OAuth token (valid for 1 year):"),
+            Some(365 * MS_PER_DAY)
+        );
+        // "less than a day" is the CLI's own fallback wording; nothing to
+        // derive from it, so the caller's assumed horizon applies.
+        assert_eq!(stated_lifetime_ms("valid for less than a day"), None);
+        assert_eq!(stated_lifetime_ms("Store this token securely."), None);
+    }
+
+    /// The login runs in a directory of its own, under /tmp, so it can never
+    /// be the state a session mounts — and `script(1)` is what gives it the
+    /// pty without which the CLI prints nothing at all.
+    #[test]
+    fn the_login_command_runs_under_a_pty_in_its_own_home() {
+        let adapter = ClaudeAdapter::new("2.1.247").with_login_image(Some("localhost/c".into()));
+        let home = ClaudeAdapter::helper_home();
+        let cmd = adapter.setup_token_cmd("tracon-login-anthropic-1", &home);
+        assert_eq!(cmd.argv[0], "script");
+        assert!(cmd.argv.contains(&"-e".to_string()), "{:?}", cmd.argv);
+        let script = cmd.argv.iter().find(|a| a.contains("claude")).unwrap();
+        assert!(script.contains("stty cols 400"), "{script}");
+        assert!(script.ends_with("exec claude setup-token"), "{script}");
+        assert!(home.starts_with("/tmp/tracon-setup-token-"), "{home}");
+        assert_eq!(cmd.image.as_deref(), Some("localhost/c"));
+        assert!(cmd.mounts.is_empty());
     }
 }

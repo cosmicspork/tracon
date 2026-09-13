@@ -114,7 +114,7 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
         state.cfg.clone(),
         broker.clone(),
         DataKey::from_bytes([seed; 32]),
-        Arc::new(support::login_fake::LoginFake::default()),
+        tracon::providers::LoginAdapters::all(Arc::new(support::login_fake::LoginFake::default())),
         Arc::new(tracon::runner::local::LocalBackend),
         id.node_id(),
         bus.clone(),

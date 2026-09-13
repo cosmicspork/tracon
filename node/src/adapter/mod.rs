@@ -260,6 +260,11 @@ pub enum AdapterError {
     },
     #[error("model {0:?} is not offered by the harness")]
     UnknownModel(String),
+    /// The stored credential cannot be renewed in place; only a fresh login
+    /// can replace it. A refresh loop has to stop asking rather than retry a
+    /// thing that will never succeed.
+    #[error("{0}")]
+    ReconnectRequired(String),
     #[error("{0}")]
     Protocol(String),
 }
