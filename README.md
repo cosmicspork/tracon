@@ -9,10 +9,13 @@ when you close the client, then return from a browser or phone to see what chang
 inspect the evidence, and answer the decisions that need you.
 
 tracon is built for one operator, not an organization chart of agents. A laptop
-node is a complete installation; an always-on server, remote access, and a mesh
-are optional. Work items and phases are there for work that benefits from
-structure, not as paperwork before every conversation. The goal is useful work
-completed with fewer interruptions, not the largest number of agents running.
+node is a complete installation, and almost everything above a session is
+optional: an always-on server, reaching it from off the machine, a mesh of other
+nodes. Work items and phases are there for work that benefits from structure, not
+paperwork before every conversation; review is a gate on publishing, not on
+working; memory is opt-in and waits for your yes before it is kept. A plain prompt
+against a repository uses none of them. The goal is useful work completed with
+fewer interruptions, not the largest number of agents running.
 
 The node supervises existing harnesses (OpenCode and Claude Code), rather than
 running its own model loop. Managed agents work in isolated workspaces; credentials stay
@@ -40,8 +43,28 @@ Laptops, servers, and Kubernetes pods run the same binary.
 
 **What it is not.** Not a coding agent — it drives OpenCode over its server API
 and Claude Code over stream-json, and contains no model loop. Not multi-user — one operator holds the keys.
-Not an IDE — the diff is the unit of review, and there is deliberately no file tree,
-no editor, no terminal.
+Not an IDE — the diff is the unit of review, and there is deliberately no file tree
+and no editor of its own.
+
+**The harnesses.** **OpenCode** is the primary one, driven through its native
+server API: one isolated `opencode serve` per session, every route decided by the
+node's own gateway, every tool call asked for rather than saved as a standing
+grant, and the session's events synthesised by the node. Its native web UI is an
+*optional advanced view* on a session tracon is already supervising — a second,
+unprivileged window on the desktop, a framed route inside the installed app on a
+phone — never the way tracon itself is used, and a node without the bundle simply
+does not offer it. A terminal comes with that view as a capability you grant to one
+session and one workspace: default-denied, revocable, and never a general shell on
+the node. **Claude Code** is retained as a second supported harness over the
+stream-json control protocol. It has no native UI, so the advanced view, the
+terminal, and streaming either of them to another node are OpenCode-only; it is
+also the Anthropic subscription login client, because `claude setup-token` is the
+only client for that flow, and its image runs that step whichever harness the node
+is configured for. One node runs one harness image, chosen by `[harness] id`.
+
+What is built but not yet proven against a real credential, device, cluster, or
+published release is listed in one place:
+[the roadmap's live checklist](docs/ROADMAP.md#live-proofs-still-the-operators).
 
 ## Five minutes to a running node
 
@@ -468,7 +491,7 @@ and revoked the moment the hub loses that key.
 | | |
 |---|---|
 | `tracon serve [--listen]` | run the node |
-| `tracon setup [--rebuild]`, `check-boundary [--deep]` | the boundary (also on the Settings screen) |
+| `tracon setup [--rebuild] [--ui-bundle <tarball>]`, `check-boundary [--deep]` | the boundary, and OpenCode's UI bundle — fetched from the release, or installed from a file offline (also on the Settings screen) |
 | `tracon service install\|uninstall\|status\|restart` | the platform supervisor (the desktop app runs these for you) |
 | `tracon auth issue [--url]\|revoke\|sessions` | off-machine access; `--url` prints the login QR |
 | `tracon external show\|detach <channel>` | a harness you run yourself, using this node's tools |
@@ -478,6 +501,9 @@ and revoked the moment the hub loses that key.
 | `tracon credential import\|ls\|rm\|share` | what the broker holds (import is also on Settings) |
 | `tracon doc import\|ls\|get\|put\|rm\|export\|reindex` | Markdown documents, and rebuilding the vector index from them; import, preview, replace, download, archive, and delete HTML bundles in Documents |
 | `tracon session show <package> [--jsonl]` | read a session package offline, with no node running |
+| `tracon session state\|backup [--quiesce]\|upgrade-state --to\|restore` | a session's own harness state: what it is, verified copies of it, a migration on a clone, and putting one back |
+| `tracon session archive-legacy\|reopen --harness` | put sessions from a retired harness away read-only, and carry one forward onto a supported one |
+| `tracon skill import <dir[#git-rev]>\|ls\|rm` | skill packages in a channel's launch manifest |
 | `tracon memory ls\|add\|rm\|recall\|batch` | memories, and the promotion batch on demand |
 | `tracon work add\|ls\|ready\|show\|close\|dep\|rm` | the ledger |
 | `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |
@@ -497,9 +523,9 @@ which reads a file and needs no node at all. `--help` on any of them says more.
 node_name = "<hostname>"            # how this node is named in the mesh
 
 [harness]
-id = "opencode"                     # "opencode" or "claude"; an unknown id refuses to start.
-                                    # The retired "omp" is refused by name, with the migration path:
-                                    # `tracon session archive-legacy`, then `tracon session reopen`.
+id = "opencode"                     # "opencode" or "claude"; an unknown id refuses to start, and a
+                                    # retired one is refused by name with its migration path
+                                    # (docs/RECOVERY.md) rather than a bare unknown-harness error.
 version = "1.18.30"                 # pinned; empty means the version this node's harness image
                                     # installs. Checked twice — `--version` in the runner, and the
                                     # handshake's own report — and a session whose harness reports
@@ -893,7 +919,7 @@ the whole of it.
 ## Reading
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the rules: commitments, invariants, boundaries.
-- [docs/ROADMAP.md](docs/ROADMAP.md) — what is to be built, and what deliberately is not.
+- [docs/ROADMAP.md](docs/ROADMAP.md) — what is to be built, what is built but still unproven live, and what deliberately is not.
 - [docs/DESIGN.md](docs/DESIGN.md) — the interface: principles, jobs, states.
 - [docs/RECOVERY.md](docs/RECOVERY.md) — working outside tracon when it is down, and rebuilding a node.
 - [docs/reference/external-harness-notes.md](docs/reference/external-harness-notes.md) — the external harness trust boundary and operating guidance.

@@ -74,6 +74,7 @@ cannot act.
 | Add a work item | yes | no | yes |
 | Send a prompt into a running session | yes | no | yes |
 | Read session output as it streams | yes | no | yes |
+| Open the session's native harness view | yes, own window | no | yes, in-app frame |
 | Kill a session | yes | yes, one submenu down | confirm |
 | Connect / disconnect a provider, any node's | yes | no | yes |
 | See and share broker credentials | yes | no | yes |
@@ -191,3 +192,24 @@ operator's information, not the model's.
 7. **Fixture mode is the screenshot rig.** `TRACON_FIXTURES=1` serves the interface
    against canned state with request-time timestamps, so the README's images
    regenerate without a node and never age.
+8. **The harness's own UI is an advanced view, never the interface.** OpenCode's web
+   app is offered on a session tracon already supervises, on its own origin, in a
+   window or a frame the operator opens deliberately. Nothing in tracon's own screens
+   depends on it: a node without the bundle offers the control and explains its
+   absence, and a Claude Code session is not second-class for having no such view.
+9. **Every tool call asks, and no grant is ever saved inside a harness.** An "always"
+   clicked in the harness's own permission control is answered "once" and the
+   attempted broadening is recorded. A grant the node did not make is one it cannot
+   show, revoke, or explain afterwards, so the interface never shows one.
+10. **Nothing merges or publishes itself.** The verdict is the operator's, and a
+    scoped grant names one target and one commit; a branch that moved needs a fresh
+    decision rather than an inherited one. There is no auto-merge to design a state
+    for.
+11. **The macOS bundle is unsigned, by choice.** The publisher holds no Apple
+    Developer ID, so build provenance is what authenticates a download and Gatekeeper
+    asks once. The install instructions say that in words, with the one command that
+    answers it, rather than letting the interface imply the warning will not appear.
+12. **A repository may carry instructions about itself.** Nested `AGENTS.md` and
+    `CLAUDE.md` under a worktree are read by the harness, and that is accepted rather
+    than fought: instruction content grants no permission, so such a file can ask for
+    something and never approve it. No screen implies those files were filtered out.
