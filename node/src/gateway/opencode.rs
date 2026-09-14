@@ -1178,8 +1178,11 @@ async fn mediate(
         Mediation::PermissionReply => {
             let mut value: Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
             let broadened = rewrite_always(&mut value);
+            // Either vocabulary's key for the same decision: the v2 routes say
+            // `reply`, the v1 one the native app uses says `response`.
             let reply = value
                 .get("reply")
+                .or_else(|| value.get("response"))
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_string();
@@ -1248,13 +1251,24 @@ async fn mediate(
                 Some(&upstream_id),
                 Some(option),
             );
-            let rewritten = Bytes::from(value.to_string());
+            // The answer goes to the route that holds the request, in that
+            // route's own spelling.
+            let (target, rewritten) = match v2_reply_route(joined) {
+                Some(target) => {
+                    let mut v2 = json!({ "reply": reply });
+                    if let Some(message) = value.get("message") {
+                        v2["message"] = message.clone();
+                    }
+                    (target, Bytes::from(v2.to_string()))
+                }
+                None => (joined.to_string(), Bytes::from(value.to_string())),
+            };
             forward(
                 s,
                 session_id,
                 api,
                 method,
-                joined,
+                &target,
                 uri,
                 headers,
                 rewritten,
@@ -1526,6 +1540,33 @@ fn rewrite_always(body: &mut Value) -> bool {
         broadened = true;
     }
     broadened
+}
+
+/// The v1 permission-answer route, mapped onto the one that holds the request.
+///
+/// The native app is a v1 client — upstream's own protocol probe asks
+/// `/global/health` first, and this build answers it — so it answers a
+/// permission on `POST /session/{id}/permissions/{permissionID}` with
+/// `{"response": …}`. But this build *raises* its asks in the v2 permission
+/// system, whose store the v1 reply handler does not read: the answer comes
+/// back **404**, the harness stays blocked, and the operator is looking at a
+/// control that did nothing. That only became visible once the page could show
+/// a control at all (finding 20); the route trace caught it in the same run.
+///
+/// So the gateway spells the answer the way the ask was raised. This is the
+/// same kind of mediation as narrowing `always` to `once`: *what* the operator
+/// decided is theirs, and which of two upstream vocabularies carries it across
+/// the wire is the gateway's business. It also leaves one vocabulary on the
+/// node — the adapter already answers every permission on this route
+/// (`adapter::opencode`), so the operator's UI and tracon's own reconciliation
+/// now re-send the identical request, which is what makes re-sending safe.
+fn v2_reply_route(joined: &str) -> Option<String> {
+    match joined.split('/').collect::<Vec<&str>>().as_slice() {
+        ["session", session, "permissions", id] => {
+            Some(format!("api/session/{session}/permission/{id}/reply"))
+        }
+        _ => None,
+    }
 }
 
 /// The harness's own permission id out of the path, for the record.

@@ -11,8 +11,8 @@
 # bundle-digest	348cb604b71e6f4706f3c5ee43d0f2ff44f01fce9cd8c8623b1759d9334e5ae7
 # bundle-version	1.18.30
 # origin	http://127.0.0.1:7423
-# permission	per_09db9fa5d001hs6gfbyuay1xaL
-# steps	load,prompt,permission,permission-probe,diff,diff-probe,model,model-probe,settings,settings-probe,share-probe,fork-probe,config-write-probe,second-session,second-session-probe,unowned-probe
+# permission	per_09e2ca576001aLHOWo19B5HXaE
+# steps	load,prompt,permission,diff,diff-probe,model,model-probe,settings,settings-probe,share-probe,fork-probe,config-write-probe,second-session,second-session-probe,unowned-probe
 # upstream-calls	POST /v1/messages | POST /v1/messages
 #
 # A step named `-probe` is a same-origin `fetch` the tour made from the loaded
@@ -25,6 +25,7 @@
 #         boot      the origin's own bootstrap exchange
 #         readable  forwarded by the gateway, directory pinned, credential injected
 #         stream    the same, proxied as a stream (the one durably replayable one)
+#         synthesised  served by the node from what it already reads, never forwarded
 #         mediated  decided by tracon before anything reached the harness
 #         unavailable  on the matrix, and refused until tracon owns what it makes
 #         forbidden the deny list, refused by name
@@ -36,7 +37,7 @@ GET	/	200	page	1	load	-
 GET	/agent	200	readable	3	load,second-session	-
 GET	/api/agent	200	readable	1	settings-probe	-
 GET	/api/command	200	readable	1	settings-probe	-
-GET	/api/health	200	readable	9	load,permission,permission-probe,diff-probe,settings,fork-probe,second-session,second-session-probe	-
+GET	/api/health	200	readable	8	load,permission,diff,model,settings-probe,second-session,second-session-probe	-
 GET	/api/model	200	readable	1	model-probe	-
 GET	/api/reference	200	readable	2	load,second-session	-
 GET	/api/session/ses_other	403	readable	1	second-session-probe	gateway_refused
@@ -53,7 +54,7 @@ GET	/experimental/resource	403	forbidden	8	load,second-session	gateway_refused
 GET	/favicon-v3.ico	200	asset	2	load	-
 GET	/file/status	200	readable	1	diff-probe	-
 GET	/global/config	403	forbidden	8	load,second-session	gateway_refused
-GET	/global/event	403	forbidden	8	load,permission,model-probe,second-session	gateway_refused
+GET	/global/event	200	synthesised	2	load,second-session	-
 GET	/global/health	200	readable	2	load,second-session	-
 GET	/index.html	404	not-found	1	unowned-probe	-
 GET	/lsp	200	readable	2	load,second-session	-
@@ -71,7 +72,7 @@ GET	/session/ses_other	403	readable	2	second-session	gateway_refused
 GET	/session/ses_x	200	readable	3	load,second-session	-
 GET	/session/ses_x/diff	200	readable	1	diff-probe	-
 GET	/session/ses_x/message	200	readable	2	load,second-session	-
-GET	/session/ses_x/todo	200	readable	1	prompt	-
+GET	/session/ses_x/todo	200	readable	2	prompt,permission	-
 GET	/session/status	200	readable	4	load,second-session	-
 GET	/site.webmanifest	200	asset	2	load,second-session	-
 GET	/skill	200	readable	1	settings-probe	-
@@ -82,12 +83,12 @@ PATCH	/config	403	forbidden	1	config-write-probe	gateway_refused
 PATCH	/global/config	403	forbidden	1	config-write-probe	gateway_refused
 PATCH	/session/ses_x	403	forbidden	1	config-write-probe	gateway_refused
 POST	/api/session/ses_x/model	400	mediated	1	model-probe	-
-POST	/api/session/ses_x/permission/per_x/reply	204	mediated	1	permission-probe	-
 POST	/boot	200	boot	1	load	-
 POST	/nope	404	not-found	1	unowned-probe	-
 POST	/pty	403	mediated	1	config-write-probe	gateway_refused
 POST	/session/ses_other/prompt_async	403	mediated	1	second-session-probe	gateway_refused
 POST	/session/ses_x/fork	403	unavailable	1	fork-probe	gateway_refused
 POST	/session/ses_x/init	403	unavailable	1	fork-probe	gateway_refused
+POST	/session/ses_x/permissions/per_x	204	mediated	1	permission	-
 POST	/session/ses_x/prompt_async	409	mediated	1	prompt	-
 POST	/session/ses_x/share	403	forbidden	1	share-probe	gateway_refused
