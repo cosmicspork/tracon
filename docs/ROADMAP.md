@@ -10,6 +10,8 @@
 - Own the data: portable, independently readable exports; no node required to inspect them.
 - Optimize useful work per interruption, not agent count; support independent installations,
   not multi-user tenancy.
+- Keep the core accountable and personal workflows adaptable. Customizations reuse
+  isolation, scoped authority, manifests and evidence; installing code grants no permission.
 
 Completed items are removed from this file when they land; the changelog and the
 reference documents under `docs/reference/` carry the history.
@@ -526,6 +528,8 @@ the agent, which is not Tracon's authority model.
       and explicitly configured test services or previews for the projects actually used.
       Snapshot the configuration per execution; show its last successful validation and
       invalidate that assurance when its inputs change.
+      Treat customizations as versioned source with provenance, compatibility
+      requirements and validation evidence, not just a collection of settings.
 - [ ] **Preview preparation and explain incompatibility.** Show detected ecosystems,
       supported preparation steps, missing tools and actionable remedies before launch.
       Preserve credential-free preparation and isolation; unsupported scripts, services
@@ -535,6 +539,22 @@ the agent, which is not Tracon's authority model.
       that still require approval. Derive this from current policy and grants, not a
       parallel permissions model. Explain node eligibility and placement; any suggested
       runner stays manually overridable within the eligible set.
+      Show what a customization can read, change and send elsewhere, not merely
+      which tools it requests.
+- [ ] **Review, activate and roll back personal customizations.** Let an agent propose
+      a skill, instruction package, project profile or recipe. Show source changes,
+      provenance, required tools/data/actions and compatibility/validation evidence
+      before explicit operator activation. Reuse Gate C's node-owned manifests and
+      pinned artifacts; activation creates a revision, not a second configuration
+      system. Updates never modify running sessions or silently broaden authority.
+      Keep disable and rollback available; rollback cannot undo external effects.
+- [ ] **Expose resource-scoped operations for custom work.** Start with operations
+      demanded by real recipes through existing tools and policy enforcement:
+      evidence for a named work item, not unrestricted ledger access; proposing a
+      change, not general mutation rights. Types describe the contract but are not
+      a security boundary: the node enforces scope and execution remains isolated.
+      Installing an extension grants no raw credentials, privileged node access or
+      unrestricted outbound networking. Prove out-of-scope access is refused.
 
 #### Portable data and recovery
 
@@ -549,6 +569,8 @@ the agent, which is not Tracon's authority model.
       state, evidence, attachments and provenance. Define identifiers, timestamps,
       encodings, paths and omission rules. Optional harness-native state must name its
       harness/build/schema compatibility; it is not the portable record's only copy.
+      Include selected customization source, configuration and pinned revisions;
+      imported customizations require fresh authorization and contain no credentials.
 - [ ] **Make import predictable and independently implementable.** Publish schemas,
       representative exports, integrity/signature verification rules, version migration
       policy and examples for ordinary processing tools. Define duplicate/conflict
@@ -599,11 +621,32 @@ the agent, which is not Tracon's authority model.
 
 #### Reusable work and bounded automation
 
+The [extensible-software principle](https://jeremymorrell.dev/blog/extensible-software-in-the-age-of-llms/)
+fits here as personal workflows around an accountable core, not a new platform.
+Sequence: fix node/desktop/credential reliability; finish profiles and effective
+authority; deliver reviewed recipe authoring and activation; prove one personal
+customization; then add bounded triggers and sharing through that lifecycle.
+Gate C's completed foundations remain complete. Provider fallback preferences may
+be configurable, but quota classification, safe resumption, accounting and permission
+enforcement stay in the core.
+
 - [ ] **Saved workflow recipes.** Start with a few recurring procedures such as regression
       investigation, small changes and release preparation. Reuse phase presets and the
       ledger; snapshot each recipe on invocation, persist expensive checkpoints and
       external waits, and let the operator revise or stop a run. No mandatory workflow
       language or ceremony for a plain prompt.
+      Let an agent draft and revise recipes from a request; the operator reviews
+      and activates a pinned revision through the customization lifecycle above.
+- [ ] **Prove one personal customization end to end.** Produce a preferred review
+      summary when work is ready: intent, changed behavior, evidence, unresolved
+      risks and decisions needed. Use an approved recipe, scoped evidence access
+      and existing report/document surfaces. Prove usefulness on real work, source
+      and revision visibility, safe failure without disrupting review or approving
+      anything, and revision/disable/export/import without authority transfer.
+      Start custom UI as isolated reports/views using document-preview isolation,
+      not plugins in the administration UI. Expose no node session cookie, Tauri
+      management commands or application store; any later interactive action needs
+      a narrowly defined authorized operation.
 - [ ] **Lightweight batches.** Group related work with dependencies, explicit assignment/
       ownership and reclaim rules, aggregate spending, blockers and one completion report.
       Build on current readiness and session holders; retain discovery lineage and prevent
@@ -618,6 +661,8 @@ the agent, which is not Tracon's authority model.
       retry limits; preserve pause/stop, deduplicate triggers, and ask before consequential
       actions absent a valid scoped grant. Use ordinary supervisor logic for scheduling,
       reconciliation and health checks, not permanent agent roles.
+      Run approved recipe revisions through the existing supervisor and ledger,
+      never arbitrary extension code inside the node.
 - [ ] **Optional conversational coordination, only if useful.** An ordinary managed
       session may inspect permitted cross-project work and propose actions through existing
       tools. No privileged manager loop in the node. Fresh reviewers remain useful for
@@ -633,6 +678,8 @@ the agent, which is not Tracon's authority model.
       pinned-release/update policy, interruption and backup requirements, and the recovery
       path for a failed upgrade. Extend the existing compatibility gates instead of
       promising arbitrary drop-in harnesses or maintaining a native UI fork.
+      Apply compatibility checks, failed-update recovery and explicit rollback to
+      installed customizations as well as the managed runtime.
 - [ ] **Offer a clearly labeled demonstration mode.** Reuse the fixture machinery to
       explore the workflow without credentials or containers, with demonstration data
       unmistakable and no implication that its output proves a live run.
@@ -672,6 +719,9 @@ the agent, which is not Tracon's authority model.
   tracon terminal.
 - **`cr-sqlite`:** only if real multi-writer convergence requires it.
 - **Stacked MR automation:** decide whether stacks are preferable to feature flags first.
+- **General dashboard/plugin system:** only after isolated reports and views prove
+  insufficient. No new extension runtime, marketplace or workflow language is required
+  for the personal-customization work above.
 
 ## Out of scope
 
