@@ -193,8 +193,7 @@ impl Trace {
 fn every_route_the_native_ui_used_is_declared_or_classified() {
     state::isolate();
     let path = repo_root().join(TRACE);
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let trace = Trace::parse(&text);
     assert!(!trace.rows.is_empty(), "{TRACE} records no requests");
 
@@ -213,10 +212,12 @@ fn every_route_the_native_ui_used_is_declared_or_classified() {
     let mut unplaced = Vec::new();
     for row in &trace.rows {
         assert_ne!(
-            row.class, gw::UNKNOWN,
+            row.class,
+            gw::UNKNOWN,
             "{TRACE}: {} {} was answered by nobody the code can name — declare it in \
              the app-route table or classify it in the matrix, never widen the origin",
-            row.method, row.path
+            row.method,
+            row.path
         );
         // What `dispatch` would make of this request on a machine with no
         // vendored tree: every case but `asset` is decided without one, and an
@@ -323,14 +324,12 @@ fn the_deny_list_the_tour_touched_failed_closed() {
             .iter()
             .find(|row| row.method == method && row.path.contains(needle))
             .unwrap_or_else(|| {
-                panic!("the tour did not try {method} …{needle}…; the trace proves nothing about it")
+                panic!(
+                    "the tour did not try {method} …{needle}…; the trace proves nothing about it"
+                )
             })
     };
-    for (needle, method) in [
-        ("/share", "POST"),
-        ("/fork", "POST"),
-        ("/config", "PATCH"),
-    ] {
+    for (needle, method) in [("/share", "POST"), ("/fork", "POST"), ("/config", "PATCH")] {
         let row = touched(needle, method);
         assert!(
             trace_class_refuses(&row.class),
@@ -368,11 +367,7 @@ fn the_trace_uses_only_the_names_the_code_defines() {
             row.method,
             row.path
         );
-        assert!(
-            row.path.starts_with('/'),
-            "{} is not a path",
-            row.path
-        );
+        assert!(row.path.starts_with('/'), "{} is not a path", row.path);
         assert!(!row.path.contains('?'), "{} carries a query", row.path);
     }
 }

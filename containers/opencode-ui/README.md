@@ -52,6 +52,35 @@ build reads is produced by a lifecycle script.
 (sorted names, no owner, fixed mtime, `gzip -n`), for shipping the artefact
 alongside a release rather than rebuilding it on every node.
 
+## Getting it onto a node
+
+Building it is the fallback, not the path. The release carries the tarball, and
+three things install it:
+
+```sh
+tracon setup                                     # fetch the release asset and verify it
+tracon setup --ui-bundle opencode-ui-v1.18.30.tar.gz   # the same, from a local file
+```
+
+`tracon setup` unpacks into a staging directory, hands it to the node's own
+`Bundle::load`, and moves it into place only if the tree digest is the one in
+`DIGEST` (`node/src/ui_bundle.rs`). A node that cannot get it serves no native
+UI and says so; it never reaches for `app.opencode.ai`, which is the whole
+point of finding 3.
+
+`Dockerfile.node` carries the tree at `/opt/tracon/opencode-ui` with
+`TRACON_OPENCODE_UI_DIR` pointing at it, because a pod's state directory is a
+volume that would shadow anything installed under it. Drop the tarball into
+this directory to build that image offline; otherwise it is fetched from the
+release. Either way the image build asserts the tarball's sha256 *and*
+recomputes the tree digest.
+
+The release job (`opencode-ui` in `.github/workflows/release.yml`) checks out
+the pinned upstream **commit**, runs this recipe, fails if the digest is not
+`DIGEST`, attests the tarball with GitHub build provenance the way the desktop
+assets are attested, and uploads it. No new secret: the source is a public tag
+and the artefact is authenticated by provenance.
+
 ## The digest
 
 `DIGEST` holds the tree digest of the artefact: for each file in path order,

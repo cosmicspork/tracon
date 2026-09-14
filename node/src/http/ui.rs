@@ -152,7 +152,9 @@ impl std::fmt::Display for BundleError {
         match self {
             Self::Missing(p) => write!(
                 f,
-                "no OpenCode UI bundle at {}; build one with \
+                "no OpenCode UI bundle at {}; install one with `tracon setup` (or \
+                 `tracon setup --ui-bundle <opencode-ui-v{PINNED_VERSION}.tar.gz>` offline), \
+                 or build one with \
                  `containers/opencode-ui/build.sh --src <opencode checkout at v{PINNED_VERSION}>`",
                 p.display()
             ),
@@ -812,8 +814,11 @@ fn unavailable() -> Response {
         ],
         format!(
             "<!doctype html><meta charset=utf-8><title>OpenCode UI not vendored</title>\
-             <p>This node serves OpenCode's interface from a pinned bundle it does not have. \
-             Build one with <code>containers/opencode-ui/build.sh --src &lt;opencode checkout \
+             <p>This node serves OpenCode's interface from a pinned bundle it does not have, \
+             and it will not fall back to anything else. Install it with \
+             <code>tracon setup</code> &mdash; or, with no route to the release, \
+             <code>tracon setup --ui-bundle opencode-ui-v{PINNED_VERSION}.tar.gz</code>, or \
+             build one with <code>containers/opencode-ui/build.sh --src &lt;opencode checkout \
              at v{PINNED_VERSION}&gt;</code>.\n"
         ),
     )
@@ -1342,9 +1347,6 @@ mod tests {
         assert_eq!(trace_case(None, "POST", "/new-session"), trace::NONE);
         // Without a vendored tree an asset is placed by nobody — which is what
         // makes a recorded 200 on such a path evidence the bundle answered it.
-        assert_eq!(
-            trace_case(None, "GET", "/assets/index-abc.js"),
-            trace::NONE
-        );
+        assert_eq!(trace_case(None, "GET", "/assets/index-abc.js"), trace::NONE);
     }
 }

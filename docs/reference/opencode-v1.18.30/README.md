@@ -18,8 +18,8 @@ mitigation, listed below with the evidence that settled it.
 | `opencode --version` | `1.18.30` (bare string); `GET /global/health` → `{"healthy":true,"version":"1.18.30"}` |
 | API snapshot | `openapi-v1.18.30.json` (`GET /doc`, 162 paths, 188 method/route pairs in `routes-v1.18.30.txt`) |
 | Environment variables | `env-vars.txt` (85 `OPENCODE_*` names found in `packages/{opencode,core,server}`) |
-| UI asset/build digest | `opencode-ui-v1.18.30`: tree digest sha256 `348cb604b71e6f4706f3c5ee43d0f2ff44f01fce9cd8c8623b1759d9334e5ae7`, 951 files, 36,049,284 bytes (sourcemaps dropped). Tarball `opencode-ui-v1.18.30.tar.gz` sha256 `782ca629c49b1e2b620460b90c4d8ec7b1a2ad9bdc9783ba9227ad626cfb6696`. Built with `bun install --frozen-lockfile --ignore-scripts` then `bun run --cwd packages/app build` (bun 1.3.14, vite 7.1.4) by `containers/opencode-ui/build.sh`; digest checked in at `containers/opencode-ui/DIGEST` and recomputed by the node over the bytes it serves |
-| Native UI route trace | to be captured in Gate D against the served bundle |
+| UI asset/build digest | `opencode-ui-v1.18.30`: tree digest sha256 `348cb604b71e6f4706f3c5ee43d0f2ff44f01fce9cd8c8623b1759d9334e5ae7`, 951 files, 36,049,284 bytes (sourcemaps dropped). Tarball `opencode-ui-v1.18.30.tar.gz` sha256 `782ca629c49b1e2b620460b90c4d8ec7b1a2ad9bdc9783ba9227ad626cfb6696`. Built with `bun install --frozen-lockfile --ignore-scripts` then `bun run --cwd packages/app build` (bun 1.3.14, vite 7.1.4) by `containers/opencode-ui/build.sh`; digest checked in at `containers/opencode-ui/DIGEST` and recomputed by the node over the bytes it serves. Reproduced twice from the pinned checkout, tarball digest included. Shipped as a release asset, attested with GitHub build provenance by the `opencode-ui` job in `.github/workflows/release.yml`, installed by `tracon setup` (or `tracon setup --ui-bundle <tarball>` offline) and carried in `Dockerfile.node` |
+| Native UI route trace | `ui-route-trace.tsv`: 60 request shapes, captured by driving the served bundle in headless Chromium over CDP against the pinned binary behind the mediated gateway (`node/tests/opencode_route_trace.rs`, `TRACON_UI_TRACE=1`). 31 readable, 5 mediated (2 answered, 3 refused), 2 mediated-but-unavailable, 8 forbidden, 7 asset, 2 page, 1 boot, and 4 deliberate 404s. **No route was unplaced**: every path the app used is either a route `http::ui`'s app-route table declares or a row the gateway's matrix classifies, and the check re-derives every recorded class from those two functions in CI without a browser. Finding 20 below is what the trace exposed |
 | Provider support matrix | `providers.md` §8 |
 | Mutation-policy matrix | `api-ui.md` §2 |
 
@@ -139,6 +139,47 @@ neither of them a config-rendering matter:
   be listed (`GET /api/model`); the node's handshake does not, which is worth a look in the
   session-controller work.
 
+### Finding 20 — the native UI's only live channel is the global stream tracon refuses
+
+Found by capturing the route trace (`ui-route-trace.tsv`). The app opens
+**`GET /global/event`** at startup and reopens it whenever it drops — eight attempts
+across the tour — and opens nothing else that streams. It never calls
+`GET /api/session/{id}/event`, the per-session stream with durable, sequenced replay
+that the matrix marks `Stream` and that finding 6 says is the only one worth proxying.
+
+So the deny list and the app disagree about where liveness comes from, and the deny
+list is right: a stream whose `id` is always undefined cannot be reconciled after a
+disconnect, and it is unscoped across every instance on the server. The consequence is
+visible rather than theoretical. In the trace the harness raised a real permission
+request for a real `bash` tool call, and **the page never showed a control for it** —
+the tour had to answer through the same route by hand, because the event that would
+have put the prompt on screen was on the refused stream. The rest of the app works:
+every view the tour opened is served from the readable routes, which the app polls.
+
+Three things follow, none of them "widen the matrix".
+
+- **The native UI is usable but not live under tracon today.** It renders, it accepts a
+  prompt, it shows history, and it answers permissions when told to; it does not update
+  by itself. That belongs in Gate D's account of what the origin delivers.
+- **The seam is tracon's to close, on tracon's terms.** The node already holds the
+  per-session durable stream and its own event bus. A same-origin `/global/event`
+  *synthesised by the node* from the sessions the caller's cookie names — sequenced,
+  replayable, scoped to one session — would satisfy the app without proxying anything
+  unscoped. That is a route tracon serves, not a route it forwards, so it is a new row
+  in the app-route table rather than a hole in the deny list.
+- **Two more startup calls are refused and survive it**: `GET /global/config` (a global
+  config read, on the deny list beside its write) and `GET /experimental/resource` (the
+  experimental tree). The app retries both and carries on. They are named here so the
+  next reader knows the 403s in the trace are deliberate.
+
+The trace also settles the shape question the matrix was written against: **this build
+of the app is a v1 client.** It calls `/session/{id}/message`, `/session/{id}/todo`,
+`/session/{id}/prompt_async`, `/permission`, `/question`, `/config`, `/provider`,
+`/path`, `/agent`, `/command`, `/lsp`, `/mcp`, `/project`, `/vcs` and `/session/status`,
+and of the v2 surface only `/api/health`, `/api/reference` and `/api/agent`. The v2 rows
+in the matrix are not dead — the node's own adapter drives them — but nothing the native
+UI does depends on them.
+
 ### Still the operator's (no credential for them exists on a test machine)
 
 - Hosted Anthropic and OpenAI API keys end to end.
@@ -156,6 +197,9 @@ neither of them a config-rendering matter:
 
 - `api-ui.md` — server surface, route/event matrix, identity and replay, permissions,
   PTY, native UI, release artifact, stop/go.
+- `ui-route-trace.tsv` — every request the native UI made on tracon's own origin, with
+  the class that answered it. Captured in a browser, re-derived from the code in CI
+  (`node/tests/opencode_route_trace.rs`).
 - `providers.md` — provider config model, auth storage, subscription plugins, proxy,
   self-hosted, usage, catalogue, verdict table.
 - `config-state.md` — config discovery, ambient repo content, skills, plugins, MCP, LSP,

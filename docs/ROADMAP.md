@@ -318,7 +318,42 @@ refer to that manifest's table.
         third-party storage blocked, background/resume recovery, notification deep links.
   - [ ] PTY only as an explicit workspace-scoped capability with a gateway-minted owner-bound
         ticket (finding 7).
-  - [ ] Native UI route trace captured and unknown mutations shown to fail closed.
+  - [x] Native UI route trace captured and unknown mutations shown to fail closed.
+        `docs/reference/opencode-v1.18.30/ui-route-trace.tsv` is 60 request shapes taken
+        from a real browser: headless Chromium over CDP, the pinned bundle on the UI
+        origin, the pinned binary behind the mediated gateway, and a fake upstream model
+        behind the model gateway returning one short answer and one `bash` tool call. The
+        tour loads the session page, types a prompt into the app's own composer, answers
+        the permission that tool call raised, opens the changes view, switches model, opens
+        settings, tries share, tries fork, opens a second session's URL, and asks for three
+        paths nobody owns. Every row records method, path, status and the class that
+        answered; `node/tests/opencode_route_trace.rs` re-derives every class from
+        `http::ui::trace_case` and `gateway::opencode::trace_class` **in CI with no browser,
+        no harness and no bundle**, so a route table or matrix edited without the trace
+        agreeing fails there.
+        **Nothing was unplaced.** Every path the app used is declared in the app-route table
+        or classified by the matrix. The deny list the tour touched failed closed with a 403
+        and a `gateway_refused` on the session's own record in every case: `*/share` both
+        ways, `fork`, `init`, `PATCH /config`, `PATCH /global/config`, `PATCH /session/{id}`,
+        `POST /pty` without the terminal capability — and a second session's routes, refused
+        for naming another session's id. The four deliberately unowned paths (`/nope`,
+        `/index.html`, a missing asset, a POST to `/nope`) were 404s, which is the claim that
+        there is no catch-all made as evidence rather than as a reading.
+        **Found doing it** (manifest finding 20): the app's only live channel is
+        `GET /global/event`, which the deny list refuses because it has no durable replay
+        (finding 6) — so the native UI renders, prompts and answers, but does not update
+        itself, and the real permission the trace raised never appeared on the page. The fix
+        is a node-synthesised, session-scoped `/global/event` served from tracon's own bus,
+        not a hole in the matrix; it is the next row this view needs. The trace also settles
+        that this build of the app is a **v1 client**: of the v2 surface it uses only
+        `/api/health`, `/api/reference` and `/api/agent`.
+        **Still to do here:** the bundle the trace was captured against is now installable
+        rather than hand-built — `tracon setup` fetches `opencode-ui-v1.18.30.tar.gz` from
+        the release and verifies it with the node's own loader, `--ui-bundle` installs it
+        offline, `Dockerfile.node` carries it, and the release workflow builds it from the
+        pinned upstream commit, asserts the tree digest, and attests it — but no release has
+        published that asset yet, so the fetch path is exercised by test rather than against
+        a real release.
 - [ ] **Gate E — remote-node parity.** Bounded encrypted owner streams over the hub for
       HTTP, SSE, and PTY: authenticated stream ids, owner binding, flow control, reconnect
       without replaying input, revocation, protocol mismatch refused; hub sees ciphertext and

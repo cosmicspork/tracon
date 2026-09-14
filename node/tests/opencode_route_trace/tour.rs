@@ -50,11 +50,7 @@ use tracon::{
     broker::Broker,
     config::{Config, ModelDecl, Provider, SHAPE_ANTHROPIC},
     gateway::model::harness_wiring,
-    http::{
-        api::AppState,
-        auth::AuthState,
-        ui,
-    },
+    http::{api::AppState, auth::AuthState, ui},
     mcp::Tools,
     runner::{Runner, RunnerCommand, RunnerError, Spawned},
     session::Manager,
@@ -93,7 +89,8 @@ fn pinned_binary() -> Option<String> {
     let candidate = match std::env::var_os("TRACON_OPENCODE_BINARY") {
         Some(named) => {
             let path = PathBuf::from(named);
-            path.is_file().then(|| path.to_string_lossy().into_owned())?
+            path.is_file()
+                .then(|| path.to_string_lossy().into_owned())?
         }
         None => std::env::split_paths(&std::env::var_os("PATH")?)
             .map(|dir| dir.join("opencode"))
@@ -634,12 +631,7 @@ impl Cdp {
             }
         }
         frame.extend_from_slice(&mask);
-        frame.extend(
-            payload
-                .iter()
-                .enumerate()
-                .map(|(i, b)| b ^ mask[i % 4]),
-        );
+        frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
         self.stream.write_all(&frame).await
     }
 
@@ -1356,7 +1348,15 @@ pub async fn run(trace_path: &Path) {
         trace.rows.len(),
         trace_path.display()
     );
-    for line in live.log().lines().rev().take(20).collect::<Vec<_>>().iter().rev() {
+    for line in live
+        .log()
+        .lines()
+        .rev()
+        .take(20)
+        .collect::<Vec<_>>()
+        .iter()
+        .rev()
+    {
         eprintln!("harness: {line}");
     }
 
@@ -1380,14 +1380,14 @@ fn classify(method: &str, path: &str, status: u16) -> String {
 }
 
 /// Every (method, path) the node wrote a `gateway_refused` for.
-fn refusals(
-    node: &Node,
-    mine: &str,
-    theirs: &str,
-) -> std::collections::BTreeSet<(String, String)> {
+fn refusals(node: &Node, mine: &str, theirs: &str) -> std::collections::BTreeSet<(String, String)> {
     let mut out = std::collections::BTreeSet::new();
     for session in [SESSION, OTHER_SESSION] {
-        for event in node.store.events_after(session, 0, 2000).unwrap_or_default() {
+        for event in node
+            .store
+            .events_after(session, 0, 2000)
+            .unwrap_or_default()
+        {
             if event.kind != "gateway_refused" {
                 continue;
             }
