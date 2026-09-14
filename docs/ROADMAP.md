@@ -78,7 +78,7 @@ each gate delivered.
   so browser verification is unchanged (#218). The real Podman and Kubernetes project
   workflows on both harnesses remain on the checklist below.
 
-Alongside the gates: an unsigned macOS bundle when Apple credentials are absent (#192),
+Alongside the gates: the macOS bundle ships unsigned (#192),
 administration and first-task workflows unified (#208), and the provider callback tests
 de-raced (#194).
 
@@ -352,9 +352,9 @@ safe resumption, accounting and permission enforcement stay in the core.
 
 - Everything under "Live proofs still the operator's" is unproven live, including the
   private-repository run and QA verification against a real target.
-- macOS releases are unsigned by choice — the publisher holds no Apple Developer ID — and
-  are authenticated by GitHub build provenance instead, so Gatekeeper asks once on first
-  open. The workflow signs and notarizes if credentials are ever configured.
+- macOS releases are unsigned — the publisher holds no Apple Developer ID — and are
+  authenticated by GitHub build provenance instead, so Gatekeeper asks once on first open
+  (right-click Open, or System Settings > Privacy & Security > Open Anyway).
 - The Kubernetes runtime backend has no scoped QA browser egress gateway; `scope_qa_egress`
   always refuses there, so browser verification is Podman-only.
 - The Kubernetes backend **drops** denied egress rather than refusing it. A NetworkPolicy
