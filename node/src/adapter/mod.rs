@@ -427,11 +427,18 @@ pub trait HarnessAdapter: Send + Sync {
 
     /// Run the harness's own login for `provider` inside the runner, against
     /// the store the runner mounts. Returns once the URL is known.
+    ///
+    /// `state_dir` is where the runner mounted this adapter's state, in the
+    /// runner's own namespace. A login that leaves its credential in a file
+    /// has to be told to leave it *there*, because that volume is the only
+    /// thing the node exports afterwards and hands to [`HarnessAdapter::lift`];
+    /// anything written elsewhere dies with the helper container.
     async fn login(
         &self,
         _runner: &dyn Runner,
         _provider: &str,
         _name: &str,
+        _state_dir: &str,
     ) -> Result<LoginFlow, AdapterError> {
         Err(AdapterError::Protocol(
             "this harness has no login flow".into(),

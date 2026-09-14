@@ -1213,33 +1213,23 @@ struct RetryNotice {
 
 /// Recognise a harness's own "the provider refused, I am retrying" notice.
 ///
-/// Two harnesses say it two ways and neither is in the ACP schema: the Claude
-/// adapter forwards `{"type":"system","subtype":"api_retry",…}`, and omp sends
-/// an unmodelled `session/update` (or a bare notification) whose discriminator
-/// names a retry. Rather than model either, match on the discriminator
-/// wherever it sits and read whatever fields came with it.
+/// Two harnesses say it two ways and neither is in a schema the node shares:
+/// the Claude adapter forwards `{"type":"system","subtype":"api_retry",…}`,
+/// and the OpenCode adapter forwards its `session.next.retried` event as
+/// `{"method":"session.next.retried","params":…}`. Rather than model either,
+/// match on the discriminator wherever it sits and read whatever fields came
+/// with it. The stem is `retr` plus an ending, because the two harnesses do
+/// not even agree on the tense.
 fn retry_notice(v: &serde_json::Value) -> Option<RetryNotice> {
-    let named_retry = [
-        v["subtype"].as_str(),
-        v["sessionUpdate"].as_str(),
-        v["update"]["sessionUpdate"].as_str(),
-        v["params"]["update"]["sessionUpdate"].as_str(),
-        v["method"].as_str(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|name| name.contains("retry"));
+    let named_retry = [v["subtype"].as_str(), v["method"].as_str()]
+        .into_iter()
+        .flatten()
+        .any(|name| name.contains("retry") || name.contains("retried"));
     if !named_retry {
         return None;
     }
-    // The fields may sit on the notice itself or in the update it wraps.
-    let scopes = [
-        v,
-        &v["params"],
-        &v["update"],
-        &v["params"]["update"],
-        &v["error"],
-    ];
+    // The fields may sit on the notice itself or in whatever it wraps.
+    let scopes = [v, &v["params"], &v["error"], &v["params"]["error"]];
     let string = |keys: &[&str]| {
         scopes.iter().find_map(|scope| {
             keys.iter()
@@ -1253,7 +1243,7 @@ fn retry_notice(v: &serde_json::Value) -> Option<RetryNotice> {
             .find_map(|scope| keys.iter().find_map(|k| scope[*k].as_i64()))
     };
     Some(RetryNotice {
-        provider: string(&["provider", "providerId"]),
+        provider: string(&["provider", "providerId", "providerID"]),
         status: number(&["status", "statusCode", "status_code", "code"]),
         message: string(&["message", "reason", "error"]),
         attempt: number(&["attempt", "attempts", "retry"]).filter(|n| *n > 0),
@@ -1403,24 +1393,29 @@ mod tests {
                 attempt: Some(2),
             }
         );
-        // An unmodelled omp `session/update`, fields on the update itself.
-        let omp = retry_notice(&json!({
-            "sessionUpdate": "provider_retry",
-            "error": { "provider": "anthropic", "statusCode": 429, "message": "rate limited" }
+        // OpenCode's `session.next.retried`, as its adapter forwards it: past
+        // tense, and the fields in the event's own payload rather than beside
+        // the discriminator.
+        let opencode = retry_notice(&json!({
+            "method": "session.next.retried",
+            "params": {
+                "providerID": "openai-codex",
+                "error": { "statusCode": 429, "message": "rate limited" },
+            },
+            "message": "rate limited",
         }))
-        .expect("omp's retry update");
-        assert_eq!(omp.status, Some(429));
-        assert_eq!(omp.message.as_deref(), Some("rate limited"));
+        .expect("opencode's session.next.retried");
+        assert_eq!(opencode.provider.as_deref(), Some("openai-codex"));
+        assert_eq!(opencode.status, Some(429));
+        assert_eq!(opencode.message.as_deref(), Some("rate limited"));
         assert_eq!(
-            omp.attempt, None,
+            opencode.attempt, None,
             "the node counts when the harness does not"
         );
-        // A bare notification the adapter forwarded whole.
-        assert!(retry_notice(&json!({ "method": "session/api_retry", "params": {} })).is_some());
         // Anything else is not a retry, including a plain error.
-        assert!(retry_notice(&json!({ "sessionUpdate": "session_info_update" })).is_none());
         assert!(retry_notice(&json!({ "type": "system", "subtype": "init" })).is_none());
-        assert!(retry_notice(&json!({ "method": "session/update" })).is_none());
+        assert!(retry_notice(&json!({ "method": "session.next.error" })).is_none());
+        assert!(retry_notice(&json!({ "method": "session.updated" })).is_none());
     }
 
     #[test]

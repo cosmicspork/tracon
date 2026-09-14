@@ -25,13 +25,30 @@ pub const VERDICT: &str = "review_verdict";
 /// The longest `review_status` will block inside a single call.
 ///
 /// A harness's MCP client gives up on a tool call long before a human gets to
-/// a review — omp 18 fails one at 30 seconds — and that failure surfaces as a
-/// transport error the agent cannot act on. Returning "still waiting" well
-/// inside that budget turns the same wait into something it can retry, so the
-/// cap is deliberately far below any client's timeout rather than near it.
-const MAX_WAIT_SECS: u64 = 20;
+/// a review, and that failure surfaces as a transport error the agent cannot
+/// act on. Returning "still waiting" inside that budget turns the same wait
+/// into something it can retry, so the cap sits below the shortest client
+/// timeout with room to spare rather than near it.
+///
+/// It was 20 s, sized against the retired omp harness's 30 s client. Both
+/// remaining harnesses give a tool call 60 s: OpenCode inherits the MCP TS
+/// SDK's `DEFAULT_REQUEST_TIMEOUT_MSEC` unless told otherwise
+/// (`docs/reference/opencode-v1.18.30/config-state.md` §5.4), and the node
+/// does tell it otherwise — the launch config it writes sets
+/// `experimental.mcp_timeout` explicitly, so 60 s is the floor rather than
+/// the ceiling. 45 s keeps a quarter of the shortest budget in hand, which is
+/// what a slow store read on a busy node needs, and more than doubles how
+/// much of a human's attention one call can cover.
+const MAX_WAIT_SECS: u64 = 45;
 
 pub fn definitions() -> Vec<Value> {
+    let wait_secs_arg = json!({
+        "type": "integer",
+        "description": format!(
+            "How long to block, up to {MAX_WAIT_SECS}; larger values are capped at \
+             {MAX_WAIT_SECS}. Defaults to {MAX_WAIT_SECS}. 0 returns the current state."
+        ),
+    });
     vec![
         json!({
             "name": SUBMIT,
@@ -76,18 +93,20 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": STATUS,
-            "description": "Wait for a review's verdict and return it. Blocks until the review is \
-                            decided or the wait elapses, whichever comes first. The wait is capped \
-                            at 20 seconds so the call always returns before an MCP client gives up \
-                            on it; a human takes far longer than that, so expect to poll — while \
-                            the review is undecided this returns `still_waiting` with the current \
-                            state, and you call it again. On approval the node publishes the \
-                            approved text itself and returns where it landed.",
+            "description": format!(
+                "Wait for a review's verdict and return it. Blocks until the review is \
+                 decided or the wait elapses, whichever comes first. The wait is capped \
+                 at {MAX_WAIT_SECS} seconds so the call always returns before an MCP \
+                 client gives up on it; a human takes far longer than that, so expect to \
+                 poll — while the review is undecided this returns `still_waiting` with \
+                 the current state, and you call it again. On approval the node publishes \
+                 the approved text itself and returns where it landed."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "review_id": { "type": "string" },
-                    "wait_secs": { "type": "integer", "description": "How long to block, up to 20; larger values are capped at 20. Defaults to 20. 0 returns the current state." },
+                    "wait_secs": wait_secs_arg.clone(),
                 },
                 "required": ["review_id"],
             },
@@ -101,7 +120,7 @@ pub fn definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "report_id": { "type": "string" },
-                    "wait_secs": { "type": "integer", "description": "How long to block, up to 20; larger values are capped at 20. Defaults to 20. 0 returns the current state." },
+                    "wait_secs": wait_secs_arg,
                 },
                 "required": ["report_id"],
             },
@@ -1020,9 +1039,11 @@ mod tests {
 
     #[test]
     fn the_wait_stays_under_any_mcp_client_timeout() {
-        // The cap only earns its keep if it is well inside the shortest client
-        // timeout seen in the wild (omp 18: 30s).
-        const { assert!(MAX_WAIT_SECS <= 20) };
+        // The cap only earns its keep if it is inside the shortest client
+        // timeout either supported harness gives a tool call: 60 s, the MCP TS
+        // SDK default OpenCode inherits and the node then states explicitly
+        // (`config-state.md` §5.4). A quarter of that stays in hand.
+        const { assert!(MAX_WAIT_SECS <= 45) };
         assert_eq!(wait_secs(&json!({})), MAX_WAIT_SECS);
         assert_eq!(wait_secs(&json!({ "wait_secs": 600 })), MAX_WAIT_SECS);
         assert_eq!(wait_secs(&json!({ "wait_secs": 300 })), MAX_WAIT_SECS);

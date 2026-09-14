@@ -998,8 +998,9 @@ pub struct Provider {
     pub upstream: String,
     /// `anthropic`, `openai`, or `openai-codex`: which headers and paths the credential becomes.
     pub shape: String,
-    /// The harness's own provider id for a subscription login
-    /// (`omp auth-broker login <id>`); none means API key only.
+    /// The login client's own provider id for a subscription login
+    /// (`opencode auth login <id>`, `claude setup-token`); none means API key
+    /// only. Which adapter runs it is `providers::LoginAdapters`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login: Option<String>,
     /// Device-code provider id used when this node cannot receive localhost callbacks.
@@ -1126,8 +1127,13 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 credential: "openai-codex".into(),
                 upstream: "https://chatgpt.com/backend-api".into(),
                 shape: SHAPE_OPENAI_CODEX.into(),
-                login: Some("openai-codex".into()),
-                device_login: Some("openai-codex-device".into()),
+                // OpenCode's own id for the Codex OAuth flow, which is what
+                // runs it now that the retired harness's `openai-codex` and
+                // `openai-codex-device` ids are gone. It prints a URL and
+                // waits for a pasted code, so there is no separate device
+                // flow and no localhost callback to receive.
+                login: Some("openai".into()),
+                device_login: None,
                 requires_local_callback: false,
                 price: None,
                 models: Vec::new(),

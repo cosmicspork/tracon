@@ -4000,16 +4000,6 @@ pub async fn probe_models_into_store(
         .probe_models(runner.as_ref(), &wiring)
         .await
         .map_err(|e| e.to_string())?;
-    // What a subscription refuses is not in the harness's list, so the node
-    // takes it off before the picker offers it.
-    let models = {
-        let broker = s.tools.broker.read().unwrap();
-        crate::gateway::model::offerable(&s.cfg, models, |provider| {
-            broker
-                .model_credential_for(provider, &s.node_id)
-                .is_some_and(|(_, credential)| credential.kind == crate::broker::KIND_OAUTH)
-        })
-    };
     if let Ok(Some(mut node)) = s.store().get_node(&s.node_id) {
         node.models_json = serde_json::to_string(&models).ok();
         let _ = s.store().put_node(&node);

@@ -24,6 +24,7 @@
 //!   minting a credential by running a command a server named.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -34,7 +35,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     AdapterError, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle, HarnessVersion,
-    LaunchSpec, Layout, LoginFlow, ModelOption, PermissionReply, PermissionRequest,
+    LaunchSpec, Layout, LiftedToken, LoginFlow, ModelOption, PermissionReply, PermissionRequest,
     ProtocolSupport, TurnResult,
 };
 use crate::adapter::types::{self, PermissionOption, ToolCall, ToolCallUpdate, Usage};
@@ -70,10 +71,22 @@ const NEVER_OFFERED: [&str; 3] = ["amazon-bedrock", "opencode", "github-copilot"
 
 pub struct OpenCodeAdapter {
     pinned: String,
+    /// The image a login helper runs in, when this adapter is brokering a
+    /// login for a node whose sessions run another harness. `None` means the
+    /// runner's own image already carries the CLI.
+    login_image: Option<String>,
 }
 
 impl OpenCodeAdapter {
     pub const ID: &'static str = "opencode";
+
+    /// The logins this adapter runs, by the provider id in `[providers]`.
+    ///
+    /// Only the Codex subscription, and the two spellings a node might carry
+    /// for it: `openai` is what `opencode auth login` calls the flow, and
+    /// `openai-codex` is what the retired harness called it, which an
+    /// operator's `node.toml` may still say.
+    pub const LOGIN_PROVIDERS: [&'static str; 2] = ["openai", "openai-codex"];
 
     /// The version this node's harness image installs.
     /// `containers/harness-opencode/Containerfile` fetches exactly this
@@ -112,7 +125,16 @@ impl OpenCodeAdapter {
     pub fn new(pinned: impl Into<String>) -> Self {
         Self {
             pinned: pinned.into(),
+            login_image: None,
         }
+    }
+
+    /// Run the login helper in `image` rather than in whatever harness image
+    /// the runner carries. This is what lets a node whose sessions run Claude
+    /// Code still sign in to a Codex subscription.
+    pub fn with_login_image(mut self, image: Option<String>) -> Self {
+        self.login_image = image;
+        self
     }
 
     /// OpenCode has no single state-directory variable, and the two that come
@@ -138,6 +160,18 @@ impl OpenCodeAdapter {
     const AUTH_FILE: &'static str = "auth.json";
     /// This session's writable tree, relative to the state directory.
     const RUN_DIR: &'static str = "run";
+    /// A login helper's tree, relative to the state directory. Separate from
+    /// `RUN_DIR` because it is the one OpenCode tree whose point is to
+    /// survive the process that wrote it: the broker lifts the credential out
+    /// of it afterwards, and the volume it lives on is cleared before every
+    /// login and deleted after the lift.
+    const LOGIN_DIR: &'static str = "login";
+    /// Where the login helper's auth store lands, relative to the state
+    /// directory. `$XDG_DATA_HOME/opencode/auth.json`
+    /// (`providers.md` §2.1), with `XDG_DATA_HOME` set by `login_env` so the
+    /// file lands on the mounted volume rather than in a container filesystem
+    /// that dies with the helper.
+    const LOGIN_AUTH_PATH: &'static str = "login/data/opencode/auth.json";
 
     fn state_dir(home: &str) -> String {
         format!("{home}/{}", Self::layout().dir)
@@ -147,6 +181,33 @@ impl OpenCodeAdapter {
     /// directories, none of which is the state volume every session shares.
     fn run_dir(home: &str) -> String {
         format!("{}/{}", Self::state_dir(home), Self::RUN_DIR)
+    }
+
+    /// The environment a login helper runs under. `state_dir` is where the
+    /// runner mounted this adapter's state; every path here is under it, so
+    /// the credential the login writes is on the volume the node exports
+    /// rather than in a container filesystem that is discarded with the
+    /// helper.
+    ///
+    /// Deliberately not `launch_env`: that one suppresses plugins, and the
+    /// Codex OAuth flow *is* a bundled plugin (`providers.md` finding 9).
+    /// What is suppressed here is only what a login must never do — replace
+    /// its own binary, or pick up a project's configuration from a worktree
+    /// it is not even mounted with.
+    fn login_env(state_dir: &str) -> Vec<(String, String)> {
+        let login = format!("{state_dir}/{}", Self::LOGIN_DIR);
+        [
+            ("HOME", format!("{login}/home")),
+            ("XDG_CONFIG_HOME", format!("{login}/config")),
+            ("XDG_DATA_HOME", format!("{login}/data")),
+            ("XDG_CACHE_HOME", format!("{login}/cache")),
+            ("XDG_STATE_HOME", format!("{login}/state")),
+            ("OPENCODE_DISABLE_PROJECT_CONFIG", "true".into()),
+            ("OPENCODE_DISABLE_AUTOUPDATE", "true".into()),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
     }
 
     /// The launch environment, settled by `config-state.md` §9.2. Every entry
@@ -861,15 +922,16 @@ impl HarnessAdapter for OpenCodeAdapter {
         runner: &dyn Runner,
         provider: &str,
         name: &str,
+        state_dir: &str,
     ) -> Result<LoginFlow, AdapterError> {
-        if provider != "openai-codex" && provider != "openai" {
+        if !Self::LOGIN_PROVIDERS.contains(&provider) {
             return Err(AdapterError::Protocol(format!(
                 "opencode has no login for {provider}; the Anthropic subscription is \
                  obtained with `claude setup-token` in the Claude Code image, because \
                  OpenCode removed its Anthropic OAuth plugin in 1.3.0"
             )));
         }
-        login_flow(runner, name).await
+        login_flow(runner, name, state_dir, self.login_image.clone()).await
     }
 
     async fn refresh(
@@ -879,16 +941,63 @@ impl HarnessAdapter for OpenCodeAdapter {
         _name: &str,
     ) -> Result<(), AdapterError> {
         Err(AdapterError::Protocol(format!(
-            "opencode refreshes no credential in the runner: its auth store holds no \
-             oauth record, which is what keeps every subscription plugin inert ({provider})"
+            "opencode refreshes no credential in the runner: a session's auth store holds \
+             no oauth record, which is what keeps every subscription plugin inert ({provider})"
         )))
+    }
+
+    /// The credential `opencode auth login` left on the login volume.
+    ///
+    /// The store is a flat `{ providerID: {type, …} }` document
+    /// (`providers.md` §2.1) and only an `oauth` record is a subscription:
+    /// an `api` record is a key the operator pasted, which the broker already
+    /// has a path for and must not be silently re-imported as a token that
+    /// looks refreshable.
+    async fn lift(&self, store_dir: &Path, provider: &str) -> Result<LiftedToken, AdapterError> {
+        let path = store_dir.join(Self::LOGIN_AUTH_PATH);
+        let raw = std::fs::read_to_string(&path).map_err(|error| {
+            AdapterError::Protocol(format!(
+                "the login left no auth store at {}: {error}",
+                path.display()
+            ))
+        })?;
+        let store: Value = serde_json::from_str(&raw)
+            .map_err(|error| AdapterError::Protocol(format!("the auth store is not JSON: {error}")))?;
+        // The login writes under OpenCode's own provider id, which is
+        // `openai` whatever this node calls the provider in `[providers]`.
+        let record = Self::LOGIN_PROVIDERS
+            .iter()
+            .map(|id| &store[*id])
+            .find(|record| record["type"] == "oauth")
+            .ok_or_else(|| {
+                AdapterError::Protocol(format!(
+                    "no oauth record for {provider} in the login's auth store; \
+                     the sign-in did not complete"
+                ))
+            })?;
+        let access = record["access"]
+            .as_str()
+            .ok_or_else(|| AdapterError::Protocol("the oauth record has no access token".into()))?
+            .to_string();
+        Ok(LiftedToken {
+            access,
+            refresh: record["refresh"].as_str().map(str::to_string),
+            expires_ms: record["expires"].as_i64(),
+            identity: None,
+            account_id: record["accountId"].as_str().map(str::to_string),
+        })
     }
 }
 
 /// `opencode auth login openai`: prints a URL for the operator and waits for
 /// the code to be pasted back. It runs in the login helper's context, against
 /// the store that context mounts, so nothing it writes is visible to a session.
-async fn login_flow(runner: &dyn Runner, name: &str) -> Result<LoginFlow, AdapterError> {
+async fn login_flow(
+    runner: &dyn Runner,
+    name: &str,
+    state_dir: &str,
+    image: Option<String>,
+) -> Result<LoginFlow, AdapterError> {
     use tokio::io::AsyncBufReadExt;
     let spawned = runner
         .spawn(RunnerCommand {
@@ -898,6 +1007,8 @@ async fn login_flow(runner: &dyn Runner, name: &str) -> Result<LoginFlow, Adapte
                 "login".into(),
                 "openai".into(),
             ],
+            env: OpenCodeAdapter::login_env(state_dir),
+            image,
             name: name.into(),
             ..Default::default()
         })

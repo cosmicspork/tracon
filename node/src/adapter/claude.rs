@@ -912,11 +912,14 @@ impl HarnessAdapter for ClaudeAdapter {
     /// device code to show: the paste-back is the whole completion. The token
     /// is read off the CLI's own output, because it is printed once and
     /// stored nowhere a `lift` could go looking for it.
+    /// `state_dir` is unused: `claude setup-token` prints its token and
+    /// writes nothing, so there is no store to steer (see `lift`).
     async fn login(
         &self,
         runner: &dyn Runner,
         provider: &str,
         name: &str,
+        _state_dir: &str,
     ) -> Result<LoginFlow, AdapterError> {
         if provider != Self::LOGIN_PROVIDER {
             return Err(AdapterError::Protocol(format!(

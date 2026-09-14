@@ -21,7 +21,7 @@ use self::callback::{
     CallbackCapture, CallbackError, CallbackOutcome, CallbackTarget, CaptureEvent, CaptureReply,
 };
 use crate::{
-    adapter::{claude::ClaudeAdapter, HarnessAdapter, LiftedToken},
+    adapter::{claude::ClaudeAdapter, opencode::OpenCodeAdapter, HarnessAdapter, LiftedToken},
     boundary::Backend,
     broker::{Credential, SharedBroker, KIND_OAUTH},
     config::Config,
@@ -43,11 +43,14 @@ const NEEDS_RECONNECT: &str = "needs_reconnect";
 
 /// Which adapter runs which provider's login.
 ///
-/// The login client and the session harness are independent. Only Claude Code
-/// can mint an Anthropic subscription token — `claude setup-token` is the whole
-/// of that path — so the `anthropic` login resolves to the Claude adapter
-/// whatever `[harness] id` names, while every other login stays with the
-/// harness the node runs sessions with, which is what still brokers Codex.
+/// The login client and the session harness are independent, and each
+/// subscription has exactly one client that can mint it. `claude setup-token`
+/// is the whole of the Anthropic path, so `anthropic` resolves to the Claude
+/// adapter whatever `[harness] id` names; `opencode auth login openai` is the
+/// whole of the Codex path, so `openai`/`openai-codex` resolve to the
+/// OpenCode adapter the same way. The retired harness used to broker Codex
+/// for a node running anything else, which is why this table names it now.
+/// Every other login stays with the harness the node runs sessions with.
 ///
 /// The table also decides who lifts: `setup-token` prints its token once and
 /// leaves nothing in a store directory, so the instance that ran the login is
@@ -70,6 +73,15 @@ impl LoginAdapters {
                 ClaudeAdapter::LOGIN_PROVIDER.to_string(),
                 Arc::new(claude) as Arc<dyn HarnessAdapter>,
             );
+        }
+        if session.id() != OpenCodeAdapter::ID {
+            let opencode = Arc::new(
+                OpenCodeAdapter::new(crate::adapter::image_version(OpenCodeAdapter::ID))
+                    .with_login_image(backend.codex_login_image()),
+            ) as Arc<dyn HarnessAdapter>;
+            for provider in OpenCodeAdapter::LOGIN_PROVIDERS {
+                per_provider.insert(provider.to_string(), opencode.clone());
+            }
         }
         // Named so an unconfigured provider cannot silently acquire a login
         // client it was never meant to have.
@@ -500,10 +512,14 @@ impl Providers {
                 return Err(ProviderError::Failed(error.to_string()));
             }
         };
+        let state_dir = state_target(
+            &self.backend.harness_home(),
+            self.logins.get(name).layout(),
+        );
         let flow = match self
             .logins
             .get(name)
-            .login(runner.as_ref(), &login, &login_process)
+            .login(runner.as_ref(), &login, &login_process, &state_dir)
             .await
         {
             Ok(flow) => flow,

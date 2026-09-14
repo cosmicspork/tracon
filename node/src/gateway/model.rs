@@ -93,8 +93,8 @@ fn shaped_for_subscription(body: &[u8]) -> Option<Vec<u8>> {
 /// A harness that reads no base-URL environment variable (OpenCode; see
 /// `docs/reference/opencode-v1.18.30/providers.md` §2.5) cannot be wired by
 /// `env` at all, and one that declares its catalogue rather than probing it
-/// needs the model list before it starts. Both come from here, so neither is
-/// reconstructed from `models_json` by string surgery.
+/// needs the model list before it starts. Both come from here, in structured
+/// form, rather than from a rendered document read back by string surgery.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProviderWiring {
     /// The provider's name in this node's configuration, which is also the
@@ -110,13 +110,16 @@ pub struct ProviderWiring {
 }
 
 /// What a harness needs to reach the gateway: environment for the providers
-/// that honour one, a `models.json` for the ones that only read a provider
-/// override (omp's `openai`), and the same wiring in structured form for the
-/// ones whose entire provider table is a file this node writes.
+/// that honour one (Claude Code reads `ANTHROPIC_BASE_URL`), and the same
+/// wiring in structured form for the ones whose entire provider table is a
+/// file this node writes (OpenCode).
+///
+/// There was a third half — a `models.json` document for a harness that read
+/// its provider overrides from its state directory — and it went with the omp
+/// adapter at the OpenCode cutover. Neither remaining harness reads one.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Wiring {
     pub env: Vec<(String, String)>,
-    pub models_json: String,
     pub providers: Vec<ProviderWiring>,
     /// The placeholder key every provider entry carries, which is also this
     /// session's token at the gateway.
@@ -146,12 +149,11 @@ pub fn base_url(host: &str, port: u16, provider: &str) -> String {
 /// `servable` answers the question the gateway answers again at request time:
 /// would this caller's model request for that provider be allowed through?
 /// Wiring a provider the gateway would refuse is not merely useless — the
-/// harness reads this file as its provider list and offers the whole
-/// catalogue of everything in it, so an unusable `openai` entry buries the
-/// Codex models the node can actually run under fifty-odd OpenAI API ones,
-/// several of which are Codex models by name (`openai/gpt-5.3-codex`). A
-/// session started on one of those is refused at the gateway, having never
-/// been reachable.
+/// harness reads this as its provider list and offers the whole catalogue of
+/// everything in it, so an unusable `openai` entry buries the Codex models
+/// the node can actually run under fifty-odd OpenAI API ones, several of
+/// which are Codex models by name (`openai/gpt-5.3-codex`). A session started
+/// on one of those is refused at the gateway, having never been reachable.
 pub fn harness_wiring(
     cfg: &Config,
     host: &str,
@@ -159,7 +161,6 @@ pub fn harness_wiring(
     servable: impl Fn(&str, &Provider) -> bool,
 ) -> Wiring {
     let mut env = Vec::new();
-    let mut providers = serde_json::Map::new();
     let mut wired = Vec::new();
     for (name, provider) in &cfg.providers {
         if !servable(name, provider) {
@@ -172,68 +173,20 @@ pub fn harness_wiring(
             base_url: base.clone(),
             models: provider.models.clone(),
         });
-        match provider.shape.as_str() {
-            SHAPE_ANTHROPIC => {
-                env.push(("ANTHROPIC_BASE_URL".to_string(), base));
-                env.push(("ANTHROPIC_API_KEY".to_string(), token.to_string()));
-            }
-            SHAPE_OPENAI_CODEX => {
-                env.push(("PI_CODEX_WEBSOCKET".to_string(), "false".to_string()));
-                providers.insert(name.clone(), json!({ "baseUrl": base, "apiKey": token }));
-            }
-            _ => {
-                providers.insert(
-                    name.clone(),
-                    json!({ "baseUrl": format!("{base}/v1"), "apiKey": token }),
-                );
-            }
+        // Only the Anthropic shape is wired by environment, because only
+        // Claude Code reads one. Everything else reaches the gateway through
+        // the provider table its adapter writes, from `wired` above.
+        if provider.shape == SHAPE_ANTHROPIC {
+            env.push(("ANTHROPIC_BASE_URL".to_string(), base));
+            env.push(("ANTHROPIC_API_KEY".to_string(), token.to_string()));
         }
     }
-    let models_json = serde_json::to_string_pretty(&json!({ "providers": providers }))
-        .unwrap_or_else(|_| "{}".into());
     Wiring {
         env,
-        models_json,
         providers: wired,
         token: token.to_string(),
         manifest: crate::manifest::LaunchManifest::default(),
     }
-}
-
-/// Models a Codex provider offers that a ChatGPT subscription cannot run: the
-/// account answers `not supported when using Codex with a ChatGPT account`.
-/// The harness image has no egress but the gateway, so it cannot refresh its
-/// model catalogue and offers the one its pinned build shipped with; the
-/// catalogue upstream publishes today lists neither of these under
-/// `openai-codex`. Nothing in the harness's list says which entries an
-/// account kind may use, so this is a denylist keyed on the known refusal
-/// rather than something derived.
-const CHATGPT_ACCOUNT_REFUSES: &[&str] = &["gpt-5.4", "gpt-5.4-mini"];
-
-/// The probed catalogue as this node can honestly offer it. `subscription`
-/// says whether the credential bound to a provider is an OAuth subscription
-/// rather than an API key; only a subscription is held to the list above, and
-/// only for a Codex-shaped provider. Every other model the harness reported
-/// survives, including ones this build has never heard of.
-pub fn offerable(
-    cfg: &Config,
-    models: Vec<crate::adapter::ModelOption>,
-    subscription: impl Fn(&str) -> bool,
-) -> Vec<crate::adapter::ModelOption> {
-    models
-        .into_iter()
-        .filter(|option| {
-            let Some((provider_name, model)) = option.value.split_once('/') else {
-                return true;
-            };
-            let Some(provider) = cfg.providers.get(provider_name) else {
-                return true;
-            };
-            provider.shape != SHAPE_OPENAI_CODEX
-                || !CHATGPT_ACCOUNT_REFUSES.contains(&model)
-                || !subscription(provider_name)
-        })
-        .collect()
 }
 
 fn refuse(status: StatusCode, reason: &str) -> Response {
@@ -1090,30 +1043,31 @@ mod tests {
         assert!(probe("GET", "v1/responses/resp_1").is_err());
     }
 
+    /// Only Claude Code reads a base URL out of the environment. Every other
+    /// provider reaches the gateway through the table its adapter writes, so
+    /// the environment must carry nothing else — a stray key here is a
+    /// credential-shaped string in a harness's process for no reason.
     #[test]
-    fn wiring_puts_anthropic_in_env_and_openai_in_models_json() {
+    fn only_the_anthropic_shape_is_wired_by_environment() {
         let cfg = Config::default();
         let w = harness_wiring(&cfg, "tracon-gw", "tok", |_, _| true);
-        assert!(w.env.contains(&(
-            "ANTHROPIC_BASE_URL".into(),
-            "http://tracon-gw:7421/model/anthropic".into()
-        )));
-        assert!(w.env.contains(&("ANTHROPIC_API_KEY".into(), "tok".into())));
-        let v: Value = serde_json::from_str(&w.models_json).unwrap();
         assert_eq!(
-            v["providers"]["openai"]["baseUrl"],
-            "http://tracon-gw:7421/model/openai/v1"
+            w.env,
+            vec![
+                (
+                    "ANTHROPIC_BASE_URL".to_string(),
+                    "http://tracon-gw:7421/model/anthropic".to_string()
+                ),
+                ("ANTHROPIC_API_KEY".to_string(), "tok".to_string()),
+            ]
         );
-        assert_eq!(v["providers"]["openai"]["apiKey"], "tok");
-        assert!(v["providers"]["anthropic"].is_null());
-        assert_eq!(
-            v["providers"]["openai-codex"]["baseUrl"],
-            "http://tracon-gw:7421/model/openai-codex"
-        );
-        assert_eq!(v["providers"]["openai-codex"]["apiKey"], "tok");
-        assert!(w
-            .env
-            .contains(&("PI_CODEX_WEBSOCKET".into(), "false".into())));
+        let codex = w
+            .providers
+            .iter()
+            .find(|p| p.name == "openai-codex")
+            .expect("openai-codex is wired");
+        assert_eq!(codex.base_url, "http://tracon-gw:7421/model/openai-codex");
+        assert_eq!(w.token, "tok");
     }
 
     #[test]
@@ -1124,59 +1078,14 @@ mod tests {
         // wrong provider.
         let cfg = Config::default();
         let w = harness_wiring(&cfg, "tracon-gw", "tok", |name, _| name == "openai-codex");
-        let v: Value = serde_json::from_str(&w.models_json).unwrap();
         assert_eq!(
-            v["providers"]["openai-codex"]["baseUrl"],
-            "http://tracon-gw:7421/model/openai-codex"
+            w.providers
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["openai-codex"]
         );
-        assert!(v["providers"]["openai"].is_null());
-        assert!(!w.env.iter().any(|(key, _)| key.starts_with("ANTHROPIC_")));
-        assert!(w
-            .env
-            .contains(&("PI_CODEX_WEBSOCKET".into(), "false".into())));
-    }
-
-    fn option(value: &str) -> crate::adapter::ModelOption {
-        crate::adapter::ModelOption {
-            value: value.into(),
-            name: value.into(),
-        }
-    }
-
-    #[test]
-    fn a_subscription_is_not_offered_the_models_the_account_refuses() {
-        let cfg = Config::default();
-        let probed = [
-            "openai-codex/gpt-5.3-codex-spark",
-            "openai-codex/gpt-5.4",
-            "openai-codex/gpt-5.4-mini",
-            "openai-codex/gpt-5.5",
-            "openai-codex/gpt-5.6-terra",
-            "openai-codex/gpt-daybreak-blue-latest",
-            "anthropic/claude-opus-5",
-            "an-alias",
-        ]
-        .map(option)
-        .to_vec();
-
-        let offered = offerable(&cfg, probed.clone(), |provider| provider == "openai-codex");
-        assert_eq!(
-            offered.iter().map(|m| m.value.as_str()).collect::<Vec<_>>(),
-            [
-                "openai-codex/gpt-5.3-codex-spark",
-                "openai-codex/gpt-5.5",
-                "openai-codex/gpt-5.6-terra",
-                // A name this build has never heard of is still the harness's
-                // to offer; only the known refusals are dropped.
-                "openai-codex/gpt-daybreak-blue-latest",
-                "anthropic/claude-opus-5",
-                "an-alias",
-            ]
-        );
-
-        // An API key on the same provider runs them, so nothing is dropped.
-        let offered = offerable(&cfg, probed, |_| false);
-        assert_eq!(offered.len(), 8);
+        assert!(w.env.is_empty());
     }
 
     #[test]
