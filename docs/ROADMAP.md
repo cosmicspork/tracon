@@ -450,6 +450,29 @@ refer to that manifest's table.
 web-UI fallback into a 404; a flag check on nested instruction attachment; invoking the
 declared `permission.ask` hook; an LSP status event.
 
+### Session portability
+
+Move a whole session to another node, or resume it later, without losing anything the
+model or the operator saw. Today the durable record is the event ledger and, for
+OpenCode, the per-session state backup (Gate C); the two gaps are the harness's own
+context and the working files a session accumulates outside the workspace.
+
+- [ ] Save the full-text conversation to a file before any compaction or context
+      reset: every turn as the harness actually sent and received it (system prefix,
+      prompts, tool inputs and outputs, model text), written to node-owned storage
+      keyed by session and turn, so a compacted context is a summary of something
+      that still exists rather than the only copy. Applies to both harnesses; for
+      OpenCode the source is the durable per-session stream plus the message
+      snapshot, for Claude Code the stream-json transcript.
+- [ ] Save session scratchpads with the session: any scratch directory, notes, or
+      temporary files the harness or the node created for the session outside the
+      workspace tree, captured in the same package as the state backup and the
+      transcript, with the same digest and generation record.
+- [ ] Make the package the unit of transfer and resume: `tracon session backup`
+      produces it, continuity transfer carries it, and reopening on another node or
+      later restores transcript, scratchpad, state, and workspace checkpoint together,
+      with lineage recorded and nothing silently dropped.
+
 ### Still waiting on a real run
 
 - [ ] Exercise a real private repository through preparation, agent work, checks, and
