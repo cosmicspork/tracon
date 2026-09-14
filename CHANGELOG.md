@@ -31,6 +31,43 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.16.0](https://github.com/cosmicspork/tracon/compare/v0.15.1...v0.16.0) (2026-09-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* the omp harness is gone. `[harness] id = "omp"` is refused at startup with the migration path; its adapter, image, release job, ACP stdio layer, provider wiring and catalogue denylist are removed. Sessions it ran are archived read-only by `tracon session archive-legacy`, keeping their harness identity, transcripts, evidence and workspaces, and are carried forward with `tracon session reopen <id> --harness opencode`.
+
+### Features
+
+* **adapter:** drive OpenCode v1.18.30 through its server API with a sealed launch environment ([#193](https://github.com/cosmicspork/tracon/issues/193)) ([6e1695c](https://github.com/cosmicspork/tracon/commit/6e1695c1bc16c597981e1347a411e33f8ed721bb))
+* **desktop:** an unprivileged window for the OpenCode UI, navigable only to its origin ([#205](https://github.com/cosmicspork/tracon/issues/205)) ([8b85729](https://github.com/cosmicspork/tracon/commit/8b85729e4281d36ef53e2b11bb09264c0c050fe5))
+* **gateway:** mediate OpenCode's native API per session, deny by default, ask-only permissions ([#195](https://github.com/cosmicspork/tracon/issues/195)) ([192f910](https://github.com/cosmicspork/tracon/commit/192f9102e398a0df0b7fa886b817e87cf2c48e05))
+* **gateway:** PTY as an explicit terminal capability with owner-bound tickets and a bounded proxy ([#207](https://github.com/cosmicspork/tracon/issues/207)) ([94e8429](https://github.com/cosmicspork/tracon/commit/94e8429de4b22d5d09d905d43995a74d47e1c538))
+* **http:** serve OpenCode's native UI from its own origin behind a single-use bootstrap ([#206](https://github.com/cosmicspork/tracon/issues/206)) ([8eefbd4](https://github.com/cosmicspork/tracon/commit/8eefbd4a830c1a5968d765913fef99d3888be7ab))
+* **mesh:** bounded encrypted owner streams over the hub for remote sessions ([#215](https://github.com/cosmicspork/tracon/issues/215)) ([21bab7c](https://github.com/cosmicspork/tracon/commit/21bab7c8ea5376dc93e01afeaadc01b8ef077abe))
+* **operator:** unify administration and first-task workflows ([#208](https://github.com/cosmicspork/tracon/issues/208)) ([9b3fe1a](https://github.com/cosmicspork/tracon/commit/9b3fe1aa883d440daf5f12d4864a858ef9d720eb))
+* **providers:** log in to an Anthropic subscription through claude setup-token ([#190](https://github.com/cosmicspork/tracon/issues/190)) ([15868ca](https://github.com/cosmicspork/tracon/commit/15868ca0eabc87d8c684d49502c2d8100f7aa119))
+* **qa:** deploy candidates to a QA target through a brokered command, for Laravel Cloud and the like ([#218](https://github.com/cosmicspork/tracon/issues/218)) ([9f73d8f](https://github.com/cosmicspork/tracon/commit/9f73d8f7609c641551cb1aeb35d813992b022f39))
+* retire the omp harness — OpenCode primary, Claude Code retained, legacy sessions archived ([#216](https://github.com/cosmicspork/tracon/issues/216)) ([069cfb1](https://github.com/cosmicspork/tracon/commit/069cfb17efd701328617f054450aea8798152b8b))
+* **runtime:** bake LSP, formatters, and the plugin cache; reject egress; reap harness children ([#202](https://github.com/cosmicspork/tracon/issues/202)) ([9ab28cf](https://github.com/cosmicspork/tracon/commit/9ab28cfeeaaa24d93b595577ae68c8a0f9e92818))
+* **session:** a node-owned launch manifest for skills, prompts, and approved plugins ([#203](https://github.com/cosmicspork/tracon/issues/203)) ([456a0ee](https://github.com/cosmicspork/tracon/commit/456a0ee596b69a76b8812fb127fca09606fe8661))
+* **session:** durable OpenCode identity mapping, idempotent ingestion, and reconciliation ([#196](https://github.com/cosmicspork/tracon/issues/196)) ([244bbbd](https://github.com/cosmicspork/tracon/commit/244bbbd981f7639a3444e0dd73a4100f6bb7329a))
+* **session:** quiesced backups, migration on a clone, and generation-gated restore for OpenCode state ([#204](https://github.com/cosmicspork/tracon/issues/204)) ([705bfc1](https://github.com/cosmicspork/tracon/commit/705bfc1ee3ebdafe101ac6f5c13663a9e1bb30b0))
+* **session:** reconcile harness and gateway usage per turn and keep unsent prompts on the node ([#197](https://github.com/cosmicspork/tracon/issues/197)) ([dcd7280](https://github.com/cosmicspork/tracon/commit/dcd7280f3d2bf5040ee724b0ce654708af0f4b03))
+* **spa:** keep the native OpenCode view inside the installed app ([#210](https://github.com/cosmicspork/tracon/issues/210)) ([b3038af](https://github.com/cosmicspork/tracon/commit/b3038af7dc648f82a94d478ae0fc5cfe1922c542))
+* **ui:** capture the native UI route trace, prove unknown mutations fail closed, and install the pinned bundle ([#211](https://github.com/cosmicspork/tracon/issues/211)) ([26cc5e5](https://github.com/cosmicspork/tracon/commit/26cc5e5b6c615b9494dadb2096be5293e4bd7e29))
+
+
+### Bug Fixes
+
+* **gateway:** adversarial run against the mediated OpenCode API and per-session state isolation ([#198](https://github.com/cosmicspork/tracon/issues/198)) ([7a7053a](https://github.com/cosmicspork/tracon/commit/7a7053ae6efaa00520fb59b710d8b73b3b6285e6))
+* **gateway:** prove OpenCode provider traffic stays inside the gateway allowlist and is counted ([#199](https://github.com/cosmicspork/tracon/issues/199)) ([9014e8a](https://github.com/cosmicspork/tracon/commit/9014e8aea11927c3a9d2df30cf00ce8b1473b52a))
+* **gateway:** synthesise a session-scoped global event stream so the native UI sees permissions ([#217](https://github.com/cosmicspork/tracon/issues/217)) ([4e6ebbf](https://github.com/cosmicspork/tracon/commit/4e6ebbff52ba569426342aea7a47b25fa5202f73))
+* **providers:** make the IPv6 collision test independent of macOS socket teardown timing ([#220](https://github.com/cosmicspork/tracon/issues/220)) ([d805d79](https://github.com/cosmicspork/tracon/commit/d805d79d87c4cc6e6cfdef05261562ed2abd8899))
+* **providers:** stop the callback listener tests racing on loopback ports ([#194](https://github.com/cosmicspork/tracon/issues/194)) ([ee87a32](https://github.com/cosmicspork/tracon/commit/ee87a32bf458b213d75b17d63f5b53f09570cc27))
+* **release:** ship an unsigned macOS bundle when Apple credentials are absent ([#192](https://github.com/cosmicspork/tracon/issues/192)) ([0956429](https://github.com/cosmicspork/tracon/commit/0956429bd9463533f44f91f017fb43376909d425))
+
 ## [0.15.1](https://github.com/cosmicspork/tracon/compare/v0.15.0...v0.15.1) (2026-09-13)
 
 
