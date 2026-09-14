@@ -357,7 +357,12 @@ async fn setup_token_mints_a_subscription_token_from_a_pasted_code() {
     let adapter = ClaudeAdapter::new("2.1.247");
     let runner = LoginRunner::default();
     let mut flow = adapter
-        .login(&runner, "anthropic", "tracon-login-anthropic-1")
+        .login(
+            &runner,
+            "anthropic",
+            "tracon-login-anthropic-1",
+            "/root/.claude",
+        )
         .await
         .unwrap();
     assert!(
@@ -413,7 +418,12 @@ async fn the_login_helper_keeps_its_state_out_of_any_session_directory() {
     let adapter = ClaudeAdapter::new("2.1.247").with_login_image(Some("localhost/claude".into()));
     let runner = LoginRunner::default();
     let flow = adapter
-        .login(&runner, "anthropic", "tracon-login-anthropic-1")
+        .login(
+            &runner,
+            "anthropic",
+            "tracon-login-anthropic-1",
+            "/root/.claude",
+        )
         .await
         .unwrap();
     drop(flow);
@@ -468,7 +478,12 @@ async fn the_claude_login_refuses_a_provider_it_cannot_sign_in_to() {
     state::isolate();
     let adapter = ClaudeAdapter::new("2.1.247");
     let err = match adapter
-        .login(&LoginRunner::default(), "openai-codex", "tracon-login-x")
+        .login(
+            &LoginRunner::default(),
+            "openai-codex",
+            "tracon-login-x",
+            "/root/.claude",
+        )
         .await
     {
         Ok(_) => panic!("Claude Code signs in to anthropic and nothing else"),

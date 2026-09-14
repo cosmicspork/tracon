@@ -336,6 +336,9 @@ mod tests {
             ended_mono_ms: Some(1),
             updated_ms: now_ms(),
             archived_ms: None,
+            legacy_ms: None,
+            parent_session: None,
+            continued_from: None,
         }
     }
 

@@ -55,7 +55,7 @@ use crate::{
 };
 
 /// The prefix this gateway is mounted at on the operator router.
-const MOUNT: &str = "/api/opencode/";
+pub(super) const MOUNT: &str = "/api/opencode/";
 
 /// How long a forwarded call may take when the node's configuration names
 /// nothing. A mediated call that outlives this is recorded as uncertain: the
@@ -74,13 +74,6 @@ fn forward_timeout(s: &AppState) -> Duration {
 /// retries a forbidden route would otherwise fill the transcript; the
 /// operator learns nothing from the fortieth.
 const MAX_REFUSALS_PER_TURN: i64 = 50;
-
-/// The policy kind a capability is decided under, and the one capability this
-/// build knows: an interactive terminal in the session's workspace. Default
-/// deny — `POST /pty` is arbitrary command execution with no permission check
-/// of its own (finding 7).
-const CAPABILITY_KIND: &str = "capability";
-const TERMINAL_CAPABILITY: &str = "terminal";
 
 /// The policy kind a mediated API call is decided under.
 const API_KIND: &str = "opencode_api";
@@ -530,6 +523,46 @@ fn classify(method: &Method, path: &[String]) -> (Class, &'static [&'static str]
     (Class::Forbidden("not a route this gateway mediates"), &[])
 }
 
+/// The PTY routes, told apart. The matrix already classifies all of them as
+/// the terminal capability; these say *which* one, because a spawn is
+/// rewritten, a ticket is minted rather than relayed, a removal is recorded,
+/// and an upgrade is not this handler's at all.
+fn pty_tail(path: &[String]) -> Option<&[String]> {
+    match path.first().map(String::as_str) {
+        Some("pty") => Some(path),
+        Some("api") if path.get(1).map(String::as_str) == Some("pty") => Some(&path[1..]),
+        _ => None,
+    }
+}
+
+fn is_pty_create(method: &Method, path: &[String]) -> bool {
+    method == Method::POST && pty_tail(path).is_some_and(|tail| tail.len() == 1)
+}
+
+fn is_pty_remove(method: &Method, path: &[String]) -> bool {
+    method == Method::DELETE && pty_tail(path).is_some_and(|tail| tail.len() == 2)
+}
+
+/// The PTY a `.../pty/{id}/connect-token` names.
+fn connect_token_pty(path: &[String]) -> Option<&str> {
+    match pty_tail(path)? {
+        [_, id, last] if last == "connect-token" && super::model::is_opaque(id) => {
+            Some(id.as_str())
+        }
+        _ => None,
+    }
+}
+
+/// Whether this is the terminal's WebSocket upgrade — the one route on the
+/// table that the catch-all handler does not answer. `gateway::pty::connect`
+/// asks before it proxies anything, so the two cannot drift apart.
+pub(super) fn is_terminal_connect(path: &[String]) -> bool {
+    match pty_tail(path) {
+        Some([_, id, last]) => last == "connect" && super::model::is_opaque(id),
+        _ => false,
+    }
+}
+
 /// Whether a first path segment is one the route matrix knows about at all.
 ///
 /// Added for the native UI's origin (`http::ui`), which serves a static bundle
@@ -586,7 +619,7 @@ const SCOPE_KEYS: &[&str] = &[
 
 /// Percent-encode a value for a query parameter. Small on purpose: the only
 /// value that reaches it is a container path the node itself chose.
-fn urlencode(value: &str) -> String {
+pub(super) fn urlencode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
@@ -674,11 +707,27 @@ fn foreign_scope_in_body(body: &Bytes, directory: &str) -> Option<String> {
 // The handler
 // ---------------------------------------------------------------------------
 
+/// The body with a top-level `cwd` removed, so the generic scope check can
+/// still read everything else in a PTY create. Only the top level: a `cwd`
+/// nested anywhere else is not `Pty.CreateInput`'s and stays refused.
+fn strip_cwd(body: &Bytes) -> Bytes {
+    if body.is_empty() {
+        return body.clone();
+    }
+    match serde_json::from_slice::<Value>(body) {
+        Ok(Value::Object(mut map)) => {
+            map.remove("cwd");
+            Bytes::from(Value::Object(map).to_string())
+        }
+        _ => body.clone(),
+    }
+}
+
 /// The client the gateway uses upstream: no proxy — the endpoint is a
 /// loopback publish or a pod address, and an ambient `HTTPS_PROXY` in the
 /// node's environment must not redirect it — and no redirect following, so a
 /// `Location` the harness returns cannot become a request the node makes.
-fn client() -> &'static reqwest::Client {
+pub(super) fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
@@ -700,7 +749,13 @@ fn answer(status: StatusCode, message: &str) -> Response {
 /// Refuse one call, naming the method and the path, and say so on the
 /// session's own log. A refusal the operator cannot see is indistinguishable
 /// from a request that was never made.
-fn refuse(s: &AppState, session_id: &str, method: &Method, path: &str, reason: &str) -> Response {
+pub(super) fn refuse(
+    s: &AppState,
+    session_id: &str,
+    method: &Method,
+    path: &str,
+    reason: &str,
+) -> Response {
     tracing::warn!(
         session = session_id,
         method = %method,
@@ -750,6 +805,24 @@ pub async fn handle(
             &format!("no session {session_id} on this node"),
         );
     };
+    // A session another node owns is not a 404 here. The request goes to that
+    // node over a bounded encrypted stream the hub only relays, and the answer
+    // comes back the same way; the owner repeats every check below on its own
+    // state before anything reaches its harness (`mesh::stream`).
+    if row.node_id != s.node_id {
+        return match s.mesh.clone() {
+            Some(mesh) => {
+                crate::mesh::stream::remote_gateway(&mesh, &row, &method, &uri, headers, body).await
+            }
+            None => answer(
+                StatusCode::NOT_FOUND,
+                &format!(
+                    "session {session_id} runs on node {} and this node has no mesh to reach it",
+                    row.node_id
+                ),
+            ),
+        };
+    }
     let Some(api) = s.manager.native_api(&session_id).await else {
         return answer(
             StatusCode::CONFLICT,
@@ -796,7 +869,18 @@ pub async fn handle(
     if let Class::Forbidden(reason) = class {
         return refuse(&s, &session_id, &method, &joined, reason);
     }
-    if let Some(named) = foreign_scope_in_body(&body, &api.directory) {
+    // A PTY create is the one route whose `cwd` is not refused for differing
+    // from the workspace: `gateway::pty::rewrite` replaces it outright, and
+    // accepts a normalised subdirectory of the workspace as well as the
+    // workspace itself — a stricter check than this one, because it rewrites
+    // rather than trusts. Every other key, on that route as on all the
+    // others, still has to name this session's scope or nothing.
+    let scoped = if is_pty_create(&method, &path) {
+        strip_cwd(&body)
+    } else {
+        body.clone()
+    };
+    if let Some(named) = foreign_scope_in_body(&scoped, &api.directory) {
         return refuse(
             &s,
             &session_id,
@@ -857,6 +941,7 @@ pub async fn handle(
                 &api,
                 mediation,
                 &method,
+                &path,
                 &joined,
                 &uri,
                 &headers,
@@ -1020,6 +1105,7 @@ async fn mediate(
     api: &NativeApi,
     mediation: Mediation,
     method: &Method,
+    path: &[String],
     joined: &str,
     uri: &Uri,
     headers: &HeaderMap,
@@ -1029,40 +1115,10 @@ async fn mediate(
         Mediation::Unavailable(reason) => refuse(s, session_id, method, joined, reason),
 
         Mediation::Terminal => {
-            let granted = {
-                let policy = s.manager.policy().read();
-                policy
-                    .decide(&PolicyRequest {
-                        channel,
-                        kind: Some(CAPABILITY_KIND),
-                        title: TERMINAL_CAPABILITY,
-                        command: None,
-                        arguments: None,
-                    })
-                    .verdict
-                    == Verdict::Allow
-            };
-            if !granted {
-                return refuse(
-                    s,
-                    session_id,
-                    method,
-                    joined,
-                    &format!(
-                        "the {TERMINAL_CAPABILITY} capability is not granted on channel {channel}; \
-                         a PTY is arbitrary command execution with no permission check of its own \
-                         (finding 7), so it is default-deny"
-                    ),
-                );
-            }
-            // The capability is granted, and the seam for Gate D is here: the
-            // WebSocket upgrade needs a gateway-minted, owner-bound ticket
-            // exchanged for the harness's own server-side, which is not built.
-            if joined.ends_with("/connect") {
-                return answer(
-                    StatusCode::NOT_IMPLEMENTED,
-                    "the terminal WebSocket needs an owner-bound ticket exchange, which arrives with Gate D",
-                );
+            let terminal = super::pty::decide(s, session_id, channel, api);
+            if !terminal.allowed() {
+                let message = terminal.refusal(channel, session_id, &api.directory);
+                return refuse(s, session_id, method, joined, &message);
             }
             record_decision(
                 s,
@@ -1070,19 +1126,50 @@ async fn mediate(
                 ek::POLICY_ALLOWED,
                 method,
                 joined,
-                TERMINAL_CAPABILITY,
-                None,
-                None,
+                super::pty::TERMINAL,
+                terminal.grant.as_ref().map(|g| g.id.as_str()),
+                terminal.grant.as_ref().map(|g| g.reason.as_str()),
             );
+
+            // A ticket request is answered by the node, not relayed. The
+            // harness's own ticket is taken server-side and never leaves it;
+            // what comes back is tracon's, bound to this operator, this
+            // session, this PTY and the origin that asked (finding 7,
+            // §8 #13).
+            if let Some(pty_id) = connect_token_pty(path) {
+                return super::pty::mint(session_id, api, pty_id, joined, headers).await;
+            }
+            // The upgrade itself never reaches here: it is routed to
+            // `gateway::pty::connect` ahead of this mount, because a
+            // WebSocket has to be taken before the body is.
+            if path.last().map(String::as_str) == Some("connect") {
+                return answer(
+                    StatusCode::BAD_REQUEST,
+                    "the terminal route is a WebSocket upgrade",
+                );
+            }
+
+            // A spawn is rewritten rather than trusted: the directory, the
+            // environment, and the command are tracon's, whatever the caller
+            // sent (finding 7).
+            let (body, spawned) = if is_pty_create(method, path) {
+                match super::pty::rewrite(&body, api).await {
+                    Ok(spawn) => (spawn.body.clone(), Some(spawn)),
+                    Err(reason) => return refuse(s, session_id, method, joined, &reason),
+                }
+            } else {
+                (body, None)
+            };
+
             let mediated = begin_intent(
                 s,
                 session_id,
-                TERMINAL_CAPABILITY,
+                super::pty::TERMINAL,
                 intent_kind::API,
                 Some(joined),
-                None,
+                spawned.as_ref().map(|spawn| spawn.command.as_str()),
             );
-            forward(
+            let response = forward(
                 s,
                 session_id,
                 api,
@@ -1094,7 +1181,41 @@ async fn mediate(
                 false,
                 Some(mediated),
             )
-            .await
+            .await;
+
+            let status = response.status();
+            if let Some(spawn) = spawned.filter(|_| status.is_success()) {
+                // The id the harness gave it, so the open and the close are
+                // the same terminal on the record. It is read back out of the
+                // response, which is the only place it exists.
+                let (parts, body) = response.into_parts();
+                let bytes = axum::body::to_bytes(body, 1 << 20)
+                    .await
+                    .unwrap_or_default();
+                let created: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                let pty_id = created["id"]
+                    .as_str()
+                    .or_else(|| created["data"]["id"].as_str());
+                s.manager.record_event(
+                    session_id,
+                    ek::PTY_OPENED,
+                    super::pty::opened_event(pty_id, &spawn, &terminal),
+                );
+                return Response::from_parts(parts, Body::from(bytes));
+            }
+            if is_pty_remove(method, path) && status.is_success() {
+                s.manager.record_event(
+                    session_id,
+                    ek::PTY_CLOSED,
+                    json!({
+                        "gateway": "opencode",
+                        "phase": "removed",
+                        "pty_id": path.last(),
+                        "reason": "the terminal was closed through the gateway",
+                    }),
+                );
+            }
+            response
         }
 
         Mediation::Prompt => {
@@ -1237,9 +1358,9 @@ async fn mediate(
             // from, not OpenCode's: a reply this gateway could not confirm is
             // sent again by reconciliation, and it has to be the same answer.
             let option = if reply == "once" {
-                crate::acp::types::OPTION_ALLOW_ONCE
+                crate::adapter::types::OPTION_ALLOW_ONCE
             } else {
-                crate::acp::types::OPTION_REJECT_ONCE
+                crate::adapter::types::OPTION_REJECT_ONCE
             };
             let mediated = begin_intent(
                 s,

@@ -9,6 +9,7 @@ use axum::{
 use proto::enroll::{normalize_code, EnrollRequest};
 use proto::frame::{valid_channel, Envelope, MAX_FRAME_BYTES, MESH_CHANNEL};
 use proto::keys::key32;
+use proto::stream::StreamEnvelope;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
@@ -598,4 +599,143 @@ pub async fn remove_member(
     } else {
         Err(err(StatusCode::NOT_FOUND, "no such member"))
     }
+}
+
+// ------------------------------------------------------------------ streams
+
+/// `POST /v0/streams`: relay one sealed stream envelope to its recipient.
+///
+/// Nothing here is stored. The hub verifies authorship, checks that both ends
+/// are members of the frame's channel, applies its bounds, and hands the bytes
+/// over verbatim. It has no key for the body and derives none: the per-stream
+/// key comes from a channel epoch key the hub was never given.
+pub async fn post_stream(
+    State(s): State<AppState>,
+    Extension(owner): Extension<Owner>,
+    body: String,
+) -> ApiResult {
+    let limits = s.streams.limits();
+    if body.len() > limits.max_frame_bytes {
+        return Err(err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "stream frame exceeds the relay's frame limit",
+        ));
+    }
+    let env: StreamEnvelope = serde_json::from_str(&body)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("not a stream frame: {e}")))?;
+    let sender = env
+        .verify()
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    if sender != owner.0 {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "stream frame sender is not the authenticated key",
+        ));
+    }
+    if !valid_channel(&env.channel) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid channel name"));
+    }
+    let me = member_of(&s, &owner)?;
+    in_channel(&me, &env.channel)?;
+    // The recipient's authority is checked here too: a member removed from the
+    // channel stops being reachable on it the moment the hub's record says so,
+    // without waiting for either node to notice.
+    let peer = s
+        .members
+        .get(&env.recipient)
+        .map_err(io)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "the recipient is not a member here"))?;
+    in_channel(&peer, &env.channel)?;
+
+    // Relayed exactly as it arrived, so the signature still covers the bytes
+    // the far side reads.
+    match s
+        .streams
+        .relay(&owner.hex(), &env.recipient, &env.stream_id, body, now_ms())
+    {
+        Ok(()) => Ok((StatusCode::ACCEPTED, Json(json!({"relayed": true})))),
+        Err(refusal) => {
+            let status = match refusal {
+                crate::streams::RelayRefusal::NotConnected => StatusCode::NOT_FOUND,
+                crate::streams::RelayRefusal::Dropped => StatusCode::CONFLICT,
+                _ => StatusCode::TOO_MANY_REQUESTS,
+            };
+            Err((
+                status,
+                Json(json!({"error": refusal.message(), "reason": refusal.code()})),
+            ))
+        }
+    }
+}
+
+/// `DELETE /v0/streams/{stream_id}`: this end is done with the stream. The
+/// relay forgets it and tells the other end, so a peer that never receives the
+/// sealed close still stops waiting.
+pub async fn close_stream(
+    State(s): State<AppState>,
+    Extension(owner): Extension<Owner>,
+    Path(stream_id): Path<String>,
+) -> ApiResult {
+    member_of(&s, &owner)?;
+    let known = s.streams.close(
+        &stream_id,
+        &owner.hex(),
+        proto::stream::closed::PEER_GONE,
+        "the other end closed the stream",
+    );
+    Ok((StatusCode::OK, Json(json!({"closed": known}))))
+}
+
+/// A member's delivery connection, and the thing that forgets it. The relay
+/// holds a sender per connected member; without the drop, a member that
+/// disconnected would keep a queue the hub fills and nobody reads.
+pub struct ConnStream {
+    rx: tokio::sync::mpsc::Receiver<crate::streams::Delivery>,
+    relay: std::sync::Arc<crate::streams::StreamRelay>,
+    node_id: String,
+    epoch: u64,
+}
+
+impl Stream for ConnStream {
+    type Item = Result<Event, Infallible>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.rx.poll_recv(cx) {
+            std::task::Poll::Ready(Some(d)) => std::task::Poll::Ready(Some(Ok(Event::default()
+                .event(d.event)
+                .data(d.data.clone())))),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+impl Drop for ConnStream {
+    fn drop(&mut self) {
+        self.relay.disconnect(&self.node_id, self.epoch);
+    }
+}
+
+/// `GET /v0/streams`: the member's live delivery connection. Sealed envelopes
+/// arrive as `stream` events and the hub's own clear notices as `control`
+/// events; there is no cursor and no backlog, because nothing was kept.
+pub async fn stream_events(
+    State(s): State<AppState>,
+    Extension(owner): Extension<Owner>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
+    member_of(&s, &owner)?;
+    let node_id = owner.hex();
+    let rx = s.streams.connect(&node_id);
+    let epoch = s.streams.epoch_of(&node_id).unwrap_or_default();
+    Ok(Sse::new(ConnStream {
+        rx,
+        relay: s.streams.clone(),
+        node_id,
+        epoch,
+    })
+    .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15))))
 }

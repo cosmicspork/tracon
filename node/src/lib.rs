@@ -1,7 +1,6 @@
 //! The tracon node: harness supervision, the gate, local store, and the
 //! interface it serves.
 
-pub mod acp;
 pub mod adapter;
 pub mod authority;
 pub mod boundary;
@@ -15,6 +14,7 @@ pub mod gateway;
 pub mod git_remote;
 pub mod git_tree;
 pub mod http;
+pub mod legacy;
 pub mod manifest;
 pub mod mcp;
 pub mod mesh;

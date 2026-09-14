@@ -93,8 +93,6 @@ jobs:
             file: Dockerfile
           - name: tracon-node
             file: Dockerfile.node
-          - name: tracon-harness
-            file: containers/harness/Containerfile
           - name: tracon-harness-claude
             file: containers/harness-claude/Containerfile
           - name: tracon-harness-opencode

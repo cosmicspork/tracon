@@ -272,6 +272,8 @@ pub fn router(state: AppState) -> Router {
         // One prompt: the item and the session that starts on it.
         .route("/api/compose", post(api::compose))
         .route("/api/sessions/archive-ended", post(api::archive_ended))
+        .route("/api/sessions/archive-legacy", post(api::archive_legacy))
+        .route("/api/sessions/{id}/reopen", post(api::reopen_session))
         .route("/api/sessions/{id}/archive", post(api::archive_session))
         .route("/api/sessions/{id}/unarchive", post(api::unarchive_session))
         .route("/api/sessions/{id}", get(api::get_session))
@@ -293,6 +295,19 @@ pub fn router(state: AppState) -> Router {
         // deliberately: the same cookie, Origin and Host checks as every other
         // operator route answer first, and the harness credential is injected
         // on the node so the browser never holds it.
+        // The terminal's WebSocket, ahead of the catch-all because an upgrade
+        // has to be taken from the request before its body is, and the
+        // catch-all buffers the body. It re-asks everything the catch-all
+        // would have: the route table, the session, the capability — and then
+        // the ticket and the origin only an upgrade needs.
+        .route(
+            "/api/opencode/{session_id}/pty/{pty_id}/connect",
+            get(crate::gateway::pty::connect),
+        )
+        .route(
+            "/api/opencode/{session_id}/api/pty/{pty_id}/connect",
+            get(crate::gateway::pty::connect),
+        )
         .route(
             "/api/opencode/{session_id}/{*rest}",
             axum::routing::any(crate::gateway::opencode::handle),
@@ -604,6 +619,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     };
     if let Some(m) = &state.mesh {
         m.set_executor(Arc::new(state.clone()));
+        // The same state answers owner streams, so a remote operator's call
+        // runs through the very handler a local one reaches.
+        m.streams().set_executor(Arc::new(state.clone()));
     }
     // The nightly batch, for channels this node processes.
     tokio::spawn(crate::corpus::promote::nightly(

@@ -28,7 +28,6 @@ use tracon::{
         api::AppState,
         auth::{self, AuthState},
     },
-    policy::{Rule, Verdict},
     session::Manager,
     store::Store,
     stream::Bus,
@@ -48,6 +47,9 @@ const REMOTE: &str = "203.0.113.7:5000";
 struct Rig {
     app: axum::Router,
     store: Arc<Store>,
+    /// The node, so a test can reach the live channel the native UI streams
+    /// from — the one thing on this mount the gateway serves rather than
+    /// forwards (finding 20).
     manager: Manager,
     seen: Arc<Mutex<Seen>>,
     /// The harness itself, so a test can put it in a state — a permission it
@@ -456,13 +458,15 @@ async fn an_always_reply_is_rewritten_to_once_and_recorded() {
 }
 
 /// A PTY is arbitrary command execution with no permission check of its own
-/// (finding 7), so it is default-deny; the capability is what opens it, and
-/// the WebSocket still waits for Gate D.
+/// (finding 7), so it is default-deny; an operator grant bound to this session
+/// and its workspace is what opens it, and the upgrade still needs a ticket
+/// the node minted. The terminal capability has tests of its own in
+/// `opencode_pty.rs`; this is the gateway's share of it.
 #[tokio::test]
 async fn a_pty_needs_an_explicitly_granted_terminal_capability() {
     let rig = Rig::new().await;
     let (status, body) = rig
-        .call("POST", "pty", Some(json!({ "command": "bash" })))
+        .call("POST", "pty", Some(json!({ "command": "/bin/bash" })))
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert!(
@@ -475,27 +479,34 @@ async fn a_pty_needs_an_explicitly_granted_terminal_capability() {
     assert!(rig.requests().is_empty());
     assert_eq!(rig.events_of("gateway_refused").len(), 1);
 
-    // Granted, the same call is forwarded — and the ticket exchange the
-    // WebSocket needs is still Gate D's.
-    rig.manager.policy().write().rules.push(Rule {
-        id: "terminal-for-this-test".into(),
-        verdict: Verdict::Allow,
-        reason: "the operator granted a terminal on this channel".into(),
-        kinds: vec!["capability".into()],
-        matches: vec!["terminal".into()],
-        args: Default::default(),
-        channels: vec![],
-    });
+    // Granted, the same call is forwarded — rewritten, and recorded.
+    rig.store
+        .authority_grant_insert(&tracon::store::AuthorityGrantRow {
+            id: uuid::Uuid::now_v7().to_string(),
+            action: tracon::authority::TERMINAL.into(),
+            verdict: "allow".into(),
+            target: tracon::authority::terminal_target(TRACON_SESSION, WORKSPACE),
+            channel: "personal".into(),
+            session_id: Some(TRACON_SESSION.into()),
+            revision: None,
+            expires_ms: Some(tracon::store::now_ms() + 600_000),
+            revoked_ms: None,
+            reason: "the operator opened a terminal for this session".into(),
+            created_ms: tracon::store::now_ms(),
+        })
+        .unwrap();
     let (status, body) = rig
-        .call("POST", "pty", Some(json!({ "command": "bash" })))
+        .call("POST", "pty", Some(json!({ "command": "/bin/bash" })))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(rig.requests().len(), 1);
     assert_eq!(rig.events_of("policy_allowed").len(), 1);
+    assert_eq!(rig.events_of("pty_opened").len(), 1);
 
+    // The upgrade is the node's own route, and it opens nothing without a
+    // ticket the node minted.
     rig.forget_requests();
     let (status, _) = rig.call("GET", "pty/pty_1/connect", None).await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(rig.requests().is_empty());
 }
 
@@ -709,6 +720,8 @@ impl Live {
                     review_id: None,
                     base_sha: None,
                     workspace_id: None,
+                    parent_session: None,
+                    continued_from: None,
                 },
                 adapter,
             )

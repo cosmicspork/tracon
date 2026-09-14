@@ -10,6 +10,8 @@
 - Own the data: portable, independently readable exports; no node required to inspect them.
 - Optimize useful work per interruption, not agent count; support independent installations,
   not multi-user tenancy.
+- Keep the core accountable and personal workflows adaptable. Customizations reuse
+  isolation, scoped authority, manifests and evidence; installing code grants no permission.
 
 Completed items are removed from this file when they land; the changelog and the
 reference documents under `docs/reference/` carry the history.
@@ -79,9 +81,9 @@ refer to that manifest's table.
         through the session manager rather than being forwarded, an unauthenticated and a
         cross-origin request refused before the gateway runs, and a PTY refused without an
         explicitly granted `terminal` capability.
-        **Still to do here:** the PTY WebSocket ticket exchange (gateway-minted and
-        owner-bound; Gate D) — the capability check point exists and the connect route
-        answers 501 — and the native UI origin that will call this mount (Gate D). Child
+        **Still to do here:** the native UI origin that will call this mount (Gate D). The PTY
+        WebSocket ticket exchange is done — gateway-minted, owner-bound, and proxied under a
+        bound buffer; see Gate D's PTY item. Child
         sessions (`fork`) and `init` are refused with a visible 403 until tracon registers
         them; a mediated call writes its `opencode_intent` row before dispatch, so one that
         times out is recorded as uncertain — on the intent and on the session — and left for
@@ -130,7 +132,7 @@ refer to that manifest's table.
         both numbers in one ledger keyed on (session, turn): the gateway's on-the-wire count,
         authoritative for budgets and ceilings, and the harness's own report
         (`tokens.{input,output,reasoning,cache.read,cache.write}` and `cost` for OpenCode,
-        the ACP `usage` for omp/claude). At turn end they are reconciled — agreement within
+        `result.usage` for Claude Code). At turn end they are reconciled — agreement within
         tolerance is recorded as such, disagreement writes a `usage_mismatch` event carrying
         both sides, and the harness's number can raise the charge but never lower it. A turn
         whose calls the gateway could not count (finding 10: OpenCode reports omitted usage
@@ -234,9 +236,23 @@ refer to that manifest's table.
           checkpoint. Covered against the real pinned binary for the generation and the
           reopen, and against a stand-in build that wrecks the clone for "the original is
           untouched".
-  - [ ] Legacy transition: archive omp sessions read-only with harness identity, reopen
-        retained workspaces as new sessions with lineage, retire omp credentials deliberately,
-        verify the omp adapter can no longer launch.
+  - [x] Legacy transition. `tracon session archive-legacy` marks every session whose
+        harness is `omp` read-only for good: the row keeps its harness identity and version
+        so the transcript stays interpretable, transcripts, evidence and workspaces are all
+        retained, a session that had not ended is ended, and its pending approvals are closed
+        with a visible reason because nothing can answer them. `legacy_ms` on the row is the
+        durable fact rather than something re-derived from a harness id no adapter resolves;
+        `archived_ms` stays presentation, so a legacy session can be un-archived to read
+        without becoming launchable. `tracon session reopen <id> --harness opencode|claude`
+        makes a *new* session on the retained workspace and branch, recording
+        `parent_session` and `continued_from` and opening with an explicit handoff note — the
+        new harness inherits the workspace and nothing else. The legacy id is never reused.
+        `tracon setup` retires what omp left in node-owned state (its login credential
+        database) by name and prints what it removed, leaving the broker untouched: those
+        tokens are provider credentials and still work. `[harness] id = "omp"` is refused at
+        startup with the migration path rather than a bare unknown-harness error, and there
+        is no omp adapter, image, or Containerfile left to launch. See
+        `docs/RECOVERY.md`.
   - [x] Direct-harness recovery route documented for both harnesses; corpus export stays
         portable and vectors rebuildable. `docs/RECOVERY.md`: get the work out, run `claude`
         or `opencode` yourself, import back as a session — with what is lost (audit, budget,
@@ -310,6 +326,29 @@ refer to that manifest's table.
         off-origin `http` assignment both left the window on the UI origin, with the latter
         handed to the system browser; a real click on a `target=_blank` link opened the
         browser and no second window; a same-origin navigation went through.
+        **Still to do here:** the same against the real UI origin once it lands (the
+        wrapper's half is feature-detected until then), and the macOS leg — bundle, window
+        behaviour and the Edit menu — which is the operator's to run.
+  - [ ] Installed mobile PWA on the always-on node: in-scope shell, isolated native view,
+        third-party storage blocked, background/resume recovery, notification deep links.
+  - [x] PTY only as an explicit workspace-scoped capability with a gateway-minted owner-bound
+        ticket (finding 7). The `terminal` grant is an authority grant bound to a session and
+        that session's workspace path, default-`ask`, revoked and expired at dispatch; a spawn
+        is rewritten rather than forwarded (`cwd` pinned to the workspace or a normalised
+        subdirectory, `env` reduced to variables that decide only how a terminal looks, command
+        held to the image's own `GET /pty/shells`); the WebSocket ticket is the node's, minted
+        after taking the harness's server-side and bound to operator, session, PTY and origin
+        for 30 s, once; the proxy is bounded in both directions and closes with a reason rather
+        than buffering for a stalled client. Covered against the fake server and the pinned
+        binary in `node/tests/opencode_pty.rs`: refused without a grant with nothing spawned, a
+        grant honoured only for the session and workspace it names, revocation immediate, the
+        spawn asserted as it reached the harness, the harness's own ticket never reaching the
+        client, the tracon ticket single-use and refused for another PTY, another origin or a
+        revoked capability, bytes pumped both ways, a non-reading client closed rather than
+        buffered, and a real `/bin/sh` read back through the proxy. **What it does not do,
+        stated rather than implied:** a terminal is an interactive shell, not a per-command
+        ledger — what is recorded is that one was opened, with what shell and where, and its
+        byte counts and duration; output capture exists, is off, and is labelled.
         **Still to do here:** the same against the real UI origin, which lands in the row
         above — the wrapper calls `POST /api/sessions/{id}/opencode-boot` and that route now
         exists, so the feature detection should find it; an end-to-end run of the two
@@ -397,8 +436,6 @@ refer to that manifest's table.
         `document.requestStorageAccess` from inside the frame before `POST /boot`, which needs
         a user gesture and therefore a visible "Show OpenCode" control in the frame rather
         than a silent boot.
-  - [ ] PTY only as an explicit workspace-scoped capability with a gateway-minted owner-bound
-        ticket (finding 7).
   - [x] Native UI route trace captured and unknown mutations shown to fail closed.
         `docs/reference/opencode-v1.18.30/ui-route-trace.tsv` is 60 request shapes taken
         from a real browser: headless Chromium over CDP, the pinned bundle on the UI
@@ -435,18 +472,66 @@ refer to that manifest's table.
         pinned upstream commit, asserts the tree digest, and attests it — but no release has
         published that asset yet, so the fetch path is exercised by test rather than against
         a real release.
-- [ ] **Gate E — remote-node parity.** Bounded encrypted owner streams over the hub for
+- [x] **Gate E — remote-node parity.** Bounded encrypted owner streams over the hub for
       HTTP, SSE, and PTY: authenticated stream ids, owner binding, flow control, reconnect
       without replaying input, revocation, protocol mismatch refused; hub sees ciphertext and
-      routing metadata only.
+      routing metadata only. Proved in process (`node/tests/owner_stream.rs`,
+      `hub/tests/streams.rs`): a GET and a mediated POST round-trip through the relay to the
+      owner's gateway, an event stream flows until the owner closes it, a slow consumer
+      closes the credit window instead of the stream, a dropped relay connection re-opens
+      without re-sending a mutation, an owner restart fences, membership revoked on the owner
+      refuses, a protocol mismatch is refused by name, and the relay's own bytes are
+      ciphertext with nothing written down. The PTY rides the same family as chunks with no
+      input replay; its `connect` route is still the gateway's documented 501 seam until the
+      owner-bound ticket exchange exists. **Left to the operator:** the same run against the
+      real hub — `tracon session open` a session on one node from another node's interface,
+      with `RUST_LOG=tracon::mesh::stream=debug` on both, and confirm the relay's
+      `GET /v0/streams` connection holds and `GET /v0/info` reports the same contract on
+      every node.
 - [ ] **Gate F — release and clean cutover.** Real Podman and Kubernetes project workflows
-      on both harnesses; compatibility manifest promoted through a tracon release; omp
-      removed; README, architecture, and design reconciled (harness sections, optionality of
-      work items, phases, review, memory, remote access, and mesh); the migration plan archived.
+      on both harnesses; compatibility manifest promoted through a tracon release; README,
+      architecture, and design reconciled (harness sections, optionality of work items,
+      phases, review, memory, remote access, and mesh); the migration plan archived.
+  - [x] omp removed: the adapter, its image and release job, its ACP stdio layer, its
+        provider wiring (the `models.json` half of `harness_wiring`, the Codex websocket
+        variable, the built-in local-provider disabling, the `CHATGPT_ACCOUNT_REFUSES`
+        catalogue denylist), its retry-notice shape, its fake and its adapter tests, and its
+        ACP captures under `docs/reference/`. `KNOWN` is `["opencode", "claude"]`, the default
+        harness is `opencode`, and the Containerfile agreement test covers those two and
+        asserts `containers/harness` is gone. The Codex subscription login moved to the
+        OpenCode adapter's `opencode auth login openai`, which a node running Claude Code
+        reaches through `[boundary] codex_login_image` the way it already reached
+        `claude setup-token` through `login_image`. The `review_status` wait cap, sized for
+        omp's 30 s MCP client, is 45 s: both remaining harnesses give a tool call 60 s
+        (`config-state.md` §5.4), and the node states OpenCode's explicitly rather than
+        inheriting it.
 
 **Upstream contributions worth a bounded PR** (not blockers): a flag that turns the
 web-UI fallback into a 404; a flag check on nested instruction attachment; invoking the
 declared `permission.ask` hook; an LSP status event.
+
+### Session portability
+
+Move a whole session to another node, or resume it later, without losing anything the
+model or the operator saw. Today the durable record is the event ledger and, for
+OpenCode, the per-session state backup (Gate C); the two gaps are the harness's own
+context and the working files a session accumulates outside the workspace.
+
+- [ ] Save the full-text conversation to a file before any compaction or context
+      reset: every turn as the harness actually sent and received it (system prefix,
+      prompts, tool inputs and outputs, model text), written to node-owned storage
+      keyed by session and turn, so a compacted context is a summary of something
+      that still exists rather than the only copy. Applies to both harnesses; for
+      OpenCode the source is the durable per-session stream plus the message
+      snapshot, for Claude Code the stream-json transcript.
+- [ ] Save session scratchpads with the session: any scratch directory, notes, or
+      temporary files the harness or the node created for the session outside the
+      workspace tree, captured in the same package as the state backup and the
+      transcript, with the same digest and generation record.
+- [ ] Make the package the unit of transfer and resume: `tracon session backup`
+      produces it, continuity transfer carries it, and reopening on another node or
+      later restores transcript, scratchpad, state, and workspace checkpoint together,
+      with lineage recorded and nothing silently dropped.
 
 ### Still waiting on a real run
 
@@ -482,6 +567,74 @@ This section records intended work, not additional guarantees of the current rel
       endpoint or a second screen. Login and desktop setup remain lifecycle entry points,
       not extra navigation destinations. Browser access to the native OpenCode view
       remains part of Gate D, not a separate interface to maintain.
+
+#### Node connections and desktop reliability
+
+- [ ] **Give the Podman gateway an independent lifecycle.** On Linux, a gateway
+      started by the setup API inherits the node service's process group and stops
+      with it; startup only verifies the now-stopped gateway. Manage the gateway in
+      its own user-service/cgroup rather than weakening the node's `KillMode` or
+      rerunning full setup on every restart. Reconcile a missing/stopped gateway
+      idempotently, retain fail-closed boundary checks, and reject incompatible
+      gateway configuration with an explicit repair path. Prove that a node-service
+      restart leaves the gateway running, stopped/missing recovery works, and node
+      shutdown still cleans up harnesses.
+- [ ] **Make credential handoff status converge.** A received share currently updates
+      the broker without republishing the provider summary peers display. After
+      durable receiver acceptance, recompute provider availability and publish the
+      local stream and mesh summary, including clearing obsolete login failures.
+      Distinguish queued, receiver-confirmed and usable credentials; the sender's
+      node bindings and successful enqueue alone prove neither receipt nor use.
+      Surface persistence/rejection failures without exposing values, and keep
+      provider connection status distinct from runtime readiness. Prove receipt,
+      persisted metadata and the peer view agree without a restart or another share.
+- [ ] **Preserve deliberate sharing through OAuth renewal.** Keep explicit channel
+      and recipient bindings when refreshing instead of resetting them to the local
+      node. Define one refresh owner and propagate renewed copies sealed to the
+      approved recipients; do not assume a broker handoff includes a harness's login
+      database or let multiple nodes race a rotating refresh token. Show refresh
+      failures, reconnect requirements and stale/offline copies. Define disconnect
+      and recipient-removal behavior explicitly: removing local bindings is not
+      evidence that a copied provider token was revoked. Prove renewal and reconnect
+      preserve scope and update the receiver without granting any new authority.
+- [ ] **Choose a policy for provider usage exhaustion.** Let the operator select in
+      advance, per project/channel with a per-run override: pause and resume after
+      reset; fall back to a named provider/model; or try that fallback, then wait if
+      no approved provider is available. Default to pausing without an authorized
+      fallback. Distinguish subscription/quota exhaustion from transient throttling,
+      authentication failures and outages; a generic 429 proves no reset schedule.
+      Use provider-reported reset evidence when available, otherwise show an unknown
+      reset and offer manual retry or bounded rechecks rather than inventing a timer.
+      Track cooldowns by the affected account/limit scope, including nodes sharing
+      that credential. Record the selected policy, reason, effective model and next
+      wake in the existing ledger; waiting survives restarts, releases idle execution
+      resources, and remains cancellable. Fallback and automatic resume must recheck
+      model/harness compatibility, destination data access, grants and spending caps;
+      permission to wait is not permission to send context to another provider.
+      Continue only from a recorded safe boundary, never replaying completed actions
+      or treating an uncertain in-flight tool as complete. Prove fallback, reset-based
+      resume and both-providers-exhausted behavior, including cancellation and unknown
+      reset times, without duplicate execution or silent changes of harness.
+- [ ] **Explain browser push enrollment failures.** Distinguish unavailable APIs,
+      denied permission, service-worker failure, browser push-service registration
+      failure and node subscription-storage errors. For the push-service case, say
+      that registration failed, identify disabled/blocked push services as possible
+      causes, and offer a supported browser or desktop notifications. Ungoogled
+      Chromium is an example, not a diagnosis inferred from a generic exception or
+      user-agent string. Keep technical details available without making them the
+      only message; do not report a device as registered after failed enrollment.
+      Verify the guidance at the failing stage without mislabeling permission,
+      invalid-key or node errors as a browser transport problem.
+- [ ] **Open external links through a clean Linux host launcher.** The shipped
+      AppImage's bundled `xdg-open` silently skips KDE 6, and its inherited library
+      path can break the Flatpak browser launcher. Select the host launcher and
+      restore its host PATH/library environment for the child only; preserve the
+      running app's libraries and existing URL/origin restrictions. Cover provider
+      sign-in and native-harness external links, report observable dispatch failures,
+      and never equate spawning a detached helper with opening the browser. Prove a
+      harmless HTTPS link opens from the installed AppImage on KDE 6 with a Flatpak
+      default browser; retain browser, mobile and other desktop behavior, and keep
+      OAuth codes and full sign-in URLs out of diagnostics.
 
 #### Review workspace and diff reading
 
@@ -574,6 +727,8 @@ the agent, which is not Tracon's authority model.
       and explicitly configured test services or previews for the projects actually used.
       Snapshot the configuration per execution; show its last successful validation and
       invalidate that assurance when its inputs change.
+      Treat customizations as versioned source with provenance, compatibility
+      requirements and validation evidence, not just a collection of settings.
 - [ ] **Preview preparation and explain incompatibility.** Show detected ecosystems,
       supported preparation steps, missing tools and actionable remedies before launch.
       Preserve credential-free preparation and isolation; unsupported scripts, services
@@ -583,6 +738,22 @@ the agent, which is not Tracon's authority model.
       that still require approval. Derive this from current policy and grants, not a
       parallel permissions model. Explain node eligibility and placement; any suggested
       runner stays manually overridable within the eligible set.
+      Show what a customization can read, change and send elsewhere, not merely
+      which tools it requests.
+- [ ] **Review, activate and roll back personal customizations.** Let an agent propose
+      a skill, instruction package, project profile or recipe. Show source changes,
+      provenance, required tools/data/actions and compatibility/validation evidence
+      before explicit operator activation. Reuse Gate C's node-owned manifests and
+      pinned artifacts; activation creates a revision, not a second configuration
+      system. Updates never modify running sessions or silently broaden authority.
+      Keep disable and rollback available; rollback cannot undo external effects.
+- [ ] **Expose resource-scoped operations for custom work.** Start with operations
+      demanded by real recipes through existing tools and policy enforcement:
+      evidence for a named work item, not unrestricted ledger access; proposing a
+      change, not general mutation rights. Types describe the contract but are not
+      a security boundary: the node enforces scope and execution remains isolated.
+      Installing an extension grants no raw credentials, privileged node access or
+      unrestricted outbound networking. Prove out-of-scope access is refused.
 
 #### Portable data and recovery
 
@@ -597,6 +768,8 @@ the agent, which is not Tracon's authority model.
       state, evidence, attachments and provenance. Define identifiers, timestamps,
       encodings, paths and omission rules. Optional harness-native state must name its
       harness/build/schema compatibility; it is not the portable record's only copy.
+      Include selected customization source, configuration and pinned revisions;
+      imported customizations require fresh authorization and contain no credentials.
 - [ ] **Make import predictable and independently implementable.** Publish schemas,
       representative exports, integrity/signature verification rules, version migration
       policy and examples for ordinary processing tools. Define duplicate/conflict
@@ -647,11 +820,32 @@ the agent, which is not Tracon's authority model.
 
 #### Reusable work and bounded automation
 
+The [extensible-software principle](https://jeremymorrell.dev/blog/extensible-software-in-the-age-of-llms/)
+fits here as personal workflows around an accountable core, not a new platform.
+Sequence: fix node/desktop/credential reliability; finish profiles and effective
+authority; deliver reviewed recipe authoring and activation; prove one personal
+customization; then add bounded triggers and sharing through that lifecycle.
+Gate C's completed foundations remain complete. Provider fallback preferences may
+be configurable, but quota classification, safe resumption, accounting and permission
+enforcement stay in the core.
+
 - [ ] **Saved workflow recipes.** Start with a few recurring procedures such as regression
       investigation, small changes and release preparation. Reuse phase presets and the
       ledger; snapshot each recipe on invocation, persist expensive checkpoints and
       external waits, and let the operator revise or stop a run. No mandatory workflow
       language or ceremony for a plain prompt.
+      Let an agent draft and revise recipes from a request; the operator reviews
+      and activates a pinned revision through the customization lifecycle above.
+- [ ] **Prove one personal customization end to end.** Produce a preferred review
+      summary when work is ready: intent, changed behavior, evidence, unresolved
+      risks and decisions needed. Use an approved recipe, scoped evidence access
+      and existing report/document surfaces. Prove usefulness on real work, source
+      and revision visibility, safe failure without disrupting review or approving
+      anything, and revision/disable/export/import without authority transfer.
+      Start custom UI as isolated reports/views using document-preview isolation,
+      not plugins in the administration UI. Expose no node session cookie, Tauri
+      management commands or application store; any later interactive action needs
+      a narrowly defined authorized operation.
 - [ ] **Lightweight batches.** Group related work with dependencies, explicit assignment/
       ownership and reclaim rules, aggregate spending, blockers and one completion report.
       Build on current readiness and session holders; retain discovery lineage and prevent
@@ -666,6 +860,8 @@ the agent, which is not Tracon's authority model.
       retry limits; preserve pause/stop, deduplicate triggers, and ask before consequential
       actions absent a valid scoped grant. Use ordinary supervisor logic for scheduling,
       reconciliation and health checks, not permanent agent roles.
+      Run approved recipe revisions through the existing supervisor and ledger,
+      never arbitrary extension code inside the node.
 - [ ] **Optional conversational coordination, only if useful.** An ordinary managed
       session may inspect permitted cross-project work and propose actions through existing
       tools. No privileged manager loop in the node. Fresh reviewers remain useful for
@@ -681,6 +877,8 @@ the agent, which is not Tracon's authority model.
       pinned-release/update policy, interruption and backup requirements, and the recovery
       path for a failed upgrade. Extend the existing compatibility gates instead of
       promising arbitrary drop-in harnesses or maintaining a native UI fork.
+      Apply compatibility checks, failed-update recovery and explicit rollback to
+      installed customizations as well as the managed runtime.
 - [ ] **Offer a clearly labeled demonstration mode.** Reuse the fixture machinery to
       explore the workflow without credentials or containers, with demonstration data
       unmistakable and no implication that its output proves a live run.
@@ -709,9 +907,6 @@ the agent, which is not Tracon's authority model.
   against. The dist channel publishes no self-contained build of either, and a
   rustfmt from anywhere else formats differently from the workspace's pinned one, so
   every edit would arrive with churn CI rejects.
-- Harness-specific surfaces that will be rewritten at cutover: the omp provider wiring,
-  catalogue denylist, and built-in-provider disabling; the retry-notice recogniser; the
-  20 s `review_status` wait cap sized for omp's MCP client.
 
 ## Deferred
 
@@ -720,6 +915,9 @@ the agent, which is not Tracon's authority model.
   tracon terminal.
 - **`cr-sqlite`:** only if real multi-writer convergence requires it.
 - **Stacked MR automation:** decide whether stacks are preferable to feature flags first.
+- **General dashboard/plugin system:** only after isolated reports and views prove
+  insufficient. No new extension runtime, marketplace or workflow language is required
+  for the personal-customization work above.
 
 ## Out of scope
 

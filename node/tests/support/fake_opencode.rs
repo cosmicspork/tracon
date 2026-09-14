@@ -25,6 +25,7 @@ use tracon::runner::{Runner, RunnerCommand, RunnerError, Spawned};
 
 pub const SESSION: &str = "ses_faketestsession0000000";
 pub const PERMISSION: &str = "per_fakepermission0000000";
+pub const PTY: &str = "pty_faketerminal000000000";
 const PASSWORD_HEADER: &str = "authorization";
 
 /// One request as the fake saw it, so a gateway test can assert on what
@@ -60,6 +61,17 @@ pub struct Seen {
     pub aborted: usize,
     /// Every request that reached the fake, in order.
     pub requests: Vec<Recorded>,
+    /// Bodies posted to `POST /pty`, exactly as they arrived — which is how a
+    /// test sees that the gateway rewrote the spawn rather than relaying it.
+    pub spawns: Vec<Value>,
+    /// Every `x-opencode-ticket` header value the connect-token route saw.
+    pub ticket_headers: Vec<Option<String>>,
+    /// Tickets the fake issued, in order.
+    pub issued: Vec<String>,
+    /// Tickets presented on a connect, and whether the fake accepted them.
+    pub presented: Vec<(String, bool)>,
+    /// PTY ids the harness was asked to remove.
+    pub removed: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -93,6 +105,15 @@ pub struct Fake {
     pending: Arc<Mutex<Vec<Value>>>,
     /// The messages the session snapshot holds.
     messages: Arc<Mutex<Vec<Value>>>,
+    /// Tickets issued and not yet consumed. The real server holds these for
+    /// 60 s, single-use, scoped to `{ptyID, directory, workspaceID}`; the fake
+    /// keeps the single-use part, which is the part the gateway has to get
+    /// right when it takes one server-side.
+    live_tickets: Arc<Mutex<Vec<String>>>,
+    /// How many 64 KiB frames a terminal connection blasts at the client
+    /// before listening. A client that does not read them is what proves the
+    /// proxy's buffer bound.
+    flood: Arc<AtomicUsize>,
     /// How many `/config/providers` requests answer with an empty catalogue
     /// before the real one appears. The pinned binary answers `/global/health`
     /// before its providers have loaded, and a prompt sent in that window is
@@ -115,8 +136,16 @@ impl Fake {
             asks: Arc::new(AtomicBool::new(true)),
             pending: Arc::new(Mutex::new(Vec::new())),
             messages: Arc::new(Mutex::new(Vec::new())),
+            live_tickets: Arc::new(Mutex::new(Vec::new())),
+            flood: Arc::new(AtomicUsize::new(0)),
             catalogue_late: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// A terminal that produces output faster than any client reads it.
+    pub fn flooding(self, frames: usize) -> Self {
+        self.flood.store(frames, Ordering::SeqCst);
+        self
     }
 
     /// A server whose catalogue settles only after `requests` answers: the
@@ -489,6 +518,83 @@ pub fn app(fake: Fake) -> Router {
             "/instance/dispose",
             post(|State(_fake): State<Fake>| async move { Json(json!(true)) }),
         )
+        // --- the PTY surface (api-ui.md §5) ---------------------------------
+        // Listed before the create route so `/pty/shells` is the shells route
+        // rather than a PTY called `shells`, exactly as upstream orders it.
+        .route(
+            "/pty/shells",
+            get(|State(_fake): State<Fake>| async move {
+                Json(json!([
+                    { "path": "/bin/bash", "name": "bash", "acceptable": true },
+                    // Listed but not acceptable: a shell the image knows about
+                    // and will not run, which the gateway must not offer.
+                    { "path": "/bin/zsh", "name": "zsh", "acceptable": false },
+                    { "path": "/bin/sh", "name": "sh", "acceptable": true },
+                ]))
+            }),
+        )
+        .route(
+            "/pty",
+            post(
+                |State(fake): State<Fake>, headers: HeaderMap, body: axum::body::Bytes| async move {
+                    if let Some(refused) = guard(&fake, &headers).await {
+                        return refused;
+                    }
+                    let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    fake.seen.lock().unwrap().spawns.push(body.clone());
+                    Json(json!({
+                        "id": PTY,
+                        "title": body["title"].as_str().unwrap_or("Terminal"),
+                        "command": body["command"],
+                        "args": body["args"],
+                        "cwd": body["cwd"],
+                        "status": "running",
+                        "pid": 4242,
+                    }))
+                    .into_response()
+                },
+            ),
+        )
+        .route(
+            "/pty/{pty}",
+            axum::routing::delete(
+                |State(fake): State<Fake>, Path(pty): Path<String>| async move {
+                    fake.seen.lock().unwrap().removed.push(pty);
+                    Json(json!(true))
+                },
+            ),
+        )
+        .route(
+            "/pty/{pty}/connect-token",
+            post(|State(fake): State<Fake>, headers: HeaderMap| async move {
+                if let Some(refused) = guard(&fake, &headers).await {
+                    return refused;
+                }
+                let header = headers
+                    .get("x-opencode-ticket")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                fake.seen
+                    .lock()
+                    .unwrap()
+                    .ticket_headers
+                    .push(header.clone());
+                // The real server refuses a token request without it.
+                if header.as_deref() != Some("1") {
+                    return (StatusCode::FORBIDDEN, "Invalid PTY connect token request")
+                        .into_response();
+                }
+                let issued = {
+                    let mut seen = fake.seen.lock().unwrap();
+                    let ticket = format!("upstream-ticket-{}", seen.issued.len() + 1);
+                    seen.issued.push(ticket.clone());
+                    ticket
+                };
+                fake.live_tickets.lock().unwrap().push(issued.clone());
+                Json(json!({ "ticket": issued, "expires_in": 60 })).into_response()
+            }),
+        )
+        .route("/pty/{pty}/connect", get(pty_connect))
         // A route the matrix classifies readable but the adapter never
         // drives: the gateway test needs somewhere real to send one.
         .fallback(|State(fake): State<Fake>, headers: HeaderMap| async move {
@@ -526,6 +632,70 @@ pub fn app(fake: Fake) -> Router {
             },
         ))
         .with_state(fake)
+}
+
+/// The harness's PTY WebSocket: a ticket is consumed once, then bytes flow
+/// both ways. The echo is what lets a test see the proxy carry them: whatever
+/// the terminal is sent comes back with the shell's own prefix, as a real one
+/// would echo a typed line before running it.
+async fn pty_connect(
+    State(fake): State<Fake>,
+    Path(pty): Path<String>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+    ws: axum::extract::WebSocketUpgrade,
+) -> Response {
+    let ticket = query.get("ticket").cloned().unwrap_or_default();
+    let accepted = {
+        let mut live = fake.live_tickets.lock().unwrap();
+        match live.iter().position(|t| *t == ticket) {
+            Some(at) => {
+                live.remove(at);
+                true
+            }
+            None => false,
+        }
+    };
+    fake.seen.lock().unwrap().presented.push((ticket, accepted));
+    if !accepted {
+        return (StatusCode::FORBIDDEN, "no such ticket").into_response();
+    }
+    let flood = fake.flood.load(Ordering::SeqCst);
+    ws.on_upgrade(move |mut socket| async move {
+        use axum::extract::ws::Message;
+        if socket
+            .send(Message::Text(format!("{pty} ready\n").into()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        for _ in 0..flood {
+            let chunk = "x".repeat(64 * 1024);
+            if socket.send(Message::Text(chunk.into())).await.is_err() {
+                return;
+            }
+        }
+        while let Some(Ok(message)) = socket.recv().await {
+            match message {
+                Message::Text(text) => {
+                    if socket
+                        .send(Message::Text(format!("$ {text}").into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Message::Binary(data) => {
+                    if socket.send(Message::Binary(data)).await.is_err() {
+                        return;
+                    }
+                }
+                Message::Close(_) => return,
+                _ => {}
+            }
+        }
+    })
 }
 
 /// The durable per-session stream. It replays from `after`, and — when the

@@ -241,6 +241,13 @@ export interface Session {
   updated_ms: number
   /** Put away: kept in full, just not listed on the home. */
   archived_ms?: number | null
+  /** Archived as legacy: this session's harness is one the node no longer
+   * has, so it is read-only for good. The row keeps `harness_id` and
+   * `harness_version` so the transcript stays interpretable. */
+  legacy_ms?: number | null
+  /** Lineage, when this session was made from another one. */
+  parent_session?: string | null
+  continued_from?: string | null
   /** The launch manifest this session was staged from. Written once, at
    * launch: a later revision is for the next session, not this one. */
   manifest_digest?: string | null
@@ -653,7 +660,15 @@ export interface PolicyRule {
 /** A narrow local authority decision. It never edits the signed policy bundle. */
 export interface AuthorityGrant {
   id: string
-  action: 'merge' | 'publish' | 'ticket_transition' | 'deploy' | 'browser_verify' | 'browser_test_account'
+  action:
+    | 'merge'
+    | 'publish'
+    | 'ticket_transition'
+    | 'deploy'
+    | 'browser_verify'
+    | 'browser_test_account'
+    /** An interactive terminal in one session's workspace. Bound to that session. */
+    | 'terminal'
   verdict: 'allow' | 'ask' | 'deny'
   target: string
   channel: string

@@ -81,12 +81,22 @@ implementation. Recorded so the rewrite is not re-decided.
 
 ## Harness control
 
-**ACP is the adapter interface**; Claude Code's stream-json control protocol is the
-one non-ACP adapter, functionally equivalent at the permission gate. The adapter
-trait is the part of the system that rots: version-pin harnesses per node, record the
-version on every session, check compatibility at session start, and let an unknown
-harness id refuse to start rather than fall back. A harness declares its own state
-layout and config files; nothing outside the trait may spell a harness's name.
+**The adapter trait is the interface**, and each harness reaches it over its own
+protocol: OpenCode over its native server API, Claude Code over the stream-json
+control protocol. They are functionally equivalent at the permission gate, which is
+the only place that has to be true. The trait is the part of the system that rots:
+version-pin harnesses per node, record the version on every session, check
+compatibility at session start, and let an unknown harness id refuse to start rather
+than fall back. A harness declares its own state layout and config files; nothing
+outside the trait may spell a harness's name.
+
+That last rule is what made the 2026-09-13 cutover cheap. tracon's first harness was
+omp, driven over the Agent Client Protocol; removing it took the adapter, its image,
+its provider wiring and its catalogue workarounds, and nothing else. What survived is
+the shared vocabulary the adapters translate into (`node/src/adapter/types.rs` — tool
+calls, permission options, usage), because both remaining harnesses have the same
+things to say. Sessions omp ran are archived read-only rather than deleted; see
+`tracon session archive-legacy` in RECOVERY.md.
 
 Rules learned against real harnesses, kept as rules:
 
@@ -94,12 +104,12 @@ Rules learned against real harnesses, kept as rules:
   denied, not silently approved. This is how local-first and fail-closed coexist:
   policy runs on the node, so auto-allowed work continues through a hub outage while
   anything needing a human blocks. Degraded means slower, never silently permissive.
-- The node declares ACP filesystem reads unavailable, so the harness reads inside its
-  runner rather than turning the node into a file server.
+- The node declares client-side filesystem reads unavailable, so the harness reads
+  inside its runner rather than turning the node into a file server.
 - Budget accounting includes the large, mostly cached startup context, not just the
   visible prompt.
-- opencode's ACP mode starts an HTTP server and can advertise over mDNS: bind
-  loopback, disable mDNS, and read the recorded cautions before adapting it.
+- OpenCode's server binds a port and can advertise over mDNS: bind loopback, disable
+  mDNS, and read the recorded cautions in `docs/reference/opencode-v1.18.30/`.
 - **A harness's language tooling is part of its image, named by absolute path.**
   Left to itself a harness downloads its language servers and formatters on first
   use, from a network that is denied — and the three formatters that install
@@ -338,6 +348,35 @@ and, for merge, publish, and deploy, the one revision it covers; the target
 moving to a later sha drops the grant rather than carrying it forward silently.
 Grants are made and revoked one at a time in Settings → Permissions & policies.
 
+One grant is not a side effect but a surface: **`terminal`**, an interactive PTY
+inside one session's workspace. The harness's `POST /pty` spawns an arbitrary
+command in an arbitrary directory with no permission check of its own, so the
+grant is the only thing between a browser and a shell; it is therefore bound to
+a session *and* to that session's workspace path (`terminal:<session>:<path>`),
+requires a session binding to be an `allow` at all, and is refused if the
+session is not active. With it, the gateway still rewrites rather than forwards:
+the working directory is pinned to the workspace or a normalised subdirectory of
+it, the caller's environment is reduced to variables that decide only how a
+terminal *looks* (`PATH` and `HOME` come from the harness, never from the
+request), and the command must be one of the shells the image itself lists at
+`GET /pty/shells`. The WebSocket is reached with a ticket the node mints after
+taking the harness's own server-side: bound to the operator, the session, the
+PTY and the exact origin it will be presented from, for thirty seconds, once.
+The proxy carries bytes both ways with a bounded queue in each direction and
+closes with a stated reason rather than buffering for a client that has stopped
+reading; input is never replayed across a reconnect, and the display is
+reconstructed by the app rather than by tracon.
+
+**A terminal grant is not a per-command ledger, and the node says so wherever it
+is offered.** Once the shell is open, everything typed at its prompt runs with
+no further decision and raises no tool call, because the harness raises none for
+a PTY. What is recorded is the shape of the thing: that a terminal was opened,
+with which shell, in which directory, under which grant, and how many bytes and
+how long the connection lasted — not the transcript. Capturing a bounded tail of
+the output to the session log is a deliberate configuration (`pty_capture_output`),
+off by default, and labelled as what it is: a record of what the operator
+happened to run, not of what tracon decided.
+
 ### Review
 
 **Review the diff with a session that never saw the implementation.** A model that
@@ -463,6 +502,38 @@ Invariants on top of the wire:
 - One contract version, checked at enrollment. A peer on an older build drops
   payloads it cannot read; senders surface that as "unreachable, or on an older
   build" rather than silence.
+
+### Owner streams
+
+A command is one message and one ack, retried until it lands. The native
+harness API is not that shape: it is a request with a body, a response with a
+body, and — for the event stream and the terminal — no end at all. Replaying
+those through the durable outbox would repeat mutations and fill the hub with
+bytes nobody reads again. So a request on one node for a session another node
+owns opens a **stream**: its own frame family, relayed by the hub and stored
+nowhere (`spec/README.md`, "Owner streams").
+
+- **The owner decides, from its own state.** On an open, the owner re-checks
+  that the session is its own, that the stream is on that session's channel,
+  and that the opener still holds the channel *by the owner's own record* —
+  then runs the request through its own gateway, matrix, policy and intent row.
+  An operator the serving node admitted is refused here if this node grants
+  them nothing.
+- **Input is never replayed.** A stream that dies is gone. The serving node
+  re-opens on the next request; it never re-sends a body, and a request with a
+  body is refused rather than retried when the owner's epoch has moved. A
+  mutation whose answer was lost is `uncertain` on the owner (the intent row
+  written before dispatch) and says so on the response head.
+- **Owner fencing is an epoch, not a heartbeat.** Each run of a node mints one;
+  the serving side remembers it per session and names it on the next open. A
+  restart fences every stream held against the run that died.
+- **The hub sees ciphertext and routing metadata.** Channel, sender, recipient,
+  stream id, epoch and sequence are clear because they are what it routes on;
+  the body is sealed under a key derived per stream *and per direction* from
+  the channel epoch key, with a label no durable operation uses. The hub bounds
+  what it carries — per stream, per connection, per member, per minute — and a
+  stream it has to drop is closed at both ends with a reason, in the clear,
+  because it cannot seal a close of its own.
 
 ## Memory and documents
 

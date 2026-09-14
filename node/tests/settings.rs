@@ -567,6 +567,9 @@ fn session_on(id: &str, channel: &str, state: &str) -> tracon::store::SessionRow
         ended_mono_ms: None,
         updated_ms: 1,
         archived_ms: None,
+        legacy_ms: None,
+        parent_session: None,
+        continued_from: None,
         manifest_digest: None,
     }
 }

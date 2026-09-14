@@ -199,6 +199,22 @@ pub mod event_kind {
     /// (#188): a tree that moved under a verified candidate has to be visible
     /// to whatever decides whether that verification still holds.
     pub const WORKSPACE_CHANGED: &str = "workspace_changed";
+    /// A terminal was opened under the `terminal` capability: the shell that
+    /// was spawned and where (`phase` — `spawn` or `attach` — `pty_id`,
+    /// `command`, `args`, `cwd`, `env_kept`, `env_dropped`, `grant`).
+    ///
+    /// A PTY is an interactive shell, not a per-command ledger. What the
+    /// operator authorised is *a terminal in this workspace*, once; every
+    /// command typed at that prompt afterwards runs without a further
+    /// decision and leaves no tool-call record, because the harness raises
+    /// none for a PTY (finding 7). The event says what was opened, not what
+    /// was run in it.
+    pub const PTY_OPENED: &str = "pty_opened";
+    /// A terminal was closed, or a proxied terminal connection ended
+    /// (`phase` — `removed` or `detached` — `pty_id`, `bytes_in`,
+    /// `bytes_out`, `duration_ms`, `reason`, and `output` only when output
+    /// capture was deliberately turned on).
+    pub const PTY_CLOSED: &str = "pty_closed";
 }
 
 #[cfg(test)]

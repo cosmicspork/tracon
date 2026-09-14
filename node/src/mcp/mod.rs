@@ -23,8 +23,10 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::{
-    acp::types::{PermissionOption, OPTION_ALLOW_ONCE, OPTION_REJECT_ONCE},
-    adapter::{PermissionReply, PermissionRequest},
+    adapter::{
+        types::{PermissionOption, OPTION_ALLOW_ONCE, OPTION_REJECT_ONCE},
+        PermissionReply, PermissionRequest,
+    },
     broker::SharedBroker,
     config::Config,
     policy::{Decision, Policy, Request, Verdict},

@@ -834,7 +834,7 @@ impl Ingest {
             let option = match decision {
                 PermissionReply::Selected(option) => option,
                 PermissionReply::Edited { option_id, .. } => option_id,
-                PermissionReply::Cancelled => crate::acp::types::OPTION_REJECT_ONCE.to_string(),
+                PermissionReply::Cancelled => crate::adapter::types::OPTION_REJECT_ONCE.to_string(),
             };
             let intent = uuid::Uuid::now_v7().to_string();
             let _ = store.opencode_intent_begin(
@@ -874,8 +874,8 @@ impl Ingest {
 /// The two options every harness permission is offered with. Allow-once and
 /// reject-once and nothing else: an `always` is a grant the node would have to
 /// mean, and it never does (finding 2).
-fn allow_or_reject() -> Vec<crate::acp::types::PermissionOption> {
-    use crate::acp::types::{PermissionOption, OPTION_ALLOW_ONCE, OPTION_REJECT_ONCE};
+fn allow_or_reject() -> Vec<crate::adapter::types::PermissionOption> {
+    use crate::adapter::types::{PermissionOption, OPTION_ALLOW_ONCE, OPTION_REJECT_ONCE};
     vec![
         PermissionOption {
             option_id: OPTION_ALLOW_ONCE.into(),
@@ -947,7 +947,7 @@ fn object_of(id: &str) -> Option<&'static str> {
 /// allows, and `always` is never sent: it would widen OpenCode's own ruleset
 /// behind the node's back (finding 2).
 fn reply_body(option_id: &str) -> Value {
-    if option_id == crate::acp::types::OPTION_ALLOW_ONCE {
+    if option_id == crate::adapter::types::OPTION_ALLOW_ONCE {
         json!({ "reply": "once" })
     } else {
         json!({ "reply": "reject" })
@@ -998,12 +998,12 @@ mod tests {
     #[test]
     fn only_allow_once_allows_and_always_is_never_sent() {
         assert_eq!(
-            reply_body(crate::acp::types::OPTION_ALLOW_ONCE)["reply"],
+            reply_body(crate::adapter::types::OPTION_ALLOW_ONCE)["reply"],
             "once"
         );
         assert_eq!(reply_body("allow_always")["reply"], "reject");
         assert_eq!(
-            reply_body(crate::acp::types::OPTION_REJECT_ONCE)["reply"],
+            reply_body(crate::adapter::types::OPTION_REJECT_ONCE)["reply"],
             "reject"
         );
     }

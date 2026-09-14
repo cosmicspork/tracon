@@ -66,8 +66,8 @@ pub struct MeshClient {
     pub(super) bus: Bus,
     /// A handle to ourselves for tasks spawned from `&self` paths.
     pub(super) weak: std::sync::Weak<MeshClient>,
-    cfg: Arc<Config>,
-    http: reqwest::Client,
+    pub(super) cfg: Arc<Config>,
+    pub(super) http: reqwest::Client,
     state: watch::Sender<MeshState>,
     mirror: Mirror,
     /// Wakes the pull loop (a poke, or a local reason to check).
@@ -89,6 +89,8 @@ pub struct MeshClient {
     /// The credential store a handoff writes into. Set once the broker
     /// exists; a handoff arriving before then is dropped and logged.
     broker: std::sync::OnceLock<(crate::broker::SharedBroker, std::path::PathBuf)>,
+    /// The non-durable half: bounded owner streams relayed by the hub.
+    pub(super) streams: Arc<super::stream::StreamRouter>,
 }
 
 impl MeshClient {
@@ -136,6 +138,7 @@ impl MeshClient {
             pending: Mutex::new(HashMap::new()),
             executor: std::sync::OnceLock::new(),
             broker: std::sync::OnceLock::new(),
+            streams: Arc::new(super::stream::StreamRouter::new(weak.clone())),
         })
     }
 
@@ -146,6 +149,12 @@ impl MeshClient {
 
     pub fn set_executor(&self, executor: Arc<dyn super::forward::CommandExecutor>) {
         let _ = self.executor.set(executor);
+    }
+
+    /// The stream router: what opens a stream to a remote owner and what
+    /// answers one addressed here.
+    pub fn streams(&self) -> &Arc<super::stream::StreamRouter> {
+        &self.streams
     }
 
     /// Is the hub connected and the peer recently heard from?
@@ -208,6 +217,8 @@ impl MeshClient {
         tokio::spawn(async move { c.pull_loop().await });
         let c = self.clone();
         tokio::spawn(async move { c.sse_loop().await });
+        let c = self.clone();
+        tokio::spawn(async move { c.stream_loop().await });
         let c = self.clone();
         tokio::spawn(async move { c.heartbeat_loop().await });
         let c = self.clone();
@@ -343,7 +354,7 @@ impl MeshClient {
         Ok(())
     }
 
-    fn keyring(&self, channel: &str) -> Result<Keyring, HubError> {
+    pub(super) fn keyring(&self, channel: &str) -> Result<Keyring, HubError> {
         let row = self
             .store
             .channel_get(channel)
@@ -1102,7 +1113,7 @@ impl MeshClient {
 
     // ----------------------------------------------------------- transport
 
-    async fn post(&self, path: &str, body: Vec<u8>) -> Result<Value, HubError> {
+    pub(super) async fn post(&self, path: &str, body: Vec<u8>) -> Result<Value, HubError> {
         let ts = now_unix();
         let mut req = self
             .http

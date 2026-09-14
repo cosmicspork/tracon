@@ -4,3 +4,4 @@ pub mod model;
 pub mod native_events;
 pub mod opencode;
 pub mod proxy;
+pub mod pty;
