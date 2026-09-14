@@ -496,6 +496,14 @@ async fn main() -> Result<()> {
             let backend = boundary::backend_for(&cfg).await;
             backend.setup(&cfg, rebuild).await?;
             println!("{} boundary is in place", backend.kind());
+            // A credential with no client left is a credential nobody is
+            // watching. Retired by name, and said out loud rather than
+            // quietly: the broker is untouched.
+            for artifact in tracon::legacy::retire_credentials() {
+                if artifact.removed {
+                    println!("removed {} — {}", artifact.path.display(), artifact.what);
+                }
+            }
             // The native interface is a separate artefact from the boundary,
             // and a node without it still serves: it is reported, never fatal.
             match tracon::ui_bundle::install(&cfg, ui_bundle.as_deref(), rebuild).await {
