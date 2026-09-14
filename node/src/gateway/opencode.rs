@@ -96,6 +96,9 @@ enum Class {
     Readable,
     /// The same, proxied as a stream rather than buffered.
     Stream,
+    /// Served by the node out of what it already reads upstream, and never
+    /// forwarded. The native UI's one live channel (finding 20).
+    Synthesised,
     /// Decided by tracon before anything reaches the harness.
     Mediated(Mediation),
     /// Refused, with the reason the operator reads.
@@ -180,13 +183,15 @@ const ROUTES: &[Row] = &[
         &["event"],
         Class::Forbidden("this stream has no durable replay; use the per-session stream (finding 6)"),
     ),
-    (
-        "GET",
-        &["global", "event"],
-        Class::Forbidden(
-            "this stream is unscoped across every instance and has no durable replay (finding 6)",
-        ),
-    ),
+    // The one route on this matrix the node *answers* rather than decides
+    // about. The native app streams from here and from nowhere else
+    // (finding 20): refusing it left the page unable to show a permission
+    // request, and forwarding it would hand this browser every other
+    // session's transcript on a stream that cannot be resumed. So tracon
+    // serves its own — session-scoped, type-filtered and sequenced — out of
+    // the events the node is already reading (`gateway::native_events`).
+    // The upstream route stays unforwarded; nothing below reaches the harness.
+    ("GET", &["global", "event"], Class::Synthesised),
     (
         "GET",
         &["api", "event"],
@@ -836,6 +841,9 @@ pub async fn handle(
             )
             .await
         }
+        // Answered here. No upstream request is built, so the harness never
+        // sees a `/global/event` on this session's behalf.
+        Class::Synthesised => synthesised_events(&s, &session_id, &api, &headers),
         Class::Mediated(mediation) => {
             // A mediated call changes something. A paused or ended session
             // takes none of them, whatever the operator's UI still shows.
@@ -857,6 +865,153 @@ pub async fn handle(
             .await
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The synthesised live channel
+// ---------------------------------------------------------------------------
+
+/// How often the node mints a `server.heartbeat`, matching what upstream's own
+/// `/global/event` does (`handlers/global.ts`, a 10 s tick with the first one
+/// dropped). The app has no handler for the type — it falls through every
+/// switch — so this is liveness for the socket, not news for the page.
+const HEARTBEAT: Duration = Duration::from_secs(10);
+
+/// `GET /global/event`, answered by the node instead of the harness.
+///
+/// The native app opens this at startup, reopens it whenever it drops, and
+/// streams from nothing else (finding 20). Upstream's version is unscoped
+/// across every session on the server and carries no `id:` at all, so it is
+/// neither safe to hand a browser nor possible to resume — it stays
+/// unforwarded, and this stands in its place.
+///
+/// What goes out is the app's own global envelope, `{directory, payload}`,
+/// where `payload` is the `{id, type, properties}` the app's legacy path reads
+/// (`packages/app/src/context/server-sdk.tsx`; the app runs its v2 adapter
+/// only on the v2 transport, so the vocabulary here is already v1 —
+/// `native_events` does that normalisation). `directory` is this session's
+/// pinned workspace, the same one every forwarded request carries, because the
+/// app fans events out by directory before it looks inside them.
+fn synthesised_events(
+    s: &AppState,
+    session_id: &str,
+    api: &NativeApi,
+    headers: &HeaderMap,
+) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use tokio::sync::broadcast::error::RecvError;
+
+    let events = s.manager.native_events(session_id);
+    let directory = api.directory.clone();
+
+    // Where this client left off. The v1 SSE client the app uses parses `id:`
+    // and resends it as `Last-Event-ID` across its own internal reconnect
+    // (`packages/sdk/js/src/v2/gen/core/serverSentEvents.gen.ts`), so a
+    // reconnect resumes rather than restarts — which upstream's stream could
+    // never offer, because it emits no ids to resume from.
+    let resume = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+
+    // Subscribe before reading the ring, so an event published between the two
+    // is delivered by the live half rather than falling down the gap.
+    let mut live = events.subscribe();
+    let replay = match resume {
+        Some(after) => events.replay(after),
+        // No resume point: start at the head. The durable per-session stream
+        // still guarantees ingestion, so nothing the *node* needs is lost
+        // here; the page refetches its own state from the snapshot routes when
+        // it sees `server.connected`.
+        None => Vec::new(),
+    };
+    let mut delivered = resume.unwrap_or_else(|| events.head());
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
+    let session = session_id.to_string();
+    tokio::spawn(async move {
+        let frame = |payload: Value| {
+            Event::default().data(
+                json!({ "directory": directory, "payload": payload }).to_string(),
+            )
+        };
+
+        // First, as upstream does: it is what marks the server connected in
+        // the app and what makes it refetch its snapshots after a reconnect
+        // (`server-sync.tsx`, `home-session-index.ts`). Carries no `id:`,
+        // so it never moves the client's resume point.
+        let connected = frame(json!({
+            "id": format!("evt_connected_{}", crate::store::now_ms()),
+            "type": "server.connected",
+            "properties": {},
+        }));
+        if tx.send(Ok(connected)).await.is_err() {
+            return;
+        }
+
+        for held in replay {
+            delivered = delivered.max(held.id);
+            if tx
+                .send(Ok(frame(held.payload.clone()).id(held.id.to_string())))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+
+        let mut beat = tokio::time::interval(HEARTBEAT);
+        // The first tick is immediate; upstream drops it too.
+        beat.tick().await;
+        loop {
+            tokio::select! {
+                _ = beat.tick() => {
+                    let beat = frame(json!({
+                        "id": format!("evt_heartbeat_{}", crate::store::now_ms()),
+                        "type": "server.heartbeat",
+                        "properties": {},
+                    }));
+                    if tx.send(Ok(beat)).await.is_err() {
+                        return;
+                    }
+                }
+                received = live.recv() => match received {
+                    Ok(published) => {
+                        // Already sent from the ring: the replay and the live
+                        // half overlap by design.
+                        if published.id <= delivered {
+                            continue;
+                        }
+                        delivered = published.id;
+                        if tx
+                            .send(Ok(frame(published.payload.clone()).id(published.id.to_string())))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    // This client fell far enough behind that frames were
+                    // dropped. End the stream rather than skipping past them:
+                    // the app reconnects in ~250 ms with its `Last-Event-ID`,
+                    // and the ring fills whatever gap it still can.
+                    Err(RecvError::Lagged(missed)) => {
+                        tracing::debug!(
+                            session = %session,
+                            missed,
+                            "a native UI stream lagged; ending it so the page resumes"
+                        );
+                        return;
+                    }
+                    Err(RecvError::Closed) => return,
+                },
+            }
+        }
+    });
+
+    Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1407,6 +1562,58 @@ const DROP_REQUEST_HEADERS: &[&str] = &[
 /// Headers never passed back: the harness's own CSP and CORS (tracon sets its
 /// own, finding 3), its challenge, and anything that would set a cookie on
 /// the operator's origin.
+/// The snapshot routes that answer "what is waiting to be answered", and the
+/// one place the gateway rewrites a readable body.
+///
+/// These are how the app finds a permission that was raised before the page
+/// opened — it never learns those from the stream (`bootstrap.ts`,
+/// `permission.tsx`) — and every one of them is **instance**-wide. The path
+/// names no session, and one OpenCode server holds more than one, so
+/// forwarding the body unchanged would put another session's pending request
+/// on this session's page and invite the operator to answer it. Pinning
+/// `?directory=` does not help: sibling sessions share the directory.
+///
+/// So the entries are filtered to this session. The route stays readable —
+/// the harness is still asked, and the answer is still its own — but what
+/// comes back is scoped the way every other route on this mount is scoped by
+/// its path (finding 5).
+const SCOPED_ASK_ROUTES: &[&str] = &[
+    // v1: a bare array of requests.
+    "permission",
+    "question",
+    // v2: `{location, data: [...]}`.
+    "api/permission/request",
+    "api/question/request",
+];
+
+/// Keep only the entries that belong to this session. Anything that is not one
+/// of the shapes above is returned untouched — this rewrites a body it
+/// recognises and never guesses at one it does not.
+fn scope_asks(joined: &str, session: &str, bytes: Bytes) -> Bytes {
+    if !SCOPED_ASK_ROUTES.contains(&joined) {
+        return bytes;
+    }
+    let Ok(mut body) = serde_json::from_slice::<Value>(&bytes) else {
+        return bytes;
+    };
+    let mine = |items: &Vec<Value>| -> Vec<Value> {
+        items
+            .iter()
+            .filter(|item| super::native_events::ask_is_mine(item, session))
+            .cloned()
+            .collect()
+    };
+    match &body {
+        Value::Array(items) => body = Value::Array(mine(items)),
+        Value::Object(_) => match body["data"].as_array() {
+            Some(items) => body["data"] = Value::Array(mine(items)),
+            None => return bytes,
+        },
+        _ => return bytes,
+    }
+    Bytes::from(body.to_string())
+}
+
 const DROP_RESPONSE_HEADERS: &[&str] = &[
     "transfer-encoding",
     "content-length",
@@ -1513,7 +1720,7 @@ async fn forward(
         Body::from_stream(upstream.bytes_stream())
     } else {
         match upstream.bytes().await {
-            Ok(bytes) => Body::from(bytes),
+            Ok(bytes) => Body::from(scope_asks(joined, &api.session_id, bytes)),
             Err(e) => {
                 tracing::warn!(session = session_id, error = %e, "the harness's answer was cut short");
                 return answer(
@@ -1541,6 +1748,11 @@ async fn forward(
 pub mod trace {
     pub const READABLE: &str = "readable";
     pub const STREAM: &str = "stream";
+    /// Served by the node out of what it already reads, never forwarded: the
+    /// native UI's live channel (finding 20). Distinct from `stream` on
+    /// purpose — one is a proxied upstream response, the other is a route the
+    /// harness is never asked about.
+    pub const SYNTHESISED: &str = "synthesised";
     pub const MEDIATED: &str = "mediated";
     pub const UNAVAILABLE: &str = "unavailable";
     pub const FORBIDDEN: &str = "forbidden";
@@ -1570,6 +1782,7 @@ pub fn trace_class(method: &str, path: &str) -> &'static str {
     match classify(&method, &path).0 {
         Class::Readable => trace::READABLE,
         Class::Stream => trace::STREAM,
+        Class::Synthesised => trace::SYNTHESISED,
         Class::Mediated(Mediation::Unavailable(_)) => trace::UNAVAILABLE,
         Class::Mediated(_) => trace::MEDIATED,
         Class::Forbidden(_) => trace::FORBIDDEN,

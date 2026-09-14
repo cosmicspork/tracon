@@ -1214,7 +1214,12 @@ impl Pump {
                         // An event the node has already ingested is dropped
                         // here rather than translated again: the resumed
                         // stream and a reconciled snapshot overlap by design.
+                        // The tap the native UI's live channel is built from
+                        // sees it first either way — a replay is a duplicate
+                        // for the record and still news to a browser that just
+                        // reconnected (finding 20).
                         if let Some(cursor) = &self.cursor {
+                            cursor.observe(&event);
                             if !cursor.admit(&event).await {
                                 continue;
                             }
@@ -1407,6 +1412,14 @@ impl Pump {
                 if response.status().is_success() {
                     let mut frames = sse(response);
                     while let Some(event) = frames.next().await {
+                        // This stream, not the durable one, is where the asks
+                        // and the v1 session events the native app renders
+                        // live. It is the node's one reader of it, so the
+                        // UI's synthesised channel is fed from here rather
+                        // than from a second connection of its own.
+                        if let Some(cursor) = &self.cursor {
+                            cursor.observe(&event);
+                        }
                         if !self.on_ask(&event, &tx).await {
                             return;
                         }
