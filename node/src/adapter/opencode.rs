@@ -2178,4 +2178,109 @@ mod tests {
             ["run".to_string()]
         );
     }
+
+    /// The Codex subscription login moved here when the omp harness was
+    /// retired, and a login whose credential lands in the container's own
+    /// filesystem is a login the broker can never lift: the only thing the
+    /// node exports afterwards is the mounted volume. So every path the
+    /// helper writes to is under the state directory the runner mounted.
+    #[test]
+    fn the_login_writes_its_credential_where_the_node_can_lift_it() {
+        let env: HashMap<_, _> = OpenCodeAdapter::login_env("/root/.opencode")
+            .into_iter()
+            .collect();
+        for key in [
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+        ] {
+            assert!(
+                env[key].starts_with("/root/.opencode/login/"),
+                "{key} = {}",
+                env[key]
+            );
+        }
+        // Where the store lands follows from XDG_DATA_HOME (`providers.md`
+        // §2.1), and `lift` reads exactly that path relative to the export.
+        assert_eq!(
+            format!("{}/opencode/auth.json", env["XDG_DATA_HOME"]),
+            format!("/root/.opencode/{}", OpenCodeAdapter::LOGIN_AUTH_PATH)
+        );
+        // A login must not replace its own binary mid-flow, and it is mounted
+        // with no worktree to discover configuration from.
+        assert_eq!(env["OPENCODE_DISABLE_AUTOUPDATE"], "true");
+        assert_eq!(env["OPENCODE_DISABLE_PROJECT_CONFIG"], "true");
+        // Plugins are deliberately NOT disabled here: the Codex OAuth flow is
+        // one, so `launch_env`'s suppression would break the login it runs.
+        assert!(!env.contains_key("OPENCODE_DISABLE_DEFAULT_PLUGINS"));
+    }
+
+    /// Only a subscription is lifted. An `api` record is a key the operator
+    /// pasted; importing it as a token would present it to the refresh loop as
+    /// something renewable, which it is not.
+    #[tokio::test]
+    async fn only_an_oauth_record_is_lifted_out_of_the_login_store() {
+        let dir = std::env::temp_dir().join(format!("tracon-oc-lift-{}", uuid::Uuid::now_v7()));
+        let store = dir.join(OpenCodeAdapter::LOGIN_AUTH_PATH);
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        let adapter = OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION);
+
+        std::fs::write(
+            &store,
+            json!({ "openai": { "type": "api", "key": "sk-pasted" } }).to_string(),
+        )
+        .unwrap();
+        let refused = adapter
+            .lift(&dir, "openai")
+            .await
+            .expect_err("an api key is not a subscription");
+        assert!(refused.to_string().contains("no oauth record"), "{refused}");
+
+        std::fs::write(
+            &store,
+            json!({ "openai": {
+                "type": "oauth",
+                "access": "at",
+                "refresh": "rt",
+                "expires": 1_700_000_000_000i64,
+                "accountId": "acct",
+            } })
+            .to_string(),
+        )
+        .unwrap();
+        let token = adapter.lift(&dir, "openai").await.expect("an oauth record");
+        assert_eq!(token.access, "at");
+        assert_eq!(token.refresh.as_deref(), Some("rt"));
+        assert_eq!(token.expires_ms, Some(1_700_000_000_000));
+        assert_eq!(token.account_id.as_deref(), Some("acct"));
+
+        // A login that never completed leaves no store, and that reads as the
+        // sign-in not finishing rather than as a corrupt file.
+        let _ = std::fs::remove_dir_all(&dir);
+        let missing = adapter
+            .lift(&dir, "openai")
+            .await
+            .expect_err("no store at all");
+        assert!(missing.to_string().contains("no auth store"), "{missing}");
+    }
+
+    /// The Anthropic subscription has no OpenCode login — upstream removed the
+    /// plugin in 1.3.0 — so asking for one here must name `claude
+    /// setup-token` rather than fail somewhere inside a helper container.
+    #[tokio::test]
+    async fn a_login_this_harness_cannot_mint_is_refused_by_name() {
+        let adapter = OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION);
+        let runner = crate::runner::local::LocalRunner;
+        let error = match adapter
+            .login(&runner, "anthropic", "tracon-login-x", "/root/.opencode")
+            .await
+        {
+            Ok(_) => panic!("opencode mints no Anthropic token"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("claude setup-token"), "{error}");
+        assert_eq!(OpenCodeAdapter::LOGIN_PROVIDERS, ["openai", "openai-codex"]);
+    }
 }
