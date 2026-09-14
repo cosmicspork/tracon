@@ -331,6 +331,18 @@ impl StreamRouter {
         self.inbound.lock().unwrap().len()
     }
 
+    /// How often a sender on an open stream has had to wait for a credit.
+    /// Observable so a slow-consumer test can assert that backpressure
+    /// actually bit, rather than that nothing happened to break.
+    pub fn credit_waits(&self) -> u64 {
+        self.inbound
+            .lock()
+            .unwrap()
+            .values()
+            .map(|i| i.credit.waits())
+            .sum()
+    }
+
     fn forget(&self, stream_id: &str) {
         if let Some(i) = self.inbound.lock().unwrap().remove(stream_id) {
             i.credit.close();

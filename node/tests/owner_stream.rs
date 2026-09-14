@@ -616,6 +616,111 @@ async fn a_mutation_is_never_replayed_when_the_owner_restarts() {
     assert_eq!(status, StatusCode::OK, "{text}");
 }
 
+/// A consumer that stops reading does not cost the owner unbounded memory and
+/// does not cost the stream a single byte. The credit window closes, the owner
+/// waits, the relay drops nothing, and everything arrives when reading
+/// resumes.
+#[tokio::test]
+async fn a_slow_consumer_stops_the_credits_rather_than_the_stream() {
+    let p = pair(usize::MAX).await;
+    let (status, _, body) = raw(
+        &p.a.app,
+        "GET",
+        &format!("/api/opencode/{TRACON_SESSION}/api/session/{SESSION}/event"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut stream = body.into_data_stream();
+
+    // Nothing is read while the harness keeps producing. The owner's window
+    // closes after `INITIAL_CREDIT` chunks and it parks there.
+    wait_for("the owner to run out of credit", || {
+        p.b.client.streams().credit_waits() > 0
+    })
+    .await;
+    assert_eq!(
+        p.b.client
+            .streams()
+            .stats
+            .relay_drops
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "backpressure must not be a drop"
+    );
+    assert_eq!(
+        p.hub.state.streams.open_streams(),
+        1,
+        "the relay is still carrying it"
+    );
+
+    // Reading resumes, and what was held comes through.
+    let mut text = String::new();
+    for _ in 0..4 {
+        match tokio::time::timeout(Duration::from_secs(10), stream.next()).await {
+            Ok(Some(Ok(bytes))) => text.push_str(&String::from_utf8_lossy(&bytes)),
+            _ => break,
+        }
+    }
+    assert!(
+        !text.is_empty(),
+        "the held bytes arrived rather than being dropped"
+    );
+}
+
+/// The relay connection dropping ends every stream on it. Nothing is replayed
+/// to make up for it: the next request opens a new stream, and a mutation
+/// already sent is not sent again.
+#[tokio::test]
+async fn a_dropped_relay_connection_re_opens_without_replaying_a_mutation() {
+    let p = pair(usize::MAX).await;
+    let (status, _, body) = raw(
+        &p.a.app,
+        "POST",
+        &format!(
+            "/api/opencode/{TRACON_SESSION}/api/session/{SESSION}/permission/{PERMISSION}/reply"
+        ),
+        Some(json!({ "reply": "once" })),
+    )
+    .await;
+    let _ = collect(body).await;
+    assert!(status.is_success());
+    assert_eq!(p.seen.lock().unwrap().replies.len(), 1);
+
+    // The hub drops A's connection: a new one replaces it and the old
+    // receiver goes, exactly as a network cut looks from here.
+    let ai = p.a.id.node_id();
+    let cut = {
+        let doomed = p.hub.state.streams.connect(&ai);
+        let epoch = p.hub.state.streams.epoch_of(&ai).unwrap();
+        drop(doomed);
+        epoch
+    };
+    // A's own connection ended when this one replaced it; it is back when the
+    // relay is holding a connection newer than the one that cut it.
+    wait_for("A to reconnect to the relay", || {
+        p.hub.state.streams.epoch_of(&ai).is_some_and(|e| e > cut)
+    })
+    .await;
+
+    // A read goes through on the new connection...
+    let (status, _, body) = raw(
+        &p.a.app,
+        "GET",
+        &format!("/api/opencode/{TRACON_SESSION}/api/session/{SESSION}/message"),
+        None,
+    )
+    .await;
+    let text = String::from_utf8_lossy(&collect(body).await).to_string();
+    assert_eq!(status, StatusCode::OK, "{text}");
+    // ...and the reconnect replayed nothing.
+    assert_eq!(
+        p.seen.lock().unwrap().replies.len(),
+        1,
+        "a reconnect must never re-send a mutation"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // A peer that speaks the relay directly, for the frames no honest node sends.
 // ---------------------------------------------------------------------------
