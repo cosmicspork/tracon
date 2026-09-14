@@ -87,16 +87,25 @@ jobs:
       contents: read
       packages: write
     strategy:
+      # One image failing must not cancel the others: the hub and node images
+      # are what deployed nodes update from.
+      fail-fast: false
       matrix:
         include:
           - name: tracon-hub
             file: Dockerfile
+            context: .
           - name: tracon-node
             file: Dockerfile.node
+            context: .
+          # The harness Containerfiles copy paths relative to their own
+          # directory, as the justfile and `tracon setup` build them.
           - name: tracon-harness-claude
             file: containers/harness-claude/Containerfile
+            context: containers/harness-claude
           - name: tracon-harness-opencode
             file: containers/harness-opencode/Containerfile
+            context: containers/harness-opencode
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -119,7 +128,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          context: .
+          context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           platforms: linux/amd64
           push: true
