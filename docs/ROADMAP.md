@@ -473,6 +473,29 @@ context and the working files a session accumulates outside the workspace.
       later restores transcript, scratchpad, state, and workspace checkpoint together,
       with lineage recorded and nothing silently dropped.
 
+### Publication follow-through
+
+A session or work item that ends in a PR or MR should not end at the push. The
+publication record already carries the change's id (Gate B), the read-only
+`pr_status`, `pipeline_status`, and `mr_status` tools are brokered, and `merge` is an
+authority action that defaults to deny and binds to a target and revision; this is the
+watcher and the button on top of them.
+
+- [ ] Watch CI on the published change: the node polls the forge for check and pipeline
+      status on the publication's PR/MR (brokered credential, bounded interval, backoff),
+      records each transition as a session event, and shows the current state on the
+      review and session cards and in the queue (pending, passing, failing with the
+      failed job named, needs rebase). A failing run can be pushed to the operator as a
+      notification, never treated as a question.
+- [ ] A human merge button for the repository default branch: on green, the card offers
+      Merge; the click is a revision-bound `merge` grant for that one PR/MR and the exact
+      head commit the checks ran on, executed through the broker (squash or the repo's
+      configured method), recorded like every other consequential action, and refused if
+      the head moved, checks regressed, or policy denies merge for that channel. No
+      auto-merge unless the signed policy allows it for the target.
+- [ ] After the merge, close the loop: mark the publication merged with the merge commit,
+      release the claim on the work item, and tidy the branch per the repo's convention.
+
 ### Still waiting on a real run
 
 - [ ] Exercise a real private repository through preparation, agent work, checks, and
