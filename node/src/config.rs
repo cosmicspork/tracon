@@ -773,6 +773,19 @@ pub struct Mesh {
     pub heartbeat_secs: u64,
     pub poll_secs: u64,
     pub command_timeout_secs: u64,
+    /// How long an owner stream may take to answer its open before the
+    /// serving node gives up. A stream that times out is closed, never
+    /// re-sent.
+    pub stream_open_timeout_secs: u64,
+    /// How long a stream may go without a frame before either end closes it.
+    pub stream_idle_secs: u64,
+    /// The largest request body a stream may carry to an owner.
+    pub stream_max_body_bytes: u64,
+    /// The largest response an owner stream may carry back. An SSE stream is
+    /// bounded by this too: a session's event stream is long, not infinite.
+    pub stream_max_response_bytes: u64,
+    /// How many owner streams this node may have open at once.
+    pub stream_max_concurrent: usize,
 }
 impl Default for Mesh {
     fn default() -> Self {
@@ -781,6 +794,11 @@ impl Default for Mesh {
             heartbeat_secs: 60,
             poll_secs: 30,
             command_timeout_secs: 15,
+            stream_open_timeout_secs: 30,
+            stream_idle_secs: 120,
+            stream_max_body_bytes: 8 * 1024 * 1024,
+            stream_max_response_bytes: 256 * 1024 * 1024,
+            stream_max_concurrent: 16,
         }
     }
 }

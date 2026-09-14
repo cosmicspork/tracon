@@ -604,6 +604,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     };
     if let Some(m) = &state.mesh {
         m.set_executor(Arc::new(state.clone()));
+        // The same state answers owner streams, so a remote operator's call
+        // runs through the very handler a local one reaches.
+        m.streams().set_executor(Arc::new(state.clone()));
     }
     // The nightly batch, for channels this node processes.
     tokio::spawn(crate::corpus::promote::nightly(
