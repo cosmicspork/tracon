@@ -35,6 +35,11 @@
       ended, or the capability it booted on has outlived the node's cookie.
       Never a guess — a live frame must not be replaced by a reconnect button. */
   let finished = $state<string | null>(null)
+  /** Whether what finished it was the session itself, which is not something
+      a reconnect can fix. Held separately from the derived `ended` because the
+      node's answer on resume is the freshest thing this page has, and the
+      event stream may not have caught up. */
+  let endedWhileAway = $state(false)
   let booting = $state(false)
   /** Re-creating the element is what reconnecting means, so the frame is keyed
       on this rather than having its `src` reassigned. */
@@ -54,6 +59,7 @@
     booting = true
     failure = null
     finished = null
+    endedWhileAway = false
     try {
       const minted = await mint(id)
       // Validate before framing: a node whose boot URL drifted from its own
@@ -86,6 +92,7 @@
       const result = await api.session(id)
       loaded = result.session
       if (isTerminal(result.session.state)) {
+        endedWhileAway = true
         finished = `This session ${result.session.state.replace(/_/g, ' ')} while the app was away.`
         return
       }
@@ -103,6 +110,7 @@
     src = null
     failure = null
     finished = null
+    endedWhileAway = false
     loaded = null
     api
       .session(id)
@@ -137,7 +145,7 @@
   {:else if finished}
     <div class="msg">
       <p>{finished}</p>
-      {#if ended}
+      {#if ended || endedWhileAway}
         <a href="/sessions/{id}">Back to the session</a>
       {:else}
         <button type="button" onclick={() => void connect()} disabled={booting}>Reconnect</button>

@@ -45,14 +45,29 @@ pub fn router(state: AppState) -> Router {
         .docs
         .preview_origin()
         .expect("validated preview origin");
+    // The two origins this interface is allowed to frame, and no others. Both
+    // are this node's own listeners, named rather than wildcarded:
+    //
+    //  * the document preview, which is sandboxed untrusted HTML; and
+    //  * OpenCode's native UI, which the installed app hosts at
+    //    `/sessions/{id}/opencode` so a phone never hands the session to the
+    //    system browser. The UI origin's own policy answers the other half of
+    //    that pair — its `frame-ancestors` names this origin alone — so each
+    //    side states the relationship and neither is taken on trust.
+    let opencode_origin = state
+        .cfg
+        .ui
+        .opencode_origin()
+        .expect("validated UI origin");
     let security_headers = OperatorSecurityHeaders {
         csp: format!(
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-             img-src 'self' data: https:; connect-src 'self'; frame-src {preview_origin}; \
+             img-src 'self' data: https:; connect-src 'self'; \
+             frame-src {preview_origin} {opencode_origin}; \
              object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
         )
         .parse()
-        .expect("validated preview origin is a valid header value"),
+        .expect("validated origins are valid header values"),
     };
     Router::new()
         // The tools, for a harness the operator runs outside the boundary.

@@ -374,7 +374,14 @@ const BOOTSTRAP: &str = r#";(function () {
 "#;
 
 /// Replace the app's module `<script>` with the bootstrap, which loads it.
-fn splice_bootstrap(html: &str) -> Result<String, BundleError> {
+///
+/// Public because it is the unit of "the page this origin serves": the PWA
+/// shell's browser test (`node/tests/opencode_pwa_shell.rs`) stands the origin
+/// up without the 34 MiB pinned bundle, and what it is testing — the boot
+/// exchange and the cookie that comes out of it — is this script rather than
+/// upstream's JavaScript. Taking the real one rather than a copy is what stops
+/// the test from passing against a bootstrap the node does not serve.
+pub fn splice_bootstrap(html: &str) -> Result<String, BundleError> {
     let (open, close) = find_module_script(html)
         .ok_or_else(|| BundleError::Shape("no <script type=\"module\"> in index.html".into()))?;
     let tag = &html[open..close];
