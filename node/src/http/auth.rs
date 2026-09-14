@@ -362,21 +362,29 @@ pub async fn guard(
         }
     }
 
+    let loopback = peer_is_loopback(&req);
     let mut response = next.run(req).await;
     if let Some(secret) = renew {
-        set_cookie(&mut response, &secret, SESSION_TTL_MS / 1000);
+        set_cookie(&mut response, &secret, !loopback, SESSION_TTL_MS / 1000);
     }
     Ok(response)
 }
 
-fn set_cookie(response: &mut Response, secret: &str, max_age_secs: i64) {
+/// `Secure` unless the caller is loopback, matching `http::ui`'s cookie
+/// (`UiState::secure`, `!cfg.ui.opencode_is_loopback()`): tracon serves plain
+/// HTTP on loopback on purpose, and a WKWebView-backed client (the macOS
+/// desktop wrapper) drops a `Secure` cookie set over that connection rather
+/// than accepting it as Chromium/Safari's own "potentially trustworthy
+/// origin" exception would. A loopback caller never needed the cookie for
+/// authentication anyway (`guard`'s step 1) — this only fixes the client's
+/// own `authenticated` readback.
+fn set_cookie(response: &mut Response, secret: &str, secure: bool, max_age_secs: i64) {
     // SameSite=Lax rather than Strict: opening a review from a push
     // notification is a top-level cross-site navigation, and Strict would drop
     // the cookie on exactly that. Lax still withholds it from cross-site
     // writes, which every mutating call here is.
-    let v = format!(
-        "{COOKIE}={secret}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={max_age_secs}"
-    );
+    let scope = if secure { "; Secure; SameSite=Lax" } else { "; SameSite=Lax" };
+    let v = format!("{COOKIE}={secret}; HttpOnly{scope}; Path=/; Max-Age={max_age_secs}");
     if let Ok(value) = axum::http::HeaderValue::from_str(&v) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
@@ -390,6 +398,7 @@ pub struct LoginBody {
 /// Exchange the operator token for a cookie.
 pub async fn login(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<LoginBody>,
 ) -> Result<Response, ApiError> {
@@ -428,7 +437,7 @@ pub async fn login(
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut response = Json(json!({ "ok": true })).into_response();
-    set_cookie(&mut response, &secret, SESSION_TTL_MS / 1000);
+    set_cookie(&mut response, &secret, !peer.ip().is_loopback(), SESSION_TTL_MS / 1000);
     Ok(response)
 }
 
@@ -441,7 +450,10 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Respon
         let _ = state.store().auth_sessions_purge(now_ms());
     }
     let mut response = Json(json!({ "ok": true })).into_response();
-    set_cookie(&mut response, "", 0);
+    // `Secure` here is cosmetic: an expiring, empty-valued cookie clears by
+    // name and path regardless of it, unlike the cookie `login` sets to
+    // actually be read back.
+    set_cookie(&mut response, "", true, 0);
     response
 }
 

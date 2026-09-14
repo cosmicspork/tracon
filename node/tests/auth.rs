@@ -281,6 +281,58 @@ async fn the_token_buys_a_cookie_and_the_cookie_is_what_travels() {
     );
 }
 
+/// A loopback client sets a token too — the macOS desktop wrapper's WKWebView
+/// reaches its own node this way — and `Secure` on that cookie is not merely
+/// unnecessary there, it is actively harmful: unlike Chromium's loopback
+/// exception, WKWebView drops a `Secure` cookie set over plain HTTP outright,
+/// so the client's own readback of its login never reflects it. Withholding
+/// `Secure` for a loopback peer is what `http::ui`'s cookie already does
+/// (`UiState::secure`); this is the same fix for the operator cookie `login`
+/// sets. Remote callers are unaffected — `the_token_buys_a_cookie_and_the_cookie_is_what_travels`
+/// and `the_browser_side_defences_back_the_middleware` cover those.
+#[tokio::test]
+async fn a_loopback_login_omits_secure_so_a_local_webview_keeps_the_cookie() {
+    state::isolate();
+    let n = node();
+    set_token(&n, "trc1.secret").await;
+
+    let (s, cookies, _) = call(
+        &n,
+        "POST",
+        "/api/login",
+        LOCAL,
+        "127.0.0.1:7420",
+        &[],
+        Some(json!({ "token": "trc1.secret" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let raw = cookies
+        .iter()
+        .find(|c| c.starts_with("tracon_session="))
+        .expect("a session cookie");
+    assert!(
+        !raw.contains("Secure"),
+        "a loopback caller must not be handed a cookie its own browser drops: {raw}"
+    );
+    assert!(raw.contains("HttpOnly"), "{raw}");
+    assert!(raw.contains("SameSite=Lax"), "{raw}");
+
+    // And it still works to reach the operator API with, same as remote.
+    let cookie = cookie_of(&cookies);
+    let (s, _, _) = call(
+        &n,
+        "GET",
+        "/api/node",
+        LOCAL,
+        "127.0.0.1:7420",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+}
+
 /// A non-browser client (the CLI over the ingress) presents the token itself.
 #[tokio::test]
 async fn the_token_also_works_as_a_bearer_for_clients_that_hold_no_cookies() {
