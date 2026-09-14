@@ -1119,6 +1119,64 @@ pub async fn serve(app: AppState, operator_listen: SocketAddr) -> anyhow::Result
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// The route trace
+// ---------------------------------------------------------------------------
+
+/// The case names the native UI's route trace
+/// (`docs/reference/opencode-v1.18.30/ui-route-trace.tsv`) records for a
+/// request this origin answered itself, alongside the gateway's own class
+/// names (`gateway::opencode::trace`).
+pub mod trace {
+    /// A file in the pinned bundle.
+    pub const ASSET: &str = "asset";
+    /// The app shell, at `/` or at a route the app's own router declares.
+    pub const PAGE: &str = "page";
+    /// Handed to the gateway's matrix, which named the class.
+    pub const API: &str = "api";
+    /// Nobody's: the 404 that is the point of having no catch-all.
+    pub const UNKNOWN: &str = "unknown";
+}
+
+/// Which of `dispatch`'s four cases answers one request, named for the route
+/// trace.
+///
+/// A transcription of `dispatch`'s order, in the same order and with the same
+/// tests, reachable without a node: the trace is only evidence if the thing
+/// that classifies a recorded row is the thing that decided it.
+///
+/// `bundle` is `None` on a machine that has not vendored the tree — CI, for
+/// one. A path that would have been a file is then [`trace::UNKNOWN`], which
+/// is what makes the recorded `asset` rows checkable there: a row the origin
+/// answered 200 that this function cannot place is a row only the bundle can
+/// have served.
+pub fn trace_case(bundle: Option<&Bundle>, method: &str, path: &str) -> &'static str {
+    let read_only = matches!(method, "GET" | "HEAD");
+    if path == "/" {
+        return if read_only {
+            trace::PAGE
+        } else {
+            trace::UNKNOWN
+        };
+    }
+    let Some(segments) = segments(path) else {
+        return trace::UNKNOWN;
+    };
+    if read_only && bundle.is_some_and(|b| b.get(&segments.join("/")).is_some()) {
+        return trace::ASSET;
+    }
+    if segments
+        .first()
+        .is_some_and(|s| crate::gateway::opencode::is_api_root(s))
+    {
+        return trace::API;
+    }
+    if read_only && app_route(&segments) {
+        return trace::PAGE;
+    }
+    trace::UNKNOWN
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1248,5 +1306,30 @@ mod tests {
         // And a path the app never calls is not a tunnel.
         assert!(!crate::gateway::opencode::is_api_root("assets"));
         assert!(!crate::gateway::opencode::is_api_root("boot"));
+    }
+
+    /// The trace's names are `dispatch`'s cases, in `dispatch`'s order.
+    #[test]
+    fn the_trace_names_the_case_that_would_have_answered() {
+        let dir = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("/work");
+        assert_eq!(trace_case(None, "GET", "/"), trace::PAGE);
+        assert_eq!(
+            trace_case(None, "GET", &format!("/server/{dir}/session/ses_1")),
+            trace::PAGE
+        );
+        assert_eq!(trace_case(None, "GET", "/new-session"), trace::PAGE);
+        // An API root is the gateway's to decide however the method reads.
+        assert_eq!(trace_case(None, "GET", "/config"), trace::API);
+        assert_eq!(trace_case(None, "PATCH", "/config"), trace::API);
+        assert_eq!(trace_case(None, "POST", "/session/ses_1/share"), trace::API);
+        // Nobody's, which is the 404 with no catch-all behind it.
+        assert_eq!(trace_case(None, "GET", "/nope"), trace::UNKNOWN);
+        assert_eq!(trace_case(None, "GET", "/../etc/passwd"), trace::UNKNOWN);
+        // A write to the shell's own route is not the shell.
+        assert_eq!(trace_case(None, "POST", "/"), trace::UNKNOWN);
+        assert_eq!(trace_case(None, "POST", "/new-session"), trace::UNKNOWN);
+        // Without a vendored tree an asset is placed by nobody — which is what
+        // makes a recorded 200 on such a path evidence the bundle answered it.
+        assert_eq!(trace_case(None, "GET", "/assets/index-abc.js"), trace::UNKNOWN);
     }
 }
