@@ -206,9 +206,10 @@ operator's information, not the model's.
     decision rather than an inherited one. There is no auto-merge to design a state
     for.
 11. **The macOS bundle is unsigned, by choice.** The publisher holds no Apple
-    Developer ID, so build provenance is what authenticates a download and Gatekeeper
-    asks once. The install instructions say that in words, with the one command that
-    answers it, rather than letting the interface imply the warning will not appear.
+    Developer ID and will not, so build provenance is what authenticates a download
+    and self-update, and Gatekeeper asks once on first open. The install instructions
+    say that in words, with the one command that answers it, rather than letting the
+    interface imply the warning will not appear.
 12. **A repository may carry instructions about itself.** Nested `AGENTS.md` and
     `CLAUDE.md` under a worktree are read by the harness, and that is accepted rather
     than fought: instruction content grants no permission, so such a file can ask for

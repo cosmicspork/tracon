@@ -71,13 +71,13 @@ published release is listed in one place:
 **On a laptop, the desktop app is the whole install.** Take the `.dmg` (macOS on
 Apple Silicon) or the `.AppImage` (Linux x86_64) from the
 [latest release](https://github.com/cosmicspork/tracon/releases/latest). The
-macOS bundle is unsigned: the publisher holds no Apple Developer ID, so what
-authenticates every desktop asset is its GitHub build provenance attestation,
-published beside it and checked by the app itself before any self-update. The
-cost is that Gatekeeper asks once — right-click the app and choose Open, or
-`xattr -d com.apple.quarantine /Applications/tracon.app`, and it never asks
-again. (The release workflow signs and notarizes instead whenever Apple
-credentials are configured for it.) The app opens on a
+macOS bundle is unsigned: the publisher holds no Apple Developer ID and does not
+intend to, so what authenticates every desktop asset is its GitHub build
+provenance attestation, published beside it and checked by the app itself before
+any self-update. The cost is that Gatekeeper asks once, on first open — right-click
+the app and choose Open, or on macOS 15 and later allow it under System Settings >
+Privacy & Security > Open Anyway (`xattr -d com.apple.quarantine
+/Applications/tracon.app` does the same) — and it never asks again. The app opens on a
 setup page that looks for rootless Podman — the boundary
 the agent runs inside; on a Mac that is `brew install podman`, then
 `podman machine init` once — and then, with one button, installs the `tracon`
@@ -92,10 +92,8 @@ in the URL fragment, which no request carries.
 The app keeps itself and the node current. It checks GitHub Releases at launch and
 replaces itself from Settings or the tray only after a verifier it carries has
 checked the download's GitHub build provenance against this repository and its
-release workflow, and — on macOS — that the update never costs the install a
-guarantee it had: an unsigned install accepts an unsigned or a signed bundle,
-while a Developer ID signed one accepts only the same publisher. An update it
-fetches itself is never quarantined, so macOS does not ask again. On the
+release workflow; there is no code-signing identity to compare. An update it
+fetches itself is unpacked without a quarantine flag, so macOS does not ask again. On the
 next launch it moves the CLI and the service onto the node it now carries —
 restarting the node only once no session is running, and saying so in the tray
 while it waits — and rebuilds the boundary images if their definitions changed.
