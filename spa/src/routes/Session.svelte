@@ -345,6 +345,25 @@
     {/if}
   </header>
 
+  {#if session.legacy_ms}
+    <div class="banner dim">
+      archived · ran <code>{session.harness_id} {session.harness_version}</code>, a harness this
+      node no longer has
+      <b
+        >· readable, never launchable again · its workspace is kept; carry the work forward with
+        <code>tracon session reopen {session.id} --harness opencode</code></b
+      >
+    </div>
+  {/if}
+  {#if session.continued_from}
+    <div class="banner dim">
+      continues <a class="lnk" href="/sessions/{session.continued_from}"
+        >{session.continued_from.slice(0, 8)}</a
+      >
+      <b>· this session inherited that one's workspace, not its context</b>
+    </div>
+  {/if}
+
   {#if session.harness_id === 'external' && session.state !== 'paused' && !isTerminal(session.state)}
     <div class="banner dim">external agent attached <b>· its host process, repository, prompts, and model usage stay outside Tracon; these controls only fence broker access</b></div>
   {/if}

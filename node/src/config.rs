@@ -1335,9 +1335,12 @@ pub struct Kubernetes {
     /// Namespace for harness pods. Empty: the pod's own.
     pub namespace: String,
     pub harness_image: String,
-    /// The image a provider login helper runs in when the session harness
-    /// cannot run it; see `Boundary::login_image`.
+    /// The image the Anthropic subscription login runs in when the session
+    /// harness cannot run it; see `Boundary::login_image`.
     pub login_image: String,
+    /// The same for the Codex subscription login; see
+    /// `Boundary::codex_login_image`.
+    pub codex_login_image: String,
     /// The PersistentVolumeClaim both the node and every harness mount.
     pub state_claim: String,
     /// Where that claim is mounted, in the node and in every harness pod —
@@ -1358,11 +1361,15 @@ impl Default for Kubernetes {
         Self {
             namespace: String::new(),
             harness_image: format!(
-                "ghcr.io/cosmicspork/tracon-harness:{}",
+                "ghcr.io/cosmicspork/tracon-harness-opencode:{}",
                 env!("CARGO_PKG_VERSION")
             ),
             login_image: format!(
                 "ghcr.io/cosmicspork/tracon-harness-claude:{}",
+                env!("CARGO_PKG_VERSION")
+            ),
+            codex_login_image: format!(
+                "ghcr.io/cosmicspork/tracon-harness-opencode:{}",
                 env!("CARGO_PKG_VERSION")
             ),
             state_claim: "tracon-state".into(),
@@ -1465,25 +1472,26 @@ pub struct Consulta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Harness {
-    /// Harness id: `omp` or `claude`. An unknown id refuses to start.
+    /// Harness id: `opencode` or `claude`. An unknown id refuses to start,
+    /// and so does the retired `omp` — with the migration path rather than a
+    /// bare refusal (`crate::adapter::RETIRED_MESSAGE`).
     pub id: String,
     /// The tools a session may use at all, by the harness's own names. Empty
     /// means the harness's default set, which is the default here.
     ///
     /// Restricting is available but not on by default, and the reason is worth
-    /// knowing: omp's `--tools` is a whitelist, and its shell is not one of the
-    /// names it accepts. Any list at all therefore removes the shell, which
-    /// removes the agent's ability to commit — and without commits there is
-    /// nothing to review, so the whole publish path stops. An agent that loses
-    /// its shell does not report that it is stuck; it starts reading `.git`
-    /// by hand to work around it.
+    /// knowing: a tool list is a whitelist, and a harness's shell is easy to
+    /// leave off it. Dropping the shell removes the agent's ability to commit —
+    /// and without commits there is nothing to review, so the whole publish
+    /// path stops. An agent that loses its shell does not report that it is
+    /// stuck; it starts reading `.git` by hand to work around it.
     ///
     /// Reduce the surface deliberately, per node, once you know which tools a
     /// given channel actually needs.
     #[serde(default)]
     pub tools: Vec<String>,
-    /// Exact version this node runs. Checked twice: `omp --version` in the
-    /// runner, and `initialize.agentInfo.version` at session start. Empty
+    /// Exact version this node runs. Checked twice: the harness's own
+    /// `--version` in the runner, and what it reports at session start. Empty
     /// means the version this node's harness image installs — never "whatever
     /// the image happens to contain", since the same string is what the image
     /// build fetches and what both checks compare against.
@@ -1503,11 +1511,18 @@ pub struct Boundary {
     pub gateway_container: String,
     pub gateway_image: String,
     pub harness_image: String,
-    /// The image a provider login helper runs in when the session harness
-    /// cannot run it: only Claude Code mints an Anthropic subscription token,
-    /// so a node whose sessions run another harness still needs this one.
-    /// Equal to `harness_image` (or empty) means there is no second image.
+    /// The image the Anthropic subscription login runs in when the session
+    /// harness cannot run it: only Claude Code mints one (`claude
+    /// setup-token`), so a node whose sessions run another harness still
+    /// needs this one. Equal to `harness_image` (or empty) means there is no
+    /// second image.
     pub login_image: String,
+    /// The same, for the Codex subscription login: only OpenCode runs it
+    /// (`opencode auth login openai`), so a node whose sessions run Claude
+    /// Code needs this image to sign in to one. Equal to `harness_image` (or
+    /// empty) means there is no second image — which is the answer on a node
+    /// whose sessions already run OpenCode.
+    pub codex_login_image: String,
     /// Podman needs `label=disable` for bind mounts on SELinux hosts.
     pub selinux_label_disable: Option<bool>,
     /// macOS: start the podman machine when the boundary finds it stopped.
@@ -1580,8 +1595,9 @@ pub struct Provider {
     pub upstream: String,
     /// `anthropic`, `openai`, or `openai-codex`: which headers and paths the credential becomes.
     pub shape: String,
-    /// The harness's own provider id for a subscription login
-    /// (`omp auth-broker login <id>`); none means API key only.
+    /// The login client's own provider id for a subscription login
+    /// (`opencode auth login <id>`, `claude setup-token`); none means API key
+    /// only. Which adapter runs it is `providers::LoginAdapters`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login: Option<String>,
     /// Device-code provider id used when this node cannot receive localhost callbacks.
@@ -1708,8 +1724,13 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 credential: "openai-codex".into(),
                 upstream: "https://chatgpt.com/backend-api".into(),
                 shape: SHAPE_OPENAI_CODEX.into(),
-                login: Some("openai-codex".into()),
-                device_login: Some("openai-codex-device".into()),
+                // OpenCode's own id for the Codex OAuth flow, which is what
+                // runs it now that the retired harness's `openai-codex` and
+                // `openai-codex-device` ids are gone. It prints a URL and
+                // waits for a pasted code, so there is no separate device
+                // flow and no localhost callback to receive.
+                login: Some("openai".into()),
+                device_login: None,
                 requires_local_callback: false,
                 price: None,
                 models: Vec::new(),
@@ -1772,8 +1793,8 @@ impl Default for Config {
             launch: Launch::default(),
             qa: Qa::default(),
             harness: Harness {
-                id: crate::adapter::omp::OmpAdapter::ID.into(),
-                version: crate::adapter::omp::OmpAdapter::PINNED_VERSION.into(),
+                id: crate::adapter::opencode::OpenCodeAdapter::ID.into(),
+                version: crate::adapter::opencode::OpenCodeAdapter::PINNED_VERSION.into(),
                 // Empty: see the field's note. The surface a session actually
                 // runs against is bounded by the boundary and by policy, both
                 // of which hold whatever the harness offers.
@@ -1786,8 +1807,9 @@ impl Default for Config {
                 gateway_ip: "10.89.0.2".into(),
                 gateway_container: "tracon-gw".into(),
                 gateway_image: "localhost/tracon-gateway".into(),
-                harness_image: "localhost/tracon-harness".into(),
+                harness_image: "localhost/tracon-harness-opencode".into(),
                 login_image: "localhost/tracon-harness-claude".into(),
+                codex_login_image: "localhost/tracon-harness-opencode".into(),
                 selinux_label_disable: None,
                 start_machine: true,
                 stop_timeout_secs: 10,
@@ -2016,8 +2038,8 @@ impl Config {
     }
 
     /// The harness's own state directory, node-owned. Only the harness's
-    /// credential database is mounted into it; nothing else from `~/.omp`
-    /// leaks in (its `AGENTS.md` is a symlink to the operator's workspace).
+    /// credential store is mounted into it; nothing from the operator's own
+    /// copy of that harness on this host ever leaks in.
     pub fn harness_state_dir() -> PathBuf {
         Self::state_dir().join("harness-state")
     }
@@ -2211,7 +2233,10 @@ shape = "openai"
         assert_eq!(codex.credential, "openai-codex");
         assert_eq!(codex.upstream, "https://chatgpt.com/backend-api");
         assert_eq!(codex.shape, SHAPE_OPENAI_CODEX);
-        assert_eq!(codex.login.as_deref(), Some("openai-codex"));
+        // OpenCode's own id for the Codex OAuth flow: the login runs
+        // `opencode auth login openai`.
+        assert_eq!(codex.login.as_deref(), Some("openai"));
+        assert_eq!(codex.device_login, None);
         let _ = std::fs::remove_dir_all(dir);
     }
     #[test]

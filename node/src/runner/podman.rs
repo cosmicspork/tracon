@@ -317,7 +317,7 @@ mod tests {
         let args = spec().podman_args(
             "tracon-h-1",
             &RunnerCommand {
-                argv: vec!["omp".into(), "acp".into()],
+                argv: vec!["opencode".into(), "serve".into()],
                 ..Default::default()
             },
             false,
@@ -332,8 +332,11 @@ mod tests {
         assert!(joined.contains("--stop-timeout 10"));
         assert!(joined.contains("--network tracon-int"));
         assert!(joined.contains("HTTPS_PROXY=http://tracon-gw:8888"));
-        assert!(joined.contains("OMP_STATE_DIR=/root/.omp"));
-        assert!(joined.ends_with("localhost/tracon-harness omp acp"));
+        // OpenCode names no state-directory variable, so the runner sets
+        // none rather than inventing one; where it keeps things is decided by
+        // the HOME and XDG values its adapter passes per session.
+        assert!(!joined.contains("STATE_DIR="));
+        assert!(joined.ends_with("localhost/tracon-harness-opencode opencode serve"));
         // No SELinux flag unless the host needs it.
         assert!(!joined.contains("label=disable"));
         // Nothing is mounted at /work here, so the image's WORKDIR is used.

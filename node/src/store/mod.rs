@@ -52,6 +52,29 @@ pub struct Store {
     conn: Mutex<Connection>,
 }
 
+/// Why a session that had not ended was ended by the legacy archive. Stored
+/// on the row, so the home says what happened rather than showing a session
+/// that stopped for no stated reason.
+pub const LEGACY_END_REASON: &str = "harness_retired";
+
+/// Why a pending approval on a legacy session was closed. It lands in
+/// `answer_option_id`, which is what the approval card renders, so an
+/// operator reading the history sees the reason and not a blank answer.
+pub const LEGACY_APPROVAL_REASON: &str = "closed: the harness that asked was retired";
+
+/// What one `archive-legacy` run put away, for the operator who ran it.
+#[derive(Debug, Clone, Default)]
+pub struct LegacyArchive {
+    /// The sessions, as they now are.
+    pub sessions: Vec<SessionRow>,
+    /// Pending approvals closed because nothing could answer them.
+    pub approvals_closed: usize,
+    /// The workspaces those sessions leave behind. Retained, never removed:
+    /// the work in them is the operator's, and a reopened session is given
+    /// one back.
+    pub workspaces: Vec<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error(transparent)]
@@ -240,9 +263,9 @@ impl Store {
                 budget_tokens, tokens_used, cost_usd, context_used, context_size, state, end_reason,
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
                 ended_mono_ms, updated_ms, project_id, phase, policy_version, review_id,
-                harness_agent, harness_found, harness_protocol)
+                harness_agent, harness_found, harness_protocol, parent_session, continued_from)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-                ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34)",
+                ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36)",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -277,7 +300,9 @@ impl Store {
                 s.review_id,
                 s.harness_agent,
                 s.harness_found,
-                s.harness_protocol
+                s.harness_protocol,
+                s.parent_session,
+                s.continued_from
             ],
         )?;
         Ok(())
@@ -388,6 +413,102 @@ impl Store {
             }
         }
         Ok(rows)
+    }
+
+    /// Put every session that ran `harness_id` away read-only.
+    ///
+    /// This is the migration step for a harness this build no longer has an
+    /// adapter for. It is deliberately not deletion: the row keeps its
+    /// harness identity and version, its transcript, its evidence and its
+    /// workspace, so the session stays readable and interpretable against the
+    /// thing that produced it. What it loses is the ability to run — nothing
+    /// resolves its harness, and `legacy_ms` says so durably rather than
+    /// leaving it to be re-derived.
+    ///
+    /// A session that had not ended is ended here, because the process behind
+    /// it is long gone and a row that says `running` for ever is a lie the
+    /// home would keep showing. Its pending approvals are closed for the same
+    /// reason: nothing is waiting on the answer, and an approval card that can
+    /// never be answered is worse than none.
+    ///
+    /// Idempotent: a session already marked legacy is left exactly as it is,
+    /// so running it twice reports nothing the second time.
+    pub fn archive_legacy_sessions(&self, harness_id: &str, ms: i64) -> Result<LegacyArchive> {
+        let ids: Vec<String> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt =
+                conn.prepare("SELECT id FROM session WHERE harness_id=?1 AND legacy_ms IS NULL")?;
+            let ids = stmt
+                .query_map([harness_id], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            ids
+        };
+        if ids.is_empty() {
+            return Ok(LegacyArchive::default());
+        }
+        let approvals_closed = {
+            let conn = self.conn.lock().unwrap();
+            // Ended, archived, and marked legacy in one statement so a crash
+            // between them cannot leave a session launchable but archived.
+            conn.execute(
+                "UPDATE session
+                 SET legacy_ms=?2,
+                     archived_ms=COALESCE(archived_ms, ?2),
+                     state=CASE WHEN state IN ('closed','killed_budget','failed')
+                                THEN state ELSE 'closed' END,
+                     -- Only a session this run actually ended gets the
+                     -- reason. One that had already ended keeps whatever it
+                     -- ended for, including nothing: claiming the retirement
+                     -- ended a session that closed on its own months earlier
+                     -- would be a plausible-looking lie in the one place the
+                     -- operator goes to find out what happened.
+                     end_reason=CASE WHEN state IN ('closed','killed_budget','failed')
+                                     THEN end_reason ELSE ?3 END,
+                     updated_ms=?2
+                 WHERE harness_id=?1 AND legacy_ms IS NULL",
+                rusqlite::params![harness_id, ms, LEGACY_END_REASON],
+            )?;
+            conn.execute(
+                "UPDATE permission_request
+                 SET state='expired', answer_option_id=?2, resolved_mono_ms=0
+                 WHERE state='new'
+                   AND session_id IN (SELECT id FROM session WHERE harness_id=?1)",
+                rusqlite::params![harness_id, LEGACY_APPROVAL_REASON],
+            )?
+        };
+        let mut sessions = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(row) = self.get_session(&id)? {
+                sessions.push(row);
+            }
+        }
+        let mut workspaces: Vec<String> = sessions
+            .iter()
+            .filter_map(|row| row.worktree_path.clone())
+            .collect();
+        workspaces.sort();
+        workspaces.dedup();
+        Ok(LegacyArchive {
+            sessions,
+            approvals_closed,
+            workspaces,
+        })
+    }
+
+    /// Record where a new session came from. Written once, right after the
+    /// row is inserted, by the reopen path.
+    pub fn set_session_lineage(
+        &self,
+        id: &str,
+        parent_session: Option<&str>,
+        continued_from: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE session SET parent_session=?2, continued_from=?3 WHERE id=?1",
+            rusqlite::params![id, parent_session, continued_from],
+        )?;
+        Ok(())
     }
 
     /// Every repository sessions have run against, most recently used first.
@@ -1179,6 +1300,11 @@ impl Store {
     }
 
     /// Insert or fully replace a peer's session, except the local draft.
+    ///
+    /// `legacy_ms` rides along with the rest: a peer's legacy session has to
+    /// read as read-only here too, or this node's interface offers to prompt
+    /// a session whose harness nobody has any more. The lineage columns ride
+    /// with it so a mirrored continuation still names what it continues.
     pub fn upsert_session_mirror(&self, s: &SessionRow) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1187,9 +1313,10 @@ impl Store {
                 budget_tokens, tokens_used, cost_usd, context_used, context_size, state, end_reason,
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
                 ended_mono_ms, updated_ms, project_id, phase, policy_version, review_id,
-                harness_agent, harness_found, harness_protocol)
+                harness_agent, harness_found, harness_protocol, legacy_ms, parent_session,
+                continued_from)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,NULL,
-                NULL,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32)
+                NULL,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35)
              ON CONFLICT(id) DO UPDATE SET node_id=?2, channel=?3, work_item_id=?4, repo_path=?5,
                 worktree_path=?6, branch=?7, harness_id=?8, harness_version=?9,
                 harness_session_id=?10, container_name=?11, model=?12, budget_tokens=?13,
@@ -1197,7 +1324,8 @@ impl Store {
                 end_reason=?19, last_error=?20, turn_active=?21, created_ms=?22,
                 started_mono_ms=?23, ended_mono_ms=?24, updated_ms=?25, project_id=?26,
                 phase=?27, policy_version=?28, review_id=?29, harness_agent=?30,
-                harness_found=?31, harness_protocol=?32",
+                harness_found=?31, harness_protocol=?32, legacy_ms=?33, parent_session=?34,
+                continued_from=?35",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -1230,7 +1358,10 @@ impl Store {
                 s.review_id,
                 s.harness_agent,
                 s.harness_found,
-                s.harness_protocol
+                s.harness_protocol,
+                s.legacy_ms,
+                s.parent_session,
+                s.continued_from
             ],
         )?;
         Ok(())
@@ -1796,6 +1927,22 @@ mod records {
         /// history changes. NULL means it is still on the home.
         #[serde(default)]
         pub archived_ms: Option<i64>,
+        /// When this session was archived as legacy: its harness is not one
+        /// this build has an adapter for, so it is read-only for good. The
+        /// row keeps `harness_id` and `harness_version` so the transcript
+        /// stays interpretable against the thing that produced it. NULL for
+        /// every session a supported harness ran.
+        #[serde(default)]
+        pub legacy_ms: Option<i64>,
+        /// The session this one was created from, when it was. Set by
+        /// `reopen`, which never reuses a legacy session's id.
+        #[serde(default)]
+        pub parent_session: Option<String>,
+        /// The session whose work this one continues. Set by `reopen`
+        /// alongside `parent_session`; they are separate because a fork has a
+        /// parent and continues nothing.
+        #[serde(default)]
+        pub continued_from: Option<String>,
         /// The launch manifest this session was staged from: the operator's
         /// skills, instructions, agents, approved plugins and the provider
         /// set and policy revision the launch settled, as one digest. Written
@@ -1848,6 +1995,9 @@ mod records {
                 ended_mono_ms: r.get("ended_mono_ms")?,
                 updated_ms: r.get("updated_ms")?,
                 archived_ms: r.get("archived_ms")?,
+                legacy_ms: r.get("legacy_ms")?,
+                parent_session: r.get("parent_session")?,
+                continued_from: r.get("continued_from")?,
                 manifest_digest: r.get("manifest_digest")?,
             })
         }
@@ -2787,6 +2937,9 @@ mod tests {
                 ended_mono_ms: None,
                 updated_ms: now_ms(),
                 archived_ms: None,
+                legacy_ms: None,
+                parent_session: None,
+                continued_from: None,
                 manifest_digest: None,
             })
             .unwrap();

@@ -74,7 +74,7 @@ pub enum RunnerError {
     Other(String),
 }
 
-/// A running harness, reduced to what the ACP transport needs: its stdio and
+/// A running harness, reduced to what a stdio transport needs: its pipes and
 /// a future that resolves when it is gone. A process and a pod attach look
 /// the same from here.
 pub struct Spawned {
@@ -129,9 +129,9 @@ impl Spawned {
 
 #[async_trait]
 pub trait Runner: Send + Sync {
-    /// Spawn a long-lived process with stdin/stdout piped (the ACP transport).
+    /// Spawn a long-lived process with stdin/stdout piped.
     async fn spawn(&self, cmd: RunnerCommand) -> Result<Spawned, RunnerError>;
-    /// Run to completion and capture output (e.g. `omp --version`).
+    /// Run to completion and capture output (e.g. `opencode --version`).
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError>;
     /// Force-remove a named process/container.
     async fn kill(&self, name: &str) -> Result<(), RunnerError>;

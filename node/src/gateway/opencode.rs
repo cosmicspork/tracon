@@ -1202,9 +1202,9 @@ async fn mediate(
             // from, not OpenCode's: a reply this gateway could not confirm is
             // sent again by reconciliation, and it has to be the same answer.
             let option = if reply == "once" {
-                crate::acp::types::OPTION_ALLOW_ONCE
+                crate::adapter::types::OPTION_ALLOW_ONCE
             } else {
-                crate::acp::types::OPTION_REJECT_ONCE
+                crate::adapter::types::OPTION_REJECT_ONCE
             };
             let mediated = begin_intent(
                 s,

@@ -1,5 +1,12 @@
-//! The subset of ACP the node uses, as captured from `omp acp` 18.0.4.
-//! Unknown fields are kept in `extra` maps and unknown update variants land in
+//! The vocabulary every adapter translates into: tool calls, permission
+//! options, usage.
+//!
+//! These shapes were first read from the Agent Client Protocol, which the
+//! retired omp harness spoke, and they outlived it because both remaining
+//! harnesses have the same things to say in their own spellings — the
+//! OpenCode adapter and the Claude Code adapter each translate into this, and
+//! the supervisor, the MCP layer and the store read only this. Unknown fields
+//! are kept in `extra` maps and unknown update variants land in
 //! `SessionUpdate::Other`, so adapter drift shows up as data rather than as a
 //! decode failure.
 
@@ -33,10 +40,10 @@ pub struct FsCapabilities {
     pub write_text_file: bool,
 }
 
-/// The ACP protocol versions this client speaks. Every shape in this module
-/// was read from protocol 1, so 1 is both the floor and the ceiling: the node
-/// announces the ceiling in `initialize` and refuses an agent that answers
-/// with anything outside the range.
+/// The revision of these shapes. Every one of them was read from protocol 1
+/// of the wire format they came from, so 1 is both the floor and the ceiling:
+/// an adapter whose harness answers with anything outside the range is
+/// refused rather than driven on the chance that the shapes still line up.
 pub const PROTOCOL_MIN: u32 = 1;
 pub const PROTOCOL_MAX: u32 = 1;
 

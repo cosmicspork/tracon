@@ -1,6 +1,6 @@
 //! A harness whose login prints a URL and then waits for one line on stdin;
 //! the line becomes the access token it "stores". What the provider tests and
-//! the mesh e2e drive instead of a real `omp auth-broker login`.
+//! the mesh e2e drive instead of a real harness login.
 
 #![allow(dead_code)]
 
@@ -75,6 +75,7 @@ impl HarnessAdapter for LoginFake {
         _r: &dyn Runner,
         provider: &str,
         _name: &str,
+        _state_dir: &str,
     ) -> Result<LoginFlow, AdapterError> {
         self.login_calls.fetch_add(1, Ordering::SeqCst);
         let delay = self.login_delay_ms.load(Ordering::SeqCst);

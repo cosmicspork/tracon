@@ -81,12 +81,22 @@ implementation. Recorded so the rewrite is not re-decided.
 
 ## Harness control
 
-**ACP is the adapter interface**; Claude Code's stream-json control protocol is the
-one non-ACP adapter, functionally equivalent at the permission gate. The adapter
-trait is the part of the system that rots: version-pin harnesses per node, record the
-version on every session, check compatibility at session start, and let an unknown
-harness id refuse to start rather than fall back. A harness declares its own state
-layout and config files; nothing outside the trait may spell a harness's name.
+**The adapter trait is the interface**, and each harness reaches it over its own
+protocol: OpenCode over its native server API, Claude Code over the stream-json
+control protocol. They are functionally equivalent at the permission gate, which is
+the only place that has to be true. The trait is the part of the system that rots:
+version-pin harnesses per node, record the version on every session, check
+compatibility at session start, and let an unknown harness id refuse to start rather
+than fall back. A harness declares its own state layout and config files; nothing
+outside the trait may spell a harness's name.
+
+That last rule is what made the 2026-09-13 cutover cheap. tracon's first harness was
+omp, driven over the Agent Client Protocol; removing it took the adapter, its image,
+its provider wiring and its catalogue workarounds, and nothing else. What survived is
+the shared vocabulary the adapters translate into (`node/src/adapter/types.rs` — tool
+calls, permission options, usage), because both remaining harnesses have the same
+things to say. Sessions omp ran are archived read-only rather than deleted; see
+`tracon session archive-legacy` in RECOVERY.md.
 
 Rules learned against real harnesses, kept as rules:
 
@@ -94,12 +104,12 @@ Rules learned against real harnesses, kept as rules:
   denied, not silently approved. This is how local-first and fail-closed coexist:
   policy runs on the node, so auto-allowed work continues through a hub outage while
   anything needing a human blocks. Degraded means slower, never silently permissive.
-- The node declares ACP filesystem reads unavailable, so the harness reads inside its
-  runner rather than turning the node into a file server.
+- The node declares client-side filesystem reads unavailable, so the harness reads
+  inside its runner rather than turning the node into a file server.
 - Budget accounting includes the large, mostly cached startup context, not just the
   visible prompt.
-- opencode's ACP mode starts an HTTP server and can advertise over mDNS: bind
-  loopback, disable mDNS, and read the recorded cautions before adapting it.
+- OpenCode's server binds a port and can advertise over mDNS: bind loopback, disable
+  mDNS, and read the recorded cautions in `docs/reference/opencode-v1.18.30/`.
 - **A harness's language tooling is part of its image, named by absolute path.**
   Left to itself a harness downloads its language servers and formatters on first
   use, from a network that is denied — and the three formatters that install

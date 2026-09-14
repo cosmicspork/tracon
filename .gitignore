@@ -44,7 +44,6 @@ Thumbs.db
 
 # Harness files: the project promises never to carry these
 .claude/
-.omp/
 .opencode/
 AGENTS.md
 CLAUDE.md

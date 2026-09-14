@@ -5,7 +5,6 @@ default: check
 # The node image for pod-hosted nodes, and the harness image those pods pull.
 node-image tag="dev":
     podman build -f Dockerfile.node -t ghcr.io/cosmicspork/tracon-node:{{tag}} .
-    podman build -f containers/harness/Containerfile -t ghcr.io/cosmicspork/tracon-harness:{{tag}} containers/harness
     podman build -f containers/harness-claude/Containerfile -t ghcr.io/cosmicspork/tracon-harness-claude:{{tag}} containers/harness-claude
     podman build -f containers/harness-opencode/Containerfile -t ghcr.io/cosmicspork/tracon-harness-opencode:{{tag}} containers/harness-opencode
 
@@ -58,10 +57,12 @@ hub admit="":
 hub-image:
     podman build -t localhost/tracon-hub .
 
-# Build the gateway and harness images this node runs.
+# Build the gateway and harness images this node runs. Both harnesses: a node
+# runs sessions with one of them and still signs in to the other's
+# subscription with the other.
 images:
     podman build -t localhost/tracon-gateway containers/gateway
-    podman build -t localhost/tracon-harness containers/harness
+    podman build -t localhost/tracon-harness-opencode containers/harness-opencode
     podman build -t localhost/tracon-harness-claude containers/harness-claude
 
 # Create the harness network and gateway the node owns.
