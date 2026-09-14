@@ -493,6 +493,38 @@ Invariants on top of the wire:
   payloads it cannot read; senders surface that as "unreachable, or on an older
   build" rather than silence.
 
+### Owner streams
+
+A command is one message and one ack, retried until it lands. The native
+harness API is not that shape: it is a request with a body, a response with a
+body, and — for the event stream and the terminal — no end at all. Replaying
+those through the durable outbox would repeat mutations and fill the hub with
+bytes nobody reads again. So a request on one node for a session another node
+owns opens a **stream**: its own frame family, relayed by the hub and stored
+nowhere (`spec/README.md`, "Owner streams").
+
+- **The owner decides, from its own state.** On an open, the owner re-checks
+  that the session is its own, that the stream is on that session's channel,
+  and that the opener still holds the channel *by the owner's own record* —
+  then runs the request through its own gateway, matrix, policy and intent row.
+  An operator the serving node admitted is refused here if this node grants
+  them nothing.
+- **Input is never replayed.** A stream that dies is gone. The serving node
+  re-opens on the next request; it never re-sends a body, and a request with a
+  body is refused rather than retried when the owner's epoch has moved. A
+  mutation whose answer was lost is `uncertain` on the owner (the intent row
+  written before dispatch) and says so on the response head.
+- **Owner fencing is an epoch, not a heartbeat.** Each run of a node mints one;
+  the serving side remembers it per session and names it on the next open. A
+  restart fences every stream held against the run that died.
+- **The hub sees ciphertext and routing metadata.** Channel, sender, recipient,
+  stream id, epoch and sequence are clear because they are what it routes on;
+  the body is sealed under a key derived per stream *and per direction* from
+  the channel epoch key, with a label no durable operation uses. The hub bounds
+  what it carries — per stream, per connection, per member, per minute — and a
+  stream it has to drop is closed at both ends with a reason, in the clear,
+  because it cannot seal a close of its own.
+
 ## Memory and documents
 
 The node owns memory; harness-native memory is disabled. **Bank identity comes from

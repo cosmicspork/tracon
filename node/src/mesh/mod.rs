@@ -8,6 +8,7 @@ pub mod forward;
 pub mod frames;
 pub mod identity;
 pub mod mirror;
+pub mod stream;
 
 use serde::Serialize;
 

@@ -800,6 +800,24 @@ pub async fn handle(
             &format!("no session {session_id} on this node"),
         );
     };
+    // A session another node owns is not a 404 here. The request goes to that
+    // node over a bounded encrypted stream the hub only relays, and the answer
+    // comes back the same way; the owner repeats every check below on its own
+    // state before anything reaches its harness (`mesh::stream`).
+    if row.node_id != s.node_id {
+        return match s.mesh.clone() {
+            Some(mesh) => {
+                crate::mesh::stream::remote_gateway(&mesh, &row, &method, &uri, headers, body).await
+            }
+            None => answer(
+                StatusCode::NOT_FOUND,
+                &format!(
+                    "session {session_id} runs on node {} and this node has no mesh to reach it",
+                    row.node_id
+                ),
+            ),
+        };
+    }
     let Some(api) = s.manager.native_api(&session_id).await else {
         return answer(
             StatusCode::CONFLICT,

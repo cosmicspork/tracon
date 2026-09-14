@@ -117,6 +117,120 @@ row (absent on older builds); a new command op fails whole-payload deserializati
 an older node, which drops the frame — the sender times out rather than erring, hence
 the version bump.
 
+## Owner streams (`stream.rs`)
+
+A second frame family, **relayed and never stored**, for a request a session's
+owner must answer now: the mediated harness API, its event stream, and the
+terminal. Durable frames are the wrong shape for these — a replayed `POST`
+repeats a mutation, and a session's event stream would fill the hub's disk with
+bytes nobody reads again — so streams get their own envelope, their own keys,
+their own replay rule and their own hub routes.
+
+```json
+{ "v": 3, "channel": "personal", "sender": "<node id>", "recipient": "<node id>",
+  "stream_id": "<hex16>", "epoch": "<hex16>", "seq": 0, "sent_ms": 0,
+  "body": "<base64>", "sig": "<hex ed25519>" }
+```
+
+Everything but `body` is routing metadata the hub reads; `body` is the sealed
+payload. `stream_id` is 16 random bytes. `seq` starts at 0 and increases by one
+per frame **per sender**, so each direction has its own sequence.
+
+Canonical bytes: `u32_be(v) ‖ len+channel ‖ sender(32) ‖ recipient(32) ‖
+stream_id(16) ‖ epoch(16) ‖ u64_be(seq) ‖ i64_be(sent_ms)`, `len` a big-endian
+u32. The canonical bytes are the AEAD associated data, so a frame the hub
+re-labels onto another stream, channel, epoch, recipient or sequence number
+fails to open. `sig = Ed25519(sender, "tracon/v0/stream" ‖ SHA256(canonical ‖
+len+body))` — sealed then signed, as with durable frames.
+
+### Keys and nonces
+
+The per-stream key is derived from the channel epoch key, under a label no
+durable operation uses, and separately for each direction:
+
+```
+salt = stream_id(16) ‖ 0x1f ‖ sender(32) ‖ recipient(32)
+info = "tracon/v0/stream-key" ‖ 0x1f ‖ channel ‖ 0x1f ‖ epoch(16) ‖ 0x1f ‖ direction
+key  = HKDF-SHA256(ikm = epoch key, salt, info)      direction ∈ {serving, owner}
+```
+
+`nonce = "trst" ‖ u64_be(seq) ‖ direction(1) ‖ 0x00 × 11` — a counter nonce
+under a key that seals nothing else, which is **not** the durable frames'
+random-nonce space. Both ends may therefore count from 0 without a `(key,
+nonce)` pair ever repeating, and repeating a `seq` is a decryption failure
+rather than a policy question. Replay protection is that plus strict
+monotonicity per `(stream_id, sender)`: a repeat, a regression or a gap is
+dropped. There is no dedupe table, because nothing is retained to dedupe
+against.
+
+### Payloads
+
+Discriminated on `frame` (not `kind`, which `open` uses for the stream's own
+kind):
+
+| `frame` | Direction | Carries |
+|---|---|---|
+| `open` | serving → owner | the request metadata allowlist (below) |
+| `head` | owner → serving | `status`, `headers`, `owner_epoch`, `uncertain` |
+| `chunk` | either | `bytes` (base64), `fin` |
+| `flow` | either | `credit`: how many more chunks the peer may send |
+| `close` | either | `reason`, optional `detail` |
+| `refused` | owner → serving | `reason`, optional `detail`; the stream is over |
+
+An `open` names `protocol_version`, `session_id`, `kind` (`http`, `sse`, `ws`),
+`method`, normalised `path`, optional `query`, an allowlisted `headers` subset,
+`body_sha256` and `body_len`, an optional `operator` identity, and an optional
+`owner_epoch` to be fenced on. The body itself travels as `chunk` frames and is
+checked against the digest before the owner dispatches it. The header
+allowlist is `accept`, `accept-language`, `content-type`, `last-event-id`,
+`if-none-match`; the response allowlist is `content-type`, `cache-control`,
+`etag`, `last-modified`, `vary`, `content-disposition`.
+
+`refused` reasons: `unsupported_version`, `unknown_session`, `revoked_member`,
+`owner_fenced`, `refused`, `busy`, `malformed`. `close` reasons: `done`,
+`timeout`, `too_large`, `relay_dropped`, `owner_fenced`, `revoked`,
+`peer_gone`, `local_error`.
+
+`STREAM_PROTOCOL_VERSION` is 1 and moves independently of `CONTRACT_VERSION`.
+An unknown `frame` variant fails the whole payload, so a peer on an older build
+refuses by name rather than half-reading a stream; a peer that does not know
+streams at all answers the routes with a 404. Neither needs the contract
+version to move, which is why it has not.
+
+### Limits
+
+| Limit | Value |
+|---|---|
+| serialized stream envelope | 1 MiB |
+| plaintext per `chunk` | 512 KiB |
+| headers named by an `open` | 32 |
+| credit window per direction | 16 chunks, one granted back per chunk consumed |
+| relay buffer per stream | 32 frames, then `429 backpressure` |
+| relay queue per connected member | 256 frames, then the stream is dropped |
+| streams open per member (relay) | 32 |
+| stream frames per member per minute | 3000 |
+| idle stream forgotten by the relay after | 300 s |
+
+The node adds its own, configurable under `[mesh]`:
+`stream_open_timeout_secs` (30), `stream_idle_secs` (120),
+`stream_max_body_bytes` (8 MiB), `stream_max_response_bytes` (256 MiB),
+`stream_max_concurrent` (16).
+
+### Hub routes
+
+| Method/Path | Auth | Purpose |
+|---|---|---|
+| `POST /v0/streams` | sender and recipient both members of the frame's channel; key = sender | relay one sealed frame. `202`; `404 not_connected`, `429 backpressure`/`too_many_streams`/`rate_limited`, `409 relay_dropped`, `413` too large |
+| `GET /v0/streams` | member | the member's live delivery connection: `stream` events carry sealed envelopes verbatim, `control` events carry the hub's own clear notices (`{stream_id, reason, detail}`) |
+| `DELETE /v0/streams/{stream_id}` | member | this end is done; the relay forgets the stream and tells the other end |
+
+The hub holds no key for a stream and derives none. It keeps a bounded
+in-memory buffer per stream and per connection, a route (`a`, `b`, last-seen)
+so the far end can be told when the near one goes, and nothing else — no
+append, no retention, no replay. A dropped stream closes both ends with a
+reason: the poster is told in the refusal, the peer in a `control` event,
+because the hub cannot seal a `close` frame of its own.
+
 ## Hub requests (`auth.rs`)
 
 Every authenticated request carries three headers:
