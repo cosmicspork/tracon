@@ -375,23 +375,36 @@ async fn deploy_command(
     // known only now. Everything origin-shaped downstream — the identity
     // fetch, the browser's allowed origins, the immutable binding — comes off
     // this resolved target rather than off the configuration.
+    // A deploy that found nothing has no origin, and inventing one would be
+    // the only way to keep the shapes tidy. The row is still written — a
+    // failure that leaves no record is the thing this whole path exists to
+    // avoid — with an empty origin, which browser verification then refuses.
     let resolved = match target.resolved(discovered.as_ref().map(|found| found.url.as_str())) {
-        Ok(resolved) => resolved,
+        Ok(resolved) => Some(resolved),
         Err(error) => {
-            let detail = format!("QA target origin could not be resolved: {error}");
-            finish_action(access.store, &action_id, "failed", &detail);
-            return Err(detail);
+            ok = false;
+            detail["origin_error"] = json!(error);
+            None
         }
     };
-    detail["browser_target_binding"] = match browser_target_binding(&resolved) {
-        Ok(binding) => binding,
-        Err(error) => {
-            finish_action(access.store, &action_id, "failed", &error);
-            return Err(error);
+    let observation = match &resolved {
+        Some(resolved) => {
+            detail["browser_target_binding"] = match browser_target_binding(resolved) {
+                Ok(binding) => binding,
+                Err(error) => {
+                    finish_action(access.store, &action_id, "failed", &error);
+                    return Err(error);
+                }
+            };
+            observe_environment(resolved).await
         }
+        None => crate::qa::EnvironmentObservation {
+            identity: None,
+            state: "unknown",
+            detail: "no environment was found, so there was no origin to observe".into(),
+            observed_ms: crate::store::now_ms(),
+        },
     };
-
-    let observation = observe_environment(&resolved).await;
     detail["environment_observation"] = json!({
         "state": observation.state,
         "detail": observation.detail,
@@ -428,7 +441,10 @@ async fn deploy_command(
             candidate.head_sha
         ),
         execution_image: prepared.execution_identity.clone(),
-        origin: crate::config::qa_origin(&resolved.origin)?,
+        origin: match &resolved {
+            Some(resolved) => crate::config::qa_origin(&resolved.origin)?,
+            None => String::new(),
+        },
         environment_identity: observation.identity,
         identity_state: observation.state.into(),
         observed_ms: observation.observed_ms,
