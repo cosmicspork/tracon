@@ -1,6 +1,7 @@
 //! Node configuration: `~/.config/tracon/node.toml`, overridden by flags.
 
 use std::{
+    collections::BTreeSet,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -171,6 +172,11 @@ pub struct QaTarget {
     /// Exact origins that browser redirects, subresources, and WebSockets may
     /// reach in addition to `origin`.
     pub allowed_origins: Vec<String>,
+    /// Discovery-mode targets only: the absolute path of the identity endpoint
+    /// on whatever origin the discovered environment turns out to have.
+    /// `identity_url` is the fixed-origin form of the same thing; a target
+    /// carries exactly one of the two.
+    pub identity_path: String,
     pub deployment: QaDeployment,
     pub browser: QaBrowser,
 }
@@ -183,6 +189,7 @@ impl Default for QaTarget {
             identity_url: String::new(),
             identity_header: "x-tracon-deployment-id".into(),
             allowed_origins: Vec::new(),
+            identity_path: String::new(),
             deployment: QaDeployment::default(),
             browser: QaBrowser::default(),
         }
@@ -198,9 +205,19 @@ impl Default for QaTarget {
 /// deploy, inside it. If no pipeline exists for that SHA, or none has that
 /// job ready to play, the deploy refuses rather than starting a pipeline on
 /// a mutable ref. The node broker keeps the token outside the runtime.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// The `command` kind exists because most hosts are not GitLab. It runs one
+/// operator-configured argv on the node — never in the runner, which has no
+/// credential — with a brokered credential supplied as environment only, and
+/// then observes readiness through further argv rather than a bespoke API
+/// client per host. Nothing here is Laravel Cloud, Fly, or Vercel specific:
+/// the host's own CLI is the integration, and the JSON field names it prints
+/// are configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QaDeployment {
+    /// `gitlab` (the default) or `command`.
+    pub kind: String,
     pub project: String,
     /// The manual job's exact name (as GitLab shows it) that performs the
     /// deploy. Played, never a whole pipeline created.
@@ -208,6 +225,134 @@ pub struct QaDeployment {
     /// Pinned container image the pipeline must attest for this target.
     pub execution_image: String,
     pub variables: std::collections::BTreeMap<String, String>,
+    /// `command` kind: the argv that starts the deploy, run directly with no
+    /// shell. Empty is legitimate for a host whose own automation deploys the
+    /// candidate branch (a preview environment opened by a pull request): then
+    /// nothing is triggered and `discover` alone finds what the host built.
+    pub command: Vec<String>,
+    /// `command` kind: the broker credential whose environment is injected.
+    /// It must be bound to the candidate's channel and to this node. Its
+    /// values never reach argv, the recorded tail, or an API response.
+    pub env_credential: String,
+    /// `command` kind: operator-named placeholder values, so `{app}` in argv
+    /// is configuration rather than a tracon concept. Never secret: a value
+    /// here is visible in evidence, which is what the credential is for.
+    pub args: std::collections::BTreeMap<String, String>,
+    /// `command` kind: how the node learns which environment the host built
+    /// for the candidate's published branch, and where it lives.
+    pub discover: Option<QaDiscover>,
+    /// `command` kind: how the node learns whether the deployment finished and
+    /// which commit it carries.
+    pub status: Option<QaStatusCommand>,
+    /// `command` kind: the observed identity must contain the candidate's SHA
+    /// before the deployment counts as live. Turn it off only for a target
+    /// whose identity endpoint reports something other than its build commit,
+    /// accepting that the deployment is then bound by the host's word alone.
+    pub identity_matches_candidate: bool,
+    pub deploy_timeout_secs: u64,
+    pub poll_interval_secs: u64,
+}
+
+impl Default for QaDeployment {
+    fn default() -> Self {
+        Self {
+            kind: QA_KIND_GITLAB.into(),
+            project: String::new(),
+            deploy_job: String::new(),
+            execution_image: String::new(),
+            variables: std::collections::BTreeMap::new(),
+            command: Vec::new(),
+            env_credential: String::new(),
+            args: std::collections::BTreeMap::new(),
+            discover: None,
+            status: None,
+            identity_matches_candidate: true,
+            deploy_timeout_secs: 900,
+            poll_interval_secs: 10,
+        }
+    }
+}
+
+pub const QA_KIND_GITLAB: &str = "gitlab";
+pub const QA_KIND_COMMAND: &str = "command";
+
+/// Finding the environment a host's own automation created for the candidate's
+/// published branch. Its origin is therefore not known when the target is
+/// configured — a preview environment has a per-branch hostname — so the
+/// operator attests the suffix such hostnames end with instead, and the
+/// discovered origin is checked against it before anything is fetched from it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QaDiscover {
+    pub command: Vec<String>,
+    /// The key holding the array, when stdout is an object wrapping one.
+    /// Empty means stdout is the array itself.
+    pub list_field: String,
+    /// The entry field compared against the candidate's published branch.
+    pub branch_field: String,
+    pub id_field: String,
+    pub url_field: String,
+    pub state_field: String,
+    /// When set, an entry whose field is truthy is preferred over one whose is
+    /// not — "the environment the automation made", not one a person made by
+    /// hand on the same branch.
+    pub prefer_field: String,
+    pub ready_states: Vec<String>,
+    /// The host suffix a discovered origin must end with, so discovery can
+    /// never point the browser or the identity fetch at an arbitrary host.
+    pub origin_suffix: String,
+}
+
+impl Default for QaDiscover {
+    fn default() -> Self {
+        Self {
+            command: Vec::new(),
+            list_field: String::new(),
+            branch_field: "branch".into(),
+            id_field: "id".into(),
+            url_field: "url".into(),
+            state_field: "status".into(),
+            prefer_field: String::new(),
+            ready_states: vec!["running".into()],
+            origin_suffix: String::new(),
+        }
+    }
+}
+
+/// Whether the host finished deploying, and which commit it deployed. The
+/// commit is what binds the evidence: without it a deployment is only "the
+/// environment is up", which says nothing about the candidate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QaStatusCommand {
+    pub command: Vec<String>,
+    /// As in `QaDiscover`. An array (or an array under this key) is read at
+    /// its first entry, which is how the host CLIs list newest-first.
+    pub list_field: String,
+    pub state_field: String,
+    /// Empty means the host does not report a commit, and the deployment is
+    /// then bound to the candidate only by the identity endpoint.
+    pub commit_field: String,
+    pub ready_states: Vec<String>,
+    pub failed_states: Vec<String>,
+}
+
+impl Default for QaStatusCommand {
+    fn default() -> Self {
+        Self {
+            command: Vec::new(),
+            list_field: String::new(),
+            state_field: "status".into(),
+            commit_field: String::new(),
+            ready_states: vec!["success".into()],
+            failed_states: vec![
+                "failed".into(),
+                "cancelled".into(),
+                "canceled".into(),
+                "error".into(),
+            ],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,25 +453,95 @@ impl QaTarget {
         Ok(identity)
     }
 
+    /// Whether the origin this target's browser and identity fetch use is
+    /// known only once a deployment exists.
+    pub fn discovers_origin(&self) -> bool {
+        self.deployment.kind == QA_KIND_COMMAND && self.deployment.discover.is_some()
+    }
+
+    /// The target as it applies to one deployment. A fixed-origin target is
+    /// itself; a discovery target's origin is the environment's own, so it is
+    /// filled in here — after the discovered origin has been checked against
+    /// the operator-attested host suffix, which is the only thing standing
+    /// between a host's JSON and the browser's allowed origins.
+    pub fn resolved(&self, discovered_origin: Option<&str>) -> Result<QaTarget, String> {
+        if !self.discovers_origin() {
+            let configured = qa_origin(&self.origin)?;
+            if let Some(discovered) = discovered_origin {
+                if qa_origin(discovered)? != configured {
+                    return Err(
+                        "QA target origin changed since deployment; create a new deployment observation"
+                            .into(),
+                    );
+                }
+            }
+            return Ok(self.clone());
+        }
+        let discovered =
+            discovered_origin.ok_or("this QA target discovers its origin, and none was found")?;
+        let origin = qa_origin(discovered)?;
+        let discover = self
+            .deployment
+            .discover
+            .as_ref()
+            .ok_or("this QA target has no discovery configured")?;
+        let host = url::Url::parse(&origin)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            .ok_or("discovered QA origin has no host")?;
+        if !host_within(&host, &discover.origin_suffix) {
+            return Err(format!(
+                "discovered QA origin {origin} is not under the attested suffix {:?}",
+                discover.origin_suffix
+            ));
+        }
+        let mut resolved = self.clone();
+        resolved.identity_url = format!("{origin}{}", self.identity_path);
+        resolved.origin = origin;
+        Ok(resolved)
+    }
+
     fn validate(&self, name: &str) -> Result<(), String> {
-        self.canonical_origins()?;
         if !self.r#private {
             return Err(format!(
                 "qa target {name:?} must be explicitly marked private"
             ));
         }
-        self.identity_endpoint()?;
         if !valid_header_name(&self.identity_header) {
             return Err(format!("qa target {name:?} has an unsafe identity_header"));
         }
-        if self.deployment.project.trim().is_empty() || self.deployment.project.len() > 255 {
-            return Err(format!("qa target {name:?} needs a GitLab project"));
+        if self.discovers_origin() {
+            if !self.origin.trim().is_empty() || !self.identity_url.trim().is_empty() {
+                return Err(format!(
+                    "qa target {name:?} discovers its origin, so it must set identity_path rather than origin or identity_url"
+                ));
+            }
+            if !browser_path_ok(&self.identity_path) {
+                return Err(format!(
+                    "qa target {name:?} needs an identity_path that is a bounded absolute path"
+                ));
+            }
+        } else {
+            if !self.identity_path.trim().is_empty() {
+                return Err(format!(
+                    "qa target {name:?} has a fixed origin, so identity_url describes its identity endpoint, not identity_path"
+                ));
+            }
+            self.canonical_origins()?;
+            self.identity_endpoint()?;
         }
-        if !valid_job_name(&self.deployment.deploy_job) {
-            return Err(format!("qa target {name:?} needs a safe deploy_job name"));
+        for value in &self.allowed_origins {
+            qa_origin(value)?;
         }
-        immutable_image(&self.deployment.execution_image)
-            .map_err(|e| format!("qa target {name:?} deployment image: {e}"))?;
+        match self.deployment.kind.as_str() {
+            QA_KIND_GITLAB => self.validate_gitlab(name)?,
+            QA_KIND_COMMAND => self.validate_command(name)?,
+            other => {
+                return Err(format!(
+                    "qa target {name:?} has an unknown deployment kind {other:?}"
+                ))
+            }
+        }
         immutable_image(&self.browser.image)
             .map_err(|e| format!("qa target {name:?} browser image: {e}"))?;
         if self.browser.timeout_secs == 0 || self.browser.timeout_secs > 900 {
@@ -340,6 +555,27 @@ impl QaTarget {
                     "qa target {name:?} has an unsafe test credential name"
                 ));
             }
+        }
+        Ok(())
+    }
+
+    fn validate_gitlab(&self, name: &str) -> Result<(), String> {
+        if self.deployment.project.trim().is_empty() || self.deployment.project.len() > 255 {
+            return Err(format!("qa target {name:?} needs a GitLab project"));
+        }
+        if !valid_job_name(&self.deployment.deploy_job) {
+            return Err(format!("qa target {name:?} needs a safe deploy_job name"));
+        }
+        immutable_image(&self.deployment.execution_image)
+            .map_err(|e| format!("qa target {name:?} deployment image: {e}"))?;
+        if !self.deployment.command.is_empty()
+            || !self.deployment.env_credential.trim().is_empty()
+            || self.deployment.discover.is_some()
+            || self.deployment.status.is_some()
+        {
+            return Err(format!(
+                "qa target {name:?} is a gitlab target; command, env_credential, discover and status belong to the command kind"
+            ));
         }
         for (key, value) in &self.deployment.variables {
             if !valid_env_key(key) || value.len() > 4096 || value.contains('\0') {
@@ -355,6 +591,322 @@ impl QaTarget {
         }
         Ok(())
     }
+
+    fn validate_command(&self, name: &str) -> Result<(), String> {
+        let deployment = &self.deployment;
+        if !deployment.project.trim().is_empty()
+            || !deployment.deploy_job.trim().is_empty()
+            || !deployment.execution_image.trim().is_empty()
+            || !deployment.variables.is_empty()
+        {
+            return Err(format!(
+                "qa target {name:?} is a command target; project, deploy_job, execution_image and variables belong to the gitlab kind"
+            ));
+        }
+        if !valid_credential_name(&deployment.env_credential) {
+            return Err(format!(
+                "qa target {name:?} needs an env_credential naming the broker entry whose environment the command receives"
+            ));
+        }
+        let mut placeholders: BTreeSet<String> = QA_PLACEHOLDERS.iter().map(|p| p.to_string()).collect();
+        for key in deployment.args.keys() {
+            if !valid_placeholder_name(key) {
+                return Err(format!(
+                    "qa target {name:?} has an unsafe deployment arg name {key:?}"
+                ));
+            }
+            if !placeholders.insert(key.clone()) {
+                return Err(format!(
+                    "qa target {name:?} redefines the built-in placeholder {{{key}}}"
+                ));
+            }
+        }
+        for (key, value) in &deployment.args {
+            if value.is_empty() || value.len() > 4096 || value.contains(['\0', '\r', '\n']) {
+                return Err(format!(
+                    "qa target {name:?} has an unsafe value for deployment arg {key:?}"
+                ));
+            }
+            if value.to_ascii_lowercase().contains("production") {
+                return Err(format!(
+                    "qa target {name:?} names production in deployment arg {key:?}"
+                ));
+            }
+        }
+        if deployment.command.is_empty() && deployment.discover.is_none() {
+            return Err(format!(
+                "qa target {name:?} needs either a command to run or a discover command; a deploy that neither starts nor finds anything is not a deploy"
+            ));
+        }
+        if !deployment.command.is_empty() {
+            validate_argv(name, "command", &deployment.command, &placeholders)?;
+        }
+        if deployment.discover.is_none() && deployment.status.is_none() {
+            return Err(format!(
+                "qa target {name:?} needs a discover or status command; without one nothing observes whether the deployment finished"
+            ));
+        }
+        if let Some(discover) = &deployment.discover {
+            validate_argv(name, "discover.command", &discover.command, &placeholders)?;
+            if discover.command.is_empty() {
+                return Err(format!("qa target {name:?} has an empty discover command"));
+            }
+            for (label, field) in [
+                ("branch_field", &discover.branch_field),
+                ("id_field", &discover.id_field),
+                ("url_field", &discover.url_field),
+                ("state_field", &discover.state_field),
+            ] {
+                if !valid_json_field(field) {
+                    return Err(format!(
+                        "qa target {name:?} has an unsafe discover.{label}"
+                    ));
+                }
+            }
+            if !discover.list_field.is_empty() && !valid_json_field(&discover.list_field) {
+                return Err(format!("qa target {name:?} has an unsafe discover.list_field"));
+            }
+            if !discover.prefer_field.is_empty() && !valid_json_field(&discover.prefer_field) {
+                return Err(format!(
+                    "qa target {name:?} has an unsafe discover.prefer_field"
+                ));
+            }
+            if discover.ready_states.is_empty()
+                || discover.ready_states.iter().any(|s| !valid_state_name(s))
+            {
+                return Err(format!(
+                    "qa target {name:?} needs discover.ready_states naming the states that mean the environment is up"
+                ));
+            }
+            if !valid_host_suffix(&discover.origin_suffix) {
+                return Err(format!(
+                    "qa target {name:?} needs discover.origin_suffix: the attested host suffix a discovered environment must live under"
+                ));
+            }
+        }
+        if let Some(status) = &deployment.status {
+            if status.command.is_empty() {
+                return Err(format!("qa target {name:?} has an empty status command"));
+            }
+            let mut with_env = placeholders.clone();
+            with_env.insert("env_id".into());
+            with_env.insert("env_url".into());
+            validate_argv(name, "status.command", &status.command, &with_env)?;
+            if !valid_json_field(&status.state_field) {
+                return Err(format!("qa target {name:?} has an unsafe status.state_field"));
+            }
+            if !status.list_field.is_empty() && !valid_json_field(&status.list_field) {
+                return Err(format!("qa target {name:?} has an unsafe status.list_field"));
+            }
+            if !status.commit_field.is_empty() && !valid_json_field(&status.commit_field) {
+                return Err(format!(
+                    "qa target {name:?} has an unsafe status.commit_field"
+                ));
+            }
+            if status.ready_states.is_empty()
+                || status.ready_states.iter().any(|s| !valid_state_name(s))
+                || status.failed_states.iter().any(|s| !valid_state_name(s))
+            {
+                return Err(format!(
+                    "qa target {name:?} needs status.ready_states, and every state name must be a plain identifier"
+                ));
+            }
+        }
+        if deployment.deploy_timeout_secs == 0 || deployment.deploy_timeout_secs > 3600 {
+            return Err(format!(
+                "qa target {name:?} deploy_timeout_secs must be 1–3600 seconds"
+            ));
+        }
+        if deployment.poll_interval_secs == 0 || deployment.poll_interval_secs > 300 {
+            return Err(format!(
+                "qa target {name:?} poll_interval_secs must be 1–300 seconds"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Placeholders every command-kind argv may use. `{env_id}` and `{env_url}`
+/// are additionally available to a status command, because they exist only
+/// after discovery has run.
+pub const QA_PLACEHOLDERS: &[&str] = &["sha", "short_sha", "branch", "target"];
+
+/// Binaries a command-kind target may name without an absolute path. It is a
+/// list of deployment CLIs rather than a policy about PATH: a node whose PATH
+/// changed must not silently start running a different program under a name
+/// the operator wrote months ago, and an operator who needs anything else
+/// writes the absolute path, which says exactly which file will run.
+pub const QA_COMMAND_BINARIES: &[&str] = &[
+    "aws", "cloud", "doctl", "flyctl", "gh", "glab", "heroku", "helm", "kubectl", "netlify",
+    "railway", "render", "vercel", "wrangler",
+];
+
+/// Programs that turn an argv into a shell line, an interpreter, or another
+/// user. Refused even by absolute path: the whole point of direct argv is that
+/// the operator's configuration is the command, not a program that reads one.
+const QA_REFUSED_BINARIES: &[&str] = &[
+    "ash", "bash", "busybox", "csh", "dash", "doas", "env", "eval", "fish", "ksh", "node", "nohup",
+    "perl", "php", "python", "python3", "ruby", "setsid", "sh", "su", "sudo", "tcsh", "xargs",
+    "zsh",
+];
+
+/// Words that mean an argument is carrying a secret rather than naming one.
+/// A credential reaches a command as environment; an argv element is world-
+/// readable in `ps` and lands verbatim in evidence, so anything that reads
+/// like a credential is refused at configuration time rather than redacted
+/// after the fact.
+const QA_CREDENTIAL_WORDS: &[&str] = &[
+    "apikey",
+    "api-key",
+    "api_key",
+    "bearer",
+    "credential",
+    "passwd",
+    "password",
+    "secret",
+    "token",
+];
+
+fn validate_argv(
+    target: &str,
+    label: &str,
+    argv: &[String],
+    placeholders: &BTreeSet<String>,
+) -> Result<(), String> {
+    if argv.len() > 32 {
+        return Err(format!("qa target {target:?} {label} has more than 32 arguments"));
+    }
+    for (index, part) in argv.iter().enumerate() {
+        if part.is_empty() || part.len() > 4096 || part.contains(['\0', '\r', '\n']) {
+            return Err(format!(
+                "qa target {target:?} {label} has an empty, oversized, or control-bearing argument"
+            ));
+        }
+        let lower = part.to_ascii_lowercase();
+        if QA_CREDENTIAL_WORDS.iter().any(|word| lower.contains(word)) {
+            return Err(format!(
+                "qa target {target:?} {label} argument {index} looks like a credential; a command receives its credential as environment through env_credential, never in argv"
+            ));
+        }
+        for name in argv_placeholders(part)? {
+            if !placeholders.contains(&name) {
+                return Err(format!(
+                    "qa target {target:?} {label} uses the unknown placeholder {{{name}}}"
+                ));
+            }
+        }
+        if index > 0 && (part.starts_with('/') || part.contains("..")) {
+            return Err(format!(
+                "qa target {target:?} {label} argument {index} names a path; a deploy command addresses the host, not this filesystem"
+            ));
+        }
+    }
+    let Some(binary) = argv.first() else {
+        return Err(format!("qa target {target:?} {label} is empty"));
+    };
+    let base = binary.rsplit('/').next().unwrap_or(binary);
+    if QA_REFUSED_BINARIES.contains(&base) {
+        return Err(format!(
+            "qa target {target:?} {label} runs {base:?}, which would make the rest of the argv a program rather than arguments"
+        ));
+    }
+    if binary.starts_with('/') {
+        if binary.contains("..") {
+            return Err(format!(
+                "qa target {target:?} {label} binary path is not canonical"
+            ));
+        }
+    } else if !QA_COMMAND_BINARIES.contains(&binary.as_str()) {
+        return Err(format!(
+            "qa target {target:?} {label} names {binary:?}, which is neither an allowlisted deployment binary nor an absolute path"
+        ));
+    }
+    Ok(())
+}
+
+/// The placeholder names one argument uses. A `{` that never closes, or a name
+/// that is not a plain identifier, is a configuration error rather than a
+/// literal brace: substitution must be total, so an unsubstituted brace can
+/// never survive into a command line.
+pub fn argv_placeholders(part: &str) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    let mut rest = part;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        let close = after
+            .find('}')
+            .ok_or_else(|| format!("argument {part:?} has an unclosed placeholder brace"))?;
+        let name = &after[..close];
+        if !valid_placeholder_name(name) {
+            return Err(format!("argument {part:?} has an unusable placeholder name"));
+        }
+        names.push(name.to_string());
+        rest = &after[close + 1..];
+    }
+    if rest.contains('}') {
+        return Err(format!("argument {part:?} has an unopened placeholder brace"));
+    }
+    Ok(names)
+}
+
+fn valid_placeholder_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+fn valid_json_field(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn valid_state_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// A host suffix an operator attests preview environments live under. It must
+/// be at least two labels, so `.com` can never stand in for "anywhere".
+fn valid_host_suffix(value: &str) -> bool {
+    let trimmed = value.trim_start_matches('.');
+    trimmed.len() >= 4
+        && trimmed.len() <= 253
+        && trimmed.split('.').count() >= 2
+        && trimmed.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+}
+
+/// Whether a host is the attested suffix or a subdomain of it. Never a
+/// substring match: `evil-laravel.cloud` must not pass for `laravel.cloud`.
+pub fn host_within(host: &str, suffix: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let suffix = suffix.trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase();
+    if suffix.is_empty() {
+        return false;
+    }
+    host == suffix || host.ends_with(&format!(".{suffix}"))
+}
+
+fn browser_path_ok(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 2048
+        && value.starts_with('/')
+        && !value.starts_with("//")
+        && !value.contains(['\0', '\r', '\n', '?', '#'])
+        && !value.contains("..")
 }
 
 impl PrototypeBuild {
