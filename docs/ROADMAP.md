@@ -333,7 +333,6 @@ refer to that manifest's table.
         stated rather than implied:** a terminal is an interactive shell, not a per-command
         ledger — what is recorded is that one was opened, with what shell and where, and its
         byte counts and duration; output capture exists, is off, and is labelled.
-  - [ ] Native UI route trace captured and unknown mutations shown to fail closed.
         **Still to do here:** the same against the real UI origin, which lands in the row
         above — the wrapper calls `POST /api/sessions/{id}/opencode-boot` and that route now
         exists, so the feature detection should find it; an end-to-end run of the two
@@ -421,8 +420,6 @@ refer to that manifest's table.
         `document.requestStorageAccess` from inside the frame before `POST /boot`, which needs
         a user gesture and therefore a visible "Show OpenCode" control in the frame rather
         than a silent boot.
-  - [ ] PTY only as an explicit workspace-scoped capability with a gateway-minted owner-bound
-        ticket (finding 7).
   - [x] Native UI route trace captured and unknown mutations shown to fail closed.
         `docs/reference/opencode-v1.18.30/ui-route-trace.tsv` is 60 request shapes taken
         from a real browser: headless Chromium over CDP, the pinned bundle on the UI
