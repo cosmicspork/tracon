@@ -367,6 +367,77 @@ This section records intended work, not additional guarantees of the current rel
       not extra navigation destinations. Browser access to the native OpenCode view
       remains part of Gate D, not a separate interface to maintain.
 
+#### Review workspace and diff reading
+
+Borrow interaction patterns from [cosmicspork/review](https://github.com/cosmicspork/review),
+especially its [diff viewer](https://github.com/cosmicspork/review/blob/main/src/diff-part.ts),
+prose editing and persistent feedback thread. Its renderer uses `diff2html` and
+`highlight.js`; evaluate those against the existing CodeMirror dependency before
+choosing an implementation. Keep Tracon's immutable candidates, isolated checks
+and brokered publication: the reference tool deliberately leaves publishing to
+the agent, which is not Tracon's authority model.
+
+- [ ] **Side-by-side and unified diff modes.** Default to side-by-side on wide screens,
+      with an explicit toggle and remembered preference; use unified as the narrow-screen
+      default without removing the choice. Align changed lines and synchronize split-pane
+      scrolling. Switching modes preserves the current file, reading position and feedback;
+      neither mode requires entering the desktop-only diff editor.
+- [ ] **Readable code and context.** Add old/new line numbers, syntax highlighting,
+      within-line change emphasis, and wrap/scroll controls using Tracon's light/dark tokens.
+      Expand context from the pinned base and candidate, never the live worktree. Label
+      additions, deletions, renames, binary files and unavailable context explicitly; keep
+      raw patch access and do not fabricate text for unsupported cases.
+- [ ] **File navigation and review progress.** Use collapsible file sections on every
+      surface, path navigation/filtering, per-file change counts/status, open/close controls
+      and next/previous file or hunk actions. Offer a full-height/focused reading view rather
+      than forcing the whole diff into one small scroll box. Track viewed files against the
+      reviewed revision and invalidate affected progress on resubmission; viewed is not
+      approved. Preserve keyboard navigation, focus and accessible control labels.
+- [ ] **Keep large reviews responsive.** Paint file headers first, render visible/open
+      bodies incrementally, and load highlighting lazily. Collapse generated and oversized
+      files with an explicit reason and Load diff action; never silently omit them or
+      count them as reviewed. Cache by content/revision and bound memory/DOM work; open-all
+      must not freeze the interface. Rendering performance does not waive submission caps.
+- [ ] **Review prose alongside code and evidence.** Present the outgoing title/body as
+      readable, sanitized Markdown with source editing and a preview of the exact text
+      to be published. Keep requirements, checks, demonstrations and diff easy to move
+      between without burying the code below administrative detail. Preserve current
+      narrative-report and evidence contracts rather than adding another artifact store.
+- [ ] **Persistent, anchored feedback.** Add general and file comments like the reference
+      tool, then true line/range threads bound to candidate revision, path and old/new side
+      (the reference's file comment uses a `path:1` anchor, not a selected line). Return
+      comments and suggestions through the agent review contract. Preserve the thread across
+      resubmissions; resolved and outdated are distinct, and moved anchors must not silently
+      attach to unrelated code. Render untrusted comments through the existing safe renderer.
+- [ ] **Durable review drafts and re-review.** Preserve unsent feedback and title/body edits
+      across navigation and reconnect, with explicit saved/conflict state. Keep desktop diff
+      drafts revision-keyed; resubmission must not silently apply old edits to new code.
+      Show what changed since the last reviewed revision alongside the complete base diff,
+      retain decisions and feedback, and notify/deep-link to a ready-for-re-review item
+      through the existing queue and push system. Suggestions still return to the agent
+      to apply and resubmit; the review client never writes the worktree.
+- [ ] **Explain and validate verdict actions.** Keep decisions reachable while reading
+      long diffs. Request changes and Reject should open/focus a labeled reason composer,
+      with the reason required at submission rather than an unexplained disabled button.
+      Preserve feedback on errors. Explain genuinely unavailable actions inline (publishing,
+      stale revision, missing evidence), distinguish rejection from requested revision,
+      and refresh authoritative state after failed or concurrent decisions.
+- [ ] **Separate review decisions from publication recovery.** Show credential/binding
+      readiness before offering publication and link missing GitHub/GitLab access to the
+      appropriate Connections settings, without exposing secrets or guaranteeing remote
+      permissions from token presence alone. A failed publish needs a durable, visible
+      outcome and remedy. Distinguish definitely-not-attempted, failed, in-progress,
+      uncertain and published; reconcile uncertain external effects before retrying.
+      Keep request-changes/reject available when safe and explain when they are not.
+      Adding a credential never retries publication automatically, and changed revisions
+      or outgoing prose require fresh authorization rather than inheriting an old approval.
+- [ ] **Prove the review experience on real surfaces.** Exercise both modes in browser
+      and desktop, narrow-screen reading and feedback, long lines, mixed file types,
+      generated/large patches, light/dark themes and keyboard-only use. Include blank
+      reasons, missing forge credential, publication failure/retry, reconnect with drafts,
+      stale revision and resubmission with existing threads. Verify the exact approved
+      revision/prose and the distinction between review state and external publication.
+
 #### Work continuity and outcomes
 
 - [ ] **Continue the work, not just the transcript.** A work-level continuation view
