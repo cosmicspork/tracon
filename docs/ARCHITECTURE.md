@@ -95,8 +95,58 @@ omp, driven over the Agent Client Protocol; removing it took the adapter, its im
 its provider wiring and its catalogue workarounds, and nothing else. What survived is
 the shared vocabulary the adapters translate into (`node/src/adapter/types.rs` — tool
 calls, permission options, usage), because both remaining harnesses have the same
-things to say. Sessions omp ran are archived read-only rather than deleted; see
-`tracon session archive-legacy` in RECOVERY.md.
+things to say. Sessions the retired harness ran are archived read-only rather than
+deleted; see `tracon session archive-legacy` in RECOVERY.md. Two concrete adapters
+behind one trait is the whole ambition; a plugin system for harnesses is not.
+
+### The OpenCode boundary
+
+The primary harness is a *server*, not a pipe, and that changes where the seam is
+rather than what it guarantees. A supervised session is one `opencode serve` in its
+own runner, and everything between it and anyone else is node-owned. In order:
+
+- **The adapter owns the process and its environment.** One server per session, bound
+  to loopback with mDNS off, a per-session `HOME`, all four XDG directories and its own
+  database, a read-only config the node wrote outside the worktree, and a server
+  password the node asserts is set. Nothing is discovered: the image carries no ambient
+  config, the model catalogue is declared rather than fetched, and the gateway's URL is
+  written into the provider entry, the catalogue provider and every catalogue model —
+  the session path resolves a model's host from the catalogue, so naming the gateway in
+  one place only leaves a silent way around it.
+- **Every route is classified before it moves.** The API a browser or another node
+  reaches is a mount on the operator router, so the operator's own guard answers first;
+  behind it a matrix derived from the release's own route table decides read, mediate,
+  refuse, or synthesise, and denies by default anything unlisted. The workspace
+  directory is pinned on every request — query, header and body — and the harness
+  credential is injected on the node, so it never reaches a client.
+- **Permissions are all-`ask`, and the node answers them.** No server-side hook gates a
+  tool before it runs, so enforcement is containment plus a ruleset the node writes that
+  asks for every tool class. Policy is evaluated on the node and the reply is always
+  `once`; an `always` is rewritten and the attempted broadening recorded, and the route
+  that would edit the ruleset is refused.
+- **Session events are synthesised, not proxied.** The harness's only server-wide stream
+  has no durable replay and no scoping, so the node never opens one on a browser's
+  behalf: it serves that route itself from its own bus, filtered to the one session the
+  caller's cookie names and numbered so a client resumes rather than restarts.
+  Correctness rests on the per-session sequenced stream the adapter ingests; this is a
+  view of it.
+- **State is the node's to fence.** Two processes can open the same harness database,
+  and an older build opens a newer one silently, so each session's state directory has a
+  single writer, its identity is recorded at launch, and backup, upgrade and restore are
+  the three verbs under "Data lifecycle".
+- **What a session was launched with is a manifest**, not a directory the harness
+  discovered; see below.
+- **The native UI is a client of that boundary, not a hole in it.** It is served from a
+  second origin under tracon's own CSP, entered through a single-use capability the page
+  exchanges for a cookie, and it can reach only the mediated mount for the one session
+  that capability named. The window and frame rules are under "Clients".
+- **A terminal is an authority grant**, bound to one session and its workspace,
+  default-`ask` and revocable, with the spawn rewritten rather than forwarded and a
+  node-minted, owner-bound, single-use ticket for the socket. What is recorded is that a
+  terminal was opened, with what shell and where: a terminal is not a per-command ledger,
+  and saying so is better than implying one.
+- **Another node's operator reaches all of it over an owner stream**, decided again by
+  the owner's own gateway, policy and intent row; see "Owner streams".
 
 Rules learned against real harnesses, kept as rules:
 
@@ -108,8 +158,10 @@ Rules learned against real harnesses, kept as rules:
   inside its runner rather than turning the node into a file server.
 - Budget accounting includes the large, mostly cached startup context, not just the
   visible prompt.
-- OpenCode's server binds a port and can advertise over mDNS: bind loopback, disable
-  mDNS, and read the recorded cautions in `docs/reference/opencode-v1.18.30/`.
+- A harness that runs a server is inventoried before it is trusted: the recorded
+  cautions in `docs/reference/opencode-v1.18.30/` are the upgrade checklist, not a
+  one-time read, because a release that moves which stack resolves a request moves
+  this boundary silently.
 - **A harness's language tooling is part of its image, named by absolute path.**
   Left to itself a harness downloads its language servers and formatters on first
   use, from a network that is denied — and the three formatters that install
@@ -187,7 +239,11 @@ harnesses' own clients — undocumented and churn-prone — so the node runs the
 harness's login and refresh as owned subprocesses inside the boundary, surfaces the
 URL and paste-back through the interface, and lifts the resulting token into its own
 sealed store. The vendor logic stays in the vendor's binary; the node owns everything
-around it.
+around it. Which binary is a property of the flow rather than of the configured
+harness: the Anthropic subscription has one client, `claude setup-token`, and the
+Codex subscription another, `opencode auth login openai`, so a node runs whichever
+image carries the one it needs and the credential lands in the same broker either
+way.
 
 ## The gate
 
