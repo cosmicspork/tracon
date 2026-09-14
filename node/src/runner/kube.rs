@@ -626,7 +626,7 @@ mod tests {
 
     fn cmd() -> RunnerCommand {
         RunnerCommand {
-            argv: vec!["omp".into(), "acp".into()],
+            argv: vec!["opencode".into(), "serve".into()],
             name: "tracon-h-1".into(),
             mounts: vec![
                 Mount::volume("tracon-workspace-repo-x", "/work", false),
@@ -672,8 +672,16 @@ mod tests {
             .map(|e| (e.name.clone(), e.value.clone().unwrap_or_default()))
             .collect();
         assert!(env.contains(&("HTTPS_PROXY".into(), "http://tracon-gw:8888".into())));
-        assert!(env.contains(&("OMP_STATE_DIR".into(), "/home/harness/.omp".into())));
-        assert_eq!(c.command, Some(vec!["omp".into(), "acp".into()]));
+        // OpenCode names no state-directory variable (`Layout::env` is
+        // empty), so the pod carries none rather than one it invented.
+        assert!(!env.iter().any(|(name, _)| name.ends_with("STATE_DIR")));
+        // The image's entrypoint is named rather than replaced; the argv
+        // becomes the args. See the entrypoint test below.
+        assert_eq!(
+            c.command,
+            Some(vec![crate::runner::toolchain::IMAGE_ENTRYPOINT.to_string()])
+        );
+        assert_eq!(c.args, Some(vec!["opencode".into(), "serve".into()]));
         assert_eq!(
             pod.metadata
                 .labels
@@ -738,7 +746,7 @@ mod tests {
             c.command,
             Some(vec![crate::runner::toolchain::IMAGE_ENTRYPOINT.to_string()])
         );
-        assert_eq!(c.args, Some(vec!["omp".into(), "acp".into()]));
+        assert_eq!(c.args, Some(vec!["opencode".into(), "serve".into()]));
         // The grace period is the same number the Podman runner stops with,
         // and the pod carries no shared process namespace: the container's own
         // init is what reaps.
@@ -746,13 +754,24 @@ mod tests {
         assert!(s.share_process_namespace.is_none());
     }
 
-    /// A harness image with no entrypoint keeps the previous shape exactly:
-    /// the command is the argv and there are no args.
+    /// A harness image with no entrypoint — the Claude Code one — keeps the
+    /// plain shape: the command is the argv and there are no args.
     #[test]
     fn an_image_without_an_entrypoint_still_carries_its_argv_as_the_command() {
-        let pod = spec().pod("tracon-h-1", &cmd(), false).unwrap();
+        let mut cfg = Config::default();
+        cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+        cfg.harness.id = crate::adapter::claude::ClaudeAdapter::ID.into();
+        let spec = KubeSpec::from_config(
+            &cfg,
+            PodEnv {
+                namespace: "tracon-lab".into(),
+                pod_ip: "10.244.0.9".into(),
+                node_name: "general-1".into(),
+            },
+        );
+        let pod = spec.pod("tracon-h-1", &cmd(), false).unwrap();
         let c = &pod.spec.unwrap().containers[0];
-        assert_eq!(c.command, Some(vec!["omp".into(), "acp".into()]));
+        assert_eq!(c.command, Some(vec!["opencode".into(), "serve".into()]));
         assert!(c.args.is_none());
     }
 

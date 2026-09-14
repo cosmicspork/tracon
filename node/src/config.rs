@@ -1441,8 +1441,8 @@ impl Config {
     }
 
     /// The harness's own state directory, node-owned. Only the harness's
-    /// credential database is mounted into it; nothing else from `~/.omp`
-    /// leaks in (its `AGENTS.md` is a symlink to the operator's workspace).
+    /// credential store is mounted into it; nothing from the operator's own
+    /// copy of that harness on this host ever leaks in.
     pub fn harness_state_dir() -> PathBuf {
         Self::state_dir().join("harness-state")
     }
@@ -1636,7 +1636,10 @@ shape = "openai"
         assert_eq!(codex.credential, "openai-codex");
         assert_eq!(codex.upstream, "https://chatgpt.com/backend-api");
         assert_eq!(codex.shape, SHAPE_OPENAI_CODEX);
-        assert_eq!(codex.login.as_deref(), Some("openai-codex"));
+        // OpenCode's own id for the Codex OAuth flow: the login runs
+        // `opencode auth login openai`.
+        assert_eq!(codex.login.as_deref(), Some("openai"));
+        assert_eq!(codex.device_login, None);
         let _ = std::fs::remove_dir_all(dir);
     }
     #[test]

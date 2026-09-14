@@ -644,7 +644,10 @@ mod tests {
         );
         for id in KNOWN {
             assert!(
-                containers.join(format!("harness-{id}")).join("Containerfile").exists(),
+                containers
+                    .join(format!("harness-{id}"))
+                    .join("Containerfile")
+                    .exists(),
                 "{id} has no Containerfile"
             );
         }

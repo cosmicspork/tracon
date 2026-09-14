@@ -1,12 +1,10 @@
 //! The Claude Code adapter. Drives `claude` headless over stream-json on the
 //! runner's stdio.
 //!
-//! Claude Code does not speak ACP, and `ARCHITECTURE.md:141` already said so:
-//! its `control_request` / `control_response` path is functionally equivalent
-//! to ACP permission requests but is not ACP. That path is what this adapter
-//! is built on. It is the same protocol the published Agent SDKs speak — they
-//! spawn this same binary and talk stream-json to it — so there is no reason
-//! to take a Node dependency to reach it from Rust.
+//! Its `control_request` / `control_response` path is what this adapter is
+//! built on: the same protocol the published Agent SDKs speak — they spawn
+//! this same binary and talk stream-json to it — so there is no reason to
+//! take a Node dependency to reach it from Rust.
 //!
 //! The shapes below were read out of the shipped 2.1.247 binary and confirmed
 //! against a live run, because the CLI's `--help` documents neither the
@@ -92,8 +90,8 @@ impl ClaudeAdapter {
     /// two from drifting apart.
     pub const PINNED_VERSION: &'static str = "2.1.247";
 
-    /// Claude Code does not speak ACP; its contract is the stream-json control
-    /// protocol, which carries no version field of its own. Every shape this
+    /// Claude Code's contract is the stream-json control protocol, which
+    /// carries no version field of its own. Every shape this
     /// adapter drives was read from one revision of it, and 1 is the name
     /// given to that revision here. A `system/init` frame that grows a version
     /// and names something outside this range is refused; an init frame with

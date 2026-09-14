@@ -961,8 +961,9 @@ impl HarnessAdapter for OpenCodeAdapter {
                 path.display()
             ))
         })?;
-        let store: Value = serde_json::from_str(&raw)
-            .map_err(|error| AdapterError::Protocol(format!("the auth store is not JSON: {error}")))?;
+        let store: Value = serde_json::from_str(&raw).map_err(|error| {
+            AdapterError::Protocol(format!("the auth store is not JSON: {error}"))
+        })?;
         // The login writes under OpenCode's own provider id, which is
         // `openai` whatever this node calls the provider in `[providers]`.
         let record = Self::LOGIN_PROVIDERS
@@ -1256,7 +1257,7 @@ fn split_model(model: &str) -> Result<(String, String), AdapterError> {
 /// The context window the harness reports for the session's model, which is
 /// this node's own declaration read back from the harness that loaded it. A
 /// harness that reports none leaves the session showing a token count without
-/// a denominator, which is what the omp adapter does when a model omits it.
+/// a denominator, which is the honest answer when a model omits it.
 async fn context_window(client: &Client, model: &str) -> Option<u64> {
     let (provider, id) = model.split_once('/')?;
     let providers = client

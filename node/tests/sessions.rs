@@ -231,6 +231,8 @@ async fn an_explicit_model_the_channel_cannot_authenticate_is_refused_by_create_
             review_id: None,
             base_sha: None,
             workspace_id: None,
+            parent_session: None,
+            continued_from: None,
         })
         .expect_err("preflight refuses an unauthenticatable model")
         .to_string();
@@ -2227,6 +2229,8 @@ async fn orientation_with(tag: &str, launch_with: Option<Arc<dyn HarnessAdapter>
                 review_id: None,
                 base_sha: None,
                 workspace_id: None,
+                parent_session: None,
+                continued_from: None,
             },
             launch_with.unwrap_or_else(|| adapter.clone()),
         )
@@ -2640,6 +2644,8 @@ async fn a_harness_that_never_starts_fails_the_session_visibly_and_removes_the_h
                 review_id: None,
                 base_sha: None,
                 workspace_id: None,
+                parent_session: None,
+                continued_from: None,
             },
             Arc::new(StallingAdapter),
         )

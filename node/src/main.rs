@@ -1099,7 +1099,10 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
             if closed > 0 {
                 println!("\nClosed {closed} pending approval(s): nothing can answer them now.");
             }
-            let kept = v["workspaces_retained"].as_array().cloned().unwrap_or_default();
+            let kept = v["workspaces_retained"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             if !kept.is_empty() {
                 println!("\nWorkspaces kept ({}):", kept.len());
                 for path in kept.iter().take(20) {

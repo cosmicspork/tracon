@@ -556,12 +556,14 @@ async fn a_long_wait_is_capped_and_returns_the_state_instead_of_timing_out() {
     assert_eq!(s["review_id"], id.as_str());
     assert_eq!(s["state"], "new");
     assert_eq!(s["still_waiting"], true);
-    assert_eq!(s["waited_secs"], 20);
+    assert_eq!(s["waited_secs"], 45);
     assert!(s["message"].as_str().unwrap().contains("review_status"));
-    // Capped, not honoured: nowhere near the 600 seconds asked for, and well
-    // inside the shortest client timeout seen in the wild (omp 18: 30s).
+    // Capped, not honoured: nowhere near the 600 seconds asked for, and
+    // inside the shortest client timeout either supported harness gives a
+    // tool call — 60 s, the MCP TS SDK default OpenCode inherits and the node
+    // then states explicitly (`config-state.md` §5.4).
     assert!(
-        waited < std::time::Duration::from_secs(25),
+        waited < std::time::Duration::from_secs(50),
         "waited {waited:?}"
     );
     // The wait leaves the review alone, so the next call picks up where this

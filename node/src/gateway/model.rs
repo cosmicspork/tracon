@@ -208,8 +208,8 @@ enum Caller {
 /// `*` stands for one opaque segment (a model id, a response id).
 type Route = (&'static str, &'static [&'static str]);
 
-/// The inference surface of an Anthropic-shaped provider: what the Claude and
-/// omp adapters send at `ANTHROPIC_BASE_URL`. Everything else on
+/// The inference surface of an Anthropic-shaped provider: what the Claude
+/// adapter sends at `ANTHROPIC_BASE_URL`. Everything else on
 /// `api.anthropic.com` — the organization, workspace, invite, API-key and
 /// usage-report endpoints a Console key can drive — is refused here, because
 /// a session was granted a model, not the account behind it.
@@ -541,7 +541,7 @@ pub async fn handle(
         requests: 1,
     }));
     // A refused call is the harness's business — it retries inside the turn,
-    // with backoff, and says nothing over ACP until it gives up, so the
+    // with backoff, and says nothing until it gives up, so the
     // session reads as a hang. The gateway is the one place that sees the
     // upstream answer, so it tells the session instead. The body is buffered
     // rather than streamed only on this path: an error body is small, and it

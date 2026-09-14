@@ -685,6 +685,8 @@ impl Live {
                     review_id: None,
                     base_sha: None,
                     workspace_id: None,
+                    parent_session: None,
+                    continued_from: None,
                 },
                 adapter,
             )

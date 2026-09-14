@@ -119,8 +119,8 @@ pub struct Supervisor {
     chunks: ChunkBuffer,
     /// A handle back into this supervisor's own command channel, for turn tasks.
     self_tx: mpsc::Sender<Command>,
-    /// Used to force-remove the harness container on teardown. Closing the ACP
-    /// session does not necessarily end the harness process, and a container
+    /// Used to force-remove the harness container on teardown. Closing the
+    /// harness session does not necessarily end its process, and a container
     /// left running holds the worktree and the credential mounts open.
     runner: Arc<dyn Runner>,
     container: String,

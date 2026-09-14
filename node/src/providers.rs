@@ -512,10 +512,7 @@ impl Providers {
                 return Err(ProviderError::Failed(error.to_string()));
             }
         };
-        let state_dir = state_target(
-            &self.backend.harness_home(),
-            self.logins.get(name).layout(),
-        );
+        let state_dir = state_target(&self.backend.harness_home(), self.logins.get(name).layout());
         let flow = match self
             .logins
             .get(name)

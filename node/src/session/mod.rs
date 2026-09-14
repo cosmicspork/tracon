@@ -132,7 +132,9 @@ fn handoff_note(old: &SessionRow, harness: &str) -> String {
         old.id, old.harness_id, old.harness_version, old.branch,
     );
     if let Some(item) = old.work_item_id.as_deref() {
-        note.push_str(&format!("\n\nIt was working on item {item}, which is still open."));
+        note.push_str(&format!(
+            "\n\nIt was working on item {item}, which is still open."
+        ));
     }
     note
 }
@@ -174,9 +176,11 @@ pub enum SessionError {
     Rejected(String),
     /// Asked to launch, resume, or otherwise run a session whose harness this
     /// build has no adapter for. Carries what to do instead.
-    #[error("session {id} ran the retired `{harness}` harness and cannot be launched again. \
+    #[error(
+        "session {id} ran the retired `{harness}` harness and cannot be launched again. \
              Carry its work forward with `tracon session reopen {id} --harness opencode`; \
-             its workspace and transcript are kept.")]
+             its workspace and transcript are kept."
+    )]
     Legacy { id: String, harness: String },
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),

@@ -390,7 +390,7 @@ mod tests {
             Path::new("/ignored"),
             Path::new("/ignored"),
             PODMAN_HARNESS_HOME,
-            &crate::adapter::omp::OmpAdapter::new("18.0.4"),
+            &crate::adapter::claude::ClaudeAdapter::new("2.1.247"),
             &Wiring::default(),
             "# Orientation",
         )
@@ -491,7 +491,7 @@ mod tests {
                 Path::new("/ignored"),
                 Path::new("/ignored"),
                 PODMAN_HARNESS_HOME,
-                &crate::adapter::omp::OmpAdapter::new("18.0.4"),
+                &crate::adapter::claude::ClaudeAdapter::new("2.1.247"),
                 &Wiring::default(),
                 "# Orientation",
             )

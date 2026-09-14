@@ -436,8 +436,8 @@ impl Store {
     pub fn archive_legacy_sessions(&self, harness_id: &str, ms: i64) -> Result<LegacyArchive> {
         let ids: Vec<String> = {
             let conn = self.conn.lock().unwrap();
-            let mut stmt = conn
-                .prepare("SELECT id FROM session WHERE harness_id=?1 AND legacy_ms IS NULL")?;
+            let mut stmt =
+                conn.prepare("SELECT id FROM session WHERE harness_id=?1 AND legacy_ms IS NULL")?;
             let ids = stmt
                 .query_map([harness_id], |r| r.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
