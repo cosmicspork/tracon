@@ -1,20 +1,34 @@
 # tracon
 
-tracon is a personal workspace for working with coding agents. Start work on a
-repository, keep credentials outside the agent's reach, inspect the evidence, and
-intervene when a decision needs you. One node is a complete installation; remote
-access and a mesh are optional.
+**A self-hosted workspace for coding agents.** Run work on your machines,
+intervene from anywhere, and keep ownership of the results and history.
+
+Coding with an agent should not mean keeping a terminal open and watching every
+turn. Start with a repository and a prompt. Let the node keep the session running
+when you close the client, then return from a browser or phone to see what changed,
+inspect the evidence, and answer the decisions that need you.
+
+tracon is built for one operator, not an organization chart of agents. A laptop
+node is a complete installation; an always-on server, remote access, and a mesh
+are optional. Work items and phases are there for work that benefits from
+structure, not as paperwork before every conversation. The goal is useful work
+completed with fewer interruptions, not the largest number of agents running.
 
 The node supervises existing harnesses (Claude Code and omp), rather than running
-its own model loop. Policy controls what the node will do on an agent's behalf,
-the review queue makes proposed publication inspectable, and the session record
-keeps the work visible when the client disconnects.
+its own model loop. Managed agents work in isolated workspaces; credentials stay
+with the node, which decides what it will do on their behalf. Proposed publication
+comes with a diff and revision-bound evidence, not just an agent's assurance that
+it finished. External harnesses can use the broker too, with a deliberately
+narrower guarantee: they never need its credentials, but do not gain its isolation.
 
-This project is built with coding agents. The demonstration is the design judgment:
-choosing useful workflows, defining authority and isolation boundaries, evaluating
-evidence, and revising decisions—not a claim that every line was hand-written.
-The name comes from terminal radar approach control: it issues clearances, but
-never flies the aircraft.
+Your work should outlive the tool. Workspaces outlive sessions, documents can be
+exported, and candidate packages carry their files and evidence outside the node.
+These are existing escape routes, not a promise of live session migration or a
+complete portable archive; broader export and cross-node continuity are on the
+[roadmap](docs/ROADMAP.md#everyday-work-and-portability).
+
+This project is built with coding agents. The name comes from terminal radar
+approach control: it issues clearances, but never flies the aircraft.
 
 ![The home: a place to start work, then what is waiting on you, running, and landed](docs/media/home-desktop.png)
 

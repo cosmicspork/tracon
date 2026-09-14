@@ -7,6 +7,9 @@
 - Keep untrusted execution isolated and credentials outside agent-owned state.
 - Prefer useful environments, clear evidence, and human intervention over more machinery.
 - Record scoped decisions and supersede them explicitly; keep harnesses replaceable.
+- Own the data: portable, independently readable exports; no node required to inspect them.
+- Optimize useful work per interruption, not agent count; support independent installations,
+  not multi-user tenancy.
 
 Completed items are removed from this file when they land; the changelog and the
 reference documents under `docs/reference/` carry the history.
@@ -338,6 +341,163 @@ declared `permission.ask` hook; an LSP status event.
       `glab` credential and a configured QA target. The Kubernetes backend has no scoped QA
       egress gateway yet, so this is Podman-only until it does.)
 
+### Everyday work and portability
+
+Build on the existing ledger, workspace snapshots, evidence, scoped grants, and
+OpenCode gates above; do not introduce another agent loop or replace the store.
+Order: prove ordinary work first; then continuity, environments, authority and
+recovery; then reusable workflows and grouping. More autonomy is demand-driven.
+This section records intended work, not additional guarantees of the current release.
+
+#### Daily-use confidence and navigation
+
+- [ ] **Prove the normal workflow.** Use the real-repository and QA runs above as the
+      foundation, then exercise client disconnect/reconnect, interrupted execution,
+      retained drafts, and recovery through completion. Record what actually ran,
+      what remained uncertain, and where the operator intervened; fixture screenshots
+      and fake-provider tests are not evidence of a live workflow.
+- [ ] **Use the existing outcome metrics.** Judge changes by setup failures, time to
+      verified work, interventions and tokens per accepted change. Keep unmetered
+      usage and missing verification visible; add no agent reputation score.
+- [ ] **Finish discoverability across surfaces.** Sessions/Usage navigation and consistent
+      Settings naming have landed; keep them reachable in empty and archived-only
+      states on browser, desktop and phone. Make export, import, handoff and recovery
+      discoverable from the work they act on, rather than requiring knowledge of an
+      endpoint or a second screen. Login and desktop setup remain lifecycle entry points,
+      not extra navigation destinations. Browser access to the native OpenCode view
+      remains part of Gate D, not a separate interface to maintain.
+
+#### Work continuity and outcomes
+
+- [ ] **Continue the work, not just the transcript.** A work-level continuation view
+      carries intent, decisions, attempts, blockers, next action, the current workspace,
+      execution lineage and evidence links. Offer continue, change approach, and abandon
+      while retaining artifacts. Plain sessions can acquire this continuity without
+      being forced into a work item or plan/review lifecycle.
+- [ ] **Produce a concise outcome record.** Show what changed, what was verified, what
+      needs a decision, unresolved or uncertain actions, and cost/usage. Derive revision,
+      workspace, check and publication status from recorded state; any narrative summary
+      is supplementary and cannot turn a claim into verification.
+
+#### Project environments and effective authority
+
+- [ ] **Save validated project setup profiles.** Extend the existing launch manifest and
+      toolchain profiles rather than creating another customization system. Record the
+      image, language tools, skills, dependency preparation/cache policy, required checks,
+      and explicitly configured test services or previews for the projects actually used.
+      Snapshot the configuration per execution; show its last successful validation and
+      invalidate that assurance when its inputs change.
+- [ ] **Preview preparation and explain incompatibility.** Show detected ecosystems,
+      supported preparation steps, missing tools and actionable remedies before launch.
+      Preserve credential-free preparation and isolation; unsupported scripts, services
+      or devcontainer features must not become silent host-execution exceptions.
+- [ ] **Explain authority in task terms.** Before and during work, summarize the selected
+      node, harness/image, effective access, applicable grants, spending limits and actions
+      that still require approval. Derive this from current policy and grants, not a
+      parallel permissions model. Explain node eligibility and placement; any suggested
+      runner stays manually overridable within the eligible set.
+
+#### Portable data and recovery
+
+- [ ] **Publish a versioned data contract.** Extend the current signed candidate JSON,
+      offline package reader and document export into round-trip session/corpus export.
+      A standard archive containing a JSON manifest, JSON/JSONL records, Markdown and
+      ordinary artifact files is the preferred shape; settle the container and schema
+      before implementation. No opaque database dump or Tracon installation required
+      for independent processing.
+- [ ] **Specify complete portable content.** Preserve selected sessions, messages/events,
+      work items and relationships, decisions, drafts, documents, memories, workspace
+      state, evidence, attachments and provenance. Define identifiers, timestamps,
+      encodings, paths and omission rules. Optional harness-native state must name its
+      harness/build/schema compatibility; it is not the portable record's only copy.
+- [ ] **Make import predictable and independently implementable.** Publish schemas,
+      representative exports, integrity/signature verification rules, version migration
+      policy and examples for ordinary processing tools. Define duplicate/conflict
+      handling and reference remapping; prove export/import on a fresh node and independent
+      reading without the node. Retain old-format import compatibility through explicit
+      migrations rather than losing existing archives.
+- [ ] **Separate export, backup and handoff.** Portable data export omits credentials and
+      private identity keys; warn that transcripts and workspace files can still contain
+      secrets and make exclusions explicit. Full installation backup protects any
+      deliberately included secrets separately. Neither importing data nor verifying a
+      signature grants execution authority. Derived indexes remain rebuildable.
+- [ ] **Unify recovery and maintenance entry points.** Build on Settings' maintenance
+      controls, session-state backups and the existing recovery route. Show retained
+      workspaces, checkpoint/export/backup age and destination, runtime/harness/node
+      versions, what survives stop/restart, and actions to inspect, export, restore or
+      diagnose. Keep client reconnect, execution recovery, workspace rescue and disaster
+      recovery distinct. Exercise restore and upgrade failure recovery; promise rollback
+      only where state compatibility permits it.
+
+#### Cross-node session handoff
+
+- [ ] **Move an unfinished session to another node.** Add a session-level action:
+      select destination, check compatibility, checkpoint and transfer, then continue
+      with a continuous work history and explicit execution lineage. Do not require a
+      submitted candidate, mesh membership for file-based transfer, or an opt-in work
+      item. This extends candidate sharing; it does not rename it.
+- [ ] **Carry the actual continuation state.** Include unfinished workspace changes,
+      conversation and decisions, selected context, unsent draft, next action,
+      harness/model/manifest identity, evidence, usage and remaining limits. Reuse the
+      portable contract and existing transport; support bounded transfer of realistic
+      workspaces rather than assuming they fit a single mesh frame.
+- [ ] **Transfer execution ownership safely.** Quiesce in-flight work and fence the
+      source before the destination executes. Persist transfer state and acknowledgements;
+      retries must not create duplicate sessions or repeat external side effects. Surface
+      uncertain actions for reconciliation. A timeout or partition never silently enables
+      both owners; failure and cancellation have explicit safe recovery paths.
+- [ ] **Re-evaluate authority and state compatibility.** Destination policy, credentials,
+      capabilities and budgets decide whether continuation can run; transport imports no
+      authority or private keys. Compatible native-state resume and fresh-session
+      continuation from portable context are distinct, visible outcomes. Explain any
+      lost fidelity before confirmation; never claim live process migration or identical
+      cross-harness state. Pending questions and permissions must be reconciled, not
+      blindly replayed or treated as newly granted.
+- [ ] **Prove handoff in both directions.** Exercise laptop-to-server and server-to-laptop,
+      interruption during transfer, unavailable destination, duplicate import, dirty
+      workspace, incompatible harness state and pending external action. Verify one active
+      owner, retained work/draft/history, and no budget reset or authority widening.
+
+#### Reusable work and bounded automation
+
+- [ ] **Saved workflow recipes.** Start with a few recurring procedures such as regression
+      investigation, small changes and release preparation. Reuse phase presets and the
+      ledger; snapshot each recipe on invocation, persist expensive checkpoints and
+      external waits, and let the operator revise or stop a run. No mandatory workflow
+      language or ceremony for a plain prompt.
+- [ ] **Lightweight batches.** Group related work with dependencies, explicit assignment/
+      ownership and reclaim rules, aggregate spending, blockers and one completion report.
+      Build on current readiness and session holders; retain discovery lineage and prevent
+      competing automated claims before scaling dispatch.
+- [ ] **Integration when parallel same-repository work needs it.** Prefer a suitable forge
+      merge queue over a custom merge agent. Serialize integration, pin the combined
+      revision, and reverify rebased/combined changes; independently approved patches do
+      not automatically approve their combination. Escalate conflicts instead of silently
+      discarding work. This is demand-gated, not a prerequisite for single-session use.
+- [ ] **Bounded scheduled/event-driven chores, after daily-use reliability.** Begin with
+      low-stakes work that returns a report and stops. Set concurrency, spend, time and
+      retry limits; preserve pause/stop, deduplicate triggers, and ask before consequential
+      actions absent a valid scoped grant. Use ordinary supervisor logic for scheduling,
+      reconciliation and health checks, not permanent agent roles.
+- [ ] **Optional conversational coordination, only if useful.** An ordinary managed
+      session may inspect permitted cross-project work and propose actions through existing
+      tools. No privileged manager loop in the node. Fresh reviewers remain useful for
+      judgment, not replacements for deterministic checks, evidence or authority boundaries.
+
+#### Independent installations
+
+- [ ] **Make the personal workflow reproducible by another operator.** Provide one proven
+      installation-to-first-task path, explicit OS/runtime/harness/login compatibility,
+      understandable project preparation and actionable diagnostics. Build on existing
+      setup and maintenance surfaces; keep remote access and mesh optional.
+- [ ] **Bound maintenance expectations.** State supported versus experimental integrations,
+      pinned-release/update policy, interruption and backup requirements, and the recovery
+      path for a failed upgrade. Extend the existing compatibility gates instead of
+      promising arbitrary drop-in harnesses or maintaining a native UI fork.
+- [ ] **Offer a clearly labeled demonstration mode.** Reuse the fixture machinery to
+      explore the workflow without credentials or containers, with demonstration data
+      unmistakable and no implication that its output proves a live run.
+
 ## Current limitations
 
 - No real private-repository end-to-end run yet; see above.
@@ -377,6 +537,7 @@ declared `permission.ask` hook; an LSP status event.
 ## Out of scope
 
 - Multi-user tenancy or a team product.
+- Federated work marketplaces, reputation scores or agent organization charts as product goals.
 - A model/agent loop inside the node.
 - A general-purpose multi-harness framework: two concrete adapters behind one trait,
   not a plugin system for harnesses.
