@@ -228,6 +228,12 @@ async fn archiving_the_retired_harness_keeps_the_sessions_and_ends_them() {
         Some("/state/workspaces/legacy-1")
     );
 
+    // A session that had already ended keeps what it ended for, which here is
+    // nothing: saying the retirement ended it would be a plausible-looking lie
+    // in the one place the operator goes to find out what happened.
+    assert_eq!(one.state, "closed");
+    assert_eq!(one.end_reason, None);
+
     // A session that had not ended is ended, with the reason on the row.
     let two = h.store.get_session("legacy-2").unwrap().unwrap();
     assert_eq!(two.state, "closed");

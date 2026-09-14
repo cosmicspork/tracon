@@ -456,7 +456,14 @@ impl Store {
                      archived_ms=COALESCE(archived_ms, ?2),
                      state=CASE WHEN state IN ('closed','killed_budget','failed')
                                 THEN state ELSE 'closed' END,
-                     end_reason=COALESCE(end_reason, ?3),
+                     -- Only a session this run actually ended gets the
+                     -- reason. One that had already ended keeps whatever it
+                     -- ended for, including nothing: claiming the retirement
+                     -- ended a session that closed on its own months earlier
+                     -- would be a plausible-looking lie in the one place the
+                     -- operator goes to find out what happened.
+                     end_reason=CASE WHEN state IN ('closed','killed_budget','failed')
+                                     THEN end_reason ELSE ?3 END,
                      updated_ms=?2
                  WHERE harness_id=?1 AND legacy_ms IS NULL",
                 rusqlite::params![harness_id, ms, LEGACY_END_REASON],
