@@ -12,10 +12,12 @@
   import Sessions from './routes/Sessions.svelte'
   import Settings from './routes/Settings.svelte'
   import Session from './routes/Session.svelte'
+  import OpencodeShell from './routes/OpencodeShell.svelte'
   import Enroll from './routes/Enroll.svelte'
   import Login from './routes/Login.svelte'
   import Qa from './routes/Qa.svelte'
   import { stashToken, tokenFromHash } from './lib/auth'
+  import { shellSessionId } from './lib/opencode'
   import { clock } from './lib/clock.svelte'
   import { formatAge } from './lib/format'
   import { remedy } from './lib/refusal'
@@ -57,6 +59,10 @@
     store.queue.waiting.length + store.queue.reviews.length + (store.queue.promotions?.length ?? 0),
   )
   const sessionId = $derived(router.path.match(/^\/sessions\/([^/]+)/)?.[1] ?? null)
+  /** OpenCode's own view, hosted here rather than handed to the system
+      browser. Full-bleed like the document preview: the native view is the
+      screen, and this app contributes one slim bar. */
+  const opencodeId = $derived(shellSessionId(router.path))
   const reviewId = $derived(router.path.match(/^\/reviews\/([^/]+)/)?.[1] ?? null)
   const promotionId = $derived(router.path.match(/^\/promotions\/([^/]+)/)?.[1] ?? null)
   const enroll = $derived(router.path === '/nodes/enroll')
@@ -92,6 +98,8 @@
   <Login />
 {:else if docPreviewRef}
   <DocPreview channel={docPreviewRef[1]} slug={docPreviewRef[2]} />
+{:else if opencodeId}
+  <OpencodeShell id={opencodeId} />
 {:else}
 <div class="shell" class:narrow={collapsed}>
   <nav class="rail">
