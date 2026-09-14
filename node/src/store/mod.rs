@@ -1293,6 +1293,11 @@ impl Store {
     }
 
     /// Insert or fully replace a peer's session, except the local draft.
+    ///
+    /// `legacy_ms` rides along with the rest: a peer's legacy session has to
+    /// read as read-only here too, or this node's interface offers to prompt
+    /// a session whose harness nobody has any more. The lineage columns ride
+    /// with it so a mirrored continuation still names what it continues.
     pub fn upsert_session_mirror(&self, s: &SessionRow) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1301,9 +1306,10 @@ impl Store {
                 budget_tokens, tokens_used, cost_usd, context_used, context_size, state, end_reason,
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
                 ended_mono_ms, updated_ms, project_id, phase, policy_version, review_id,
-                harness_agent, harness_found, harness_protocol)
+                harness_agent, harness_found, harness_protocol, legacy_ms, parent_session,
+                continued_from)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,NULL,
-                NULL,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32)
+                NULL,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35)
              ON CONFLICT(id) DO UPDATE SET node_id=?2, channel=?3, work_item_id=?4, repo_path=?5,
                 worktree_path=?6, branch=?7, harness_id=?8, harness_version=?9,
                 harness_session_id=?10, container_name=?11, model=?12, budget_tokens=?13,
@@ -1311,7 +1317,8 @@ impl Store {
                 end_reason=?19, last_error=?20, turn_active=?21, created_ms=?22,
                 started_mono_ms=?23, ended_mono_ms=?24, updated_ms=?25, project_id=?26,
                 phase=?27, policy_version=?28, review_id=?29, harness_agent=?30,
-                harness_found=?31, harness_protocol=?32",
+                harness_found=?31, harness_protocol=?32, legacy_ms=?33, parent_session=?34,
+                continued_from=?35",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -1344,7 +1351,10 @@ impl Store {
                 s.review_id,
                 s.harness_agent,
                 s.harness_found,
-                s.harness_protocol
+                s.harness_protocol,
+                s.legacy_ms,
+                s.parent_session,
+                s.continued_from
             ],
         )?;
         Ok(())
