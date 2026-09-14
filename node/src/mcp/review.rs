@@ -791,6 +791,8 @@ async fn spawn_review_session(
         branch: Some(format!("review/{short}")),
         work_item_id: implementing.work_item_id.clone(),
         workspace_id: Some(workspace_id),
+        parent_session: None,
+        continued_from: None,
         model,
         budget_tokens: bindings["phases"]["review"]["budget_tokens"].as_i64(),
         initial_prompt: None,

@@ -1041,6 +1041,26 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE node ADD COLUMN policy_sha256 TEXT;
     ALTER TABLE node ADD COLUMN policy_receipt_v1 INTEGER;
     "#,
+    // 41: the OpenCode cutover retired the omp harness. A session it ran can
+    // never be relaunched, and that is a durable fact about the row rather
+    // than something to re-derive from a harness id no adapter resolves any
+    // more — the row keeps `harness_id` and `harness_version` precisely so
+    // the transcript stays interpretable. `legacy_ms` is when it was put
+    // away; `archived_ms` stays presentation, so an operator can un-archive a
+    // legacy session to read it without making it launchable.
+    //
+    // Lineage is the other half: a session that carries a legacy one's work
+    // forward is a new session with a new id, and these say where it came
+    // from. For a reopen they name the same row; they are separate because a
+    // fork has a parent and continues nothing, and a session resumed from an
+    // export continues something with no parent here.
+    r#"
+    ALTER TABLE session ADD COLUMN legacy_ms INTEGER;
+    ALTER TABLE session ADD COLUMN parent_session TEXT;
+    ALTER TABLE session ADD COLUMN continued_from TEXT;
+    CREATE INDEX session_legacy ON session(legacy_ms);
+    CREATE INDEX session_parent ON session(parent_session);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

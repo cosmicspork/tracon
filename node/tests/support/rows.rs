@@ -69,6 +69,9 @@ pub fn session_row(id: &str, node: &str, channel: &str) -> SessionRow {
         ended_mono_ms: None,
         updated_ms: now_ms(),
         archived_ms: None,
+        legacy_ms: None,
+        parent_session: None,
+        continued_from: None,
         manifest_digest: None,
     }
 }

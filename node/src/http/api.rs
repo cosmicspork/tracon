@@ -83,6 +83,7 @@ impl From<SessionError> for ApiError {
             // session that will not take the command are all state conflicts.
             SessionError::NodeRefused(_)
             | SessionError::VersionMismatch { .. }
+            | SessionError::Legacy { .. }
             | SessionError::Rejected(_) => StatusCode::CONFLICT,
             SessionError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -809,6 +810,8 @@ pub async fn import_transfer(
         review_id: None,
         base_sha: None,
         workspace_id: None,
+        parent_session: None,
+        continued_from: None,
     };
     if let Err(error) = s.manager.preflight(&preflight_spec) {
         let detail = error.to_string();
@@ -874,6 +877,8 @@ pub async fn import_transfer(
         review_id: None,
         base_sha: None,
         workspace_id: Some(workspace.id.clone()),
+        parent_session: None,
+        continued_from: None,
     };
     let session = match s.manager.create_local(spec).await {
         Ok(session) => session,
@@ -1293,6 +1298,8 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         channel: c.channel,
         repo_path: c.repo_path,
         workspace_id: c.workspace_id,
+        parent_session: None,
+        continued_from: None,
         branch: c.branch,
         work_item_id: Some(item.id.clone()),
         model: c.model,
@@ -1585,6 +1592,81 @@ pub async fn archive_ended(State(s): State<AppState>) -> ApiResult<Json<serde_js
             .publish_untapped(crate::stream::Frame::Session(Box::new(row.clone())));
     }
     Ok(Json(json!({ "archived": rows.len() })))
+}
+
+#[derive(Deserialize, Default)]
+pub struct ArchiveLegacyBody {
+    /// The retired harness to put away. Defaults to the one this build
+    /// removed; named explicitly so a node that ran some other harness a
+    /// build or two ago can be migrated with the same gesture.
+    #[serde(default)]
+    pub harness: Option<String>,
+}
+
+/// Put every session that ran a retired harness away read-only.
+///
+/// The migration step for the OpenCode cutover: the sessions keep their
+/// harness identity and version, their transcripts, their evidence and their
+/// workspaces, and lose only the ability to run — which they had already
+/// lost, because nothing resolves their harness any more. What this adds is
+/// that the node says so, once, in a form the interface and `tracon session`
+/// can both render.
+pub async fn archive_legacy(
+    State(s): State<AppState>,
+    body: Option<Json<ArchiveLegacyBody>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let harness = body
+        .and_then(|Json(b)| b.harness)
+        .unwrap_or_else(|| crate::adapter::RETIRED.to_string());
+    if crate::adapter::KNOWN.contains(&harness.as_str()) {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("`{harness}` is a harness this node still runs; it has no legacy sessions"),
+        ));
+    }
+    let archived = s
+        .store()
+        .archive_legacy_sessions(&harness, crate::store::now_ms())?;
+    for row in &archived.sessions {
+        s.manager
+            .bus()
+            .publish_untapped(crate::stream::Frame::Session(Box::new(row.clone())));
+    }
+    Ok(Json(json!({
+        "harness": harness,
+        "archived": archived.sessions.len(),
+        "sessions": archived.sessions.iter().map(|row| json!({
+            "id": row.id,
+            "channel": row.channel,
+            "branch": row.branch,
+            "harness": format!("{} {}", row.harness_id, row.harness_version),
+            "state": row.state,
+        })).collect::<Vec<_>>(),
+        "approvals_closed": archived.approvals_closed,
+        "workspaces_retained": archived.workspaces,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct ReopenBody {
+    /// The harness the new session runs. Must be the one this node is
+    /// configured for: one node runs one harness image.
+    pub harness: String,
+}
+
+/// Carry an archived session's work forward under a supported harness. The
+/// old session is untouched and still read-only; this is a new session, with
+/// a new id, that says where it came from.
+pub async fn reopen_session(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ReopenBody>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let row = s
+        .manager
+        .reopen(&id, &body.harness, s.adapter.clone())
+        .await?;
+    Ok((StatusCode::CREATED, Json(json!(row))))
 }
 
 #[derive(Deserialize)]

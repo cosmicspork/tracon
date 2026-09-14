@@ -71,6 +71,14 @@ pub struct NewSession {
     /// selected checkout. The value is a workspace id, never a host path.
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// Lineage, when this session is made from another one. Written onto the
+    /// row at creation and never afterwards. Both are validated against this
+    /// node's own sessions: a spec naming a session that is not here is
+    /// refused rather than recording a dangling ancestor.
+    #[serde(default)]
+    pub parent_session: Option<String>,
+    #[serde(default)]
+    pub continued_from: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -90,6 +98,43 @@ impl Phase {
             Self::Review => "review",
         }
     }
+}
+
+/// The phase a reopened session starts in. A plan session reopens as one;
+/// anything else reopens as ordinary work on the same workspace. A review
+/// session is deliberately not reopened as a review: reviews are spawned by
+/// the node against a specific review id, and a second one for a decision
+/// that was already made is not what the operator asked for.
+fn reopen_phase(stored: &str) -> Phase {
+    match stored {
+        "plan" => Phase::Plan,
+        _ => Phase::Execute,
+    }
+}
+
+/// What the new session is told, as its first prompt.
+///
+/// The new harness inherits nothing: not the old one's context window, not
+/// its plan, not what it had already tried. Saying so explicitly is the whole
+/// point — an agent handed a workspace with no account of how it got that way
+/// re-derives it, badly, and calls the result progress.
+fn handoff_note(old: &SessionRow, harness: &str) -> String {
+    let mut note = format!(
+        "This session continues session {} (`{}` {}), which ran a harness this node no \
+         longer has and which is now archived read-only. You are {harness}, and you \
+         inherit none of its context: not its conversation, not its plan, not what it \
+         had already tried.\n\n\
+         What you do have is its workspace, exactly as it left it, on branch `{}`.\n\n\
+         Start by reading the workspace — the diff against the branch point, and any \
+         notes left in it — and say what you find before changing anything. If the \
+         earlier session's transcript matters, it is readable in the interface under \
+         that id; ask for what you need from it rather than guessing.",
+        old.id, old.harness_id, old.harness_version, old.branch,
+    );
+    if let Some(item) = old.work_item_id.as_deref() {
+        note.push_str(&format!("\n\nIt was working on item {item}, which is still open."));
+    }
+    note
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -127,6 +172,12 @@ pub enum SessionError {
     NoMesh,
     #[error("{0}")]
     Rejected(String),
+    /// Asked to launch, resume, or otherwise run a session whose harness this
+    /// build has no adapter for. Carries what to do instead.
+    #[error("session {id} ran the retired `{harness}` harness and cannot be launched again. \
+             Carry its work forward with `tracon session reopen {id} --harness opencode`; \
+             its workspace and transcript are kept.")]
+    Legacy { id: String, harness: String },
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
 }
@@ -229,6 +280,63 @@ impl Manager {
 
     /// Create a session on this node with the node's own adapter, for
     /// sessions the node spawns itself (review sessions).
+    /// Carry a session's work forward under a harness this build can run.
+    ///
+    /// The legacy session is never relaunched and never reused: its id names
+    /// a transcript produced by a harness that is gone, and a second session
+    /// writing under that id would make the transcript unreadable. This makes
+    /// a new session instead — same channel, same workspace, same work item —
+    /// records where it came from on both rows' terms (`parent_session`,
+    /// `continued_from`), and gives it an explicit handoff note as its first
+    /// prompt, because the new harness inherits none of the old one's context
+    /// and pretending otherwise is how an agent redoes finished work.
+    pub async fn reopen(
+        &self,
+        id: &str,
+        harness: &str,
+        adapter: Arc<dyn HarnessAdapter>,
+    ) -> Result<SessionRow, SessionError> {
+        let old = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        if !crate::adapter::KNOWN.contains(&harness) {
+            return Err(SessionError::Rejected(format!(
+                "no harness `{harness}`; this node knows {}",
+                crate::adapter::KNOWN.join(", ")
+            )));
+        }
+        // One node runs one harness image. Offering to reopen under the other
+        // one and then failing at the version check would be a worse answer
+        // than saying so here.
+        if harness != adapter.id() {
+            return Err(SessionError::Rejected(format!(
+                "this node runs the `{}` harness; reopen under it, or set \
+                 [harness] id = \"{harness}\" in node.toml and run `tracon setup` first",
+                adapter.id()
+            )));
+        }
+        let workspace_id = old
+            .repo_path
+            .strip_prefix("workspace://")
+            .map(str::to_string);
+        let note = handoff_note(&old, harness);
+        let spec = NewSession {
+            channel: old.channel.clone(),
+            repo_path: old.repo_path.clone(),
+            branch: Some(old.branch.clone()),
+            work_item_id: old.work_item_id.clone(),
+            model: String::new(),
+            budget_tokens: Some(old.budget_tokens),
+            initial_prompt: Some(note),
+            node_id: Some(old.node_id.clone()),
+            phase: reopen_phase(&old.phase),
+            review_id: None,
+            base_sha: None,
+            workspace_id,
+            parent_session: Some(old.id.clone()),
+            continued_from: Some(old.id.clone()),
+        };
+        self.create(spec, adapter).await
+    }
+
     pub async fn create_local(&self, spec: NewSession) -> Result<SessionRow, SessionError> {
         let adapter = self
             .adapter
@@ -335,6 +443,9 @@ impl Manager {
                     ended_mono_ms: None,
                     updated_ms: now,
                     archived_ms: None,
+                    legacy_ms: None,
+                    parent_session: None,
+                    continued_from: None,
                     manifest_digest: None,
                 })
                 .expect("test session row");
@@ -383,12 +494,33 @@ impl Manager {
             .store
             .get_session(session_id)?
             .ok_or(SessionError::NotFound)?;
+        // Before the state, because "no longer active" is true of a legacy
+        // session and useless to the operator: what they need is that its
+        // harness is gone and how to carry the work forward.
+        Self::refuse_legacy(&row)?;
         let state = SessionState::from_stored(&row.state);
         if state == SessionState::Paused {
             return Err(SessionError::Rejected("session is paused".into()));
         }
         if state.is_terminal() {
             return Err(SessionError::Rejected("session is no longer active".into()));
+        }
+        Ok(())
+    }
+
+    /// Refuse anything that would put a legacy session back to work.
+    ///
+    /// A session archived by `archive-legacy` is read-only for good: no
+    /// adapter resolves its harness, so there is nothing to launch, and a
+    /// second process writing under its id would make its transcript
+    /// unreadable. The refusal names the reopen path rather than leaving the
+    /// operator with a session that merely will not start.
+    pub fn refuse_legacy(row: &SessionRow) -> Result<(), SessionError> {
+        if row.legacy_ms.is_some() {
+            return Err(SessionError::Legacy {
+                id: row.id.clone(),
+                harness: row.harness_id.clone(),
+            });
         }
         Ok(())
     }
@@ -603,6 +735,21 @@ impl Manager {
             return Ok(row);
         }
         self.validate_review_context(&spec)?;
+        // A dangling ancestor is worse than none: it reads as history that
+        // can be followed and cannot.
+        for ancestor in [
+            spec.parent_session.as_deref(),
+            spec.continued_from.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if self.store.get_session(ancestor)?.is_none() {
+                return Err(SessionError::Rejected(format!(
+                    "no session {ancestor} on this node to continue from"
+                )));
+            }
+        }
         let bindings = self.bindings(&spec.channel);
         // An archived channel keeps everything it has and takes nothing new.
         if !bindings["archived"].is_null() {
@@ -780,6 +927,9 @@ impl Manager {
             ended_mono_ms: None,
             updated_ms: now_ms(),
             archived_ms: None,
+            legacy_ms: None,
+            parent_session: spec.parent_session.clone(),
+            continued_from: spec.continued_from.clone(),
             manifest_digest: None,
         };
         self.store.insert_session(&row)?;
@@ -1432,6 +1582,9 @@ impl Manager {
             ended_mono_ms: None,
             updated_ms: now_ms(),
             archived_ms: None,
+            legacy_ms: None,
+            parent_session: None,
+            continued_from: None,
             manifest_digest: None,
         };
         self.store.insert_session(&row)?;
@@ -1885,6 +2038,9 @@ impl Manager {
     /// external attachment's paused fence, which a restart cannot restore a
     /// process for but can still honestly release.
     pub async fn resume(&self, id: &str, reason: String) -> Result<(), SessionError> {
+        if let Some(row) = self.store.get_session(id)? {
+            Self::refuse_legacy(&row)?;
+        }
         let (ack, wait) = oneshot::channel();
         match self
             .send(

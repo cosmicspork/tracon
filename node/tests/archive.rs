@@ -61,6 +61,9 @@ fn session_row(id: &str, state: &str, created_ms: i64) -> SessionRow {
         ended_mono_ms: None,
         updated_ms: created_ms,
         archived_ms: None,
+        legacy_ms: None,
+        parent_session: None,
+        continued_from: None,
         manifest_digest: None,
     }
 }

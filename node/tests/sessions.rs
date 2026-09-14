@@ -678,6 +678,9 @@ fn insert_running_session(store: &Arc<Store>, budget: i64) -> String {
             ended_mono_ms: None,
             updated_ms: now_ms(),
             archived_ms: None,
+            legacy_ms: None,
+            parent_session: None,
+            continued_from: None,
             manifest_digest: None,
         })
         .unwrap();
@@ -1383,6 +1386,9 @@ async fn reconcile_after_restart_closes_a_managed_pause_but_keeps_an_external_on
             ended_mono_ms: None,
             updated_ms: now_ms(),
             archived_ms: None,
+            legacy_ms: None,
+            parent_session: None,
+            continued_from: None,
             manifest_digest: None,
         })
         .unwrap();
