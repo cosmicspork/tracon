@@ -28,11 +28,15 @@ pub const DEFINITIONS_LABEL: &str = "io.tracon.definitions";
 
 /// The directory the harness image is built from. Each harness has its own
 /// definitions; another harness's under this one's tag would run the wrong CLI.
+///
+/// Only the two supported harnesses have definitions. An id outside them
+/// never reaches here — `adapter_for` refuses it at startup, the retired
+/// `omp` by name — so OpenCode's is the safe answer rather than a panic in
+/// the setup path.
 pub fn harness_dir(cfg: &Config) -> &'static str {
     match cfg.harness.id.as_str() {
         "claude" => "harness-claude",
-        "opencode" => "harness-opencode",
-        _ => "harness",
+        _ => "harness-opencode",
     }
 }
 
@@ -42,14 +46,18 @@ pub fn images(cfg: &Config) -> Vec<(&str, &'static str)> {
         (cfg.boundary.gateway_image.as_str(), "gateway"),
         (cfg.boundary.harness_image.as_str(), harness_dir(cfg)),
     ];
-    // The Anthropic subscription login runs `claude setup-token`, which only
-    // the Claude Code image carries. A node whose sessions run another harness
+    // Each subscription login runs in the one image that carries its CLI:
+    // `claude setup-token` in the Claude Code image, `opencode auth login
+    // openai` in the OpenCode one. A node whose sessions run the other harness
     // still has to be able to sign in, so the image is built alongside rather
     // than only when it is also the session harness.
-    if crate::boundary::login_image(&cfg.boundary.login_image, &cfg.boundary.harness_image)
-        .is_some()
-    {
-        images.push((cfg.boundary.login_image.as_str(), "harness-claude"));
+    for (configured, dir) in [
+        (&cfg.boundary.login_image, "harness-claude"),
+        (&cfg.boundary.codex_login_image, "harness-opencode"),
+    ] {
+        if crate::boundary::login_image(configured, &cfg.boundary.harness_image).is_some() {
+            images.push((configured.as_str(), dir));
+        }
     }
     images
 }

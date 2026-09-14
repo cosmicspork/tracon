@@ -1,11 +1,13 @@
 //! The harness-agnostic seam. The trait has been here from the first commit
 //! because adapters are the part that rots; what a harness is called, where it
 //! keeps its state, and what it must find in that state directory all live
-//! behind it rather than being spelled `omp` throughout the node.
+//! behind it rather than being spelled with one harness's name throughout the
+//! node. That seam is what let the omp harness be removed at the OpenCode
+//! cutover without the rest of the node noticing.
 
 pub mod claude;
-pub mod omp;
 pub mod opencode;
+pub mod types;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -34,26 +36,36 @@ pub struct Layout {
 }
 
 /// The harness ids this node has an adapter for.
-pub const KNOWN: &[&str] = &["omp", "claude", "opencode"];
+pub const KNOWN: &[&str] = &["opencode", "claude"];
+
+/// The harness this node ran until the 2026-09-13 cutover. It is named here
+/// and nowhere else, so an operator whose `node.toml` still says `omp` reads
+/// the migration path rather than a bare "no adapter for harness `omp`".
+pub const RETIRED: &str = "omp";
+
+/// What that operator is told. The sessions omp ran are not lost — they are
+/// archived read-only, keeping their harness identity and version — and the
+/// way to carry one forward is a new session under a supported harness, not a
+/// relaunch of a harness that is gone.
+pub const RETIRED_MESSAGE: &str = concat!(
+    "the `omp` harness was removed at the OpenCode cutover. ",
+    "Set [harness] id = \"opencode\" (or \"claude\") in node.toml, then run ",
+    "`tracon setup` to build the image and `tracon session archive-legacy` to ",
+    "put the omp sessions away read-only. Carry one forward with ",
+    "`tracon session reopen <id> --harness opencode`."
+);
 
 /// The layout for a harness id, for the few callers that have the config but
-/// not the adapter (the boundary preflight). An unknown id gets omp's, which
-/// only that preflight can reach: `adapter_for` refuses the id first, so no
-/// session ever runs against a layout that is not its harness's.
+/// not the adapter (the boundary preflight). An id that is not Claude's gets
+/// OpenCode's, which only that preflight can reach: `adapter_for` refuses an
+/// unknown id first, so no session ever runs against a layout that is not its
+/// harness's.
 pub fn layout(harness_id: &str) -> Layout {
     if harness_id == claude::ClaudeAdapter::ID {
         return claude::ClaudeAdapter::layout();
     }
-    if harness_id == opencode::OpenCodeAdapter::ID {
-        return opencode::OpenCodeAdapter::layout();
-    }
-    OMP_LAYOUT
+    opencode::OpenCodeAdapter::layout()
 }
-
-const OMP_LAYOUT: Layout = Layout {
-    dir: ".omp",
-    env: "OMP_STATE_DIR",
-};
 
 /// The adapter for the configured harness. An unknown id fails here, at
 /// startup, rather than silently running whichever harness happens to be the
@@ -61,11 +73,11 @@ const OMP_LAYOUT: Layout = Layout {
 /// node that will not start.
 pub fn adapter_for(cfg: &Config) -> Result<Arc<dyn HarnessAdapter>, AdapterError> {
     match cfg.harness.id.as_str() {
-        omp::OmpAdapter::ID => Ok(Arc::new(omp::OmpAdapter::new(pinned_version(cfg)))),
         claude::ClaudeAdapter::ID => Ok(Arc::new(claude::ClaudeAdapter::new(pinned_version(cfg)))),
         opencode::OpenCodeAdapter::ID => Ok(Arc::new(opencode::OpenCodeAdapter::new(
             pinned_version(cfg),
         ))),
+        RETIRED => Err(AdapterError::Protocol(RETIRED_MESSAGE.to_string())),
         other => Err(AdapterError::Protocol(format!(
             "no adapter for harness `{other}`; this node knows {}",
             KNOWN.join(", ")
@@ -101,10 +113,8 @@ pub fn baked_plugins(harness_id: &str) -> Vec<String> {
 pub fn image_version(harness_id: &str) -> &'static str {
     if harness_id == claude::ClaudeAdapter::ID {
         claude::ClaudeAdapter::PINNED_VERSION
-    } else if harness_id == opencode::OpenCodeAdapter::ID {
-        opencode::OpenCodeAdapter::PINNED_VERSION
     } else {
-        omp::OmpAdapter::PINNED_VERSION
+        opencode::OpenCodeAdapter::PINNED_VERSION
     }
 }
 
@@ -129,7 +139,8 @@ impl HarnessVersion {
 /// can interpret afterwards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProtocolSupport {
-    /// What the protocol is called on the wire: `acp`, `claude-stream-json`.
+    /// What the protocol is called on the wire: `opencode-http`,
+    /// `claude-stream-json`.
     pub name: &'static str,
     pub min: u32,
     pub max: u32,
@@ -149,7 +160,8 @@ impl ProtocolSupport {
         }
     }
 
-    /// `acp/1` — what a session records as the contract it ran under.
+    /// `opencode-http/1` — what a session records as the contract it ran
+    /// under.
     pub fn tag(&self, version: u32) -> String {
         format!("{}/{version}", self.name)
     }
@@ -161,11 +173,12 @@ impl ProtocolSupport {
 /// mismatch is diagnosable from the row rather than only from a log line.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HarnessCompat {
-    /// The name the harness calls itself: `oh-my-pi`, not the node's `omp`.
+    /// The name the harness calls itself, which need not be the node's id
+    /// for it.
     pub agent: String,
     /// The version the harness reported, which the pin was checked against.
     pub version: String,
-    /// The protocol and version this session negotiated: `acp/1`.
+    /// The protocol and version this session negotiated: `opencode-http/1`.
     pub protocol: String,
 }
 
@@ -181,7 +194,7 @@ pub struct PermissionRequest {
     pub title: String,
     pub kind: Option<String>,
     pub raw_input: Option<Value>,
-    pub options: Vec<crate::acp::types::PermissionOption>,
+    pub options: Vec<crate::adapter::types::PermissionOption>,
 }
 
 /// The operator's answer to a permission request, or the request being withdrawn.
@@ -207,8 +220,8 @@ pub enum HarnessEvent {
         message_id: Option<String>,
         text: String,
     },
-    ToolCall(crate::acp::types::ToolCall),
-    ToolCallUpdate(crate::acp::types::ToolCallUpdate),
+    ToolCall(crate::adapter::types::ToolCall),
+    ToolCallUpdate(crate::adapter::types::ToolCallUpdate),
     Plan(Value),
     Usage {
         size: Option<u64>,
@@ -229,7 +242,7 @@ pub enum HarnessEvent {
 #[derive(Debug, Clone)]
 pub struct TurnResult {
     pub stop_reason: String,
-    pub usage: crate::acp::types::Usage,
+    pub usage: crate::adapter::types::Usage,
 }
 
 pub struct LaunchSpec {
@@ -306,8 +319,6 @@ pub trait DurableCursor: Send + Sync {
 pub enum AdapterError {
     #[error("runner: {0}")]
     Runner(#[from] crate::runner::RunnerError),
-    #[error("rpc: {0}")]
-    Rpc(#[from] crate::acp::rpc::RpcClientError),
     #[error("harness has no stdio pipe")]
     NoPipe,
     #[error("version mismatch: found {found}, pinned {pinned}")]
@@ -475,9 +486,9 @@ pub trait HarnessHandle: Send + Sync {
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError>;
     async fn cancel(&self) -> Result<(), AdapterError>;
     /// Establish an adapter-specific ordering barrier after a turn response.
-    /// ACP notifications share a reader with RPC responses; implementations
-    /// that split those queues must drain notifications that preceded the
-    /// response before the supervisor can resume a paused session.
+    /// A harness whose events arrive on a queue of their own must drain the
+    /// ones that preceded the turn response before the supervisor can resume a
+    /// paused session.
     async fn quiesce_events(&self) -> Result<(), AdapterError> {
         Ok(())
     }
@@ -491,18 +502,18 @@ mod tests {
     #[test]
     fn the_configured_harness_picks_the_adapter() {
         let mut cfg = Config::default();
-        cfg.harness.id = "omp".into();
+        cfg.harness.id = "claude".into();
         let Ok(a) = adapter_for(&cfg) else {
-            panic!("omp has an adapter")
+            panic!("claude has an adapter")
         };
-        assert_eq!(a.id(), "omp");
-        assert_eq!(a.layout().dir, ".omp");
-        assert_eq!(a.layout().env, "OMP_STATE_DIR");
+        assert_eq!(a.id(), "claude");
+        assert_eq!(a.layout().dir, ".claude");
+        assert_eq!(a.layout().env, "CLAUDE_CONFIG_DIR");
     }
 
-    /// Falling back to omp would run a harness the operator did not ask for,
-    /// under a version pin that does not describe it. Refusing at startup is
-    /// the only safe answer.
+    /// Falling back to a default would run a harness the operator did not ask
+    /// for, under a version pin that does not describe it. Refusing at startup
+    /// is the only safe answer.
     #[test]
     fn an_unknown_harness_is_refused_rather_than_guessed_at() {
         let mut cfg = Config::default();
@@ -512,7 +523,26 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(err.contains("not-a-harness"), "{err}");
-        assert!(err.contains("omp"), "{err}");
+        assert!(err.contains("opencode"), "{err}");
+        assert!(err.contains("claude"), "{err}");
+    }
+
+    /// The retired harness is not merely unknown. An operator whose node.toml
+    /// still says `omp` gets the migration path — the supported ids, the
+    /// archive step, and how to carry one session forward — rather than a
+    /// list of adapter names that leaves them to guess what happened to their
+    /// sessions.
+    #[test]
+    fn the_retired_harness_is_refused_with_the_migration_path() {
+        let mut cfg = Config::default();
+        cfg.harness.id = RETIRED.into();
+        let err = match adapter_for(&cfg) {
+            Ok(_) => panic!("the retired harness must not resolve"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("was removed"), "{err}");
+        assert!(err.contains("archive-legacy"), "{err}");
+        assert!(err.contains("session reopen"), "{err}");
         assert!(err.contains("opencode"), "{err}");
     }
 
@@ -552,17 +582,6 @@ mod tests {
     }
 
     #[test]
-    fn the_image_installs_the_pinned_omp() {
-        assert_eq!(
-            container_arg(
-                include_str!("../../../containers/harness/Containerfile"),
-                "OMP_VERSION"
-            ),
-            omp::OmpAdapter::PINNED_VERSION
-        );
-    }
-
-    #[test]
     fn the_image_installs_the_pinned_opencode() {
         assert_eq!(
             container_arg(
@@ -595,17 +614,39 @@ mod tests {
             panic!("claude has an adapter")
         };
         assert_eq!(a.pinned_version(), claude::ClaudeAdapter::PINNED_VERSION);
-        cfg.harness.id = "omp".into();
+        cfg.harness.id = "opencode".into();
         let Ok(a) = adapter_for(&cfg) else {
-            panic!("omp has an adapter")
+            panic!("opencode has an adapter")
         };
-        assert_eq!(a.pinned_version(), omp::OmpAdapter::PINNED_VERSION);
+        assert_eq!(
+            a.pinned_version(),
+            opencode::OpenCodeAdapter::PINNED_VERSION
+        );
+    }
+
+    /// Only the two supported images are agreed with. The retired harness had
+    /// a third, `containers/harness`, and it is gone: a build that still
+    /// carried it would be an image nothing can launch.
+    #[test]
+    fn only_the_supported_harnesses_have_images() {
+        assert_eq!(KNOWN, ["opencode", "claude"]);
+        let containers = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../containers");
+        assert!(
+            !containers.join("harness").exists(),
+            "the retired harness's image directory is still here"
+        );
+        for id in KNOWN {
+            assert!(
+                containers.join(format!("harness-{id}")).join("Containerfile").exists(),
+                "{id} has no Containerfile"
+            );
+        }
     }
 
     #[test]
     fn a_protocol_range_reads_as_one_version_or_a_span() {
         let one = ProtocolSupport {
-            name: "acp",
+            name: "opencode-http",
             min: 1,
             max: 1,
         };
@@ -613,9 +654,9 @@ mod tests {
         assert!(!one.accepts(0));
         assert!(!one.accepts(2));
         assert_eq!(one.versions(), "1");
-        assert_eq!(one.tag(1), "acp/1");
+        assert_eq!(one.tag(1), "opencode-http/1");
         let span = ProtocolSupport {
-            name: "acp",
+            name: "opencode-http",
             min: 1,
             max: 3,
         };

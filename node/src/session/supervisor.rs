@@ -586,7 +586,7 @@ impl Supervisor {
     /// operator to read, and repetition on its own does not distinguish a
     /// stuck agent from an agent doing repetitive work. Only repeated
     /// failure, counted separately, is allowed to fence a session.
-    fn note_repetition(&mut self, call: &crate::acp::types::ToolCall) {
+    fn note_repetition(&mut self, call: &crate::adapter::types::ToolCall) {
         let signature = json!({
             "title": call.title, "kind": call.kind, "raw_input": call.raw_input,
         })
@@ -791,9 +791,9 @@ impl Supervisor {
             crate::policy::Verdict::Allow | crate::policy::Verdict::Deny => {
                 let allow = decision.verdict == crate::policy::Verdict::Allow;
                 let option = if allow {
-                    crate::acp::types::OPTION_ALLOW_ONCE
+                    crate::adapter::types::OPTION_ALLOW_ONCE
                 } else {
-                    crate::acp::types::OPTION_REJECT_ONCE
+                    crate::adapter::types::OPTION_REJECT_ONCE
                 };
                 let _ = reply.send(PermissionReply::Selected(option.into()));
                 self.record(
@@ -826,7 +826,7 @@ impl Supervisor {
         if let Err(e) = self.store.insert_permission(&row) {
             tracing::error!(error = %e, "failed to record permission request");
             let _ = reply.send(PermissionReply::Selected(
-                crate::acp::types::OPTION_REJECT_ONCE.into(),
+                crate::adapter::types::OPTION_REJECT_ONCE.into(),
             ));
             return;
         }
@@ -889,7 +889,7 @@ impl Supervisor {
         for id in due {
             if let Some(sender) = self.open.lock().await.remove(&id) {
                 let _ = sender.send(PermissionReply::Selected(
-                    crate::acp::types::OPTION_REJECT_ONCE.into(),
+                    crate::adapter::types::OPTION_REJECT_ONCE.into(),
                 ));
             }
             let _ = self
@@ -1344,7 +1344,7 @@ pub(super) fn on_answer_row(
         return Err("permission request is no longer open".into());
     }
     let reply = match arguments {
-        Some(arguments) if option_id == crate::acp::types::OPTION_ALLOW_ONCE => {
+        Some(arguments) if option_id == crate::adapter::types::OPTION_ALLOW_ONCE => {
             PermissionReply::Edited {
                 option_id: option_id.to_string(),
                 arguments,

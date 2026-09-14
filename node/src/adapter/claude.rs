@@ -27,7 +27,7 @@ use super::{
     LaunchSpec, Layout, LiftedToken, LoginFlow, ModelOption, PermissionReply, PermissionRequest,
     ProtocolSupport, TurnResult,
 };
-use crate::acp::types::{self, PermissionOption, ToolCall, ToolCallUpdate, Usage};
+use crate::adapter::types::{self, PermissionOption, ToolCall, ToolCallUpdate, Usage};
 use crate::runner::{Runner, RunnerCommand, RunnerError, Spawned};
 
 /// How long to wait for the `system/init` frame before giving up on a launch.

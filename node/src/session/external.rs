@@ -243,7 +243,7 @@ impl Loop {
         if let Err(e) = self.store.insert_permission(&row) {
             tracing::error!(error = %e, "failed to record permission request");
             let _ = reply.send(PermissionReply::Selected(
-                crate::acp::types::OPTION_REJECT_ONCE.into(),
+                crate::adapter::types::OPTION_REJECT_ONCE.into(),
             ));
             return;
         }
@@ -283,7 +283,7 @@ impl Loop {
         for id in due {
             if let Some(sender) = open.remove(&id) {
                 let _ = sender.send(PermissionReply::Selected(
-                    crate::acp::types::OPTION_REJECT_ONCE.into(),
+                    crate::adapter::types::OPTION_REJECT_ONCE.into(),
                 ));
             }
             let _ = self.store.resolve_permission(

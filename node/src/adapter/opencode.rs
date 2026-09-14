@@ -37,7 +37,7 @@ use super::{
     LaunchSpec, Layout, LoginFlow, ModelOption, PermissionReply, PermissionRequest,
     ProtocolSupport, TurnResult,
 };
-use crate::acp::types::{self, PermissionOption, ToolCall, ToolCallUpdate, Usage};
+use crate::adapter::types::{self, PermissionOption, ToolCall, ToolCallUpdate, Usage};
 use crate::gateway::model::Wiring;
 use crate::runner::{free_loopback_port, Runner, RunnerCommand};
 
