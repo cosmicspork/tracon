@@ -98,18 +98,18 @@ async fn rig() -> (Tools, Seen) {
     (tools, seen)
 }
 
-fn allowing(names: &str) -> Arc<std::sync::RwLock<tracon::policy::Policy>> {
-    Arc::new(std::sync::RwLock::new(
+fn allowing(names: &str) -> Arc<parking_lot::RwLock<tracon::policy::Policy>> {
+    Arc::new(parking_lot::RwLock::new(
         toml::from_str(&format!(
             r#"
-            version = 9
-            [[rule]]
-            id = "test-allow"
-            verdict = "allow"
-            reason = "Under test."
-            kinds = ["tool"]
-            matches = [{names}]
-            "#
+        version = 9
+        [[rule]]
+        id = "test-allow"
+        verdict = "allow"
+        reason = "Under test."
+        kinds = ["tool"]
+        matches = [{names}]
+        "#
         ))
         .unwrap(),
     ))

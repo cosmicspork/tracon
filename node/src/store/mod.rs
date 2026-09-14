@@ -27,10 +27,13 @@ pub mod metrics;
 pub mod opencode;
 pub mod opencode_state;
 pub mod operator;
+pub mod policy_rollouts;
 pub mod publication;
 pub mod qa;
+pub mod reports;
 pub mod rollups;
 pub mod transfers;
+pub mod ui;
 pub mod vectors;
 pub use corpus::*;
 pub use evidence::*;
@@ -38,10 +41,12 @@ pub use manifest::*;
 pub use opencode::*;
 pub use opencode_state::*;
 pub use operator::*;
+pub use policy_rollouts::*;
 pub use publication::*;
 pub use qa::*;
 pub use records::*;
 pub use transfers::*;
+pub use ui::*;
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -130,15 +135,19 @@ impl Store {
         conn.execute(
             "INSERT INTO node (id, name, state, failed_check, failed_detail, harness_id,
                 harness_pinned, harness_found, models_json, checked_at_ms, is_self, x25519_pub,
-                last_seen_ms, reachable, providers_json)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                last_seen_ms, reachable, providers_json, app_version, wire_contract,
+                policy_identity, policy_sha256, policy_receipt_v1)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
              ON CONFLICT(id) DO UPDATE SET name=?2, state=?3, failed_check=?4, failed_detail=?5,
                 harness_id=?6, harness_pinned=?7, harness_found=?8, models_json=?9, checked_at_ms=?10,
-                is_self=?11, x25519_pub=?12, last_seen_ms=?13, reachable=?14, providers_json=?15",
+                is_self=?11, x25519_pub=?12, last_seen_ms=?13, reachable=?14, providers_json=?15,
+                app_version=?16, wire_contract=?17, policy_identity=?18, policy_sha256=?19,
+                policy_receipt_v1=?20",
             rusqlite::params![
                 n.id, n.name, n.state, n.failed_check, n.failed_detail, n.harness_id,
                 n.harness_pinned, n.harness_found, n.models_json, n.checked_at_ms, n.is_self,
-                n.x25519_pub, n.last_seen_ms, n.reachable, n.providers_json
+                n.x25519_pub, n.last_seen_ms, n.reachable, n.providers_json, n.app_version,
+                n.wire_contract, n.policy_identity, n.policy_sha256, n.policy_receipt_v1.map(i64::from)
             ],
         )?;
         Ok(())
@@ -161,6 +170,26 @@ impl Store {
         conn.execute(
             "UPDATE node SET providers_json=?2 WHERE id=?1",
             [id, providers_json],
+        )?;
+        Ok(())
+    }
+
+    /// Refresh the signed-policy facts this node will advertise in its next
+    /// hello. Receipt support is explicit so an absent field remains legacy or
+    /// unknown, never an implied acknowledgement capability.
+    pub fn set_node_policy_metadata(
+        &self,
+        id: &str,
+        identity: Option<&str>,
+        sha256: Option<&str>,
+        receipt_v1: bool,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE node
+             SET policy_identity=?2, policy_sha256=?3, policy_receipt_v1=?4
+             WHERE id=?1",
+            rusqlite::params![id, identity, sha256, i64::from(receipt_v1)],
         )?;
         Ok(())
     }
@@ -1301,9 +1330,13 @@ impl Store {
         Ok(n)
     }
 
-    pub fn upsert_review_mirror(&self, r: &ReviewRow) -> Result<()> {
+    /// Upsert a review an owner mirrored to us. An ID collision from a
+    /// different owner/channel never rewrites the existing row.
+    ///
+    /// Returns `false` only for that rejected collision.
+    pub fn upsert_review_mirror(&self, r: &ReviewRow) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let changed = conn.execute(
             "INSERT INTO review (id, session_id, node_id, channel, kind, title, body, edited_title,
                 edited_body, provider, target, diff, files, head_sha, base_ref, added, removed, state,
                 verdict_reason, publish_result, claimed_ms, created_ms, created_mono_ms,
@@ -1313,7 +1346,9 @@ impl Store {
              ON CONFLICT(id) DO UPDATE SET title=?6, body=?7, edited_title=?8, edited_body=?9,
                 diff=?12, files=?13, head_sha=?14, added=?16, removed=?17, state=?18,
                 verdict_reason=?19, publish_result=?20, claimed_ms=?21, resolved_mono_ms=?24,
-                updated_ms=?25",
+                updated_ms=?25
+             WHERE node_id=excluded.node_id AND channel=excluded.channel
+                AND session_id=excluded.session_id AND kind=excluded.kind",
             rusqlite::params![
                 r.id,
                 r.session_id,
@@ -1342,7 +1377,7 @@ impl Store {
                 r.updated_ms
             ],
         )?;
-        Ok(())
+        Ok(changed == 1)
     }
 
     /// Open reviews of `node_id` in `channel` not in `keep` are marked gone:
@@ -1572,6 +1607,22 @@ mod records {
         /// carried in the hello like `models_json`. NULL from older builds.
         #[serde(default)]
         pub providers_json: Option<String>,
+        /// The application and mesh-wire revisions this node actually
+        /// advertised in its hello. NULL means a legacy or not-yet-heard peer.
+        #[serde(default)]
+        pub app_version: Option<String>,
+        #[serde(default)]
+        pub wire_contract: Option<u32>,
+        /// The verified policy signer and exact immutable bundle hash this
+        /// node advertised. Absent is unknown, not a policy match.
+        #[serde(default)]
+        pub policy_identity: Option<String>,
+        #[serde(default)]
+        pub policy_sha256: Option<String>,
+        /// `Some(true)` only when the peer advertises authenticated
+        /// PolicyReceipt support. NULL means unknown or legacy.
+        #[serde(default)]
+        pub policy_receipt_v1: Option<bool>,
     }
 
     fn one() -> i64 {
@@ -1608,6 +1659,13 @@ mod records {
                     .providers_json
                     .as_deref()
                     .and_then(|p| serde_json::from_str::<Value>(p).ok()),
+                "application_version": self.app_version,
+                "wire_contract": self.wire_contract,
+                "policy": {
+                    "identity": self.policy_identity,
+                    "sha256": self.policy_sha256,
+                    "receipt_v1": self.policy_receipt_v1,
+                },
             })
         }
 
@@ -1634,6 +1692,14 @@ mod records {
                     .get("providers")
                     .filter(|p| !p.is_null())
                     .map(|p| p.to_string()),
+                app_version: s("application_version"),
+                wire_contract: v
+                    .get("wire_contract")
+                    .and_then(Value::as_u64)
+                    .and_then(|version| version.try_into().ok()),
+                policy_identity: v["policy"]["identity"].as_str().map(String::from),
+                policy_sha256: v["policy"]["sha256"].as_str().map(String::from),
+                policy_receipt_v1: v["policy"]["receipt_v1"].as_bool(),
             })
         }
     }
@@ -1656,6 +1722,13 @@ mod records {
                 last_seen_ms: r.get("last_seen_ms")?,
                 reachable: r.get("reachable")?,
                 providers_json: r.get("providers_json")?,
+                app_version: r.get("app_version")?,
+                wire_contract: r.get("wire_contract")?,
+                policy_identity: r.get("policy_identity")?,
+                policy_sha256: r.get("policy_sha256")?,
+                policy_receipt_v1: r
+                    .get::<_, Option<i64>>("policy_receipt_v1")?
+                    .map(|value| value != 0),
             })
         }
     }
@@ -2409,6 +2482,24 @@ impl Store {
         Ok(rows)
     }
 
+    /// Reviews that must cross the mesh. This intentionally includes
+    /// acknowledged narrative reports so peers retain their terminal receipt,
+    /// but keeps them out of the operator's waiting queue.
+    pub fn mirrored_reviews(&self) -> Result<Vec<ReviewRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM review
+             WHERE state IN ('new','claimed','revising','publishing')
+                OR (kind=?1 AND state=?2)
+             ORDER BY created_ms ASC",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![reports::KIND, reports::ACKNOWLEDGED],
+            ReviewRow::from_row,
+        )?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// Claim on open, as the design decided: a metric, not a lock.
     pub fn claim_review(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -2616,26 +2707,46 @@ mod tests {
             last_seen_ms: None,
             reachable: 1,
             providers_json: None,
+            app_version: Some("1.0.0".into()),
+            wire_contract: Some(3),
+            policy_identity: Some("identity".into()),
+            policy_sha256: Some("bundle".into()),
+            policy_receipt_v1: Some(true),
         };
         store.put_node(&n).unwrap();
         n.id
     }
 
     #[test]
-    fn a_nodes_provider_summary_round_trips_the_wire_shape() {
+    fn a_node_advertisement_round_trips_optional_compatibility_metadata() {
         let store = Store::open_in_memory().unwrap();
         let id = node(&store);
         let summary = r#"[{"name":"anthropic","state":"connected"}]"#;
         store.set_node_providers(&id, summary).unwrap();
         let v = store.get_node(&id).unwrap().unwrap().to_json();
         assert_eq!(v["providers"][0]["name"], "anthropic");
-        // A peer reads the row off the wire: the summary survives.
+        // A peer reads the row off the wire: observed metadata survives.
         let back = NodeRow::from_json(&v).unwrap();
         assert_eq!(back.providers_json.as_deref(), Some(summary));
-        // A row from an older build has no providers field at all.
+        assert_eq!(back.app_version.as_deref(), Some("1.0.0"));
+        assert_eq!(back.wire_contract, Some(3));
+        assert_eq!(back.policy_identity.as_deref(), Some("identity"));
+        assert_eq!(back.policy_sha256.as_deref(), Some("bundle"));
+        assert_eq!(back.policy_receipt_v1, Some(true));
+        // Older advertisements omit these facts. Their absence is preserved as
+        // unknown rather than reconstructed as compatibility.
         let mut old = v.clone();
         old.as_object_mut().unwrap().remove("providers");
-        assert!(NodeRow::from_json(&old).unwrap().providers_json.is_none());
+        old.as_object_mut().unwrap().remove("application_version");
+        old.as_object_mut().unwrap().remove("wire_contract");
+        old["policy"].as_object_mut().unwrap().clear();
+        let old = NodeRow::from_json(&old).unwrap();
+        assert!(old.providers_json.is_none());
+        assert!(old.app_version.is_none());
+        assert!(old.wire_contract.is_none());
+        assert!(old.policy_identity.is_none());
+        assert!(old.policy_sha256.is_none());
+        assert!(old.policy_receipt_v1.is_none());
     }
 
     fn session(store: &Store, id: &str, node_id: &str) {
@@ -2679,6 +2790,63 @@ mod tests {
                 manifest_digest: None,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn mirrored_review_id_collision_cannot_cross_owner_or_channel() {
+        let store = Store::open_in_memory().unwrap();
+        let owner = node(&store);
+        session(&store, "owner-session", &owner);
+        store.ensure_peer_node("n2").unwrap();
+        session(&store, "sender-session", "n2");
+
+        let report = ReviewRow {
+            id: "shared-id".into(),
+            session_id: "owner-session".into(),
+            node_id: owner.clone(),
+            channel: "personal".into(),
+            kind: reports::KIND.into(),
+            title: "original".into(),
+            body: "the original report".into(),
+            edited_title: None,
+            edited_body: None,
+            provider: "none".into(),
+            target: "{}".into(),
+            diff: String::new(),
+            files: "[]".into(),
+            head_sha: "original-version".into(),
+            base_ref: "none".into(),
+            added: 0,
+            removed: 0,
+            state: reports::ACKNOWLEDGED.into(),
+            verdict_reason: Some("received".into()),
+            publish_result: None,
+            claimed_ms: None,
+            created_ms: now_ms(),
+            created_mono_ms: 0,
+            resolved_mono_ms: Some(now_ms()),
+            updated_ms: now_ms(),
+            checks_json: None,
+            review_session_id: None,
+            ai_verdict_json: None,
+            revision_patch: None,
+        };
+        store.insert_review(&report).unwrap();
+
+        let mut collision = report.clone();
+        collision.session_id = "sender-session".into();
+        collision.node_id = "n2".into();
+        collision.channel = "other".into();
+        collision.title = "attacker replacement".into();
+        collision.body = "replacement".into();
+        collision.state = "new".into();
+
+        assert!(!store.upsert_review_mirror(&collision).unwrap());
+        let preserved = store.get_review("shared-id").unwrap().unwrap();
+        assert_eq!(preserved.node_id, owner);
+        assert_eq!(preserved.channel, "personal");
+        assert_eq!(preserved.title, "original");
+        assert_eq!(preserved.state, reports::ACKNOWLEDGED);
     }
 
     #[test]
@@ -3049,6 +3217,11 @@ mod migration_tests {
                 last_seen_ms: None,
                 reachable: 1,
                 providers_json: None,
+                app_version: None,
+                wire_contract: None,
+                policy_identity: None,
+                policy_sha256: None,
+                policy_receipt_v1: None,
             })
             .unwrap();
         let conn = store.conn.lock().unwrap();

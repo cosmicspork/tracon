@@ -33,6 +33,116 @@ pub struct Config {
     pub launch: Launch,
     /// Explicit, fail-closed targets for candidate-bound QA and browser proof.
     pub qa: Qa,
+    /// Interfaces this node serves beside the operator's own.
+    pub ui: Ui,
+}
+
+/// The harness's native interface, served by tracon from a pinned bundle on an
+/// origin of its own.
+///
+/// A separate origin rather than a path under the operator interface, for three
+/// reasons that are all upstream's: the bundle's asset, font and manifest
+/// references are root-absolute, so it cannot live under a subpath
+/// (`api-ui.md` §8 #16); its `site.webmanifest` claims `scope: "/"` and would
+/// collide with tracon's own (#17); and its server URL is `location.origin`,
+/// so whatever origin serves the page is the origin its API calls go to
+/// (§6, "Server URL discovery"). Giving it an origin is what lets tracon
+/// answer those calls with the mediated gateway instead of the harness.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ui {
+    /// Dedicated bind address for the native OpenCode interface. A different
+    /// port from the operator listener, and never the same router: no operator
+    /// route is reachable here and no operator cookie is read here.
+    pub opencode_listen: SocketAddr,
+    /// Public HTTP(S) origin for that listener, when it is published through
+    /// an ingress. A *separate hostname* from the operator interface's — the
+    /// cookie that authorises this origin is host-only, and a browser does not
+    /// scope cookies by port, so two loopback ports share a cookie jar even
+    /// though they are different origins to everything else. The separation
+    /// that actually holds is in the code (each guard reads only its own
+    /// cookie name, `http::ui::UI_COOKIE` and `http::auth::COOKIE`); a
+    /// distinct hostname is what makes the browser agree.
+    pub opencode_url: Option<String>,
+    /// Where the vendored bundle was installed. Unset is the node's state
+    /// directory, which is where `containers/opencode-ui/build.sh` puts it.
+    pub opencode_bundle_dir: Option<PathBuf>,
+}
+
+impl Default for Ui {
+    fn default() -> Self {
+        Self {
+            opencode_listen: "127.0.0.1:7423".parse().expect("valid UI address"),
+            opencode_url: None,
+            opencode_bundle_dir: None,
+        }
+    }
+}
+
+impl Ui {
+    /// The origin the UI is reached at: what its CSP, its cookie audience and
+    /// its `Origin` check are all written against.
+    pub fn opencode_origin(&self) -> Result<String, String> {
+        let Some(configured) = self.opencode_url.as_deref() else {
+            return Ok(format!("http://127.0.0.1:{}", self.opencode_listen.port()));
+        };
+        let url = url::Url::parse(configured)
+            .map_err(|error| format!("ui.opencode_url is not a valid URL: {error}"))?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || !matches!(url.path(), "" | "/")
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(
+                "ui.opencode_url must be an HTTP(S) origin without credentials, path, query, or fragment"
+                    .into(),
+            );
+        }
+        Ok(url.origin().ascii_serialization())
+    }
+
+    /// The host the UI listener answers to, for the `Host` check that is the
+    /// DNS-rebinding defence on this origin — the same question
+    /// `http::host_is_local` asks of the operator listener.
+    pub fn opencode_host(&self) -> Result<String, String> {
+        let origin = self.opencode_origin()?;
+        Ok(crate::http::hostname(&origin).to_string())
+    }
+
+    /// Whether the origin is loopback, which is what decides `Secure` on the
+    /// cookie: a `Secure` cookie over plain HTTP is dropped by the browser,
+    /// and loopback is the one place tracon serves plain HTTP on purpose.
+    pub fn opencode_is_loopback(&self) -> bool {
+        let Ok(host) = self.opencode_host() else {
+            return false;
+        };
+        matches!(host.as_str(), "localhost" | "::1")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    }
+
+    /// Where the vendored bundle is read from.
+    ///
+    /// `TRACON_OPENCODE_UI_DIR` wins over both, because the one deployment
+    /// that needs it has no operator to write a config file: the node image
+    /// carries the tree on its own filesystem (`Dockerfile.node`) and mounts
+    /// the state directory as a volume, which would shadow a copy under it.
+    /// The digest check does not move — whatever this names is verified over
+    /// the bytes about to be served, or nothing is served.
+    pub fn opencode_bundle_path(&self) -> PathBuf {
+        if let Some(named) = std::env::var_os("TRACON_OPENCODE_UI_DIR") {
+            if !named.is_empty() {
+                return PathBuf::from(named);
+            }
+        }
+        self.opencode_bundle_dir
+            .clone()
+            .unwrap_or_else(|| Config::state_dir().join("opencode-ui"))
+    }
 }
 
 /// QA has no implicit environment. Every destination, browser image, build
@@ -1037,6 +1147,7 @@ impl Default for Config {
             runtime: Runtime::default(),
             providers: default_providers(),
             memory: Memory::default(),
+            ui: Ui::default(),
             supervision: Supervision::default(),
             review: ReviewLimits::default(),
             notify: Notify::default(),
@@ -1327,6 +1438,10 @@ impl Config {
                     .preview_origin()
                     .map_err(|error| format!("{}: {error}", path.display()))?;
                 config
+                    .ui
+                    .opencode_origin()
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                config
                     .qa
                     .validate()
                     .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -1501,6 +1616,39 @@ shape = "openai"
         ] {
             docs.preview_url = Some(invalid.into());
             assert!(docs.preview_origin().is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn the_opencode_ui_origin_is_its_own_and_origin_only() {
+        let mut ui = Ui::default();
+        // Not the operator listener's port, and not the preview listener's.
+        assert_eq!(ui.opencode_origin().unwrap(), "http://127.0.0.1:7423");
+        assert_ne!(
+            ui.opencode_listen.port(),
+            Docs::default().preview_listen.port()
+        );
+        assert!(ui.opencode_is_loopback());
+        assert_eq!(ui.opencode_host().unwrap(), "127.0.0.1");
+
+        ui.opencode_url = Some("https://opencode.example:8443".into());
+        assert_eq!(
+            ui.opencode_origin().unwrap(),
+            "https://opencode.example:8443"
+        );
+        assert_eq!(ui.opencode_host().unwrap(), "opencode.example");
+        // Published through an ingress: the cookie must carry `Secure`.
+        assert!(!ui.opencode_is_loopback());
+
+        for invalid in [
+            "ftp://opencode.example",
+            "https://opencode.example/path",
+            "https://user@opencode.example",
+            "https://opencode.example?x=1",
+            "https://opencode.example#f",
+        ] {
+            ui.opencode_url = Some(invalid.into());
+            assert!(ui.opencode_origin().is_err(), "{invalid}");
         }
     }
 }

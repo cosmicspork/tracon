@@ -14,7 +14,6 @@ import type {
   EnrollStatus,
   Event,
   ForgeList,
-  Invite,
   HubRollups,
   ManagedRepo,
   MeshState,
@@ -72,7 +71,7 @@ export class ApiError extends Error {
   }
 }
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+export async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
     headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
@@ -116,9 +115,14 @@ export const api = {
   /** Optional hub aggregate; never substitutes for this node's local metrics. */
   hubRollups: (channel: string) =>
     call<HubRollups>('GET', `/api/mesh/rollups?channel=${encodeURIComponent(channel)}`),
-  /** Dotted keys nest; `null` removes. Handed to every member of the channel. */
+  /** Shared channel rules: save locally, then report whether distribution was queued. */
   putChannelBindings: (name: string, patch: Record<string, unknown>) =>
-    call<{ name: string; bindings: Record<string, unknown> }>('PUT', `/api/channels/${name}/bindings`, patch),
+    call<{
+      name: string
+      bindings: Record<string, unknown>
+      handed_to: number | null
+      delivery: { state: 'local' | 'queued' | 'failed'; handed_to: number | null; error: string | null }
+    }>('PUT', `/api/channels/${encodeURIComponent(name)}/bindings`, patch),
   authorityGrants: () =>
     call<{ policy: { version: number; rules: PolicyRule[]; trusted: boolean }; grants: AuthorityGrant[] }>('GET', '/api/authority/grants'),
   // Push: this node pushes to the phones subscribed here.
@@ -150,7 +154,7 @@ export const api = {
   deletePushSubscription: (id: string) => call<void>('DELETE', `/api/push/subscriptions/${id}`),
   deletePushSubscriptionByEndpoint: (endpoint: string) =>
     call<void>('DELETE', '/api/push/subscriptions', { endpoint }),
-  testPush: () => call<{ sent: { id: string; outcome: string }[] }>('POST', '/api/push/test', {}),
+  testPush: () => call<{ sent: { id: string; outcome: string; service_accepted: boolean }[] }>('POST', '/api/push/test', {}),
   queue: () => call<Queue>('GET', '/api/queue'),
   recentRepos: () =>
     call<{ repos: RecentRepo[]; managed: ManagedRepo[] }>('GET', '/api/repos/recent'),
@@ -181,6 +185,14 @@ export const api = {
       ceiling: Ceiling
       toolchain: ToolchainStatus | null
     }>('GET', `/api/sessions/${id}`),
+  /** Mint a single-use capability for this session's OpenCode view. The URL
+      that comes back carries it in a fragment and belongs in exactly one
+      place: an iframe's `src`, or the desktop window. Never log it. */
+  opencodeBoot: (id: string) =>
+    call<{ url: string; origin: string; expires_ms: number; cookie_ttl_ms?: number }>(
+      'POST',
+      `/api/sessions/${encodeURIComponent(id)}/opencode-boot`,
+    ),
   // Page through the whole history: a long session has more events than one
   // request returns, and stopping at a fixed cap would show the oldest events
   // with a gap before the live tail.
@@ -372,7 +384,6 @@ export const api = {
     call<{ removed: string }>('DELETE', `/api/credentials/forge/${forge}`),
   createChannel: (name: string) =>
     call<{ name: string; created: boolean; note: string | null }>('POST', '/api/channels', { name }),
-  checkBoundary: () => call<BoundaryResult>('POST', '/api/boundary/check'),
   runSetup: (rebuild = false) => call<BoundaryResult>('POST', '/api/boundary/setup', { rebuild }),
   config: () => call<NodeConfig>('GET', '/api/config'),
   putConfig: (patch: unknown) =>
@@ -489,15 +500,15 @@ export const api = {
       'GET',
       `/api/metrics${sinceMs ? `?since_ms=${sinceMs}` : ''}`,
     ),
-  // Enrollment: browser only.
-  openInvite: (channels: string[]) => call<Invite>('POST', '/api/mesh/invite', { channels }),
-  pollInvite: (code: string) => call<Invite>('GET', `/api/mesh/invite/${code}`),
-  admitInvite: (code: string) => call<Invite>('POST', `/api/mesh/invite/${code}/admit`),
-  cancelInvite: (code: string) => call<void>('DELETE', `/api/mesh/invite/${code}`),
   // Candidate-bound QA. Inputs name a stored candidate and configured target;
   // this surface accepts neither host commands nor browser credential values.
-  qaEvidence: (candidateId: string) =>
-    call<QaEvidence>('GET', `/api/qa/candidates/${encodeURIComponent(candidateId)}`),
+  qaEvidence: (candidateId: string, source: { owner?: string; channel?: string } = {}) => {
+    const query = new URLSearchParams()
+    if (source.owner) query.set('owner', source.owner)
+    if (source.channel) query.set('channel', source.channel)
+    const suffix = query.size ? `?${query}` : ''
+    return call<QaEvidence>('GET', `/api/qa/candidates/${encodeURIComponent(candidateId)}${suffix}`)
+  },
   qaTargets: (candidateId: string) =>
     call<{ targets: QaTarget[] }>('GET', `/api/qa/candidates/${encodeURIComponent(candidateId)}/targets`),
   deployCandidate: (candidateId: string, target: string) =>

@@ -51,9 +51,9 @@
       })
       if (response.delivery === 'portable') {
         download(response.transfer, `tracon-transfer-${response.transfer.sha256.slice(0, 12)}.json`)
-        result = 'Signed package downloaded. Import still needs confirmation on the receiving node.'
+        result = 'Signed package downloaded. On the receiving node, choose Import a session and explicitly start the isolated continuation.'
       } else {
-        result = `Queued for ${destination}. That node must confirm import before a new session starts.`
+        result = `Sealed package queued for ${destination}. That node must explicitly import it before a new isolated session starts.`
       }
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught)
@@ -65,50 +65,73 @@
 
 <details class="transfer">
   <summary>Continue on another node</summary>
-  <p>
-    Export one immutable candidate and only the context named below. The source session stays running and no
-    credential or live harness state is transferred.
+  <p class="consequence">
+    Continue one immutable candidate with only the named context. The source session stays unchanged; credentials and a
+    live harness are never transferred. The receiving node must confirm import, which creates a new isolated workspace.
   </p>
   <label>
-    Candidate ID
-    <input bind:value={candidateId} placeholder="immutable candidate id" autocapitalize="off" autocomplete="off" />
+    <span>Source candidate ID</span>
+    <input bind:value={candidateId} placeholder="Immutable candidate ID" autocapitalize="off" autocomplete="off" />
   </label>
   <label>
-    Destination
+    <span>Destination node</span>
     <select bind:value={destination}>
-      <option value="">Portable download — choose/import offline</option>
+      <option value="">Portable download — choose and import on another node</option>
       {#each destinations as node (node.id)}
         <option value={node.id}>{node.name || node.id.slice(0, 12)}</option>
       {/each}
     </select>
+    <small>Only reachable nodes in {channel} are shown. Leave this blank to download a portable package.</small>
   </label>
   <label>
-    Included document slugs <small>comma separated; Markdown only</small>
+    <span>Included document slugs</span>
+    <small>Comma separated; Markdown only.</small>
     <input bind:value={documentSlugs} placeholder="guide-release, ref-api" />
   </label>
   <label>
-    Included memory IDs <small>comma separated</small>
-    <input bind:value={memoryIds} placeholder="memory ids" />
+    <span>Included memory IDs</span>
+    <small>Comma separated.</small>
+    <input bind:value={memoryIds} placeholder="Memory IDs" />
   </label>
   <label>
-    Handoff note
+    <span>Handoff note</span>
     <textarea bind:value={note} placeholder="What the next session should know"></textarea>
   </label>
-  <button class="btn" onclick={exportTransfer} disabled={sending || !candidateId.trim()}>
-    {sending ? 'Preparing…' : destination ? 'Deliver sealed package' : 'Download signed package'}
+  <button class="btn" type="button" onclick={exportTransfer} disabled={sending || !candidateId.trim()}>
+    {sending ? 'Preparing package…' : destination ? 'Send sealed package' : 'Download signed package'}
   </button>
   {#if result}<p class="ok">{result}</p>{/if}
   {#if error}<p class="bad">{error}</p>{/if}
 </details>
 
 <style>
-  .transfer { margin: 14px 0; padding: 9px 11px; background: var(--s1); border-left: 3px solid var(--ink2); }
+  .transfer {
+    margin: 14px 0;
+    padding: 9px 11px;
+    background: var(--s1);
+    border-left: 3px solid var(--ink2);
+  }
   summary { cursor: pointer; font: 600 13px var(--sans); }
-  p, label { display: block; font: 12px var(--mono); color: var(--ink2); }
-  label { margin-top: 8px; }
+  .consequence, label, .transfer > p {
+    color: var(--ink2);
+    font: 12px var(--mono);
+  }
+  .consequence { margin: 4px 0 10px; }
+  label {
+    display: grid;
+    gap: 3px;
+    margin-top: 10px;
+  }
+  label > span {
+    font: 11px var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink2);
+  }
   small { color: var(--dim); }
-  input, select, textarea { width: 100%; box-sizing: border-box; margin-top: 3px; }
-  textarea { min-height: 48px; }
+  input, select, textarea { width: 100%; }
+  textarea { min-height: 72px; resize: vertical; }
+  .transfer > .btn { margin-top: 12px; }
   .ok { color: var(--ok); }
   .bad { color: var(--crit); }
 </style>

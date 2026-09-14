@@ -6,6 +6,7 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { desktopCanOpenOpencode, openOpencodeWindow } from '../lib/desktop-opencode'
+  import { opencodeShellPath } from '../lib/opencode'
   import { draftBox } from '../lib/draft'
   import { humanizeError } from '../lib/errors'
   import { formatAge, formatBudget, formatTokens } from '../lib/format'
@@ -210,13 +211,17 @@
   })
   // A prompt to an unreachable owner is queued on this node and sent when it
   // returns; the box stays open and says so.
-  // The desktop app only: OpenCode's own interface opens in a second window
-  // that holds none of this one's privileges. It is the session's own harness,
-  // so it is offered for an OpenCode session running on this machine and
-  // nowhere else.
-  const canOpenOpencode = $derived(
-    desktopCanOpenOpencode() && session?.harness_id === 'opencode' && !remote,
-  )
+  // OpenCode's own interface has two ways in, and which one is offered is a
+  // fact about the client rather than a preference: the desktop app opens a
+  // second window holding none of this one's privileges, and a browser —
+  // installed or not — stays inside the app's own scope. A new tab is never
+  // the answer on a phone: leaving the installed app for Safari or Chrome is
+  // exactly the handover the shell route exists to avoid. Either way it is
+  // this session's own harness, so it is offered for an OpenCode session
+  // running on this machine and nowhere else.
+  const opencodeHere = $derived(session?.harness_id === 'opencode' && !remote)
+  const canOpenOpencode = $derived(desktopCanOpenOpencode() && opencodeHere)
+  const canFrameOpencode = $derived(!desktopCanOpenOpencode() && opencodeHere)
   let openingOpencode = $state(false)
   async function openOpencode() {
     openingOpencode = true
@@ -245,7 +250,7 @@
 {:else}
   <header class="sess">
     <a class="lnk" href="/">‹ Queue</a>
-    <span class="model">{session.model}</span>
+    <span class="model">{session.harness_id === 'external' ? 'External agent' : session.model}</span>
     <span class="chip">{session.phase}</span>
     <span class="chip" class:self={owner?.is_self} class:off={unreachable !== null}
       >{chipLabel(store.nodes, session.node_id)}{unreachable !== null && owner?.last_seen_ms
@@ -265,19 +270,27 @@
         >{toolchainNote.text}</span
       >
     {/if}
-    <span class="mono">{session.worktree_path ?? session.repo_path}</span>
-    <span class="mono">{session.branch}</span>
-    <span class="sp"></span>
-    <span class="mono">{formatBudget(session.tokens_used, session.budget_tokens)} tok</span>
-    {#if usageNote}
-      <span class="mono" class:unsure={usageNote.warn} title={usageNote.title}>{usageNote.text}</span>
+    {#if session.harness_id !== 'external'}
+      <span class="mono">{session.worktree_path ?? session.repo_path}</span>
+      <span class="mono">{session.branch}</span>
+    {:else}
+      <span class="mono" title="The external host and its repository stay outside Tracon's supervision.">brokered external attachment</span>
     {/if}
-    {#if session.context_used != null && session.context_size != null}
+    <span class="sp"></span>
+    {#if session.harness_id === 'external'}
+      <span class="mono" title="External-agent model use happens outside Tracon's metered runtime.">usage outside Tracon · unknown</span>
+    {:else}
+      <span class="mono">{formatBudget(session.tokens_used, session.budget_tokens)} tok</span>
+      {#if usageNote}
+        <span class="mono" class:unsure={usageNote.warn} title={usageNote.title}>{usageNote.text}</span>
+      {/if}
+    {/if}
+    {#if session.harness_id !== 'external' && session.context_used != null && session.context_size != null}
       <span class="mono"
         >ctx {formatTokens(session.context_used)}/{formatTokens(session.context_size)}</span
       >
     {/if}
-    {#if session.cost_usd != null}
+    {#if session.harness_id !== 'external' && session.cost_usd != null}
       <span class="mono">${session.cost_usd.toFixed(2)}</span>
     {/if}
     {#if session.policy_version != null}
@@ -301,6 +314,13 @@
         title="OpenCode's own interface, in a window that can reach nothing but that interface"
         >OpenCode</button
       >
+    {:else if canFrameOpencode}
+      <a
+        class="lnk"
+        href={opencodeShellPath(id)}
+        title="OpenCode's own interface, framed here from its own origin — the installed app keeps it"
+        >OpenCode</a
+      >
     {/if}
     {#if !isTerminal(session.state)}
       {#if session.state === 'paused'}
@@ -308,7 +328,9 @@
           >{session.harness_id === 'external' ? 'Resume broker access' : 'Resume'}</button
         >
       {:else if session.state !== 'starting'}
-        <button class="lnk" onclick={() => void control('pause')} disabled={unreachable !== null || controlling}>Pause</button>
+        <button class="lnk" onclick={() => void control('pause')} disabled={unreachable !== null || controlling}
+          >{session.harness_id === 'external' ? 'Pause broker access' : 'Pause'}</button
+        >
       {/if}
       <button class="lnk d" onclick={stop} disabled={unreachable !== null}
         >{confirmingKill
@@ -322,6 +344,10 @@
       {/if}
     {/if}
   </header>
+
+  {#if session.harness_id === 'external' && session.state !== 'paused' && !isTerminal(session.state)}
+    <div class="banner dim">external agent attached <b>· its host process, repository, prompts, and model usage stay outside Tracon; these controls only fence broker access</b></div>
+  {/if}
 
   {#if session.state === 'killed_budget'}
     <div class="banner crit">

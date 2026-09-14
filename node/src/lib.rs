@@ -31,4 +31,5 @@ pub mod session;
 pub mod store;
 pub mod stream;
 pub mod transfers;
+pub mod ui_bundle;
 pub mod workspace;

@@ -35,7 +35,8 @@ pub enum Applied {
 impl Mirror {
     pub fn apply(&self, sender: &str, channel: &str, payload: Payload) -> Applied {
         match payload {
-            Payload::Hello { node, .. } | Payload::Node(node) => self.apply_node(sender, &node),
+            Payload::Hello { node, contract } => self.apply_node(sender, &node, Some(contract)),
+            Payload::Node(node) => self.apply_node(sender, &node, None),
             Payload::Session(v) => match serde_json::from_value::<SessionRow>(v) {
                 Ok(row) if row.node_id == sender => {
                     let _ = self.store.ensure_peer_node(sender);
@@ -145,6 +146,9 @@ impl Mirror {
                 if p == Applied::Impersonation || r == Applied::Impersonation {
                     return Applied::Impersonation;
                 }
+                if p == Applied::Malformed || r == Applied::Malformed {
+                    return Applied::Malformed;
+                }
                 self.publish_queue();
                 Applied::Stored
             }
@@ -154,6 +158,7 @@ impl Mirror {
             Payload::EventsBatch { .. } => Applied::Unhandled("events_batch"),
             Payload::KeyHandoff { .. } => Applied::Unhandled("key_handoff"),
             Payload::PolicyBundle { .. } => Applied::Unhandled("policy_bundle"),
+            Payload::PolicyReceipt { .. } => Applied::Unhandled("policy_receipt"),
             Payload::CredentialHandoff { .. } => Applied::Unhandled("credential_handoff"),
             // These are handled before the generic mirror path: a hub stores
             // rollups separately and a direct transfer only stages a package.
@@ -202,10 +207,22 @@ impl Mirror {
         }
     }
 
-    fn apply_node(&self, sender: &str, node: &Value) -> Applied {
+    fn apply_node(&self, sender: &str, node: &Value, hello_contract: Option<u32>) -> Applied {
         let Some(mut row) = NodeRow::from_json(node) else {
             return Applied::Malformed;
         };
+        if let Some(contract) = hello_contract {
+            row.wire_contract = Some(contract);
+        } else if row.wire_contract.is_none() {
+            // `Hello.contract` predates node JSON metadata. A later legacy
+            // Node frame must not erase that observed wire fact.
+            row.wire_contract = self
+                .store
+                .get_node(sender)
+                .ok()
+                .flatten()
+                .and_then(|known| known.wire_contract);
+        }
         if row.id != sender {
             return Applied::Impersonation;
         }
@@ -244,14 +261,25 @@ impl Mirror {
         for v in rows {
             match serde_json::from_value::<ReviewRow>(v.clone()) {
                 Ok(r) if r.node_id == sender && r.channel == channel => {
-                    keep.push(r.id.clone());
-                    let _ = self.store.upsert_review_mirror(&r);
+                    match self.store.upsert_review_mirror(&r) {
+                        Ok(true) => keep.push(r.id.clone()),
+                        // The sender owns the payload row, but it tried to
+                        // reuse an ID already bound to another owner/channel.
+                        Ok(false) => return Applied::Impersonation,
+                        Err(error) => {
+                            tracing::warn!(%error, review = %r.id, "mirrored review not stored");
+                            return Applied::Malformed;
+                        }
+                    }
                 }
                 Ok(_) => return Applied::Impersonation,
                 Err(_) => return Applied::Malformed,
             }
         }
-        let _ = self.store.gone_absent_reviews(sender, channel, &keep);
+        if let Err(error) = self.store.gone_absent_reviews(sender, channel, &keep) {
+            tracing::warn!(%error, "mirrored review absence reconciliation failed");
+            return Applied::Malformed;
+        }
         Applied::Stored
     }
 
@@ -263,5 +291,162 @@ impl Mirror {
             self.bus
                 .publish_untapped(Frame::Reviews { waiting: reviews });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn terminal_session() -> SessionRow {
+        SessionRow {
+            id: "report-session".into(),
+            node_id: "owner".into(),
+            channel: "personal".into(),
+            work_item_id: None,
+            repo_path: "/repo".into(),
+            worktree_path: None,
+            branch: "report".into(),
+            harness_id: crate::session::external::HARNESS_ID.into(),
+            harness_version: "external".into(),
+            harness_agent: None,
+            harness_found: None,
+            harness_protocol: None,
+            harness_session_id: None,
+            container_name: None,
+            model: "external".into(),
+            project_id: None,
+            phase: "done".into(),
+            policy_version: None,
+            manifest_digest: None,
+            review_id: None,
+            budget_tokens: 0,
+            tokens_used: 0,
+            cost_usd: None,
+            context_used: None,
+            context_size: None,
+            state: "closed".into(),
+            end_reason: Some("complete".into()),
+            last_error: None,
+            turn_active: 0,
+            draft: None,
+            draft_updated_ms: None,
+            created_ms: now_ms(),
+            started_mono_ms: Some(0),
+            ended_mono_ms: Some(1),
+            updated_ms: now_ms(),
+            archived_ms: None,
+        }
+    }
+
+    fn acknowledged_report() -> ReviewRow {
+        ReviewRow {
+            id: "report".into(),
+            session_id: "report-session".into(),
+            node_id: "owner".into(),
+            channel: "personal".into(),
+            kind: crate::store::reports::KIND.into(),
+            title: "Incident summary".into(),
+            body: "The narrative body".into(),
+            edited_title: None,
+            edited_body: None,
+            provider: "none".into(),
+            target: r#"{"kind":"narrative_report"}"#.into(),
+            diff: String::new(),
+            files: "[]".into(),
+            head_sha: "narrative-version".into(),
+            base_ref: "none".into(),
+            added: 0,
+            removed: 0,
+            state: crate::store::reports::ACKNOWLEDGED.into(),
+            verdict_reason: Some("received".into()),
+            publish_result: None,
+            claimed_ms: None,
+            created_ms: now_ms(),
+            created_mono_ms: 0,
+            resolved_mono_ms: Some(now_ms()),
+            updated_ms: now_ms(),
+            checks_json: None,
+            review_session_id: None,
+            ai_verdict_json: None,
+            revision_patch: None,
+        }
+    }
+
+    fn owner_with_acknowledged_report() -> Store {
+        let owner = Store::open_in_memory().unwrap();
+        owner.ensure_peer_node("owner").unwrap();
+        owner.node_channel_add("owner", "personal").unwrap();
+        owner.insert_session(&terminal_session()).unwrap();
+        owner.insert_review(&acknowledged_report()).unwrap();
+        owner
+    }
+
+    #[test]
+    fn snapshot_keeps_acknowledged_report_and_terminal_session_on_peer() {
+        let owner = owner_with_acknowledged_report();
+
+        let payload = crate::mesh::frames::snapshots(&owner, "owner")
+            .into_iter()
+            .find_map(|(channel, payload)| (channel == "personal").then_some(payload))
+            .unwrap();
+
+        let peer = Arc::new(Store::open_in_memory().unwrap());
+        let mirror = Mirror {
+            store: peer.clone(),
+            bus: Bus::new(),
+            self_id: "peer".into(),
+        };
+        assert_eq!(mirror.apply("owner", "personal", payload), Applied::Stored);
+
+        assert_eq!(
+            peer.get_session("report-session").unwrap().unwrap().state,
+            "closed"
+        );
+        let report = peer.get_review("report").unwrap().unwrap();
+        assert_eq!(report.state, crate::store::reports::ACKNOWLEDGED);
+        assert_eq!(report.verdict_reason.as_deref(), Some("received"));
+        assert!(
+            peer.open_reviews().unwrap().is_empty(),
+            "terminal reports must not re-enter the operator queue"
+        );
+    }
+
+    #[test]
+    fn review_frame_mirrors_acknowledgement_without_reopening_the_queue() {
+        let owner = owner_with_acknowledged_report();
+        let peer = Arc::new(Store::open_in_memory().unwrap());
+        let mirror = Mirror {
+            store: peer.clone(),
+            bus: Bus::new(),
+            self_id: "peer".into(),
+        };
+        let session = owner.get_session("report-session").unwrap().unwrap();
+        assert_eq!(
+            mirror.apply(
+                "owner",
+                "personal",
+                Payload::Session(serde_json::to_value(session).unwrap()),
+            ),
+            Applied::Stored
+        );
+
+        let payload = crate::mesh::frames::to_payloads(
+            &Frame::Reviews {
+                waiting: Vec::new(),
+            },
+            &owner,
+            "owner",
+        )
+        .into_iter()
+        .find_map(|(channel, payload)| (channel == "personal").then_some(payload))
+        .unwrap();
+        assert_eq!(mirror.apply("owner", "personal", payload), Applied::Stored);
+
+        assert_eq!(
+            peer.get_review("report").unwrap().unwrap().state,
+            crate::store::reports::ACKNOWLEDGED
+        );
+        assert!(peer.open_reviews().unwrap().is_empty());
     }
 }

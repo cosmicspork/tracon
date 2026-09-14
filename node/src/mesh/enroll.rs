@@ -347,6 +347,8 @@ pub async fn admit(
             toml,
             sig_hex: sig,
             pubkey_hex: key,
+            rollout_id: None,
+            bundle_sha256: None,
         };
         post_direct(identity, hub_url, node_id, &grantee, &p).await?;
     }
@@ -526,6 +528,8 @@ pub async fn push_policy(identity: &Identity, hub_url: &str) -> Result<usize, En
         toml,
         sig_hex: sig,
         pubkey_hex: key,
+        rollout_id: None,
+        bundle_sha256: None,
     };
     let (st, text) = send(identity, hub_url, "GET", "/v0/members", None).await?;
     let members: Vec<Value> = serde_json::from_value(ok(st, text)?).map_err(local)?;
@@ -651,9 +655,13 @@ pub async fn accept(
                     else {
                         continue;
                     };
-                    if !env.is_direct() || env.verify().is_err() {
+                    let Ok(sender_key) = env.verify() else {
+                        continue;
+                    };
+                    if !env.is_direct() {
                         continue;
                     }
+                    let sender = hex::encode(sender_key);
                     let _ = store.seen_insert(&env.id, now_ms());
                     match env.open_direct(identity) {
                         Ok(Payload::KeyHandoff { channels }) => {
@@ -694,13 +702,36 @@ pub async fn accept(
                             toml,
                             sig_hex,
                             pubkey_hex,
+                            rollout_id,
+                            bundle_sha256,
                         }) => {
+                            if rollout_id.is_some() != bundle_sha256.is_some()
+                                || bundle_sha256.as_deref().is_some_and(|expected| {
+                                    crate::policy::bundle::sha256(&toml) != expected
+                                })
+                            {
+                                progress
+                                    .say("policy bundle refused: rollout metadata does not match");
+                                continue;
+                            }
                             match crate::policy::bundle::install(&toml, &sig_hex, &pubkey_hex, true)
                             {
-                                Ok(p) => progress.say(&format!(
-                                    "policy bundle installed ({} rules)",
-                                    p.rules.len()
-                                )),
+                                Ok(p) => {
+                                    if let Err(error) = store.record_policy_installation(
+                                        &crate::policy::bundle::sha256(&toml),
+                                        Some(&sender),
+                                        rollout_id.as_deref(),
+                                    ) {
+                                        progress.say(&format!(
+                                            "policy installed but source could not be recorded: {error}"
+                                        ));
+                                    } else {
+                                        progress.say(&format!(
+                                            "policy bundle installed ({} rules)",
+                                            p.rules.len()
+                                        ));
+                                    }
+                                }
                                 Err(e) => progress.say(&format!("policy bundle refused: {e}")),
                             }
                         }

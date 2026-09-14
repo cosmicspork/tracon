@@ -164,7 +164,7 @@ pub(super) fn decide(s: &AppState, session_id: &str, channel: &str, api: &Native
     // (`http/qa.rs`, `mcp/mod.rs`): a capability and a forge action must not
     // be able to disagree about which policy is in force.
     let decision = {
-        let policy = s.tools.policy.read().unwrap();
+        let policy = s.tools.policy.read();
         authority::decide(
             s.store(),
             &policy,

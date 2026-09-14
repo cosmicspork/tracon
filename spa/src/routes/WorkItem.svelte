@@ -1,4 +1,5 @@
 <script lang="ts">
+  import EvidenceLinks from '../components/EvidenceLinks.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatBudget } from '../lib/format'
@@ -135,6 +136,14 @@
 
   {#if item.body.trim()}
     <div class="body">{item.body}</div>
+  {/if}
+
+  {#if sessions.length === 0}
+    <EvidenceLinks workItemId={item.id} channel={item.channel} />
+  {:else}
+    {#each sessions as session (session.id)}
+      <EvidenceLinks sessionId={session.id} channel={item.channel} />
+    {/each}
   {/if}
 
   {#if discovered.length}

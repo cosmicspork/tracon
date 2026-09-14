@@ -111,6 +111,12 @@ impl AuthState {
         self.token_hash.lock().unwrap().clone()
     }
 
+    /// Whether a token exists that can explicitly step a caller up to
+    /// administrator access. This does not disclose the token or its hash.
+    pub fn token_configured(&self) -> bool {
+        self.configured().is_some()
+    }
+
     fn set_configured(&self, hash: Option<String>) {
         *self.token_hash.lock().unwrap() = hash;
     }
@@ -140,13 +146,16 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// A path the guard lets through unauthenticated when a token is configured:
-/// the login endpoint itself, and the SPA shell and its assets. The shell is
-/// open-source code and holds nothing; serving it is what lets the login screen
-/// render and lets a notification's deep link open at all. Every `/api` path
-/// other than login stays gated.
+/// login, the non-sensitive administrator access-status probe, and the SPA
+/// shell/assets. The shell is open-source code and the status probe contains
+/// no secret; serving them is what lets a remote login screen render. Every
+/// other `/api` path stays gated.
 fn is_public(req: &Request) -> bool {
     let path = req.uri().path();
     if path == "/api/login" {
+        return true;
+    }
+    if req.method() == axum::http::Method::GET && path == "/api/admin/access" {
         return true;
     }
     req.method() == axum::http::Method::GET && !path.starts_with("/api/")
@@ -187,6 +196,54 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Loopback {
         Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "this is done at the node itself: open the interface on the node's own machine",
+        ))
+    }
+}
+
+/// An explicitly authenticated administrator. Unlike the ordinary operator
+/// middleware, this extractor never treats a loopback connection as a
+/// credential: callers present either a live operator-session cookie or the
+/// configured bearer token.
+pub struct Administrator;
+
+/// Check the credential portions shared by the extractor and the deliberately
+/// non-sensitive access-status endpoint. A live cookie stops being valid when
+/// the configured operator token is removed, so deleting the token closes both
+/// doors immediately.
+pub(crate) fn administrator_authenticated(
+    auth: &AuthState,
+    store: &Store,
+    headers: &HeaderMap,
+) -> bool {
+    let Some(configured) = auth.configured() else {
+        return false;
+    };
+    if let Some(secret) = cookie_value(headers, COOKIE) {
+        return matches!(
+            store.auth_session_live(&hash(secret), now_ms()),
+            Ok(Some(_))
+        );
+    }
+    bearer(headers).is_some_and(|token| hash(token) == configured)
+}
+
+impl axum::extract::FromRequestParts<super::api::AppState> for Administrator {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &super::api::AppState,
+    ) -> Result<Self, Self::Rejection> {
+        if administrator_authenticated(&state.auth, state.store(), &parts.headers) {
+            return Ok(Administrator);
+        }
+        Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            if state.auth.token_configured() {
+                "administrator authentication required; sign in with the operator token"
+            } else {
+                "administrator access needs an operator token configured on this node"
+            },
         ))
     }
 }
@@ -485,6 +542,47 @@ mod tests {
         assert_eq!(bearer(&h), Some("tok"));
         let h = headers_with(header::AUTHORIZATION, "Basic tok");
         assert_eq!(bearer(&h), None);
+    }
+
+    fn request(method: axum::http::Method, path: &str) -> Request {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn only_the_non_sensitive_admin_status_probe_is_public() {
+        assert!(is_public(&request(
+            axum::http::Method::GET,
+            "/api/admin/access",
+        )));
+        assert!(!is_public(&request(
+            axum::http::Method::POST,
+            "/api/admin/access",
+        )));
+        assert!(!is_public(&request(
+            axum::http::Method::GET,
+            "/api/admin/mesh",
+        )));
+    }
+
+    #[test]
+    fn administrator_requires_an_explicit_bearer_credential() {
+        let store = Store::open_in_memory().unwrap();
+        let auth = AuthState::new("127.0.0.1".into(), Some(hash("operator-token")));
+        // There is deliberately no loopback input to this check: a local
+        // address cannot become an administrator credential by accident.
+        assert!(!administrator_authenticated(
+            &auth,
+            &store,
+            &HeaderMap::new()
+        ));
+        let headers = headers_with(header::AUTHORIZATION, "Bearer operator-token");
+        assert!(administrator_authenticated(&auth, &store, &headers));
+        let wrong = headers_with(header::AUTHORIZATION, "Bearer another-token");
+        assert!(!administrator_authenticated(&auth, &store, &wrong));
     }
 
     #[test]

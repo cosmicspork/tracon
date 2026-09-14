@@ -303,6 +303,27 @@ request is asked: the failure mode of broken policy is more questions, never few
 Bundles are signed with a key never present on the hub, so a compromised hub can
 serve stale policy but not new policy.
 
+**Administration is an explicit operator capability, not a loopback exemption.**
+Mesh admission, removal, and hub-key sharing accept authenticated administrators
+from the remote UI. Policy signing/install and host service actions additionally
+require loopback. Service actions name only the supported fixed supervisor,
+refuse active work or ambiguous process identity, and report scheduling rather
+than pretending a restart has already succeeded.
+
+**A policy preview is a signed artifact with a fixed baseline.** Application
+compares the preview's expected installed hash while holding the same policy lock
+used for disk installation, cache replacement, and provenance recording. Refresh
+cannot advance an old preview to a new baseline. Status reports verified installed
+files separately from the actual running policy; a disk read cannot establish a
+running hash. Initialization refuses any existing or partial signing installation.
+
+**Sending a policy is not installing it.** Durable rollout targets become applied
+only on an authenticated receipt matching sender, target, rollout, and exact
+bundle hash. Offline, sent, and legacy targets remain unconfirmed; retry uses the
+stored signed bytes. Optional application/wire/policy metadata is additive to
+node advertisements without changing the wire contract. Missing metadata stays
+unknown; neither a receipt nor an upgrade silently replaces a trust root.
+
 ### Authority grants
 
 A grant is a local operator decision layered under signed policy, not a
@@ -315,7 +336,7 @@ take effect immediately, never at the next poll. A grant is scoped to one target
 (a pull request, a merge request, an issue's exact transition, a deployment job)
 and, for merge, publish, and deploy, the one revision it covers; the target
 moving to a later sha drops the grant rather than carrying it forward silently.
-Grants are made and revoked one at a time from Settings' Authority panel.
+Grants are made and revoked one at a time in Settings → Permissions & policies.
 
 One grant is not a side effect but a surface: **`terminal`**, an interactive PTY
 inside one session's workspace. The harness's `POST /pty` spawns an arbitrary
@@ -366,6 +387,20 @@ says no at submission time. An operator's hand-edit travels back as a request fo
 changes: the agent applies it and resubmits, and **the agent remains the only
 writer to the worktree.** Every decision is recorded against the revision it
 decided, with the requirements pinned as they were at submission.
+
+**Narrative reports are not publication candidates.** `submit_report` creates an
+owner/channel/session-bound report without Git or a repository. Acknowledgement
+and requests for changes compare the inspected content hash atomically; mirrors
+cannot change ownership, channel, session, or review kind. An acknowledged report
+continues to replicate, while code publication and review-session creation reject
+report IDs. Notification delivery records only push-service acceptance, never
+human receipt; `report_status` exposes the separate operator decision.
+
+**Evidence reads preserve ownership.** Candidate lists and detail requests carry
+their runner/owner and ordinary channel. Mesh handlers authenticate both channel
+memberships, verify the candidate's actual channel and owner, refuse third-node
+relays, and bound responses. Peer UI detail is read-only; it never turns a remote
+ID into a local deploy, build, or browser action.
 
 **Publication is two side effects the node cannot take back, so it writes down
 what it is about to do before it does it.** Approval imports the candidate into a
@@ -588,6 +623,24 @@ Every node serves the same embedded SPA; a client is a matter of shell.
   and is stripped from anything the app logs. Nothing about this depends on the page
   behaving; it is the window's grants and its navigation handler, both asserted by
   test against the manifest.
+- **A browser gets the same isolation without a window to put it in.** The desktop
+  app can hand OpenCode's UI a window with its own capability; a phone cannot, and an
+  installed web app that opened the system browser would have given the session away
+  to a context it no longer controls. So the interface hosts the native view itself,
+  at `/sessions/{id}/opencode` — a route inside the app's own `scope`, holding a
+  cross-origin frame on the node's OpenCode UI origin. The isolation is that origin,
+  exactly as it is for the desktop window: no `sandbox` (a sandboxed frame's origin
+  is opaque, which that listener refuses outright), no message bridge, nothing
+  delegated, and a status bar read from tracon's own session API rather than from the
+  frame. Both policies name the other: the interface's `frame-src` names the UI
+  origin, the UI origin's `frame-ancestors` names the interface.
+  Being framed changes one thing on the node. The cookie the view's own bootstrap
+  sets is third-party from the browser's point of view, and third-party cookies are
+  blocked by default on phones — so the bootstrap says whether it is framed, and a
+  framed exchange is answered with a `Partitioned` cookie (CHIPS) instead of
+  `SameSite=Strict`. That keys the cookie to tracon's own site as the page around it,
+  which is stricter than what it replaces rather than looser: the origin guard already
+  required a matching `Origin` on everything that writes.
 - The interface talks only to the node that served it; that node mirrors peers and
   forwards commands to owners. A verdict executes on the owner, because staleness
   and publishing need the owner's worktree and broker.

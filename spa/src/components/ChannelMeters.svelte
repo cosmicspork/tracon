@@ -12,7 +12,7 @@
   }
 </script>
 
-<div class="h4">Today per channel <b>gateway tokens · resets at local midnight</b><a class="lnk r" href="/metrics">Metrics</a></div>
+<div class="h4">Today per channel <b>gateway tokens · resets at local midnight</b><a class="lnk r" href="/metrics">Usage</a></div>
 <div class="meters">
   {#each channels as c (c.name)}
     <div class="meter {c.ceiling.state}">

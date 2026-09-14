@@ -6,7 +6,7 @@
 # Anything not matched here is asked, so adding a rule can only ever reduce the
 # number of interruptions, never widen what an agent may do unattended.
 
-version = 6
+version = 7
 
 # --- 1. Worktree, not the main checkout -------------------------------------
 # Structurally true already: the harness only ever sees its own worktree at
@@ -103,19 +103,21 @@ kinds = ["read", "think"]
 # --- Brokered tools ----------------------------------------------------------
 # What the node does on the agent's behalf is decided here too, before the
 # broker is touched. A tool is allowed by name; one not named is asked. The
-# verbs that would merge, transition, or deploy are not tools at all, so there
-# is nothing to deny: the surface is the enforcement.
+# merge, transition, and deploy tools also require narrow authority grants.
+# A grant never overrides a signed policy denial.
 
 [[rule]]
 id = "brokered-reads"
 verdict = "allow"
-reason = "A read-only query or lookup, a search, a pipeline or check read, or a review submission changes nothing the operator has not agreed to."
+reason = "A read-only query or lookup, a search, a pipeline or check read, or a report/review submission that only enters the operator queue changes nothing the operator has not agreed to."
 kinds = ["tool"]
 matches = [
     "query",
     "describe",
     "submit_review",
     "review_status",
+    "submit_report",
+    "report_status",
     "review_verdict",
     "mr_status",
     "pipeline_status",

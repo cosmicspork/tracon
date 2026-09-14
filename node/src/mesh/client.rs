@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use parking_lot::RwLock;
 use proto::auth::signed_headers;
 use proto::frame::{Envelope, Payload, MESH_CHANNEL};
 use proto::keyring::Keyring;
@@ -77,7 +78,7 @@ pub struct MeshClient {
     undecryptable: AtomicU64,
     /// Peer node id → X25519 public key hex, from the member list and hellos.
     peers: Mutex<HashMap<String, String>>,
-    policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
+    policy: Arc<RwLock<crate::policy::Policy>>,
     /// Invitations this node has open, by code.
     invites: Mutex<HashMap<String, enroll::Invite>>,
     /// Commands this node sent and is waiting on, by command id.
@@ -97,7 +98,7 @@ impl MeshClient {
         store: Arc<Store>,
         bus: Bus,
         cfg: Arc<Config>,
-        policy: Arc<std::sync::RwLock<crate::policy::Policy>>,
+        policy: Arc<RwLock<crate::policy::Policy>>,
     ) -> Arc<Self> {
         let hub_url = hub_url.trim_end_matches('/').to_string();
         let self_id = identity.node_id();
@@ -214,7 +215,78 @@ impl MeshClient {
         tap_tx
     }
 
-    // ------------------------------------------------------------ outbound
+    /// Queue the exact immutable bundle retained for a rollout to every target
+    /// that has not authenticated its installation. Queuing is recorded as
+    /// `sent`, never as `applied`; only [`Payload::PolicyReceipt`] changes that.
+    pub fn dispatch_policy_rollout(&self, rollout_id: &str) -> Result<(), HubError> {
+        let rollout = self
+            .store
+            .policy_rollout(rollout_id)
+            .map_err(|e| HubError::Local(e.to_string()))?
+            .ok_or_else(|| HubError::Local(format!("unknown policy rollout {rollout_id}")))?;
+        for target in self
+            .store
+            .policy_rollout_retry_targets(rollout_id)
+            .map_err(|e| HubError::Local(e.to_string()))?
+        {
+            if !self.peer_reachable(&target.node_id) {
+                let _ = self.store.mark_policy_rollout_offline(
+                    rollout_id,
+                    &target.node_id,
+                    "Peer is offline or the mesh is not connected; retry when it is reachable.",
+                );
+                continue;
+            }
+            let payload = Payload::PolicyBundle {
+                toml: rollout.toml.clone(),
+                sig_hex: rollout.sig_hex.clone(),
+                pubkey_hex: rollout.pubkey_hex.clone(),
+                rollout_id: Some(rollout.id.clone()),
+                bundle_sha256: Some(rollout.bundle_sha256.clone()),
+            };
+            match self.enqueue_direct(MESH_CHANNEL, &target.node_id, &payload) {
+                Ok(()) => {
+                    let _ = self
+                        .store
+                        .mark_policy_rollout_sent(rollout_id, &target.node_id);
+                }
+                Err(error) => {
+                    let _ = self.store.mark_policy_rollout_offline(
+                        rollout_id,
+                        &target.node_id,
+                        &format!("Could not queue direct delivery: {error}"),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Send an authenticated receiver result back to the node that sent a
+    /// rollout. Old sources omit rollout metadata, so no speculative receipt
+    /// is generated for them.
+    fn send_policy_receipt(
+        &self,
+        channel: &str,
+        sender: &str,
+        rollout_id: Option<&str>,
+        bundle_sha256: Option<&str>,
+        applied: bool,
+        detail: Option<String>,
+    ) {
+        let (Some(rollout_id), Some(bundle_sha256)) = (rollout_id, bundle_sha256) else {
+            return;
+        };
+        let payload = Payload::PolicyReceipt {
+            rollout_id: rollout_id.to_string(),
+            bundle_sha256: bundle_sha256.to_string(),
+            applied,
+            detail,
+        };
+        if let Err(error) = self.enqueue_direct(channel, sender, &payload) {
+            tracing::warn!(to = %sender, error = %error, "policy receipt could not be queued");
+        }
+    }
 
     /// Convert a locally published frame into sealed envelopes in the outbox.
     pub fn on_frame(&self, frame: &Frame) {
@@ -553,16 +625,109 @@ impl MeshClient {
                 toml,
                 sig_hex,
                 pubkey_hex,
+                rollout_id,
+                bundle_sha256,
             } if env.is_direct() => {
-                match crate::policy::bundle::install(toml, sig_hex, pubkey_hex, false) {
-                    Ok(p) => {
-                        tracing::info!(from = %sender, rules = p.rules.len(), "policy bundle installed");
-                        *self.policy.write().unwrap() = p;
+                let metadata_complete = rollout_id.is_some() == bundle_sha256.is_some();
+                let hash_matches = bundle_sha256
+                    .as_deref()
+                    .is_none_or(|expected| crate::policy::bundle::sha256(toml) == expected);
+                if !metadata_complete || !hash_matches {
+                    let detail =
+                        "rollout metadata is incomplete or does not match the signed bundle";
+                    tracing::warn!(from = %sender, "{detail}");
+                    self.send_policy_receipt(
+                        &env.channel,
+                        sender,
+                        rollout_id.as_deref(),
+                        bundle_sha256.as_deref(),
+                        false,
+                        Some(detail.into()),
+                    );
+                    self.note_refusal(format!("policy from {sender}: {detail}"));
+                    return Opened::Ignored;
+                }
+                // Keep the policy cache locked across the on-disk compare and
+                // install: policy administration holds the same lock, so
+                // neither path can leave a newer file paired with stale rules.
+                let installed = {
+                    let mut cached = self.policy.write();
+                    match crate::policy::bundle::install(toml, sig_hex, pubkey_hex, false) {
+                        Ok(policy) => {
+                            tracing::info!(from = %sender, rules = policy.rules.len(), "policy bundle installed");
+                            *cached = policy;
+                            let sha256 = crate::policy::bundle::sha256(toml);
+                            let identity = pubkey_hex.trim().to_ascii_lowercase();
+                            if let Err(error) = self.store.record_policy_installation(
+                                &sha256,
+                                Some(sender),
+                                rollout_id.as_deref(),
+                            ) {
+                                tracing::error!(error = %error, "installed policy provenance was not recorded");
+                            }
+                            if let Err(error) = self.store.set_node_policy_metadata(
+                                &self.node_id(),
+                                Some(&identity),
+                                Some(&sha256),
+                                true,
+                            ) {
+                                tracing::error!(error = %error, "installed policy compatibility was not recorded");
+                            }
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    }
+                };
+                match installed {
+                    Ok(()) => {
+                        self.send_policy_receipt(
+                            &env.channel,
+                            sender,
+                            rollout_id.as_deref(),
+                            bundle_sha256.as_deref(),
+                            true,
+                            None,
+                        );
                         return Opened::Applied;
                     }
-                    Err(e) => {
-                        tracing::warn!(from = %sender, error = %e, "policy bundle refused");
-                        self.note_refusal(format!("policy from {sender}: {e}"));
+                    Err(error) => {
+                        tracing::warn!(from = %sender, error = %error, "policy bundle refused");
+                        self.send_policy_receipt(
+                            &env.channel,
+                            sender,
+                            rollout_id.as_deref(),
+                            bundle_sha256.as_deref(),
+                            false,
+                            Some(error.to_string()),
+                        );
+                        self.note_refusal(format!("policy from {sender}: {error}"));
+                        return Opened::Ignored;
+                    }
+                }
+            }
+            Payload::PolicyReceipt {
+                rollout_id,
+                bundle_sha256,
+                applied,
+                detail,
+            } if env.is_direct() => {
+                match self.store.record_policy_receipt(
+                    rollout_id,
+                    sender,
+                    bundle_sha256,
+                    *applied,
+                    detail.as_deref(),
+                ) {
+                    Ok(true) => {
+                        tracing::info!(from = %sender, rollout = %rollout_id, applied, "policy receipt recorded");
+                        return Opened::Applied;
+                    }
+                    Ok(false) => {
+                        tracing::warn!(from = %sender, rollout = %rollout_id, "policy receipt did not match a selected target");
+                        return Opened::Ignored;
+                    }
+                    Err(error) => {
+                        tracing::warn!(from = %sender, error = %error, "policy receipt could not be recorded");
                         return Opened::Ignored;
                     }
                 }
@@ -773,6 +938,11 @@ impl MeshClient {
                     last_seen_ms: None,
                     reachable: 0,
                     providers_json: None,
+                    app_version: None,
+                    wire_contract: None,
+                    policy_identity: None,
+                    policy_sha256: None,
+                    policy_receipt_v1: None,
                 });
             }
         }

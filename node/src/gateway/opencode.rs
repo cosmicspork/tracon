@@ -558,6 +558,33 @@ pub(super) fn is_terminal_connect(path: &[String]) -> bool {
     }
 }
 
+/// Whether a first path segment is one the route matrix knows about at all.
+///
+/// Added for the native UI's origin (`http::ui`), which serves a static bundle
+/// at `/` and has to decide, for a path that is not in that bundle, whether it
+/// is an API call the app is making or a path nobody owns. "Is it on the
+/// matrix" is the only honest way to ask that, and this is the matrix. The
+/// answer is deliberately coarse — a `true` here means only that `classify`
+/// gets to see the request, and `classify` refuses everything it does not
+/// recognise. A `false` is a 404 on that origin, which is what keeps the UI
+/// origin from being a catch-all proxy into the harness (finding 3).
+pub fn is_api_root(segment: &str) -> bool {
+    if ROUTES
+        .iter()
+        .any(|(_, pattern, _)| pattern.first().is_some_and(|first| *first == segment))
+    {
+        return true;
+    }
+    // The deny list is not in `ROUTES`; `forbidden_tree` names whole subtrees.
+    // They belong here too, or the UI origin would answer 404 for a route the
+    // gateway has a reason for — and "nobody owns this path" and "this is
+    // refused because it would re-point the harness" are different answers.
+    // Observed: the app calls `GET /experimental/resource` at startup, and a
+    // bare 404 told the operator nothing.
+    forbidden_tree(&Method::GET, &[segment.to_string(), "probe".to_string()]).is_some()
+        || forbidden_tree(&Method::POST, &[segment.to_string(), "probe".to_string()]).is_some()
+}
+
 /// A session id in the path that is not this session's. One Basic credential
 /// is authority over every session on the server (finding 5), so the path is
 /// the only thing that keeps one session's UI out of another's transcript.
@@ -1187,7 +1214,7 @@ async fn mediate(
 
         Mediation::Policy(action) => {
             let decision = {
-                let policy = s.manager.policy().read().unwrap();
+                let policy = s.manager.policy().read();
                 policy.decide(&PolicyRequest {
                     channel,
                     kind: Some(API_KIND),
@@ -1603,6 +1630,64 @@ async fn forward(
         .unwrap_or_else(|_| answer(StatusCode::BAD_GATEWAY, "the harness answered unusably"))
 }
 
+// ---------------------------------------------------------------------------
+// The route trace
+// ---------------------------------------------------------------------------
+
+/// The class names the native UI's route trace
+/// (`docs/reference/opencode-v1.18.30/ui-route-trace.tsv`) writes down, and the
+/// vocabulary `node/tests/opencode_route_trace.rs` re-derives every recorded
+/// row from. They are the matrix's own [`Class`] made into strings, with one
+/// split: [`Mediation::Unavailable`] is named apart from the rest of
+/// [`Class::Mediated`] because it is a row the matrix *has* and still refuses,
+/// which is a different fact from a route the matrix never heard of.
+pub mod trace {
+    pub const READABLE: &str = "readable";
+    pub const STREAM: &str = "stream";
+    pub const MEDIATED: &str = "mediated";
+    pub const UNAVAILABLE: &str = "unavailable";
+    pub const FORBIDDEN: &str = "forbidden";
+    /// What the trace records for a call nothing on this node claimed, and
+    /// what a recorded row may never be. Deny-by-default means the matrix
+    /// always has an answer for a request that reaches it, so the only ones
+    /// here are the requests that do not: a path that does not normalise, a
+    /// method that is not one, and a path the UI origin answered 404 without
+    /// asking (`http::ui::trace::UNKNOWN`).
+    pub const UNKNOWN: &str = "unknown";
+}
+
+/// What the matrix makes of one (method, path), named for the route trace.
+///
+/// The same `classify` the handler runs, reached from a test with no node
+/// behind it — so a checked-in trace can be re-derived from the matrix in CI
+/// with no browser, no harness, and no bundle on the machine. A path that does
+/// not normalise, or a method that is not one, is [`trace::UNKNOWN`]: the
+/// handler refuses both, and the trace must not launder either into a class.
+pub fn trace_class(method: &str, path: &str) -> &'static str {
+    let Ok(method) = Method::from_bytes(method.as_bytes()) else {
+        return trace::UNKNOWN;
+    };
+    let Some(path) = super::model::normalised(path.trim_start_matches('/')) else {
+        return trace::UNKNOWN;
+    };
+    match classify(&method, &path).0 {
+        Class::Readable => trace::READABLE,
+        Class::Stream => trace::STREAM,
+        Class::Mediated(Mediation::Unavailable(_)) => trace::UNAVAILABLE,
+        Class::Mediated(_) => trace::MEDIATED,
+        Class::Forbidden(_) => trace::FORBIDDEN,
+    }
+}
+
+/// Whether a class the trace recorded is one the gateway answers by refusing,
+/// with a 403 and a `gateway_refused` event behind it. Both halves of the deny
+/// list end there: the trees and rows `classify` calls [`Class::Forbidden`],
+/// and the rows it mediates into [`Mediation::Unavailable`], which `mediate`
+/// refuses through the same `refuse`.
+pub fn trace_class_refuses(class: &str) -> bool {
+    matches!(class, trace::FORBIDDEN | trace::UNAVAILABLE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1776,6 +1861,46 @@ mod tests {
             requested_model(&split).as_deref(),
             Some("anthropic/claude-x")
         );
+    }
+
+    /// The trace's names are the matrix's verdicts, not a second opinion.
+    #[test]
+    fn the_trace_names_what_the_matrix_decided() {
+        assert_eq!(trace_class("GET", "/global/health"), trace::READABLE);
+        assert_eq!(
+            trace_class("GET", "/api/session/ses_x/event"),
+            trace::STREAM
+        );
+        assert_eq!(
+            trace_class("POST", "/api/session/ses_x/prompt"),
+            trace::MEDIATED
+        );
+        assert_eq!(
+            trace_class("POST", "/session/ses_x/fork"),
+            trace::UNAVAILABLE
+        );
+        assert_eq!(trace_class("PATCH", "/config"), trace::FORBIDDEN);
+        assert_eq!(
+            trace_class("POST", "/session/ses_x/share"),
+            trace::FORBIDDEN
+        );
+        // A route the matrix never heard of, and a method it does not have for
+        // a route it does: refused, not unplaced. Deny-by-default means the
+        // matrix always has an answer, so `unknown` is never the gateway's.
+        assert_eq!(trace_class("GET", "/not/a/route"), trace::FORBIDDEN);
+        assert!(trace_class_refuses(trace_class(
+            "PUT",
+            "/api/session/ses_x/prompt"
+        )));
+        // Only a request the handler would not get as far as classifying.
+        assert_eq!(trace_class("GET", "/../etc/passwd"), trace::UNKNOWN);
+        assert_eq!(trace_class("WHAT EVER", "/global/health"), trace::UNKNOWN);
+        // Both halves of the deny list are refusals; nothing else is.
+        assert!(trace_class_refuses(trace::FORBIDDEN));
+        assert!(trace_class_refuses(trace::UNAVAILABLE));
+        assert!(!trace_class_refuses(trace::READABLE));
+        assert!(!trace_class_refuses(trace::MEDIATED));
+        assert!(!trace_class_refuses(trace::STREAM));
     }
 
     #[test]

@@ -7,6 +7,9 @@
 - Keep untrusted execution isolated and credentials outside agent-owned state.
 - Prefer useful environments, clear evidence, and human intervention over more machinery.
 - Record scoped decisions and supersede them explicitly; keep harnesses replaceable.
+- Own the data: portable, independently readable exports; no node required to inspect them.
+- Optimize useful work per interruption, not agent count; support independent installations,
+  not multi-user tenancy.
 
 Completed items are removed from this file when they land; the changelog and the
 reference documents under `docs/reference/` carry the history.
@@ -245,10 +248,38 @@ refer to that manifest's table.
         and rebuilt by `tracon doc reindex` returns the same top-k for the same queries; a
         session package reads back off disk with `tracon session show`, no node running.
 - [ ] **Gate D — browser, desktop, and installed mobile PWA.**
-  - [ ] Dedicated UI origin served by tracon from the pinned bundle, catch-all never proxied,
+  - [x] Dedicated UI origin served by tracon from the pinned bundle, catch-all never proxied,
         tracon CSP replacing `connect-src *` (finding 3); short-lived single-use bootstrap
         exchanged for an HttpOnly cookie; no password in the browser (finding 4); Origin/CSRF
         on mutations and WebSocket upgrades.
+        `[ui] opencode_listen`/`opencode_url` bind a second listener (`node/src/http/ui.rs`)
+        that serves the vendored bundle at `/` and routes the app's API calls into the #195
+        gateway for the one session its cookie names. The bundle is built by
+        `containers/opencode-ui/build.sh` from the pinned tag, is not in git, and is verified
+        against the tree digest in `containers/opencode-ui/DIGEST` over the bytes about to be
+        served — a tree that does not match is not served. "Open in OpenCode" mints a
+        single-use 60-second capability bound to (operator login, session, this origin) and
+        opens it in a **fragment**; an inline bootstrap tracon splices into `index.html`
+        strips the fragment, exchanges it at `POST /boot` for a host-only HttpOnly
+        `SameSite=Strict` cookie, and only then loads upstream's module — so no upstream code
+        ever sees the capability. The operator cookie is not read on this origin and the UI
+        cookie is not a credential on the operator's; both asserted. Every request re-reads
+        the session and the operator login, so ending either revokes the window.
+        **Proven in a browser** (`node/tests/opencode_ui.rs`, 18 cases plus a
+        `TRACON_UI_SMOKE=1` harness driven with headless Chromium over CDP): against the real
+        bundle and the pinned binary, the session page renders, **no request left the UI
+        origin**, **no request carried an `Authorization` header**, and `localStorage` holds
+        no password and no server record — which settles §8 #8's open question, that the app
+        is usable with `password: undefined`.
+        **Still to do here:** the PTY WebSocket upgrade is held to the same Origin rule but
+        the gateway's connect route still answers 501 (the ticket exchange is its own row);
+        `connect-src 'self'` will need the `wss://` form of this origin when it lands. The
+        SPA's "Open in OpenCode" control (#205) was desktop-only — gated on `isTauri()`,
+        because opening a *window* is the wrapper's to do — and the mobile shell row below is
+        where a browser got its own way in, off the same mint route
+        (`POST /api/sessions/{id}/opencode-boot`) and into an in-scope frame rather than a tab.
+        That row also added a `framed` flag to `POST /boot`: the cookie this origin sets is
+        third-party inside that frame, and `SameSite=Strict` would never arrive.
   - [x] Desktop: an unprivileged window with no node-management commands; navigation limited
         to the UI origin. A second window labelled `opencode`, declared in `tauri.conf.json`
         with `"create": false` and built on demand from a boot URL the node mints
@@ -303,6 +334,131 @@ refer to that manifest's table.
         ledger — what is recorded is that one was opened, with what shell and where, and its
         byte counts and duration; output capture exists, is off, and is labelled.
   - [ ] Native UI route trace captured and unknown mutations shown to fail closed.
+        **Still to do here:** the same against the real UI origin, which lands in the row
+        above — the wrapper calls `POST /api/sessions/{id}/opencode-boot` and that route now
+        exists, so the feature detection should find it; an end-to-end run of the two
+        together is unexercised. And the macOS leg — bundle, window behaviour and the Edit
+        menu — which is the operator's to run.
+  - [x] Installed mobile PWA: in-scope shell, isolated native view, third-party storage
+        blocked, background/resume recovery, notification deep links.
+        `/sessions/{id}/opencode` (`spa/src/routes/OpencodeShell.svelte`) is a route inside the
+        manifest's `scope` that hosts the native view in a cross-origin `<iframe>` at the UI
+        origin's boot URL, so an installed app never hands the session to the system browser.
+        "Open in OpenCode" is no longer desktop-only: Tauri still opens #205's window, and
+        every other client navigates to this route — never a new tab, which on a phone is the
+        handover the route exists to prevent. The capability goes into the frame's `src` and
+        nowhere else. `spa/src/lib/opencode.ts` refuses a boot URL whose token is in the query
+        (where a log would keep it), whose origin is not the one the node named, or which
+        shares tracon's own — the isolation *is* the origin — and `redact` is what every
+        message about one goes through, so it reaches no history entry, error or console.
+        No `sandbox`: a sandboxed frame's origin is opaque and the UI origin refuses
+        `Origin: null` outright, so the attribute would break the boot exchange without
+        tightening anything. No `postMessage` bridge; the status chip reads tracon's own
+        session API, which this page is already authorised for. Nothing delegated by `allow`,
+        and `referrerpolicy=no-referrer`. `frame-src` on the operator origin now names the UI
+        origin alongside the preview origin, and the UI origin's `frame-ancestors` already
+        names the operator's: both sides state the relationship and neither is assumed.
+        **Third-party storage.** The shell is a page on tracon's origin and the view is a page
+        on the node's other origin, so the cookie the view's own `POST /boot` sets is
+        third-party — and third-party cookies are blocked by default on the phones this is
+        for. `/boot` now takes a `framed` flag that the spliced bootstrap reports
+        (`window.top !== window.self`, a throw read as framed), and a framed boot is answered
+        with `Secure; SameSite=None; Partitioned` (CHIPS) where a window still gets
+        `SameSite=Strict`. The loosening that `SameSite=None` would otherwise be is already
+        answered by `origin_guard`, which requires a matching `Origin` on every mutation and
+        every WebSocket upgrade; `Partitioned` then keys the jar to the *top-level* site, so
+        the cookie exists only while tracon's own origin is the page around it — a stronger
+        statement than `Strict` made, because it holds against a same-site attacker too.
+        `Secure` is carried even on loopback, where this listener is plain HTTP: loopback is a
+        potentially trustworthy origin and the browser accepts it, measured rather than
+        assumed.
+        **Proven in a browser** (`node/tests/opencode_pwa_shell.rs`, four cases; Chromium at
+        390×844 with `--test-third-party-cookie-phaseout`, driven by
+        `spa/tests/opencode-shell-driver.mjs`, skipped where the browser or the SPA's dev
+        dependencies are absent): two genuinely cross-site loopback origins, `127.0.0.1` and
+        `127.0.0.2` — distinct sites because neither has a registrable domain, where two
+        *ports* of one host would not be, which is what an earlier attempt at this got wrong —
+        with the real shell, the real mint route, the real bootstrap, the real cookie and the
+        real gateway. The framed view authenticates with third-party cookies blocked and its
+        mediated call returns 200; the shell's URL stays on the in-scope route and never
+        carries the capability; there is exactly one frame and it is the other origin; the
+        frame carries no `sandbox`, an empty `allow` and `no-referrer`; the cookie is absent
+        from the origin's unpartitioned jar; and nothing overflows horizontally at 390px.
+        The **control** is what makes that mean anything: the same flow with the `Set-Cookie`
+        downgraded in the test's own middleware to what #205/#206 send is refused — 401 at the
+        gateway, `refused:401` on the page — so the pair is cross-site and the partitioned run
+        is not passing for a boring reason. A fourth case does the exchange on the wire with
+        no browser at all, so a browser refusal is visibly the browser's.
+        Upstream's bundle is stood in for and only there: it is 34 MiB, not in git, and not
+        what any of this is about. The UI origin's `/` serves a two-line page with tracon's
+        *own* `splice_bootstrap` applied, whose module makes one authorised call through the
+        gateway and writes the answer where the driver reads it.
+        **Background and resume.** On `visibilitychange`/`pageshow` the shell re-reads the
+        session from tracon's API rather than trusting what is on screen. A session that ended
+        while the app slept is said so, and the offer is the way back rather than a reconnect
+        that cannot work — asserted in the browser with the session ended from outside the
+        page between load and resume, so it is an ordering and not a race. A capability past
+        the node's own cookie lifetime — returned by the mint route as `cookie_ttl_ms`, since
+        an `HttpOnly` cookie cannot be read from the page — offers **Reconnect**, which mints
+        a fresh one.
+        **Service worker.** Cache key `v3`. `/api/**` and `/boot` pass straight through and
+        are never cached — a replayed `/boot` response would be a capability the node has
+        already spent — the UI origin is another origin and is never intercepted, and the
+        previous version's caches are dropped on activate so an existing install updates
+        without being reinstalled. All four asserted in `spa/src/lib/sw.test.ts`.
+        **Deep links.** `notify::Kind::Opencode` and `Notification::opencode` put a push about
+        an OpenCode session on the shell route, and the test reads `scope` out of
+        `spa/public/manifest.webmanifest` itself — compiled in, so moving the manifest fails
+        the build — rather than asserting about a string. Nothing produces one yet; the
+        producer is the PTY and native-UI work in the rows below.
+        **Still to do here:** the same run against the *real* pinned bundle, which needs
+        `containers/opencode-ui/build.sh` to have been run on the machine — the browser case
+        above stands in for upstream's JavaScript and asserts nothing about it. And the
+        physical devices, which are the operator's: installing from the always-on node over
+        HTTPS on iOS Safari and Android Chrome, and confirming the framed view authenticates
+        with cross-site tracking prevention on. Safari is the open one — its partitioned-cookie
+        story is not Chromium's, and if the frame is refused there the candidate fix is
+        `document.requestStorageAccess` from inside the frame before `POST /boot`, which needs
+        a user gesture and therefore a visible "Show OpenCode" control in the frame rather
+        than a silent boot.
+  - [ ] PTY only as an explicit workspace-scoped capability with a gateway-minted owner-bound
+        ticket (finding 7).
+  - [x] Native UI route trace captured and unknown mutations shown to fail closed.
+        `docs/reference/opencode-v1.18.30/ui-route-trace.tsv` is 60 request shapes taken
+        from a real browser: headless Chromium over CDP, the pinned bundle on the UI
+        origin, the pinned binary behind the mediated gateway, and a fake upstream model
+        behind the model gateway returning one short answer and one `bash` tool call. The
+        tour loads the session page, types a prompt into the app's own composer, answers
+        the permission that tool call raised, opens the changes view, switches model, opens
+        settings, tries share, tries fork, opens a second session's URL, and asks for three
+        paths nobody owns. Every row records method, path, status and the class that
+        answered; `node/tests/opencode_route_trace.rs` re-derives every class from
+        `http::ui::trace_case` and `gateway::opencode::trace_class` **in CI with no browser,
+        no harness and no bundle**, so a route table or matrix edited without the trace
+        agreeing fails there.
+        **Nothing was unplaced.** Every path the app used is declared in the app-route table
+        or classified by the matrix. The deny list the tour touched failed closed with a 403
+        and a `gateway_refused` on the session's own record in every case: `*/share` both
+        ways, `fork`, `init`, `PATCH /config`, `PATCH /global/config`, `PATCH /session/{id}`,
+        `POST /pty` without the terminal capability — and a second session's routes, refused
+        for naming another session's id. The four deliberately unowned paths (`/nope`,
+        `/index.html`, a missing asset, a POST to `/nope`) were 404s, which is the claim that
+        there is no catch-all made as evidence rather than as a reading.
+        **Found doing it** (manifest finding 20): the app's only live channel is
+        `GET /global/event`, which the deny list refuses because it has no durable replay
+        (finding 6) — so the native UI renders, prompts and answers, but does not update
+        itself, and the real permission the trace raised never appeared on the page. The fix
+        is a node-synthesised, session-scoped `/global/event` served from tracon's own bus,
+        not a hole in the matrix; it is the next row this view needs. The trace also settles
+        that this build of the app is a **v1 client**: of the v2 surface it uses only
+        `/api/health`, `/api/reference` and `/api/agent`.
+        **Still to do here:** the bundle the trace was captured against is now installable
+        rather than hand-built — `tracon setup` fetches `opencode-ui-v1.18.30.tar.gz` from
+        the release and verifies it with the node's own loader, `--ui-bundle` installs it
+        offline, `Dockerfile.node` carries it, and the release workflow builds it from the
+        pinned upstream commit, asserts the tree digest, and attests it — but no release has
+        published that asset yet, so the fetch path is exercised by test rather than against
+        a real release.
 - [ ] **Gate E — remote-node parity.** Bounded encrypted owner streams over the hub for
       HTTP, SSE, and PTY: authenticated stream ids, owner binding, flow control, reconnect
       without replaying input, revocation, protocol mismatch refused; hub sees ciphertext and
@@ -324,6 +480,234 @@ declared `permission.ask` hook; an LSP status event.
 - [ ] Exercise QA deploy and browser verification against a real target. (Needs a
       `glab` credential and a configured QA target. The Kubernetes backend has no scoped QA
       egress gateway yet, so this is Podman-only until it does.)
+
+### Everyday work and portability
+
+Build on the existing ledger, workspace snapshots, evidence, scoped grants, and
+OpenCode gates above; do not introduce another agent loop or replace the store.
+Order: prove ordinary work first; then continuity, environments, authority and
+recovery; then reusable workflows and grouping. More autonomy is demand-driven.
+This section records intended work, not additional guarantees of the current release.
+
+#### Daily-use confidence and navigation
+
+- [ ] **Prove the normal workflow.** Use the real-repository and QA runs above as the
+      foundation, then exercise client disconnect/reconnect, interrupted execution,
+      retained drafts, and recovery through completion. Record what actually ran,
+      what remained uncertain, and where the operator intervened; fixture screenshots
+      and fake-provider tests are not evidence of a live workflow.
+- [ ] **Use the existing outcome metrics.** Judge changes by setup failures, time to
+      verified work, interventions and tokens per accepted change. Keep unmetered
+      usage and missing verification visible; add no agent reputation score.
+- [ ] **Finish discoverability across surfaces.** Sessions/Usage navigation and consistent
+      Settings naming have landed; keep them reachable in empty and archived-only
+      states on browser, desktop and phone. Make export, import, handoff and recovery
+      discoverable from the work they act on, rather than requiring knowledge of an
+      endpoint or a second screen. Login and desktop setup remain lifecycle entry points,
+      not extra navigation destinations. Browser access to the native OpenCode view
+      remains part of Gate D, not a separate interface to maintain.
+
+#### Review workspace and diff reading
+
+Borrow interaction patterns from [cosmicspork/review](https://github.com/cosmicspork/review),
+especially its [diff viewer](https://github.com/cosmicspork/review/blob/main/src/diff-part.ts),
+prose editing and persistent feedback thread. Its renderer uses `diff2html` and
+`highlight.js`; evaluate those against the existing CodeMirror dependency before
+choosing an implementation. Keep Tracon's immutable candidates, isolated checks
+and brokered publication: the reference tool deliberately leaves publishing to
+the agent, which is not Tracon's authority model.
+
+- [ ] **Side-by-side and unified diff modes.** Default to side-by-side on wide screens,
+      with an explicit toggle and remembered preference; use unified as the narrow-screen
+      default without removing the choice. Align changed lines and synchronize split-pane
+      scrolling. Switching modes preserves the current file, reading position and feedback;
+      neither mode requires entering the desktop-only diff editor.
+- [ ] **Readable code and context.** Add old/new line numbers, syntax highlighting,
+      within-line change emphasis, and wrap/scroll controls using Tracon's light/dark tokens.
+      Expand context from the pinned base and candidate, never the live worktree. Label
+      additions, deletions, renames, binary files and unavailable context explicitly; keep
+      raw patch access and do not fabricate text for unsupported cases.
+- [ ] **File navigation and review progress.** Use collapsible file sections on every
+      surface, path navigation/filtering, per-file change counts/status, open/close controls
+      and next/previous file or hunk actions. Offer a full-height/focused reading view rather
+      than forcing the whole diff into one small scroll box. Track viewed files against the
+      reviewed revision and invalidate affected progress on resubmission; viewed is not
+      approved. Preserve keyboard navigation, focus and accessible control labels.
+- [ ] **Keep large reviews responsive.** Paint file headers first, render visible/open
+      bodies incrementally, and load highlighting lazily. Collapse generated and oversized
+      files with an explicit reason and Load diff action; never silently omit them or
+      count them as reviewed. Cache by content/revision and bound memory/DOM work; open-all
+      must not freeze the interface. Rendering performance does not waive submission caps.
+- [ ] **Review prose alongside code and evidence.** Present the outgoing title/body as
+      readable, sanitized Markdown with source editing and a preview of the exact text
+      to be published. Keep requirements, checks, demonstrations and diff easy to move
+      between without burying the code below administrative detail. Preserve current
+      narrative-report and evidence contracts rather than adding another artifact store.
+- [ ] **Persistent, anchored feedback.** Add general and file comments like the reference
+      tool, then true line/range threads bound to candidate revision, path and old/new side
+      (the reference's file comment uses a `path:1` anchor, not a selected line). Return
+      comments and suggestions through the agent review contract. Preserve the thread across
+      resubmissions; resolved and outdated are distinct, and moved anchors must not silently
+      attach to unrelated code. Render untrusted comments through the existing safe renderer.
+- [ ] **Durable review drafts and re-review.** Preserve unsent feedback and title/body edits
+      across navigation and reconnect, with explicit saved/conflict state. Keep desktop diff
+      drafts revision-keyed; resubmission must not silently apply old edits to new code.
+      Show what changed since the last reviewed revision alongside the complete base diff,
+      retain decisions and feedback, and notify/deep-link to a ready-for-re-review item
+      through the existing queue and push system. Suggestions still return to the agent
+      to apply and resubmit; the review client never writes the worktree.
+- [ ] **Explain and validate verdict actions.** Keep decisions reachable while reading
+      long diffs. Request changes and Reject should open/focus a labeled reason composer,
+      with the reason required at submission rather than an unexplained disabled button.
+      Preserve feedback on errors. Explain genuinely unavailable actions inline (publishing,
+      stale revision, missing evidence), distinguish rejection from requested revision,
+      and refresh authoritative state after failed or concurrent decisions.
+- [ ] **Separate review decisions from publication recovery.** Show credential/binding
+      readiness before offering publication and link missing GitHub/GitLab access to the
+      appropriate Connections settings, without exposing secrets or guaranteeing remote
+      permissions from token presence alone. A failed publish needs a durable, visible
+      outcome and remedy. Distinguish definitely-not-attempted, failed, in-progress,
+      uncertain and published; reconcile uncertain external effects before retrying.
+      Keep request-changes/reject available when safe and explain when they are not.
+      Adding a credential never retries publication automatically, and changed revisions
+      or outgoing prose require fresh authorization rather than inheriting an old approval.
+- [ ] **Prove the review experience on real surfaces.** Exercise both modes in browser
+      and desktop, narrow-screen reading and feedback, long lines, mixed file types,
+      generated/large patches, light/dark themes and keyboard-only use. Include blank
+      reasons, missing forge credential, publication failure/retry, reconnect with drafts,
+      stale revision and resubmission with existing threads. Verify the exact approved
+      revision/prose and the distinction between review state and external publication.
+
+#### Work continuity and outcomes
+
+- [ ] **Continue the work, not just the transcript.** A work-level continuation view
+      carries intent, decisions, attempts, blockers, next action, the current workspace,
+      execution lineage and evidence links. Offer continue, change approach, and abandon
+      while retaining artifacts. Plain sessions can acquire this continuity without
+      being forced into a work item or plan/review lifecycle.
+- [ ] **Produce a concise outcome record.** Show what changed, what was verified, what
+      needs a decision, unresolved or uncertain actions, and cost/usage. Derive revision,
+      workspace, check and publication status from recorded state; any narrative summary
+      is supplementary and cannot turn a claim into verification.
+
+#### Project environments and effective authority
+
+- [ ] **Save validated project setup profiles.** Extend the existing launch manifest and
+      toolchain profiles rather than creating another customization system. Record the
+      image, language tools, skills, dependency preparation/cache policy, required checks,
+      and explicitly configured test services or previews for the projects actually used.
+      Snapshot the configuration per execution; show its last successful validation and
+      invalidate that assurance when its inputs change.
+- [ ] **Preview preparation and explain incompatibility.** Show detected ecosystems,
+      supported preparation steps, missing tools and actionable remedies before launch.
+      Preserve credential-free preparation and isolation; unsupported scripts, services
+      or devcontainer features must not become silent host-execution exceptions.
+- [ ] **Explain authority in task terms.** Before and during work, summarize the selected
+      node, harness/image, effective access, applicable grants, spending limits and actions
+      that still require approval. Derive this from current policy and grants, not a
+      parallel permissions model. Explain node eligibility and placement; any suggested
+      runner stays manually overridable within the eligible set.
+
+#### Portable data and recovery
+
+- [ ] **Publish a versioned data contract.** Extend the current signed candidate JSON,
+      offline package reader and document export into round-trip session/corpus export.
+      A standard archive containing a JSON manifest, JSON/JSONL records, Markdown and
+      ordinary artifact files is the preferred shape; settle the container and schema
+      before implementation. No opaque database dump or Tracon installation required
+      for independent processing.
+- [ ] **Specify complete portable content.** Preserve selected sessions, messages/events,
+      work items and relationships, decisions, drafts, documents, memories, workspace
+      state, evidence, attachments and provenance. Define identifiers, timestamps,
+      encodings, paths and omission rules. Optional harness-native state must name its
+      harness/build/schema compatibility; it is not the portable record's only copy.
+- [ ] **Make import predictable and independently implementable.** Publish schemas,
+      representative exports, integrity/signature verification rules, version migration
+      policy and examples for ordinary processing tools. Define duplicate/conflict
+      handling and reference remapping; prove export/import on a fresh node and independent
+      reading without the node. Retain old-format import compatibility through explicit
+      migrations rather than losing existing archives.
+- [ ] **Separate export, backup and handoff.** Portable data export omits credentials and
+      private identity keys; warn that transcripts and workspace files can still contain
+      secrets and make exclusions explicit. Full installation backup protects any
+      deliberately included secrets separately. Neither importing data nor verifying a
+      signature grants execution authority. Derived indexes remain rebuildable.
+- [ ] **Unify recovery and maintenance entry points.** Build on Settings' maintenance
+      controls, session-state backups and the existing recovery route. Show retained
+      workspaces, checkpoint/export/backup age and destination, runtime/harness/node
+      versions, what survives stop/restart, and actions to inspect, export, restore or
+      diagnose. Keep client reconnect, execution recovery, workspace rescue and disaster
+      recovery distinct. Exercise restore and upgrade failure recovery; promise rollback
+      only where state compatibility permits it.
+
+#### Cross-node session handoff
+
+- [ ] **Move an unfinished session to another node.** Add a session-level action:
+      select destination, check compatibility, checkpoint and transfer, then continue
+      with a continuous work history and explicit execution lineage. Do not require a
+      submitted candidate, mesh membership for file-based transfer, or an opt-in work
+      item. This extends candidate sharing; it does not rename it.
+- [ ] **Carry the actual continuation state.** Include unfinished workspace changes,
+      conversation and decisions, selected context, unsent draft, next action,
+      harness/model/manifest identity, evidence, usage and remaining limits. Reuse the
+      portable contract and existing transport; support bounded transfer of realistic
+      workspaces rather than assuming they fit a single mesh frame.
+- [ ] **Transfer execution ownership safely.** Quiesce in-flight work and fence the
+      source before the destination executes. Persist transfer state and acknowledgements;
+      retries must not create duplicate sessions or repeat external side effects. Surface
+      uncertain actions for reconciliation. A timeout or partition never silently enables
+      both owners; failure and cancellation have explicit safe recovery paths.
+- [ ] **Re-evaluate authority and state compatibility.** Destination policy, credentials,
+      capabilities and budgets decide whether continuation can run; transport imports no
+      authority or private keys. Compatible native-state resume and fresh-session
+      continuation from portable context are distinct, visible outcomes. Explain any
+      lost fidelity before confirmation; never claim live process migration or identical
+      cross-harness state. Pending questions and permissions must be reconciled, not
+      blindly replayed or treated as newly granted.
+- [ ] **Prove handoff in both directions.** Exercise laptop-to-server and server-to-laptop,
+      interruption during transfer, unavailable destination, duplicate import, dirty
+      workspace, incompatible harness state and pending external action. Verify one active
+      owner, retained work/draft/history, and no budget reset or authority widening.
+
+#### Reusable work and bounded automation
+
+- [ ] **Saved workflow recipes.** Start with a few recurring procedures such as regression
+      investigation, small changes and release preparation. Reuse phase presets and the
+      ledger; snapshot each recipe on invocation, persist expensive checkpoints and
+      external waits, and let the operator revise or stop a run. No mandatory workflow
+      language or ceremony for a plain prompt.
+- [ ] **Lightweight batches.** Group related work with dependencies, explicit assignment/
+      ownership and reclaim rules, aggregate spending, blockers and one completion report.
+      Build on current readiness and session holders; retain discovery lineage and prevent
+      competing automated claims before scaling dispatch.
+- [ ] **Integration when parallel same-repository work needs it.** Prefer a suitable forge
+      merge queue over a custom merge agent. Serialize integration, pin the combined
+      revision, and reverify rebased/combined changes; independently approved patches do
+      not automatically approve their combination. Escalate conflicts instead of silently
+      discarding work. This is demand-gated, not a prerequisite for single-session use.
+- [ ] **Bounded scheduled/event-driven chores, after daily-use reliability.** Begin with
+      low-stakes work that returns a report and stops. Set concurrency, spend, time and
+      retry limits; preserve pause/stop, deduplicate triggers, and ask before consequential
+      actions absent a valid scoped grant. Use ordinary supervisor logic for scheduling,
+      reconciliation and health checks, not permanent agent roles.
+- [ ] **Optional conversational coordination, only if useful.** An ordinary managed
+      session may inspect permitted cross-project work and propose actions through existing
+      tools. No privileged manager loop in the node. Fresh reviewers remain useful for
+      judgment, not replacements for deterministic checks, evidence or authority boundaries.
+
+#### Independent installations
+
+- [ ] **Make the personal workflow reproducible by another operator.** Provide one proven
+      installation-to-first-task path, explicit OS/runtime/harness/login compatibility,
+      understandable project preparation and actionable diagnostics. Build on existing
+      setup and maintenance surfaces; keep remote access and mesh optional.
+- [ ] **Bound maintenance expectations.** State supported versus experimental integrations,
+      pinned-release/update policy, interruption and backup requirements, and the recovery
+      path for a failed upgrade. Extend the existing compatibility gates instead of
+      promising arbitrary drop-in harnesses or maintaining a native UI fork.
+- [ ] **Offer a clearly labeled demonstration mode.** Reuse the fixture machinery to
+      explore the workflow without credentials or containers, with demonstration data
+      unmistakable and no implication that its output proves a live run.
 
 ## Current limitations
 
@@ -364,6 +748,7 @@ declared `permission.ask` hook; an LSP status event.
 ## Out of scope
 
 - Multi-user tenancy or a team product.
+- Federated work marketplaces, reputation scores or agent organization charts as product goals.
 - A model/agent loop inside the node.
 - A general-purpose multi-harness framework: two concrete adapters behind one trait,
   not a plugin system for harnesses.

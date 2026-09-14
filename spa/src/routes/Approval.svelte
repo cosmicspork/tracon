@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ReportReview from '../components/ReportReview.svelte'
   import Diff from '../components/Diff.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
@@ -15,6 +16,7 @@
     type ReviewContext,
   } from '../lib/types'
   import { baseFromDiff, buildPatch, fileSection } from '../lib/patch'
+  import { isNarrativeReport } from '../lib/reports'
 
   let { id }: { id: string } = $props()
 
@@ -29,6 +31,7 @@
   let busy = $state(false)
   let error = $state<string | null>(null)
   let loaded = $state(false)
+  const report = $derived(review && isNarrativeReport(review) ? review : null)
 
   $effect(() => {
     void id
@@ -227,6 +230,8 @@
   <div class="empty">Loading review…</div>
 {:else if !review}
   <div class="banner crit">not found <b>· {error ?? 'no such review'}</b></div>
+{:else if report}
+  <ReportReview {report} />
 {:else}
   <div class="head" class:stale={stale.length > 0}>
     <span class="bar"></span>

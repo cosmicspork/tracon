@@ -139,11 +139,12 @@
         {#if loading}
           <span class="dim">Checking…</span>
         {:else if summary}
-          <span><span class="chip">Token saved</span> · {summary.channels.join(', ') || 'no channels'}</span>
+          <span><span class="chip">Token saved</span> · allowed in {summary.channels.join(', ') || 'no channels'}</span>
           <small>
+            Source: the serving node ·
             {summary.nodes.length === 0
-              ? 'This node only'
-              : `${summary.nodes.length} node${summary.nodes.length === 1 ? '' : 's'} bound`}
+              ? 'no peer copies'
+              : `${summary.nodes.length} peer cop${summary.nodes.length === 1 ? 'y' : 'ies'} sealed separately`}
           </small>
         {:else}
           <span class="dim">No token saved.</span>
@@ -161,7 +162,7 @@
               />
             </label>
             <fieldset>
-              <legend>Channels</legend>
+              <legend>Channels this token may serve</legend>
               {#each store.channels as channel (channel.name)}
                 <label class="channel-choice">
                   <input
@@ -175,7 +176,7 @@
               {/each}
             </fieldset>
             {#if peerCopies}
-              <small class="warn">Saved copies on peer nodes do not update automatically.</small>
+              <small class="warn">Replacing this source token does not update any peer’s sealed copy.</small>
             {/if}
             <div class="actions">
               <button
@@ -188,9 +189,9 @@
           </div>
         {:else if confirming === forge.forge}
           <div class="confirmation">
-            <strong>Remove {forge.label} token?</strong>
-            <span>This removes only the source on this node.</span>
-            {#if peerCopies}<span class="warn">Saved copies on peer nodes will remain unchanged.</span>{/if}
+            <strong>Remove {forge.label} token from the serving node?</strong>
+            <span>New work here can no longer use it. Existing peer copies remain unchanged.</span>
+            {#if peerCopies}<span class="warn">Peer copies must be removed separately on those nodes.</span>{/if}
             <div class="actions">
               <button class="btn d" onclick={() => remove(forge.forge)} disabled={busy !== null}
                 >{busy === forge.forge ? 'Removing…' : 'Remove token'}</button
@@ -225,7 +226,7 @@
       spellcheck="false"
       placeholder={'[credentials.name]\nchannels = ["personal"]\n[credentials.name.env]\nTOKEN = "…"'}
     ></textarea>
-    <small>Sealed on arrival under this node's identity. Share a peer-bound credential from Nodes.</small>
+    <small>Sealed on arrival under the serving node’s identity. Share a peer-bound copy from Settings › Connections.</small>
   </label>
   <div class="actions">
     <button class="btn" onclick={importCredential} disabled={!toml.trim() || importing}>

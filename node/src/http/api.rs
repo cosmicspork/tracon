@@ -170,7 +170,7 @@ pub async fn list_authority_grants(
         .iter()
         .map(crate::authority::grant_visible)
         .collect::<Vec<_>>();
-    let policy = s.tools.policy.read().unwrap();
+    let policy = s.tools.policy.read();
     Ok(Json(json!({
         "policy": {
             "version": policy.version,
@@ -347,8 +347,8 @@ pub async fn list_channels(State(s): State<AppState>) -> ApiResult<Json<serde_js
 }
 
 /// `PUT /api/channels/{name}/bindings`: merge keys into the channel's
-/// bindings (a null value removes a key) and, on a mesh, hand the channel
-/// again to every member so they hold the same bindings.
+/// bindings (a null value removes a key), then attempt distribution to the mesh.
+/// A local save and a hub accepting envelopes are not peer acknowledgements.
 pub async fn put_channel_bindings(
     State(s): State<AppState>,
     Path(name): Path<String>,
@@ -371,21 +371,36 @@ pub async fn put_channel_bindings(
     }
     s.store()
         .channel_put(&name, &row.keyring, &bindings.to_string())?;
-    let mut handed = 0;
-    if let Some(hub) = s.cfg.mesh.hub_url.as_deref() {
-        match crate::mesh::identity::load_or_generate() {
+    let (delivery, handed, delivery_error) = if let Some(hub) = s.cfg.mesh.hub_url.as_deref() {
+        let result = match crate::mesh::identity::load_or_generate() {
             Ok((identity, _)) => {
-                match crate::mesh::enroll::rehand_channel(s.store(), &identity, hub, &name).await {
-                    Ok(n) => handed = n,
-                    Err(e) => tracing::warn!(error = %e, channel = %name, "bindings not re-handed"),
-                }
+                crate::mesh::enroll::rehand_channel(s.store(), &identity, hub, &name)
+                    .await
+                    .map_err(|error| error.to_string())
             }
-            Err(e) => tracing::warn!(error = %e, "no identity to re-hand bindings with"),
+            Err(error) => Err(error.to_string()),
+        };
+        match result {
+            Ok(count) => ("queued", Some(count), None),
+            Err(error) => {
+                tracing::warn!(%error, channel = %name, "channel saved locally; distribution incomplete");
+                // Distribution may have reached some peers before failing.
+                ("failed", None, Some(error))
+            }
         }
-    }
-    Ok(Json(
-        json!({ "name": name, "bindings": bindings, "handed_to": handed }),
-    ))
+    } else {
+        ("local", Some(0), None)
+    };
+    Ok(Json(json!({
+        "name": name,
+        "bindings": bindings,
+        "handed_to": handed,
+        "delivery": {
+            "state": delivery,
+            "handed_to": handed,
+            "error": delivery_error,
+        },
+    })))
 }
 
 /// `DELETE /api/channels/{name}`: forget an archived channel on this node.
@@ -1669,6 +1684,21 @@ pub async fn get_review(
         .store()
         .get_review(&id)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    // A narrative report deliberately has no worktree, candidate, diff, or
+    // publication evidence. Returning empty code-review fields prevents the
+    // presentation layer from treating its content hash as a commit.
+    if r.kind == crate::store::reports::KIND {
+        s.manager.publish_queue().await;
+        return Ok(Json(json!({
+            "review": r,
+            "stale": [],
+            "requirements": null,
+            "surrounding_code": [],
+            "evidence": null,
+            "legacy_check_events": [],
+            "publications": [],
+        })));
+    }
     let stale = staleness_of(&s, &r).await;
     s.manager.publish_queue().await;
     let revision = s.store().latest_review_revision(&id)?;
@@ -1763,6 +1793,12 @@ pub async fn review_file(
         StatusCode::NOT_FOUND,
         "no review with that id".into(),
     ))?;
+    if r.kind == crate::store::reports::KIND {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "standalone narrative reports have no reviewed files",
+        ));
+    }
     // The worktree lives on the owning node, so a peer's review cannot be
     // edited here. Saying so beats an empty editor.
     if r.node_id != s.node_id {
@@ -1990,6 +2026,9 @@ pub(crate) async fn decide_local(
         .store()
         .get_review(&id)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    if r.kind == crate::store::reports::KIND {
+        return decide_report_local(&s, &id, &r, b).await;
+    }
     if r.state == "approved" || r.state == "rejected" {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -2151,6 +2190,80 @@ pub(crate) async fn decide_local(
             format!("{other:?} is not a verdict"),
         )),
     }
+}
+
+/// Resolve a standalone narrative report. This bypasses every code-review
+/// publication and evidence path: acknowledgement is a durable receipt, not
+/// an approval to run a brokered forge operation.
+async fn decide_report_local(
+    s: &AppState,
+    id: &str,
+    report: &crate::store::ReviewRow,
+    b: VerdictBody,
+) -> ApiResult<serde_json::Value> {
+    if report.state == crate::store::reports::ACKNOWLEDGED {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "this report was already acknowledged",
+        ));
+    }
+    if b.title.is_some() || b.body.is_some() || b.patch.is_some() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a report decision cannot alter or attach code; request changes with a note instead",
+        ));
+    }
+    let seen = b
+        .head_sha
+        .as_deref()
+        .filter(|hash| !hash.is_empty())
+        .ok_or(ApiError::new(
+            StatusCode::PRECONDITION_REQUIRED,
+            "a report decision must name the content version that was read",
+        ))?;
+    if seen != report.head_sha {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "this report was resubmitted while it was being decided; reload it and decide again",
+        ));
+    }
+    let note = b
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|note| !note.is_empty());
+    let state = match b.verdict.as_str() {
+        "acknowledge" => {
+            if !s.store().acknowledge_report(id, note, seen)? {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "this report is no longer awaiting an acknowledgement",
+                ));
+            }
+            crate::store::reports::ACKNOWLEDGED
+        }
+        "request_changes" => {
+            let note = note.ok_or(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "requesting report changes needs a note saying what to change",
+            ))?;
+            if !s.store().request_report_changes(id, note, seen)? {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "this report is no longer awaiting a decision",
+                ));
+            }
+            "revising"
+        }
+        other => {
+            return Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("{other:?} is not a narrative report decision"),
+            ))
+        }
+    };
+    s.manager.publish_queue().await;
+    Ok(json!({ "state": state }))
 }
 
 /// Whether this node answers harnesses outside the boundary, which channels
@@ -3806,6 +3919,9 @@ pub async fn node_disconnect_provider(
 
 /// Each configured provider and whether a credential for it is usable here.
 pub(crate) fn providers_json(s: &AppState) -> Vec<serde_json::Value> {
+    if let Some(providers) = s.manager.providers() {
+        return providers.list_public();
+    }
     let broker = s.tools.broker.read().unwrap();
     s.cfg
         .providers
@@ -3815,8 +3931,12 @@ pub(crate) fn providers_json(s: &AppState) -> Vec<serde_json::Value> {
             json!({
                 "name": name,
                 "state": if cred.is_some() { "connected" } else { "disconnected" },
-                "identity": cred.and_then(|(_, c)| c.identity.clone()),
+                "identity": cred.and_then(|(_, c)| c.identity.as_deref()),
                 "expires_ms": cred.and_then(|(_, c)| c.expires_ms),
+                "kind": null,
+                "can_login": false,
+                "channels": cred.map_or(&[][..], |(_, c)| c.channels.as_slice()),
+                "updated_ms": null,
             })
         })
         .collect()
@@ -3933,156 +4053,6 @@ pub async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }))
 }
 
-// ---- enrollment, for the "Enroll a new node" screen ----
-
-fn mesh_or_conflict(s: &AppState) -> ApiResult<Arc<crate::mesh::client::MeshClient>> {
-    s.mesh.clone().ok_or(ApiError(
-        StatusCode::CONFLICT,
-        "no hub configured on this node; run tracon mesh init or tracon enroll first".into(),
-    ))
-}
-
-fn enroll_err(e: crate::mesh::enroll::EnrollError) -> ApiError {
-    use crate::mesh::enroll::EnrollError::*;
-    match e {
-        Transport(m) => ApiError(StatusCode::BAD_GATEWAY, format!("hub unreachable: {m}")),
-        Refused { status, body } => ApiError(
-            StatusCode::BAD_GATEWAY,
-            format!("hub refused ({status}): {body}"),
-        ),
-        Local(m) => ApiError(StatusCode::CONFLICT, m),
-    }
-}
-
-#[derive(Deserialize)]
-pub struct InviteBody {
-    #[serde(default)]
-    channels: Vec<String>,
-    #[serde(default)]
-    ttl_secs: Option<u64>,
-}
-
-fn invite_json(inv: &crate::mesh::enroll::Invite) -> serde_json::Value {
-    json!({
-        "code": inv.code,
-        "display_code": inv.display_code(),
-        "url": inv.url,
-        "qr_svg": crate::mesh::enroll::qr_svg(&inv.url),
-        "channels": inv.channels,
-        "expires_at": inv.expires_at,
-        "state": if inv.admitted { "admitted" } else if inv.received.is_some() { "received" } else { "waiting" },
-        "received": inv.received,
-        "received_fingerprint": inv.received_fingerprint(),
-        "own_fingerprint": proto::enroll::fingerprint_hex(&s_node_id_placeholder()),
-    })
-}
-
-fn s_node_id_placeholder() -> String {
-    String::new()
-}
-
-pub async fn open_invite(
-    State(s): State<AppState>,
-    Json(b): Json<InviteBody>,
-) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    let mesh = mesh_or_conflict(&s)?;
-    let inv =
-        crate::mesh::enroll::open_invite(mesh.identity(), mesh.hub_url(), &b.channels, b.ttl_secs)
-            .await
-            .map_err(enroll_err)?;
-    let mut v = invite_json(&inv);
-    v["own_fingerprint"] = json!(proto::enroll::fingerprint_hex(&s.node_id));
-    mesh.invites().lock().unwrap().insert(inv.code.clone(), inv);
-    Ok((StatusCode::CREATED, Json(v)))
-}
-
-pub async fn poll_invite(
-    State(s): State<AppState>,
-    Path(code): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let mesh = mesh_or_conflict(&s)?;
-    let code = proto::enroll::normalize_code(&code)
-        .ok_or(ApiError(StatusCode::BAD_REQUEST, "malformed code".into()))?;
-    let mut inv = mesh
-        .invites()
-        .lock()
-        .unwrap()
-        .get(&code)
-        .cloned()
-        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such invitation".into()))?;
-    if inv.received.is_none() {
-        if let Some(req) = crate::mesh::enroll::poll_invite(mesh.identity(), mesh.hub_url(), &code)
-            .await
-            .map_err(enroll_err)?
-        {
-            inv.received = Some(req);
-            mesh.invites()
-                .lock()
-                .unwrap()
-                .insert(code.clone(), inv.clone());
-        }
-    }
-    let mut v = invite_json(&inv);
-    v["own_fingerprint"] = json!(proto::enroll::fingerprint_hex(&s.node_id));
-    Ok(Json(v))
-}
-
-/// The operator compared fingerprints and said they match.
-pub async fn admit_invite(
-    State(s): State<AppState>,
-    Path(code): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let mesh = mesh_or_conflict(&s)?;
-    let code = proto::enroll::normalize_code(&code)
-        .ok_or(ApiError(StatusCode::BAD_REQUEST, "malformed code".into()))?;
-    let inv = mesh
-        .invites()
-        .lock()
-        .unwrap()
-        .get(&code)
-        .cloned()
-        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such invitation".into()))?;
-    let req = inv.received.clone().ok_or(ApiError(
-        StatusCode::CONFLICT,
-        "the other node has not answered yet".into(),
-    ))?;
-    let handoff = s.tools.broker.read().unwrap().bound_to(&req.node_id);
-    crate::mesh::enroll::admit(
-        s.store(),
-        mesh.identity(),
-        mesh.hub_url(),
-        &req.node_id,
-        &req.x25519_pub,
-        &req.binding_sig,
-        &req.name,
-        &inv.channels,
-        &handoff,
-    )
-    .await
-    .map_err(enroll_err)?;
-    let mut done = inv.clone();
-    done.admitted = true;
-    mesh.invites().lock().unwrap().insert(code, done.clone());
-    if let Ok(Some(row)) = s.store().get_node(&req.node_id) {
-        s.manager
-            .bus()
-            .publish_untapped(crate::stream::Frame::Node(row.to_json()));
-    }
-    Ok(Json(invite_json(&done)))
-}
-
-pub async fn cancel_invite(
-    State(s): State<AppState>,
-    Path(code): Path<String>,
-) -> ApiResult<StatusCode> {
-    let mesh = mesh_or_conflict(&s)?;
-    let code = proto::enroll::normalize_code(&code)
-        .ok_or(ApiError(StatusCode::BAD_REQUEST, "malformed code".into()))?;
-    mesh.invites().lock().unwrap().remove(&code);
-    let _ = crate::mesh::enroll::cancel_invite(mesh.identity(), mesh.hub_url(), &code).await;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 fn valid_operator_notification(title: &str, body: &str, path: &str, device_ids: &[String]) -> bool {
     !title.trim().is_empty()
         && !body.trim().is_empty()
@@ -4109,13 +4079,61 @@ impl crate::mesh::forward::CommandExecutor for AppState {
     ) -> Result<serde_json::Value, String> {
         use proto::frame::Command as C;
         let r: Result<serde_json::Value, ApiError> = match command {
-            C::Create { spec } => {
-                let spec: NewSession = serde_json::from_value(spec).map_err(|e| e.to_string())?;
-                self.manager
-                    .create(spec, self.adapter.clone())
-                    .await
-                    .map(|row| json!(row))
-                    .map_err(Into::into)
+            C::EvidenceCandidate { request } => {
+                crate::http::qa::forwarded_candidate_evidence(self, sender, request)
+            }
+            C::EvidenceCandidates { query } => {
+                crate::http::qa::forwarded_candidates(self, sender, query)
+            }
+            C::Create { spec, work_item } => {
+                async {
+                    let spec: NewSession = serde_json::from_value(spec).map_err(|error| {
+                        ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, error.to_string())
+                    })?;
+                    let members = self.store().nodes_in_channel(&spec.channel)?;
+                    if !members.iter().any(|member| member == sender)
+                        || !members.contains(&self.node_id)
+                        || spec
+                            .node_id
+                            .as_deref()
+                            .is_some_and(|node| node != self.node_id)
+                    {
+                        return Err(ApiError::new(
+                            StatusCode::FORBIDDEN,
+                            "sender and destination must belong to the task channel",
+                        ));
+                    }
+                    if let Some(change) = work_item {
+                        if change.table != "work_item"
+                            || change.op != proto::frame::ChangeOp::Upsert
+                            || change.site != sender
+                            || spec.work_item_id.as_deref() != Some(change.id.as_str())
+                            || change.row["channel"].as_str() != Some(spec.channel.as_str())
+                        {
+                            return Err(ApiError::new(
+                                StatusCode::FORBIDDEN,
+                                "the task prerequisite must be the sender's matching work item",
+                            ));
+                        }
+                        self.store().apply_changes(
+                            sender,
+                            &spec.channel,
+                            std::slice::from_ref(&change),
+                        )?;
+                        self.manager
+                            .bus()
+                            .publish_untapped(crate::stream::Frame::Changes {
+                                channel: spec.channel.clone(),
+                                changes: vec![change],
+                            });
+                    }
+                    self.manager
+                        .create(spec, self.adapter.clone())
+                        .await
+                        .map(|row| json!(row))
+                        .map_err(Into::into)
+                }
+                .await
             }
             C::Prompt { session_id, text } => self
                 .manager
@@ -4160,18 +4178,33 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 patch,
                 head_sha,
             } => {
-                decide_local(
-                    self,
-                    &review_id,
-                    VerdictBody {
-                        verdict,
-                        reason,
-                        title,
-                        body,
-                        patch,
-                        head_sha,
-                    },
-                )
+                async {
+                    let review = self
+                        .store()
+                        .get_review(&review_id)?
+                        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+                    let members = self.store().nodes_in_channel(&review.channel)?;
+                    if !members.contains(&sender.to_string()) || !members.contains(&self.node_id) {
+                        Err(ApiError::new(
+                            StatusCode::FORBIDDEN,
+                            "sender is not a member of this review channel",
+                        ))
+                    } else {
+                        decide_local(
+                            self,
+                            &review_id,
+                            VerdictBody {
+                                verdict,
+                                reason,
+                                title,
+                                body,
+                                patch,
+                                head_sha,
+                            },
+                        )
+                        .await
+                    }
+                }
                 .await
             }
             // The provider commands run exactly what a local request would:

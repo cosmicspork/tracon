@@ -39,10 +39,14 @@ struct Node {
 
 /// The router with the guard layered on, as `serve` builds it.
 fn node() -> Node {
+    node_with(Config::default())
+}
+
+fn node_with(cfg: Config) -> Node {
     // Before anything can reach the credential store or node.toml.
     state::isolate();
     let store = Arc::new(Store::open_in_memory().unwrap());
-    let cfg = Arc::new(Config::default());
+    let cfg = Arc::new(cfg);
     let tools = Arc::new(Tools {
         broker: Broker::default().shared(),
         cfg: cfg.clone(),
@@ -676,4 +680,52 @@ async fn unpairing_clears_the_hub_and_keeps_the_mesh_channel() {
     let (s, v) = call(&n, "POST", "/api/mesh/unpair", Some(LOCAL), None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["restart_required"], false);
+}
+
+#[tokio::test]
+async fn channel_distribution_failure_is_visible_without_losing_the_local_change() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let unavailable_hub = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            axum::Router::new().fallback(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        )
+        .await
+        .unwrap();
+    });
+    let mut cfg = Config::default();
+    cfg.mesh.hub_url = Some(format!("http://{address}"));
+    let n = node_with(cfg);
+    let (status, created) = call(
+        &n,
+        "POST",
+        "/api/channels",
+        Some(LOCAL),
+        Some(json!({ "name": "personal" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+
+    let (status, result) = call(
+        &n,
+        "PUT",
+        "/api/channels/personal/bindings",
+        Some(LOCAL),
+        Some(json!({ "notify.enabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["delivery"]["state"], "failed", "{result}");
+    assert!(result["delivery"]["handed_to"].is_null(), "{result}");
+    assert!(result["delivery"]["error"].as_str().is_some());
+    let (_, channels) = call(&n, "GET", "/api/channels", Some(LOCAL), None).await;
+    let personal = channels
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|channel| channel["name"] == "personal")
+        .unwrap();
+    assert_eq!(personal["bindings"]["notify"]["enabled"], false);
+    unavailable_hub.abort();
 }

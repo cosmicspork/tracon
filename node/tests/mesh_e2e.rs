@@ -7,11 +7,11 @@
 mod support;
 use support::state;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::http::StatusCode;
 use proto::envelope::DataKey;
-use proto::frame::MESH_CHANNEL;
+use proto::frame::{Command, MESH_CHANNEL};
 use proto::keyring::Keyring;
 use proto::keys::Identity;
 use serde_json::json;
@@ -23,6 +23,7 @@ use tracon::adapter::HarnessEvent;
 use tracon::config::Config;
 use tracon::http::api::AppState;
 use tracon::mesh::client::MeshClient;
+use tracon::mesh::forward::CommandError;
 use tracon::session::Manager;
 use tracon::store::Store;
 use tracon::stream::Bus;
@@ -256,6 +257,35 @@ async fn a_session_on_b_is_driven_from_a() {
         .iter()
         .all(|e| e.node_id == bi));
     let _ = ai;
+}
+
+#[tokio::test]
+async fn remote_evidence_refuses_a_third_nodes_claimed_owner() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let (ai, bi) = (a.id.node_id(), b.id.node_id());
+
+    // The mesh envelope authenticates A, but it must not let A ask B to
+    // forward a candidate that claims to belong to a third owner.
+    let result = a
+        .client
+        .command(
+            &bi,
+            Command::EvidenceCandidate {
+                request: json!({
+                    "candidate_id": "commit:personal",
+                    "channel": "personal",
+                    "owner": ai,
+                }),
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(CommandError::Refused(message))
+            if message.contains("evidence owner does not match this node")
+    ));
 }
 
 #[tokio::test]

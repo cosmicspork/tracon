@@ -161,11 +161,26 @@ pub enum Payload {
     KeyHandoff {
         channels: Vec<ChannelHandoff>,
     },
-    /// Direct only.
+    /// Direct only. Older peers ignore the optional rollout metadata and still
+    /// receive the exact signed bundle; they simply cannot confirm installation.
     PolicyBundle {
         toml: String,
         sig_hex: String,
         pubkey_hex: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rollout_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bundle_sha256: Option<String>,
+    },
+    /// Direct only. The envelope identity authenticates the receiving node;
+    /// this is an acknowledgement of a particular immutable bundle, not a
+    /// claim inferred from successful delivery to the hub.
+    PolicyReceipt {
+        rollout_id: String,
+        bundle_sha256: String,
+        applied: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     /// Direct only. A signed, bounded candidate/context package; the receiver
     /// stages it and requires an operator-confirmed import before it can start
@@ -252,6 +267,10 @@ pub enum ChangeOp {
 pub enum Command {
     Create {
         spec: Value,
+        /// A self-authored causal prerequisite, applied before starting a
+        /// composed task. Older senders omit it; no other record may ride here.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        work_item: Option<Change>,
     },
     Prompt {
         session_id: String,
@@ -324,6 +343,19 @@ pub enum Command {
         path: String,
         #[serde(default)]
         device_ids: Vec<String>,
+    },
+    /// A bounded, read-only detail view from the node that captured one
+    /// candidate. The request binds both the owner and ordinary channel so the
+    /// receiver can reject a third-node relay or cross-channel lookup.
+    EvidenceCandidate {
+        request: Value,
+    },
+    /// A bounded read of immutable candidate evidence from the node that
+    /// captured it. The owner validates the request shape and shared-channel
+    /// membership before returning any rows; an older peer rejects this
+    /// additive command rather than treating it as a local lookup.
+    EvidenceCandidates {
+        query: Value,
     },
 }
 

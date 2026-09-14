@@ -5,7 +5,6 @@
   import { formatAge } from '../lib/format'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
-  import { surface } from '../lib/surface.svelte'
   import type { Document, RecallHit } from '../lib/types'
 
   const KINDS = ['guide', 'ref', 'architecture', 'plan', 'proposal', 'repo', 'note', 'meeting', 'inbox', 'other']
@@ -88,29 +87,36 @@
       : ''}{textOnly ? ' · text only · no semantic search' : ''}</b
   >
   <span class="r actions">
-    {#if !surface.phone}
-      <button class="lnk" onclick={() => { creating = !creating; importing = false }}>{creating ? 'Cancel' : 'New Markdown'}</button>
-    {/if}
-    <button class="lnk" onclick={() => { importing = !importing; creating = false }}>{importing ? 'Cancel' : 'Import HTML'}</button>
+    <button class="btn p" type="button" aria-expanded={creating} onclick={() => { creating = !creating; importing = false }}>{creating ? 'Close editor' : 'New Markdown'}</button>
+    <button class="lnk" type="button" aria-expanded={importing} onclick={() => { importing = !importing; creating = false }}>{importing ? 'Cancel import' : 'Import HTML'}</button>
   </span>
 </div>
 
 <div class="bar">
   {#if channels.length > 1}
-    <select bind:value={channel}>
-      {#each channels as c (c)}<option value={c}>{c}</option>{/each}
-    </select>
+    <label class="channel">
+      <span>Channel</span>
+      <select bind:value={channel}>
+        {#each channels as c (c)}<option value={c}>{c}</option>{/each}
+      </select>
+    </label>
   {/if}
-  <input placeholder="Search by content" bind:value={query} />
-  <label class="toggle"><input type="checkbox" bind:checked={showArchived} /> Show archived</label>
+  <label class="search">
+    <span>Search documents</span>
+    <input placeholder="Search by content" bind:value={query} />
+  </label>
+  <label class="toggle"><input type="checkbox" bind:checked={showArchived} /> <span>Show archived</span></label>
 </div>
 
 {#if creating}
-  <div class="new">
-    <input placeholder="kind-slug, e.g. guide-deploy" bind:value={newSlug} onkeydown={(e) => e.key === 'Enter' && create()} />
-    <button class="btn p" onclick={create} disabled={!newSlug.trim()}>Write it</button>
+  <form class="new" onsubmit={(event) => { event.preventDefault(); create() }}>
+    <label class="new-slug">
+      <span>Document slug</span>
+      <input placeholder="kind-slug, e.g. guide-deploy" bind:value={newSlug} />
+    </label>
+    <button class="btn p" type="submit" disabled={!newSlug.trim()}>Write Markdown</button>
     <small>Kinds: guide, ref, architecture, plan, proposal, repo, note, meeting, inbox.</small>
-  </div>
+  </form>
 {/if}
 
 {#if importing}
@@ -118,10 +124,10 @@
 {/if}
 
 {#if error}
-  <div class="empty">{error}</div>
+  <div class="banner crit">documents <b>· {error}</b></div>
 {:else if hits !== null}
   {#if hits.length === 0}
-    <div class="empty">Nothing matches.</div>
+    <div class="empty">Nothing matches this search. <button class="lnk" type="button" onclick={() => (query = '')}>Clear search</button> or use different words.</div>
   {:else}
     <div class="rows">
       {#each hits as h (h.id)}
@@ -139,7 +145,14 @@
     </div>
   {/if}
 {:else if docs.length === 0}
-  <div class="empty">No documents on {channel} yet. <code>tracon doc import &lt;dir&gt;</code> brings a directory of markdown in.</div>
+  <div class="empty">
+    <div>No documents on {channel || 'this channel'} yet.</div>
+    <div class="empty-actions">
+      <button class="btn p" type="button" onclick={() => { creating = true; importing = false }}>Write Markdown</button>
+      <button class="lnk" type="button" onclick={() => { importing = true; creating = false }}>Import HTML</button>
+    </div>
+    <small><code>tracon doc import &lt;dir&gt;</code> brings a directory of Markdown in.</small>
+  </div>
 {:else}
   {#each grouped as [kind, list] (kind)}
     <div class="h5">{kind} <b>{list.length}</b></div>
@@ -179,8 +192,25 @@
   }
   .bar {
     display: flex;
+    align-items: end;
     gap: 8px;
     margin-bottom: 10px;
+  }
+  .bar .channel,
+  .bar .search {
+    display: grid;
+    gap: 3px;
+  }
+  .bar .search {
+    flex: 1;
+    min-width: 0;
+  }
+  .bar .channel span,
+  .bar .search span {
+    font: 11px var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink2);
   }
   .bar input,
   .bar select,
@@ -192,33 +222,46 @@
     border-radius: 4px;
     padding: 8px 10px;
   }
-  .bar input {
-    flex: 1;
-    min-width: 0;
+  .bar .search input {
+    width: 100%;
   }
   .bar .toggle {
     display: flex;
     align-items: center;
     gap: 6px;
     font: 12px var(--mono);
-    color: var(--dim);
+    color: var(--ink2);
     white-space: nowrap;
   }
   .bar .toggle input {
     flex: none;
   }
   .new {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(260px, 1fr) auto;
     gap: 8px;
-    align-items: center;
+    align-items: end;
+    max-width: 640px;
     margin-bottom: 10px;
-    flex-wrap: wrap;
+  }
+  .new-slug {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+  .new-slug span {
+    font: 11px var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink2);
   }
   .new input {
     font-family: var(--mono);
-    min-width: 260px;
+    width: 100%;
+    min-width: 0;
   }
   .new small {
+    grid-column: 1 / -1;
     color: var(--dim);
     font: 11.5px var(--mono);
   }
@@ -272,5 +315,45 @@
   }
   .empty code {
     font: 12px var(--mono);
+  }
+  .empty-actions {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    margin: 12px 0 6px;
+  }
+  .empty small {
+    color: var(--ink2);
+  }
+  @media (max-width: 700px) {
+    .h4 {
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .h4 .r {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 12px;
+      margin-left: 0;
+    }
+    .bar {
+      flex-wrap: wrap;
+    }
+    .bar .search {
+      flex-basis: 100%;
+      order: -1;
+    }
+    .new {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .new .btn {
+      width: 100%;
+    }
+    .new input {
+      font-size: 16px;
+    }
+    .empty-actions {
+      flex-wrap: wrap;
+    }
   }
 </style>

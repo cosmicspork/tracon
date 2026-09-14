@@ -8,19 +8,32 @@
   import { defaultChannel, rememberChannel, rememberedChannel } from '../lib/channel'
   import { digits, formatGrouped, formatTokens } from '../lib/format'
   import { recentModelValues } from '../lib/models'
-  import { eligibleNodes } from '../lib/nodes'
+  import { eligibleNodes, modelsForChannel, nodeReadiness } from '../lib/nodes'
   import { repoLabel } from '../lib/repo'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
-  import type { WorkView } from '../lib/types'
+  import type { NodeInfo, WorkView } from '../lib/types'
 
-  let { item = null, phase = $bindable('execute') }: { item?: WorkView | null; phase?: 'plan' | 'execute' } =
-    $props()
+  let {
+    item = null,
+    phase = $bindable('execute'),
+    preferredNodeId = null,
+    preferredChannel = null,
+    ontargetchange = undefined,
+  }: {
+    item?: WorkView | null
+    phase?: 'plan' | 'execute'
+    preferredNodeId?: string | null
+    preferredChannel?: string | null
+    ontargetchange?: (target: { nodeId: string | null; channel: string }) => void
+  } = $props()
 
   let prompt = $state('')
   let channel = $state('')
   let repo = $state('')
+  let modelScope = $state<string | null>(null)
   let workspaceId = $state<string | null>(null)
+  let repoScope = $state<string | null>(null)
   let branch = $state('')
   let model = $state('')
   let budget = $state('')
@@ -36,17 +49,22 @@
 
   // An archived channel takes no new sessions, so it is not offered.
   const channelNames = $derived(store.channels.filter((c) => !c.archived).map((c) => c.name))
-  const memberships = $derived(Object.fromEntries(store.channels.map((c) => [c.name, c.nodes])))
-  const eligible = $derived(eligibleNodes(store.nodes, memberships, channel))
-  const node = $derived(
-    eligible.find((n) => n.id === nodeId) ?? eligible.find((n) => n.is_self) ?? eligible[0] ?? store.node,
-  )
   const channelInfo = $derived(store.channels.find((c) => c.name === channel))
+  const memberships = $derived(Object.fromEntries(store.channels.map((c) => [c.name, c.nodes])))
+  const eligible = $derived(
+    eligibleNodes(store.nodes, memberships, channel).filter((node) => modelsForChannel(node, channel, store.providers, channelInfo?.bindings).length > 0),
+  )
+  const selectedNode = $derived(
+    eligible.find((node) => node.id === nodeId) ?? eligible.find((node) => node.is_self) ?? eligible[0] ?? null,
+  )
+  // `node` keeps the operator's own row visible when no target is usable;
+  // only `selectedNode` is ever sent to the API.
+  const node = $derived(selectedNode ?? store.node)
   const atCeiling = $derived(channelInfo?.ceiling.state === 'at')
-  const blocked = $derived(!node || node.state === 'refused' || node.harness.mismatch === true || !node.reachable)
+  const blocked = $derived(selectedNode === null)
   const sessionPhase = $derived(structured ? phase : 'execute')
   const bound = $derived(phaseDefaults(channelInfo?.bindings, sessionPhase))
-  const models = $derived(node?.models ?? [])
+  const models = $derived(selectedNode ? modelsForChannel(selectedNode, channel, store.providers, channelInfo?.bindings) : [])
   const recentModels = $derived(recentModelValues(store.sessions.values()))
   const planLabel = $derived(modelLabel(phaseDefaults(channelInfo?.bindings, 'plan').model, models))
   const execLabel = $derived(modelLabel(phaseDefaults(channelInfo?.bindings, 'execute').model, models))
@@ -58,8 +76,53 @@
       channel !== '' &&
       (repo.trim() !== '' || workspaceId !== null) &&
       (item !== null || prompt.trim() !== '') &&
+      (model === '' || models.some((candidate) => candidate.value === model)) &&
       !busy,
   )
+  function nodeBlock(node: NodeInfo): string | null {
+    const members = memberships[channel]
+    if (members && !members.includes(node.id)) return `Not a member of ${channel}.`
+    const readiness = nodeReadiness(node)
+    if (!readiness.canRun) return readiness.detail
+    if (modelsForChannel(node, channel, store.providers, channelInfo?.bindings).length === 0)
+      return `No connected provider offers a model for ${channel}.`
+    return null
+  }
+  function selectLocalRepository(selection: { targetId: string; channel: string; repo: string; workspaceId: string | null }) {
+    if (selectedNode?.id !== selection.targetId || !selectedNode.is_self || channel !== selection.channel) return
+    repo = selection.repo
+    workspaceId = selection.workspaceId
+  }
+
+
+  $effect(() => {
+    if (preferredChannel !== null) channel = preferredChannel
+    if (preferredNodeId !== null) nodeId = preferredNodeId
+  })
+  $effect(() => {
+    ontargetchange?.({ nodeId: selectedNode?.id ?? null, channel })
+  })
+  $effect(() => {
+    const scope = selectedNode ? `${selectedNode.id}:${channel}:${sessionPhase}` : null
+    if (scope === modelScope) return
+    modelScope = scope
+    model = ''
+    budget = ''
+  })
+  $effect(() => {
+    if (model && !models.some((candidate) => candidate.value === model)) model = ''
+  })
+  // A workspace import belongs to the serving node and cannot be forwarded to
+  // a peer. Do not carry a local checkout into a different runner either: a
+  // remote path is only used after the operator enters it for that machine.
+  $effect(() => {
+    const scope = selectedNode ? `${selectedNode.id}:${channel}` : null
+    if (scope === repoScope) return
+    repoScope = scope
+    workspaceId = null
+    repo = ''
+  })
+
 
   // The channel the node actually has; the item's own channel when there is one.
   $effect(() => {
@@ -76,12 +139,13 @@
       })
     }
   })
-  // The repository this channel worked in last, so the common case needs no pick.
+  // The repository this channel worked in last is a local convenience only.
+  // A peer has its own filesystem, so it must receive an explicit path.
   $effect(() => {
-    if (repo !== '' || workspaceId !== null || !channel) return
+    if (!node?.is_self || repo !== '' || workspaceId !== null || !channel) return
     const last = [...store.sessions.values()]
       .sort((a, b) => b.created_ms - a.created_ms)
-      .find((s) => s.channel === channel && s.repo_path && !s.repo_path.startsWith('workspace://'))
+      .find((s) => s.node_id === node.id && s.channel === channel && s.repo_path && !s.repo_path.startsWith('workspace://'))
     if (last) repo = last.repo_path
   })
   $effect(() => {
@@ -103,7 +167,7 @@
         phase: sessionPhase,
         model: model || undefined,
         budget_tokens: budget === '' ? undefined : Number(budget),
-        node_id: node && !node.is_self ? node.id : undefined,
+        node_id: selectedNode && !selectedNode.is_self ? selectedNode.id : undefined,
       }
       const lines = prompt.trim().split('\n')
       const session = item
@@ -178,10 +242,29 @@
           >
         {/if}
       </label>
-      <div class="field">
-        <span>Repository</span>
-        <RepoPicker bind:value={repo} bind:workspaceId {channel} />
-      </div>
+      {#if selectedNode && !selectedNode.is_self}
+        <label>
+          <span>Repository path on {selectedNode.name}</span>
+          <input bind:value={repo} placeholder="Absolute path on {selectedNode.name}" spellcheck="false" />
+          <small>This exact path is sent to {selectedNode.name}. Clones and browser-file uploads on {store.node?.name ?? 'this controller'} are not transferred to a peer.</small>
+        </label>
+      {:else if selectedNode?.is_self}
+        <div class="field">
+          <span>Repository</span>
+          <RepoPicker
+            bind:value={repo}
+            bind:workspaceId
+            {channel}
+            targetId={selectedNode.id}
+            onselect={selectLocalRepository}
+          />
+        </div>
+      {:else}
+        <div class="field">
+          <span>Repository</span>
+          <small class="crit">Choose a usable runner before selecting a repository.</small>
+        </div>
+      {/if}
       <label>
         <span>Branch</span>
         <input bind:value={branch} placeholder="feat/…  (a name is generated if empty)" spellcheck="false" />
@@ -196,16 +279,14 @@
               onclick={() => {
                 structured = false
                 phase = 'execute'
-              }}>Plain session</button
-            >
+              }}>Plain session</button>
             <button
               type="button"
               class:on={structured}
               onclick={() => {
                 structured = true
                 phase = 'plan'
-              }}>Plan work item</button
-            >
+              }}>Plan work item</button>
           </div>
           <small>{structured ? 'Writes a durable work item, then runs its plan phase.' : 'Starts directly; no work item or plan is created.'}</small>
         </div>
@@ -233,7 +314,7 @@
         {/if}
       </label>
       <label>
-        <span>Budget <em>{Number(budget) ? `${formatTokens(Number(budget))} tokens` : 'no cap'}</em></span>
+        <span>Budget <em>{budget.trim() === '' ? 'channel or node default' : Number(budget) ? `${formatTokens(Number(budget))} tokens` : 'no cap'}</em></span>
         <input
           value={budget ? formatGrouped(Number(budget)) : ''}
           placeholder="No cap"
@@ -251,34 +332,30 @@
         {#if store.nodes.length > 1}
           <div class="pick">
             {#each store.nodes as n (n.id)}
-              {@const ok = eligible.some((e) => e.id === n.id)}
-              <label class:no={!ok}>
+              {@const reason = nodeBlock(n)}
+              {@const readiness = nodeReadiness(n)}
+              <label class:no={reason !== null}>
                 <input
                   type="radio"
                   name="node"
                   value={n.id}
-                  disabled={!ok}
-                  checked={node?.id === n.id}
+                  disabled={reason !== null}
+                  checked={selectedNode?.id === n.id}
                   onchange={() => (nodeId = n.id)}
                 />
-                <span class="chip" class:bad={n.state === 'refused' || n.harness.mismatch} class:off={!n.reachable}
-                  >{n.name}</span
-                >
+                <span class="chip" class:bad={!readiness.canRun} class:off={!n.reachable}>{n.name}</span>
+                {#if reason}<small class="crit">{readiness.label} · {reason}</small>{/if}
               </label>
             {/each}
           </div>
-        {:else if node?.state === 'refused'}
-          <span class="chip bad">{node.name}</span>
-          <small class="crit">Refused: {node.failed_check}: {node.failed_detail}</small>
-        {:else if node?.harness.mismatch}
-          <span class="chip bad">{node.name}</span>
-          <small class="crit">Version mismatch: node expects {node.harness.pinned}, host has {node.harness.found}.</small>
-        {:else if node && !node.reachable}
-          <span class="chip off">{node.name}</span>
-          <small class="crit">Unreachable. Start when it returns.</small>
+        {:else if node && nodeBlock(node)}
+          <span class="chip bad" class:off={!node.reachable}>{node.name}</span>
+          <small class="crit">{nodeReadiness(node).label} · {nodeBlock(node)}</small>
         {:else if node}
           <span class="chip">{node.name}</span>
           <small>{node.harness.id} {node.harness.found ?? node.harness.pinned}</small>
+        {:else}
+          <small class="crit">No node has reported a usable isolated runtime for {channel || 'this channel'}.</small>
         {/if}
       </div>
     </div>
@@ -438,12 +515,19 @@
     align-items: center;
   }
   .pick label {
-    display: inline-flex;
-    gap: 7px;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 2px 7px;
     align-items: center;
+    max-width: 320px;
     font: 13px var(--sans);
     color: var(--ink);
     cursor: pointer;
+  }
+  .pick label small {
+    grid-column: 2;
+    color: var(--dim);
+    font: 11px/1.35 var(--mono);
   }
   .pick label.no {
     color: var(--dim);

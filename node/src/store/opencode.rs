@@ -564,6 +564,11 @@ mod tests {
                 last_seen_ms: None,
                 reachable: 1,
                 providers_json: None,
+                app_version: None,
+                wire_contract: None,
+                policy_identity: None,
+                policy_sha256: None,
+                policy_receipt_v1: None,
             })
             .unwrap();
         let mut row = SessionRow {

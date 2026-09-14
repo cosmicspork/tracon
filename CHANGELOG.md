@@ -16,6 +16,20 @@
 * **review:** immutable candidates with reusable, image-bound check evidence, pinned requirements, attributed decisions, and linked demonstrations
 * **continuity:** signed candidate/context transfer packages bound to their candidate's identity and file tree, single-import reservation with runtime-workspace reuse on retry, and opt-in, revocation-aware hub-side channel rollups
 * **qa:** deploy a candidate to an authorized QA target by exact commit SHA, verify it with a network-scoped headless browser, and build repository-derived prototypes
+* **operator UI:** align desktop/mobile navigation, group Settings by scope, improve contrast and touch targets, and link empty states, usage explanations, and owner-scoped candidate evidence
+* **onboarding:** guide local and existing-mesh first tasks without requiring a local provider for peer execution; keep runner, channel, repository, model, and budget selections coherent
+* **administration:** add authenticated mesh membership and hub-sharing controls, guarded service recovery, and separate application, wire, runtime, and policy compatibility
+* **policy:** preview and apply exact signed bundles with a fixed comparison baseline, distinguish installed and running policy, and persist per-node authenticated rollout receipts
+* **reports:** accept repository-free narrative reports with revision-bound acknowledgement or requested changes, independently of publication and push-service acceptance
+
+### Bug Fixes
+
+* **mesh:** carry the authenticated work-item change with peer compose requests so session creation cannot race work-item replication
+* **review:** reject cross-owner/channel report mirrors, stale decisions, and invalid review-session context; bind remote evidence reads to the actual owner and shared channel
+* **models:** filter channel choices by the connected provider that owns each model, including legacy peers without provider-scope metadata
+* **notifications:** distinguish browser subscriptions, shared channel rules, push-service acceptance, and operator acknowledgement
+* **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
+* **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
 ## [0.15.1](https://github.com/cosmicspork/tracon/compare/v0.15.0...v0.15.1) (2026-09-13)
 

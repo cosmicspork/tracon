@@ -11,7 +11,10 @@
 // key; the browser opens it and hands the worker a small JSON with a title, a
 // body, a tag and a path on this origin.
 
-const VERSION = 'v2'
+// Bumped whenever what is cached changes shape. An installed app updates by
+// the old caches being dropped on activate, so an existing install picks a new
+// version up on its next start rather than needing to be reinstalled.
+const VERSION = 'v3'
 const SHELL = `tracon-shell-${VERSION}`
 const ASSETS = `tracon-assets-${VERSION}`
 
@@ -50,7 +53,14 @@ self.addEventListener('fetch', (event) => {
   // The node's API and its event stream are never cached and never even
   // intercepted: what is waiting on you is worth nothing if it is stale, and
   // wrapping an endless SSE response in a fetch handler breaks it outright.
-  if (url.pathname.startsWith('/api/')) return
+  //
+  // `/boot` is here for the same reason and one more. It is the OpenCode UI
+  // origin's bootstrap exchange — a different origin, so the check above has
+  // already let it past — but a node reached at some other address, or a
+  // future same-origin spelling of it, must never find a cached answer: the
+  // token it carries is single-use, and a replayed response would be a
+  // capability the node has already spent. Named rather than assumed.
+  if (url.pathname.startsWith('/api/') || url.pathname === '/boot') return
 
   // Build assets carry a content hash, so a hit is always correct.
   if (url.pathname.startsWith('/assets/')) {
