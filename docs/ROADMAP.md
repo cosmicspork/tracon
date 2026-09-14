@@ -400,10 +400,22 @@ refer to that manifest's table.
   - [ ] PTY only as an explicit workspace-scoped capability with a gateway-minted owner-bound
         ticket (finding 7).
   - [ ] Native UI route trace captured and unknown mutations shown to fail closed.
-- [ ] **Gate E — remote-node parity.** Bounded encrypted owner streams over the hub for
+- [x] **Gate E — remote-node parity.** Bounded encrypted owner streams over the hub for
       HTTP, SSE, and PTY: authenticated stream ids, owner binding, flow control, reconnect
       without replaying input, revocation, protocol mismatch refused; hub sees ciphertext and
-      routing metadata only.
+      routing metadata only. Proved in process (`node/tests/owner_stream.rs`,
+      `hub/tests/streams.rs`): a GET and a mediated POST round-trip through the relay to the
+      owner's gateway, an event stream flows until the owner closes it, a slow consumer
+      closes the credit window instead of the stream, a dropped relay connection re-opens
+      without re-sending a mutation, an owner restart fences, membership revoked on the owner
+      refuses, a protocol mismatch is refused by name, and the relay's own bytes are
+      ciphertext with nothing written down. The PTY rides the same family as chunks with no
+      input replay; its `connect` route is still the gateway's documented 501 seam until the
+      owner-bound ticket exchange exists. **Left to the operator:** the same run against the
+      real hub — `tracon session open` a session on one node from another node's interface,
+      with `RUST_LOG=tracon::mesh::stream=debug` on both, and confirm the relay's
+      `GET /v0/streams` connection holds and `GET /v0/info` reports the same contract on
+      every node.
 - [ ] **Gate F — release and clean cutover.** Real Podman and Kubernetes project workflows
       on both harnesses; compatibility manifest promoted through a tracon release; omp
       removed; README, architecture, and design reconciled (harness sections, optionality of
