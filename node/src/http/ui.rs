@@ -152,7 +152,9 @@ impl std::fmt::Display for BundleError {
         match self {
             Self::Missing(p) => write!(
                 f,
-                "no OpenCode UI bundle at {}; build one with \
+                "no OpenCode UI bundle at {}; install one with `tracon setup` (or \
+                 `tracon setup --ui-bundle <opencode-ui-v{PINNED_VERSION}.tar.gz>` offline), \
+                 or build one with \
                  `containers/opencode-ui/build.sh --src <opencode checkout at v{PINNED_VERSION}>`",
                 p.display()
             ),
@@ -830,8 +832,11 @@ fn unavailable() -> Response {
         ],
         format!(
             "<!doctype html><meta charset=utf-8><title>OpenCode UI not vendored</title>\
-             <p>This node serves OpenCode's interface from a pinned bundle it does not have. \
-             Build one with <code>containers/opencode-ui/build.sh --src &lt;opencode checkout \
+             <p>This node serves OpenCode's interface from a pinned bundle it does not have, \
+             and it will not fall back to anything else. Install it with \
+             <code>tracon setup</code> &mdash; or, with no route to the release, \
+             <code>tracon setup --ui-bundle opencode-ui-v{PINNED_VERSION}.tar.gz</code>, or \
+             build one with <code>containers/opencode-ui/build.sh --src &lt;opencode checkout \
              at v{PINNED_VERSION}&gt;</code>.\n"
         ),
     )
@@ -1202,6 +1207,72 @@ pub async fn serve(app: AppState, operator_listen: SocketAddr) -> anyhow::Result
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// The route trace
+// ---------------------------------------------------------------------------
+
+/// The case names the native UI's route trace
+/// (`docs/reference/opencode-v1.18.30/ui-route-trace.tsv`) records for a
+/// request this origin answered itself, alongside the gateway's own class
+/// names (`gateway::opencode::trace`).
+pub mod trace {
+    /// A file in the pinned bundle.
+    pub const ASSET: &str = "asset";
+    /// The app shell, at `/` or at a route the app's own router declares.
+    pub const PAGE: &str = "page";
+    /// The bootstrap exchange, which is this origin's own route and neither
+    /// the bundle's nor the harness's.
+    pub const BOOT: &str = "boot";
+    /// Handed to the gateway's matrix, which named the class.
+    pub const API: &str = "api";
+    /// Nobody's: the 404 that is the point of having no catch-all. A *named*
+    /// outcome rather than an absence, so a trace can record having asked for
+    /// something nobody owns and show that it was refused.
+    pub const NONE: &str = "not-found";
+}
+
+/// Which of `dispatch`'s four cases answers one request, named for the route
+/// trace.
+///
+/// A transcription of `dispatch`'s order, in the same order and with the same
+/// tests, reachable without a node: the trace is only evidence if the thing
+/// that classifies a recorded row is the thing that decided it.
+///
+/// `bundle` is `None` on a machine that has not vendored the tree — CI, for
+/// one. A path that would have been a file is then [`trace::NONE`], which is
+/// what makes the recorded `asset` rows checkable there: a row the origin
+/// answered 200 that this function cannot place is a row only the bundle can
+/// have served.
+pub fn trace_case(bundle: Option<&Bundle>, method: &str, path: &str) -> &'static str {
+    let read_only = matches!(method, "GET" | "HEAD");
+    if path == "/boot" {
+        return if method == "POST" {
+            trace::BOOT
+        } else {
+            trace::NONE
+        };
+    }
+    if path == "/" {
+        return if read_only { trace::PAGE } else { trace::NONE };
+    }
+    let Some(segments) = segments(path) else {
+        return trace::NONE;
+    };
+    if read_only && bundle.is_some_and(|b| b.get(&segments.join("/")).is_some()) {
+        return trace::ASSET;
+    }
+    if segments
+        .first()
+        .is_some_and(|s| crate::gateway::opencode::is_api_root(s))
+    {
+        return trace::API;
+    }
+    if read_only && app_route(&segments) {
+        return trace::PAGE;
+    }
+    trace::NONE
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1402,5 +1473,34 @@ mod tests {
         // And a path the app never calls is not a tunnel.
         assert!(!crate::gateway::opencode::is_api_root("assets"));
         assert!(!crate::gateway::opencode::is_api_root("boot"));
+    }
+
+    /// The trace's names are `dispatch`'s cases, in `dispatch`'s order.
+    #[test]
+    fn the_trace_names_the_case_that_would_have_answered() {
+        let dir = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("/work");
+        assert_eq!(trace_case(None, "GET", "/"), trace::PAGE);
+        assert_eq!(
+            trace_case(None, "GET", &format!("/server/{dir}/session/ses_1")),
+            trace::PAGE
+        );
+        assert_eq!(trace_case(None, "GET", "/new-session"), trace::PAGE);
+        // An API root is the gateway's to decide however the method reads.
+        assert_eq!(trace_case(None, "GET", "/config"), trace::API);
+        assert_eq!(trace_case(None, "PATCH", "/config"), trace::API);
+        assert_eq!(trace_case(None, "POST", "/session/ses_1/share"), trace::API);
+        // This origin's own route, which is neither the bundle's nor the
+        // harness's — and is a POST or it is nobody's.
+        assert_eq!(trace_case(None, "POST", "/boot"), trace::BOOT);
+        assert_eq!(trace_case(None, "GET", "/boot"), trace::NONE);
+        // Nobody's, which is the 404 with no catch-all behind it.
+        assert_eq!(trace_case(None, "GET", "/nope"), trace::NONE);
+        assert_eq!(trace_case(None, "GET", "/../etc/passwd"), trace::NONE);
+        // A write to the shell's own route is not the shell.
+        assert_eq!(trace_case(None, "POST", "/"), trace::NONE);
+        assert_eq!(trace_case(None, "POST", "/new-session"), trace::NONE);
+        // Without a vendored tree an asset is placed by nobody — which is what
+        // makes a recorded 200 on such a path evidence the bundle answered it.
+        assert_eq!(trace_case(None, "GET", "/assets/index-abc.js"), trace::NONE);
     }
 }

@@ -10,6 +10,8 @@
 - Own the data: portable, independently readable exports; no node required to inspect them.
 - Optimize useful work per interruption, not agent count; support independent installations,
   not multi-user tenancy.
+- Keep the core accountable and personal workflows adaptable. Customizations reuse
+  isolation, scoped authority, manifests and evidence; installing code grants no permission.
 
 Completed items are removed from this file when they land; the changelog and the
 reference documents under `docs/reference/` carry the history.
@@ -399,7 +401,42 @@ refer to that manifest's table.
         than a silent boot.
   - [ ] PTY only as an explicit workspace-scoped capability with a gateway-minted owner-bound
         ticket (finding 7).
-  - [ ] Native UI route trace captured and unknown mutations shown to fail closed.
+  - [x] Native UI route trace captured and unknown mutations shown to fail closed.
+        `docs/reference/opencode-v1.18.30/ui-route-trace.tsv` is 60 request shapes taken
+        from a real browser: headless Chromium over CDP, the pinned bundle on the UI
+        origin, the pinned binary behind the mediated gateway, and a fake upstream model
+        behind the model gateway returning one short answer and one `bash` tool call. The
+        tour loads the session page, types a prompt into the app's own composer, answers
+        the permission that tool call raised, opens the changes view, switches model, opens
+        settings, tries share, tries fork, opens a second session's URL, and asks for three
+        paths nobody owns. Every row records method, path, status and the class that
+        answered; `node/tests/opencode_route_trace.rs` re-derives every class from
+        `http::ui::trace_case` and `gateway::opencode::trace_class` **in CI with no browser,
+        no harness and no bundle**, so a route table or matrix edited without the trace
+        agreeing fails there.
+        **Nothing was unplaced.** Every path the app used is declared in the app-route table
+        or classified by the matrix. The deny list the tour touched failed closed with a 403
+        and a `gateway_refused` on the session's own record in every case: `*/share` both
+        ways, `fork`, `init`, `PATCH /config`, `PATCH /global/config`, `PATCH /session/{id}`,
+        `POST /pty` without the terminal capability — and a second session's routes, refused
+        for naming another session's id. The four deliberately unowned paths (`/nope`,
+        `/index.html`, a missing asset, a POST to `/nope`) were 404s, which is the claim that
+        there is no catch-all made as evidence rather than as a reading.
+        **Found doing it** (manifest finding 20): the app's only live channel is
+        `GET /global/event`, which the deny list refuses because it has no durable replay
+        (finding 6) — so the native UI renders, prompts and answers, but does not update
+        itself, and the real permission the trace raised never appeared on the page. The fix
+        is a node-synthesised, session-scoped `/global/event` served from tracon's own bus,
+        not a hole in the matrix; it is the next row this view needs. The trace also settles
+        that this build of the app is a **v1 client**: of the v2 surface it uses only
+        `/api/health`, `/api/reference` and `/api/agent`.
+        **Still to do here:** the bundle the trace was captured against is now installable
+        rather than hand-built — `tracon setup` fetches `opencode-ui-v1.18.30.tar.gz` from
+        the release and verifies it with the node's own loader, `--ui-bundle` installs it
+        offline, `Dockerfile.node` carries it, and the release workflow builds it from the
+        pinned upstream commit, asserts the tree digest, and attests it — but no release has
+        published that asset yet, so the fetch path is exercised by test rather than against
+        a real release.
 - [x] **Gate E — remote-node parity.** Bounded encrypted owner streams over the hub for
       HTTP, SSE, and PTY: authenticated stream ids, owner binding, flow control, reconnect
       without replaying input, revocation, protocol mismatch refused; hub sees ciphertext and
@@ -459,6 +496,74 @@ This section records intended work, not additional guarantees of the current rel
       endpoint or a second screen. Login and desktop setup remain lifecycle entry points,
       not extra navigation destinations. Browser access to the native OpenCode view
       remains part of Gate D, not a separate interface to maintain.
+
+#### Node connections and desktop reliability
+
+- [ ] **Give the Podman gateway an independent lifecycle.** On Linux, a gateway
+      started by the setup API inherits the node service's process group and stops
+      with it; startup only verifies the now-stopped gateway. Manage the gateway in
+      its own user-service/cgroup rather than weakening the node's `KillMode` or
+      rerunning full setup on every restart. Reconcile a missing/stopped gateway
+      idempotently, retain fail-closed boundary checks, and reject incompatible
+      gateway configuration with an explicit repair path. Prove that a node-service
+      restart leaves the gateway running, stopped/missing recovery works, and node
+      shutdown still cleans up harnesses.
+- [ ] **Make credential handoff status converge.** A received share currently updates
+      the broker without republishing the provider summary peers display. After
+      durable receiver acceptance, recompute provider availability and publish the
+      local stream and mesh summary, including clearing obsolete login failures.
+      Distinguish queued, receiver-confirmed and usable credentials; the sender's
+      node bindings and successful enqueue alone prove neither receipt nor use.
+      Surface persistence/rejection failures without exposing values, and keep
+      provider connection status distinct from runtime readiness. Prove receipt,
+      persisted metadata and the peer view agree without a restart or another share.
+- [ ] **Preserve deliberate sharing through OAuth renewal.** Keep explicit channel
+      and recipient bindings when refreshing instead of resetting them to the local
+      node. Define one refresh owner and propagate renewed copies sealed to the
+      approved recipients; do not assume a broker handoff includes a harness's login
+      database or let multiple nodes race a rotating refresh token. Show refresh
+      failures, reconnect requirements and stale/offline copies. Define disconnect
+      and recipient-removal behavior explicitly: removing local bindings is not
+      evidence that a copied provider token was revoked. Prove renewal and reconnect
+      preserve scope and update the receiver without granting any new authority.
+- [ ] **Choose a policy for provider usage exhaustion.** Let the operator select in
+      advance, per project/channel with a per-run override: pause and resume after
+      reset; fall back to a named provider/model; or try that fallback, then wait if
+      no approved provider is available. Default to pausing without an authorized
+      fallback. Distinguish subscription/quota exhaustion from transient throttling,
+      authentication failures and outages; a generic 429 proves no reset schedule.
+      Use provider-reported reset evidence when available, otherwise show an unknown
+      reset and offer manual retry or bounded rechecks rather than inventing a timer.
+      Track cooldowns by the affected account/limit scope, including nodes sharing
+      that credential. Record the selected policy, reason, effective model and next
+      wake in the existing ledger; waiting survives restarts, releases idle execution
+      resources, and remains cancellable. Fallback and automatic resume must recheck
+      model/harness compatibility, destination data access, grants and spending caps;
+      permission to wait is not permission to send context to another provider.
+      Continue only from a recorded safe boundary, never replaying completed actions
+      or treating an uncertain in-flight tool as complete. Prove fallback, reset-based
+      resume and both-providers-exhausted behavior, including cancellation and unknown
+      reset times, without duplicate execution or silent changes of harness.
+- [ ] **Explain browser push enrollment failures.** Distinguish unavailable APIs,
+      denied permission, service-worker failure, browser push-service registration
+      failure and node subscription-storage errors. For the push-service case, say
+      that registration failed, identify disabled/blocked push services as possible
+      causes, and offer a supported browser or desktop notifications. Ungoogled
+      Chromium is an example, not a diagnosis inferred from a generic exception or
+      user-agent string. Keep technical details available without making them the
+      only message; do not report a device as registered after failed enrollment.
+      Verify the guidance at the failing stage without mislabeling permission,
+      invalid-key or node errors as a browser transport problem.
+- [ ] **Open external links through a clean Linux host launcher.** The shipped
+      AppImage's bundled `xdg-open` silently skips KDE 6, and its inherited library
+      path can break the Flatpak browser launcher. Select the host launcher and
+      restore its host PATH/library environment for the child only; preserve the
+      running app's libraries and existing URL/origin restrictions. Cover provider
+      sign-in and native-harness external links, report observable dispatch failures,
+      and never equate spawning a detached helper with opening the browser. Prove a
+      harmless HTTPS link opens from the installed AppImage on KDE 6 with a Flatpak
+      default browser; retain browser, mobile and other desktop behavior, and keep
+      OAuth codes and full sign-in URLs out of diagnostics.
 
 #### Review workspace and diff reading
 
@@ -551,6 +656,8 @@ the agent, which is not Tracon's authority model.
       and explicitly configured test services or previews for the projects actually used.
       Snapshot the configuration per execution; show its last successful validation and
       invalidate that assurance when its inputs change.
+      Treat customizations as versioned source with provenance, compatibility
+      requirements and validation evidence, not just a collection of settings.
 - [ ] **Preview preparation and explain incompatibility.** Show detected ecosystems,
       supported preparation steps, missing tools and actionable remedies before launch.
       Preserve credential-free preparation and isolation; unsupported scripts, services
@@ -560,6 +667,22 @@ the agent, which is not Tracon's authority model.
       that still require approval. Derive this from current policy and grants, not a
       parallel permissions model. Explain node eligibility and placement; any suggested
       runner stays manually overridable within the eligible set.
+      Show what a customization can read, change and send elsewhere, not merely
+      which tools it requests.
+- [ ] **Review, activate and roll back personal customizations.** Let an agent propose
+      a skill, instruction package, project profile or recipe. Show source changes,
+      provenance, required tools/data/actions and compatibility/validation evidence
+      before explicit operator activation. Reuse Gate C's node-owned manifests and
+      pinned artifacts; activation creates a revision, not a second configuration
+      system. Updates never modify running sessions or silently broaden authority.
+      Keep disable and rollback available; rollback cannot undo external effects.
+- [ ] **Expose resource-scoped operations for custom work.** Start with operations
+      demanded by real recipes through existing tools and policy enforcement:
+      evidence for a named work item, not unrestricted ledger access; proposing a
+      change, not general mutation rights. Types describe the contract but are not
+      a security boundary: the node enforces scope and execution remains isolated.
+      Installing an extension grants no raw credentials, privileged node access or
+      unrestricted outbound networking. Prove out-of-scope access is refused.
 
 #### Portable data and recovery
 
@@ -574,6 +697,8 @@ the agent, which is not Tracon's authority model.
       state, evidence, attachments and provenance. Define identifiers, timestamps,
       encodings, paths and omission rules. Optional harness-native state must name its
       harness/build/schema compatibility; it is not the portable record's only copy.
+      Include selected customization source, configuration and pinned revisions;
+      imported customizations require fresh authorization and contain no credentials.
 - [ ] **Make import predictable and independently implementable.** Publish schemas,
       representative exports, integrity/signature verification rules, version migration
       policy and examples for ordinary processing tools. Define duplicate/conflict
@@ -624,11 +749,32 @@ the agent, which is not Tracon's authority model.
 
 #### Reusable work and bounded automation
 
+The [extensible-software principle](https://jeremymorrell.dev/blog/extensible-software-in-the-age-of-llms/)
+fits here as personal workflows around an accountable core, not a new platform.
+Sequence: fix node/desktop/credential reliability; finish profiles and effective
+authority; deliver reviewed recipe authoring and activation; prove one personal
+customization; then add bounded triggers and sharing through that lifecycle.
+Gate C's completed foundations remain complete. Provider fallback preferences may
+be configurable, but quota classification, safe resumption, accounting and permission
+enforcement stay in the core.
+
 - [ ] **Saved workflow recipes.** Start with a few recurring procedures such as regression
       investigation, small changes and release preparation. Reuse phase presets and the
       ledger; snapshot each recipe on invocation, persist expensive checkpoints and
       external waits, and let the operator revise or stop a run. No mandatory workflow
       language or ceremony for a plain prompt.
+      Let an agent draft and revise recipes from a request; the operator reviews
+      and activates a pinned revision through the customization lifecycle above.
+- [ ] **Prove one personal customization end to end.** Produce a preferred review
+      summary when work is ready: intent, changed behavior, evidence, unresolved
+      risks and decisions needed. Use an approved recipe, scoped evidence access
+      and existing report/document surfaces. Prove usefulness on real work, source
+      and revision visibility, safe failure without disrupting review or approving
+      anything, and revision/disable/export/import without authority transfer.
+      Start custom UI as isolated reports/views using document-preview isolation,
+      not plugins in the administration UI. Expose no node session cookie, Tauri
+      management commands or application store; any later interactive action needs
+      a narrowly defined authorized operation.
 - [ ] **Lightweight batches.** Group related work with dependencies, explicit assignment/
       ownership and reclaim rules, aggregate spending, blockers and one completion report.
       Build on current readiness and session holders; retain discovery lineage and prevent
@@ -643,6 +789,8 @@ the agent, which is not Tracon's authority model.
       retry limits; preserve pause/stop, deduplicate triggers, and ask before consequential
       actions absent a valid scoped grant. Use ordinary supervisor logic for scheduling,
       reconciliation and health checks, not permanent agent roles.
+      Run approved recipe revisions through the existing supervisor and ledger,
+      never arbitrary extension code inside the node.
 - [ ] **Optional conversational coordination, only if useful.** An ordinary managed
       session may inspect permitted cross-project work and propose actions through existing
       tools. No privileged manager loop in the node. Fresh reviewers remain useful for
@@ -658,6 +806,8 @@ the agent, which is not Tracon's authority model.
       pinned-release/update policy, interruption and backup requirements, and the recovery
       path for a failed upgrade. Extend the existing compatibility gates instead of
       promising arbitrary drop-in harnesses or maintaining a native UI fork.
+      Apply compatibility checks, failed-update recovery and explicit rollback to
+      installed customizations as well as the managed runtime.
 - [ ] **Offer a clearly labeled demonstration mode.** Reuse the fixture machinery to
       explore the workflow without credentials or containers, with demonstration data
       unmistakable and no implication that its output proves a live run.
@@ -697,6 +847,9 @@ the agent, which is not Tracon's authority model.
   tracon terminal.
 - **`cr-sqlite`:** only if real multi-writer convergence requires it.
 - **Stacked MR automation:** decide whether stacks are preferable to feature flags first.
+- **General dashboard/plugin system:** only after isolated reports and views prove
+  insufficient. No new extension runtime, marketplace or workflow language is required
+  for the personal-customization work above.
 
 ## Out of scope
 

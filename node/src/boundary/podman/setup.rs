@@ -10,8 +10,16 @@ use crate::boundary::BoundaryError;
 
 /// The gateway and harness definitions, carried inside the binary so a host
 /// that only fetched the release can build the images it needs.
+///
+/// The exclusion is load-bearing. An operator doing an offline `Dockerfile.node`
+/// build drops `opencode-ui-v<version>.tar.gz` into `containers/opencode-ui/`,
+/// and that directory is embedded — so without this, a 10 MB release artefact
+/// would be compiled into every binary built from that tree, silently, and the
+/// node would carry a second unverified copy of the bundle it already verifies
+/// by digest on disk.
 #[derive(Embed)]
 #[folder = "../containers"]
+#[exclude = "opencode-ui/*.tar.gz"]
 struct Containers;
 
 /// The label a built image carries: a digest of the definitions it was built
@@ -343,6 +351,29 @@ mod tests {
         assert_eq!(harness_dir(&cfg), "harness");
         cfg.harness.id = "claude".into();
         assert_eq!(harness_dir(&cfg), "harness-claude");
+    }
+
+    /// The recipes are carried; the artefact never is.
+    ///
+    /// An offline `Dockerfile.node` build wants the release tarball in
+    /// `containers/opencode-ui/`, and that directory is what this embeds. A
+    /// build from such a tree must not quietly gain 10 MB and a second,
+    /// unverified copy of a bundle the node already pins by digest on disk.
+    #[test]
+    fn the_ui_bundle_recipe_is_embedded_and_the_artefact_is_not() {
+        let paths: Vec<String> = Containers::iter().map(|p| p.to_string()).collect();
+        for wanted in [
+            "opencode-ui/build.sh",
+            "opencode-ui/DIGEST",
+            "opencode-ui/PINNED",
+        ] {
+            assert!(paths.iter().any(|p| p == wanted), "{wanted} is not carried");
+        }
+        let artefacts: Vec<&String> = paths.iter().filter(|p| p.ends_with(".tar.gz")).collect();
+        assert!(
+            artefacts.is_empty(),
+            "a release artefact is compiled into the binary: {artefacts:?}"
+        );
     }
 
     #[test]

@@ -116,7 +116,8 @@ same release: the .AppImage on Linux, the .dmg on macOS.
 
 next, on this machine:
   tracon enroll <invitation url>        join the mesh (run \`tracon mesh invite\` on an enrolled node)
-  tracon setup                          create the harness network and gateway (needs rootless podman)
+  tracon setup                          create the harness network and gateway (needs rootless podman),
+                                        and install the pinned OpenCode UI bundle
   tracon credential import <file>       seal a credential (or connect a provider on the Nodes screen)
   tracon check-boundary --deep          prove the boundary
   tracon service install                run the node under systemd or launchd
