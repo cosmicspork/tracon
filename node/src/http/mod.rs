@@ -54,11 +54,7 @@ pub fn router(state: AppState) -> Router {
     //    system browser. The UI origin's own policy answers the other half of
     //    that pair — its `frame-ancestors` names this origin alone — so each
     //    side states the relationship and neither is taken on trust.
-    let opencode_origin = state
-        .cfg
-        .ui
-        .opencode_origin()
-        .expect("validated UI origin");
+    let opencode_origin = state.cfg.ui.opencode_origin().expect("validated UI origin");
     let security_headers = OperatorSecurityHeaders {
         csp: format!(
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \

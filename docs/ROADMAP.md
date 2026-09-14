@@ -274,11 +274,12 @@ refer to that manifest's table.
         **Still to do here:** the PTY WebSocket upgrade is held to the same Origin rule but
         the gateway's connect route still answers 501 (the ticket exchange is its own row);
         `connect-src 'self'` will need the `wss://` form of this origin when it lands. The
-        SPA's "Open in OpenCode" control (#205) is desktop-only — it is gated on `isTauri()`
-        because opening a *window* is the wrapper's to do — so a browser has no way to reach
-        this origin yet. The mint route, `POST /api/sessions/{id}/opencode-boot`, is the same
-        one for both; a browser control would open the URL in a tab rather than invoking the
-        wrapper, and belongs with the mobile shell.
+        SPA's "Open in OpenCode" control (#205) was desktop-only — gated on `isTauri()`,
+        because opening a *window* is the wrapper's to do — and the mobile shell row below is
+        where a browser got its own way in, off the same mint route
+        (`POST /api/sessions/{id}/opencode-boot`) and into an in-scope frame rather than a tab.
+        That row also added a `framed` flag to `POST /boot`: the cookie this origin sets is
+        third-party inside that frame, and `SameSite=Strict` would never arrive.
   - [x] Desktop: an unprivileged window with no node-management commands; navigation limited
         to the UI origin. A second window labelled `opencode`, declared in `tauri.conf.json`
         with `"create": false` and built on demand from a boot URL the node mints
@@ -314,8 +315,88 @@ refer to that manifest's table.
         exists, so the feature detection should find it; an end-to-end run of the two
         together is unexercised. And the macOS leg — bundle, window behaviour and the Edit
         menu — which is the operator's to run.
-  - [ ] Installed mobile PWA on the always-on node: in-scope shell, isolated native view,
-        third-party storage blocked, background/resume recovery, notification deep links.
+  - [x] Installed mobile PWA: in-scope shell, isolated native view, third-party storage
+        blocked, background/resume recovery, notification deep links.
+        `/sessions/{id}/opencode` (`spa/src/routes/OpencodeShell.svelte`) is a route inside the
+        manifest's `scope` that hosts the native view in a cross-origin `<iframe>` at the UI
+        origin's boot URL, so an installed app never hands the session to the system browser.
+        "Open in OpenCode" is no longer desktop-only: Tauri still opens #205's window, and
+        every other client navigates to this route — never a new tab, which on a phone is the
+        handover the route exists to prevent. The capability goes into the frame's `src` and
+        nowhere else. `spa/src/lib/opencode.ts` refuses a boot URL whose token is in the query
+        (where a log would keep it), whose origin is not the one the node named, or which
+        shares tracon's own — the isolation *is* the origin — and `redact` is what every
+        message about one goes through, so it reaches no history entry, error or console.
+        No `sandbox`: a sandboxed frame's origin is opaque and the UI origin refuses
+        `Origin: null` outright, so the attribute would break the boot exchange without
+        tightening anything. No `postMessage` bridge; the status chip reads tracon's own
+        session API, which this page is already authorised for. Nothing delegated by `allow`,
+        and `referrerpolicy=no-referrer`. `frame-src` on the operator origin now names the UI
+        origin alongside the preview origin, and the UI origin's `frame-ancestors` already
+        names the operator's: both sides state the relationship and neither is assumed.
+        **Third-party storage.** The shell is a page on tracon's origin and the view is a page
+        on the node's other origin, so the cookie the view's own `POST /boot` sets is
+        third-party — and third-party cookies are blocked by default on the phones this is
+        for. `/boot` now takes a `framed` flag that the spliced bootstrap reports
+        (`window.top !== window.self`, a throw read as framed), and a framed boot is answered
+        with `Secure; SameSite=None; Partitioned` (CHIPS) where a window still gets
+        `SameSite=Strict`. The loosening that `SameSite=None` would otherwise be is already
+        answered by `origin_guard`, which requires a matching `Origin` on every mutation and
+        every WebSocket upgrade; `Partitioned` then keys the jar to the *top-level* site, so
+        the cookie exists only while tracon's own origin is the page around it — a stronger
+        statement than `Strict` made, because it holds against a same-site attacker too.
+        `Secure` is carried even on loopback, where this listener is plain HTTP: loopback is a
+        potentially trustworthy origin and the browser accepts it, measured rather than
+        assumed.
+        **Proven in a browser** (`node/tests/opencode_pwa_shell.rs`, four cases; Chromium at
+        390×844 with `--test-third-party-cookie-phaseout`, driven by
+        `spa/tests/opencode-shell-driver.mjs`, skipped where the browser or the SPA's dev
+        dependencies are absent): two genuinely cross-site loopback origins, `127.0.0.1` and
+        `127.0.0.2` — distinct sites because neither has a registrable domain, where two
+        *ports* of one host would not be, which is what an earlier attempt at this got wrong —
+        with the real shell, the real mint route, the real bootstrap, the real cookie and the
+        real gateway. The framed view authenticates with third-party cookies blocked and its
+        mediated call returns 200; the shell's URL stays on the in-scope route and never
+        carries the capability; there is exactly one frame and it is the other origin; the
+        frame carries no `sandbox`, an empty `allow` and `no-referrer`; the cookie is absent
+        from the origin's unpartitioned jar; and nothing overflows horizontally at 390px.
+        The **control** is what makes that mean anything: the same flow with the `Set-Cookie`
+        downgraded in the test's own middleware to what #205/#206 send is refused — 401 at the
+        gateway, `refused:401` on the page — so the pair is cross-site and the partitioned run
+        is not passing for a boring reason. A fourth case does the exchange on the wire with
+        no browser at all, so a browser refusal is visibly the browser's.
+        Upstream's bundle is stood in for and only there: it is 34 MiB, not in git, and not
+        what any of this is about. The UI origin's `/` serves a two-line page with tracon's
+        *own* `splice_bootstrap` applied, whose module makes one authorised call through the
+        gateway and writes the answer where the driver reads it.
+        **Background and resume.** On `visibilitychange`/`pageshow` the shell re-reads the
+        session from tracon's API rather than trusting what is on screen. A session that ended
+        while the app slept is said so, and the offer is the way back rather than a reconnect
+        that cannot work — asserted in the browser with the session ended from outside the
+        page between load and resume, so it is an ordering and not a race. A capability past
+        the node's own cookie lifetime — returned by the mint route as `cookie_ttl_ms`, since
+        an `HttpOnly` cookie cannot be read from the page — offers **Reconnect**, which mints
+        a fresh one.
+        **Service worker.** Cache key `v3`. `/api/**` and `/boot` pass straight through and
+        are never cached — a replayed `/boot` response would be a capability the node has
+        already spent — the UI origin is another origin and is never intercepted, and the
+        previous version's caches are dropped on activate so an existing install updates
+        without being reinstalled. All four asserted in `spa/src/lib/sw.test.ts`.
+        **Deep links.** `notify::Kind::Opencode` and `Notification::opencode` put a push about
+        an OpenCode session on the shell route, and the test reads `scope` out of
+        `spa/public/manifest.webmanifest` itself — compiled in, so moving the manifest fails
+        the build — rather than asserting about a string. Nothing produces one yet; the
+        producer is the PTY and native-UI work in the rows below.
+        **Still to do here:** the same run against the *real* pinned bundle, which needs
+        `containers/opencode-ui/build.sh` to have been run on the machine — the browser case
+        above stands in for upstream's JavaScript and asserts nothing about it. And the
+        physical devices, which are the operator's: installing from the always-on node over
+        HTTPS on iOS Safari and Android Chrome, and confirming the framed view authenticates
+        with cross-site tracking prevention on. Safari is the open one — its partitioned-cookie
+        story is not Chromium's, and if the frame is refused there the candidate fix is
+        `document.requestStorageAccess` from inside the frame before `POST /boot`, which needs
+        a user gesture and therefore a visible "Show OpenCode" control in the frame rather
+        than a silent boot.
   - [ ] PTY only as an explicit workspace-scoped capability with a gateway-minted owner-bound
         ticket (finding 7).
   - [ ] Native UI route trace captured and unknown mutations shown to fail closed.

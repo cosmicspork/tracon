@@ -61,11 +61,7 @@ use serde_json::Value;
 use tracon::{
     adapter::NativeApi,
     config::Config,
-    http::{
-        api::AppState,
-        auth::AuthState,
-        ui,
-    },
+    http::{api::AppState, auth::AuthState, ui},
     session::Manager,
     store::Store,
     stream::Bus,
@@ -90,8 +86,6 @@ const UI_HOST: &str = "127.0.0.2";
 struct Rig {
     operator_origin: String,
     ui_origin: String,
-    #[allow(dead_code)]
-    store: Arc<Store>,
     /// Set to downgrade the UI cookie to what #206 sent, for the control run.
     downgrade: Arc<AtomicBool>,
     /// Every `Set-Cookie` the UI origin sent the browser, in order. The
@@ -238,7 +232,6 @@ async fn stand_up() -> Rig {
     Rig {
         operator_origin,
         ui_origin,
-        store,
         downgrade,
         cookies_sent,
         tasks,
@@ -249,7 +242,9 @@ async fn stand_up() -> Rig {
 /// Reached by the browser between the frame settling and the page being told
 /// it is visible again, so "what the shell does on resume" is asserted in
 /// order rather than against a clock.
-async fn end_session(axum::extract::State(store): axum::extract::State<Arc<Store>>) -> &'static str {
+async fn end_session(
+    axum::extract::State(store): axum::extract::State<Arc<Store>>,
+) -> &'static str {
     store
         .update_session(TRACON_SESSION, tracon::store::SessionPatch::state("closed"))
         .expect("the session ends");
@@ -427,16 +422,14 @@ async fn the_installed_app_keeps_the_native_view_with_third_party_cookies_blocke
     //    path the manifest claims.
     assert_eq!(
         saw["shell_url"].as_str().unwrap(),
-        format!(
-            "{}/sessions/{TRACON_SESSION}/opencode",
-            rig.operator_origin
-        ),
+        format!("{}/sessions/{TRACON_SESSION}/opencode", rig.operator_origin),
         "the shell navigated away{}",
         ctx()
     );
     assert_eq!(saw["in_scope"], true, "{}", ctx());
     assert_eq!(
-        saw["shell_url_has_boot"], false,
+        saw["shell_url_has_boot"],
+        false,
         "the capability reached the shell's own address bar{}",
         ctx()
     );
@@ -464,10 +457,9 @@ async fn the_installed_app_keeps_the_native_view_with_third_party_cookies_blocke
 
     // 4. The point of the run. With third-party cookies blocked, the frame
     //    spent its token, the node's partitioned cookie was stored, and the
-    //    call it made afterwards was authorised by it.
-    // What the node actually put on the wire, read from the wire. A cookie the
-    // browser silently refuses is indistinguishable, from the page, from one
-    // that was never sent.
+    //    call it made afterwards was authorised by it. What the node put on
+    //    the wire is read from the wire, because a cookie the browser silently
+    //    refuses is indistinguishable, from the page, from one never sent.
     let sent = rig.cookies_sent.lock().unwrap().clone();
     let ui_cookie = sent
         .iter()
@@ -489,7 +481,8 @@ async fn the_installed_app_keeps_the_native_view_with_third_party_cookies_blocke
         .find(|r| r["path"] == "/global/health")
         .unwrap_or_else(|| panic!("the frame made no authorised call{}", ctx()));
     assert_eq!(
-        health["status"], 200,
+        health["status"],
+        200,
         "the partitioned cookie was not sent back{}",
         ctx()
     );
@@ -517,18 +510,14 @@ async fn the_installed_app_keeps_the_native_view_with_third_party_cookies_blocke
     // 5. A phone screen that scrolls sideways is a broken screen.
     let overflow = &saw["overflow"];
     assert_eq!(
-        overflow["scroll_width"], overflow["client_width"],
+        overflow["scroll_width"],
+        overflow["client_width"],
         "the shell overflows horizontally at 390px{}",
         ctx()
     );
 
     // 6. Nothing threw, and nothing on the page wrote the capability anywhere.
-    assert_eq!(
-        saw["page_errors"].as_array().unwrap().len(),
-        0,
-        "{}",
-        ctx()
-    );
+    assert_eq!(saw["page_errors"].as_array().unwrap().len(), 0, "{}", ctx());
     for line in saw["console"].as_array().unwrap() {
         let line = line.as_str().unwrap_or_default();
         assert!(
@@ -570,7 +559,8 @@ async fn the_cookie_the_desktop_window_uses_is_refused_in_the_shells_frame() {
         .find(|r| r["path"] == "/global/health")
         .unwrap_or_else(|| panic!("the frame made no call to fail{}", ctx()));
     assert_eq!(
-        health["status"], 401,
+        health["status"],
+        401,
         "a SameSite=Strict cookie was accepted in a third-party frame, so this pair of \
          origins is not cross-site and the partitioned run proves nothing{}",
         ctx()

@@ -754,7 +754,9 @@ mod tests {
         // actually serves: moving or renaming it fails the build.
         const MANIFEST: &str = include_str!("../../../spa/public/manifest.webmanifest");
         let manifest: serde_json::Value = serde_json::from_str(MANIFEST).expect("valid manifest");
-        let scope = manifest["scope"].as_str().expect("the manifest has a scope");
+        let scope = manifest["scope"]
+            .as_str()
+            .expect("the manifest has a scope");
         let start = manifest["start_url"].as_str().expect("a start_url");
         assert!(start.starts_with(scope), "{start} is outside {scope}");
 
@@ -771,7 +773,7 @@ mod tests {
         // Per session, so a second nudge replaces the first rather than
         // stacking, and distinct from the session screen's own banner.
         assert_eq!(n.tag, "tracon-opencode-ses_7");
-        assert_ne!(n.tag, format!("tracon-perm-{}", "ses_7"));
+        assert_ne!(n.tag, "tracon-perm-ses_7");
         let payload = n.payload(0);
         assert_eq!(payload["path"], "/sessions/ses_7/opencode");
         assert_eq!(payload["kind"], "opencode");

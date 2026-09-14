@@ -146,6 +146,16 @@ counts as secure, which is why the laptop needed no ceremony. Issuing a token ag
 rotates it and logs every client out. `tracon auth revoke` returns the node to
 loopback-only.
 
+An OpenCode session's own interface opens on the phone too, at
+`/sessions/{id}/opencode` — inside the installed app, not handed off to Safari or
+Chrome. It is the node's separate OpenCode origin in a frame, so the page you are
+holding lends it nothing: no cookie of yours, no DOM, no command. The capability that
+gets it in is single-use, lives in the URL fragment, and reaches only that frame; the
+cookie it becomes is partitioned to this app, so it works with third-party cookies
+blocked and exists nowhere else. Put the phone down and come back and the shell
+re-checks the session before it trusts what is on the screen: a session that ended
+says so, and an expired capability offers a fresh one.
+
 ### Start on the phone, pick it up on the laptop
 
 <img src="docs/media/home-phone.png" align="right" width="230" alt="The home on a phone">

@@ -1311,7 +1311,10 @@ mod tests {
         // is nonetheless potentially trustworthy.
         for secure in [true, false] {
             let framed = cookie(secure, true);
-            assert!(framed.starts_with("tracon_opencode_ui=s3cret; "), "{framed}");
+            assert!(
+                framed.starts_with("tracon_opencode_ui=s3cret; "),
+                "{framed}"
+            );
             assert!(framed.contains("; HttpOnly"), "{framed}");
             assert!(framed.contains("; Secure"), "{framed}");
             assert!(framed.contains("; SameSite=None"), "{framed}");

@@ -52,7 +52,9 @@
 
   const session = $derived(store.sessions.get(id) ?? loaded ?? undefined)
   const title = $derived(session?.branch ?? id.slice(0, 8))
-  const ended = $derived(session !== undefined && isTerminal(session.state))
+  const ended = $derived(
+    endedWhileAway || (session !== undefined && isTerminal(session.state)),
+  )
   const chip = $derived(session ? session.state.replace(/_/g, ' ') : 'loading')
 
   async function connect() {
@@ -96,8 +98,12 @@
         finished = `This session ${result.session.state.replace(/_/g, ' ')} while the app was away.`
         return
       }
-    } catch (err) {
-      finished = humanizeError(err instanceof Error ? err.message : String(err))
+    } catch {
+      // The node did not answer this time. That is not evidence the view is
+      // finished — a phone waking up on a bad connection asks again a moment
+      // later — and tearing a working frame down over a blip would be worse
+      // than leaving it. The frame is the node's own origin and will say so
+      // itself if the node is really gone.
       return
     }
     if (Date.now() >= staleAfter(bootedMs, cookieTtlMs)) {
@@ -145,7 +151,7 @@
   {:else if finished}
     <div class="msg">
       <p>{finished}</p>
-      {#if ended || endedWhileAway}
+      {#if ended}
         <a href="/sessions/{id}">Back to the session</a>
       {:else}
         <button type="button" onclick={() => void connect()} disabled={booting}>Reconnect</button>

@@ -594,6 +594,24 @@ Every node serves the same embedded SPA; a client is a matter of shell.
   and is stripped from anything the app logs. Nothing about this depends on the page
   behaving; it is the window's grants and its navigation handler, both asserted by
   test against the manifest.
+- **A browser gets the same isolation without a window to put it in.** The desktop
+  app can hand OpenCode's UI a window with its own capability; a phone cannot, and an
+  installed web app that opened the system browser would have given the session away
+  to a context it no longer controls. So the interface hosts the native view itself,
+  at `/sessions/{id}/opencode` — a route inside the app's own `scope`, holding a
+  cross-origin frame on the node's OpenCode UI origin. The isolation is that origin,
+  exactly as it is for the desktop window: no `sandbox` (a sandboxed frame's origin
+  is opaque, which that listener refuses outright), no message bridge, nothing
+  delegated, and a status bar read from tracon's own session API rather than from the
+  frame. Both policies name the other: the interface's `frame-src` names the UI
+  origin, the UI origin's `frame-ancestors` names the interface.
+  Being framed changes one thing on the node. The cookie the view's own bootstrap
+  sets is third-party from the browser's point of view, and third-party cookies are
+  blocked by default on phones — so the bootstrap says whether it is framed, and a
+  framed exchange is answered with a `Partitioned` cookie (CHIPS) instead of
+  `SameSite=Strict`. That keys the cookie to tracon's own site as the page around it,
+  which is stricter than what it replaces rather than looser: the origin guard already
+  required a matching `Origin` on everything that writes.
 - The interface talks only to the node that served it; that node mirrors peers and
   forwards commands to owners. A verdict executes on the owner, because staleness
   and publishing need the owner's worktree and broker.
