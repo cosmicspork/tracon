@@ -361,6 +361,14 @@ async fn drive(rig: &Rig, resume: Option<&str>) -> Run {
             "the SPA's dev dependencies are not installed; run `bun install` in spa/".into(),
         );
     }
+    // `node/build.rs` writes a placeholder page when nobody has built the SPA,
+    // so the Rust job never needs the JS toolchain. Driving a browser over that
+    // placeholder would fail for a reason that has nothing to do with the
+    // shell, so say which it is.
+    let index = std::fs::read_to_string(spa.join("dist/index.html")).unwrap_or_default();
+    if !index.contains("/assets/") {
+        return Run::Skipped("spa/dist is the placeholder page; run `just spa`".into());
+    }
     let Some(bun) = which("bun") else {
         return Run::Skipped("bun is not on PATH, so the browser driver cannot run".into());
     };
