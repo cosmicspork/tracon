@@ -287,7 +287,7 @@ pub struct StreamRouter {
     weak: Weak<MeshClient>,
     /// This run of this node. A restart mints a new one, which is what fences
     /// a serving node still holding a stream to the process that died.
-    owner_epoch: String,
+    owner_epoch: Mutex<String>,
     inbound: Mutex<HashMap<String, Inbound>>,
     /// The owner epoch last seen per `(owner node, session)`, so the next open
     /// can name it and be fenced rather than answered by a stranger.
@@ -300,7 +300,7 @@ impl StreamRouter {
     pub fn new(weak: Weak<MeshClient>) -> Self {
         Self {
             weak,
-            owner_epoch: uuid::Uuid::now_v7().to_string(),
+            owner_epoch: Mutex::new(uuid::Uuid::now_v7().to_string()),
             inbound: Mutex::new(HashMap::new()),
             seen_epochs: Mutex::new(HashMap::new()),
             executor: std::sync::OnceLock::new(),
@@ -312,8 +312,19 @@ impl StreamRouter {
         let _ = self.executor.set(executor);
     }
 
-    pub fn owner_epoch(&self) -> &str {
-        &self.owner_epoch
+    pub fn owner_epoch(&self) -> String {
+        self.owner_epoch.lock().unwrap().clone()
+    }
+
+    /// Mint a new owner epoch and drop every stream: what a restart does, and
+    /// what a test needs to make one happen without a second process. A
+    /// serving node holding the old epoch is fenced on its next open.
+    pub fn restart(&self) {
+        *self.owner_epoch.lock().unwrap() = uuid::Uuid::now_v7().to_string();
+        let open: Vec<String> = self.inbound.lock().unwrap().keys().cloned().collect();
+        for id in open {
+            self.forget(&id);
+        }
     }
 
     pub fn open_count(&self) -> usize {
@@ -595,7 +606,7 @@ impl StreamRouter {
         if open
             .owner_epoch
             .as_deref()
-            .is_some_and(|e| e != self.owner_epoch)
+            .is_some_and(|e| e != self.owner_epoch())
         {
             self.stats.fenced.fetch_add(1, Ordering::Relaxed);
             refuse(
@@ -687,7 +698,7 @@ impl StreamRouter {
             .send(&StreamFrame::Head {
                 status: answer.status,
                 headers: answer.headers,
-                owner_epoch: self.owner_epoch.clone(),
+                owner_epoch: self.owner_epoch(),
                 uncertain: answer.uncertain,
             })
             .await

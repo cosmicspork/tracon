@@ -28,6 +28,16 @@ pub struct TestHub {
     pub url: String,
     pub members: Arc<MemoryMembers>,
     pub frames: Arc<MemoryFrames>,
+    /// The router's own state, so a stream test can watch the relay: what it
+    /// is holding, and who is connected to it.
+    pub state: hub::AppState,
+}
+
+impl TestHub {
+    /// Whether a node's owner-stream connection is open on this hub.
+    pub fn relay_connected(&self, node_id: &str) -> bool {
+        self.state.streams.is_connected(node_id)
+    }
 }
 
 /// A hub with these members already admitted, on an ephemeral port.
@@ -73,7 +83,14 @@ pub async fn start_hub_with_members(members: Arc<MemoryMembers>) -> String {
 }
 
 async fn serve(frames: Arc<MemoryFrames>, members: Arc<MemoryMembers>) -> TestHub {
-    let app = hub::app(frames.clone(), members.clone(), HubConfig::default());
+    let state = hub::state_for(
+        frames.clone(),
+        members.clone(),
+        HubConfig::default(),
+        Arc::new(hub::pokes::PokeHub::new()),
+        None,
+    );
+    let app = hub::app_with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -83,6 +100,7 @@ async fn serve(frames: Arc<MemoryFrames>, members: Arc<MemoryMembers>) -> TestHu
         url: format!("http://{addr}"),
         members,
         frames,
+        state,
     }
 }
 
