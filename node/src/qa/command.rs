@@ -233,7 +233,9 @@ pub fn resolve_binary(binary: &str) -> Result<PathBuf, String> {
         return if path.is_file() {
             Ok(path)
         } else {
-            Err(format!("configured QA deploy binary {binary} is not a file"))
+            Err(format!(
+                "configured QA deploy binary {binary} is not a file"
+            ))
         };
     }
     let path = std::env::var("PATH").unwrap_or_default();
@@ -306,10 +308,18 @@ pub fn select_environment(
         matched.sort_by_key(|row| !truthy(row.get(&discover.prefer_field)));
     }
     let chosen = matched[0];
-    let id = field_str(chosen, &discover.id_field)
-        .ok_or_else(|| format!("the environment for branch {branch} has no {} field", discover.id_field))?;
-    let url = field_str(chosen, &discover.url_field)
-        .ok_or_else(|| format!("the environment for branch {branch} has no {} field", discover.url_field))?;
+    let id = field_str(chosen, &discover.id_field).ok_or_else(|| {
+        format!(
+            "the environment for branch {branch} has no {} field",
+            discover.id_field
+        )
+    })?;
+    let url = field_str(chosen, &discover.url_field).ok_or_else(|| {
+        format!(
+            "the environment for branch {branch} has no {} field",
+            discover.url_field
+        )
+    })?;
     let state = field_str(chosen, &discover.state_field).unwrap_or_default();
     Ok(Discovered {
         id,
@@ -399,7 +409,9 @@ pub fn identity_attests(identity: &str, sha: &str) -> bool {
     // An abbreviation the host chose: any 7-or-more prefix of the candidate
     // SHA appearing in the identity, longest first so a coincidence of seven
     // characters is not preferred to a real match.
-    (7..=sha.len()).rev().any(|len| identity.contains(&sha[..len]))
+    (7..=sha.len())
+        .rev()
+        .any(|len| identity.contains(&sha[..len]))
 }
 
 #[cfg(test)]
@@ -533,8 +545,14 @@ mod tests {
         let names = BTreeSet::from(["HOME".to_string(), "PATH".to_string()]);
         let base = execution_identity(&argv, &names, "/usr/bin/cloud", "0.5.0");
         assert!(base.starts_with("command:sha256:"), "{base}");
-        assert_ne!(base, execution_identity(&argv, &names, "/usr/bin/cloud", "0.6.0"));
-        assert_ne!(base, execution_identity(&argv, &names, "/opt/cloud", "0.5.0"));
+        assert_ne!(
+            base,
+            execution_identity(&argv, &names, "/usr/bin/cloud", "0.6.0")
+        );
+        assert_ne!(
+            base,
+            execution_identity(&argv, &names, "/opt/cloud", "0.5.0")
+        );
         assert_ne!(
             base,
             execution_identity(
@@ -544,6 +562,9 @@ mod tests {
                 "0.5.0"
             )
         );
-        assert_eq!(base, execution_identity(&argv, &names, "/usr/bin/cloud", "0.5.0"));
+        assert_eq!(
+            base,
+            execution_identity(&argv, &names, "/usr/bin/cloud", "0.5.0")
+        );
     }
 }

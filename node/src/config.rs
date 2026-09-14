@@ -612,7 +612,8 @@ impl QaTarget {
                 "qa target {name:?} needs an env_credential naming the broker entry whose environment the command receives"
             ));
         }
-        let mut placeholders: BTreeSet<String> = QA_PLACEHOLDERS.iter().map(|p| p.to_string()).collect();
+        let mut placeholders: BTreeSet<String> =
+            QA_PLACEHOLDERS.iter().map(|p| p.to_string()).collect();
         for key in deployment.args.keys() {
             if !valid_placeholder_name(key) {
                 return Err(format!(
@@ -662,13 +663,13 @@ impl QaTarget {
                 ("state_field", &discover.state_field),
             ] {
                 if !valid_json_field(field) {
-                    return Err(format!(
-                        "qa target {name:?} has an unsafe discover.{label}"
-                    ));
+                    return Err(format!("qa target {name:?} has an unsafe discover.{label}"));
                 }
             }
             if !discover.list_field.is_empty() && !valid_json_field(&discover.list_field) {
-                return Err(format!("qa target {name:?} has an unsafe discover.list_field"));
+                return Err(format!(
+                    "qa target {name:?} has an unsafe discover.list_field"
+                ));
             }
             if !discover.prefer_field.is_empty() && !valid_json_field(&discover.prefer_field) {
                 return Err(format!(
@@ -700,10 +701,14 @@ impl QaTarget {
                 return Err(format!("qa target {name:?} has an unsafe status.id_field"));
             }
             if !valid_json_field(&status.state_field) {
-                return Err(format!("qa target {name:?} has an unsafe status.state_field"));
+                return Err(format!(
+                    "qa target {name:?} has an unsafe status.state_field"
+                ));
             }
             if !status.list_field.is_empty() && !valid_json_field(&status.list_field) {
-                return Err(format!("qa target {name:?} has an unsafe status.list_field"));
+                return Err(format!(
+                    "qa target {name:?} has an unsafe status.list_field"
+                ));
             }
             if !status.commit_field.is_empty() && !valid_json_field(&status.commit_field) {
                 return Err(format!(
@@ -781,7 +786,9 @@ fn validate_argv(
     placeholders: &BTreeSet<String>,
 ) -> Result<(), String> {
     if argv.len() > 32 {
-        return Err(format!("qa target {target:?} {label} has more than 32 arguments"));
+        return Err(format!(
+            "qa target {target:?} {label} has more than 32 arguments"
+        ));
     }
     for (index, part) in argv.iter().enumerate() {
         if part.is_empty() || part.len() > 4096 || part.contains(['\0', '\r', '\n']) {
@@ -845,13 +852,17 @@ pub fn argv_placeholders(part: &str) -> Result<Vec<String>, String> {
             .ok_or_else(|| format!("argument {part:?} has an unclosed placeholder brace"))?;
         let name = &after[..close];
         if !valid_placeholder_name(name) {
-            return Err(format!("argument {part:?} has an unusable placeholder name"));
+            return Err(format!(
+                "argument {part:?} has an unusable placeholder name"
+            ));
         }
         names.push(name.to_string());
         rest = &after[close + 1..];
     }
     if rest.contains('}') {
-        return Err(format!("argument {part:?} has an unopened placeholder brace"));
+        return Err(format!(
+            "argument {part:?} has an unopened placeholder brace"
+        ));
     }
     Ok(names)
 }
@@ -900,7 +911,10 @@ fn valid_host_suffix(value: &str) -> bool {
 /// substring match: `evil-laravel.cloud` must not pass for `laravel.cloud`.
 pub fn host_within(host: &str, suffix: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
-    let suffix = suffix.trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase();
+    let suffix = suffix
+        .trim_start_matches('.')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
     if suffix.is_empty() {
         return false;
     }
@@ -945,7 +959,9 @@ impl PrototypeBuild {
 pub fn qa_discovered_origin(value: &str) -> Result<String, String> {
     let url = url::Url::parse(value.trim())
         .map_err(|e| format!("discovered QA environment URL is not a URL: {e}"))?;
-    let host = url.host_str().ok_or("discovered QA environment URL has no host")?;
+    let host = url
+        .host_str()
+        .ok_or("discovered QA environment URL has no host")?;
     let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1");
     if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
         || !url.username().is_empty()

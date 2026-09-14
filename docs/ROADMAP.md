@@ -511,9 +511,28 @@ context and the working files a session accumulates outside the workspace.
 - [ ] Exercise a real private repository through preparation, agent work, checks, and
       authorized publication. (Needs a model credential and a private repository on the
       node; folds into Gate B's real coding task.)
-- [ ] Exercise QA deploy and browser verification against a real target. (Needs a
-      `glab` credential and a configured QA target. The Kubernetes backend has no scoped QA
-      egress gateway yet, so this is Podman-only until it does.)
+- [ ] Exercise QA deploy and browser verification against a real target. **The target
+      code is built; the live run is the operator's.** A QA target now has two deployment
+      kinds: the original GitLab one, and a `command` kind that runs an operator-configured
+      argv on the node with a brokered credential as environment, observes the host through
+      further argv, and ends in the same identity check and immutable browser binding — so
+      browser verification is unchanged. For a GitHub-hosted project on Laravel Cloud the
+      documented recipe is *discovery*: it creates and deletes nothing, finds the preview
+      environment Cloud's pull-request automation made for the candidate's published branch,
+      waits for it, compares the deployed commit to the candidate, and leaves teardown to
+      the platform. The precondition is refused loudly rather than worked around: `cloud`
+      v0.5.0 cannot deploy a bare commit, so the candidate must be published first, which
+      publication already does. Covered by tests against a fake `cloud` that records its own
+      argv and environment: the credential present as environment and absent from argv, the
+      tail, and the row; placeholders substituted; discovery preferring the automation's
+      environment; polling to ready and to timeout; a host that deployed another commit; an
+      identity endpoint that does not attest the candidate; a browser plan bound to the
+      discovered origin; and the MCP tool refused without the deploy grant.
+      **Still the operator's:** a Laravel Cloud API token in the broker as `laravel-cloud`
+      (read and deployment-status scope), the `cloud` login written into the node-owned home,
+      the target's `origin_suffix` and app name, an identity endpoint on the application that
+      returns its build commit, and a digest-pinned browser image. The Kubernetes backend has
+      no scoped QA egress gateway yet, so the browser half is Podman-only until it does.
 
 ### Everyday work and portability
 

@@ -295,6 +295,29 @@ deploy, the one revision it covers. A grant that does not exist, or whose target
 moved, is asked, never assumed. QA browser verification and its test-account
 credential are authority actions of the same shape, not unattended tool calls.
 
+**A QA target is a configured destination, and the transport to it is one of
+two.** The GitLab kind plays an operator-named manual job in a pipeline GitLab
+already ran at the candidate's exact SHA — never creating one, because a
+pipeline `ref` resolves only to a branch or tag and creating one would deploy
+whatever that ref holds now. The command kind runs an operator-configured argv
+on the *node*, directly and with no shell, because the runner has no credential
+and must not be given one; the brokered credential is injected as environment
+only, bound to the candidate's channel and this node, absent from argv by
+construction, and scrubbed out of the bounded output tail that becomes evidence.
+Hosts of that shape deploy a branch rather than a commit, so the command kind
+requires the candidate to have been published — the forge observed holding that
+exact SHA on a branch — and refuses with that reason rather than deploying a
+branch head that may have moved. Where the host's own automation opens a preview
+environment per pull request, the target discovers that environment rather than
+creating one: it selects by the candidate's branch, holds the discovered origin
+to an operator-attested host suffix before anything fetches from it, and leaves
+teardown to the platform. Both kinds end in the same place — the identity
+endpoint is fetched and compared against the candidate, the immutable browser
+binding is recorded, and browser verification runs unchanged. A command kind's
+equivalent of a pinned execution image is a digest of the argv, the injected
+environment's key names, the resolved absolute path of the binary and its
+reported version, so evidence identity still moves when the deploy tool does.
+
 **Policy decides every tool call before the broker is touched.** An allow rule names
 the tool exactly; a deny returns its reason to the agent; a tool the bundle does not
 mention is put to the operator. Adding a tool never widens what runs unattended. A

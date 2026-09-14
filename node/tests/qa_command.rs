@@ -18,8 +18,9 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::ge
 use serde_json::{json, Value};
 use tracon::{
     broker::{Broker, Credential},
-    config::{Config, QaBrowser, QaDeployment, QaDiscover, QaStatusCommand, QaTarget, Qa,
-        QA_KIND_COMMAND},
+    config::{
+        Config, Qa, QaBrowser, QaDeployment, QaDiscover, QaStatusCommand, QaTarget, QA_KIND_COMMAND,
+    },
     mcp::Tools,
     qa::{service::QaAccess, DeployRequest},
     session::Manager,
@@ -97,18 +98,14 @@ async fn fake_origin(identity: Option<String>) -> String {
     let app = Router::new()
         .route(
             "/_tracon/identity",
-            get(
-                |State(identity): State<Option<String>>| async move {
-                    match identity {
-                        Some(value) => (
-                            StatusCode::OK,
-                            [("x-tracon-deployment-id", value)],
-                        )
-                            .into_response(),
-                        None => StatusCode::NOT_FOUND.into_response(),
+            get(|State(identity): State<Option<String>>| async move {
+                match identity {
+                    Some(value) => {
+                        (StatusCode::OK, [("x-tracon-deployment-id", value)]).into_response()
                     }
-                },
-            ),
+                    None => StatusCode::NOT_FOUND.into_response(),
+                }
+            }),
         )
         .with_state(identity);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -261,7 +258,9 @@ fn fixture(target: QaTarget, published: bool, granted: bool) -> Fixture {
             })
             .unwrap();
         store.publication_pushed(&row.id, SHA).unwrap();
-        store.publication_opened(&row.id, "https://github.invalid/pr/1").unwrap();
+        store
+            .publication_opened(&row.id, "https://github.invalid/pr/1")
+            .unwrap();
     }
     if granted {
         store
@@ -280,12 +279,13 @@ fn fixture(target: QaTarget, published: bool, granted: bool) -> Fixture {
             })
             .unwrap();
     }
-    let mut cfg = Config::default();
-    cfg.qa = Qa {
-        targets: BTreeMap::from([("cloud-qa".to_string(), target)]),
-        prototype: None,
-    };
-    let cfg = Arc::new(cfg);
+    let cfg = Arc::new(Config {
+        qa: Qa {
+            targets: BTreeMap::from([("cloud-qa".to_string(), target)]),
+            prototype: None,
+        },
+        ..Config::default()
+    });
     let mut broker = Broker::default();
     broker.put(
         "laravel-cloud",
@@ -472,7 +472,9 @@ fn a_command_target_needs_a_credential_a_way_to_observe_and_no_gitlab_fields() {
     state::isolate();
     let mut no_credential = plain_command_target();
     no_credential.deployment.env_credential = String::new();
-    assert!(validating(no_credential).unwrap_err().contains("env_credential"));
+    assert!(validating(no_credential)
+        .unwrap_err()
+        .contains("env_credential"));
 
     let mut blind = plain_command_target();
     blind.deployment.status = None;
@@ -512,18 +514,18 @@ fn a_discovery_target_attests_a_suffix_instead_of_an_origin_and_is_held_to_it() 
         .contains("identity_path rather than origin"));
 
     let mut no_suffix = target.clone();
-    no_suffix.deployment.discover.as_mut().unwrap().origin_suffix = String::new();
+    no_suffix
+        .deployment
+        .discover
+        .as_mut()
+        .unwrap()
+        .origin_suffix = String::new();
     assert!(validating(no_suffix).unwrap_err().contains("origin_suffix"));
 
     // Resolution holds a discovered URL to the attested suffix, and a
     // lookalike host is not a subdomain of it.
     let mut laravel = target.clone();
-    laravel
-        .deployment
-        .discover
-        .as_mut()
-        .unwrap()
-        .origin_suffix = "laravel.cloud".into();
+    laravel.deployment.discover.as_mut().unwrap().origin_suffix = "laravel.cloud".into();
     let resolved = laravel
         .resolved(Some("https://qa-abc.hounddog.laravel.cloud/"))
         .unwrap();
@@ -570,7 +572,9 @@ async fn a_candidate_deploys_through_the_command_and_the_credential_never_leaves
         row.execution_image
     );
     assert!(
-        row.build_id.contains("env-auto") && row.build_id.contains("dep-9") && row.build_id.contains(SHA),
+        row.build_id.contains("env-auto")
+            && row.build_id.contains("dep-9")
+            && row.build_id.contains(SHA),
         "the build id names the environment, the host deployment and the candidate: {}",
         row.build_id
     );
@@ -578,17 +582,32 @@ async fn a_candidate_deploys_through_the_command_and_the_credential_never_leaves
     // The candidate's own SHA and published branch were substituted in, and
     // the operator's `{app}` with them.
     let argv = cli.argv_log();
-    assert!(argv.contains(&format!("deploy hounddog {BRANCH} -n")), "{argv}");
-    assert!(argv.contains("environment:list hounddog --json -n"), "{argv}");
-    assert!(argv.contains("deployment:list env-auto --json -n"), "{argv}");
+    assert!(
+        argv.contains(&format!("deploy hounddog {BRANCH} -n")),
+        "{argv}"
+    );
+    assert!(
+        argv.contains("environment:list hounddog --json -n"),
+        "{argv}"
+    );
+    assert!(
+        argv.contains("deployment:list env-auto --json -n"),
+        "{argv}"
+    );
 
     // The credential reached the command as environment, and nowhere else.
     let env = cli.env_log();
-    assert!(env.contains(&format!("CLOUD_API_TOKEN={TOKEN}")), "the command needs the credential");
+    assert!(
+        env.contains(&format!("CLOUD_API_TOKEN={TOKEN}")),
+        "the command needs the credential"
+    );
     assert!(env.contains(&format!("TRACON_CANDIDATE_SHA={SHA}")));
     assert!(env.contains(&format!("TRACON_CANDIDATE_BRANCH={BRANCH}")));
     assert!(env.contains("TRACON_QA_TARGET=cloud-qa"));
-    assert!(!argv.contains(TOKEN), "the credential must never be an argument: {argv}");
+    assert!(
+        !argv.contains(TOKEN),
+        "the credential must never be an argument: {argv}"
+    );
     assert!(
         !row.detail_json.contains(TOKEN),
         "the credential must never reach durable evidence"
@@ -602,14 +621,13 @@ async fn a_candidate_deploys_through_the_command_and_the_credential_never_leaves
     assert_eq!(detail["deploy_command"]["ok"], json!(true));
     assert_eq!(detail["deploy_command"]["exit_status"], json!(0));
     assert_eq!(detail["env_credential"], "laravel-cloud");
-
 }
 
 #[tokio::test]
 async fn a_target_whose_host_builds_the_branch_itself_runs_no_deploy_command_at_all() {
     state::isolate();
     let cli = FakeCli::new("qa-command-discover-only");
-    let origin = fake_origin(Some(format!("build 0123456789ab"))).await;
+    let origin = fake_origin(Some("build 0123456789ab".to_string())).await;
     cli.environments(environments(&origin, BRANCH, "running"));
     cli.deployments(json!([{ "id": "dep-1", "status": "success", "commitHash": SHA }]));
     let f = fixture(discovery_target(&cli, false), true, true);
@@ -617,7 +635,10 @@ async fn a_target_whose_host_builds_the_branch_itself_runs_no_deploy_command_at_
     let row = f.deploy().await.expect("discovery alone is a deploy");
     assert_eq!(row.outcome, "succeeded", "{}", row.detail_json);
     let argv = cli.argv_log();
-    assert!(!argv.contains("deploy hounddog"), "nothing was triggered: {argv}");
+    assert!(
+        !argv.contains("deploy hounddog"),
+        "nothing was triggered: {argv}"
+    );
     assert!(argv.contains("environment:list"), "{argv}");
     let detail: Value = serde_json::from_str(&row.detail_json).unwrap();
     assert!(detail.get("deploy_command").is_none());
@@ -639,7 +660,11 @@ async fn an_unpublished_candidate_is_refused_with_the_reason_rather_than_deployi
         cli.argv_log().is_empty(),
         "nothing may run when the precondition fails"
     );
-    assert!(f.store.qa_deployments_for_candidate(&f.candidate_id).unwrap().is_empty());
+    assert!(f
+        .store
+        .qa_deployments_for_candidate(&f.candidate_id)
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -690,7 +715,10 @@ async fn no_environment_for_the_branch_times_out_and_creates_nothing() {
     )
     .await
     .unwrap_err();
-    assert!(error.contains("did not attest this candidate SHA"), "{error}");
+    assert!(
+        error.contains("did not attest this candidate SHA"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -724,7 +752,10 @@ async fn a_failed_host_deployment_stops_the_poll_rather_than_waiting_out_the_tim
     assert_eq!(row.outcome, "failed");
     let detail: Value = serde_json::from_str(&row.detail_json).unwrap();
     assert_eq!(detail["deployment_status"]["state"], "failed");
-    assert!(detail.get("observation_error").is_none(), "it was observed, not timed out");
+    assert!(
+        detail.get("observation_error").is_none(),
+        "it was observed, not timed out"
+    );
 }
 
 #[tokio::test]
@@ -740,11 +771,15 @@ async fn an_identity_endpoint_that_does_not_attest_the_candidate_is_not_a_live_d
     assert_eq!(row.outcome, "failed");
     let detail: Value = serde_json::from_str(&row.detail_json).unwrap();
     assert_eq!(detail["identity_attests_candidate"], json!(false));
-    assert_eq!(row.environment_identity.as_deref(), Some("some-other-build"));
+    assert_eq!(
+        row.environment_identity.as_deref(),
+        Some("some-other-build")
+    );
 }
 
 #[tokio::test]
-async fn a_failing_deploy_command_records_its_exit_status_and_redacted_tail_and_waits_for_nothing() {
+async fn a_failing_deploy_command_records_its_exit_status_and_redacted_tail_and_waits_for_nothing()
+{
     state::isolate();
     let cli = FakeCli::new("qa-command-failing");
     let origin = fake_origin(Some(SHA.into())).await;
@@ -778,7 +813,10 @@ async fn a_credential_that_is_not_bound_to_this_channel_refuses_before_anything_
     target.deployment.env_credential = "not-configured".into();
     let f = fixture(target, true, true);
     let error = f.deploy().await.unwrap_err();
-    assert!(error.contains("not-configured") && error.contains("unavailable"), "{error}");
+    assert!(
+        error.contains("not-configured") && error.contains("unavailable"),
+        "{error}"
+    );
     assert!(cli.argv_log().is_empty());
 }
 
@@ -857,7 +895,9 @@ async fn browser_verification_binds_to_the_discovered_origin_and_refuses_a_chang
 
     // The plan a browser run would be given comes off the deployment's own
     // origin, not off configuration that never had one.
-    let target = f.cfg.qa.targets["cloud-qa"].resolved(Some(&row.origin)).unwrap();
+    let target = f.cfg.qa.targets["cloud-qa"]
+        .resolved(Some(&row.origin))
+        .unwrap();
     let plan = tracon::qa::browser_plan(
         &target,
         &serde_json::from_value(json!({
@@ -900,7 +940,10 @@ async fn browser_verification_binds_to_the_discovered_origin_and_refuses_a_chang
     )
     .await
     .unwrap_err();
-    assert!(error.contains("did not attest this candidate SHA"), "{error}");
+    assert!(
+        error.contains("did not attest this candidate SHA"),
+        "{error}"
+    );
 }
 
 // ---------------------------------------------------------------------------
