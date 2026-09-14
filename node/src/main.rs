@@ -20,11 +20,18 @@ enum Command {
         #[arg(long, env = "TRACON_LISTEN", default_value = "127.0.0.1:7420")]
         listen: SocketAddr,
     },
-    /// Create the harness network, gateway, and images this node owns.
+    /// Create the harness network, gateway, and images this node owns, and
+    /// install the pinned OpenCode UI bundle.
     Setup {
-        /// Rebuild the gateway and harness images even if they exist.
+        /// Rebuild the gateway and harness images, and reinstall the OpenCode
+        /// UI bundle, even if they are already current.
         #[arg(long)]
         rebuild: bool,
+        /// Install the OpenCode UI bundle from a local
+        /// `opencode-ui-v<version>.tar.gz` instead of fetching the release
+        /// asset. For a machine with no route to GitHub.
+        #[arg(long, value_name = "PATH")]
+        ui_bundle: Option<std::path::PathBuf>,
     },
     /// Verify the harness boundary and exit non-zero naming the first failed check.
     CheckBoundary {
@@ -459,11 +466,23 @@ async fn main() -> Result<()> {
 
     match Cli::parse().command {
         Command::Serve { listen } => http::serve(listen).await,
-        Command::Setup { rebuild } => {
+        Command::Setup {
+            rebuild,
+            ui_bundle,
+        } => {
             let cfg = config::Config::load();
             let backend = boundary::backend_for(&cfg).await;
             backend.setup(&cfg, rebuild).await?;
             println!("{} boundary is in place", backend.kind());
+            // The native interface is a separate artefact from the boundary,
+            // and a node without it still serves: it is reported, never fatal.
+            match tracon::ui_bundle::install(&cfg, ui_bundle.as_deref(), rebuild).await {
+                Ok(outcome) => println!("{outcome}"),
+                Err(error) => {
+                    eprintln!("tracon: {error}");
+                    eprintln!("{}", tracon::ui_bundle::absent_advice());
+                }
+            }
             Ok(())
         }
         Command::Credential(cmd) => credential_command(cmd).await,

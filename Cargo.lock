@@ -3131,6 +3131,7 @@ dependencies = [
  "clap",
  "dirs",
  "ed25519-dalek",
+ "flate2",
  "futures-core",
  "futures-util",
  "hex",

@@ -41,6 +41,9 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek = "2"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 futures-core = "0.3.34"
+# Unpacking the release's OpenCode UI bundle. The pure-Rust backend, so the
+# static musl build stays static.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 hex.workspace = true
 sha1.workspace = true
 sha2.workspace = true
