@@ -211,16 +211,14 @@
   })
   // A prompt to an unreachable owner is queued on this node and sent when it
   // returns; the box stays open and says so.
-  // The desktop app only: OpenCode's own interface opens in a second window
-  // that holds none of this one's privileges. It is the session's own harness,
-  // so it is offered for an OpenCode session running on this machine and
-  // nowhere else.
   // OpenCode's own interface has two ways in, and which one is offered is a
   // fact about the client rather than a preference: the desktop app opens a
-  // native window with a capability of its own, and a browser — installed or
-  // not — stays inside the app's scope. A new tab is never the answer on a
-  // phone: leaving the installed app for Safari or Chrome is exactly the
-  // handover this route exists to avoid.
+  // second window holding none of this one's privileges, and a browser —
+  // installed or not — stays inside the app's own scope. A new tab is never
+  // the answer on a phone: leaving the installed app for Safari or Chrome is
+  // exactly the handover the shell route exists to avoid. Either way it is
+  // this session's own harness, so it is offered for an OpenCode session
+  // running on this machine and nowhere else.
   const opencodeHere = $derived(session?.harness_id === 'opencode' && !remote)
   const canOpenOpencode = $derived(desktopCanOpenOpencode() && opencodeHere)
   const canFrameOpencode = $derived(!desktopCanOpenOpencode() && opencodeHere)
