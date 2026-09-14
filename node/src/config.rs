@@ -329,6 +329,9 @@ pub struct QaStatusCommand {
     /// As in `QaDiscover`. An array (or an array under this key) is read at
     /// its first entry, which is how the host CLIs list newest-first.
     pub list_field: String,
+    /// The host's own id for this deployment, recorded so evidence names what
+    /// the host will still show the operator afterwards.
+    pub id_field: String,
     pub state_field: String,
     /// Empty means the host does not report a commit, and the deployment is
     /// then bound to the candidate only by the identity endpoint.
@@ -342,6 +345,7 @@ impl Default for QaStatusCommand {
         Self {
             command: Vec::new(),
             list_field: String::new(),
+            id_field: "id".into(),
             state_field: "status".into(),
             commit_field: String::new(),
             ready_states: vec!["success".into()],
@@ -479,7 +483,7 @@ impl QaTarget {
         }
         let discovered =
             discovered_origin.ok_or("this QA target discovers its origin, and none was found")?;
-        let origin = qa_origin(discovered)?;
+        let origin = qa_discovered_origin(discovered)?;
         let discover = self
             .deployment
             .discover
@@ -692,6 +696,9 @@ impl QaTarget {
             with_env.insert("env_id".into());
             with_env.insert("env_url".into());
             validate_argv(name, "status.command", &status.command, &with_env)?;
+            if !status.id_field.is_empty() && !valid_json_field(&status.id_field) {
+                return Err(format!("qa target {name:?} has an unsafe status.id_field"));
+            }
             if !valid_json_field(&status.state_field) {
                 return Err(format!("qa target {name:?} has an unsafe status.state_field"));
             }
@@ -928,6 +935,28 @@ impl PrototypeBuild {
         }
         Ok(())
     }
+}
+
+/// The origin of a URL a host's own CLI printed. Unlike `qa_origin` this
+/// tolerates a path — an environment URL routinely has a trailing slash — but
+/// it concedes nothing else: the scheme, the absence of credentials, and (at
+/// the call site) the attested host suffix all still have to hold, because
+/// this string decides what the browser and the identity fetch may reach.
+pub fn qa_discovered_origin(value: &str) -> Result<String, String> {
+    let url = url::Url::parse(value.trim())
+        .map_err(|e| format!("discovered QA environment URL is not a URL: {e}"))?;
+    let host = url.host_str().ok_or("discovered QA environment URL has no host")?;
+    let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1");
+    if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(
+            "a discovered QA environment URL must be a credential-free HTTPS URL (HTTP is loopback-only)"
+                .into(),
+        );
+    }
+    Ok(url.origin().ascii_serialization())
 }
 
 pub fn qa_origin(value: &str) -> Result<String, String> {

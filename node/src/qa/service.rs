@@ -23,9 +23,10 @@ use crate::{
     policy::{Policy, Verdict},
     qa::{
         bounded_redacted_log, browser_authority_target, browser_plan, browser_report,
-        deploy_authority_target, evidence_state, observe_environment, redact_secrets,
-        requested_credential_keys, test_account_authority_target, BrowserAssertionResult,
-        BrowserPlan, BrowserReport, BrowserRequest, DeployRequest, BROWSER_RUNNER,
+        command as qa_command, deploy_authority_target, evidence_state, observe_environment,
+        redact_secrets, requested_credential_keys, test_account_authority_target,
+        BrowserAssertionResult, BrowserPlan, BrowserReport, BrowserRequest, DeployRequest,
+        BROWSER_RUNNER,
     },
     runner::RunnerCommand,
     session::Manager,
@@ -37,6 +38,10 @@ use crate::{
 };
 
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// One command-kind observation invocation. The poll loop as a whole is
+/// bounded by the target's `deploy_timeout_secs`; this keeps one hung CLI from
+/// consuming the whole of it.
+const OBSERVE_TIMEOUT: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const REPORT_BYTES: u64 = 512 * 1024;
 const HTML_FILES: usize = 128;
@@ -63,9 +68,15 @@ pub struct BrowserRunResult {
     pub artifact_error: Option<String>,
 }
 
-/// Start the configured GitLab QA pipeline at an exact candidate SHA, then
-/// persist the resulting deployment identity observation whether it succeeds,
-/// fails, or cannot be observed.
+/// Put one candidate into its configured QA target and persist what that
+/// produced, whether it succeeds, fails, or cannot be observed.
+///
+/// Which transport does the work is the target's, not the request's: a
+/// `gitlab` target plays a manual job in a pipeline GitLab already ran at the
+/// candidate's exact SHA, a `command` target runs the operator's argv on the
+/// node with a brokered credential. Everything after the transport — the
+/// identity observation, the immutable browser binding, the row — is the same
+/// for both, which is what lets browser verification stay unchanged.
 pub async fn deploy(
     access: &QaAccess<'_>,
     request: DeployRequest,
@@ -73,11 +84,14 @@ pub async fn deploy(
     let candidate = candidate(access.store, &request.candidate_id)?;
     let owner_session = candidate_owner(&candidate)?;
     let target = configured_target(access.cfg, &request.target)?;
-    let browser_binding = browser_target_binding(&target)?;
     if candidate.channel.trim().is_empty() {
         return Err("candidate has no channel".into());
     }
     ensure_requester_scope(access, &candidate, &owner_session)?;
+    if target.deployment.kind == crate::config::QA_KIND_COMMAND {
+        return deploy_command(access, request, candidate, owner_session, target).await;
+    }
+    let browser_binding = browser_target_binding(&target)?;
 
     let authority_target = deploy_authority_target(&request.target, &target);
     let action_id = authorize(
@@ -212,6 +226,506 @@ pub async fn deploy(
     Ok(row)
 }
 
+/// The command kind's deploy: run the operator's argv on the node, with the
+/// brokered credential as environment, and observe the result through the
+/// operator's other argv.
+///
+/// The precondition is deliberate and refused loudly rather than worked
+/// around. Hosts of this shape — Laravel Cloud, and the others that watch a
+/// repository — deploy a *branch*; none of them will build a bare commit that
+/// no ref points at. So the candidate must already be published: the forge
+/// must have been observed to hold the candidate's exact SHA on a branch, and
+/// that branch name is what the host is then asked about. Without it the node
+/// says so and stops, because the alternative is deploying whatever the branch
+/// holds now and calling it this candidate.
+async fn deploy_command(
+    access: &QaAccess<'_>,
+    request: DeployRequest,
+    candidate: crate::store::CandidateRow,
+    owner_session: String,
+    target: QaTarget,
+) -> Result<QaDeploymentRow, String> {
+    let branch = access
+        .store
+        .publication_pushed_for_candidate(&candidate.id, &candidate.head_sha)
+        .map_err(store_error)?
+        .map(|publication| publication.branch)
+        .ok_or_else(|| {
+            format!(
+                "candidate {} has no published branch holding {}: this QA target deploys a branch its host watches, never a bare commit, so publish the candidate before deploying it",
+                candidate.id, candidate.head_sha
+            )
+        })?;
+    let subject = qa_command::Subject {
+        target_id: request.target.clone(),
+        sha: candidate.head_sha.clone(),
+        branch: branch.clone(),
+    };
+    let authority_target = deploy_authority_target(&request.target, &target);
+    let action_id = authorize(
+        access,
+        &candidate.channel,
+        &owner_session,
+        authority::DEPLOY,
+        &authority_target,
+        Some(&candidate.head_sha),
+        &json!({ "candidate_id": candidate.id, "target": request.target, "head_sha": candidate.head_sha, "branch": branch }),
+    )?;
+    let prepared = match prepare_command_run(access, &candidate, &target, &subject).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            finish_action(access.store, &action_id, "failed", &error);
+            return Err(error);
+        }
+    };
+    let started_ms = crate::store::now_ms();
+    let mut detail = json!({
+        "transport": "command",
+        "target": request.target,
+        "candidate_id": candidate.id,
+        "head_sha": candidate.head_sha,
+        "branch": branch,
+        "execution_image": prepared.execution_identity,
+        "binary": prepared.binary_path,
+        "binary_version": prepared.binary_version,
+        "env_credential": target.deployment.env_credential,
+        "env_names": prepared.env_names,
+    });
+
+    let mut ok = true;
+    if let Some(argv) = &prepared.deploy_argv {
+        // The last authority recheck before the one thing this flow does that
+        // cannot be taken back. Authority can move while the credential is
+        // fetched and the binary probed, and a started deploy is started.
+        if let Err(error) = recheck_deploy(
+            access,
+            &candidate.channel,
+            &owner_session,
+            &request.target,
+            &candidate.head_sha,
+            &authority_target,
+            &action_id,
+        ) {
+            finish_action(access.store, &action_id, "failed", &error);
+            return Err(error);
+        }
+        let run = qa_command::run(
+            argv,
+            &request.target,
+            &prepared.env,
+            &prepared.secrets,
+            Duration::from_secs(target.deployment.deploy_timeout_secs),
+        )
+        .await;
+        match run {
+            Ok(run) => {
+                ok = run.ok;
+                detail["deploy_command"] = json!({
+                    "argv": run.argv,
+                    "exit_status": run.exit_status,
+                    "ok": run.ok,
+                    "tail": run.tail,
+                });
+            }
+            Err(error) => {
+                ok = false;
+                detail["deploy_command"] = json!({ "argv": argv, "error": error });
+            }
+        }
+    }
+
+    let observed = if ok {
+        observe_until_ready(&target, &subject, &prepared).await
+    } else {
+        Err("the deploy command failed, so nothing was waited for".into())
+    };
+    let (discovered, reported) = match observed {
+        Ok((discovered, reported)) => {
+            detail["environment"] = json!(discovered);
+            detail["deployment_status"] = json!(reported);
+            (discovered, reported)
+        }
+        Err(error) => {
+            ok = false;
+            detail["observation_error"] = json!(error);
+            (None, None)
+        }
+    };
+    if let Some(reported) = &reported {
+        let ready = target
+            .deployment
+            .status
+            .as_ref()
+            .is_some_and(|status| contains_state(&status.ready_states, &reported.state));
+        if !ready {
+            ok = false;
+        }
+        if let Some(commit) = &reported.commit {
+            if !qa_command::identity_attests(commit, &candidate.head_sha) {
+                ok = false;
+                detail["commit_mismatch"] = json!(format!(
+                    "the host deployed {commit}, not candidate {}",
+                    candidate.head_sha
+                ));
+            }
+        }
+    }
+
+    // The origin is the environment's own for a discovery target, so it is
+    // known only now. Everything origin-shaped downstream — the identity
+    // fetch, the browser's allowed origins, the immutable binding — comes off
+    // this resolved target rather than off the configuration.
+    let resolved = match target.resolved(discovered.as_ref().map(|found| found.url.as_str())) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            let detail = format!("QA target origin could not be resolved: {error}");
+            finish_action(access.store, &action_id, "failed", &detail);
+            return Err(detail);
+        }
+    };
+    detail["browser_target_binding"] = match browser_target_binding(&resolved) {
+        Ok(binding) => binding,
+        Err(error) => {
+            finish_action(access.store, &action_id, "failed", &error);
+            return Err(error);
+        }
+    };
+
+    let observation = observe_environment(&resolved).await;
+    detail["environment_observation"] = json!({
+        "state": observation.state,
+        "detail": observation.detail,
+        "at_ms": observation.observed_ms,
+    });
+    if target.deployment.identity_matches_candidate {
+        let attested = observation
+            .identity
+            .as_deref()
+            .is_some_and(|identity| qa_command::identity_attests(identity, &candidate.head_sha));
+        detail["identity_attests_candidate"] = json!(attested);
+        if !attested {
+            ok = false;
+        }
+    }
+
+    let outcome = if ok { "succeeded" } else { "failed" };
+    let row = QaDeploymentRow {
+        id: uuid::Uuid::now_v7().to_string(),
+        candidate_id: candidate.id.clone(),
+        channel: candidate.channel.clone(),
+        target_id: request.target.clone(),
+        build_id: format!(
+            "command:{}:{}:{}:{}",
+            request.target,
+            discovered
+                .as_ref()
+                .map(|found| found.id.as_str())
+                .unwrap_or("-"),
+            reported
+                .as_ref()
+                .and_then(|reported| reported.id.as_deref())
+                .unwrap_or("-"),
+            candidate.head_sha
+        ),
+        execution_image: prepared.execution_identity.clone(),
+        origin: crate::config::qa_origin(&resolved.origin)?,
+        environment_identity: observation.identity,
+        identity_state: observation.state.into(),
+        observed_ms: observation.observed_ms,
+        started_ms,
+        finished_ms: crate::store::now_ms(),
+        outcome: outcome.into(),
+        detail_json: detail.to_string(),
+    };
+    if let Err(error) = access.store.qa_insert_deployment(&row) {
+        let detail = store_error(error);
+        finish_action(access.store, &action_id, "failed", &detail);
+        return Err(detail);
+    }
+    finish_action(
+        access.store,
+        &action_id,
+        outcome,
+        if ok {
+            "the deploy command completed and the environment attested the candidate"
+        } else {
+            "the deploy command failed, timed out, or did not attest the candidate SHA"
+        },
+    );
+    Ok(row)
+}
+
+/// Everything a command-kind deploy needs before it runs anything: the
+/// credential as environment, the substituted argv, and the identity of the
+/// tool that will do the work.
+struct PreparedCommand {
+    deploy_argv: Option<Vec<String>>,
+    env: Vec<(String, String)>,
+    secrets: Vec<String>,
+    env_names: Vec<String>,
+    binary_path: String,
+    binary_version: String,
+    execution_identity: String,
+}
+
+async fn prepare_command_run(
+    access: &QaAccess<'_>,
+    candidate: &crate::store::CandidateRow,
+    target: &QaTarget,
+    subject: &qa_command::Subject,
+) -> Result<PreparedCommand, String> {
+    let deployment = &target.deployment;
+    let credential = {
+        let broker = access
+            .broker
+            .read()
+            .map_err(|_| "credential broker lock is unavailable".to_string())?;
+        broker
+            .env_for(
+                &deployment.env_credential,
+                &candidate.channel,
+                access.node_id,
+            )
+            .map_err(|error| {
+                format!(
+                    "the QA deploy credential {:?} is unavailable: {error}",
+                    deployment.env_credential
+                )
+            })?
+    };
+    let secrets: Vec<String> = credential
+        .values()
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .collect();
+    let mut env = subject.env();
+    env.extend(credential.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let mut env_names: Vec<String> = env.iter().map(|(key, _)| key.clone()).collect();
+    env_names.push("HOME".into());
+    env_names.push("PATH".into());
+    env_names.sort();
+    env_names.dedup();
+
+    let deploy_argv = match deployment.command.is_empty() {
+        true => None,
+        false => Some(qa_command::substitute(
+            &deployment.command,
+            target,
+            subject,
+            &BTreeMap::new(),
+        )?),
+    };
+    // Configuration already refuses credential-shaped argv; this refuses an
+    // argv that came out of substitution carrying the credential's actual
+    // value, which configuration cannot see.
+    let visible: Vec<&Vec<String>> = deploy_argv.iter().collect();
+    for argv in visible {
+        for part in argv {
+            if secrets.iter().any(|secret| part.contains(secret)) {
+                return Err(
+                    "the deploy command's arguments would carry the brokered credential; a credential reaches a command as environment only"
+                        .into(),
+                );
+            }
+        }
+    }
+
+    let binary = deploy_argv
+        .as_ref()
+        .and_then(|argv| argv.first())
+        .or_else(|| {
+            deployment
+                .discover
+                .as_ref()
+                .and_then(|discover| discover.command.first())
+        })
+        .cloned()
+        .ok_or("this QA target configures no command to run")?;
+    let binary_path = qa_command::resolve_binary(&binary)?
+        .to_string_lossy()
+        .into_owned();
+    let mut template: Vec<String> = deployment.command.clone();
+    if let Some(discover) = &deployment.discover {
+        template.extend(discover.command.clone());
+    }
+    if let Some(status) = &deployment.status {
+        template.extend(status.command.clone());
+    }
+    let binary_version =
+        qa_command::binary_version(&binary_path, &subject.target_id, &env, &secrets).await;
+    let execution_identity = qa_command::execution_identity(
+        &template,
+        &env_names.iter().cloned().collect(),
+        &binary_path,
+        &binary_version,
+    );
+    Ok(PreparedCommand {
+        deploy_argv,
+        env,
+        secrets,
+        env_names,
+        binary_path,
+        binary_version,
+        execution_identity,
+    })
+}
+
+/// Poll the host until it says the candidate's environment is up and its
+/// deployment finished. Both observations are the operator's own argv; neither
+/// invents a state the host did not print.
+async fn observe_until_ready(
+    target: &QaTarget,
+    subject: &qa_command::Subject,
+    prepared: &PreparedCommand,
+) -> Result<(Option<qa_command::Discovered>, Option<qa_command::Reported>), String> {
+    let deployment = &target.deployment;
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(deployment.deploy_timeout_secs);
+    let interval = Duration::from_secs(deployment.poll_interval_secs);
+    let mut last = String::from("nothing was observed");
+    loop {
+        let mut discovered = None;
+        if let Some(discover) = &deployment.discover {
+            match observe(
+                &discover.command,
+                target,
+                subject,
+                prepared,
+                &BTreeMap::new(),
+            )
+            .await
+            {
+                Ok(stdout) => {
+                    match qa_command::select_environment(&stdout, discover, &subject.branch) {
+                        Ok(found) => {
+                            if contains_state(&discover.ready_states, &found.state) {
+                                discovered = Some(found);
+                            } else {
+                                last = format!(
+                                    "the environment for branch {} is {:?}",
+                                    subject.branch, found.state
+                                );
+                            }
+                        }
+                        Err(error) => last = error,
+                    }
+                }
+                Err(error) => last = error,
+            }
+            if discovered.is_none() {
+                wait_or_give_up(deadline, interval, &last).await?;
+                continue;
+            }
+        }
+        let Some(status) = &deployment.status else {
+            return Ok((discovered, None));
+        };
+        let mut extra = BTreeMap::new();
+        if let Some(found) = &discovered {
+            extra.insert("env_id".to_string(), found.id.clone());
+            extra.insert("env_url".to_string(), found.url.clone());
+        }
+        match observe(&status.command, target, subject, prepared, &extra).await {
+            Ok(stdout) => match qa_command::read_status(&stdout, status) {
+                Ok(reported) => {
+                    if contains_state(&status.ready_states, &reported.state)
+                        || contains_state(&status.failed_states, &reported.state)
+                    {
+                        return Ok((discovered, Some(reported)));
+                    }
+                    last = format!("the deployment is {:?}", reported.state);
+                }
+                Err(error) => last = error,
+            },
+            Err(error) => last = error,
+        }
+        wait_or_give_up(deadline, interval, &last).await?;
+    }
+}
+
+async fn wait_or_give_up(
+    deadline: tokio::time::Instant,
+    interval: Duration,
+    last: &str,
+) -> Result<(), String> {
+    if tokio::time::Instant::now() + interval >= deadline {
+        return Err(format!("the QA deployment was not ready in time: {last}"));
+    }
+    tokio::time::sleep(interval).await;
+    Ok(())
+}
+
+async fn observe(
+    argv: &[String],
+    target: &QaTarget,
+    subject: &qa_command::Subject,
+    prepared: &PreparedCommand,
+    extra: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let argv = qa_command::substitute(argv, target, subject, extra)?;
+    let run = qa_command::run(
+        &argv,
+        &subject.target_id,
+        &prepared.env,
+        &prepared.secrets,
+        OBSERVE_TIMEOUT,
+    )
+    .await?;
+    if run.ok {
+        Ok(run.stdout)
+    } else {
+        Err(format!(
+            "{:?} exited {}: {}",
+            argv.first().map(String::as_str).unwrap_or_default(),
+            run.exit_status
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "on a signal".into()),
+            run.tail.lines().next_back().unwrap_or_default()
+        ))
+    }
+}
+
+fn contains_state(states: &[String], observed: &str) -> bool {
+    states
+        .iter()
+        .any(|state| state.eq_ignore_ascii_case(observed.trim()))
+}
+
+fn recheck_deploy(
+    access: &QaAccess<'_>,
+    channel: &str,
+    session_id: &str,
+    target_id: &str,
+    sha: &str,
+    authority_target: &str,
+    action_id: &str,
+) -> Result<(), String> {
+    let policy = access.policy.read();
+    let decision = authority::decide(
+        access.store,
+        &policy,
+        &AuthorityQuery {
+            channel,
+            session_id,
+            action: authority::DEPLOY,
+            target: authority_target,
+            revision: Some(sha),
+            args: &json!({ "target": target_id, "head_sha": sha }),
+        },
+    )
+    .map_err(|error| format!("could not recheck deploy authority: {error}"))?;
+    if decision.verdict != Verdict::Allow {
+        return Err(format!(
+            "deploy authorization for {authority_target} is no longer valid: {}",
+            decision.reason.unwrap_or_default()
+        ));
+    }
+    access
+        .store
+        .authority_action_set_grant(action_id, decision.rule_id.as_deref())
+        .map_err(store_error)
+}
+
 /// Run a real Playwright browser in the configured image. It receives only the
 /// explicitly selected values from the configured dedicated test credential,
 /// and only while the process is inside the runtime boundary.
@@ -233,15 +747,18 @@ pub async fn browser_verify(
     if deployment.outcome != "succeeded" {
         return Err("QA deployment did not attest this candidate SHA; browser evidence would be untrustworthy".into());
     }
-    let target = configured_target(access.cfg, &deployment.target_id)?;
-    if crate::config::qa_origin(&target.origin)? != deployment.origin {
-        return Err(
-            "QA target origin changed since deployment; create a new deployment observation".into(),
-        );
-    }
+    let configured = configured_target(access.cfg, &deployment.target_id)?;
+    // A discovery target's origin belongs to the deployment, not to the
+    // configuration, so it is resolved from the row — and re-checked against
+    // the operator's attested suffix on the way, because the row is only as
+    // trustworthy as what the host printed when it was written.
+    let target = configured.resolved(Some(&deployment.origin))?;
     ensure_browser_target_binding(&deployment, &target)?;
     let plan = browser_plan(&target, &request.scenario)?;
-    let browser_authority = browser_authority_target(&deployment.target_id, &target)?;
+    // The grant names the configured target — for a discovery target, the
+    // attested suffix — so one grant covers the preview environments of a
+    // target rather than needing a new one per pull request.
+    let browser_authority = browser_authority_target(&deployment.target_id, &configured)?;
     let browser_action = authorize(
         access,
         &candidate.channel,
