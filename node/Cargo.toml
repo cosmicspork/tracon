@@ -89,5 +89,8 @@ tempfile = "3"
 [dev-dependencies]
 tracon-hub = { path = "../hub" }
 tower = { version = "0.5.3", features = ["util"] }
+# Reading a response body frame by frame: an SSE stream never ends, so a test
+# that asserts what the native UI receives cannot wait for the whole body.
+futures-util = { version = "0.3", default-features = false }
 # `start_paused`, so a test can drive a wait without serving it in real time.
 tokio = { workspace = true, features = ["test-util"] }

@@ -1835,7 +1835,6 @@ mod tests {
             ("PATCH", "api/credential/c1"),
             ("POST", "api/integration/i1/connect/key"),
             ("GET", "event"),
-            ("GET", "global/event"),
             ("GET", "api/event"),
             ("POST", "api/session"),
         ] {
@@ -1876,10 +1875,66 @@ mod tests {
         );
     }
 
+    /// The durable per-session stream is the only upstream stream forwarded,
+    /// and `/global/event` is served rather than forwarded — which is a
+    /// different thing from being allowed. Nothing here widens the deny list:
+    /// the two remaining unscoped, unreplayable streams stay refused, and the
+    /// route the app actually opens never becomes an upstream request.
     #[test]
     fn the_durable_stream_is_the_only_one_proxied() {
         assert_eq!(class_of("GET", "api/session/ses_x/event"), Class::Stream);
+        assert_eq!(class_of("GET", "global/event"), Class::Synthesised);
         assert!(matches!(class_of("GET", "event"), Class::Forbidden(_)));
+        assert!(matches!(class_of("GET", "api/event"), Class::Forbidden(_)));
+        // The synthesised route is one exact (method, path). A neighbour on
+        // the same tree is not swept along with it.
+        assert!(matches!(
+            class_of("POST", "global/event"),
+            Class::Forbidden(_)
+        ));
+        assert!(matches!(
+            class_of("GET", "global/event/all"),
+            Class::Forbidden(_)
+        ));
+    }
+
+    /// The one readable body the gateway rewrites, and the reason it does.
+    /// These snapshots are instance-wide — the path names no session — so a
+    /// sibling session's pending permission would otherwise land on this
+    /// session's page.
+    #[test]
+    fn the_pending_ask_snapshots_are_scoped_to_this_session() {
+        let mine = json!({ "id": "per_1", "sessionID": "ses_x" });
+        let theirs = json!({ "id": "per_2", "sessionID": "ses_other" });
+
+        // v1: a bare array.
+        let body = Bytes::from(json!([mine, theirs]).to_string());
+        let scoped: Value =
+            serde_json::from_slice(&scope_asks("permission", "ses_x", body)).unwrap();
+        assert_eq!(scoped, json!([mine]));
+
+        // v2: `{location, data}` — the envelope survives, the entries are cut.
+        let body = Bytes::from(json!({ "location": { "directory": "/work" }, "data": [mine, theirs] }).to_string());
+        let scoped: Value =
+            serde_json::from_slice(&scope_asks("api/permission/request", "ses_x", body)).unwrap();
+        assert_eq!(scoped["data"], json!([mine]));
+        assert_eq!(scoped["location"]["directory"], "/work");
+
+        // Questions are asks too, and go the same way.
+        let body = Bytes::from(json!([mine, theirs]).to_string());
+        let scoped: Value = serde_json::from_slice(&scope_asks("question", "ses_x", body)).unwrap();
+        assert_eq!(scoped, json!([mine]));
+
+        // Every other readable body is passed through untouched — this
+        // rewrites what it recognises and never guesses at what it does not.
+        let body = Bytes::from(json!([mine, theirs]).to_string());
+        assert_eq!(
+            scope_asks("session", "ses_x", body.clone()),
+            body,
+            "an unrelated route's body is not rewritten"
+        );
+        let opaque = Bytes::from_static(b"not json at all");
+        assert_eq!(scope_asks("permission", "ses_x", opaque.clone()), opaque);
     }
 
     #[test]
@@ -1989,6 +2044,11 @@ mod tests {
             trace_class("POST", "/session/ses_x/fork"),
             trace::UNAVAILABLE
         );
+        assert_eq!(
+            trace_class("GET", "/global/event"),
+            trace::SYNTHESISED,
+            "the route the app streams from is the node's own, not a proxied one"
+        );
         assert_eq!(trace_class("PATCH", "/config"), trace::FORBIDDEN);
         assert_eq!(
             trace_class("POST", "/session/ses_x/share"),
@@ -2011,6 +2071,7 @@ mod tests {
         assert!(!trace_class_refuses(trace::READABLE));
         assert!(!trace_class_refuses(trace::MEDIATED));
         assert!(!trace_class_refuses(trace::STREAM));
+        assert!(!trace_class_refuses(trace::SYNTHESISED));
     }
 
     #[test]

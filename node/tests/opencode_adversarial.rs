@@ -45,6 +45,7 @@ use tower::ServiceExt;
 use tracon::{
     adapter::{opencode::OpenCodeAdapter, HarnessAdapter, HarnessHandle, LaunchSpec, NativeApi},
     config::Config,
+    gateway::native_events::NativeEvents,
     http::{
         api::AppState,
         auth::{self, AuthState},
@@ -787,6 +788,7 @@ async fn a_mediated_mutation_that_never_reports_is_uncertain_until_it_is_settled
         TRACON_SESSION.into(),
         Instant::now(),
         commands,
+        NativeEvents::new(),
     );
     ingest.rebind(SESSION, HttpApi::connect(rig.endpoint, PASSWORD));
     let report = ingest.reconcile(Reconcile::Reconnect).await;
