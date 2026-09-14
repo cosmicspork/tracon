@@ -28,6 +28,7 @@ use tracon::adapter::{
     opencode::OpenCodeAdapter, DurableCursor, HarnessAdapter, HarnessEvent, LaunchSpec,
     PermissionReply,
 };
+use tracon::gateway::native_events::NativeEvents;
 use tracon::runner::Runner;
 use tracon::session::ingest::{Ingest, Reconcile};
 use tracon::session::state::SessionState;
@@ -74,7 +75,17 @@ fn store_with_session(state: &str) -> Arc<Store> {
 /// An ingestion layer over a store, with the supervisor's command channel in
 /// hand so a test can see what reconciliation puts back on the queue.
 fn ingest_for(store: &Arc<Store>) -> (Arc<Ingest>, mpsc::Receiver<Command>) {
+    let (ingest, rx, _) = ingest_and_channel(store);
+    (ingest, rx)
+}
+
+/// The same, with the native UI's live channel in hand: the tap the adapter's
+/// pumps write to through `DurableCursor::observe`.
+fn ingest_and_channel(
+    store: &Arc<Store>,
+) -> (Arc<Ingest>, mpsc::Receiver<Command>, Arc<NativeEvents>) {
     let (tx, rx) = mpsc::channel(16);
+    let native = NativeEvents::new();
     let ingest = Ingest::new(
         store.clone(),
         Bus::new(),
@@ -82,8 +93,9 @@ fn ingest_for(store: &Arc<Store>) -> (Arc<Ingest>, mpsc::Receiver<Command>) {
         SESSION_ID.into(),
         Instant::now(),
         tx,
+        native.clone(),
     );
-    (ingest, rx)
+    (ingest, rx, native)
 }
 
 fn kinds(store: &Store) -> Vec<String> {
@@ -345,6 +357,7 @@ async fn a_prompt_that_never_reported_leaves_the_session_uncertain_until_asked()
         SESSION_ID.into(),
         Instant::now(),
         tx.clone(),
+        NativeEvents::new(),
     );
     // Nothing here is about the queue: the scripted permission would move the
     // session to `waiting_on_you` and refuse the second prompt for a reason
@@ -614,4 +627,73 @@ impl Runner for NoRunner {
     async fn kill(&self, _name: &str) -> Result<(), tracon::runner::RunnerError> {
         Ok(())
     }
+}
+
+/// The tap the native UI's live channel is built from is fed by the pumps the
+/// node already runs, and by nothing else.
+///
+/// Finding 20 is a seam between two true things: the app streams only from
+/// `GET /global/event`, and that stream is unforwardable. The node closes it by
+/// serving its own — but only if the events actually arrive, and only if they
+/// arrive without a second reader. So this drives the real adapter against the
+/// fake server, with the real `Ingest` as the cursor, and asserts the ask
+/// reaches the channel in the shape the page reads.
+///
+/// The permission here is the same one the rest of this file uses: raised on
+/// the server-wide stream, because the durable per-session one does not carry
+/// asks at all (finding 6). That is exactly why the tap is on both pumps.
+#[tokio::test]
+async fn the_native_channel_is_fed_from_the_pumps_the_node_already_runs() {
+    state::isolate();
+    let store = store_with_session("running");
+    let (ingest, _commands, native) = ingest_and_channel(&store);
+    let fake = Fake::new("1.18.30", usize::MAX);
+    let (runner, seen) = start(fake).await;
+    let (handle, mut rx) = OpenCodeAdapter::new("1.18.30")
+        .launch(&runner, launch_spec(ingest.clone()))
+        .await
+        .expect("the harness starts");
+
+    let turn = tokio::spawn(async move { handle.prompt("fix the validation".into()).await });
+    let mut labels = Vec::new();
+    let permission = support::events::next_permission(&mut rx, &mut labels).await;
+    let HarnessEvent::Permission { reply, .. } = permission else {
+        panic!("expected a permission request")
+    };
+
+    // The ask is on the page's channel, in the v1 shape the app switches on —
+    // not the `permission.v2.asked` the server put on the wire.
+    await_true("the ask reached the native channel", || {
+        native
+            .replay(0)
+            .iter()
+            .any(|f| f.payload["type"] == "permission.asked")
+    })
+    .await;
+    let frame = native
+        .replay(0)
+        .into_iter()
+        .find(|f| f.payload["type"] == "permission.asked")
+        .expect("the ask");
+    assert_eq!(frame.payload["properties"]["id"], PERMISSION);
+    assert_eq!(frame.payload["properties"]["sessionID"], SESSION);
+    assert_eq!(frame.payload["properties"]["permission"], "bash");
+    assert_eq!(frame.payload["properties"]["tool"]["callID"], "call_1");
+    // The node's own sequence, which is what makes the stream resumable at all.
+    assert!(frame.id > 0);
+
+    reply
+        .send(PermissionReply::Selected("allow_once".into()))
+        .unwrap();
+    turn.await.unwrap().expect("the turn completes");
+
+    // One reader per upstream stream, still. The channel opened nothing of its
+    // own: if it had, the durable stream would have been connected more than
+    // once and the sequence it exists to protect would be raced — which is the
+    // bug the sequence was introduced to prevent (finding 6).
+    let resumed = seen.lock().unwrap().resumed_from.len();
+    assert_eq!(
+        resumed, 1,
+        "the durable stream was opened {resumed} times; the native channel must tee, not re-read"
+    );
 }

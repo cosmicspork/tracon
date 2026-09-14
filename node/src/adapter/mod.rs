@@ -308,6 +308,21 @@ pub trait DurableCursor: Send + Sync {
     /// time.
     async fn admit(&self, event: &Value) -> bool;
 
+    /// Every event the adapter read, admitted or not, before anything is
+    /// decided about it.
+    ///
+    /// Ingestion is the node's *record*; this is the node's *tap*. The native
+    /// UI's only live channel is a stream the node synthesises rather than
+    /// forwards (`gateway::native_events`, finding 20), and it is built from
+    /// what the adapter is already reading — so the two pumps stay the only
+    /// readers of the harness's streams. Deliberately not gated on `admit`: a
+    /// replayed event is a duplicate for the record and still the freshest
+    /// thing a browser that just reconnected has seen.
+    ///
+    /// Cheap, synchronous and infallible by contract: it runs on the pump's
+    /// own loop, and a tap that could block would stall ingestion.
+    fn observe(&self, _event: &Value) {}
+
     /// The stream dropped and is about to be reopened. What was missed comes
     /// back through the resumed stream itself; this is where anything the
     /// stream cannot carry — a permission raised while it was down, a session

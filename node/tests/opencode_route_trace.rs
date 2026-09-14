@@ -161,6 +161,7 @@ impl Trace {
              #         boot      the origin's own bootstrap exchange\n\
              #         readable  forwarded by the gateway, directory pinned, credential injected\n\
              #         stream    the same, proxied as a stream (the one durably replayable one)\n\
+             #         synthesised  served by the node from what it already reads, never forwarded\n\
              #         mediated  decided by tracon before anything reached the harness\n\
              #         unavailable  on the matrix, and refused until tracon owns what it makes\n\
              #         forbidden the deny list, refused by name\n\
@@ -358,6 +359,7 @@ fn the_trace_uses_only_the_names_the_code_defines() {
                     | ui::trace::NONE
                     | gw::READABLE
                     | gw::STREAM
+                    | gw::SYNTHESISED
                     | gw::MEDIATED
                     | gw::UNAVAILABLE
                     | gw::FORBIDDEN

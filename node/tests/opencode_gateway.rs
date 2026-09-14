@@ -47,7 +47,14 @@ const REMOTE: &str = "203.0.113.7:5000";
 struct Rig {
     app: axum::Router,
     store: Arc<Store>,
+    /// The node, so a test can reach the live channel the native UI streams
+    /// from — the one thing on this mount the gateway serves rather than
+    /// forwards (finding 20).
+    manager: Manager,
     seen: Arc<Mutex<Seen>>,
+    /// The harness itself, so a test can put it in a state — a permission it
+    /// is still blocked on — rather than only observe what it was asked.
+    fake: Fake,
 }
 
 impl Rig {
@@ -59,7 +66,7 @@ impl Rig {
         let fake = Fake::new("1.18.30", usize::MAX);
         let seen = fake.seen.clone();
         *fake.password.lock().unwrap() = PASSWORD.to_string();
-        let endpoint = serve(fake).await;
+        let endpoint = serve(fake.clone()).await;
 
         let store = Arc::new(Store::open_in_memory().unwrap());
         store.ensure_peer_node("n1").unwrap();
@@ -104,7 +111,13 @@ impl Rig {
             .register_native_api_for_test(TRACON_SESSION, native_api(endpoint))
             .await;
 
-        Self { app, store, seen }
+        Self {
+            app,
+            store,
+            manager,
+            seen,
+            fake,
+        }
     }
 
     /// One request through the gateway, as the operator's own client makes
@@ -170,6 +183,24 @@ impl Rig {
             cookies,
             serde_json::from_str(&text).unwrap_or(Value::String(text)),
         )
+    }
+
+    /// Open a streaming route and hand back the live response. Unlike
+    /// [`Rig::raw`] this never reads the body to its end, because an event
+    /// stream does not have one.
+    async fn open(&self, tail: &str, headers: &[(&str, &str)]) -> axum::response::Response {
+        let mut b = Request::builder()
+            .method("GET")
+            .uri(format!("/api/opencode/{TRACON_SESSION}/{tail}"))
+            .header("host", "127.0.0.1:7420")
+            .header("accept", "text/event-stream");
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        let mut req = b.body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(LOCAL.parse::<SocketAddr>().unwrap()));
+        self.app.clone().oneshot(req).await.unwrap()
     }
 
     fn requests(&self) -> Vec<Recorded> {
@@ -272,8 +303,12 @@ async fn the_deny_list_is_refused_and_nothing_reaches_the_harness() {
         ("POST", "instance/dispose"),
         ("POST", "project/git/init"),
         ("GET", "event"),
-        ("GET", "global/event"),
         ("GET", "api/event"),
+        // `GET /global/event` is no longer here: the node answers it itself
+        // rather than forwarding it (finding 20). That it still reaches the
+        // harness never, and that the other two unscoped streams stay refused,
+        // is asserted in
+        // `the_other_global_streams_are_still_refused_and_nothing_is_proxied`.
         ("POST", "api/session"),
         // Not on the list by name: not on the table either, so it fails closed.
         ("GET", "made/up/route"),
@@ -762,4 +797,253 @@ impl Live {
         }
         false
     }
+}
+
+// ---------------------------------------------------------------------------
+// The synthesised live channel (finding 20)
+// ---------------------------------------------------------------------------
+
+/// One frame off an SSE body: the `id:` the client would resume from, and the
+/// parsed `data:` payload.
+type Frame = (Option<String>, Value);
+
+/// Read frames until `want` of them have arrived or the deadline passes.
+///
+/// An event stream has no end, so nothing here may wait for one — which is why
+/// this exists beside the rig's `to_bytes`. Two kinds of frame are skipped
+/// because they are liveness rather than news, exactly as the app skips them:
+/// comment keep-alives, which carry no `data:` at all, and `server.heartbeat`.
+///
+/// The deadline is deliberately under the ten-second heartbeat, so a test that
+/// asks for more frames than exist settles quickly and always the same way.
+async fn frames(body: Body, want: usize) -> Vec<Frame> {
+    use futures_util::StreamExt;
+
+    let mut stream = body.into_data_stream();
+    let mut buffer = String::new();
+    let mut out: Vec<Frame> = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    while out.len() < want {
+        let Ok(Some(Ok(chunk))) = tokio::time::timeout_at(deadline, stream.next()).await else {
+            break;
+        };
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(at) = buffer.find("\n\n") {
+            let block: String = buffer.drain(..at + 2).collect();
+            let mut id = None;
+            let mut data = String::new();
+            for line in block.lines() {
+                if let Some(rest) = line.strip_prefix("data:") {
+                    data.push_str(rest.trim_start());
+                } else if let Some(rest) = line.strip_prefix("id:") {
+                    id = Some(rest.trim().to_string());
+                }
+            }
+            if data.is_empty() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(&data).expect("an SSE frame is JSON");
+            if value["payload"]["type"] == "server.heartbeat" {
+                continue;
+            }
+            out.push((id, value));
+        }
+    }
+    out
+}
+
+/// The `permission.v2.asked` the fake server raises on its server-wide stream,
+/// which is what the adapter's pump hands the channel.
+fn asked(session: &str, id: &str) -> Value {
+    json!({
+        "id": "evt_perm",
+        "type": "permission.v2.asked",
+        "data": {
+            "id": id,
+            "sessionID": session,
+            "action": "bash",
+            "resources": ["just test"],
+            "source": { "type": "tool", "messageID": "msg_1", "callID": "call_1" },
+        },
+    })
+}
+
+/// Finding 20, closed: the page's one live channel now carries the permission.
+///
+/// The native app streams from `GET /global/event` and from nothing else, so
+/// before this a permission request reached the node, blocked the harness, and
+/// never appeared on screen. Here the ask goes in the way the adapter's pump
+/// puts it in and comes out on the app's own socket in the app's own shape —
+/// with no part of it forwarded from upstream.
+#[tokio::test]
+async fn a_permission_reaches_the_native_ui_on_the_synthesised_stream() {
+    let rig = Rig::new().await;
+    let events = rig.manager.native_events(TRACON_SESSION);
+
+    let res = rig.open("global/event", &[]).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    // The app's client refuses any other content type outright.
+    assert_eq!(
+        res.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.starts_with("text/event-stream")),
+        Some(true),
+    );
+
+    // Published after the client is attached, exactly as a live ask arrives.
+    events.offer(SESSION, &asked(SESSION, PERMISSION));
+
+    let frames = frames(res.into_body(), 2).await;
+    assert_eq!(frames.len(), 2, "{frames:?}");
+
+    // First, as upstream does: what marks the server connected in the app and
+    // makes it refetch its snapshots. It carries no id, so it never moves the
+    // client's resume point.
+    let (id, connected) = &frames[0];
+    assert_eq!(connected["payload"]["type"], "server.connected");
+    assert_eq!(connected["directory"], WORKSPACE);
+    assert_eq!(*id, None);
+
+    // Then the ask, in the global envelope the app's legacy path reads:
+    // `{directory, payload:{id, type, properties}}`.
+    let (id, event) = &frames[1];
+    assert_eq!(event["directory"], WORKSPACE);
+    let payload = &event["payload"];
+    assert_eq!(
+        payload["type"], "permission.asked",
+        "the app runs its v2 adapter only on the v2 transport; this envelope \
+         must already be v1 or the page switches on a name it does not know"
+    );
+    let properties = &payload["properties"];
+    assert_eq!(properties["id"], PERMISSION);
+    assert_eq!(properties["sessionID"], SESSION);
+    assert_eq!(properties["permission"], "bash");
+    assert_eq!(properties["patterns"], json!(["just test"]));
+    assert_eq!(properties["always"], json!([]));
+    assert_eq!(properties["tool"]["callID"], "call_1");
+    // tracon's own sequence, which upstream has none of: this is what the v1
+    // client sends back as `Last-Event-ID`.
+    assert_eq!(id.as_deref(), Some("1"));
+
+    // And nothing was forwarded. The harness was never asked for an event
+    // stream: the route is served, not proxied.
+    assert!(
+        !rig.requests().iter().any(|r| r.path.contains("event")),
+        "the synthesised stream reached the harness: {:?}",
+        rig.requests()
+    );
+}
+
+/// One OpenCode server holds more than one session, and one Basic credential
+/// is authority over all of them. The channel is the browser's view of exactly
+/// one, so a sibling session's ask is not on it.
+#[tokio::test]
+async fn another_sessions_events_are_never_forwarded_to_this_page() {
+    let rig = Rig::new().await;
+    let events = rig.manager.native_events(TRACON_SESSION);
+
+    let res = rig.open("global/event", &[]).await;
+    events.offer(SESSION, &asked("ses_other", "per_theirs"));
+    events.offer(SESSION, &asked(SESSION, PERMISSION));
+
+    // Asking for three and getting two is the assertion: the sibling's ask was
+    // dropped before the broadcast, so only `server.connected` and this
+    // session's own ask exist to be read.
+    let frames = frames(res.into_body(), 3).await;
+    assert_eq!(frames.len(), 2, "{frames:?}");
+    assert_eq!(frames[0].1["payload"]["type"], "server.connected");
+    assert_eq!(frames[1].1["payload"]["properties"]["id"], PERMISSION);
+    assert!(
+        !frames
+            .iter()
+            .any(|(_, f)| f.to_string().contains("per_theirs")),
+        "another session's permission reached the page: {frames:?}"
+    );
+}
+
+/// An ask raised while the page was away is still delivered, because the node
+/// numbers what upstream never did. This is the half of finding 6 that made
+/// the upstream stream unforwardable, fixed rather than wished away.
+#[tokio::test]
+async fn a_reconnecting_page_resumes_from_its_last_event_id() {
+    let rig = Rig::new().await;
+    let events = rig.manager.native_events(TRACON_SESSION);
+
+    // Raised with nobody connected.
+    events.offer(SESSION, &asked(SESSION, PERMISSION));
+
+    // The v1 SSE client the app uses parses `id:` and resends it.
+    let res = rig.open("global/event", &[("last-event-id", "0")]).await;
+    let resumed = frames(res.into_body(), 2).await;
+    assert_eq!(resumed.len(), 2, "{resumed:?}");
+    assert_eq!(resumed[0].1["payload"]["type"], "server.connected");
+    assert_eq!(resumed[1].1["payload"]["properties"]["id"], PERMISSION);
+    assert_eq!(resumed[1].0.as_deref(), Some("1"));
+
+    // A client that has already seen it does not get it twice.
+    let res = rig.open("global/event", &[("last-event-id", "1")]).await;
+    let again = frames(res.into_body(), 2).await;
+    assert_eq!(
+        again.len(),
+        1,
+        "a frame the client already had was re-delivered: {again:?}"
+    );
+    assert_eq!(again[0].1["payload"]["type"], "server.connected");
+}
+
+/// Serving `/global/event` is not the same as allowing it. The two remaining
+/// unscoped, unreplayable streams stay refused by name, and the synthesised
+/// route is one exact (method, path) rather than a hole in the tree.
+#[tokio::test]
+async fn the_other_global_streams_are_still_refused_and_nothing_is_proxied() {
+    let rig = Rig::new().await;
+    for tail in ["event", "api/event"] {
+        let (status, body) = rig.call("GET", tail, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "GET /{tail}: {body}");
+    }
+    let (status, _) = rig.call("POST", "global/event", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = rig.call("GET", "global/event/all", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    assert!(
+        rig.requests().is_empty(),
+        "a refused stream still reached the harness: {:?}",
+        rig.requests()
+    );
+    assert_eq!(rig.events_of("gateway_refused").len(), 4);
+}
+
+/// A permission raised before the page opened is on the page, and a sibling
+/// session's is not.
+///
+/// This is how the app finds pending asks at all — it never learns them from
+/// the stream (`bootstrap.ts`), so without it a request raised before the tab
+/// opened stays invisible however good the stream is. The route is
+/// instance-wide upstream: the path names no session, and pinning
+/// `?directory=` does not separate siblings that share a workspace. So the
+/// gateway scopes the body.
+#[tokio::test]
+async fn the_pending_permission_snapshot_is_scoped_to_this_session() {
+    let rig = Rig::new().await;
+    rig.fake
+        .pending_permission_for(SESSION, PERMISSION, "call_1");
+    rig.fake
+        .pending_permission_for("ses_other", "per_theirs", "call_9");
+
+    let (status, body) = rig.call("GET", "permission", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed = body.as_array().expect("a list of pending permissions");
+    assert_eq!(listed.len(), 1, "{body}");
+    assert_eq!(listed[0]["id"], PERMISSION);
+    assert_eq!(listed[0]["sessionID"], SESSION);
+
+    // The harness was asked; only the answer was narrowed. This is still a
+    // readable route, not a thing the node makes up.
+    assert!(
+        rig.requests().iter().any(|r| r.path == "/permission"),
+        "{:?}",
+        rig.requests()
+    );
 }

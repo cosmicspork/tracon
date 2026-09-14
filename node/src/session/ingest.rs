@@ -99,6 +99,10 @@ pub struct Ingest {
     commands: mpsc::Sender<Command>,
     upstream: Mutex<Option<String>>,
     api: Mutex<Option<Arc<dyn HarnessSnapshots>>>,
+    /// The native UI's live channel, fed from the streams this cursor is
+    /// already on. Ingestion owns the record; this is the tap the page reads
+    /// (`gateway::native_events`, finding 20).
+    native: Arc<crate::gateway::native_events::NativeEvents>,
 }
 
 impl Ingest {
@@ -109,6 +113,7 @@ impl Ingest {
         session_id: String,
         started: Instant,
         commands: mpsc::Sender<Command>,
+        native: Arc<crate::gateway::native_events::NativeEvents>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
@@ -119,6 +124,7 @@ impl Ingest {
             commands,
             upstream: Mutex::new(None),
             api: Mutex::new(None),
+            native,
         })
     }
 
@@ -906,6 +912,17 @@ impl DurableCursor for Ingest {
         };
         self.map_identities(event, seq as i64);
         self.admit_seq(seq)
+    }
+
+    /// The tap for the native UI's synthesised live channel. Scoped to this
+    /// session's upstream id, so an event for another session on the same
+    /// server is dropped before it can be broadcast; before the handshake has
+    /// named that id there is nothing to scope against and nothing is
+    /// published.
+    fn observe(&self, event: &Value) {
+        if let Some(upstream) = self.upstream_id() {
+            self.native.offer(&upstream, event);
+        }
     }
 
     async fn reconnected(&self) {
