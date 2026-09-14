@@ -308,6 +308,15 @@ pub struct StreamEnvelope {
     pub sig: String,
 }
 
+/// The clear fields of an envelope, decoded once.
+struct Parts {
+    sender: [u8; 32],
+    recipient: [u8; 32],
+    stream_id: [u8; STREAM_ID_LEN],
+    epoch: [u8; EPOCH_ID_LEN],
+    body: Vec<u8>,
+}
+
 fn stream_id32(hex: &str) -> Option<[u8; STREAM_ID_LEN]> {
     hex::decode(hex).ok().and_then(|b| b.try_into().ok())
 }
@@ -464,30 +473,20 @@ impl StreamEnvelope {
         })
     }
 
-    fn parts(
-        &self,
-    ) -> Result<
-        (
-            [u8; 32],
-            [u8; 32],
-            [u8; STREAM_ID_LEN],
-            [u8; EPOCH_ID_LEN],
-            Vec<u8>,
-        ),
-        StreamError,
-    > {
+    fn parts(&self) -> Result<Parts, StreamError> {
         use base64::Engine;
         if !crate::frame::valid_channel(&self.channel) {
             return Err(StreamError::Malformed("channel"));
         }
-        let sender = key32(&self.sender).ok_or(StreamError::Malformed("sender"))?;
-        let recipient = key32(&self.recipient).ok_or(StreamError::Malformed("recipient"))?;
-        let sid = stream_id32(&self.stream_id).ok_or(StreamError::Malformed("stream_id"))?;
-        let epoch = epoch32(&self.epoch).ok_or(StreamError::Malformed("epoch"))?;
-        let body = base64::engine::general_purpose::STANDARD
-            .decode(&self.body)
-            .map_err(|_| StreamError::Malformed("body"))?;
-        Ok((sender, recipient, sid, epoch, body))
+        Ok(Parts {
+            sender: key32(&self.sender).ok_or(StreamError::Malformed("sender"))?,
+            recipient: key32(&self.recipient).ok_or(StreamError::Malformed("recipient"))?,
+            stream_id: stream_id32(&self.stream_id).ok_or(StreamError::Malformed("stream_id"))?,
+            epoch: epoch32(&self.epoch).ok_or(StreamError::Malformed("epoch"))?,
+            body: base64::engine::general_purpose::STANDARD
+                .decode(&self.body)
+                .map_err(|_| StreamError::Malformed("body"))?,
+        })
     }
 
     /// Check the wire version and the signature. Returns the sender's key.
@@ -500,13 +499,13 @@ impl StreamEnvelope {
                 expected: crate::CONTRACT_VERSION,
             });
         }
-        let (sender, recipient, sid, epoch, body) = self.parts()?;
+        let p = self.parts()?;
         let canon = canonical(
             &self.channel,
-            &sender,
-            &recipient,
-            &sid,
-            &epoch,
+            &p.sender,
+            &p.recipient,
+            &p.stream_id,
+            &p.epoch,
             self.seq,
             self.sent_ms,
         );
@@ -514,15 +513,16 @@ impl StreamEnvelope {
             .ok()
             .and_then(|b| b.try_into().ok())
             .ok_or(StreamError::Malformed("sig"))?;
-        let vk = VerifyingKey::from_bytes(&sender).map_err(|_| StreamError::Malformed("sender"))?;
+        let vk =
+            VerifyingKey::from_bytes(&p.sender).map_err(|_| StreamError::Malformed("sender"))?;
         if !crate::keys::verify(
             &vk,
-            &signing_bytes(&canon, &body),
+            &signing_bytes(&canon, &p.body),
             &Signature::from_bytes(&sig),
         ) {
             return Err(StreamError::BadSignature);
         }
-        Ok(sender)
+        Ok(p.sender)
     }
 
     /// Open a frame addressed to `me`. `direction` is the direction the
@@ -533,33 +533,33 @@ impl StreamEnvelope {
         me: &Identity,
         direction: Direction,
     ) -> Result<StreamFrame, StreamError> {
-        let (sender, recipient, sid, epoch, body) = self.parts()?;
-        if recipient != me.verifying_key().to_bytes() {
+        let p = self.parts()?;
+        if p.recipient != me.verifying_key().to_bytes() {
             return Err(StreamError::NotRecipient);
         }
         let entry = keyring
-            .entry(&epoch)
-            .ok_or_else(|| StreamError::UnknownEpoch(hex::encode(epoch)))?;
+            .entry(&p.epoch)
+            .ok_or_else(|| StreamError::UnknownEpoch(hex::encode(p.epoch)))?;
         let epoch_key = keyring.key_for(entry, me)?;
         let key = stream_key(
             &epoch_key,
             &self.channel,
-            &epoch,
-            &sid,
-            &sender,
-            &recipient,
+            &p.epoch,
+            &p.stream_id,
+            &p.sender,
+            &p.recipient,
             direction,
         );
         let canon = canonical(
             &self.channel,
-            &sender,
-            &recipient,
-            &sid,
-            &epoch,
+            &p.sender,
+            &p.recipient,
+            &p.stream_id,
+            &p.epoch,
             self.seq,
             self.sent_ms,
         );
-        let plaintext = key.open(&Sealed::from_bytes(&body)?, &canon)?;
+        let plaintext = key.open(&Sealed::from_bytes(&p.body)?, &canon)?;
         Ok(serde_json::from_slice(&plaintext)?)
     }
 }
