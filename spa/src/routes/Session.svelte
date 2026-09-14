@@ -6,6 +6,7 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { desktopCanOpenOpencode, openOpencodeWindow } from '../lib/desktop-opencode'
+  import { opencodeShellPath } from '../lib/opencode'
   import { draftBox } from '../lib/draft'
   import { humanizeError } from '../lib/errors'
   import { formatAge, formatBudget, formatTokens } from '../lib/format'
@@ -210,13 +211,17 @@
   })
   // A prompt to an unreachable owner is queued on this node and sent when it
   // returns; the box stays open and says so.
-  // The desktop app only: OpenCode's own interface opens in a second window
-  // that holds none of this one's privileges. It is the session's own harness,
-  // so it is offered for an OpenCode session running on this machine and
-  // nowhere else.
-  const canOpenOpencode = $derived(
-    desktopCanOpenOpencode() && session?.harness_id === 'opencode' && !remote,
-  )
+  // OpenCode's own interface has two ways in, and which one is offered is a
+  // fact about the client rather than a preference: the desktop app opens a
+  // second window holding none of this one's privileges, and a browser —
+  // installed or not — stays inside the app's own scope. A new tab is never
+  // the answer on a phone: leaving the installed app for Safari or Chrome is
+  // exactly the handover the shell route exists to avoid. Either way it is
+  // this session's own harness, so it is offered for an OpenCode session
+  // running on this machine and nowhere else.
+  const opencodeHere = $derived(session?.harness_id === 'opencode' && !remote)
+  const canOpenOpencode = $derived(desktopCanOpenOpencode() && opencodeHere)
+  const canFrameOpencode = $derived(!desktopCanOpenOpencode() && opencodeHere)
   let openingOpencode = $state(false)
   async function openOpencode() {
     openingOpencode = true
@@ -308,6 +313,13 @@
         disabled={openingOpencode}
         title="OpenCode's own interface, in a window that can reach nothing but that interface"
         >OpenCode</button
+      >
+    {:else if canFrameOpencode}
+      <a
+        class="lnk"
+        href={opencodeShellPath(id)}
+        title="OpenCode's own interface, framed here from its own origin — the installed app keeps it"
+        >OpenCode</a
       >
     {/if}
     {#if !isTerminal(session.state)}

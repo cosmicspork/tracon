@@ -345,11 +345,22 @@ const BOOTSTRAP: &str = r#";(function () {
   // Gone before anything can read it, and before any request this page makes
   // can carry it in a Referer.
   history.replaceState(null, "", location.pathname)
+  // Whether this page is framed decides how the node must scope the cookie
+  // it is about to set: inside the installed app's shell this origin is
+  // third-party, and a `SameSite=Strict` cookie would never arrive. Comparing
+  // the two window handles is allowed across origins; reading anything off
+  // `top` is not, and nothing here does.
+  var framed = false
+  try {
+    framed = window.top !== window.self
+  } catch (e) {
+    framed = true
+  }
   fetch("/boot", {
     method: "POST",
     credentials: "same-origin",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ boot: boot }),
+    body: JSON.stringify({ boot: boot, framed: framed }),
   })
     .then(function (r) {
       return r.ok ? r.json() : null
@@ -363,7 +374,14 @@ const BOOTSTRAP: &str = r#";(function () {
 "#;
 
 /// Replace the app's module `<script>` with the bootstrap, which loads it.
-fn splice_bootstrap(html: &str) -> Result<String, BundleError> {
+///
+/// Public because it is the unit of "the page this origin serves": the PWA
+/// shell's browser test (`node/tests/opencode_pwa_shell.rs`) stands the origin
+/// up without the 34 MiB pinned bundle, and what it is testing — the boot
+/// exchange and the cookie that comes out of it — is this script rather than
+/// upstream's JavaScript. Taking the real one rather than a copy is what stops
+/// the test from passing against a bootstrap the node does not serve.
+pub fn splice_bootstrap(html: &str) -> Result<String, BundleError> {
     let (open, close) = find_module_script(html)
         .ok_or_else(|| BundleError::Shape("no <script type=\"module\"> in index.html".into()))?;
     let tag = &html[open..close];
@@ -827,6 +845,14 @@ fn unavailable() -> Response {
 #[derive(Deserialize)]
 struct BootBody {
     boot: String,
+    /// Whether the page spending this token is embedded in a frame — the
+    /// installed PWA's shell (`spa/src/routes/OpencodeShell.svelte`) rather
+    /// than the desktop window or a tab of its own. The bootstrap reports it
+    /// because only the page can know, and the answer decides one thing: how
+    /// this origin's cookie must be scoped to survive being third-party.
+    /// Absent on an older bootstrap, which is the un-framed case.
+    #[serde(default)]
+    framed: bool,
 }
 
 /// Spend a bootstrap token for a cookie.
@@ -892,20 +918,73 @@ async fn boot(
         "path": session_route(&state.origin, &api.session_id),
     }))
     .into_response();
-    set_cookie(&mut response, &secret, state.secure, COOKIE_TTL_MS / 1000);
+    set_cookie(
+        &mut response,
+        &secret,
+        state.secure,
+        COOKIE_TTL_MS / 1000,
+        body.framed,
+    );
     let _ = headers;
     Ok(response)
 }
 
-/// Host-only (no `Domain`), `HttpOnly`, and `SameSite=Strict`: this cookie is
-/// never wanted on a request some other site caused, and unlike the operator's
-/// there is no cross-site entry path — the operator's own page opens this
-/// window, and the bootstrap that follows is same-origin.
-fn set_cookie(response: &mut Response, secret: &str, secure: bool, max_age_secs: i64) {
-    let secure = if secure { "; Secure" } else { "" };
-    let v = format!(
-        "{UI_COOKIE}={secret}; HttpOnly{secure}; SameSite=Strict; Path=/; Max-Age={max_age_secs}"
-    );
+/// Host-only (no `Domain`) and `HttpOnly` always. The rest depends on where
+/// the page spending the token is.
+///
+/// **In a window or a tab of its own** — the desktop app, a desktop browser —
+/// the cookie is `SameSite=Strict`: it is never wanted on a request some other
+/// site caused, and there is no cross-site entry path, because the operator's
+/// own page opens the window and the bootstrap that follows is same-origin.
+///
+/// **In the installed app's shell** the same cookie would never be set at all.
+/// The shell is a page on tracon's origin; the frame inside it is this origin;
+/// so every request the frame makes — including its own `POST /boot` — is
+/// *third-party* by the browser's reckoning, whatever it looks like from
+/// inside the frame. `SameSite=Strict` is refused on the way in and would not
+/// be sent on the way out.
+///
+/// So a framed boot gets `SameSite=None` with `Partitioned` (CHIPS). The pair
+/// is the point:
+///
+/// * `SameSite=None` is what lets the cookie exist in a third-party context at
+///   all. On its own it would be a loosening — the cookie would ride along on
+///   any cross-site request to this origin.
+/// * `Partitioned` takes that back, and more. The jar is keyed by the
+///   *top-level* site, so the cookie this exchange sets exists only while
+///   tracon's own origin is the page around it. A frame of this origin on
+///   `evil.example` is a different partition and an empty jar — which is a
+///   stronger statement than `SameSite=Strict` made, because it holds even
+///   against a same-site attacker. It is also what makes the view work with
+///   third-party cookies blocked, which is the default on the phones this is
+///   for.
+/// * And the loosening `SameSite=None` would otherwise be is already answered
+///   by `origin_guard`: every mutation and every WebSocket upgrade on this
+///   origin must carry a matching `Origin`, so a cookie riding along on a
+///   cross-site request buys the caller nothing it can read or write.
+///
+/// `Partitioned` requires `Secure`, so a framed cookie carries it even on
+/// loopback, where this listener is plain HTTP. That is not a contradiction:
+/// `http://localhost` and `http://127.0.0.0/8` are *potentially trustworthy*
+/// origins, and browsers accept `Secure` cookies from them. Asserted against
+/// a real Chromium in `node/tests/opencode_pwa_shell.rs` rather than assumed.
+fn set_cookie(
+    response: &mut Response,
+    secret: &str,
+    secure: bool,
+    max_age_secs: i64,
+    framed: bool,
+) {
+    let scope = if framed {
+        // Forced `Secure`: `Partitioned` is ignored without it, and an ignored
+        // partition attribute is a cookie that is either blocked or shared.
+        "; Secure; SameSite=None; Partitioned"
+    } else if secure {
+        "; Secure; SameSite=Strict"
+    } else {
+        "; SameSite=Strict"
+    };
+    let v = format!("{UI_COOKIE}={secret}; HttpOnly{scope}; Path=/; Max-Age={max_age_secs}");
     if let Ok(value) = HeaderValue::from_str(&v) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
@@ -1072,6 +1151,10 @@ pub async fn open(
         "url": format!("{origin}/#/session/{}?boot={token}", api.session_id),
         "origin": origin,
         "expires_ms": now + BOOT_TTL_MS,
+        // What the capability becomes once spent. The shell cannot read an
+        // `HttpOnly` cookie, so without this it could only guess when a frame
+        // it backgrounded has certainly stopped working.
+        "cookie_ttl_ms": COOKIE_TTL_MS,
     })))
 }
 
@@ -1201,6 +1284,77 @@ mod tests {
         assert!(v.contains("frame-ancestors http://127.0.0.1:7420"));
         assert!(v.contains("base-uri 'none'"));
         assert!(v.contains("form-action 'none'"));
+    }
+
+    /// What the shell's frame depends on, stated as an assertion rather than
+    /// left to a browser run: a cookie set for a framed page must survive
+    /// being third-party, and one set for a window must not become available
+    /// to anyone else's page.
+    #[test]
+    fn a_framed_boot_is_partitioned_and_a_windowed_one_stays_strict() {
+        let cookie = |secure: bool, framed: bool| {
+            let mut response = StatusCode::OK.into_response();
+            set_cookie(&mut response, "s3cret", secure, 42, framed);
+            response
+                .headers()
+                .get(header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+
+        // Framed: `SameSite=None` so it is set and sent at all inside the
+        // shell's iframe, `Partitioned` so it exists only while tracon's own
+        // origin is the page around it, and `Secure` because CHIPS requires it
+        // -- on loopback too, where this listener is plain HTTP and the origin
+        // is nonetheless potentially trustworthy.
+        for secure in [true, false] {
+            let framed = cookie(secure, true);
+            assert!(
+                framed.starts_with("tracon_opencode_ui=s3cret; "),
+                "{framed}"
+            );
+            assert!(framed.contains("; HttpOnly"), "{framed}");
+            assert!(framed.contains("; Secure"), "{framed}");
+            assert!(framed.contains("; SameSite=None"), "{framed}");
+            assert!(framed.contains("; Partitioned"), "{framed}");
+            assert!(!framed.contains("SameSite=Strict"), "{framed}");
+            // Host-only: no `Domain`, so a sibling host never receives it.
+            assert!(!framed.contains("Domain="), "{framed}");
+            assert!(framed.contains("; Path=/; Max-Age=42"), "{framed}");
+        }
+
+        // A window of its own has no third-party leg, so it keeps the
+        // narrowest rule there is and is never partitioned into a jar the
+        // desktop app would have to re-mint against.
+        let windowed = cookie(true, false);
+        assert!(windowed.contains("; SameSite=Strict"), "{windowed}");
+        assert!(windowed.contains("; Secure"), "{windowed}");
+        assert!(!windowed.contains("Partitioned"), "{windowed}");
+        // And on loopback, where a `Secure` cookie would be dropped by a
+        // browser that has not made the trustworthy-origin carve-out, the
+        // un-framed cookie still does not carry it.
+        let loopback = cookie(false, false);
+        assert!(!loopback.contains("Secure"), "{loopback}");
+        assert!(loopback.contains("; SameSite=Strict"), "{loopback}");
+    }
+
+    /// The bootstrap is what tells `/boot` which of those two it is. It must
+    /// ask without reading anything off a cross-origin `top`, and must treat a
+    /// throw as framed rather than as a window.
+    #[test]
+    fn the_bootstrap_reports_whether_it_is_framed() {
+        let html = concat!(
+            "<html><head>",
+            "<script type=\"module\" crossorigin src=\"/assets/index-abc.js\"></script>",
+            "</head><body></body></html>"
+        );
+        let out = splice_bootstrap(html).unwrap();
+        assert!(out.contains("window.top !== window.self"), "{out}");
+        assert!(out.contains("framed: framed"), "{out}");
+        // Nothing reads a property off `top`, which would throw cross-origin.
+        assert!(!out.contains("window.top."), "{out}");
     }
 
     #[test]

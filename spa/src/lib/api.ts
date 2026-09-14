@@ -185,6 +185,14 @@ export const api = {
       ceiling: Ceiling
       toolchain: ToolchainStatus | null
     }>('GET', `/api/sessions/${id}`),
+  /** Mint a single-use capability for this session's OpenCode view. The URL
+      that comes back carries it in a fragment and belongs in exactly one
+      place: an iframe's `src`, or the desktop window. Never log it. */
+  opencodeBoot: (id: string) =>
+    call<{ url: string; origin: string; expires_ms: number; cookie_ttl_ms?: number }>(
+      'POST',
+      `/api/sessions/${encodeURIComponent(id)}/opencode-boot`,
+    ),
   // Page through the whole history: a long session has more events than one
   // request returns, and stopping at a fixed cap would show the oldest events
   // with a gap before the live tail.
