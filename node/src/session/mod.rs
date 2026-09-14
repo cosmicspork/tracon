@@ -214,9 +214,10 @@ pub struct Manager {
     /// sessions that are live and for no other endpoint.
     native: Arc<Mutex<HashMap<String, crate::adapter::NativeApi>>>,
     /// Session id → the live channel the node synthesises for that session's
-    /// native UI. Created on demand and kept for the node's life, so a browser
-    /// that reconnects across a harness restart resumes on the same sequence
-    /// rather than silently starting over (`gateway::native_events`).
+    /// native UI (`gateway::native_events`). Created on demand — ingestion and
+    /// the gateway each ask for it and neither is reliably first — and dropped
+    /// when the session's supervisor ends, so its replay ring does not outlive
+    /// the session whose events it holds.
     native_events:
         Arc<std::sync::Mutex<HashMap<String, Arc<crate::gateway::native_events::NativeEvents>>>>,
     /// The node's own model probe presents this to the gateway; it may only
@@ -1517,6 +1518,7 @@ impl Manager {
         let live = self.live.clone();
         let tokens = self.tokens.clone();
         let native = self.native.clone();
+        let native_events = self.native_events.clone();
         let sid = id.to_string();
         tokio::spawn(async move {
             sup.run(events, cmd_rx).await;
@@ -1527,6 +1529,13 @@ impl Manager {
             // gone, and a later request must not be forwarded to whatever
             // took the port.
             native.lock().await.remove(&sid);
+            // And the live channel its native UI streamed from. Nothing will
+            // publish to it again, and its replay ring is a held page of this
+            // session's events; a node that ran a thousand sessions would
+            // otherwise still be holding all thousand. A browser that
+            // reconnects after this gets a fresh, empty channel, which is the
+            // truth about a session that has ended.
+            native_events.lock().unwrap().remove(&sid);
             materialize::remove(&sid);
         });
         Ok(())
