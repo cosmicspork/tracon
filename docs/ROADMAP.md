@@ -81,9 +81,9 @@ refer to that manifest's table.
         through the session manager rather than being forwarded, an unauthenticated and a
         cross-origin request refused before the gateway runs, and a PTY refused without an
         explicitly granted `terminal` capability.
-        **Still to do here:** the PTY WebSocket ticket exchange (gateway-minted and
-        owner-bound; Gate D) — the capability check point exists and the connect route
-        answers 501 — and the native UI origin that will call this mount (Gate D). Child
+        **Still to do here:** the native UI origin that will call this mount (Gate D). The PTY
+        WebSocket ticket exchange is done — gateway-minted, owner-bound, and proxied under a
+        bound buffer; see Gate D's PTY item. Child
         sessions (`fork`) and `init` are refused with a visible 403 until tracon registers
         them; a mediated call writes its `opencode_intent` row before dispatch, so one that
         times out is recorded as uncertain — on the intent and on the session — and left for
@@ -312,6 +312,29 @@ refer to that manifest's table.
         off-origin `http` assignment both left the window on the UI origin, with the latter
         handed to the system browser; a real click on a `target=_blank` link opened the
         browser and no second window; a same-origin navigation went through.
+        **Still to do here:** the same against the real UI origin once it lands (the
+        wrapper's half is feature-detected until then), and the macOS leg — bundle, window
+        behaviour and the Edit menu — which is the operator's to run.
+  - [ ] Installed mobile PWA on the always-on node: in-scope shell, isolated native view,
+        third-party storage blocked, background/resume recovery, notification deep links.
+  - [x] PTY only as an explicit workspace-scoped capability with a gateway-minted owner-bound
+        ticket (finding 7). The `terminal` grant is an authority grant bound to a session and
+        that session's workspace path, default-`ask`, revoked and expired at dispatch; a spawn
+        is rewritten rather than forwarded (`cwd` pinned to the workspace or a normalised
+        subdirectory, `env` reduced to variables that decide only how a terminal looks, command
+        held to the image's own `GET /pty/shells`); the WebSocket ticket is the node's, minted
+        after taking the harness's server-side and bound to operator, session, PTY and origin
+        for 30 s, once; the proxy is bounded in both directions and closes with a reason rather
+        than buffering for a stalled client. Covered against the fake server and the pinned
+        binary in `node/tests/opencode_pty.rs`: refused without a grant with nothing spawned, a
+        grant honoured only for the session and workspace it names, revocation immediate, the
+        spawn asserted as it reached the harness, the harness's own ticket never reaching the
+        client, the tracon ticket single-use and refused for another PTY, another origin or a
+        revoked capability, bytes pumped both ways, a non-reading client closed rather than
+        buffered, and a real `/bin/sh` read back through the proxy. **What it does not do,
+        stated rather than implied:** a terminal is an interactive shell, not a per-command
+        ledger — what is recorded is that one was opened, with what shell and where, and its
+        byte counts and duration; output capture exists, is off, and is labelled.
         **Still to do here:** the same against the real UI origin, which lands in the row
         above — the wrapper calls `POST /api/sessions/{id}/opencode-boot` and that route now
         exists, so the feature detection should find it; an end-to-end run of the two
@@ -399,8 +422,6 @@ refer to that manifest's table.
         `document.requestStorageAccess` from inside the frame before `POST /boot`, which needs
         a user gesture and therefore a visible "Show OpenCode" control in the frame rather
         than a silent boot.
-  - [ ] PTY only as an explicit workspace-scoped capability with a gateway-minted owner-bound
-        ticket (finding 7).
   - [x] Native UI route trace captured and unknown mutations shown to fail closed.
         `docs/reference/opencode-v1.18.30/ui-route-trace.tsv` is 60 request shapes taken
         from a real browser: headless Chromium over CDP, the pinned bundle on the UI

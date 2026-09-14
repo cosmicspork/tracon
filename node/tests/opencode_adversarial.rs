@@ -290,6 +290,28 @@ fn allow(rig: &Rig, kind: &str, title: &str) {
     });
 }
 
+/// The grant an operator makes to open a terminal: bound to this channel,
+/// this session, and this session's workspace path, with an expiry. A policy
+/// rule could allow the capability too, but a grant is what binds it, and the
+/// binding is what the terminal tests are about.
+fn grant_terminal(rig: &Rig) {
+    rig.store
+        .authority_grant_insert(&tracon::store::AuthorityGrantRow {
+            id: uuid::Uuid::now_v7().to_string(),
+            action: tracon::authority::TERMINAL.into(),
+            verdict: "allow".into(),
+            target: tracon::authority::terminal_target(TRACON_SESSION, WORKSPACE),
+            channel: "personal".into(),
+            session_id: Some(TRACON_SESSION.into()),
+            revision: None,
+            expires_ms: Some(tracon::store::now_ms() + 600_000),
+            revoked_ms: None,
+            reason: "the operator opened a terminal for this session".into(),
+            created_ms: tracon::store::now_ms(),
+        })
+        .unwrap();
+}
+
 fn deny(rig: &Rig, kind: &str, title: &str) {
     rig.manager.policy().write().rules.push(Rule {
         id: format!("deny-{title}-for-this-test"),
@@ -533,8 +555,10 @@ async fn every_spelling_of_a_directory_is_replaced_or_refused() {
     );
 
     // Bodies, on every mediated route that takes one. A directory is an
-    // authorization, so it is refused rather than quietly corrected.
-    allow(&rig, "capability", "terminal");
+    // authorization, so it is refused rather than quietly corrected — and for
+    // a PTY that holds even with the capability granted, because `cwd` is the
+    // one field a granted terminal could otherwise use to leave the workspace.
+    grant_terminal(&rig);
     for (method, tail, body) in [
         (
             "POST",
@@ -687,8 +711,9 @@ async fn a_revert_is_decided_by_policy_and_a_permitted_one_says_the_tree_moved()
 }
 
 /// `POST /pty` is arbitrary command execution with no permission check of its
-/// own (finding 7). Default-deny, and the capability is what opens it; the
-/// WebSocket still waits for its owner-bound ticket (Gate D).
+/// own (finding 7). Default-deny; an operator grant bound to this session and
+/// workspace is what opens it; and the upgrade still needs a ticket the node
+/// minted, so a granted capability alone does not open a socket.
 #[tokio::test]
 async fn a_pty_is_refused_by_default_and_spawns_nothing() {
     let rig = Rig::new().await;
@@ -700,23 +725,55 @@ async fn a_pty_is_refused_by_default_and_spawns_nothing() {
         ("POST", "pty/pty_1/connect-token"),
     ] {
         let message = rig
-            .refused(method, tail, Some(json!({ "command": "bash" })))
+            .refused(method, tail, Some(json!({ "command": "/bin/bash" })))
             .await;
         assert!(message.contains("terminal"), "{method} /{tail}: {message}");
     }
 
-    // Granted, the create is forwarded — and the connect is not, because the
-    // ticket exchange it needs does not exist yet.
-    allow(&rig, "capability", "terminal");
+    // Granting the capability does not bypass the rest of the mediation: the
+    // spawn is still rewritten, and a command that is not one of the
+    // workspace's own shells is still refused with nothing spawned. (The
+    // shells list itself is read from the harness to decide that, which is why
+    // this is not asserted through `refused`.)
+    grant_terminal(&rig);
+    rig.forget_requests();
+    let (status, answer) = rig
+        .call("POST", "pty", Some(json!({ "command": "/usr/bin/env" })))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{answer}");
+    assert!(
+        answer["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("shells"),
+        "{answer}"
+    );
+    assert!(
+        rig.requests().iter().all(|r| r.method == "GET"),
+        "a refused spawn must not have been sent: {:?}",
+        rig.requests()
+    );
+
     rig.forget_requests();
     let (status, _) = rig
-        .call("POST", "pty", Some(json!({ "command": "bash" })))
+        .call("POST", "pty", Some(json!({ "command": "/bin/bash" })))
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(rig.requests().len(), 1);
+    // The shells list and the create: the gateway asks the image what it may
+    // open a terminal with rather than taking the caller's word.
+    assert_eq!(
+        rig.requests()
+            .iter()
+            .map(|r| format!("{} {}", r.method, r.path))
+            .collect::<Vec<_>>(),
+        vec!["GET /pty/shells", "POST /pty"]
+    );
+
+    // And the upgrade is refused without a ticket the node minted, with
+    // nothing reaching the harness.
     rig.forget_requests();
     let (status, _) = rig.call("GET", "pty/pty_1/connect", None).await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(rig.requests().is_empty());
 }
 

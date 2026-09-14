@@ -338,6 +338,35 @@ and, for merge, publish, and deploy, the one revision it covers; the target
 moving to a later sha drops the grant rather than carrying it forward silently.
 Grants are made and revoked one at a time in Settings → Permissions & policies.
 
+One grant is not a side effect but a surface: **`terminal`**, an interactive PTY
+inside one session's workspace. The harness's `POST /pty` spawns an arbitrary
+command in an arbitrary directory with no permission check of its own, so the
+grant is the only thing between a browser and a shell; it is therefore bound to
+a session *and* to that session's workspace path (`terminal:<session>:<path>`),
+requires a session binding to be an `allow` at all, and is refused if the
+session is not active. With it, the gateway still rewrites rather than forwards:
+the working directory is pinned to the workspace or a normalised subdirectory of
+it, the caller's environment is reduced to variables that decide only how a
+terminal *looks* (`PATH` and `HOME` come from the harness, never from the
+request), and the command must be one of the shells the image itself lists at
+`GET /pty/shells`. The WebSocket is reached with a ticket the node mints after
+taking the harness's own server-side: bound to the operator, the session, the
+PTY and the exact origin it will be presented from, for thirty seconds, once.
+The proxy carries bytes both ways with a bounded queue in each direction and
+closes with a stated reason rather than buffering for a client that has stopped
+reading; input is never replayed across a reconnect, and the display is
+reconstructed by the app rather than by tracon.
+
+**A terminal grant is not a per-command ledger, and the node says so wherever it
+is offered.** Once the shell is open, everything typed at its prompt runs with
+no further decision and raises no tool call, because the harness raises none for
+a PTY. What is recorded is the shape of the thing: that a terminal was opened,
+with which shell, in which directory, under which grant, and how many bytes and
+how long the connection lasted — not the transcript. Capturing a bounded tail of
+the output to the session log is a deliberate configuration (`pty_capture_output`),
+off by default, and labelled as what it is: a record of what the operator
+happened to run, not of what tracon decided.
+
 ### Review
 
 **Review the diff with a session that never saw the implementation.** A model that

@@ -731,7 +731,7 @@
       </div>
     {:else}
       <div class="grid">
-        <label><span>Action</span><select bind:value={grant.action} disabled={!local}><option value="merge">merge</option><option value="publish">publish</option><option value="ticket_transition">ticket transition</option><option value="deploy">deploy</option></select></label>
+        <label><span>Action</span><select bind:value={grant.action} disabled={!local}><option value="merge">merge</option><option value="publish">publish</option><option value="ticket_transition">ticket transition</option><option value="deploy">deploy</option><option value="terminal">terminal</option></select></label>
         <label><span>Decision</span><select bind:value={grant.verdict} disabled={!local}><option value="ask">ask · safe default</option><option value="allow">allow</option><option value="deny">deny</option></select><small>Ask preserves an explicit operator decision.</small></label>
         <label><span>Resource type</span><select bind:value={grantResource} disabled={!local}><option value="repository">repository pull or merge request</option><option value="deployment">QA deployment</option><option value="ticket">ticket transition</option><option value="advanced">advanced canonical target</option></select></label>
         <label><span>Exact target</span><input bind:value={grant.target} disabled={!local} placeholder={grantTargetHint} spellcheck="false" /><small>One canonical identifier, no spaces. This is the only target the grant can match.</small></label>
@@ -746,6 +746,9 @@
           <label><span>Expires at (optional)</span><input type="datetime-local" value={grant.expires_ms ? new Date(grant.expires_ms).toISOString().slice(0, 16) : ''} onchange={(event) => grant.expires_ms = event.currentTarget.value ? Date.parse(event.currentTarget.value) : null} disabled={!local} /></label>
         </div>
       </details>
+      {#if grant.action === 'terminal'}
+        <p class="why">A terminal grant opens an interactive shell inside one session's workspace. Target is <code>terminal:&lt;session id&gt;:&lt;workspace path&gt;</code> and the session field is required, because the grant is of a terminal in that directory. It is not a per-command ledger: everything typed at the prompt afterwards runs without a further decision and raises no tool call. The node records that a terminal was opened, with what shell and where, and how much traffic crossed it — not what was run in it.</p>
+      {/if}
       <div class="acts"><button class="btn p" onclick={reviewGrant} disabled={!local || busy !== ''}>Review scoped grant</button></div>
     {/if}
     {#if authority.grants.length}

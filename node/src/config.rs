@@ -1125,6 +1125,18 @@ pub struct SessionDefaults {
     pub claim_grace_secs: u64,
     /// Where worktrees are created. Outside any repo, so nothing is gitignored.
     pub worktree_root: PathBuf,
+    /// How many terminal frames the gateway will hold for a browser that has
+    /// stopped reading, in each direction. Past this the connection is closed
+    /// with a reason rather than buffered: a stalled tab must not be able to
+    /// grow the node's memory without bound.
+    pub pty_buffer_frames: usize,
+    /// Whether a proxied terminal's output tail is written to the session log
+    /// when the connection ends. Off, because a terminal transcript is not a
+    /// tool ledger and reads like one: the harness raises no permission and
+    /// no tool call for anything typed at a PTY prompt, so a captured
+    /// transcript records what the operator happened to run, not what tracon
+    /// decided. Turn it on deliberately, knowing that.
+    pub pty_capture_output: bool,
 }
 
 impl Default for Config {
@@ -1209,6 +1221,8 @@ impl Default for Config {
                 default_channel: String::new(),
                 claim_grace_secs: 60,
                 worktree_root: default_worktree_root(),
+                pty_buffer_frames: 256,
+                pty_capture_output: false,
             },
         }
     }

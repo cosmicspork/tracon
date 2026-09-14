@@ -17,16 +17,53 @@ pub const TICKET_TRANSITION: &str = "ticket_transition";
 pub const DEPLOY: &str = "deploy";
 pub const BROWSER_VERIFY: &str = "browser_verify";
 pub const BROWSER_TEST_ACCOUNT: &str = "browser_test_account";
+/// An interactive terminal inside one session's workspace. Unlike the forge
+/// actions, this one authorises a *surface* rather than a single external
+/// side effect: `POST /pty` is arbitrary command execution with no permission
+/// check of its own (finding 7), so the grant is the only thing between the
+/// native UI and a shell. It is therefore bound to a session and to that
+/// session's workspace path, and it expires.
+pub const TERMINAL: &str = "terminal";
+
+/// The policy kind the forge actions are decided under.
+pub const AUTHORITY_KIND: &str = "authority";
+/// The policy kind a capability is decided under. A terminal is not a forge
+/// operation, and a bundle rule that names it should read as what it is.
+pub const CAPABILITY_KIND: &str = "capability";
 
 pub fn valid_action(action: &str) -> bool {
     matches!(
         action,
-        MERGE | PUBLISH | TICKET_TRANSITION | DEPLOY | BROWSER_VERIFY | BROWSER_TEST_ACCOUNT
+        MERGE
+            | PUBLISH
+            | TICKET_TRANSITION
+            | DEPLOY
+            | BROWSER_VERIFY
+            | BROWSER_TEST_ACCOUNT
+            | TERMINAL
     )
+}
+
+/// The policy kind one action is decided under. Keeping the mapping here is
+/// what stops a capability grant and a capability rule disagreeing about which
+/// name the bundle should be consulted under.
+pub fn kind_of(action: &str) -> &'static str {
+    match action {
+        TERMINAL => CAPABILITY_KIND,
+        _ => AUTHORITY_KIND,
+    }
 }
 
 pub fn target(kind: &str, parts: &[&str]) -> String {
     format!("{kind}:{}", parts.join(":"))
+}
+
+/// The target a terminal grant binds to: this session and the exact workspace
+/// path the gateway pins every request to. A session whose workspace moved no
+/// longer matches the grant it was given, which is the point — the grant is of
+/// a terminal *in that directory*, not of a terminal in general.
+pub fn terminal_target(session_id: &str, workspace: &str) -> String {
+    target(TERMINAL, &[session_id, workspace])
 }
 
 pub fn policy_decision(
@@ -38,7 +75,7 @@ pub fn policy_decision(
 ) -> Decision {
     policy.decide(&Request {
         channel,
-        kind: Some("authority"),
+        kind: Some(kind_of(action)),
         title: action,
         command: Some(target),
         arguments: Some(args),

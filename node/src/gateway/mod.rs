@@ -3,3 +3,4 @@
 pub mod model;
 pub mod opencode;
 pub mod proxy;
+pub mod pty;

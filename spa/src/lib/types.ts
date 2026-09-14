@@ -653,7 +653,15 @@ export interface PolicyRule {
 /** A narrow local authority decision. It never edits the signed policy bundle. */
 export interface AuthorityGrant {
   id: string
-  action: 'merge' | 'publish' | 'ticket_transition' | 'deploy' | 'browser_verify' | 'browser_test_account'
+  action:
+    | 'merge'
+    | 'publish'
+    | 'ticket_transition'
+    | 'deploy'
+    | 'browser_verify'
+    | 'browser_test_account'
+    /** An interactive terminal in one session's workspace. Bound to that session. */
+    | 'terminal'
   verdict: 'allow' | 'ask' | 'deny'
   target: string
   channel: string

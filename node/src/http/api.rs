@@ -224,6 +224,21 @@ pub async fn create_authority_grant(
             "merge, publish, and deploy allow grants must bind an immutable revision",
         ));
     }
+    // A terminal grant authorises a shell inside one session's workspace, and
+    // its target names that workspace. An allow grant that named no session
+    // would outlive the workspace it was given for, so it is refused here
+    // rather than filtered at the gateway.
+    if b.verdict == "allow"
+        && action == crate::authority::TERMINAL
+        && b.session_id
+            .as_deref()
+            .is_none_or(|session| session.trim().is_empty())
+    {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a terminal allow grant must bind the session whose workspace it opens a shell in",
+        ));
+    }
     if b.expires_ms
         .is_some_and(|expires_ms| expires_ms <= crate::store::now_ms())
     {
