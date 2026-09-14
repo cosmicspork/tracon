@@ -216,10 +216,14 @@ fn reason_from_log(log: &str, fallback: bool) -> Option<String> {
     let reason = if let Some(i) = lines.iter().rposition(|l| l.starts_with("Error: ")) {
         let mut parts = vec![lines[i]["Error: ".len()..].trim().to_string()];
         for line in &lines[i + 1..] {
-            let line = line.trim();
-            if line.is_empty() || line == "Caused by:" {
+            if line.trim().is_empty() || line == "Caused by:" {
                 continue;
             }
+            // Causes are indented; anything else is a later run talking.
+            if !line.starts_with(char::is_whitespace) {
+                break;
+            }
+            let line = line.trim();
             // anyhow numbers its causes: `0: …`.
             let cause = line
                 .split_once(": ")
@@ -235,7 +239,12 @@ fn reason_from_log(log: &str, fallback: bool) -> Option<String> {
     {
         line.trim().to_string()
     } else if fallback {
-        lines.iter().rev().find(|l| !l.trim().is_empty())?.trim().to_string()
+        lines
+            .iter()
+            .rev()
+            .find(|l| !l.trim().is_empty())?
+            .trim()
+            .to_string()
     } else {
         return None;
     };
@@ -370,7 +379,8 @@ mod tests {
             Some("the `omp` harness was removed at the OpenCode cutover.")
         );
 
-        let caused = "Error: open store\n\nCaused by:\n    0: migrating node.db\n    1: disk full\n";
+        let caused =
+            "Error: open store\n\nCaused by:\n    0: migrating node.db\n    1: disk full\n2026 INFO a later run\n";
         assert_eq!(
             reason_from_log(caused, false).as_deref(),
             Some("open store: migrating node.db: disk full")
@@ -385,7 +395,10 @@ mod tests {
         // An ordinary log is not a reason, unless the unit is known to fail.
         let quiet = "2026 INFO serving\n\n";
         assert_eq!(reason_from_log(quiet, false), None);
-        assert_eq!(reason_from_log(quiet, true).as_deref(), Some("2026 INFO serving"));
+        assert_eq!(
+            reason_from_log(quiet, true).as_deref(),
+            Some("2026 INFO serving")
+        );
         assert_eq!(reason_from_log("", true), None);
 
         let long = format!("Error: {}", "x".repeat(1000));

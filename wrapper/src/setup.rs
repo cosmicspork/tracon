@@ -20,8 +20,12 @@ pub enum Owner {
     Foreign,
 }
 
-pub fn owner(answering: bool, migrated: bool, service_running: bool) -> Owner {
-    match (answering, migrated, service_running) {
+/// `unit_has_process` rather than "the unit is active": across a restart the
+/// unit is deactivating or activating while its node still answers, and that
+/// node is the service's. A unit with no process at all — stopped, or waiting
+/// to restart one that exited — cannot be what answers.
+pub fn owner(answering: bool, migrated: bool, unit_has_process: bool) -> Owner {
+    match (answering, migrated, unit_has_process) {
         (false, _, _) => Owner::None,
         (true, true, _) => Owner::Migrated,
         (true, false, true) => Owner::Service,
@@ -40,6 +44,10 @@ pub struct SetupStatus {
     pub path_hint: Option<String>,
     pub service_installed: bool,
     pub service_running: bool,
+    /// The unit is installed and its node keeps exiting.
+    pub service_failing: bool,
+    /// What the node said as it exited, when it is failing.
+    pub service_error: Option<String>,
     pub podman: Option<String>,
     /// macOS only: `running`, `starting`, `stopped` or `missing`.
     pub machine: Option<&'static str>,
@@ -101,7 +109,8 @@ pub async fn status(http: &reqwest::Client, url: &str) -> SetupStatus {
         None
     };
     let migrated = node::migrated_node(&node::state_dir()).is_some();
-    let service_running = service::running();
+    let unit = service::state();
+    let service_installed = service::installed();
     let cli = node::installed_path();
     let path_hint = match cli.as_deref().and_then(Path::parent) {
         Some(dir) => node::path_hint(dir).await,
@@ -118,14 +127,20 @@ pub async fn status(http: &reqwest::Client, url: &str) -> SetupStatus {
         } else {
             "linux"
         },
-        owner: owner(answering, migrated, service_running),
+        owner: owner(answering, migrated, unit.has_process),
         node_version,
         sidecar_version: node::sidecar_path().and_then(|p| node::version_of(&p)),
         cli_version: cli.as_deref().and_then(node::version_of),
         cli_path: cli.map(|p| p.display().to_string()),
         path_hint,
-        service_installed: service::installed(),
-        service_running,
+        service_installed,
+        service_running: unit.running,
+        service_failing: service_installed && unit.failing,
+        service_error: if service_installed {
+            service::failure(unit)
+        } else {
+            None
+        },
         podman: podman.map(|p| p.display().to_string()),
         machine,
     }
@@ -160,12 +175,14 @@ pub async fn install_service(http: &reqwest::Client, url: &str) -> Result<SetupS
         Owner::None | Owner::Service => {}
     }
     let cli = blocking(node::install_cli).await?;
+    let mark = service::log_mark();
     blocking(move || service::install(&cli)).await?;
     if !node::wait_ready(http, url).await {
-        return Err(
-            "the service started, but the node did not answer within a minute; `tracon service status` says why"
-                .into(),
-        );
+        let why = "the service started, but the node did not answer within a minute";
+        return Err(match service::error_since(mark) {
+            Some(reason) => format!("{why}: {reason}"),
+            None => format!("{why}; `tracon service status` says why"),
+        });
     }
     Ok(status(http, url).await)
 }
@@ -177,9 +194,13 @@ pub async fn install_cli(http: &reqwest::Client, url: &str) -> Result<SetupStatu
 
 pub async fn restart_node(http: &reqwest::Client, url: &str) -> Result<SetupStatus, String> {
     let cli = node::installed_path().ok_or("HOME is not set")?;
+    let mark = service::log_mark();
     blocking(move || service::restart(&cli)).await?;
     if !node::wait_ready(http, url).await {
-        return Err("the node did not answer within a minute of restarting".into());
+        return Err(service::explain(
+            "the node did not answer within a minute of restarting".into(),
+            service::error_since(mark),
+        ));
     }
     Ok(status(http, url).await)
 }
@@ -196,6 +217,14 @@ mod tests {
         assert_eq!(owner(true, true, true), Owner::Migrated);
         assert_eq!(owner(true, false, true), Owner::Service);
         assert_eq!(owner(true, false, false), Owner::Foreign);
+        // A unit that is restarting still has its node: answering then is
+        // the service answering, whatever `is-active` says at that instant.
+        let restarting = service::UnitState {
+            running: false,
+            has_process: true,
+            failing: false,
+        };
+        assert_eq!(owner(true, false, restarting.has_process), Owner::Service);
     }
 
     #[test]

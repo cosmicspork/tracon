@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { blocked, setupSteps, type SetupStatus } from './desktop-setup'
+import { blocked, canRestartNode, nodeOwnerSummary, setupSteps, type SetupStatus } from './desktop-setup'
 
 const fresh: SetupStatus = {
   platform: 'macos',
@@ -11,6 +11,8 @@ const fresh: SetupStatus = {
   path_hint: null,
   service_installed: false,
   service_running: false,
+  service_failing: false,
+  service_error: null,
   podman: '/opt/homebrew/bin/podman',
   machine: 'stopped',
 }
@@ -65,4 +67,41 @@ test('an older CLI and a PATH that misses it are both left to do', () => {
   const hinted = byId({ ...fresh, cli_version: '0.15.0', path_hint: 'export PATH="/Users/op/.local/bin:$PATH"' })
   expect(hinted.cli.done).toBe(false)
   expect(hinted.cli.command).toContain('.local/bin')
+})
+
+test('a service whose node keeps exiting says why, and can be restarted', () => {
+  const failing: SetupStatus = {
+    ...fresh,
+    platform: 'linux',
+    machine: null,
+    service_installed: true,
+    service_failing: true,
+    service_error: 'the `omp` harness was removed at the OpenCode cutover.',
+  }
+  const s = byId(failing)
+  expect(s.service.done).toBe(false)
+  expect(s.service.detail).toContain('keeps exiting')
+  expect(s.service.reason).toContain('`omp` harness was removed')
+  expect(nodeOwnerSummary(failing)).toBe('keeps exiting under the service')
+  expect(canRestartNode(failing)).toBe(true)
+
+  // Failing with nothing in the log: point at the supervisor instead.
+  const silent = byId({ ...failing, service_error: null })
+  expect(silent.service.reason).toBeUndefined()
+  expect(silent.service.command).toBe('tracon service status')
+
+  // Merely not answering yet is not failing.
+  const starting = byId({ ...failing, service_failing: false, service_error: null })
+  expect(starting.service.detail).toBe('Installed, but the node is not answering.')
+  expect(nodeOwnerSummary({ ...failing, service_failing: false })).toBe('not answering under the service')
+})
+
+test('restart is offered whenever the unit is installed, and only then', () => {
+  expect(canRestartNode(fresh)).toBe(false)
+  expect(nodeOwnerSummary(fresh)).toBe('not running')
+  const running: SetupStatus = { ...fresh, owner: 'service', service_installed: true, service_running: true }
+  expect(canRestartNode(running)).toBe(true)
+  expect(nodeOwnerSummary(running)).toBe('runs under the service')
+  // Not a failure reason when nothing is failing, even if one was sent.
+  expect(byId({ ...running, service_error: 'stale' }).service.reason).toBeUndefined()
 })

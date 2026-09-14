@@ -130,14 +130,23 @@ async fn move_to_carried_node(
         let Some(cli) = node::installed_path() else {
             return fail("HOME is not set".into());
         };
+        let mark = service::log_mark();
         match tauri::async_runtime::spawn_blocking(move || service::restart(&cli)).await {
             Ok(Ok(())) => {}
             Ok(Err(why)) => return fail(why),
             Err(e) => return fail(e.to_string()),
         }
         if !node::wait_ready(&http, &url).await {
-            return fail(format!(
-                "The node did not answer after restarting to v{carried}"
+            // What the new node said as it exited is the whole diagnosis: a
+            // configuration it refuses, most likely, which nothing else in
+            // the app can see while the node is down.
+            let reason = tauri::async_runtime::spawn_blocking(move || service::error_since(mark))
+                .await
+                .ok()
+                .flatten();
+            return fail(service::explain(
+                format!("The node did not answer after restarting to v{carried}"),
+                reason,
             ));
         }
         let _ = app
@@ -292,8 +301,10 @@ fn main() {
                         return;
                     }
                     if !ready && service::installed() {
-                        let why =
-                            "The service is installed but the node is not answering".to_string();
+                        let why = service::explain(
+                            "The service is installed but the node is not answering".into(),
+                            service::failure(service::state()),
+                        );
                         eprintln!("tracon: {why}");
                         *st.node_error.lock().unwrap() = Some(why);
                         tray::refresh(&handle, &st);
