@@ -622,14 +622,111 @@ mod tests {
         None
     }
 
+    /// The local address `descriptor` is bound to, when it is still an
+    /// internet socket this process holds.
+    ///
+    /// `getsockname` consults the descriptor table before anything a
+    /// descriptor names, so a descriptor that was closed answers `EBADF`, and
+    /// one this process has since reused for something else answers
+    /// `ENOTSOCK` or some other address. All of those mean released, and none
+    /// of them is a question about protocol state.
+    #[cfg(unix)]
+    fn bound_address(descriptor: std::os::fd::RawFd) -> io::Result<SocketAddr> {
+        // SAFETY: the closure writes only into the storage socket2 provides,
+        // and `getsockname` validates the descriptor before it touches
+        // anything — which is the point here, since the descriptor under test
+        // is expected to be closed.
+        let (_, address) = unsafe {
+            socket2::SockAddr::try_init(|storage, length| {
+                match libc::getsockname(descriptor, storage.cast(), length) {
+                    -1 => Err(io::Error::last_os_error()),
+                    _ => Ok(()),
+                }
+            })
+        }?;
+        address
+            .as_socket()
+            .ok_or_else(|| io::Error::other("not an internet socket"))
+    }
+
+    /// Bind `127.0.0.1:port` the way production would were it to ask for the
+    /// port again: a fresh socket with `SO_REUSEADDR` set deliberately rather
+    /// than left to `std`, which sets it on every Unix listener anyway.
+    ///
+    /// This is a diagnostic, never an assertion — what the kernel makes of
+    /// the port is exactly the timing-dependent answer this test stopped
+    /// relying on.
+    #[cfg(unix)]
+    fn rebind_with_reuse_address(port: u16) -> io::Result<std::net::TcpListener> {
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+        socket.set_reuse_address(true)?;
+        socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)).into())?;
+        socket.listen(1)?;
+        Ok(socket.into())
+    }
+
+    /// Everything a failure of the release assertion needs to be diagnosable
+    /// from a CI log alone, on a platform it cannot be reproduced on: what
+    /// the descriptor answers now, what the kernel makes of the port itself,
+    /// the options in effect on both halves, and where it ran.
+    #[cfg(unix)]
+    fn release_diagnostics(
+        descriptor: std::os::fd::RawFd,
+        port: u16,
+        reuse_address: io::Result<bool>,
+        occupier: &std::net::TcpListener,
+    ) -> String {
+        let occupier = socket2::SockRef::from(occupier);
+        let rebind = match rebind_with_reuse_address(port) {
+            Ok(_) => "accepted".to_owned(),
+            Err(error) => format!("refused with {error:?}"),
+        };
+        format!(
+            "the IPv6 collision on {port} left the IPv4 half held: descriptor {descriptor} answers \
+             {bound:?}, and its SO_REUSEADDR was {reuse_address:?}; a fresh SO_REUSEADDR bind of \
+             127.0.0.1:{port} was {rebind}; the IPv6 occupier holds {occupied:?} with IPV6_V6ONLY \
+             {only_v6:?}; platform {os}/{arch}",
+            bound = bound_address(descriptor),
+            occupied = occupier.local_addr().map(|address| address.as_socket()),
+            only_v6 = occupier.only_v6(),
+            os = std::env::consts::OS,
+            arch = std::env::consts::ARCH,
+        )
+    }
+
+    /// A collision on the IPv6 half must not leave the IPv4 half held. Held
+    /// by *this process* is the guarantee, so the descriptor handed over is
+    /// what the test asks about — not whether the port can be bound again.
+    ///
+    /// Binding it again is what kept failing on the macOS runner, and not for
+    /// any fault in the code under test. `close(2)` invalidates a descriptor
+    /// at once on every Unix, but freeing the protocol control block that
+    /// holds `127.0.0.1:port` is the kernel's own business afterwards: Linux
+    /// unhashes a listening socket inside `close`, so the port is free the
+    /// instant it returns, while macOS detaches the pcb asynchronously and
+    /// the port can still read as taken a moment after this process has let
+    /// go of it. `SO_REUSEADDR` does not cover that case: `std` sets it on
+    /// every Unix listener, so both binds here already had it, and on BSD it
+    /// relaxes `TIME_WAIT` and wildcard-against-specific conflicts, never a
+    /// pcb still in the table. Nothing else in the run explains it either —
+    /// the occupier is v6-only on `::1`, and the reservation proved
+    /// `127.0.0.1:port` bindable beside it a moment earlier.
+    ///
+    /// Unix only: descriptors are, and the node ships for Linux and macOS.
+    #[cfg(unix)]
     #[test]
     fn an_ipv6_collision_releases_the_ipv4_listener() {
+        use std::os::fd::AsRawFd;
+
         let _range = FIXED_LOOPBACK_RANGE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some((occupied, ipv4, port)) = reserved_collision_port() else {
             return;
         };
+        let descriptor = ipv4.as_raw_fd();
+        let reuse_address = socket2::SockRef::from(&ipv4).reuse_address();
+
         // `bind_ipv6_beside` is the whole of the release logic; `start` is it
         // plus the IPv4 bind this test has already done.
         match bind_ipv6_beside(ipv4, port) {
@@ -637,12 +734,14 @@ mod tests {
             Err(other) => panic!("expected the IPv6 collision on {port}, got {other}"),
             Ok(_) => panic!("the occupied IPv6 loopback on {port} did not collide"),
         }
-        // `occupied` still holds the IPv6 half, and this test held the IPv4
-        // half from the moment it chose the port until it handed that very
-        // listener over, so the port being free now means the capture closed
-        // it and nothing else could have taken it in between.
-        std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))
-            .expect("partial IPv4 listener was released");
+
+        let held = bound_address(descriptor)
+            .is_ok_and(|address| address == SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+        assert!(
+            !held,
+            "{}",
+            release_diagnostics(descriptor, port, reuse_address, &occupied)
+        );
         drop(occupied);
     }
 }
