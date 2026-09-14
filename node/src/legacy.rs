@@ -278,7 +278,7 @@ mod tests {
     /// trimmed to the keys the migration reads plus a few it must leave alone,
     /// and one host the operator added.
     const PRE_CUTOVER: &str = r#"
-node_name = "bazzite"
+node_name = "laptop"
 
 [harness]
 id = "omp"
@@ -336,7 +336,7 @@ state_claim = "tracon-state"
         assert_eq!(hosts.len(), 7);
 
         // What the migration had no business with is exactly as it was.
-        assert_eq!(cfg.node_name, "bazzite");
+        assert_eq!(cfg.node_name, "laptop");
         assert_eq!(cfg.boundary.login_image, "localhost/tracon-harness-claude");
         assert_eq!(cfg.gateway.proxy_port, 8888);
 
