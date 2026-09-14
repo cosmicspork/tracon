@@ -31,6 +31,14 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.16.1](https://github.com/cosmicspork/tracon/compare/v0.16.0...v0.16.1) (2026-09-14)
+
+
+### Bug Fixes
+
+* **desktop:** migrate an omp node.toml and surface a failing node service ([#223](https://github.com/cosmicspork/tracon/issues/223)) ([566b018](https://github.com/cosmicspork/tracon/commit/566b01863383b40e145fb5f812ee07e3b5cf1803))
+* **desktop:** remove Apple code signing from macOS updates and releases ([#222](https://github.com/cosmicspork/tracon/issues/222)) ([419d971](https://github.com/cosmicspork/tracon/commit/419d9716e6c73daa42b5d0f9cfbb10a67283c029))
+
 ## [0.16.0](https://github.com/cosmicspork/tracon/compare/v0.15.1...v0.16.0) (2026-09-14)
 
 
