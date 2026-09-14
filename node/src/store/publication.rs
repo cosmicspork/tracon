@@ -158,6 +158,32 @@ impl Store {
         Ok(rows)
     }
 
+    /// The newest publication of this exact candidate whose branch the forge
+    /// was observed to hold at the candidate's head. A QA target that deploys
+    /// a branch — which is every host whose automation watches a repository —
+    /// needs this: the branch name is the only thing the host can be asked
+    /// about, and it means the candidate only while the remote holds that
+    /// exact SHA. A record that merely tried is deliberately not enough.
+    pub fn publication_pushed_for_candidate(
+        &self,
+        candidate_id: &str,
+        head_sha: &str,
+    ) -> Result<Option<PublicationRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM publication
+              WHERE candidate_id=?1
+                AND pushed_sha IS NOT NULL
+                AND lower(pushed_sha)=lower(?2)
+                AND state IN ('pushed','opening','opened')
+              ORDER BY created_ms DESC LIMIT 1",
+            rusqlite::params![candidate_id, head_sha],
+            PublicationRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// The branch was pushed and the remote was then observed to hold it.
     pub fn publication_pushed(&self, id: &str, sha: &str) -> Result<()> {
         self.publication_set(id, "pushed", Some(sha), None, None)

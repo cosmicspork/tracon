@@ -14,6 +14,7 @@ use crate::{
     config::{qa_origin, QaTarget},
     store::{BrowserRunRow, QaDeploymentRow},
 };
+pub mod command;
 pub mod service;
 
 pub const MAX_STEPS: usize = 32;
@@ -101,7 +102,27 @@ pub struct EnvironmentObservation {
     pub observed_ms: i64,
 }
 
+/// A deploy grant names what will actually be done. For the GitLab kind that
+/// is the project's environment; for the command kind it is the binary the
+/// node will run for this target, so a grant cannot survive the operator
+/// swapping the deploy tool underneath it.
 pub fn deploy_authority_target(target_id: &str, target: &QaTarget) -> String {
+    if target.deployment.kind == crate::config::QA_KIND_COMMAND {
+        let binary = target
+            .deployment
+            .command
+            .first()
+            .or_else(|| {
+                target
+                    .deployment
+                    .discover
+                    .as_ref()
+                    .and_then(|discover| discover.command.first())
+            })
+            .map(String::as_str)
+            .unwrap_or("");
+        return format!("qa:{target_id}:command:{binary}");
+    }
     format!(
         "gitlab:{}:environment:{}",
         target.deployment.project.trim(),
@@ -109,7 +130,23 @@ pub fn deploy_authority_target(target_id: &str, target: &QaTarget) -> String {
     )
 }
 
+/// A browser grant names the origin the browser will be allowed to begin from.
+/// A discovery target has no fixed one — a preview environment is a new
+/// hostname per branch — so the grant names the suffix the operator attested
+/// instead. That keeps one grant valid across the candidates of a target
+/// without ever widening past the attestation.
 pub fn browser_authority_target(target_id: &str, target: &QaTarget) -> Result<String, String> {
+    if let Some(discover) = target
+        .deployment
+        .discover
+        .as_ref()
+        .filter(|_| target.discovers_origin())
+    {
+        return Ok(format!(
+            "qa:{target_id}:origin:*.{}",
+            discover.origin_suffix.trim_start_matches('.')
+        ));
+    }
     Ok(format!(
         "qa:{target_id}:origin:{}",
         qa_origin(&target.origin)?

@@ -617,6 +617,9 @@ timeout_secs = 900
 max_diff_lines = 800                # a bigger submission is refused before any check runs
 max_files = 40
 
+[qa]                                # no targets by default: QA has no implicit environment
+# [qa.targets.<name>]               # see QA targets below. A name containing "production" is refused.
+
 [notify]
 # contact = "mailto:you@example.com"    # what a push service may write to about this sender
 
@@ -667,6 +670,126 @@ preview origin configured with `preview_url`.
 CLI import, put, and export remain Markdown-only. Agents can read HTML through
 `doc_read`; HTML creation and replacement use the operator's import flow, not
 `doc_write`.
+
+### QA targets
+
+A QA target is where a candidate goes to be proved by a browser. Nothing about
+one is inferred: the operator names the destination, attests that it is
+private, and says how a candidate gets there. Two kinds do the getting.
+
+**`kind = "gitlab"`** (the default) plays an operator-named manual job in a
+pipeline GitLab already ran at the candidate's exact SHA. It never creates a
+pipeline, because GitLab resolves a pipeline `ref` only against a branch or a
+tag, so creating one would mean deploying whatever that ref holds now.
+
+**`kind = "command"`** runs an argv on the node — directly, with no shell —
+and observes the result through further argv. It exists because most hosts are
+not GitLab, and their integration is their own CLI. The credential comes from
+the broker as *environment only*: it is bound to the candidate's channel and
+to this node, it never appears in an argument, and every value it holds is
+scrubbed out of the recorded output before that becomes evidence. Configuration
+that puts a credential-shaped word in argv, names a shell or an interpreter as
+the binary, or names a filesystem path in an argument is refused at startup.
+The binary is either one of an allowlist of deployment CLIs (`aws`, `cloud`,
+`doctl`, `flyctl`, `gh`, `glab`, `heroku`, `helm`, `kubectl`, `netlify`,
+`railway`, `render`, `vercel`, `wrangler`) or an absolute path, which says
+exactly which file will run.
+
+Placeholders in argv are `{sha}`, `{short_sha}`, `{branch}`, `{target}`, plus
+anything under `deployment.args` (so `{app}` is configuration, not a tracon
+concept), plus `{env_id}` and `{env_url}` in a status command. The same facts
+reach the command as `TRACON_CANDIDATE_SHA`, `TRACON_CANDIDATE_BRANCH`, and
+`TRACON_QA_TARGET`. A placeholder with no value is a configuration error, so an
+unsubstituted brace can never survive into a command line.
+
+A command target's equivalent of `execution_image` is a digest of the argv, the
+injected environment's key names, the resolved absolute path of the binary, and
+what that binary reports as its version. Upgrade the deploy CLI and the
+evidence identity changes, which is what the pinned image buys the GitLab kind.
+
+#### Laravel Cloud
+
+Laravel Cloud is the worked example. Its CLI (`cloud`, v0.5.0) has no flag for
+deploying a specific commit: `cloud deploy <app> <environment>` builds whatever
+the environment's branch holds. **So the candidate must be published first** —
+tracon refuses the deploy otherwise, naming that reason, rather than deploying a
+branch head that may have moved. Publication already pushes the candidate's
+branch and opens the pull request; the deploy asks for the publication record
+that observed the forge holding the candidate's *exact* SHA, and uses its
+branch name.
+
+The default recipe below is **discovery**: it creates nothing and deletes
+nothing. Laravel Cloud can be configured to open a preview environment when a
+pull request opens and delete it when the pull request merges, so tracon's job
+is to find the environment the automation made for the candidate's branch,
+wait for it, and record it. Teardown stays the platform's; an environment that
+has disappeared after the evidence was recorded is normal, not a failure. The
+credential therefore needs read and deployment-status scope only.
+
+<!-- qa-target-example -->
+```toml
+[qa.targets.cloud-qa]
+private = true                        # the operator attests this destination is not public
+identity_path = "/_tracon/deployment" # on whatever origin the discovered environment has
+identity_header = "x-tracon-deployment-id"
+
+[qa.targets.cloud-qa.deployment]
+kind = "command"
+env_credential = "laravel-cloud"      # broker entry, injected as environment, never in argv
+args = { app = "hounddogreading" }    # supplies {app} below
+command = []                          # nothing is triggered: the PR automation builds the branch
+deploy_timeout_secs = 1800
+poll_interval_secs = 15
+
+[qa.targets.cloud-qa.deployment.discover]
+command = ["cloud", "environment:list", "{app}", "--json", "-n"]
+branch_field = "branch"
+id_field = "id"
+url_field = "url"
+state_field = "status"
+prefer_field = "createdFromAutomation"   # the automation's environment, not one made by hand
+ready_states = ["running"]
+origin_suffix = "laravel.cloud"          # a discovered origin must live under this
+
+[qa.targets.cloud-qa.deployment.status]
+command = ["cloud", "deployment:list", "{env_id}", "--json", "-n"]
+id_field = "id"
+state_field = "status"
+commit_field = "commitHash"              # must equal the candidate's SHA
+ready_states = ["success"]
+failed_states = ["failed", "cancelled"]
+
+[qa.targets.cloud-qa.browser]
+image = "ghcr.io/cosmicspork/tracon-qa-browser@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+timeout_secs = 120
+```
+
+Notes on the recipe:
+
+- **The credential.** `cloud` v0.5.0 reads its API token from
+  `~/.config/cloud/config.json` and offers no token environment variable. The
+  node clears the environment and sets `HOME` to node-owned state
+  (`<state>/qa-command-home/<target>/`), so the operator authenticates once
+  into that home — `HOME=<state>/qa-command-home/cloud-qa cloud auth -n` — or
+  puts `HOME` in the `laravel-cloud` broker entry pointing at a directory only
+  the node can read. Either way the operator's own `cloud` login is never what
+  a deploy uses. A CLI that does take a token variable needs only the variable
+  in the broker entry.
+- **Flags.** Always `-n`; `--json` on reads; never `-q`/`--silent`, which would
+  leave nothing to parse. `environment:get` output is never stored: a
+  production environment's build command can carry a credential in clear text
+  and the CLI prints it unmasked, so the node reads only the fields named above
+  and redacts every brokered value out of the tail it keeps.
+- **The identity check.** The application must return its deployed commit in
+  `identity_header` at `identity_path`. Without that the deployment is bound to
+  the candidate only by what the host said; set
+  `identity_matches_candidate = false` under `[…deployment]` to accept that
+  explicitly, rather than having it happen silently.
+- **Repos without the PR automation.** Drop `discover`, give the target a fixed
+  `origin` and `identity_url`, and set
+  `command = ["cloud", "deploy", "{app}", "qa", "-n"]` with the same `status`
+  block. The environment is then the operator's standing QA environment, whose
+  branch the publication's push updates.
 
 ### Policy
 

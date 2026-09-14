@@ -71,8 +71,12 @@ each gate delivered.
   hub sees ciphertext and routing metadata only.
 - **Gate F — release and clean cutover** (#216, #218, and this change). omp retired;
   README, architecture and design reconciled with the landed migration; the migration plan
-  archived. The real Podman and Kubernetes project workflows on both harnesses remain on
-  the checklist below.
+  archived. A QA target gained a second deployment kind so the first real run need not be
+  GitLab-shaped: `command` runs an operator-configured argv on the node with a brokered
+  credential as environment — never in argv, never in the recorded tail — observes the host
+  through further argv, and ends in the same identity check and immutable browser binding,
+  so browser verification is unchanged (#218). The real Podman and Kubernetes project
+  workflows on both harnesses remain on the checklist below.
 
 Alongside the gates: an unsigned macOS bundle when Apple credentials are absent (#192),
 administration and first-task workflows unified (#208), and the provider callback tests
@@ -122,10 +126,21 @@ work that does not need it, and nothing on it may be described elsewhere as prov
 - [ ] **Real project workflows on both harnesses, on Podman and on Kubernetes**:
       preparation, a coding task, checks, review.
 - [ ] **A private repository end to end**, through preparation, agent work, checks, and
-      authorized publication to GitHub.
+      authorized publication to GitHub. This is the same GitHub-hosted project the QA run
+      below deploys, and its publication is that run's precondition: Laravel Cloud's
+      automation opens the preview environment when the pull request opens, so the branch
+      has to be on the forge before there is anything to discover.
 - [ ] **QA deploy and browser verification against a real target** (the Laravel Cloud
-      preview target). Podman-only until the Kubernetes backend has a scoped QA egress
-      gateway.
+      preview target). The documented recipe *discovers* rather than creates: it finds the
+      preview environment Cloud's pull-request automation made for the candidate's published
+      branch, waits for it, compares the deployed commit to the candidate, and leaves
+      teardown to the platform. `cloud` v0.5.0 cannot deploy a bare commit, so an
+      unpublished candidate is refused with that reason rather than deploying a branch head.
+      Still the operator's: a Cloud API token in the broker as `laravel-cloud` (read and
+      deployment-status scope), the `cloud` login written into the node-owned home, the
+      target's attested `origin_suffix` and app name, an identity endpoint on the
+      application that returns its build commit, and a digest-pinned browser image.
+      Podman-only until the Kubernetes backend has a scoped QA egress gateway.
 - [ ] **The normal workflow, proven as a workflow**: client disconnect and reconnect,
       interrupted execution, retained drafts, and recovery through completion, with what
       actually ran, what stayed uncertain, and where the operator intervened recorded.

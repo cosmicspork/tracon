@@ -610,10 +610,30 @@ fn target_views(state: &AppState, candidate: &CandidateRow) -> ApiResult<Vec<Val
         }
         views.push(json!({
             "id": id,
-            "origin": target.origin,
-            "identity_url": target.identity_url,
+            "kind": target.deployment.kind,
+            // A discovery target has no origin until a deployment exists, so
+            // what the operator is shown is the suffix they attested.
+            "origin": match target.discovers_origin() {
+                true => target
+                    .deployment
+                    .discover
+                    .as_ref()
+                    .map(|discover| format!("*.{}", discover.origin_suffix.trim_start_matches('.')))
+                    .unwrap_or_default(),
+                false => target.origin.clone(),
+            },
+            "identity_url": match target.discovers_origin() {
+                true => target.identity_path.clone(),
+                false => target.identity_url.clone(),
+            },
             "identity_header": target.identity_header,
+            // The command kind's equivalent is a digest of the tool that runs,
+            // and it exists only once a deploy has resolved and probed it — so
+            // the target list names the command instead, which is what the
+            // operator configured.
             "execution_image": target.deployment.execution_image,
+            "deploy_command": target.deployment.command,
+            "env_credential": target.deployment.env_credential,
             "browser_image": target.browser.image,
             "test_credential": target.browser.test_credential,
             "missing_grants": missing,

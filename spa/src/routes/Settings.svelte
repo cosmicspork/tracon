@@ -163,7 +163,7 @@
     grantResource === 'repository'
       ? 'github:owner/repo:pr:42'
       : grantResource === 'deployment'
-        ? 'qa:environment:deployment-id'
+        ? 'gitlab:group/project:environment:qa — or qa:<target>:command:<binary> for a command target'
         : grantResource === 'ticket'
           ? 'github:owner/repo:issue:42'
           : 'canonical, no-space identifier',
