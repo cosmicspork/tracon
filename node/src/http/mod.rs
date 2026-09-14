@@ -467,6 +467,17 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     store
         .reconcile_interrupted_runs()
         .context("reconcile interrupted checks")?;
+    // Serving does not need them archived — nothing relaunches a session on
+    // startup — but until they are, the ones that never ended read as running
+    // and hold up anything that waits for the node to be idle.
+    match store.unarchived_legacy_sessions(crate::adapter::RETIRED) {
+        Ok(0) => {}
+        Ok(sessions) => tracing::warn!(
+            sessions,
+            "sessions of the retired `omp` harness are not archived; `tracon session archive-legacy` puts them away read-only"
+        ),
+        Err(e) => tracing::warn!(error = %e, "could not count the retired harness's sessions"),
+    }
     let bus = Bus::new();
     let adapter: Arc<dyn HarnessAdapter> = crate::adapter::adapter_for(&cfg)?;
     // The identity comes first: the credential store is sealed under a key

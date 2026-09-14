@@ -38,9 +38,11 @@ pub struct Layout {
 /// The harness ids this node has an adapter for.
 pub const KNOWN: &[&str] = &["opencode", "claude"];
 
-/// The harness this node ran until the 2026-09-13 cutover. It is named here
-/// and nowhere else, so an operator whose `node.toml` still says `omp` reads
-/// the migration path rather than a bare "no adapter for harness `omp`".
+/// The harness this node ran until the 2026-09-13 cutover. A `node.toml`
+/// that still names it is migrated to OpenCode as it loads
+/// (`crate::legacy::migrate_config`); a config that reaches the adapter
+/// saying `omp` anyway reads the migration path rather than a bare "no
+/// adapter for harness `omp`".
 pub const RETIRED: &str = "omp";
 
 /// What that operator is told. The sessions omp ran are not lost — they are
@@ -49,6 +51,8 @@ pub const RETIRED: &str = "omp";
 /// relaunch of a harness that is gone.
 pub const RETIRED_MESSAGE: &str = concat!(
     "the `omp` harness was removed at the OpenCode cutover. ",
+    "A node.toml that names it is migrated to \"opencode\" when the node loads it; ",
+    "this configuration was not. ",
     "Set [harness] id = \"opencode\" (or \"claude\") in node.toml, then run ",
     "`tracon setup` to build the image and `tracon session archive-legacy` to ",
     "put the omp sessions away read-only. Carry one forward with ",

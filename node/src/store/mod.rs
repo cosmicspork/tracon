@@ -415,6 +415,17 @@ impl Store {
         Ok(rows)
     }
 
+    /// How many sessions of `harness_id` are not yet marked legacy: what
+    /// `archive_legacy_sessions` would put away.
+    pub fn unarchived_legacy_sessions(&self, harness_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM session WHERE harness_id=?1 AND legacy_ms IS NULL",
+            [harness_id],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Put every session that ran `harness_id` away read-only.
     ///
     /// This is the migration step for a harness this build no longer has an

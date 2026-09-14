@@ -72,7 +72,22 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
             "harness" => {
                 for (k, v) in object(value, "harness")? {
                     match k.as_str() {
-                        "id" => set_string(&mut cfg.harness.id, v, "harness.id", &mut changed)?,
+                        "id" => {
+                            // Written here, refused at the next start: an id
+                            // the node has no adapter for is a crash loop
+                            // under the service, so it never reaches the file.
+                            let id = v.as_str().unwrap_or_default();
+                            if id == crate::adapter::RETIRED {
+                                return Err(crate::adapter::RETIRED_MESSAGE.into());
+                            }
+                            if v.is_string() && !crate::adapter::KNOWN.contains(&id) {
+                                return Err(format!(
+                                    "`harness.id` must be one of {}",
+                                    crate::adapter::KNOWN.join(", ")
+                                ));
+                            }
+                            set_string(&mut cfg.harness.id, v, "harness.id", &mut changed)?
+                        }
                         "version" => set_string(
                             &mut cfg.harness.version,
                             v,
@@ -403,6 +418,16 @@ mod tests {
         // say honestly whether a restart is owed.
         let again = apply(&mut cfg, &json!({ "harness": { "id": "claude" } })).unwrap();
         assert!(again.is_empty());
+    }
+
+    #[test]
+    fn a_harness_the_node_cannot_run_is_never_written() {
+        let mut cfg = Config::default();
+        let err = apply(&mut cfg, &json!({ "harness": { "id": "omp" } })).unwrap_err();
+        assert!(err.contains("was removed"), "{err}");
+        let err = apply(&mut cfg, &json!({ "harness": { "id": "aider" } })).unwrap_err();
+        assert!(err.contains("opencode"), "{err}");
+        assert_eq!(cfg.harness.id, Config::default().harness.id);
     }
 
     #[test]
