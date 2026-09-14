@@ -140,36 +140,35 @@ declared `permission.ask` hook; an LSP status event.
 ### Session portability
 
 Move a whole session to another node, or resume it later, without losing anything the
-model or the operator saw. Today the durable record is the event ledger and, for OpenCode,
-the per-session state backup; the gaps are the harness's own context and the working files
-a session accumulates outside the workspace.
+model or the operator saw. The durable record today is the event ledger and, for
+OpenCode, the per-session state backup; the gaps are the harness's own context and the
+working files a session accumulates outside the workspace.
 
 - [ ] Save the full-text conversation before any compaction or context reset — every turn
-      as the harness sent and received it — to node-owned storage keyed by session and turn,
-      so a compacted context summarises something that still exists.
-- [ ] Save session scratchpads with the session: scratch directories, notes and temporary
-      files created outside the workspace tree, in the same package, digest and generation
-      record as the state backup.
-- [ ] Make that package the unit of transfer and resume: `tracon session backup` produces
-      it, continuity transfer carries it, and reopening restores transcript, scratchpad,
-      state and workspace checkpoint together, with lineage recorded.
+      as the harness sent and received it — keyed by session and turn, so a compacted
+      context summarises something that still exists.
+- [ ] Save session scratchpads with the session, in the same package, digest and
+      generation record as the state backup.
+- [ ] Make that package the unit of transfer and resume: backup produces it, continuity
+      transfer carries it, reopening restores transcript, scratchpad, state and workspace
+      checkpoint together with lineage recorded.
 
 ### Publication follow-through
 
 - [ ] Separate review decisions from publication recovery. Show credential and binding
-      readiness before offering publication, and link missing GitHub/GitLab access to the
-      right Connections settings without implying remote permission from token presence.
-      A failed publish needs a durable, visible outcome and a remedy; distinguish
-      definitely-not-attempted, failed, in-progress, uncertain and published, and reconcile
-      uncertain external effects before retrying. Adding a credential never retries
-      publication automatically, and changed revisions or prose need fresh authorization.
+      readiness before offering publication and link missing forge access to the right
+      settings, without implying remote permission from token presence. A failed publish
+      needs a durable, visible outcome and a remedy: distinguish definitely-not-attempted,
+      failed, in-progress, uncertain and published, and reconcile uncertain external
+      effects before retrying. Adding a credential never retries automatically; changed
+      revisions or prose need fresh authorization.
 
 ### Everyday work and portability
 
 Build on the existing ledger, workspace snapshots, evidence, scoped grants and the gates
 above; do not introduce another agent loop or replace the store. Order: prove ordinary
-work first; then continuity, environments, authority and recovery; then reusable workflows
-and grouping. More autonomy is demand-driven. This section records intended work, not
+work first; then continuity, environments, authority and recovery; then reusable
+workflows and grouping. More autonomy is demand-driven. This records intended work, not
 additional guarantees of the current release.
 
 **Daily-use confidence and navigation**
@@ -177,187 +176,162 @@ additional guarantees of the current release.
 - [ ] Judge changes by the existing outcome metrics — setup failures, time to verified
       work, interventions and tokens per accepted change — keeping unmetered usage and
       missing verification visible. No agent reputation score.
-- [ ] Finish discoverability across surfaces: export, import, handoff and recovery
-      reachable from the work they act on, and empty and archived-only states reachable on
-      browser, desktop and phone.
+- [ ] Make export, import, handoff and recovery discoverable from the work they act on,
+      and keep empty and archived-only states navigable on every surface.
 
 **Node connections and desktop reliability**
 
-- [ ] Give the Podman gateway an independent lifecycle: its own user service or cgroup,
-      reconciled idempotently, so a node-service restart leaves it running and a
-      stopped or missing gateway recovers without rerunning full setup or weakening
-      `KillMode`. Fail-closed boundary checks stay.
-- [ ] Make credential handoff status converge: after durable receiver acceptance,
-      recompute provider availability and republish the local and mesh summaries.
-      Distinguish queued, receiver-confirmed and usable; a successful enqueue proves
-      neither receipt nor use.
+- [ ] Give the Podman gateway its own user service or cgroup, reconciled idempotently, so
+      a node-service restart leaves it running and a stopped gateway recovers without
+      rerunning setup or weakening `KillMode`. Fail-closed boundary checks stay.
+- [ ] Converge credential handoff status: after durable receiver acceptance, recompute
+      provider availability and republish the local and mesh summaries. A successful
+      enqueue proves neither receipt nor use.
 - [ ] Preserve deliberate sharing through OAuth renewal: keep channel and recipient
-      bindings across refresh, name one refresh owner, and never let two nodes race a
-      rotating token. Removing local bindings is not evidence a copied token was revoked.
-- [ ] Choose a policy for provider usage exhaustion: per project or channel, with a
-      per-run override — pause and resume after reset, fall back to a named provider, or
-      fall back then wait — defaulting to pause. Distinguish exhaustion from throttling,
-      auth failure and outage; never invent a reset timer; record policy, reason, model
-      and next wake in the ledger; recheck grants, caps and compatibility before resuming,
-      and continue only from a recorded safe boundary.
+      bindings across refresh, name one refresh owner, never race a rotating token, and
+      do not treat removed local bindings as evidence a copied token was revoked.
+- [ ] Choose a provider-exhaustion policy, per channel with a per-run override — pause and
+      resume after reset, fall back to a named provider, or fall back then wait —
+      defaulting to pause. Distinguish exhaustion from throttling, auth failure and
+      outage; never invent a reset timer; record policy, reason, model and next wake;
+      recheck grants, caps and compatibility before resuming, and continue only from a
+      recorded safe boundary.
 - [ ] Explain browser push enrollment failures by stage — unavailable API, denied
       permission, service-worker failure, push-service registration failure, node storage
-      error — without reporting a device as registered after failed enrollment.
+      error — and never report a device as registered after a failed enrollment.
 - [ ] Open external links through a clean Linux host launcher: the AppImage's bundled
       `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
-      host environment for the child only, keep URL and origin restrictions, and never
-      equate spawning a helper with opening a browser.
+      host environment for the child only and keep the URL and origin restrictions.
 
 **Review workspace and diff reading.** Borrow interaction patterns from
 [cosmicspork/review](https://github.com/cosmicspork/review), especially its
-[diff viewer](https://github.com/cosmicspork/review/blob/main/src/diff-part.ts); evaluate
-`diff2html`/`highlight.js` against the existing CodeMirror dependency first. Keep tracon's
-immutable candidates, isolated checks and brokered publication.
+[diff viewer](https://github.com/cosmicspork/review/blob/main/src/diff-part.ts); weigh
+`diff2html`/`highlight.js` against the existing CodeMirror dependency first. Keep
+tracon's immutable candidates, isolated checks and brokered publication.
 
-- [ ] Side-by-side and unified diff modes, defaulting by width, with a remembered
-      preference, aligned changed lines and synchronized scrolling; switching preserves
-      file, position and feedback, and neither mode needs the desktop diff editor.
-- [ ] Readable code and context: old/new line numbers, syntax highlighting, within-line
+- [ ] Side-by-side and unified modes, defaulting by width, with aligned lines, synchronized
+      scrolling and a remembered preference; switching preserves file, position and
+      feedback, and neither mode needs the desktop diff editor.
+- [ ] Readable code and context: line numbers both sides, syntax highlighting, within-line
       emphasis, wrap controls, context expanded from the pinned base and candidate rather
       than the live worktree, and explicit labels for renames, binaries and missing context.
-- [ ] File navigation and review progress: collapsible sections everywhere, filtering,
-      per-file counts, next/previous hunk, a full-height reading view, and viewed-file
-      tracking against the reviewed revision that invalidates on resubmission. Viewed is
-      not approved.
+- [ ] File navigation and progress: collapsible sections, filtering, per-file counts,
+      next/previous hunk, a full-height reading view, and viewed-file tracking against the
+      reviewed revision that invalidates on resubmission. Viewed is not approved.
 - [ ] Keep large reviews responsive: headers first, incremental bodies, lazy highlighting,
-      generated and oversized files collapsed with a reason and a Load diff action, bounded
-      memory. Rendering performance does not waive submission caps.
-- [ ] Review prose alongside code and evidence: the outgoing title and body as sanitized
-      Markdown with source editing and a preview of the exact text to be published, without
-      burying the diff under administrative detail.
+      generated and oversized files collapsed with a reason and a Load diff action.
+      Rendering performance does not waive submission caps.
+- [ ] Present the outgoing title and body as sanitized Markdown with source editing and a
+      preview of the exact text to be published, without burying the diff.
 - [ ] Persistent, anchored feedback: general and file comments, then line/range threads
       bound to revision, path and side, returned through the agent review contract and
-      preserved across resubmission. Resolved and outdated are distinct; moved anchors must
-      not silently attach to unrelated code.
-- [ ] Durable review drafts and re-review: unsent feedback and prose edits survive
-      navigation and reconnect with explicit saved/conflict state; desktop diff drafts stay
-      revision-keyed; show what changed since the last reviewed revision beside the full
-      base diff, and deep-link a ready-for-re-review item through the existing queue.
-- [ ] Explain and validate verdict actions: keep decisions reachable in long diffs, open a
-      labelled reason composer for Request changes and Reject rather than disabling a
-      button, and explain genuinely unavailable actions inline.
+      preserved across resubmission. Resolved and outdated are distinct; a moved anchor
+      must not silently attach to unrelated code.
+- [ ] Durable review drafts and re-review: unsent feedback and prose survive navigation and
+      reconnect with explicit saved/conflict state, desktop diff drafts stay revision-keyed,
+      and what changed since the last reviewed revision shows beside the full base diff.
+- [ ] Keep verdicts reachable in long diffs, open a labelled reason composer for Request
+      changes and Reject rather than disabling a button, and explain unavailable actions
+      inline.
 - [ ] Prove the review experience on real surfaces: both modes in browser and desktop,
-      narrow screens, long lines, mixed and generated files, light and dark, keyboard-only,
-      blank reasons, missing forge credential, publication failure and retry, reconnect with
-      drafts, stale revisions and resubmission into existing threads.
+      narrow screens, long lines, generated files, light and dark, keyboard-only, blank
+      reasons, missing forge credential, publication failure, reconnect with drafts, stale
+      revisions and resubmission into existing threads.
 
 **Work continuity and outcomes**
 
-- [ ] Continue the work, not just the transcript: a work-level continuation view carrying
-      intent, decisions, attempts, blockers, next action, workspace, lineage and evidence,
-      with continue / change approach / abandon. Plain sessions gain this without being
-      forced into a work item.
-- [ ] Produce a concise outcome record derived from recorded state — what changed, what was
-      verified, what needs a decision, what is uncertain, and cost. Narrative summary is
-      supplementary and cannot turn a claim into verification.
+- [ ] A work-level continuation view carrying intent, decisions, attempts, blockers, next
+      action, workspace, lineage and evidence, with continue / change approach / abandon.
+      Plain sessions gain it without being forced into a work item.
+- [ ] A concise outcome record derived from recorded state — what changed, what was
+      verified, what needs a decision, what is uncertain, and cost. Narrative summary
+      cannot turn a claim into verification.
 
 **Project environments and effective authority**
 
 - [ ] Save validated project setup profiles by extending the launch manifest and toolchain
-      profiles: image, language tools, skills, dependency preparation, required checks and
-      configured previews, snapshotted per execution, with validation invalidated when its
-      inputs change. Customizations are versioned source with provenance.
-- [ ] Preview preparation and explain incompatibility before launch — detected ecosystems,
-      supported steps, missing tools, remedies — without turning unsupported scripts or
-      devcontainer features into silent host execution.
-- [ ] Explain authority in task terms: selected node, harness and image, effective access,
-      grants, spending limits and what still needs approval, derived from current policy
-      rather than a parallel model. Show what a customization can read, change and send.
-- [ ] Review, activate and roll back personal customizations: an agent may propose a skill,
-      instruction package, profile or recipe; the operator sees source, provenance and
-      validation evidence before explicit activation, which creates a revision on the
-      existing manifests. Updates never change running sessions or broaden authority;
-      rollback cannot undo external effects.
+      profiles: image, language tools, skills, preparation, required checks and previews,
+      snapshotted per execution, with validation invalidated when its inputs change.
+- [ ] Preview preparation and explain incompatibility before launch, without turning
+      unsupported scripts or devcontainer features into silent host execution.
+- [ ] Explain authority in task terms — node, harness, image, effective access, grants,
+      limits, what still needs approval — derived from current policy, not a parallel model.
+- [ ] Let an agent propose a skill, instruction package, profile or recipe, and show source,
+      provenance and validation evidence before explicit activation, which creates a
+      revision on the existing manifests. Updates never change running sessions or broaden
+      authority; rollback cannot undo external effects.
 - [ ] Expose resource-scoped operations for custom work — evidence for a named work item,
-      not ledger access; proposing a change, not mutation rights. Types describe the
-      contract; the node enforces scope, and out-of-scope access is proven refused.
+      not ledger access; proposing a change, not mutation rights — and prove out-of-scope
+      access refused.
 
 **Portable data and recovery**
 
-- [ ] Publish a versioned data contract: extend the signed candidate JSON, offline package
-      reader and document export into a round-trip session and corpus export — an archive of
-      JSON manifest, JSON/JSONL records, Markdown and ordinary files, readable without
-      tracon.
+- [ ] Publish a versioned data contract: the signed candidate JSON, offline package reader
+      and document export extended into a round-trip export readable without tracon.
 - [ ] Specify complete portable content — sessions, events, work items, decisions, drafts,
-      documents, memories, workspace state, evidence and provenance, with identifiers,
-      encodings and omission rules defined. Harness-native state names its compatibility and
-      is never the only copy.
-- [ ] Make import predictable and independently implementable: published schemas, example
-      exports, integrity rules, migration policy, duplicate and reference handling, proven
-      on a fresh node and by reading without one.
+      documents, memories, workspace state, evidence, provenance — with identifiers,
+      encodings and omission rules defined. Harness-native state is never the only copy.
+- [ ] Make import predictable and independently implementable: schemas, example exports,
+      integrity rules, migration policy, duplicate and reference handling, proven on a
+      fresh node and by reading without one.
 - [ ] Separate export, backup and handoff: export omits credentials and private keys and
-      warns that transcripts can still carry secrets; backup protects deliberately included
-      secrets separately; neither import nor signature verification grants authority.
-- [ ] Unify recovery and maintenance entry points on the existing Settings controls: what is
-      retained, how old the checkpoints are, what survives a restart, and the actions to
-      inspect, export, restore or diagnose. Promise rollback only where state compatibility
-      allows it.
+      warns that transcripts can still carry secrets; neither import nor signature
+      verification grants authority.
+- [ ] Unify recovery and maintenance entry points on the existing Settings controls, and
+      promise rollback only where state compatibility allows it.
 
 **Cross-node session handoff**
 
-- [ ] Move an unfinished session to another node: select destination, check compatibility,
-      checkpoint, transfer and continue with continuous history and explicit lineage. No
-      submitted candidate, mesh membership or work item required.
-- [ ] Carry the actual continuation state — workspace changes, conversation, decisions,
-      selected context, unsent draft, next action, harness/model/manifest identity,
-      evidence, usage and remaining limits — over the portable contract and existing
-      transport.
-- [ ] Transfer execution ownership safely: quiesce and fence the source before the
-      destination runs, persist acknowledgements so retries create no duplicate sessions or
-      repeated side effects, and never let a timeout enable both owners.
+- [ ] Move an unfinished session to another node — select, check compatibility, checkpoint,
+      transfer, continue — with continuous history and explicit lineage, requiring no
+      candidate, mesh membership or work item.
+- [ ] Carry the actual continuation state: workspace changes, conversation, decisions,
+      context, unsent draft, next action, harness/model/manifest identity, evidence, usage
+      and remaining limits, over the portable contract and existing transport.
+- [ ] Transfer ownership safely: quiesce and fence the source first, persist
+      acknowledgements so retries duplicate nothing, and never let a timeout enable both
+      owners.
 - [ ] Re-evaluate authority and state compatibility at the destination; native-state resume
-      and fresh continuation from portable context are distinct, visible outcomes, and lost
-      fidelity is explained before confirmation.
+      and fresh continuation are distinct, visible outcomes, and lost fidelity is explained
+      before confirmation.
 - [ ] Prove handoff both directions, including interruption, unavailable destination,
-      duplicate import, dirty workspace, incompatible harness state and pending external
-      action, with one active owner and no budget reset.
+      duplicate import, dirty workspace and incompatible harness state, with one active
+      owner and no budget reset.
 
 **Reusable work and bounded automation.** Personal workflows around an accountable core,
 not a new platform ([extensible software](https://jeremymorrell.dev/blog/extensible-software-in-the-age-of-llms/)).
 Sequence: node and credential reliability; profiles and effective authority; reviewed
-recipe authoring; one proven personal customization; then bounded triggers. Provider
-fallback may be configurable, but quota classification, safe resumption, accounting and
-permission enforcement stay in the core.
+recipe authoring; one proven customization; then bounded triggers. Quota classification,
+safe resumption, accounting and permission enforcement stay in the core.
 
 - [ ] Saved workflow recipes for a few recurring procedures, reusing phase presets and the
       ledger, snapshotted on invocation, revisable and stoppable. No workflow language, and
-      no ceremony for a plain prompt. An agent may draft one; the operator activates a
-      pinned revision.
-- [ ] Prove one personal customization end to end: a preferred review summary produced from
-      an approved recipe and scoped evidence, through existing report and document surfaces,
-      shown to fail safely and to be revisable, disableable and exportable without
-      transferring authority. Custom UI starts as isolated reports, not plugins in the
-      administration UI.
+      no ceremony for a plain prompt.
+- [ ] Prove one personal customization end to end — a preferred review summary from an
+      approved recipe and scoped evidence — shown to fail safely and to be revisable,
+      disableable and exportable without transferring authority. Custom UI starts as
+      isolated reports, not plugins in the administration UI.
 - [ ] Lightweight batches: related work with dependencies, explicit ownership and reclaim
-      rules, aggregate spending, blockers and one completion report, built on current
-      readiness and session holders.
+      rules, aggregate spending, blockers and one completion report.
 - [ ] Integration when parallel same-repository work needs it: prefer a forge merge queue,
-      serialize, pin the combined revision and reverify — independently approved patches do
-      not approve their combination. Demand-gated.
+      serialize, pin the combined revision and reverify. Demand-gated.
 - [ ] Bounded scheduled or event-driven chores, after daily-use reliability: low-stakes work
-      that returns a report and stops, with concurrency, spend, time and retry limits,
-      deduplicated triggers, and approved recipe revisions run through the existing
-      supervisor rather than extension code inside the node.
+      that returns a report and stops, with concurrency, spend, time and retry limits, run
+      through the existing supervisor rather than extension code inside the node.
 - [ ] Optional conversational coordination, only if useful: an ordinary session inspecting
       permitted cross-project work and proposing actions through existing tools. No
       privileged manager loop.
 
 **Independent installations**
 
-- [ ] Make the personal workflow reproducible by another operator: one proven
-      installation-to-first-task path, explicit OS/runtime/harness/login compatibility, and
-      actionable diagnostics. Remote access and mesh stay optional.
+- [ ] One proven installation-to-first-task path for another operator, with explicit
+      OS/runtime/harness/login compatibility and actionable diagnostics. Remote access and
+      mesh stay optional.
 - [ ] Bound maintenance expectations: supported versus experimental integrations, pinned
       release and update policy, backup requirements, and the recovery path for a failed
-      upgrade — applied to installed customizations as well as the runtime. No promise of
-      arbitrary drop-in harnesses or a maintained native UI fork.
-- [ ] Offer a clearly labelled demonstration mode reusing the fixture machinery, with
-      demonstration data unmistakable and no implication that its output proves a live run.
+      upgrade — for installed customizations as well as the runtime.
+- [ ] A clearly labelled demonstration mode reusing the fixture machinery, with no
+      implication that its output proves a live run.
 
 ## Current limitations
 
