@@ -273,6 +273,41 @@
     }
   }
 
+  /** What a command-kind deploy recorded, read out of the row's own detail. */
+  function commandEvidence(detailJson: string) {
+    let detail: Record<string, unknown>
+    try {
+      detail = JSON.parse(detailJson) as Record<string, unknown>
+    } catch {
+      return null
+    }
+    if (detail.transport !== 'command') return null
+    const ran = (detail.deploy_command ?? null) as
+      | { argv?: string[]; exit_status?: number | null; ok?: boolean; tail?: string; error?: string }
+      | null
+    const environment = (detail.environment ?? null) as { id?: string; url?: string; state?: string } | null
+    const status = (detail.deployment_status ?? null) as
+      | { id?: string | null; state?: string; commit?: string | null }
+      | null
+    return {
+      ran,
+      environment,
+      status,
+      branch: (detail.branch as string) ?? '',
+      binary: (detail.binary as string) ?? '',
+      binaryVersion: (detail.binary_version as string) ?? '',
+      credential: (detail.env_credential as string) ?? '',
+      envNames: (detail.env_names as string[]) ?? [],
+      identityAttests: detail.identity_attests_candidate as boolean | undefined,
+      commitMismatch: detail.commit_mismatch as string | undefined,
+      observationError: detail.observation_error as string | undefined,
+    }
+  }
+
+  function chosenDeployment() {
+    return evidence?.deployments.find((deployment) => deployment.id === deploymentId) ?? null
+  }
+
   $effect(() => {
     const params = new URLSearchParams(router.search)
     const selected: CandidateIdentity = {
@@ -392,9 +427,14 @@
       <div class="targets">
         {#each evidence.targets as configured (configured.id)}
           <article class="target" class:blocked={configured.missing_grants.length > 0}>
-            <b>{configured.id}</b>
+            <b>{configured.id} <span class="kind">{configured.kind}</span></b>
             <code>{configured.origin}</code>
-            <small>deployment {configured.execution_image}<br />browser {configured.browser_image}</small>
+            {#if configured.kind === 'command'}
+              <small class="argv">deploys by running {configured.deploy_command.join(' ') || 'nothing: the host’s own automation builds the branch'}</small>
+              <small>credential {configured.env_credential} (environment only)<br />browser {configured.browser_image}</small>
+            {:else}
+              <small>deployment {configured.execution_image}<br />browser {configured.browser_image}</small>
+            {/if}
             <small>identity {configured.identity_header} at {configured.identity_url}</small>
             {#if configured.test_credential}<small>dedicated test account: {configured.test_credential}</small>{/if}
             {#if configured.missing_grants.length}
@@ -431,6 +471,37 @@
           </button>
         {/each}
       </div>
+      {#if chosenDeployment()}
+        {@const chosen = chosenDeployment()!}
+        {@const ran = commandEvidence(chosen.detail_json)}
+        {#if ran}
+          <div class="command">
+            <small>branch {ran.branch} · {ran.binary} {ran.binaryVersion}</small>
+            {#if ran.ran}
+              <small>
+                {ran.ran.error
+                  ? `the deploy command could not run: ${ran.ran.error}`
+                  : `exit ${ran.ran.exit_status ?? 'on a signal'} · ${ran.ran.ok ? 'ran' : 'failed'}`}
+              </small>
+            {:else}
+              <small>no deploy command: this target waits for the host’s own automation to build the branch</small>
+            {/if}
+            {#if ran.environment}<small>environment {ran.environment.id} ({ran.environment.state}) at {ran.environment.url}</small>{/if}
+            {#if ran.status}<small>host deployment {ran.status.id ?? 'unnamed'} · {ran.status.state}{ran.status.commit ? ` · commit ${ran.status.commit}` : ''}</small>{/if}
+            {#if ran.commitMismatch}<div class="missing">{ran.commitMismatch}</div>{/if}
+            {#if ran.observationError}<div class="missing">{ran.observationError}</div>{/if}
+            {#if ran.identityAttests !== undefined}
+              <div class={ran.identityAttests ? 'fresh' : 'missing'}>
+                {ran.identityAttests
+                  ? 'the identity endpoint attests this candidate’s SHA'
+                  : 'the identity endpoint did not attest this candidate’s SHA'}
+              </div>
+            {/if}
+            <small>credential {ran.credential}, injected as environment ({ran.envNames.join(', ')}) and never in the command line</small>
+            {#if ran.ran?.tail}<details><summary>Redacted output tail</summary><pre>{ran.ran.tail}</pre></details>{/if}
+          </div>
+        {/if}
+      {/if}
     {/if}
   </section>
 
@@ -529,6 +600,9 @@
   .target, .runs article { display: grid; gap: .35rem; background: var(--s1); padding: .75rem .85rem; border-left: 3px solid var(--ok); min-width: 0; }
   .target.blocked, .runs article.stale { border-left-color: var(--wait); } .target code, .row code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink2); }
   .missing { color: var(--wait); font: 12px var(--mono); } .fresh { color: var(--ok); font: 12px var(--mono); }
+  .kind { color: var(--dim); font: 11px var(--mono); text-transform: uppercase; letter-spacing: .06em; }
+  .command { display: grid; gap: .3rem; background: var(--s1); padding: .75rem .85rem; border-left: 3px solid var(--acc); min-width: 0; }
+  .argv { word-break: break-all; }
   .rows { display: grid; gap: .35rem; } .row { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(10rem, .9fr); gap: .6rem; align-items: center; text-align: left; color: var(--ink); background: var(--s1); border: 0; border-left: 3px solid var(--ok); padding: .65rem; cursor: pointer; } .row.chosen { background: var(--s2); } .row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dot { width: .55rem; height: .55rem; border-radius: 50%; background: var(--ok); } .dot.unknown { background: var(--wait); }
   .runs header { display: flex; justify-content: space-between; gap: .5rem; } .state { color: var(--ink2); font: 12px var(--mono); } details { min-width: 0; } summary { cursor: pointer; color: var(--acc); font: 12px var(--mono); } pre { max-height: 18rem; overflow: auto; white-space: pre-wrap; color: var(--ink2); font: 11px/1.45 var(--mono); } .artifacts { display: flex; flex-wrap: wrap; gap: .6rem; } .artifacts a, .runs a { font: 12px var(--mono); } .notice, .remote-artifact { color: var(--wait); font: 12px var(--mono); }

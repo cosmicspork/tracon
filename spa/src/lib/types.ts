@@ -934,10 +934,19 @@ export interface Prototype {
 
 export interface QaTarget {
   id: string
+  /** `gitlab` plays a manual pipeline job; `command` runs a brokered argv on the node. */
+  kind: 'gitlab' | 'command'
+  /** A discovery target reports the attested host suffix (`*.example.com`) instead. */
   origin: string
+  /** A discovery target reports its identity path, which hangs off whatever origin it finds. */
   identity_url: string
   identity_header: string
+  /** Empty for a command target: its equivalent is a digest, and it exists only per deployment. */
   execution_image: string
+  /** Command targets only: the configured argv, before placeholder substitution. */
+  deploy_command: string[]
+  /** Command targets only: the broker entry whose environment the command receives. */
+  env_credential: string
   browser_image: string
   test_credential: string | null
   missing_grants: string[]
