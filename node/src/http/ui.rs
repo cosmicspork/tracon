@@ -1132,10 +1132,15 @@ pub mod trace {
     pub const ASSET: &str = "asset";
     /// The app shell, at `/` or at a route the app's own router declares.
     pub const PAGE: &str = "page";
+    /// The bootstrap exchange, which is this origin's own route and neither
+    /// the bundle's nor the harness's.
+    pub const BOOT: &str = "boot";
     /// Handed to the gateway's matrix, which named the class.
     pub const API: &str = "api";
-    /// Nobody's: the 404 that is the point of having no catch-all.
-    pub const UNKNOWN: &str = "unknown";
+    /// Nobody's: the 404 that is the point of having no catch-all. A *named*
+    /// outcome rather than an absence, so a trace can record having asked for
+    /// something nobody owns and show that it was refused.
+    pub const NONE: &str = "not-found";
 }
 
 /// Which of `dispatch`'s four cases answers one request, named for the route
@@ -1146,21 +1151,24 @@ pub mod trace {
 /// that classifies a recorded row is the thing that decided it.
 ///
 /// `bundle` is `None` on a machine that has not vendored the tree — CI, for
-/// one. A path that would have been a file is then [`trace::UNKNOWN`], which
-/// is what makes the recorded `asset` rows checkable there: a row the origin
+/// one. A path that would have been a file is then [`trace::NONE`], which is
+/// what makes the recorded `asset` rows checkable there: a row the origin
 /// answered 200 that this function cannot place is a row only the bundle can
 /// have served.
 pub fn trace_case(bundle: Option<&Bundle>, method: &str, path: &str) -> &'static str {
     let read_only = matches!(method, "GET" | "HEAD");
-    if path == "/" {
-        return if read_only {
-            trace::PAGE
+    if path == "/boot" {
+        return if method == "POST" {
+            trace::BOOT
         } else {
-            trace::UNKNOWN
+            trace::NONE
         };
     }
+    if path == "/" {
+        return if read_only { trace::PAGE } else { trace::NONE };
+    }
     let Some(segments) = segments(path) else {
-        return trace::UNKNOWN;
+        return trace::NONE;
     };
     if read_only && bundle.is_some_and(|b| b.get(&segments.join("/")).is_some()) {
         return trace::ASSET;
@@ -1174,7 +1182,7 @@ pub fn trace_case(bundle: Option<&Bundle>, method: &str, path: &str) -> &'static
     if read_only && app_route(&segments) {
         return trace::PAGE;
     }
-    trace::UNKNOWN
+    trace::NONE
 }
 
 #[cfg(test)]
@@ -1322,17 +1330,21 @@ mod tests {
         assert_eq!(trace_case(None, "GET", "/config"), trace::API);
         assert_eq!(trace_case(None, "PATCH", "/config"), trace::API);
         assert_eq!(trace_case(None, "POST", "/session/ses_1/share"), trace::API);
+        // This origin's own route, which is neither the bundle's nor the
+        // harness's — and is a POST or it is nobody's.
+        assert_eq!(trace_case(None, "POST", "/boot"), trace::BOOT);
+        assert_eq!(trace_case(None, "GET", "/boot"), trace::NONE);
         // Nobody's, which is the 404 with no catch-all behind it.
-        assert_eq!(trace_case(None, "GET", "/nope"), trace::UNKNOWN);
-        assert_eq!(trace_case(None, "GET", "/../etc/passwd"), trace::UNKNOWN);
+        assert_eq!(trace_case(None, "GET", "/nope"), trace::NONE);
+        assert_eq!(trace_case(None, "GET", "/../etc/passwd"), trace::NONE);
         // A write to the shell's own route is not the shell.
-        assert_eq!(trace_case(None, "POST", "/"), trace::UNKNOWN);
-        assert_eq!(trace_case(None, "POST", "/new-session"), trace::UNKNOWN);
+        assert_eq!(trace_case(None, "POST", "/"), trace::NONE);
+        assert_eq!(trace_case(None, "POST", "/new-session"), trace::NONE);
         // Without a vendored tree an asset is placed by nobody — which is what
         // makes a recorded 200 on such a path evidence the bundle answered it.
         assert_eq!(
             trace_case(None, "GET", "/assets/index-abc.js"),
-            trace::UNKNOWN
+            trace::NONE
         );
     }
 }
