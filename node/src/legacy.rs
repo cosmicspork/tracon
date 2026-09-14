@@ -408,6 +408,84 @@ harness_image = "ghcr.io/cosmicspork/tracon-harness-opencode:0.15.0"
         assert_eq!(migrate_config("[harness\nid = \"omp\"\n"), None);
     }
 
+    /// A pod-hosted node: the `tracon-node` image reading a node.toml an older
+    /// version wrote onto its state volume. Nobody edits that file by hand,
+    /// so the next release has to come up healthy on the migration alone.
+    #[test]
+    fn a_pre_cutover_kubernetes_node_comes_up_on_the_published_opencode_image() {
+        let dir = std::env::temp_dir().join(format!("tracon-legacy-k8s-{}", uuid::Uuid::now_v7()));
+        let path = dir.join("state/config/tracon/node.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = r#"
+node_name = "tracon-node-0"
+
+[harness]
+id = "omp"
+version = "18.0.4"
+
+[boundary]
+harness_image = "localhost/tracon-harness"
+
+[gateway]
+allow_hosts = ['^api\.anthropic\.com$', '^api\.openai\.com$', '^chatgpt\.com$', '^auth\.openai\.com$']
+
+[runtime]
+kind = "kubernetes"
+
+[runtime.kubernetes]
+harness_image = "ghcr.io/cosmicspork/tracon-harness:0.12.1"
+state_claim = "tracon-state"
+"#;
+        std::fs::write(&path, original).unwrap();
+
+        let cfg = Config::try_load_from(&path).unwrap();
+        assert!(crate::adapter::adapter_for(&cfg).is_ok());
+        assert_eq!(cfg.harness.id, "opencode");
+        assert_eq!(
+            crate::adapter::pinned_version(&cfg),
+            crate::adapter::image_version("opencode")
+        );
+        assert_eq!(cfg.runtime.kind, crate::config::RuntimeKind::Kubernetes);
+        assert_eq!(
+            cfg.runtime.kubernetes.harness_image,
+            format!(
+                "ghcr.io/cosmicspork/tracon-harness-opencode:{}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert_eq!(cfg.runtime.kubernetes.state_claim, "tracon-state");
+        assert_eq!(
+            cfg.boundary.harness_image,
+            "localhost/tracon-harness-opencode"
+        );
+        assert_eq!(
+            cfg.gateway.allow_hosts,
+            [
+                r"^api\.anthropic\.com$",
+                r"^api\.openai\.com$",
+                r"^chatgpt\.com$",
+                r"^auth\.openai\.com$",
+                r"^platform\.claude\.com$",
+                r"^claude\.ai$",
+            ]
+        );
+
+        // Written back onto the volume, with the original beside it, so the
+        // next start (and every one after) loads it without migrating again.
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(migrate_config(&written), None);
+        assert_eq!(
+            std::fs::read_to_string(path.with_file_name("node.toml.pre-opencode")).unwrap(),
+            original
+        );
+        let again = Config::try_load_from(&path).unwrap();
+        assert_eq!(
+            again.runtime.kubernetes.harness_image,
+            cfg.runtime.kubernetes.harness_image
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn loading_a_pre_cutover_file_persists_the_migration_beside_a_backup() {
         let dir = std::env::temp_dir().join(format!("tracon-legacy-cfg-{}", uuid::Uuid::now_v7()));
