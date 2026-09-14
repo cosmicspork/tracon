@@ -367,6 +367,74 @@ This section records intended work, not additional guarantees of the current rel
       not extra navigation destinations. Browser access to the native OpenCode view
       remains part of Gate D, not a separate interface to maintain.
 
+#### Node connections and desktop reliability
+
+- [ ] **Give the Podman gateway an independent lifecycle.** On Linux, a gateway
+      started by the setup API inherits the node service's process group and stops
+      with it; startup only verifies the now-stopped gateway. Manage the gateway in
+      its own user-service/cgroup rather than weakening the node's `KillMode` or
+      rerunning full setup on every restart. Reconcile a missing/stopped gateway
+      idempotently, retain fail-closed boundary checks, and reject incompatible
+      gateway configuration with an explicit repair path. Prove that a node-service
+      restart leaves the gateway running, stopped/missing recovery works, and node
+      shutdown still cleans up harnesses.
+- [ ] **Make credential handoff status converge.** A received share currently updates
+      the broker without republishing the provider summary peers display. After
+      durable receiver acceptance, recompute provider availability and publish the
+      local stream and mesh summary, including clearing obsolete login failures.
+      Distinguish queued, receiver-confirmed and usable credentials; the sender's
+      node bindings and successful enqueue alone prove neither receipt nor use.
+      Surface persistence/rejection failures without exposing values, and keep
+      provider connection status distinct from runtime readiness. Prove receipt,
+      persisted metadata and the peer view agree without a restart or another share.
+- [ ] **Preserve deliberate sharing through OAuth renewal.** Keep explicit channel
+      and recipient bindings when refreshing instead of resetting them to the local
+      node. Define one refresh owner and propagate renewed copies sealed to the
+      approved recipients; do not assume a broker handoff includes a harness's login
+      database or let multiple nodes race a rotating refresh token. Show refresh
+      failures, reconnect requirements and stale/offline copies. Define disconnect
+      and recipient-removal behavior explicitly: removing local bindings is not
+      evidence that a copied provider token was revoked. Prove renewal and reconnect
+      preserve scope and update the receiver without granting any new authority.
+- [ ] **Choose a policy for provider usage exhaustion.** Let the operator select in
+      advance, per project/channel with a per-run override: pause and resume after
+      reset; fall back to a named provider/model; or try that fallback, then wait if
+      no approved provider is available. Default to pausing without an authorized
+      fallback. Distinguish subscription/quota exhaustion from transient throttling,
+      authentication failures and outages; a generic 429 proves no reset schedule.
+      Use provider-reported reset evidence when available, otherwise show an unknown
+      reset and offer manual retry or bounded rechecks rather than inventing a timer.
+      Track cooldowns by the affected account/limit scope, including nodes sharing
+      that credential. Record the selected policy, reason, effective model and next
+      wake in the existing ledger; waiting survives restarts, releases idle execution
+      resources, and remains cancellable. Fallback and automatic resume must recheck
+      model/harness compatibility, destination data access, grants and spending caps;
+      permission to wait is not permission to send context to another provider.
+      Continue only from a recorded safe boundary, never replaying completed actions
+      or treating an uncertain in-flight tool as complete. Prove fallback, reset-based
+      resume and both-providers-exhausted behavior, including cancellation and unknown
+      reset times, without duplicate execution or silent changes of harness.
+- [ ] **Explain browser push enrollment failures.** Distinguish unavailable APIs,
+      denied permission, service-worker failure, browser push-service registration
+      failure and node subscription-storage errors. For the push-service case, say
+      that registration failed, identify disabled/blocked push services as possible
+      causes, and offer a supported browser or desktop notifications. Ungoogled
+      Chromium is an example, not a diagnosis inferred from a generic exception or
+      user-agent string. Keep technical details available without making them the
+      only message; do not report a device as registered after failed enrollment.
+      Verify the guidance at the failing stage without mislabeling permission,
+      invalid-key or node errors as a browser transport problem.
+- [ ] **Open external links through a clean Linux host launcher.** The shipped
+      AppImage's bundled `xdg-open` silently skips KDE 6, and its inherited library
+      path can break the Flatpak browser launcher. Select the host launcher and
+      restore its host PATH/library environment for the child only; preserve the
+      running app's libraries and existing URL/origin restrictions. Cover provider
+      sign-in and native-harness external links, report observable dispatch failures,
+      and never equate spawning a detached helper with opening the browser. Prove a
+      harmless HTTPS link opens from the installed AppImage on KDE 6 with a Flatpak
+      default browser; retain browser, mobile and other desktop behavior, and keep
+      OAuth codes and full sign-in URLs out of diagnostics.
+
 #### Review workspace and diff reading
 
 Borrow interaction patterns from [cosmicspork/review](https://github.com/cosmicspork/review),
