@@ -162,9 +162,8 @@ pub struct Manager {
     /// native UI. Created on demand and kept for the node's life, so a browser
     /// that reconnects across a harness restart resumes on the same sequence
     /// rather than silently starting over (`gateway::native_events`).
-    native_events: Arc<
-        std::sync::Mutex<HashMap<String, Arc<crate::gateway::native_events::NativeEvents>>>,
-    >,
+    native_events:
+        Arc<std::sync::Mutex<HashMap<String, Arc<crate::gateway::native_events::NativeEvents>>>>,
     /// The node's own model probe presents this to the gateway; it may only
     /// read, and it names no channel.
     probe_token: String,

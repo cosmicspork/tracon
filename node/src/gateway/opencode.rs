@@ -931,9 +931,7 @@ fn synthesised_events(
     let session = session_id.to_string();
     tokio::spawn(async move {
         let frame = |payload: Value| {
-            Event::default().data(
-                json!({ "directory": directory, "payload": payload }).to_string(),
-            )
+            Event::default().data(json!({ "directory": directory, "payload": payload }).to_string())
         };
 
         // First, as upstream does: it is what marks the server connected in
@@ -1955,7 +1953,9 @@ mod tests {
         assert_eq!(scoped, json!([mine]));
 
         // v2: `{location, data}` — the envelope survives, the entries are cut.
-        let body = Bytes::from(json!({ "location": { "directory": "/work" }, "data": [mine, theirs] }).to_string());
+        let body = Bytes::from(
+            json!({ "location": { "directory": "/work" }, "data": [mine, theirs] }).to_string(),
+        );
         let scoped: Value =
             serde_json::from_slice(&scope_asks("api/permission/request", "ses_x", body)).unwrap();
         assert_eq!(scoped["data"], json!([mine]));

@@ -19,7 +19,7 @@ mitigation, listed below with the evidence that settled it.
 | API snapshot | `openapi-v1.18.30.json` (`GET /doc`, 162 paths, 188 method/route pairs in `routes-v1.18.30.txt`) |
 | Environment variables | `env-vars.txt` (85 `OPENCODE_*` names found in `packages/{opencode,core,server}`) |
 | UI asset/build digest | `opencode-ui-v1.18.30`: tree digest sha256 `348cb604b71e6f4706f3c5ee43d0f2ff44f01fce9cd8c8623b1759d9334e5ae7`, 951 files, 36,049,284 bytes (sourcemaps dropped). Tarball `opencode-ui-v1.18.30.tar.gz` sha256 `782ca629c49b1e2b620460b90c4d8ec7b1a2ad9bdc9783ba9227ad626cfb6696`. Built with `bun install --frozen-lockfile --ignore-scripts` then `bun run --cwd packages/app build` (bun 1.3.14, vite 7.1.4) by `containers/opencode-ui/build.sh`; digest checked in at `containers/opencode-ui/DIGEST` and recomputed by the node over the bytes it serves. Reproduced twice from the pinned checkout, tarball digest included. Shipped as a release asset, attested with GitHub build provenance by the `opencode-ui` job in `.github/workflows/release.yml`, installed by `tracon setup` (or `tracon setup --ui-bundle <tarball>` offline) and carried in `Dockerfile.node` |
-| Native UI route trace | `ui-route-trace.tsv`: 60 request shapes, captured by driving the served bundle in headless Chromium over CDP against the pinned binary behind the mediated gateway (`node/tests/opencode_route_trace.rs`, `TRACON_UI_TRACE=1`). 31 readable, 5 mediated (2 answered, 3 refused), 2 mediated-but-unavailable, 8 forbidden, 7 asset, 2 page, 1 boot, and 4 deliberate 404s. **No route was unplaced**: every path the app used is either a route `http::ui`'s app-route table declares or a row the gateway's matrix classifies, and the check re-derives every recorded class from those two functions in CI without a browser. Finding 20 below is what the trace exposed |
+| Native UI route trace | `ui-route-trace.tsv`: 60 request shapes, captured by driving the served bundle in headless Chromium over CDP against the pinned binary behind the mediated gateway (`node/tests/opencode_route_trace.rs`, `TRACON_UI_TRACE=1`). 31 readable, 1 synthesised, 5 mediated (3 answered, 2 refused), 2 mediated-but-unavailable, 7 forbidden, 7 asset, 2 page, 1 boot, and 4 deliberate 404s. **No route was unplaced**: every path the app used is either a route `http::ui`'s app-route table declares or a row the gateway's matrix classifies, and the check re-derives every recorded class from those two functions in CI without a browser. Finding 20 below is what the trace exposed, and the `synthesised` row is its resolution: the page now streams, shows a permission control, and answers it |
 | Provider support matrix | `providers.md` §8 |
 | Mutation-policy matrix | `api-ui.md` §2 |
 
@@ -141,6 +141,10 @@ neither of them a config-rendering matter:
 
 ### Finding 20 — the native UI's only live channel is the global stream tracon refuses
 
+**Resolved: synthesised, session-scoped.** The node serves `GET /global/event`
+itself rather than forwarding it. What follows is the finding as it was found;
+the resolution is at the end.
+
 Found by capturing the route trace (`ui-route-trace.tsv`). The app opens
 **`GET /global/event`** at startup and reopens it whenever it drops — eight attempts
 across the tour — and opens nothing else that streams. It never calls
@@ -158,19 +162,88 @@ every view the tour opened is served from the readable routes, which the app pol
 
 Three things follow, none of them "widen the matrix".
 
-- **The native UI is usable but not live under tracon today.** It renders, it accepts a
-  prompt, it shows history, and it answers permissions when told to; it does not update
-  by itself. That belongs in Gate D's account of what the origin delivers.
+- **The native UI was usable but not live under tracon.** It rendered, it accepted a
+  prompt, it showed history, and it answered permissions when told to; it did not update
+  by itself. *(Closed below: it is live now, and Gate D's account of what the origin
+  delivers says so.)*
 - **The seam is tracon's to close, on tracon's terms.** The node already holds the
   per-session durable stream and its own event bus. A same-origin `/global/event`
   *synthesised by the node* from the sessions the caller's cookie names — sequenced,
   replayable, scoped to one session — would satisfy the app without proxying anything
   unscoped. That is a route tracon serves, not a route it forwards, so it is a new row
-  in the app-route table rather than a hole in the deny list.
+  in the app-route table rather than a hole in the deny list. *(This is what was
+  built; see "The resolution".)*
 - **Two more startup calls are refused and survive it**: `GET /global/config` (a global
   config read, on the deny list beside its write) and `GET /experimental/resource` (the
   experimental tree). The app retries both and carries on. They are named here so the
   next reader knows the 403s in the trace are deliberate.
+
+#### The resolution
+
+`GET /global/event` is now a route the node **answers**, not one it forwards —
+`Class::Synthesised` in the matrix, `synthesised` in the trace, and a class of
+its own precisely because "served by tracon" and "proxied from the harness" are
+different facts. The upstream stream is still never opened on a browser's
+behalf, and `GET /event` and `GET /api/event` are still refused by name.
+
+- **Where the events come from.** The adapter already runs the only two readers
+  of the harness's streams: the durable per-session one ingestion is anchored
+  on, and the server-wide `/api/event` that carries the asks the durable one
+  does not. Both now offer every event they see to
+  `gateway::native_events::NativeEvents` on the way past
+  (`DurableCursor::observe`). Nothing opens a second connection — two readers
+  for one sequence is the bug the sequence exists to prevent (finding 6).
+- **What the browser gets.** The app's own global envelope,
+  `{directory, payload: {id, type, properties}}`, with `directory` this
+  session's pinned workspace. The app runs its v2 adapter only on the v2
+  transport, so the node does that normalisation itself: a
+  `permission.v2.asked` reaches the page as `permission.asked` with
+  `permission`/`patterns`/`always`/`tool`, which is what the page switches on.
+  `server.connected` leads, a `server.heartbeat` follows every 10 s, and both
+  are minted per connection rather than relayed.
+- **What it will not carry.** A closed allowlist of session-scoped types, and
+  an event that does not *name* this session — in `data.sessionID`, the info or
+  part it carries, or the durable aggregate — is dropped rather than broadcast.
+  Global, config, auth, installation, catalogue, MCP, LSP, PTY and project
+  events are not on it at all.
+- **It replays, which upstream could not.** Frames are numbered by the node and
+  served with that number as the SSE `id:`, so the v1 SSE client — which does
+  parse `id:` and resend `Last-Event-ID` — resumes instead of restarting. A
+  client with no resume point starts at the head; correctness still rests on
+  the durable stream, and this is the UI's view of it.
+- **Pending asks on load.** The app never learns those from the stream, and
+  `GET /permission`, `GET /question` and their v2 spellings are **instance**-wide:
+  the path names no session, and pinning `?directory=` does not separate
+  siblings that share a workspace. The gateway now filters those four bodies to
+  this session, so a permission raised before the tab opened is on the page and
+  a sibling's is not.
+
+Two things the live tour turned up on the way, both fixed here:
+
+- **The app's own answer 404'd.** It is a v1 client, so it replies on
+  `POST /session/{id}/permissions/{permissionID}` — but this build *raises* its
+  asks in the v2 permission system, whose store that handler does not read. The
+  control appeared and did nothing. The gateway now spells the answer the way
+  the ask was raised, onto `/api/session/{id}/permission/{id}/reply`, which is
+  also the route tracon's own adapter and reconciliation already use — so the
+  whole node speaks one vocabulary and a re-sent reply is the same request.
+- **Dropping the adapter's event channel stops the node reading the harness.**
+  `tx.is_closed()` ends the permission pump outright and a failed send ends the
+  durable one. The tour was doing exactly that, which is why its first run saw
+  a working stream carrying nothing.
+
+**The evidence.** In the captured trace `GET /global/event` is `200 synthesised`,
+opened 3 times across the tour rather than retried 8 times and refused. In the
+same run the harness raised a real `bash` permission, **the page showed a
+control for it** ("Allow always"), and the click left as
+`POST /session/ses_x/permissions/per_x → 204 mediated` — the app's own route,
+with no hand-answering step in the trace at all. The node recorded the answer as
+`once` with `broadening_refused`, so the `always` the operator clicked reached
+the harness narrowed (finding 2), asserted in the tour rather than read off a
+screenshot. Beside it, `node/tests/opencode_gateway.rs` proves the shape, the
+scoping, the resume and that the harness is never asked for an event stream;
+`node/tests/opencode_ingest.rs` proves the tap is fed by the existing pumps and
+that the durable stream is still opened exactly once.
 
 The trace also settles the shape question the matrix was written against: **this build
 of the app is a v1 client.** It calls `/session/{id}/message`, `/session/{id}/todo`,

@@ -1014,7 +1014,8 @@ async fn the_other_global_streams_are_still_refused_and_nothing_is_proxied() {
 #[tokio::test]
 async fn the_pending_permission_snapshot_is_scoped_to_this_session() {
     let rig = Rig::new().await;
-    rig.fake.pending_permission_for(SESSION, PERMISSION, "call_1");
+    rig.fake
+        .pending_permission_for(SESSION, PERMISSION, "call_1");
     rig.fake
         .pending_permission_for("ses_other", "per_theirs", "call_9");
 

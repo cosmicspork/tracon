@@ -46,10 +46,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use tracon::{
-    adapter::{
-        opencode::OpenCodeAdapter, DurableCursor, HarnessAdapter, HarnessHandle, LaunchSpec,
-        NativeApi,
-    },
+    adapter::{opencode::OpenCodeAdapter, DurableCursor, HarnessAdapter, LaunchSpec, NativeApi},
     broker::Broker,
     config::{Config, ModelDecl, Provider, SHAPE_ANTHROPIC},
     gateway::model::harness_wiring,
@@ -1029,7 +1026,11 @@ pub async fn run(trace_path: &Path) {
     // and an unowned session is what the foreign-id refusals are asked about.
     let mine = live.handle.harness_session_id().to_string();
     let (status, created) = live
-        .ask("POST", "/api/session", Some(json!({ "title": "another session" })))
+        .ask(
+            "POST",
+            "/api/session",
+            Some(json!({ "title": "another session" })),
+        )
         .await;
     let theirs = created["data"]["id"]
         .as_str()

@@ -28,8 +28,8 @@ use tracon::adapter::{
     opencode::OpenCodeAdapter, DurableCursor, HarnessAdapter, HarnessEvent, LaunchSpec,
     PermissionReply,
 };
-use tracon::runner::Runner;
 use tracon::gateway::native_events::NativeEvents;
+use tracon::runner::Runner;
 use tracon::session::ingest::{Ingest, Reconcile};
 use tracon::session::state::SessionState;
 use tracon::session::supervisor::{Command, Supervisor};

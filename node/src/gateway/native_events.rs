@@ -393,7 +393,10 @@ mod tests {
             "server.heartbeat",
         ] {
             assert!(
-                !events.offer(MINE, &json!({ "type": kind, "data": { "sessionID": MINE } })),
+                !events.offer(
+                    MINE,
+                    &json!({ "type": kind, "data": { "sessionID": MINE } })
+                ),
                 "{kind} must not reach a browser"
             );
         }
