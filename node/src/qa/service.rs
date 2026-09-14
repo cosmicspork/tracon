@@ -534,15 +534,19 @@ async fn prepare_command_run(
     // Configuration already refuses credential-shaped argv; this refuses an
     // argv that came out of substitution carrying the credential's actual
     // value, which configuration cannot see.
-    let visible: Vec<&Vec<String>> = deploy_argv.iter().collect();
-    for argv in visible {
-        for part in argv {
-            if secrets.iter().any(|secret| part.contains(secret)) {
-                return Err(
-                    "the deploy command's arguments would carry the brokered credential; a credential reaches a command as environment only"
-                        .into(),
-                );
-            }
+    let arguments = deployment
+        .command
+        .iter()
+        .chain(deployment.args.values())
+        .chain(deployment.discover.iter().flat_map(|d| d.command.iter()))
+        .chain(deployment.status.iter().flat_map(|s| s.command.iter()))
+        .chain(deploy_argv.iter().flatten());
+    for part in arguments {
+        if secrets.iter().any(|secret| part.contains(secret)) {
+            return Err(
+                "this QA target's arguments would carry the brokered credential; a credential reaches a command as environment only"
+                    .into(),
+            );
         }
     }
 
