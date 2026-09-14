@@ -1472,9 +1472,11 @@ pub struct Consulta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Harness {
-    /// Harness id: `opencode` or `claude`. An unknown id refuses to start,
-    /// and so does the retired `omp` — with the migration path rather than a
-    /// bare refusal (`crate::adapter::RETIRED_MESSAGE`).
+    /// Harness id: `opencode` or `claude`. An unknown id refuses to start. A
+    /// `node.toml` that still names the retired `omp` is migrated to
+    /// `opencode` as it loads (`crate::legacy::migrate_config`); a config
+    /// that says `omp` anyway is refused with the migration path rather than
+    /// a bare refusal (`crate::adapter::RETIRED_MESSAGE`).
     pub id: String,
     /// The tools a session may use at all, by the harness's own names. Empty
     /// means the harness's default set, which is the default here.
@@ -2065,6 +2067,17 @@ impl Config {
     pub fn try_load_from(path: &Path) -> Result<Self, String> {
         match std::fs::read_to_string(path) {
             Ok(text) => {
+                // Before parsing into the struct: the retired harness is a
+                // value the struct accepts and the node then refuses, and
+                // every load — `serve`'s and `setup`'s alike — should see the
+                // file the node can run.
+                let text = match crate::legacy::migrate_config(&text) {
+                    Some(migration) => {
+                        crate::legacy::apply_config_migration(path, &migration);
+                        migration.text
+                    }
+                    None => text,
+                };
                 let mut config: Self = toml::from_str(&text)
                     .map_err(|error| format!("{}: {error}", path.display()))?;
                 for (name, provider) in default_providers() {

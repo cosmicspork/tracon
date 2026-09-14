@@ -434,9 +434,38 @@ fn unit_text() -> Result<String> {
 /// minimal one without podman, gh, glab or uv, so the unit carries the PATH
 /// of whoever installed it, then the usual install locations.
 fn service_path(home: Option<PathBuf>) -> String {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+    compose_service_path(
+        std::env::var_os("PATH"),
+        std::env::var_os("APPDIR").map(PathBuf::from),
+        home,
+    )
+}
+
+/// A directory that exists only while an AppImage runs: its FUSE mount
+/// (`/tmp/.mount_*`), the directory `--appimage-extract-and-run` unpacks to
+/// (`/tmp/appimage_extracted_*`), or anything under the `APPDIR` it exported.
+/// The desktop app installs the service from inside one, so its PATH carries
+/// these; in a unit they name directories that are gone by the next boot, and
+/// until then shadow the host's own binaries with the bundle's.
+fn transient_bundle_dir(dir: &Path, appdir: Option<&Path>) -> bool {
+    if appdir.is_some_and(|app| app.is_absolute() && dir.starts_with(app)) {
+        return true;
+    }
+    dir.components().any(|c| {
+        let name = c.as_os_str().to_string_lossy();
+        name.starts_with(".mount_") || name.starts_with("appimage_extracted_")
+    })
+}
+
+fn compose_service_path(
+    current: Option<std::ffi::OsString>,
+    appdir: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> String {
+    let mut dirs: Vec<PathBuf> = current
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
+    dirs.retain(|d| !transient_bundle_dir(d, appdir.as_deref()));
     let usual = [
         home.map(|h| h.join(".local/bin")),
         Some("/opt/homebrew/bin".into()),
@@ -678,6 +707,53 @@ mod tests {
         let exe = std::env::current_exe().unwrap();
         let text = unit_text().unwrap();
         assert!(text.contains(&*exe.to_string_lossy()), "{text}");
+    }
+
+    #[test]
+    fn the_units_path_drops_what_only_exists_while_an_appimage_runs() {
+        let current = std::env::join_paths([
+            "/tmp/.mount_traconAb12/usr/bin",
+            "/tmp/appimage_extracted_0123abcd/usr/bin",
+            "/tmp/appimage_extracted_0123abcd/usr/sbin",
+            "/opt/apps/tracon.AppDir/usr/lib/helpers",
+            "/home/op/.local/bin",
+            "/home/linuxbrew/.linuxbrew/bin",
+            "/usr/bin",
+        ])
+        .unwrap();
+        let path = compose_service_path(
+            Some(current),
+            Some("/opt/apps/tracon.AppDir".into()),
+            Some("/home/op".into()),
+        );
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert_eq!(
+            dirs[..3],
+            [
+                PathBuf::from("/home/op/.local/bin"),
+                PathBuf::from("/home/linuxbrew/.linuxbrew/bin"),
+                PathBuf::from("/usr/bin"),
+            ],
+            "{path}"
+        );
+        assert!(!path.contains("mount_"), "{path}");
+        assert!(!path.contains("appimage_extracted_"), "{path}");
+        assert!(!path.contains("AppDir"), "{path}");
+        // The usual locations still follow, once each.
+        assert!(dirs.contains(&PathBuf::from("/bin")), "{path}");
+        assert_eq!(
+            dirs.iter().filter(|d| *d == Path::new("/usr/bin")).count(),
+            1
+        );
+
+        // Without an APPDIR only the recognisable bundle directories go; a
+        // directory that merely resembles one by prefix stays.
+        let path = compose_service_path(
+            Some("/tmp/.mount_x/usr/bin:/srv/mount_points/bin".into()),
+            None,
+            None,
+        );
+        assert!(path.starts_with("/srv/mount_points/bin:"), "{path}");
     }
 
     #[test]

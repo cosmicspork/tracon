@@ -21,8 +21,19 @@
 //! The provider login volumes need no step here: `Providers::connect` clears a
 //! provider's login volume before every sign-in, so whatever omp's login wrote
 //! into one is gone the first time the operator signs in again.
+//!
+//! `node.toml` is the other thing it left. Versions before the cutover wrote
+//! that file in full, so an operator who never touched `[harness]` still has
+//! `id = "omp"` in it, and a node that refused to start on that turned an app
+//! update into a crash loop nobody chose. So a file that still names omp is
+//! migrated as it is loaded (`migrate_config`): the harness becomes OpenCode,
+//! and the values omp's defaults put beside it become OpenCode's — only values
+//! that are recognisably those defaults, never something the operator chose.
+//! The original is kept beside it. The sessions omp ran are not touched here:
+//! a node serves with them in place, and archiving them stays the explicit
+//! `tracon session archive-legacy`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 
@@ -55,7 +66,7 @@ pub fn retire_credentials() -> Vec<Artifact> {
     retire_credentials_in(&Config::harness_state_dir())
 }
 
-fn retire_credentials_in(harness_state: &std::path::Path) -> Vec<Artifact> {
+fn retire_credentials_in(harness_state: &Path) -> Vec<Artifact> {
     ARTIFACTS
         .iter()
         .map(|(relative, what)| {
@@ -70,6 +81,168 @@ fn retire_credentials_in(harness_state: &std::path::Path) -> Vec<Artifact> {
             }
         })
         .collect()
+}
+
+/// What `migrate_config` made of a `node.toml` that still named the retired
+/// harness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigMigration {
+    /// The migrated file, as it is written back and then loaded.
+    pub text: String,
+    /// The keys it changed, dotted, for the operator reading the warning.
+    pub changed: Vec<String>,
+}
+
+/// The repositories omp's image defaults named: the local build, and the
+/// published image the pod runtime pulled at a versioned tag. OpenCode's are
+/// `…-opencode`, which these deliberately do not match.
+const RETIRED_IMAGES: &[&str] = &[
+    "localhost/tracon-harness",
+    "ghcr.io/cosmicspork/tracon-harness",
+];
+
+/// Egress the harness logins need that files written before those logins
+/// existed do not allow: `claude setup-token` exchanges its code at
+/// `platform.claude.com` and reads client metadata from `claude.ai`. Both are
+/// in the default `gateway.allow_hosts`.
+const LOGIN_HOSTS: &[&str] = &[r"^platform\.claude\.com$", r"^claude\.ai$"];
+
+/// The suffix of the untouched original kept beside a migrated `node.toml`.
+pub const CONFIG_BACKUP_SUFFIX: &str = ".pre-opencode";
+
+fn is_retired_image(value: &str) -> bool {
+    RETIRED_IMAGES.iter().any(|repo| {
+        value
+            .strip_prefix(repo)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(':') || rest.starts_with('@'))
+    })
+}
+
+fn table<'a>(doc: &'a mut toml::Table, path: &[&str]) -> Option<&'a mut toml::Table> {
+    path.iter()
+        .try_fold(doc, |t, key| t.get_mut(*key)?.as_table_mut())
+}
+
+fn replace_retired_image(
+    doc: &mut toml::Table,
+    path: &[&str],
+    current: &str,
+    changed: &mut Vec<String>,
+) {
+    let Some(image) = table(doc, path).and_then(|t| t.get_mut("harness_image")) else {
+        return;
+    };
+    if image.as_str().is_some_and(is_retired_image) {
+        *image = toml::Value::String(current.to_string());
+        changed.push(format!("{}.harness_image", path.join(".")));
+    }
+}
+
+/// Migrate the text of a `node.toml` whose `[harness] id` is the retired
+/// harness. None for every other file — including one that does not parse,
+/// which the ordinary load reports with its line and column.
+///
+/// Only keys the file already has are touched, so a key the operator left out
+/// keeps following the defaults; and only values that are omp's own defaults
+/// are replaced, so an image or host the operator chose survives.
+pub fn migrate_config(text: &str) -> Option<ConfigMigration> {
+    let mut doc: toml::Table = toml::from_str(text).ok()?;
+    let harness = table(&mut doc, &["harness"])?;
+    if harness.get("id")?.as_str()? != crate::adapter::RETIRED {
+        return None;
+    }
+    let mut changed = vec!["harness.id".to_string()];
+    harness.insert(
+        "id".into(),
+        toml::Value::String(crate::adapter::opencode::OpenCodeAdapter::ID.into()),
+    );
+    // omp's pinned version means nothing to OpenCode; empty is the version
+    // this node's OpenCode image installs.
+    if let Some(version) = harness.get_mut("version") {
+        if version.as_str().is_some_and(|v| !v.is_empty()) {
+            *version = toml::Value::String(String::new());
+            changed.push("harness.version".into());
+        }
+    }
+
+    let defaults = Config::default();
+    replace_retired_image(
+        &mut doc,
+        &["boundary"],
+        &defaults.boundary.harness_image,
+        &mut changed,
+    );
+    replace_retired_image(
+        &mut doc,
+        &["runtime", "kubernetes"],
+        &defaults.runtime.kubernetes.harness_image,
+        &mut changed,
+    );
+    if let Some(hosts) = table(&mut doc, &["gateway"])
+        .and_then(|t| t.get_mut("allow_hosts"))
+        .and_then(toml::Value::as_array_mut)
+    {
+        let before = hosts.len();
+        for host in LOGIN_HOSTS {
+            if !hosts.iter().any(|h| h.as_str() == Some(host)) {
+                hosts.push(toml::Value::String((*host).into()));
+            }
+        }
+        if hosts.len() != before {
+            changed.push("gateway.allow_hosts".into());
+        }
+    }
+
+    let text = toml::to_string_pretty(&doc).ok()?;
+    Some(ConfigMigration { text, changed })
+}
+
+/// Where the original of a migrated `node.toml` is kept.
+pub fn config_backup_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "node.toml".into());
+    path.with_file_name(format!("{name}{CONFIG_BACKUP_SUFFIX}"))
+}
+
+/// Write a migration back, keeping the original beside it. An existing backup
+/// is never replaced: it is the operator's real original, and a file put back
+/// to omp by hand and migrated a second time is not.
+pub fn persist_config_migration(
+    path: &Path,
+    migration: &ConfigMigration,
+) -> std::io::Result<PathBuf> {
+    let backup = config_backup_path(path);
+    if !backup.exists() {
+        // A copy, so the backup keeps the original's permissions.
+        std::fs::copy(path, &backup)?;
+    }
+    std::fs::write(path, &migration.text)?;
+    Ok(backup)
+}
+
+/// Persist a migration and say so loudly. A file that cannot be written back
+/// still loads migrated — the node runs either way — and the warning repeats
+/// on every load until it can be.
+pub fn apply_config_migration(path: &Path, migration: &ConfigMigration) {
+    let changed = migration.changed.join(", ");
+    let next = "run `tracon setup` to build the OpenCode image, and \
+                `tracon session archive-legacy` to put omp's sessions away read-only";
+    match persist_config_migration(path, migration) {
+        Ok(backup) => tracing::warn!(
+            path = %path.display(),
+            backup = %backup.display(),
+            %changed,
+            "node.toml named the retired `omp` harness, so it was migrated to `opencode`; {next}"
+        ),
+        Err(error) => tracing::warn!(
+            path = %path.display(),
+            %changed,
+            %error,
+            "node.toml names the retired `omp` harness; running as `opencode`, but the migration could not be written back; {next}"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -98,6 +271,249 @@ mod tests {
         // reporting a second removal that did not happen.
         let again = retire_credentials_in(&dir);
         assert!(!again[0].removed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a node.toml written in full by a pre-cutover version looks like,
+    /// trimmed to the keys the migration reads plus a few it must leave alone,
+    /// and one host the operator added.
+    const PRE_CUTOVER: &str = r#"
+node_name = "laptop"
+
+[harness]
+id = "omp"
+version = "18.0.4"
+tools = []
+
+[boundary]
+network = "tracon-int"
+gateway_image = "localhost/tracon-gateway"
+harness_image = "localhost/tracon-harness"
+login_image = "localhost/tracon-harness-claude"
+
+[gateway]
+allow_hosts = ['^api\.anthropic\.com$', '^api\.openai\.com$', '^chatgpt\.com$', '^auth\.openai\.com$', '^git\.internal\.example$']
+proxy_port = 8888
+
+[runtime.kubernetes]
+harness_image = "ghcr.io/cosmicspork/tracon-harness:0.2.1"
+state_claim = "tracon-state"
+"#;
+
+    #[test]
+    fn a_pre_cutover_node_toml_becomes_opencode_and_keeps_what_the_operator_chose() {
+        let migration = migrate_config(PRE_CUTOVER).expect("an omp file migrates");
+        let cfg: Config = toml::from_str(&migration.text).unwrap();
+        let defaults = Config::default();
+
+        assert_eq!(cfg.harness.id, "opencode");
+        assert_eq!(cfg.harness.version, "");
+        assert_eq!(cfg.boundary.harness_image, defaults.boundary.harness_image);
+        assert_eq!(
+            cfg.runtime.kubernetes.harness_image,
+            defaults.runtime.kubernetes.harness_image
+        );
+        // The migrated config resolves to an adapter: the node starts.
+        assert!(crate::adapter::adapter_for(&cfg).is_ok());
+
+        // The logins' hosts are added after what was there, which keeps its
+        // order and the operator's own host.
+        let hosts = &cfg.gateway.allow_hosts;
+        assert_eq!(
+            hosts[..5],
+            [
+                r"^api\.anthropic\.com$",
+                r"^api\.openai\.com$",
+                r"^chatgpt\.com$",
+                r"^auth\.openai\.com$",
+                r"^git\.internal\.example$",
+            ]
+        );
+        for host in LOGIN_HOSTS {
+            assert!(hosts.iter().any(|h| h == host), "{host} missing: {hosts:?}");
+            assert!(defaults.gateway.allow_hosts.iter().any(|h| h == host));
+        }
+        assert_eq!(hosts.len(), 7);
+
+        // What the migration had no business with is exactly as it was.
+        assert_eq!(cfg.node_name, "laptop");
+        assert_eq!(cfg.boundary.login_image, "localhost/tracon-harness-claude");
+        assert_eq!(cfg.gateway.proxy_port, 8888);
+
+        assert_eq!(
+            migration.changed,
+            [
+                "harness.id",
+                "harness.version",
+                "boundary.harness_image",
+                "runtime.kubernetes.harness_image",
+                "gateway.allow_hosts",
+            ]
+        );
+        // And the result is not migrated a second time.
+        assert_eq!(migrate_config(&migration.text), None);
+    }
+
+    #[test]
+    fn only_omps_own_image_defaults_are_replaced() {
+        let text = r#"
+[harness]
+id = "omp"
+
+[boundary]
+harness_image = "registry.example/team/harness:3"
+
+[runtime.kubernetes]
+harness_image = "ghcr.io/cosmicspork/tracon-harness-opencode:0.15.0"
+"#;
+        let migration = migrate_config(text).unwrap();
+        let cfg: Config = toml::from_str(&migration.text).unwrap();
+        assert_eq!(cfg.harness.id, "opencode");
+        assert_eq!(
+            cfg.boundary.harness_image,
+            "registry.example/team/harness:3"
+        );
+        assert_eq!(
+            cfg.runtime.kubernetes.harness_image,
+            "ghcr.io/cosmicspork/tracon-harness-opencode:0.15.0"
+        );
+        // Keys the file never had keep following the defaults.
+        assert_eq!(
+            cfg.gateway.allow_hosts,
+            Config::default().gateway.allow_hosts
+        );
+        assert_eq!(migration.changed, ["harness.id"]);
+
+        assert!(is_retired_image("localhost/tracon-harness"));
+        assert!(is_retired_image("ghcr.io/cosmicspork/tracon-harness:0.2.1"));
+        assert!(is_retired_image(
+            "ghcr.io/cosmicspork/tracon-harness@sha256:abc"
+        ));
+        assert!(!is_retired_image("localhost/tracon-harness-claude"));
+        assert!(!is_retired_image(
+            "ghcr.io/cosmicspork/tracon-harness-opencode:0.16.0"
+        ));
+    }
+
+    #[test]
+    fn supported_unknown_and_unparseable_files_are_not_migrated() {
+        assert_eq!(migrate_config("[harness]\nid = \"opencode\"\n"), None);
+        assert_eq!(
+            migrate_config("[harness]\nid = \"claude\"\nversion = \"2.0.0\"\n"),
+            None
+        );
+        // An unknown id is still the adapter's refusal, not a guess.
+        assert_eq!(migrate_config("[harness]\nid = \"aider\"\n"), None);
+        assert_eq!(migrate_config("node_name = \"n\"\n"), None);
+        assert_eq!(migrate_config("[harness\nid = \"omp\"\n"), None);
+    }
+
+    /// A pod-hosted node: the `tracon-node` image reading a node.toml an older
+    /// version wrote onto its state volume. Nobody edits that file by hand,
+    /// so the next release has to come up healthy on the migration alone.
+    #[test]
+    fn a_pre_cutover_kubernetes_node_comes_up_on_the_published_opencode_image() {
+        let dir = std::env::temp_dir().join(format!("tracon-legacy-k8s-{}", uuid::Uuid::now_v7()));
+        let path = dir.join("state/config/tracon/node.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = r#"
+node_name = "tracon-node-0"
+
+[harness]
+id = "omp"
+version = "18.0.4"
+
+[boundary]
+harness_image = "localhost/tracon-harness"
+
+[gateway]
+allow_hosts = ['^api\.anthropic\.com$', '^api\.openai\.com$', '^chatgpt\.com$', '^auth\.openai\.com$']
+
+[runtime]
+kind = "kubernetes"
+
+[runtime.kubernetes]
+harness_image = "ghcr.io/cosmicspork/tracon-harness:0.12.1"
+state_claim = "tracon-state"
+"#;
+        std::fs::write(&path, original).unwrap();
+
+        let cfg = Config::try_load_from(&path).unwrap();
+        assert!(crate::adapter::adapter_for(&cfg).is_ok());
+        assert_eq!(cfg.harness.id, "opencode");
+        assert_eq!(
+            crate::adapter::pinned_version(&cfg),
+            crate::adapter::image_version("opencode")
+        );
+        assert_eq!(cfg.runtime.kind, crate::config::RuntimeKind::Kubernetes);
+        assert_eq!(
+            cfg.runtime.kubernetes.harness_image,
+            format!(
+                "ghcr.io/cosmicspork/tracon-harness-opencode:{}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert_eq!(cfg.runtime.kubernetes.state_claim, "tracon-state");
+        assert_eq!(
+            cfg.boundary.harness_image,
+            "localhost/tracon-harness-opencode"
+        );
+        assert_eq!(
+            cfg.gateway.allow_hosts,
+            [
+                r"^api\.anthropic\.com$",
+                r"^api\.openai\.com$",
+                r"^chatgpt\.com$",
+                r"^auth\.openai\.com$",
+                r"^platform\.claude\.com$",
+                r"^claude\.ai$",
+            ]
+        );
+
+        // Written back onto the volume, with the original beside it, so the
+        // next start (and every one after) loads it without migrating again.
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(migrate_config(&written), None);
+        assert_eq!(
+            std::fs::read_to_string(path.with_file_name("node.toml.pre-opencode")).unwrap(),
+            original
+        );
+        let again = Config::try_load_from(&path).unwrap();
+        assert_eq!(
+            again.runtime.kubernetes.harness_image,
+            cfg.runtime.kubernetes.harness_image
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loading_a_pre_cutover_file_persists_the_migration_beside_a_backup() {
+        let dir = std::env::temp_dir().join(format!("tracon-legacy-cfg-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node.toml");
+        std::fs::write(&path, PRE_CUTOVER).unwrap();
+
+        let cfg = Config::try_load_from(&path).unwrap();
+        assert_eq!(cfg.harness.id, "opencode");
+        let backup = dir.join("node.toml.pre-opencode");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), PRE_CUTOVER);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(migrate_config(&written), None, "{written}");
+        assert_eq!(
+            toml::from_str::<Config>(&written).unwrap().harness.id,
+            "opencode"
+        );
+
+        // Put back to omp by hand and loaded again: migrated again, but the
+        // backup is still the real original.
+        std::fs::write(&path, "[harness]\nid = \"omp\"\n").unwrap();
+        assert_eq!(Config::try_load_from(&path).unwrap().harness.id, "opencode");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), PRE_CUTOVER);
+
+        // An unknown id is still refused where the node starts.
+        std::fs::write(&path, "[harness]\nid = \"aider\"\n").unwrap();
+        let cfg = Config::try_load_from(&path).unwrap();
+        assert!(crate::adapter::adapter_for(&cfg).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

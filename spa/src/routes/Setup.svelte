@@ -2,16 +2,18 @@
   import { onMount } from 'svelte'
   import {
     blocked,
+    canRestartNode,
     installCli,
     installService,
     openNode,
+    restartNode,
     setupStatus,
     setupSteps,
     type SetupStatus,
   } from '../lib/desktop-setup'
 
   let status = $state<SetupStatus | null>(null)
-  let busy = $state<'service' | 'cli' | null>(null)
+  let busy = $state<'service' | 'cli' | 'restart' | null>(null)
   let error = $state<string | null>(null)
 
   const steps = $derived(status ? setupSteps(status) : [])
@@ -27,7 +29,7 @@
     }
   }
 
-  async function run(what: 'service' | 'cli', f: () => Promise<SetupStatus>) {
+  async function run(what: 'service' | 'cli' | 'restart', f: () => Promise<SetupStatus>) {
     busy = what
     error = null
     try {
@@ -65,13 +67,25 @@
           <div>
             <strong>{s.title}</strong>
             <small>{s.detail}</small>
+            {#if s.reason}
+              <code class="reason">{s.reason}</code>
+            {/if}
             {#if s.command}
               <code>{s.command}</code>
             {/if}
-            {#if s.id === 'service' && !s.done && status.owner !== 'foreign'}
-              <button class="btn p" disabled={busy !== null || stuck} onclick={() => run('service', installService)}>
-                {busy === 'service' ? 'Installing…' : 'Install and start'}
-              </button>
+            {#if s.id === 'service' && (canRestartNode(status) || (!s.done && status.owner !== 'foreign'))}
+              <div class="row">
+                {#if canRestartNode(status)}
+                  <button class="btn" class:p={!s.done} disabled={busy !== null} onclick={() => run('restart', restartNode)}>
+                    {busy === 'restart' ? 'Restarting…' : 'Restart node'}
+                  </button>
+                {/if}
+                {#if !s.done && status.owner !== 'foreign'}
+                  <button class="btn" class:p={!status.service_installed} disabled={busy !== null || stuck} onclick={() => run('service', installService)}>
+                    {busy === 'service' ? 'Installing…' : status.service_installed ? 'Reinstall and start' : 'Install and start'}
+                  </button>
+                {/if}
+              </div>
             {:else if s.id === 'cli' && status.cli_version !== status.sidecar_version}
               <button class="btn" disabled={busy !== null} onclick={() => run('cli', installCli)}>
                 {busy === 'cli' ? 'Installing…' : 'Install'}
@@ -147,6 +161,14 @@
     border-radius: 3px;
     user-select: all;
     overflow-wrap: anywhere;
+  }
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  code.reason {
+    color: var(--crit);
   }
   .err {
     margin: 0;

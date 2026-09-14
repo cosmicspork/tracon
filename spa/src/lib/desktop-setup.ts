@@ -10,6 +10,10 @@ export interface SetupStatus {
   path_hint: string | null
   service_installed: boolean
   service_running: boolean
+  // Installed, and the node keeps exiting under it.
+  service_failing: boolean
+  // What the node said as it exited, while it is failing.
+  service_error: string | null
   podman: string | null
   machine: 'running' | 'starting' | 'stopped' | 'missing' | null
 }
@@ -19,6 +23,8 @@ export interface SetupStep {
   title: string
   detail: string
   command?: string
+  // Why it is not working, in the node's own words.
+  reason?: string
   done: boolean
   // Nothing after it can work until it is done.
   blocking: boolean
@@ -27,6 +33,7 @@ export interface SetupStep {
 function serviceStep(s: SetupStatus): SetupStep {
   const manager = s.platform === 'macos' ? 'launchd' : 'systemd'
   const step = { id: 'service' as const, title: 'Background service', done: false, blocking: false }
+  const reason = s.service_failing ? (s.service_error ?? undefined) : undefined
   switch (s.owner) {
     case 'service':
       return {
@@ -35,13 +42,18 @@ function serviceStep(s: SetupStatus): SetupStep {
         detail: `The node${s.node_version ? ` v${s.node_version}` : ''} runs under ${manager} and keeps running when this app quits.`,
       }
     case 'foreign':
-      return { ...step, detail: 'A node you started yourself is answering. Stop it, then install the service here.' }
+      return { ...step, reason, detail: 'A node you started yourself is answering. Stop it, then install the service here.' }
     case 'migrated':
       return {
         ...step,
         detail: 'The node is running inside this app, as earlier versions ran it. Installing the service moves it there; running sessions end.',
       }
     case 'none':
+      if (s.service_failing) {
+        return reason
+          ? { ...step, reason, detail: 'Installed, but the node keeps exiting. The last thing it said:' }
+          : { ...step, detail: 'Installed, but the node keeps exiting.', command: 'tracon service status' }
+      }
       return s.service_installed
         ? { ...step, detail: 'Installed, but the node is not answering.', command: 'tracon service status' }
         : { ...step, detail: `Runs the node under ${manager} at login, whether or not this app is open.` }
@@ -85,6 +97,26 @@ export function setupSteps(s: SetupStatus): SetupStep[] {
   steps.push(serviceStep(s), cliStep(s))
   return steps
 }
+
+// One line for Settings: who runs the node, or why nothing is.
+export function nodeOwnerSummary(s: SetupStatus): string {
+  switch (s.owner) {
+    case 'service':
+      return 'runs under the service'
+    case 'migrated':
+      return 'runs inside the app; restart the app to move it under the service'
+    case 'foreign':
+      return 'started outside the app'
+    case 'none':
+      if (!s.service_installed) return 'not running'
+      return s.service_failing ? 'keeps exiting under the service' : 'not answering under the service'
+  }
+}
+
+// The unit is the app's to restart whether or not its node answers: a node
+// that will not start is exactly when the restart is wanted, and nothing
+// that needs the node (its admin surface) can offer it then.
+export const canRestartNode = (s: SetupStatus) => s.service_installed
 
 export function blocked(steps: SetupStep[]): boolean {
   return steps.some((s) => s.blocking && !s.done)

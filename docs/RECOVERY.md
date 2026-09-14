@@ -120,18 +120,43 @@ guarantees are gone and nothing says so.
 ## Migrating a node off the retired omp harness
 
 tracon's first harness was omp, and the 2026-09-13 OpenCode cutover removed it:
-the adapter, its image, its provider wiring and its catalogue workarounds. A
-node that still says `[harness] id = "omp"` refuses to start, and says this
-instead of guessing. The migration is three steps and keeps everything.
+the adapter, its image, its provider wiring and its catalogue workarounds.
+Versions before the cutover wrote `node.toml` in full, so most nodes that ran
+omp still say `[harness] id = "omp"` without anyone having chosen it.
+
+The node migrates that file the first time anything loads it — `tracon serve`
+under the service, `tracon setup`, or any other command — and logs a warning
+naming what it changed:
+
+- `[harness] id` becomes `"opencode"`, and a pinned `version` is cleared
+  (empty is the version this node's OpenCode image installs);
+- `[boundary] harness_image` and `[runtime.kubernetes] harness_image` are
+  replaced only when they are omp's own defaults (`localhost/tracon-harness`,
+  `ghcr.io/cosmicspork/tracon-harness:<tag>`); an image you chose is kept;
+- `[gateway] allow_hosts` gains `^platform\.claude\.com$` and `^claude\.ai$`
+  if it lacks them, which the Anthropic subscription login needs; hosts you
+  added stay.
+
+The original is kept beside it as `node.toml.pre-opencode` (written once, never
+overwritten). Keys the file did not have are left out, so they keep following
+the defaults; comments in a hand-written file are not carried over, which is
+what the backup is for. A harness id that is neither omp nor a supported one is
+still refused at startup rather than guessed at.
+
+What is left is two steps, and neither is needed for the node to serve:
 
 ```sh
-# 1. Point the node at a harness it has. In node.toml:
-#      [harness]
-#      id = "opencode"     # or "claude"
-#      version = ""        # empty: whatever this node's harness image installs
-tracon setup                       # builds the image, retires omp's leftovers
+tracon setup                       # builds the OpenCode image, retires omp's leftovers
 tracon session archive-legacy      # puts the omp sessions away, read-only
 ```
+
+Until the second runs, the node logs how many omp sessions are unarchived at
+every start: the ones that never ended still read as running, which holds up
+anything waiting for the node to be idle — the desktop app's restart onto a
+newer node after an update among them.
+
+To choose Claude Code instead, set `[harness] id = "claude"` (and run `tracon
+setup`) after the migration, or before it.
 
 `tracon setup` removes what omp left in node-owned state and prints each thing
 it removed — today that is `harness-state/agent/`, its login credential

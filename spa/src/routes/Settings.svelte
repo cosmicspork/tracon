@@ -27,7 +27,10 @@
     status as desktopUpdateStatus,
   } from '../lib/desktop-update'
   import {
+    canRestartNode,
     installCli as installDesktopCli,
+    nodeOwnerSummary,
+    restartNode as restartDesktopNode,
     setupStatus as desktopSetupStatus,
     type SetupStatus,
   } from '../lib/desktop-setup'
@@ -804,7 +807,7 @@
   <div class="h5 sub">Harness and limits <b>host configuration for the serving node only</b></div>
   {#if form && cfg}
     <div class="grid">
-      <label><span>Harness</span><select bind:value={form.harness.id} disabled={!local}><option value="omp">omp</option><option value="claude">claude</option></select><small>Running: {cfg.running.harness_id} {cfg.running.harness_version}</small></label>
+      <label><span>Harness</span><select bind:value={form.harness.id} disabled={!local}><option value="opencode">opencode</option><option value="claude">claude</option></select><small>Running: {cfg.running.harness_id} {cfg.running.harness_version}</small></label>
       <label><span>Harness version</span><input bind:value={form.harness.version} disabled={!local} spellcheck="false" /></label>
       <label><span>Session budget (tokens)</span><input type="number" bind:value={form.session.budget_tokens} disabled={!local} /></label>
       <label><span>Default channel</span><select bind:value={form.session.default_channel} disabled={!local}><option value="">none</option>{#each open_channels as c (c.name)}<option value={c.name}>{c.name}</option>{/each}</select><small>What the composer starts on until a browser selects another.</small></label>
@@ -829,8 +832,9 @@
     {#if !local}<small>From another machine, add <code>--header "Authorization: Bearer &lt;operator token&gt;"</code>.</small>{/if}
   {/if}
 
-  {#if desktopUpdate}
+  {#if desktopUpdate || desktopSetup}
     <div class="h5 sub">Desktop app <b>on this device</b></div>
+    {#if desktopUpdate}
     <small>
       Running v{desktopUpdate.current_version} ·
       {#if desktopUpdate.state === 'current'}
@@ -850,13 +854,18 @@
       {/if}
     </small>
     {#if desktopAction}<div class="acts"><button class="btn p" onclick={runDesktopUpdate} disabled={desktopAction.disabled}>{desktopAction.label}</button></div>{/if}
+    {/if}
     {#if desktopSetup}
       <small>
-        Node v{desktopSetup.node_version ?? '?'} ·
-        {desktopSetup.owner === 'service' ? 'runs under the service' : desktopSetup.owner === 'migrated' ? 'runs inside the app; restart the app to move it under the service' : 'started outside the app'}
+        Node{desktopSetup.node_version ? ` v${desktopSetup.node_version}` : ''} ·
+        {nodeOwnerSummary(desktopSetup)}
         · CLI {desktopSetup.cli_version ? `v${desktopSetup.cli_version}` : 'not installed'}{#if desktopSetupError} · {desktopSetupError}{/if}
       </small>
+      {#if desktopSetup.service_failing}
+        <p class="why"><b>The node keeps exiting under the service</b><i>{desktopSetup.service_error ?? 'It left no reason in its log; `tracon service status` shows what the supervisor saw.'}</i></p>
+      {/if}
       <div class="acts">
+        {#if canRestartNode(desktopSetup)}<button class="btn" class:p={desktopSetup.service_failing} disabled={desktopBusy} onclick={() => runDesktop(restartDesktopNode)}>{desktopBusy ? 'Working…' : 'Restart node'}</button>{/if}
         {#if desktopSetup.sidecar_version && desktopSetup.cli_version !== desktopSetup.sidecar_version}<button class="btn" disabled={desktopBusy} onclick={() => runDesktop(installDesktopCli)}>Install CLI v{desktopSetup.sidecar_version}</button>{/if}
       </div>
     {/if}
