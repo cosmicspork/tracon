@@ -83,8 +83,6 @@ pub enum StreamError {
     NotRecipient,
     #[error("no key for epoch {0}")]
     UnknownEpoch(String),
-    #[error("stream frame exceeds the {MAX_STREAM_FRAME_BYTES} byte limit")]
-    TooLarge,
     #[error(transparent)]
     Envelope(#[from] EnvelopeError),
     #[error("stream payload is not valid JSON: {0}")]
@@ -107,14 +105,6 @@ impl Direction {
         match self {
             Direction::Serving => "serving",
             Direction::Owner => "owner",
-        }
-    }
-
-    /// The direction a peer's frames arrive in, given what this node is.
-    pub fn peer(self) -> Direction {
-        match self {
-            Direction::Serving => Direction::Owner,
-            Direction::Owner => Direction::Serving,
         }
     }
 }
@@ -564,36 +554,6 @@ impl StreamEnvelope {
     }
 }
 
-/// The per-`(stream_id, sender)` monotonicity check. There is no dedupe table
-/// and no window: a stream's frames arrive in order on one relay connection,
-/// and anything else is a replay.
-#[derive(Debug, Default)]
-pub struct SeqGuard {
-    next: std::collections::HashMap<String, u64>,
-}
-
-impl SeqGuard {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// `true` if `seq` is the next one expected from `key`. A repeat, a gap
-    /// backwards, or a jump forwards is refused: a stream with a hole in it
-    /// is not a stream, it is a truncated one pretending otherwise.
-    pub fn admit(&mut self, key: &str, seq: u64) -> bool {
-        let slot = self.next.entry(key.to_string()).or_insert(0);
-        if seq != *slot {
-            return false;
-        }
-        *slot += 1;
-        true
-    }
-
-    pub fn forget(&mut self, key: &str) {
-        self.next.remove(key);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,17 +711,6 @@ mod tests {
             .is_err());
         assert!(epoch_key.open(&sealed, &[]).is_err());
         let _ = ring_a;
-    }
-
-    #[test]
-    fn a_sequence_is_admitted_once_and_in_order() {
-        let mut g = SeqGuard::new();
-        assert!(g.admit("s", 0));
-        assert!(!g.admit("s", 0), "a replay is refused");
-        assert!(!g.admit("s", 2), "a gap is refused");
-        assert!(g.admit("s", 1));
-        g.forget("s");
-        assert!(g.admit("s", 0));
     }
 
     /// #179's rule: an unknown variant fails the whole payload, so a peer on
