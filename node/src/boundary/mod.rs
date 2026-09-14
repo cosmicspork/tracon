@@ -92,11 +92,16 @@ pub trait Backend: Send + Sync {
     /// The harness user's home inside its runner; state and gitconfig are
     /// mounted under it.
     fn harness_home(&self) -> String;
-    /// The image a provider login helper runs in, when that helper is not the
-    /// harness this node runs sessions with. `None` means the runner's own
-    /// harness image already carries it — or that this backend runs no images
-    /// at all, which is the test backend's answer.
+    /// The image the Anthropic subscription login helper runs in, when that
+    /// helper is not the harness this node runs sessions with. `None` means
+    /// the runner's own harness image already carries it — or that this
+    /// backend runs no images at all, which is the test backend's answer.
     fn login_image(&self) -> Option<String> {
+        None
+    }
+    /// The same, for the Codex subscription login helper: `opencode auth
+    /// login openai`, which only the OpenCode image carries.
+    fn codex_login_image(&self) -> Option<String> {
         None
     }
     /// The port the node itself serves the CONNECT allowlist proxy on, when

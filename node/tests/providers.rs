@@ -242,8 +242,17 @@ async fn invalid_provider_and_manual_completion_are_refused() {
     assert!(broker.read().unwrap().is_empty());
 }
 
+/// A Codex login from a phone still works, and it needs no device-code flow
+/// of its own to do it.
+///
+/// The retired harness had two login ids for this provider — one that wanted a
+/// localhost callback and a `-device` one for everything else. `opencode auth
+/// login openai` has neither problem: it prints a URL and waits for a code to
+/// be pasted back, which is exactly what a remote owner can supply. So the
+/// completion is a paste, and the login is not refused for want of a callback
+/// this node cannot receive.
 #[tokio::test]
-async fn remote_codex_uses_device_authorization() {
+async fn a_remote_codex_login_completes_by_paste_rather_than_a_callback() {
     state::isolate();
     let fake = Arc::new(LoginFake::default());
     let (p, _broker, _bus) = providers("device_login", fake);
@@ -257,9 +266,9 @@ async fn remote_codex_uses_device_authorization() {
         )
         .await
         .unwrap();
-    assert_eq!(result.completion, LoginCompletion::DeviceCode);
-    assert_eq!(result.url, "https://login.example/openai-codex-device");
-    assert_eq!(result.device_code.as_deref(), Some("ABCD-1234"));
+    assert_eq!(result.completion, LoginCompletion::Paste);
+    assert_eq!(result.url, "https://login.example/openai");
+    assert_eq!(result.device_code, None);
 
     p.disconnect("openai-codex", &LoginOwner::Peer("phone".into()))
         .await
@@ -311,32 +320,42 @@ async fn a_cancelled_startup_cannot_remove_the_next_login_generation() {
     p.disconnect("anthropic", &LoginOwner::Local).await.unwrap();
 }
 
-/// The login client and the session harness are independent now. Only Claude
-/// Code can mint an Anthropic subscription token, so that login goes through
-/// the Claude adapter even on a node whose sessions run omp — and the Codex
-/// login, which omp does broker, stays where it was.
+/// The login client and the session harness are independent. Each
+/// subscription has exactly one client that can mint it: `claude setup-token`
+/// for Anthropic, `opencode auth login openai` for Codex. So each login goes
+/// to its own adapter whatever `[harness] id` names, and the harness the node
+/// runs sessions with keeps only the logins nothing else claims.
+///
+/// The retired harness used to broker Codex for a node running anything else.
+/// With it gone, a Claude Code node that could not sign in to Codex at all
+/// would be the regression, which is what the second half asserts.
 #[test]
-fn the_anthropic_login_runs_through_claude_whatever_harness_runs_sessions() {
+fn each_subscription_login_runs_through_the_one_client_that_mints_it() {
     state::isolate();
     let mut cfg = Config::default();
-    cfg.harness.id = "omp".into();
-    let omp: Arc<dyn tracon::adapter::HarnessAdapter> =
-        Arc::new(tracon::adapter::omp::OmpAdapter::new("18.0.4"));
-    let logins = LoginAdapters::for_node(&cfg, omp.clone(), &LocalBackend);
+    cfg.harness.id = "opencode".into();
+    let opencode: Arc<dyn tracon::adapter::HarnessAdapter> =
+        Arc::new(tracon::adapter::opencode::OpenCodeAdapter::new("1.18.30"));
+    let logins = LoginAdapters::for_node(&cfg, opencode.clone(), &LocalBackend);
     assert_eq!(logins.get("anthropic").id(), "claude");
-    assert_eq!(logins.get("openai-codex").id(), "omp");
-    assert!(Arc::ptr_eq(logins.get("openai-codex"), &omp));
+    // Codex is this node's own harness, so it is the same instance rather
+    // than a second one built for the login.
+    assert!(Arc::ptr_eq(logins.get("openai-codex"), &opencode));
     // The login client's own state layout comes with it, not the harness's.
     assert_eq!(logins.get("anthropic").layout().env, "CLAUDE_CONFIG_DIR");
 
-    // A node already running Claude Code signs in with the harness it has:
-    // the same instance, because `setup-token` leaves its token in the
-    // adapter that ran the login and nowhere else.
+    // A node already running Claude Code signs in to Anthropic with the
+    // harness it has — the same instance, because `setup-token` leaves its
+    // token in the adapter that ran the login and nowhere else — and reaches
+    // for OpenCode to sign in to Codex.
     cfg.harness.id = "claude".into();
     let claude: Arc<dyn tracon::adapter::HarnessAdapter> =
         Arc::new(tracon::adapter::claude::ClaudeAdapter::new("2.1.247"));
     let logins = LoginAdapters::for_node(&cfg, claude.clone(), &LocalBackend);
     assert!(Arc::ptr_eq(logins.get("anthropic"), &claude));
+    assert_eq!(logins.get("openai-codex").id(), "opencode");
+    assert_eq!(logins.get("openai").id(), "opencode");
+    assert_eq!(logins.get("openai-codex").layout().dir, ".opencode");
 }
 
 /// A credential nothing can renew must stop the refresh loop rather than be
@@ -401,10 +420,9 @@ async fn a_credential_that_cannot_be_renewed_asks_for_a_new_sign_in() {
 }
 
 /// The catalogue a node with only a Codex subscription connected can offer:
-/// the providers it cannot spend on are never wired, and what the account
-/// refuses is never listed.
+/// the providers it cannot spend on are never wired at all.
 #[test]
-fn only_a_connected_provider_is_wired_and_the_account_decides_the_rest() {
+fn only_a_connected_provider_is_wired() {
     state::isolate();
     let cfg = Config::default();
     let shared = Broker::default().shared();
@@ -427,35 +445,19 @@ fn only_a_connected_provider_is_wired_and_the_account_decides_the_rest() {
             .inject_for_probe(&provider.credential, "n1", &provider.shape)
             .is_ok()
     });
-    let wired: serde_json::Value = serde_json::from_str(&wiring.models_json).unwrap();
-    assert_eq!(wired["providers"]["openai-codex"]["apiKey"], "tok");
     // Wiring `openai` with no credential behind it is what put Codex models
     // under that provider: the harness offers everything it is handed.
-    assert!(wired["providers"]["openai"].is_null());
+    assert_eq!(
+        wiring
+            .providers
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        ["openai-codex"]
+    );
+    assert_eq!(wiring.token, "tok");
     assert!(!wiring
         .env
         .iter()
         .any(|(key, _)| key.starts_with("ANTHROPIC_")));
-
-    let probed = ["gpt-5.3-codex-spark", "gpt-5.4", "gpt-daybreak-blue-latest"]
-        .map(|model| tracon::adapter::ModelOption {
-            value: format!("openai-codex/{model}"),
-            name: model.into(),
-        })
-        .to_vec();
-    let offered = tracon::gateway::model::offerable(&cfg, probed, |provider| {
-        broker
-            .model_credential_for(provider, "n1")
-            .is_some_and(|(_, credential)| credential.kind == KIND_OAUTH)
-    });
-    assert_eq!(
-        offered
-            .iter()
-            .map(|model| model.value.as_str())
-            .collect::<Vec<_>>(),
-        [
-            "openai-codex/gpt-5.3-codex-spark",
-            "openai-codex/gpt-daybreak-blue-latest"
-        ]
-    );
 }

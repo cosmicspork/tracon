@@ -82,7 +82,7 @@ pub fn ceiling(store: &Store, bindings: &Value, channel: &str) -> CeilingInfo {
 // The gateway counts every model call on the wire and that count is what the
 // budget and the channel ceiling are charged against. The harness reports its
 // own usage per turn — OpenCode's `tokens.{input,output,reasoning,cache.*}`
-// and `cost`, omp's ACP `usage` — and a harness that reports nothing reports
+// and `cost`, Claude Code's `result.usage` — and a harness that reports nothing reports
 // zero rather than "unknown" (`docs/reference/opencode-v1.18.30/providers.md`
 // §6.3). So the two are recorded side by side and compared, and the harness
 // number is never allowed to lower the charge.

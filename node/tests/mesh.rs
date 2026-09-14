@@ -416,9 +416,12 @@ async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
         review_id: None,
         base_sha: None,
         workspace_id: None,
+        parent_session: None,
+        continued_from: None,
     };
-    let adapter: Arc<dyn tracon::adapter::HarnessAdapter> =
-        Arc::new(tracon::adapter::omp::OmpAdapter::new(String::from("1")));
+    let adapter: Arc<dyn tracon::adapter::HarnessAdapter> = Arc::new(
+        tracon::adapter::opencode::OpenCodeAdapter::new(String::from("1")),
+    );
     let err = manager.create(spec, adapter).await.unwrap_err();
     assert!(matches!(err, SessionError::UnknownChannel(c) if c == "work"));
     let _ = NewEvent {

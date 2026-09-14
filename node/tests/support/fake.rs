@@ -45,7 +45,7 @@ impl HarnessHandle for FakeHandle {
         let total = *self.tokens.lock().await;
         Ok(TurnResult {
             stop_reason: "end_turn".into(),
-            usage: tracon::acp::types::Usage {
+            usage: tracon::adapter::types::Usage {
                 input_tokens: 10,
                 output_tokens: 5,
                 total_tokens: total,

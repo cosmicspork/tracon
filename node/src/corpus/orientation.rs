@@ -312,7 +312,7 @@ mod tests {
             node_name: "laptop",
             node_id: "0123456789abcdef",
             backend: "podman",
-            harness: "omp",
+            harness: "opencode",
             harness_version: "18.0.4",
             channel: "personal",
             project_id: Some("p1"),

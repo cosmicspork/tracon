@@ -188,6 +188,31 @@ enum SessionCommand {
         jsonl: bool,
     },
 
+    /// Put every session that ran a retired harness away read-only.
+    ///
+    /// The migration step for the OpenCode cutover. Each session keeps its
+    /// harness identity and version, its transcript, its evidence and its
+    /// workspace; what it loses is the ability to run, which it had already
+    /// lost when the harness was removed. Pending approvals on them are
+    /// closed, because nothing can answer them. Idempotent.
+    ArchiveLegacy {
+        /// The retired harness id. Defaults to the one this build removed.
+        #[arg(long)]
+        harness: Option<String>,
+    },
+    /// Carry an archived session's work forward under a supported harness.
+    ///
+    /// A new session, with a new id, on the same workspace and branch,
+    /// recording where it came from and opening with an explicit handoff
+    /// note. The archived session is untouched and stays readable.
+    Reopen {
+        id: String,
+        /// The harness the new session runs. Must be the one this node is
+        /// configured for; one node runs one harness image.
+        #[arg(long, default_value = "opencode")]
+        harness: String,
+    },
+
     /// What a session's harness state is, and every backup of it held here.
     State { id: String },
     /// Copy a session's harness state, verified, with a manifest.
@@ -471,6 +496,14 @@ async fn main() -> Result<()> {
             let backend = boundary::backend_for(&cfg).await;
             backend.setup(&cfg, rebuild).await?;
             println!("{} boundary is in place", backend.kind());
+            // A credential with no client left is a credential nobody is
+            // watching. Retired by name, and said out loud rather than
+            // quietly: the broker is untouched.
+            for artifact in tracon::legacy::retire_credentials() {
+                if artifact.removed {
+                    println!("removed {} — {}", artifact.path.display(), artifact.what);
+                }
+            }
             // The native interface is a separate artefact from the boundary,
             // and a node without it still serves: it is reported, never fatal.
             match tracon::ui_bundle::install(&cfg, ui_bundle.as_deref(), rebuild).await {
@@ -1049,6 +1082,70 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
                 }
             }
             println!("\n`--jsonl` prints every record, evidence included.");
+            Ok(())
+        }
+        SessionCommand::ArchiveLegacy { harness } => {
+            let body = harness.map(|h| serde_json::json!({ "harness": h }));
+            let v = node_call(Method::POST, "/api/sessions/archive-legacy", body, None).await?;
+            let harness = v["harness"].as_str().unwrap_or("");
+            let archived = v["archived"].as_i64().unwrap_or_default();
+            if archived == 0 {
+                println!("No {harness} sessions left to archive.");
+                return Ok(());
+            }
+            println!("Archived {archived} {harness} session(s), read-only:");
+            for row in v["sessions"].as_array().cloned().unwrap_or_default() {
+                println!(
+                    "  {}  {:<12} {:<28} {}",
+                    row["id"].as_str().unwrap_or(""),
+                    row["channel"].as_str().unwrap_or(""),
+                    row["branch"].as_str().unwrap_or(""),
+                    row["harness"].as_str().unwrap_or("")
+                );
+            }
+            let closed = v["approvals_closed"].as_i64().unwrap_or_default();
+            if closed > 0 {
+                println!("\nClosed {closed} pending approval(s): nothing can answer them now.");
+            }
+            let kept = v["workspaces_retained"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if !kept.is_empty() {
+                println!("\nWorkspaces kept ({}):", kept.len());
+                for path in kept.iter().take(20) {
+                    println!("  {}", path.as_str().unwrap_or(""));
+                }
+            }
+            println!(
+                "\nThese sessions stay readable and can never be launched again.\n\
+                 Carry one forward with `tracon session reopen <id> --harness opencode`."
+            );
+            Ok(())
+        }
+        SessionCommand::Reopen { id, harness } => {
+            let v = node_call(
+                Method::POST,
+                &format!("/api/sessions/{id}/reopen"),
+                Some(serde_json::json!({ "harness": harness })),
+                None,
+            )
+            .await?;
+            println!(
+                "reopened {id} as {} on {}",
+                v["id"].as_str().unwrap_or("?"),
+                v["branch"].as_str().unwrap_or("?")
+            );
+            println!("  harness      {harness}");
+            println!("  workspace    {}", v["repo_path"].as_str().unwrap_or(""));
+            println!(
+                "  continues    {}",
+                v["continued_from"].as_str().unwrap_or("")
+            );
+            println!(
+                "\nThe new session opens with a handoff note: it inherits the workspace, \
+                 not the old session's context."
+            );
             Ok(())
         }
         SessionCommand::State { id } => {

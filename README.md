@@ -14,8 +14,8 @@ are optional. Work items and phases are there for work that benefits from
 structure, not as paperwork before every conversation. The goal is useful work
 completed with fewer interruptions, not the largest number of agents running.
 
-The node supervises existing harnesses (Claude Code and omp), rather than running
-its own model loop. Managed agents work in isolated workspaces; credentials stay
+The node supervises existing harnesses (OpenCode and Claude Code), rather than
+running its own model loop. Managed agents work in isolated workspaces; credentials stay
 with the node, which decides what it will do on their behalf. Proposed publication
 comes with a diff and revision-bound evidence, not just an agent's assurance that
 it finished. External harnesses can use the broker too, with a deliberately
@@ -38,8 +38,8 @@ A single node works without a hub. Optionally, nodes dial out to a small hub tha
 relays end-to-end-encrypted frames so one interface can reach work on other nodes.
 Laptops, servers, and Kubernetes pods run the same binary.
 
-**What it is not.** Not a coding agent — it drives Claude Code and omp over their own
-protocols and contains no model loop. Not multi-user — one operator holds the keys.
+**What it is not.** Not a coding agent — it drives OpenCode over its server API
+and Claude Code over stream-json, and contains no model loop. Not multi-user — one operator holds the keys.
 Not an IDE — the diff is the unit of review, and there is deliberately no file tree,
 no editor, no terminal.
 
@@ -451,7 +451,7 @@ and revoked the moment the hub loses that key.
 | **hub** | The always-on relay nodes dial out to. Sees ciphertext only. |
 | **mesh** | The nodes enrolled against one hub, under one operator. |
 | **channel** | A context (`personal`, `work`) that is also an encryption key. Bindings hang policy off it. |
-| **harness** | The coding agent a node runs — Claude Code or omp — inside the boundary. |
+| **harness** | The coding agent a node runs — OpenCode or Claude Code — inside the boundary. |
 | **boundary** | The container/network setup that makes the harness's isolation real, proven at startup. |
 | **broker** | The sealed credential store. Agents get tools that use credentials, never the credentials. |
 | **work item / ledger** | The replicated to-do list, optional per session. A session that names one runs one phase of it. |
@@ -497,14 +497,17 @@ which reads a file and needs no node at all. `--help` on any of them says more.
 node_name = "<hostname>"            # how this node is named in the mesh
 
 [harness]
-id = "omp"                          # "omp" or "claude"; an unknown id refuses to start
-version = "18.0.4"                  # pinned; empty means the version this node's harness image
+id = "opencode"                     # "opencode" or "claude"; an unknown id refuses to start.
+                                    # The retired "omp" is refused by name, with the migration path:
+                                    # `tracon session archive-legacy`, then `tracon session reopen`.
+version = "1.18.30"                 # pinned; empty means the version this node's harness image
                                     # installs. Checked twice — `--version` in the runner, and the
                                     # handshake's own report — and a session whose harness reports
                                     # another version, or a protocol revision this node was not
                                     # written against, fails with that reason rather than running.
 tools = []                          # the only tools a session may use; empty is the harness's own set
-                                    # (a list without omp's shell leaves nothing to commit, so nothing to review)
+                                    # (a list without the harness's shell leaves nothing to commit,
+                                    #  so nothing to review)
 
 [boundary]                          # the rootless-Podman boundary a laptop establishes
 podman = ""                         # empty: found on PATH, then the usual install locations
@@ -513,11 +516,15 @@ subnet = "10.89.0.0/24"
 gateway_ip = "10.89.0.2"
 gateway_container = "tracon-gw"
 gateway_image = "localhost/tracon-gateway"
-harness_image = "localhost/tracon-harness"  # "localhost/tracon-harness-claude" with [harness] id = "claude"
+harness_image = "localhost/tracon-harness-opencode"  # "localhost/tracon-harness-claude" with
+                                    # [harness] id = "claude"
 login_image = "localhost/tracon-harness-claude"  # the Anthropic subscription login runs `claude
-                                    # setup-token`, which only this image carries; `tracon setup`
-                                    # builds it alongside the harness image. Set it to the same
-                                    # string as harness_image (or empty) when they are one image.
+                                    # setup-token`, which only this image carries.
+codex_login_image = "localhost/tracon-harness-opencode"  # and the Codex subscription login runs
+                                    # `opencode auth login openai`, which only that one carries.
+                                    # `tracon setup` builds whichever of these is not already the
+                                    # harness image; set either to the same string as harness_image
+                                    # (or empty) when they are one image.
 start_machine = true                # macOS: start the podman machine when it is stopped
 # selinux_label_disable = true      # only if the boundary check says the labels fight you
 
@@ -539,7 +546,8 @@ claim_grace_secs = 60               # a review claim lapses this long after the 
 
 [runtime]
 kind = "podman"                     # or "kubernetes", for a pod-hosted node
-# [runtime.kubernetes]              # namespace, harness_image, state_claim, state_mount, harness_home, uid, gateway_host
+# [runtime.kubernetes]              # namespace, harness_image, login_image, codex_login_image,
+                                    # state_claim, state_mount, harness_home, uid, gateway_host
 # approved_images = []              # digest-pinned project images preparation may use besides the harness image
 
 [providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
@@ -742,7 +750,7 @@ out of the tool needed to fix it. The path out is the harness directly, outside
 tracon — nothing in tracon is required for it:
 
 ```sh
-omp     # or claude: the harness, unsupervised, in any checkout
+opencode   # or claude: the harness, unsupervised, in any checkout
 git worktree add /tmp/<slug> -b <branch> origin/main
 ```
 

@@ -117,6 +117,59 @@ worst case is a change with a thin history, not an unreviewed merge. What would
 not be acceptable is making this the ordinary path — at which point the
 guarantees are gone and nothing says so.
 
+## Migrating a node off the retired omp harness
+
+tracon's first harness was omp, and the 2026-09-13 OpenCode cutover removed it:
+the adapter, its image, its provider wiring and its catalogue workarounds. A
+node that still says `[harness] id = "omp"` refuses to start, and says this
+instead of guessing. The migration is three steps and keeps everything.
+
+```sh
+# 1. Point the node at a harness it has. In node.toml:
+#      [harness]
+#      id = "opencode"     # or "claude"
+#      version = ""        # empty: whatever this node's harness image installs
+tracon setup                       # builds the image, retires omp's leftovers
+tracon session archive-legacy      # puts the omp sessions away, read-only
+```
+
+`tracon setup` removes what omp left in node-owned state and prints each thing
+it removed — today that is `harness-state/agent/`, its login credential
+database and the provider document it persisted. It does **not** touch
+`credentials.sealed`: the tokens the node lifted out of that database are
+provider credentials, they still work, and the harness they were obtained
+through is irrelevant to them. Nor does it touch workspaces or `node.db`.
+
+`tracon session archive-legacy` marks every omp session read-only, for good. It
+is deliberately not deletion:
+
+- the row keeps `harness_id` and `harness_version`, so the transcript stays
+  interpretable against the thing that produced it;
+- transcripts, evidence, candidates and **workspaces are all retained**;
+- a session that had not ended is ended, because the process behind it is long
+  gone and a row that says `running` for ever is a lie;
+- its pending approvals are closed with a visible reason, because nothing can
+  answer them;
+- nothing can launch it again. The refusal names the way forward rather than
+  reading as a session that merely will not start.
+
+To carry one forward:
+
+```sh
+tracon session reopen <id> --harness opencode
+```
+
+That is a **new session, with a new id**, on the same workspace and branch,
+recording where it came from (`parent_session`, `continued_from`). It opens
+with an explicit handoff note, because the new harness inherits the workspace
+and nothing else — not the old conversation, not its plan, not what it had
+already tried. The archived session stays readable at its own id; ask the new
+session to read from it rather than assuming it can.
+
+One node runs one harness image, so `--harness` has to name the harness the
+node is configured for. To reopen under the other one, change `[harness] id`
+and run `tracon setup` first.
+
 ## Recovering the node itself
 
 Everything a node is lives in two directories. On Linux that is

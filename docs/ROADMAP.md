@@ -132,7 +132,7 @@ refer to that manifest's table.
         both numbers in one ledger keyed on (session, turn): the gateway's on-the-wire count,
         authoritative for budgets and ceilings, and the harness's own report
         (`tokens.{input,output,reasoning,cache.read,cache.write}` and `cost` for OpenCode,
-        the ACP `usage` for omp/claude). At turn end they are reconciled — agreement within
+        `result.usage` for Claude Code). At turn end they are reconciled — agreement within
         tolerance is recorded as such, disagreement writes a `usage_mismatch` event carrying
         both sides, and the harness's number can raise the charge but never lower it. A turn
         whose calls the gateway could not count (finding 10: OpenCode reports omitted usage
@@ -236,9 +236,23 @@ refer to that manifest's table.
           checkpoint. Covered against the real pinned binary for the generation and the
           reopen, and against a stand-in build that wrecks the clone for "the original is
           untouched".
-  - [ ] Legacy transition: archive omp sessions read-only with harness identity, reopen
-        retained workspaces as new sessions with lineage, retire omp credentials deliberately,
-        verify the omp adapter can no longer launch.
+  - [x] Legacy transition. `tracon session archive-legacy` marks every session whose
+        harness is `omp` read-only for good: the row keeps its harness identity and version
+        so the transcript stays interpretable, transcripts, evidence and workspaces are all
+        retained, a session that had not ended is ended, and its pending approvals are closed
+        with a visible reason because nothing can answer them. `legacy_ms` on the row is the
+        durable fact rather than something re-derived from a harness id no adapter resolves;
+        `archived_ms` stays presentation, so a legacy session can be un-archived to read
+        without becoming launchable. `tracon session reopen <id> --harness opencode|claude`
+        makes a *new* session on the retained workspace and branch, recording
+        `parent_session` and `continued_from` and opening with an explicit handoff note — the
+        new harness inherits the workspace and nothing else. The legacy id is never reused.
+        `tracon setup` retires what omp left in node-owned state (its login credential
+        database) by name and prints what it removed, leaving the broker untouched: those
+        tokens are provider credentials and still work. `[harness] id = "omp"` is refused at
+        startup with the migration path rather than a bare unknown-harness error, and there
+        is no omp adapter, image, or Containerfile left to launch. See
+        `docs/RECOVERY.md`.
   - [x] Direct-harness recovery route documented for both harnesses; corpus export stays
         portable and vectors rebuildable. `docs/RECOVERY.md`: get the work out, run `claude`
         or `opencode` yourself, import back as a session — with what is lost (audit, budget,
@@ -475,9 +489,22 @@ refer to that manifest's table.
       `GET /v0/streams` connection holds and `GET /v0/info` reports the same contract on
       every node.
 - [ ] **Gate F — release and clean cutover.** Real Podman and Kubernetes project workflows
-      on both harnesses; compatibility manifest promoted through a tracon release; omp
-      removed; README, architecture, and design reconciled (harness sections, optionality of
-      work items, phases, review, memory, remote access, and mesh); the migration plan archived.
+      on both harnesses; compatibility manifest promoted through a tracon release; README,
+      architecture, and design reconciled (harness sections, optionality of work items,
+      phases, review, memory, remote access, and mesh); the migration plan archived.
+  - [x] omp removed: the adapter, its image and release job, its ACP stdio layer, its
+        provider wiring (the `models.json` half of `harness_wiring`, the Codex websocket
+        variable, the built-in local-provider disabling, the `CHATGPT_ACCOUNT_REFUSES`
+        catalogue denylist), its retry-notice shape, its fake and its adapter tests, and its
+        ACP captures under `docs/reference/`. `KNOWN` is `["opencode", "claude"]`, the default
+        harness is `opencode`, and the Containerfile agreement test covers those two and
+        asserts `containers/harness` is gone. The Codex subscription login moved to the
+        OpenCode adapter's `opencode auth login openai`, which a node running Claude Code
+        reaches through `[boundary] codex_login_image` the way it already reached
+        `claude setup-token` through `login_image`. The `review_status` wait cap, sized for
+        omp's 30 s MCP client, is 45 s: both remaining harnesses give a tool call 60 s
+        (`config-state.md` §5.4), and the node states OpenCode's explicitly rather than
+        inheriting it.
 
 **Upstream contributions worth a bounded PR** (not blockers): a flag that turns the
 web-UI fallback into a 404; a flag check on nested instruction attachment; invoking the
@@ -880,9 +907,6 @@ enforcement stay in the core.
   against. The dist channel publishes no self-contained build of either, and a
   rustfmt from anywhere else formats differently from the workspace's pinned one, so
   every edit would arrive with churn CI rejects.
-- Harness-specific surfaces that will be rewritten at cutover: the omp provider wiring,
-  catalogue denylist, and built-in-provider disabling; the retry-notice recogniser; the
-  20 s `review_status` wait cap sized for omp's MCP client.
 
 ## Deferred
 

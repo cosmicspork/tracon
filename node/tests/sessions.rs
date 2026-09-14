@@ -231,6 +231,8 @@ async fn an_explicit_model_the_channel_cannot_authenticate_is_refused_by_create_
             review_id: None,
             base_sha: None,
             workspace_id: None,
+            parent_session: None,
+            continued_from: None,
         })
         .expect_err("preflight refuses an unauthenticatable model")
         .to_string();
@@ -678,6 +680,9 @@ fn insert_running_session(store: &Arc<Store>, budget: i64) -> String {
             ended_mono_ms: None,
             updated_ms: now_ms(),
             archived_ms: None,
+            legacy_ms: None,
+            parent_session: None,
+            continued_from: None,
             manifest_digest: None,
         })
         .unwrap();
@@ -1383,6 +1388,9 @@ async fn reconcile_after_restart_closes_a_managed_pause_but_keeps_an_external_on
             ended_mono_ms: None,
             updated_ms: now_ms(),
             archived_ms: None,
+            legacy_ms: None,
+            parent_session: None,
+            continued_from: None,
             manifest_digest: None,
         })
         .unwrap();
@@ -1455,7 +1463,7 @@ async fn identical_tool_calls_in_a_row_are_recorded_without_pausing() {
     let rig = Rig::start(10_000, Duration::from_secs(60)).await;
     for i in 0..6 {
         rig.events
-            .send(HarnessEvent::ToolCall(tracon::acp::types::ToolCall {
+            .send(HarnessEvent::ToolCall(tracon::adapter::types::ToolCall {
                 tool_call_id: format!("call-{i}"),
                 title: "run just test".into(),
                 kind: Some("execute".into()),
@@ -1516,7 +1524,7 @@ async fn varied_and_interleaved_tool_calls_are_not_repetition() {
         // test, edit, test, edit, ... — the same command five times over, but
         // never twice without a change between.
         let call = if i % 2 == 0 {
-            tracon::acp::types::ToolCall {
+            tracon::adapter::types::ToolCall {
                 tool_call_id: format!("call-{i}"),
                 title: "run just test".into(),
                 kind: Some("execute".into()),
@@ -1526,7 +1534,7 @@ async fn varied_and_interleaved_tool_calls_are_not_repetition() {
                 locations: vec![],
             }
         } else {
-            tracon::acp::types::ToolCall {
+            tracon::adapter::types::ToolCall {
                 tool_call_id: format!("call-{i}"),
                 title: "edit src/lib.rs".into(),
                 kind: Some("edit".into()),
@@ -1871,7 +1879,7 @@ async fn streamed_chunks_are_coalesced_into_one_logged_message() {
     }
     // A tool call closes the open message.
     rig.events
-        .send(HarnessEvent::ToolCall(tracon::acp::types::ToolCall {
+        .send(HarnessEvent::ToolCall(tracon::adapter::types::ToolCall {
             tool_call_id: "call|fc".into(),
             title: "read file".into(),
             kind: Some("read".into()),
@@ -2221,6 +2229,8 @@ async fn orientation_with(tag: &str, launch_with: Option<Arc<dyn HarnessAdapter>
                 review_id: None,
                 base_sha: None,
                 workspace_id: None,
+                parent_session: None,
+                continued_from: None,
             },
             launch_with.unwrap_or_else(|| adapter.clone()),
         )
@@ -2634,6 +2644,8 @@ async fn a_harness_that_never_starts_fails_the_session_visibly_and_removes_the_h
                 review_id: None,
                 base_sha: None,
                 workspace_id: None,
+                parent_session: None,
+                continued_from: None,
             },
             Arc::new(StallingAdapter),
         )

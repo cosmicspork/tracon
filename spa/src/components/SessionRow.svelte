@@ -25,8 +25,14 @@
   // A harness the operator runs themselves has no turn, no budget, and no
   // repository; saying "Running · main" of it would be three lies.
   const external = $derived(session.harness_id === 'external')
+  // A session whose harness the node no longer has. Readable, never
+  // launchable: saying "Closed" of it would leave the operator to work out
+  // why it cannot be resumed.
+  const legacy = $derived(session.legacy_ms != null)
   const kind = $derived(
-    {
+    legacy
+      ? `Archived · ${session.harness_id} ${session.harness_version}`
+      : {
       starting: 'Starting',
       running: external ? 'Attached' : session.turn_active ? 'Working' : 'Running',
       paused: external ? 'Broker access paused' : 'Paused',
@@ -84,7 +90,7 @@
   </span>
   <span class="mono">{external ? '' : formatBudget(session.tokens_used, session.budget_tokens)}</span>
 </a>
-{#if onarchive}
+{#if onarchive && !legacy}
   <button
     class="arch"
     type="button"
