@@ -46,14 +46,14 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use tracon::{
-    adapter::{opencode::OpenCodeAdapter, HarnessAdapter, LaunchSpec, NativeApi},
+    adapter::{opencode::OpenCodeAdapter, DurableCursor, HarnessAdapter, LaunchSpec, NativeApi},
     broker::Broker,
     config::{Config, ModelDecl, Provider, SHAPE_ANTHROPIC},
     gateway::model::harness_wiring,
     http::{api::AppState, auth::AuthState, ui},
     mcp::Tools,
     runner::{Runner, RunnerCommand, RunnerError, Spawned},
-    session::Manager,
+    session::{ingest::Ingest, Manager},
     store::Store,
     stream::Bus,
 };
@@ -506,7 +506,7 @@ impl Live {
     }
 }
 
-async fn launch(node: &Node, binary: &str) -> Live {
+async fn launch(node: &Node, binary: &str, cursor: Arc<dyn DurableCursor>) -> Live {
     let root = state::scratch("ui-route-trace");
     let work = root.join("work");
     std::fs::create_dir_all(&work).unwrap();
@@ -535,12 +535,36 @@ async fn launch(node: &Node, binary: &str) -> Live {
         tools: Vec::new(),
         env: Vec::new(),
         system_prompt_file: None,
-        cursor: None,
+        // The node's own ingestion, which is also the tap the native UI's live
+        // channel is fed from (finding 20). Without it the adapter's two pumps
+        // run with nowhere to report, and the page's stream carries nothing
+        // but its connection frame — which is exactly what this tour found
+        // the first time it was run against the synthesised route.
+        cursor: Some(cursor),
     };
-    let (handle, _rx) = OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION)
+    let (handle, mut rx) = OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION)
         .launch(&runner, spec)
         .await
         .expect("the pinned binary starts");
+    // Something has to hold the adapter's event channel, or both pumps stop at
+    // their first send — `tx.is_closed()` ends the permission pump outright and
+    // a failed send ends the durable one — and the node stops reading the
+    // harness at all. In a real session the supervisor is what holds it.
+    // Dropping the receiver is what made an earlier run of this tour see no
+    // permission on the page: the stream was fine and there was nothing
+    // upstream of it.
+    //
+    // Held rather than drained, because a `Permission` event carries the
+    // channel the answer goes back on: letting one drop answers the request by
+    // hanging up, and the harness stops waiting before the page can show a
+    // control for it. Here the operator's answer comes from the browser, so
+    // nothing on this side may answer first.
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Some(event) = rx.recv().await {
+            held.push(event);
+        }
+    });
     let (endpoint, password) = runner
         .launched
         .lock()
@@ -975,28 +999,44 @@ pub async fn run(trace_path: &Path) {
     let operator_origin = "http://127.0.0.1:7420";
     let node = start_node(bundle, operator_origin).await;
     let origin = node.cfg.ui.opencode_origin().unwrap();
-    let live = launch(&node, &binary).await;
+    // The node's own ingestion for the session the page will show, holding the
+    // live channel the app streams from. This is the production wiring: the
+    // adapter's pumps are the only readers of the harness's streams, and every
+    // event they see is offered to this channel on the way past.
+    let (commands, _command_rx) = tokio::sync::mpsc::channel(64);
+    let ingest = Ingest::new(
+        node.store.clone(),
+        Bus::new(),
+        "n1".into(),
+        SESSION.into(),
+        Instant::now(),
+        commands,
+        node.manager.native_events(SESSION),
+    );
+
+    let live = launch(&node, &binary, ingest.clone()).await;
     eprintln!("harness at {} in {}", live.base(), live.work.display());
     if !live.catalogue_settled(MODEL).await {
         eprintln!("the harness never listed {MODEL}; the turn will not run");
     }
 
-    // Two real harness sessions, made out of band: the gateway forbids session
-    // creation on purpose, and what is under test is the origin.
-    let mut harness_sessions = Vec::new();
-    for title in ["tracon route trace", "another session"] {
-        let (status, created) = live
-            .ask("POST", "/api/session", Some(json!({ "title": title })))
-            .await;
-        let id = created["data"]["id"]
-            .as_str()
-            .or_else(|| created["id"].as_str())
-            .unwrap_or_else(|| panic!("no session id in {status} {created}"))
-            .to_string();
-        harness_sessions.push(id);
-    }
-    let mine = harness_sessions[0].clone();
-    let theirs = harness_sessions[1].clone();
+    // The session the page shows is the one the node's own adapter made, so
+    // its pumps — and the tap under them — are running against it. The second
+    // is made out of band: the gateway forbids session creation on purpose,
+    // and an unowned session is what the foreign-id refusals are asked about.
+    let mine = live.handle.harness_session_id().to_string();
+    let (status, created) = live
+        .ask(
+            "POST",
+            "/api/session",
+            Some(json!({ "title": "another session" })),
+        )
+        .await;
+    let theirs = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["id"].as_str())
+        .unwrap_or_else(|| panic!("no session id in {status} {created}"))
+        .to_string();
     eprintln!("harness sessions {mine} and {theirs}");
 
     node.manager
@@ -1114,18 +1154,40 @@ pub async fn run(trace_path: &Path) {
         Some(id) => {
             eprintln!("the harness raised permission {id}");
             // The app's own control first: a button offering to allow it.
-            let clicked = cdp
-                .eval(
-                    "(() => { const b = [...document.querySelectorAll('button')] \
-                     .find(b => /allow|approve|accept|once|yes/i.test(b.textContent || '')); \
-                     if (b) { b.click(); return b.textContent } return null })()",
-                )
-                .await;
+            //
+            // Waited for rather than looked for once. The control appears when
+            // the ask reaches the page over the live channel and the app
+            // renders it — which is the whole of finding 20, and which takes
+            // longer than the click did when there was no channel at all and
+            // the control was never going to appear. A fixed deadline keeps a
+            // regression honest: if the stream stops carrying the ask, this
+            // falls back to the route probe exactly as it used to, and the
+            // trace records that it had to.
+            let mut clicked = Value::Null;
+            let control = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < control {
+                clicked = cdp
+                    .eval(
+                        "(() => { const b = [...document.querySelectorAll('button')] \
+                         .find(b => /allow|approve|accept|once|yes/i.test(b.textContent || '')); \
+                         if (b) { b.click(); return b.textContent } return null })()",
+                    )
+                    .await;
+                if !clicked.is_null() {
+                    eprintln!("the page showed a permission control: {clicked}");
+                    break;
+                }
+                cdp.settle(Duration::from_secs(2)).await;
+            }
             cdp.settle(Duration::from_secs(4)).await;
-            let answered = cdp
-                .events
-                .iter()
-                .any(|e| e.to_string().contains("/permission/"));
+            // The app is a v1 client, so its own answer goes to
+            // `POST /session/{id}/permissions/{permissionID}` — the plural,
+            // with no `/reply` on the end. Matching only the v2 spelling was
+            // why an earlier run reported "no control" after clicking one.
+            let answered = cdp.events.iter().any(|e| {
+                let e = e.to_string();
+                e.contains("/permissions/") || e.contains("/permission/")
+            });
             if clicked.is_null() || !answered {
                 eprintln!("no permission control found; answering through the same route");
                 mark(&cdp, &mut steps, "permission-probe");
@@ -1146,6 +1208,46 @@ pub async fn run(trace_path: &Path) {
         None => eprintln!("no permission was raised; the trace will not carry that route"),
     }
     cdp.settle(Duration::from_secs(6)).await;
+
+    // What the operator's click became on the wire.
+    //
+    // The control the page offered says "Allow always", and an `always` would
+    // persist a grant inside the harness that tracon never decided on
+    // (finding 2). So the answer that left the node is `once`, and the attempt
+    // to broaden is on the session's own record. Asserted rather than printed:
+    // this is the half of finding 20 that says the control does something, and
+    // it is the one thing a route trace alone cannot show.
+    if permission.is_some() {
+        let recorded = node
+            .store
+            .events_after(SESSION, 0, 2000)
+            .unwrap_or_default();
+        let answers: Vec<Value> = recorded
+            .iter()
+            .filter(|e| e.kind == "permission_answer")
+            .map(|e| e.payload.clone())
+            .collect();
+        assert!(
+            answers
+                .iter()
+                .any(|a| a["option_id"] == "once" && a["broadening_refused"] == true),
+            "the operator answered through the native UI and the node did not record a \
+             narrowed `once`: {answers:?}"
+        );
+        let narrowed: Vec<Value> = recorded
+            .iter()
+            .filter(|e| {
+                e.kind == "policy_denied" && e.payload["decision"] == "always_rewritten_to_once"
+            })
+            .map(|e| e.payload.clone())
+            .collect();
+        assert_eq!(
+            narrowed.len(),
+            1,
+            "the attempted broadening must be on the record exactly once: {narrowed:?}"
+        );
+        eprintln!("the UI's answer reached the harness as `once`, broadening refused");
+    }
 
     // --- the views the app has --------------------------------------------
     // Each of these is clicked in the app first and then asked for directly.

@@ -196,9 +196,18 @@ impl Fake {
 
     /// Make the harness report `id` as a permission it is still blocked on.
     pub fn pending_permission(&self, id: &str, call: &str) {
+        self.pending_permission_for(SESSION, id, call);
+    }
+
+    /// The same, for any session on this server.
+    ///
+    /// One OpenCode server holds more than one session, and the snapshot
+    /// routes that list pending asks are instance-wide — which is what makes a
+    /// sibling's request visible to a page that should not see it.
+    pub fn pending_permission_for(&self, session: &str, id: &str, call: &str) {
         self.pending.lock().unwrap().push(json!({
             "id": id,
-            "sessionID": SESSION,
+            "sessionID": session,
             "action": "bash",
             "resources": ["just test"],
             "source": { "type": "tool", "messageID": "msg_1", "callID": call },
@@ -458,6 +467,15 @@ pub fn app(fake: Fake) -> Router {
         )
         .route("/api/session/{session}/event", get(durable_stream))
         .route("/api/event", get(server_stream))
+        // The v1 snapshot the native UI loads a page from, and the shape the
+        // real binary serves: a bare array, across every session on the
+        // server rather than scoped to one.
+        .route(
+            "/permission",
+            get(|State(fake): State<Fake>| async move {
+                Json(Value::Array(fake.pending.lock().unwrap().clone()))
+            }),
+        )
         .route(
             "/api/session/{session}/permission",
             get(|State(fake): State<Fake>| async move {
