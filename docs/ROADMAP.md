@@ -35,7 +35,7 @@ each gate delivered.
 - **Gate A — candidate inventory and contract** (#189). Release pinned with checksums,
   API snapshot, server flags and startup egress verified live, provider/mutation/config
   matrices produced. Verdict: no stop condition.
-- **Gate B — owner-side policy, credentials, convergence** (#190, #193–#200). One
+- **Gate B — owner-side policy, credentials, convergence** (#190, #193, #195–#200). One
   isolated `opencode serve` per session under a sealed launch environment (#193); the
   policy-aware API gateway — deny by default from the route matrix, directory pinned and
   bodies inspected, an all-`ask` ruleset with every `always` rewritten to `once` and the

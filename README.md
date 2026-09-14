@@ -796,7 +796,7 @@ the whole of it.
 ## Reading
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the rules: commitments, invariants, boundaries.
-- [docs/ROADMAP.md](docs/ROADMAP.md) — what is to be built, and what deliberately is not.
+- [docs/ROADMAP.md](docs/ROADMAP.md) — what is to be built, what is built but still unproven live, and what deliberately is not.
 - [docs/DESIGN.md](docs/DESIGN.md) — the interface: principles, jobs, states.
 - [docs/RECOVERY.md](docs/RECOVERY.md) — working outside tracon when it is down, and rebuilding a node.
 - [docs/reference/external-harness-notes.md](docs/reference/external-harness-notes.md) — the external harness trust boundary and operating guidance.
