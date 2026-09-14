@@ -120,8 +120,8 @@ pub async fn install(cfg: &Config, tarball: Option<&Path>, force: bool) -> Resul
 
     let (bytes, source) = match tarball {
         Some(path) => {
-            let bytes = std::fs::read(path)
-                .with_context(|| format!("reading {}", path.display()))?;
+            let bytes =
+                std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
             (bytes, path.display().to_string())
         }
         None => {
@@ -140,8 +140,7 @@ pub async fn install(cfg: &Config, tarball: Option<&Path>, force: bool) -> Resul
     let parent = dir
         .parent()
         .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", dir.display()))?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("creating {}", parent.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     let staging = parent.join(format!(
         ".{}.incoming",
         dir.file_name()
@@ -242,8 +241,9 @@ fn unpack(bytes: &[u8], into: &Path) -> Result<usize> {
                 named.display()
             );
         }
-        let relative = within(&named)
-            .ok_or_else(|| anyhow::anyhow!("{} is not a path inside the bundle", named.display()))?;
+        let relative = within(&named).ok_or_else(|| {
+            anyhow::anyhow!("{} is not a path inside the bundle", named.display())
+        })?;
         let dest = into.join(&relative);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
@@ -297,12 +297,18 @@ mod tests {
         let advice = absent_advice();
         assert!(advice.contains("--ui-bundle"), "{advice}");
         assert!(advice.contains("build.sh"), "{advice}");
-        assert!(advice.contains("refuses rather than falling back"), "{advice}");
+        assert!(
+            advice.contains("refuses rather than falling back"),
+            "{advice}"
+        );
     }
 
     #[test]
     fn an_entry_that_climbs_out_is_not_a_path_inside_the_bundle() {
-        assert_eq!(within(Path::new("./index.html")).unwrap(), Path::new("index.html"));
+        assert_eq!(
+            within(Path::new("./index.html")).unwrap(),
+            Path::new("index.html")
+        );
         assert_eq!(
             within(Path::new("./assets/index-a.js")).unwrap(),
             Path::new("assets/index-a.js")
@@ -323,12 +329,14 @@ mod tests {
         cfg.ui.opencode_bundle_dir = Some(dir.clone());
 
         let mut tar = tar::Builder::new(Vec::new());
-        let body = b"<html><head><script type=\"module\" src=\"/assets/a.js\"></script></head></html>";
+        let body =
+            b"<html><head><script type=\"module\" src=\"/assets/a.js\"></script></head></html>";
         let mut header = tar::Header::new_gnu();
         header.set_size(body.len() as u64);
         header.set_mode(0o644);
         header.set_cksum();
-        tar.append_data(&mut header, "index.html", &body[..]).unwrap();
+        tar.append_data(&mut header, "index.html", &body[..])
+            .unwrap();
         let raw = tar.into_inner().unwrap();
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         std::io::Write::write_all(&mut gz, &raw).unwrap();
@@ -339,10 +347,18 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("not the pinned bundle"), "{message}");
         assert!(message.contains("tree digest"), "{message}");
-        assert!(!dir.exists(), "nothing is installed from a tree that fails the digest");
+        assert!(
+            !dir.exists(),
+            "nothing is installed from a tree that fails the digest"
+        );
         // And the staging directory is not left behind either.
         let leftovers: Vec<_> = std::fs::read_dir(home.path().join("state"))
-            .map(|entries| entries.filter_map(Result::ok).map(|e| e.file_name()).collect())
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|e| e.file_name())
+                    .collect()
+            })
             .unwrap_or_default();
         assert!(leftovers.is_empty(), "{leftovers:?}");
     }
@@ -403,9 +419,6 @@ mod tests {
         std::fs::write(&tarball, gz.finish().unwrap()).unwrap();
 
         let err = install(&cfg, Some(&tarball), false).await.unwrap_err();
-        assert!(
-            err.to_string().contains("regular files only"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("regular files only"), "{err}");
     }
 }

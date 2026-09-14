@@ -125,7 +125,20 @@ impl Ui {
                 .is_ok_and(|ip| ip.is_loopback())
     }
 
+    /// Where the vendored bundle is read from.
+    ///
+    /// `TRACON_OPENCODE_UI_DIR` wins over both, because the one deployment
+    /// that needs it has no operator to write a config file: the node image
+    /// carries the tree on its own filesystem (`Dockerfile.node`) and mounts
+    /// the state directory as a volume, which would shadow a copy under it.
+    /// The digest check does not move — whatever this names is verified over
+    /// the bytes about to be served, or nothing is served.
     pub fn opencode_bundle_path(&self) -> PathBuf {
+        if let Some(named) = std::env::var_os("TRACON_OPENCODE_UI_DIR") {
+            if !named.is_empty() {
+                return PathBuf::from(named);
+            }
+        }
         self.opencode_bundle_dir
             .clone()
             .unwrap_or_else(|| Config::state_dir().join("opencode-ui"))

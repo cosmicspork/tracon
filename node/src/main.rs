@@ -466,10 +466,7 @@ async fn main() -> Result<()> {
 
     match Cli::parse().command {
         Command::Serve { listen } => http::serve(listen).await,
-        Command::Setup {
-            rebuild,
-            ui_bundle,
-        } => {
+        Command::Setup { rebuild, ui_bundle } => {
             let cfg = config::Config::load();
             let backend = boundary::backend_for(&cfg).await;
             backend.setup(&cfg, rebuild).await?;

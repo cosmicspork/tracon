@@ -1330,6 +1330,9 @@ mod tests {
         assert_eq!(trace_case(None, "POST", "/new-session"), trace::UNKNOWN);
         // Without a vendored tree an asset is placed by nobody — which is what
         // makes a recorded 200 on such a path evidence the bundle answered it.
-        assert_eq!(trace_case(None, "GET", "/assets/index-abc.js"), trace::UNKNOWN);
+        assert_eq!(
+            trace_case(None, "GET", "/assets/index-abc.js"),
+            trace::UNKNOWN
+        );
     }
 }
