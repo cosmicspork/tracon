@@ -7,6 +7,9 @@
 - Keep untrusted execution isolated and credentials outside agent-owned state.
 - Prefer useful environments, clear evidence, and human intervention over more machinery.
 - Record scoped decisions and supersede them explicitly; keep harnesses replaceable.
+- Own the data: portable, independently readable exports; no node required to inspect them.
+- Optimize useful work per interruption, not agent count; support independent installations,
+  not multi-user tenancy.
 
 Completed items are removed from this file when they land; the changelog and the
 reference documents under `docs/reference/` carry the history.
@@ -338,6 +341,234 @@ declared `permission.ask` hook; an LSP status event.
       `glab` credential and a configured QA target. The Kubernetes backend has no scoped QA
       egress gateway yet, so this is Podman-only until it does.)
 
+### Everyday work and portability
+
+Build on the existing ledger, workspace snapshots, evidence, scoped grants, and
+OpenCode gates above; do not introduce another agent loop or replace the store.
+Order: prove ordinary work first; then continuity, environments, authority and
+recovery; then reusable workflows and grouping. More autonomy is demand-driven.
+This section records intended work, not additional guarantees of the current release.
+
+#### Daily-use confidence and navigation
+
+- [ ] **Prove the normal workflow.** Use the real-repository and QA runs above as the
+      foundation, then exercise client disconnect/reconnect, interrupted execution,
+      retained drafts, and recovery through completion. Record what actually ran,
+      what remained uncertain, and where the operator intervened; fixture screenshots
+      and fake-provider tests are not evidence of a live workflow.
+- [ ] **Use the existing outcome metrics.** Judge changes by setup failures, time to
+      verified work, interventions and tokens per accepted change. Keep unmetered
+      usage and missing verification visible; add no agent reputation score.
+- [ ] **Finish discoverability across surfaces.** Sessions/Usage navigation and consistent
+      Settings naming have landed; keep them reachable in empty and archived-only
+      states on browser, desktop and phone. Make export, import, handoff and recovery
+      discoverable from the work they act on, rather than requiring knowledge of an
+      endpoint or a second screen. Login and desktop setup remain lifecycle entry points,
+      not extra navigation destinations. Browser access to the native OpenCode view
+      remains part of Gate D, not a separate interface to maintain.
+
+#### Review workspace and diff reading
+
+Borrow interaction patterns from [cosmicspork/review](https://github.com/cosmicspork/review),
+especially its [diff viewer](https://github.com/cosmicspork/review/blob/main/src/diff-part.ts),
+prose editing and persistent feedback thread. Its renderer uses `diff2html` and
+`highlight.js`; evaluate those against the existing CodeMirror dependency before
+choosing an implementation. Keep Tracon's immutable candidates, isolated checks
+and brokered publication: the reference tool deliberately leaves publishing to
+the agent, which is not Tracon's authority model.
+
+- [ ] **Side-by-side and unified diff modes.** Default to side-by-side on wide screens,
+      with an explicit toggle and remembered preference; use unified as the narrow-screen
+      default without removing the choice. Align changed lines and synchronize split-pane
+      scrolling. Switching modes preserves the current file, reading position and feedback;
+      neither mode requires entering the desktop-only diff editor.
+- [ ] **Readable code and context.** Add old/new line numbers, syntax highlighting,
+      within-line change emphasis, and wrap/scroll controls using Tracon's light/dark tokens.
+      Expand context from the pinned base and candidate, never the live worktree. Label
+      additions, deletions, renames, binary files and unavailable context explicitly; keep
+      raw patch access and do not fabricate text for unsupported cases.
+- [ ] **File navigation and review progress.** Use collapsible file sections on every
+      surface, path navigation/filtering, per-file change counts/status, open/close controls
+      and next/previous file or hunk actions. Offer a full-height/focused reading view rather
+      than forcing the whole diff into one small scroll box. Track viewed files against the
+      reviewed revision and invalidate affected progress on resubmission; viewed is not
+      approved. Preserve keyboard navigation, focus and accessible control labels.
+- [ ] **Keep large reviews responsive.** Paint file headers first, render visible/open
+      bodies incrementally, and load highlighting lazily. Collapse generated and oversized
+      files with an explicit reason and Load diff action; never silently omit them or
+      count them as reviewed. Cache by content/revision and bound memory/DOM work; open-all
+      must not freeze the interface. Rendering performance does not waive submission caps.
+- [ ] **Review prose alongside code and evidence.** Present the outgoing title/body as
+      readable, sanitized Markdown with source editing and a preview of the exact text
+      to be published. Keep requirements, checks, demonstrations and diff easy to move
+      between without burying the code below administrative detail. Preserve current
+      narrative-report and evidence contracts rather than adding another artifact store.
+- [ ] **Persistent, anchored feedback.** Add general and file comments like the reference
+      tool, then true line/range threads bound to candidate revision, path and old/new side
+      (the reference's file comment uses a `path:1` anchor, not a selected line). Return
+      comments and suggestions through the agent review contract. Preserve the thread across
+      resubmissions; resolved and outdated are distinct, and moved anchors must not silently
+      attach to unrelated code. Render untrusted comments through the existing safe renderer.
+- [ ] **Durable review drafts and re-review.** Preserve unsent feedback and title/body edits
+      across navigation and reconnect, with explicit saved/conflict state. Keep desktop diff
+      drafts revision-keyed; resubmission must not silently apply old edits to new code.
+      Show what changed since the last reviewed revision alongside the complete base diff,
+      retain decisions and feedback, and notify/deep-link to a ready-for-re-review item
+      through the existing queue and push system. Suggestions still return to the agent
+      to apply and resubmit; the review client never writes the worktree.
+- [ ] **Explain and validate verdict actions.** Keep decisions reachable while reading
+      long diffs. Request changes and Reject should open/focus a labeled reason composer,
+      with the reason required at submission rather than an unexplained disabled button.
+      Preserve feedback on errors. Explain genuinely unavailable actions inline (publishing,
+      stale revision, missing evidence), distinguish rejection from requested revision,
+      and refresh authoritative state after failed or concurrent decisions.
+- [ ] **Separate review decisions from publication recovery.** Show credential/binding
+      readiness before offering publication and link missing GitHub/GitLab access to the
+      appropriate Connections settings, without exposing secrets or guaranteeing remote
+      permissions from token presence alone. A failed publish needs a durable, visible
+      outcome and remedy. Distinguish definitely-not-attempted, failed, in-progress,
+      uncertain and published; reconcile uncertain external effects before retrying.
+      Keep request-changes/reject available when safe and explain when they are not.
+      Adding a credential never retries publication automatically, and changed revisions
+      or outgoing prose require fresh authorization rather than inheriting an old approval.
+- [ ] **Prove the review experience on real surfaces.** Exercise both modes in browser
+      and desktop, narrow-screen reading and feedback, long lines, mixed file types,
+      generated/large patches, light/dark themes and keyboard-only use. Include blank
+      reasons, missing forge credential, publication failure/retry, reconnect with drafts,
+      stale revision and resubmission with existing threads. Verify the exact approved
+      revision/prose and the distinction between review state and external publication.
+
+#### Work continuity and outcomes
+
+- [ ] **Continue the work, not just the transcript.** A work-level continuation view
+      carries intent, decisions, attempts, blockers, next action, the current workspace,
+      execution lineage and evidence links. Offer continue, change approach, and abandon
+      while retaining artifacts. Plain sessions can acquire this continuity without
+      being forced into a work item or plan/review lifecycle.
+- [ ] **Produce a concise outcome record.** Show what changed, what was verified, what
+      needs a decision, unresolved or uncertain actions, and cost/usage. Derive revision,
+      workspace, check and publication status from recorded state; any narrative summary
+      is supplementary and cannot turn a claim into verification.
+
+#### Project environments and effective authority
+
+- [ ] **Save validated project setup profiles.** Extend the existing launch manifest and
+      toolchain profiles rather than creating another customization system. Record the
+      image, language tools, skills, dependency preparation/cache policy, required checks,
+      and explicitly configured test services or previews for the projects actually used.
+      Snapshot the configuration per execution; show its last successful validation and
+      invalidate that assurance when its inputs change.
+- [ ] **Preview preparation and explain incompatibility.** Show detected ecosystems,
+      supported preparation steps, missing tools and actionable remedies before launch.
+      Preserve credential-free preparation and isolation; unsupported scripts, services
+      or devcontainer features must not become silent host-execution exceptions.
+- [ ] **Explain authority in task terms.** Before and during work, summarize the selected
+      node, harness/image, effective access, applicable grants, spending limits and actions
+      that still require approval. Derive this from current policy and grants, not a
+      parallel permissions model. Explain node eligibility and placement; any suggested
+      runner stays manually overridable within the eligible set.
+
+#### Portable data and recovery
+
+- [ ] **Publish a versioned data contract.** Extend the current signed candidate JSON,
+      offline package reader and document export into round-trip session/corpus export.
+      A standard archive containing a JSON manifest, JSON/JSONL records, Markdown and
+      ordinary artifact files is the preferred shape; settle the container and schema
+      before implementation. No opaque database dump or Tracon installation required
+      for independent processing.
+- [ ] **Specify complete portable content.** Preserve selected sessions, messages/events,
+      work items and relationships, decisions, drafts, documents, memories, workspace
+      state, evidence, attachments and provenance. Define identifiers, timestamps,
+      encodings, paths and omission rules. Optional harness-native state must name its
+      harness/build/schema compatibility; it is not the portable record's only copy.
+- [ ] **Make import predictable and independently implementable.** Publish schemas,
+      representative exports, integrity/signature verification rules, version migration
+      policy and examples for ordinary processing tools. Define duplicate/conflict
+      handling and reference remapping; prove export/import on a fresh node and independent
+      reading without the node. Retain old-format import compatibility through explicit
+      migrations rather than losing existing archives.
+- [ ] **Separate export, backup and handoff.** Portable data export omits credentials and
+      private identity keys; warn that transcripts and workspace files can still contain
+      secrets and make exclusions explicit. Full installation backup protects any
+      deliberately included secrets separately. Neither importing data nor verifying a
+      signature grants execution authority. Derived indexes remain rebuildable.
+- [ ] **Unify recovery and maintenance entry points.** Build on Settings' maintenance
+      controls, session-state backups and the existing recovery route. Show retained
+      workspaces, checkpoint/export/backup age and destination, runtime/harness/node
+      versions, what survives stop/restart, and actions to inspect, export, restore or
+      diagnose. Keep client reconnect, execution recovery, workspace rescue and disaster
+      recovery distinct. Exercise restore and upgrade failure recovery; promise rollback
+      only where state compatibility permits it.
+
+#### Cross-node session handoff
+
+- [ ] **Move an unfinished session to another node.** Add a session-level action:
+      select destination, check compatibility, checkpoint and transfer, then continue
+      with a continuous work history and explicit execution lineage. Do not require a
+      submitted candidate, mesh membership for file-based transfer, or an opt-in work
+      item. This extends candidate sharing; it does not rename it.
+- [ ] **Carry the actual continuation state.** Include unfinished workspace changes,
+      conversation and decisions, selected context, unsent draft, next action,
+      harness/model/manifest identity, evidence, usage and remaining limits. Reuse the
+      portable contract and existing transport; support bounded transfer of realistic
+      workspaces rather than assuming they fit a single mesh frame.
+- [ ] **Transfer execution ownership safely.** Quiesce in-flight work and fence the
+      source before the destination executes. Persist transfer state and acknowledgements;
+      retries must not create duplicate sessions or repeat external side effects. Surface
+      uncertain actions for reconciliation. A timeout or partition never silently enables
+      both owners; failure and cancellation have explicit safe recovery paths.
+- [ ] **Re-evaluate authority and state compatibility.** Destination policy, credentials,
+      capabilities and budgets decide whether continuation can run; transport imports no
+      authority or private keys. Compatible native-state resume and fresh-session
+      continuation from portable context are distinct, visible outcomes. Explain any
+      lost fidelity before confirmation; never claim live process migration or identical
+      cross-harness state. Pending questions and permissions must be reconciled, not
+      blindly replayed or treated as newly granted.
+- [ ] **Prove handoff in both directions.** Exercise laptop-to-server and server-to-laptop,
+      interruption during transfer, unavailable destination, duplicate import, dirty
+      workspace, incompatible harness state and pending external action. Verify one active
+      owner, retained work/draft/history, and no budget reset or authority widening.
+
+#### Reusable work and bounded automation
+
+- [ ] **Saved workflow recipes.** Start with a few recurring procedures such as regression
+      investigation, small changes and release preparation. Reuse phase presets and the
+      ledger; snapshot each recipe on invocation, persist expensive checkpoints and
+      external waits, and let the operator revise or stop a run. No mandatory workflow
+      language or ceremony for a plain prompt.
+- [ ] **Lightweight batches.** Group related work with dependencies, explicit assignment/
+      ownership and reclaim rules, aggregate spending, blockers and one completion report.
+      Build on current readiness and session holders; retain discovery lineage and prevent
+      competing automated claims before scaling dispatch.
+- [ ] **Integration when parallel same-repository work needs it.** Prefer a suitable forge
+      merge queue over a custom merge agent. Serialize integration, pin the combined
+      revision, and reverify rebased/combined changes; independently approved patches do
+      not automatically approve their combination. Escalate conflicts instead of silently
+      discarding work. This is demand-gated, not a prerequisite for single-session use.
+- [ ] **Bounded scheduled/event-driven chores, after daily-use reliability.** Begin with
+      low-stakes work that returns a report and stops. Set concurrency, spend, time and
+      retry limits; preserve pause/stop, deduplicate triggers, and ask before consequential
+      actions absent a valid scoped grant. Use ordinary supervisor logic for scheduling,
+      reconciliation and health checks, not permanent agent roles.
+- [ ] **Optional conversational coordination, only if useful.** An ordinary managed
+      session may inspect permitted cross-project work and propose actions through existing
+      tools. No privileged manager loop in the node. Fresh reviewers remain useful for
+      judgment, not replacements for deterministic checks, evidence or authority boundaries.
+
+#### Independent installations
+
+- [ ] **Make the personal workflow reproducible by another operator.** Provide one proven
+      installation-to-first-task path, explicit OS/runtime/harness/login compatibility,
+      understandable project preparation and actionable diagnostics. Build on existing
+      setup and maintenance surfaces; keep remote access and mesh optional.
+- [ ] **Bound maintenance expectations.** State supported versus experimental integrations,
+      pinned-release/update policy, interruption and backup requirements, and the recovery
+      path for a failed upgrade. Extend the existing compatibility gates instead of
+      promising arbitrary drop-in harnesses or maintaining a native UI fork.
+- [ ] **Offer a clearly labeled demonstration mode.** Reuse the fixture machinery to
+      explore the workflow without credentials or containers, with demonstration data
+      unmistakable and no implication that its output proves a live run.
+
 ## Current limitations
 
 - No real private-repository end-to-end run yet; see above.
@@ -377,6 +608,7 @@ declared `permission.ask` hook; an LSP status event.
 ## Out of scope
 
 - Multi-user tenancy or a team product.
+- Federated work marketplaces, reputation scores or agent organization charts as product goals.
 - A model/agent loop inside the node.
 - A general-purpose multi-harness framework: two concrete adapters behind one trait,
   not a plugin system for harnesses.
