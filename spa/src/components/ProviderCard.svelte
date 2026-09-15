@@ -21,10 +21,12 @@
   let justResult = $state<ProviderConnectResult | null>(null)
   let managedLocal = $state(false)
   let sameHostBrowser = $state(false)
+  let shareSignIn = $state(true)
 
   const isSelf = $derived(nodeId === store.node?.id)
   const nodeName = $derived(store.nodes.find((node) => node.id === nodeId)?.name ?? nodeId.slice(0, 8))
   const mayClaimBrowser = $derived(isSelf && !managedLocal && browserCanClaimNode())
+  const meshed = $derived(store.nodes.length > 1)
   const shownState = $derived(justResult && p.state === 'disconnected' ? 'pending' : p.state)
   const shownUrl = $derived(p.url ?? justResult?.url ?? null)
   const completion = $derived(p.completion ?? justResult?.completion ?? null)
@@ -60,6 +62,7 @@
         p.name,
         store.channels.filter((channel) => !channel.archived).map((channel) => channel.name),
         managedLocal || sameHostBrowser,
+        shareSignIn,
       )
     })
   }
@@ -169,6 +172,12 @@
           <label class="local-choice">
             <input type="checkbox" bind:checked={sameHostBrowser} />
             This browser is physically on the serving node; use its local callback
+          </label>
+        {/if}
+        {#if meshed}
+          <label class="local-choice">
+            <input type="checkbox" bind:checked={shareSignIn} />
+            Share this sign-in with every node in its channels
           </label>
         {/if}
         <span><button class="lnk" onclick={connect} disabled={busy}>{p.state === 'failed' ? 'Try again' : 'Connect'}</button></span>

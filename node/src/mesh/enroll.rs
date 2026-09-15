@@ -680,7 +680,8 @@ pub async fn accept(
                             let key = identity.credential_store_key();
                             match crate::broker::Broker::load(&key) {
                                 Ok(mut b) => {
-                                    let n = b.apply_handoff(&identity.node_id(), &credentials);
+                                    let n =
+                                        b.apply_handoff(&identity.node_id(), &credentials).len();
                                     if n > 0 {
                                         if let Err(e) = b.save(&key) {
                                             progress

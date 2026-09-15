@@ -3,6 +3,7 @@
 
 pub mod channels;
 pub mod client;
+pub mod credentials;
 pub mod enroll;
 pub mod forward;
 pub mod frames;

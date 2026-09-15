@@ -593,6 +593,7 @@ git = "git"
 heartbeat_secs = 60
 poll_secs = 30
 command_timeout_secs = 15
+# renew_credentials = true          # on an always-on node: renew shared subscription sign-ins first
 
 [memory]
 promote_at = "02:00"                # the nightly promotion batch

@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 
 use crate::auth::{now_ms, now_unix, Owner};
-use crate::store::{Fill, Member, Take};
+use crate::store::{ClaimOutcome, Fill, Member, Take};
 use crate::AppState;
 
 type ApiResult = Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)>;
@@ -434,6 +434,62 @@ pub async fn cancel_enroll(
         Ok((StatusCode::NO_CONTENT, Json(Value::Null)))
     } else {
         Err(err(StatusCode::NOT_FOUND, "no such invitation"))
+    }
+}
+
+// ------------------------------------------------------------------- claims
+
+/// The longest a claim may be held before another member may take it.
+pub const MAX_CLAIM_SECS: u64 = 600;
+
+#[derive(Deserialize)]
+pub struct ClaimBody {
+    /// Opaque to the hub: a node derives it from what it is claiming, so the
+    /// hub never learns what that is.
+    key: String,
+    version: u64,
+    ttl_secs: Option<u64>,
+}
+
+/// Win the right to act on one version of something every member holds a
+/// copy of — a credential's refresh, which revokes the copy every other
+/// holder has. `201` to the first member to ask; `409` with the holder to
+/// anyone else until that claim lapses, and with the newer version to a
+/// member asking about an old one.
+pub async fn claim(
+    State(s): State<AppState>,
+    Extension(owner): Extension<Owner>,
+    Json(body): Json<ClaimBody>,
+) -> ApiResult {
+    member_of(&s, &owner)?;
+    if body.key.len() != 64 || !body.key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(err(StatusCode::BAD_REQUEST, "key must be 32-byte hex"));
+    }
+    let ttl = body.ttl_secs.unwrap_or(120).clamp(1, MAX_CLAIM_SECS);
+    let now = now_unix();
+    match s.claims.claim(
+        &body.key.to_ascii_lowercase(),
+        body.version,
+        owner.0,
+        now + ttl,
+        now,
+    ) {
+        ClaimOutcome::Granted { expires_at } => Ok((
+            StatusCode::CREATED,
+            Json(json!({"granted": true, "version": body.version, "expires_at": expires_at})),
+        )),
+        ClaimOutcome::Held { holder, version } => Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "another member holds this claim",
+                "holder": hex::encode(holder),
+                "version": version,
+            })),
+        )),
+        ClaimOutcome::Stale { version } => Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "a newer version has been claimed", "version": version})),
+        )),
     }
 }
 

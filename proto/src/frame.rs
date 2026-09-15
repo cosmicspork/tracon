@@ -262,6 +262,10 @@ pub enum ChangeOp {
     Delete,
 }
 
+fn shares() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Command {
@@ -324,6 +328,10 @@ pub enum Command {
         name: String,
         #[serde(default)]
         channels: Vec<String>,
+        /// Share the credential with the other members in `channels` once
+        /// signed in. A peer on an older build names nothing, which shares.
+        #[serde(default = "shares")]
+        share: bool,
     },
     ProviderCode {
         name: String,
@@ -868,6 +876,7 @@ mod tests {
         let v = serde_json::to_value(Command::ProviderConnect {
             name: "anthropic".into(),
             channels: vec!["personal".into()],
+            share: false,
         })
         .unwrap();
         assert_eq!(v["op"], "provider_connect");
@@ -879,6 +888,7 @@ mod tests {
             Command::ProviderConnect {
                 name: "a".into(),
                 channels: vec![],
+                share: true,
             }
         );
         let v = serde_json::to_value(Command::ProviderCode {

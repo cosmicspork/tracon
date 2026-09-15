@@ -479,3 +479,100 @@ async fn prompt_answer_and_kill_forward_to_the_owner() {
     let _ = a.adapter.tokens.lock().await;
     let _: Option<HarnessEvent> = None;
 }
+
+/// One sign-in for the pair, and a refresh either node may make but only one
+/// makes per version: A signs in and B receives it; each renews in turn through
+/// the real hub's claims, handing the renewed copy to the other; and when both
+/// try the same version at once, exactly one refreshes.
+#[tokio::test]
+async fn a_subscription_signed_in_once_is_shared_and_renewed_by_one_holder_at_a_time() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let (ai, bi) = (a.id.node_id(), b.id.node_id());
+    let fake = support::oauth_fake::OAuthFake::start().await;
+    let providers_for = |n: &Node, seed: u8| {
+        let p = tracon::providers::Providers::with_endpoints(
+            Arc::new(Config::default()),
+            n.broker.clone(),
+            DataKey::from_bytes([seed; 32]),
+            fake.endpoints(),
+            n.id.node_id(),
+            Bus::new(),
+        );
+        p.set_mesh(n.client.clone());
+        let receiver = p.clone();
+        n.client
+            .set_on_handoff(Box::new(move |names| receiver.handoff_received(names)));
+        p
+    };
+    let pa = providers_for(&a, 31);
+    let pb = providers_for(&b, 32);
+    a.client.refresh_members().await.unwrap();
+    b.client.refresh_members().await.unwrap();
+
+    let result = pa
+        .connect(
+            "anthropic",
+            vec!["personal".into()],
+            true,
+            tracon::providers::LoginOwner::Local,
+            false,
+        )
+        .await
+        .unwrap();
+    let authorized = fake.authorize(&result.url);
+    pa.code(
+        "anthropic",
+        &format!("{}#{}", support::oauth_fake::GOOD_CODE, authorized.state),
+        &tracon::providers::LoginOwner::Local,
+    )
+    .await
+    .unwrap();
+    let version = |n: &Node| {
+        n.broker
+            .read()
+            .unwrap()
+            .get("anthropic")
+            .map(|c| (c.grant_version, c.env["ACCESS_TOKEN"].clone()))
+    };
+    wait_for("B to receive the sign-in", || version(&b).is_some()).await;
+    {
+        let held = b.broker.read().unwrap().get("anthropic").unwrap().clone();
+        assert_eq!(held.nodes, [ai.clone(), bi.clone()]);
+        assert!(held.allows("personal"));
+    }
+    wait_for("B to publish it", || {
+        pb.list_public()
+            .iter()
+            .any(|p| p["name"] == "anthropic" && p["state"] == "connected")
+    })
+    .await;
+
+    use tracon::providers::Refreshed;
+    assert_eq!(pa.refresh("anthropic").await.unwrap(), Refreshed::Renewed);
+    wait_for("B to receive A's renewal", || {
+        version(&b).is_some_and(|(v, _)| v == 1)
+    })
+    .await;
+    assert_eq!(pb.refresh("anthropic").await.unwrap(), Refreshed::Renewed);
+    wait_for("A to receive B's renewal", || {
+        version(&a).is_some_and(|(v, _)| v == 2)
+    })
+    .await;
+    assert_eq!(version(&a), version(&b));
+
+    let before = fake.with(|f| f.refreshes);
+    let (ra, rb) = tokio::join!(pa.refresh("anthropic"), pb.refresh("anthropic"));
+    let mut outcomes = [ra.unwrap(), rb.unwrap()];
+    outcomes.sort_by_key(|o| *o == Refreshed::Renewed);
+    assert_eq!(
+        outcomes,
+        [Refreshed::LeftToAnotherHolder, Refreshed::Renewed]
+    );
+    assert_eq!(fake.with(|f| f.refreshes), before + 1);
+    wait_for("both to hold version 3", || {
+        version(&a).is_some_and(|(v, _)| v == 3) && version(&b).is_some_and(|(v, _)| v == 3)
+    })
+    .await;
+    assert_eq!(version(&a), version(&b));
+}

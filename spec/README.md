@@ -262,6 +262,7 @@ See `hub/` and `docs/ARCHITECTURE.md` (Mesh frames). Summary:
 | `PUT /v0/enroll/{code}` | member | open a slot |
 | `POST /v0/enroll/{code}` | none, rate-limited; `binding_sig` must prove the pair | fill it (public keys and a name) |
 | `GET /v0/enroll/{code}` | slot creator | fetch and delete |
+| `POST /v0/claims` | member | `{key, version, ttl_secs}`: first member to claim a version of an opaque key wins (`201`); others get `409 {holder, version}` until it lapses, and `409 {version}` for an older version |
 | `POST /v0/admit`, `DELETE /v0/admit/{id}` | member; writing a sealing key needs the target's `binding_sig` | membership |
 
 ## Vectors

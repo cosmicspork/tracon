@@ -253,6 +253,37 @@ async fn cursor_behind_retention_is_gone() {
     assert_eq!(st, StatusCode::OK);
 }
 
+/// One member wins a version; the others are told who holds it, and a
+/// stranger cannot claim at all.
+#[tokio::test]
+async fn a_claim_is_won_by_one_member() {
+    let (a, b, stranger) = ids();
+    let h = hub_with(&[(&a, &[MESH_CHANNEL]), (&b, &[MESH_CHANNEL])]);
+    let key = "ab".repeat(32);
+    let body = |version: u64| json!({"key": key, "version": version, "ttl_secs": 60}).to_string();
+
+    let (st, v) = s(&h, &a, "POST", "/v0/claims", &body(1)).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    assert_eq!(v["granted"], true);
+    let (st, v) = s(&h, &b, "POST", "/v0/claims", &body(1)).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["holder"], a.node_id());
+    let (st, v) = s(&h, &b, "POST", "/v0/claims", &body(0)).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["version"], 1);
+    let (st, _) = s(&h, &b, "POST", "/v0/claims", &body(2)).await;
+    assert_eq!(st, StatusCode::CREATED);
+
+    let (st, _) = s(&h, &stranger, "POST", "/v0/claims", &body(3)).await;
+    assert!(
+        st == StatusCode::FORBIDDEN || st == StatusCode::UNAUTHORIZED,
+        "{st}"
+    );
+    let bad = json!({"key": "not-hex", "version": 1}).to_string();
+    let (st, _) = s(&h, &a, "POST", "/v0/claims", &bad).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn enrollment_lifecycle_and_admit() {
     let (a, b, c) = ids();

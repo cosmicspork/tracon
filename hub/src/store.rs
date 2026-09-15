@@ -473,6 +473,80 @@ impl EnrollSlots {
     }
 }
 
+// ---------------------------------------------------------------- claims
+
+struct Claim {
+    version: u64,
+    holder: [u8; 32],
+    expires_at: u64,
+}
+
+pub enum ClaimOutcome {
+    Granted {
+        expires_at: u64,
+    },
+    /// Another member holds this version and its claim has not lapsed.
+    Held {
+        holder: [u8; 32],
+        version: u64,
+    },
+    /// The key has moved past this version: the caller holds a stale copy.
+    Stale {
+        version: u64,
+    },
+}
+
+/// "One member acts on version N of this thing": the only first-writer-wins
+/// decision the hub makes about content it cannot read. A key is opaque to
+/// the hub. Memory only, like enrollment: a claim lives for minutes, and one
+/// lost to a restart can at worst be granted a second time.
+#[derive(Default)]
+pub struct Claims {
+    claims: Mutex<HashMap<String, Claim>>,
+}
+
+/// How long a claim is kept once lapsed, so a late claim for an old version
+/// is still told it is stale.
+const CLAIM_MEMORY_SECS: u64 = 24 * 60 * 60;
+
+impl Claims {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn claim(
+        &self,
+        key: &str,
+        version: u64,
+        holder: [u8; 32],
+        expires_at: u64,
+        now: u64,
+    ) -> ClaimOutcome {
+        let mut claims = self.claims.lock().unwrap();
+        claims.retain(|_, c| c.expires_at + CLAIM_MEMORY_SECS > now);
+        match claims.get(key) {
+            Some(c) if c.version > version => ClaimOutcome::Stale { version: c.version },
+            Some(c) if c.version == version && c.holder != holder && c.expires_at > now => {
+                ClaimOutcome::Held {
+                    holder: c.holder,
+                    version: c.version,
+                }
+            }
+            _ => {
+                claims.insert(
+                    key.to_string(),
+                    Claim {
+                        version,
+                        holder,
+                        expires_at,
+                    },
+                );
+                ClaimOutcome::Granted { expires_at }
+            }
+        }
+    }
+}
+
 /// Per-key fixed-window rate limit for the one public write.
 #[derive(Default)]
 pub struct RateLimit {
@@ -592,6 +666,48 @@ mod tests {
         assert!(e.open("LATE", a, 400, 300));
         assert!(e.cancel("LATE", &a));
         assert!(!e.cancel("LATE", &a));
+    }
+
+    #[test]
+    fn a_claim_goes_to_the_first_member_until_it_lapses() {
+        let c = Claims::new();
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        assert!(matches!(
+            c.claim("k", 3, a, 100, 0),
+            ClaimOutcome::Granted { .. }
+        ));
+        // The holder asking again is the same claim, renewed.
+        assert!(matches!(
+            c.claim("k", 3, a, 120, 10),
+            ClaimOutcome::Granted { .. }
+        ));
+        assert!(matches!(
+            c.claim("k", 3, b, 150, 10),
+            ClaimOutcome::Held { holder, version: 3 } if holder == a
+        ));
+        // A copy older than the claimed version is stale, whoever asks.
+        assert!(matches!(
+            c.claim("k", 2, b, 150, 10),
+            ClaimOutcome::Stale { version: 3 }
+        ));
+        // The next version is anyone's.
+        assert!(matches!(
+            c.claim("k", 4, b, 150, 10),
+            ClaimOutcome::Granted { .. }
+        ));
+        assert!(matches!(
+            c.claim("k", 4, a, 150, 20),
+            ClaimOutcome::Held { .. }
+        ));
+        // A lapsed claim frees its version for another member.
+        assert!(matches!(
+            c.claim("k", 4, a, 300, 200),
+            ClaimOutcome::Granted { .. }
+        ));
+        assert!(matches!(
+            c.claim("other", 1, b, 300, 200),
+            ClaimOutcome::Granted { .. }
+        ));
     }
 
     #[test]

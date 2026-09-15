@@ -28,7 +28,7 @@ use tower_http::cors::CorsLayer;
 
 use nonce::NonceStore;
 use pokes::PokeHub;
-use store::{EnrollSlots, FrameStore, Member, MemberStore, RateLimit};
+use store::{Claims, EnrollSlots, FrameStore, Member, MemberStore, RateLimit};
 
 #[derive(Clone, Debug)]
 pub struct HubConfig {
@@ -60,6 +60,7 @@ pub struct AppState {
     pub nonces: Arc<NonceStore>,
     pub pokes: Arc<PokeHub>,
     pub enroll: Arc<EnrollSlots>,
+    pub claims: Arc<Claims>,
     pub limiter: Arc<RateLimit>,
     /// The replica half, when the hub has an identity and a data directory.
     pub replica: Option<Arc<replica::Replica>>,
@@ -122,6 +123,7 @@ pub fn state_for(
         nonces: Arc::new(NonceStore::new()),
         pokes,
         enroll: Arc::new(EnrollSlots::new()),
+        claims: Arc::new(Claims::new()),
         limiter: Arc::new(RateLimit::new()),
         replica,
         streams: Arc::new(streams::StreamRelay::default()),
@@ -179,6 +181,7 @@ pub fn app_with_state(state: AppState) -> Router {
                 .get(routes::take_enroll)
                 .delete(routes::cancel_enroll),
         )
+        .route("/v0/claims", post(routes::claim))
         .route("/v0/admit", post(routes::admit))
         .route("/v0/admit/{node_id}", delete(routes::remove_member))
         .route_layer(middleware::from_fn_with_state(

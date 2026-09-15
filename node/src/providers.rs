@@ -3,6 +3,7 @@
 //! credential.
 
 pub mod callback;
+pub mod mesh;
 
 use std::{
     collections::HashMap,
@@ -19,6 +20,7 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
 use self::callback::{CallbackCapture, CallbackError, CallbackOutcome, CaptureEvent, CaptureReply};
+use self::mesh::{claim_key, ClaimResult, CredentialMesh};
 use crate::{
     broker::{Credential, SharedBroker, KIND_OAUTH},
     config::Config,
@@ -27,7 +29,12 @@ use crate::{
     stream::{Bus, Frame},
 };
 
+/// How far ahead of expiry a credential is renewed by a node that renews
+/// first: one set to (`[mesh] renew_credentials`), or the only holder.
 const REFRESH_AHEAD_MS: i64 = 30 * 60 * 1000;
+/// How far ahead every other holder of a shared credential steps in, leaving
+/// the renewing node the first half hour.
+const FALLBACK_REFRESH_AHEAD_MS: i64 = 15 * 60 * 1000;
 pub const REFRESH_TICK_SECS: u64 = 5 * 60;
 const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const MAX_MANUAL_INPUT: usize = 8 * 1024;
@@ -64,6 +71,7 @@ struct Inflight {
     generation: u64,
     owner: LoginOwner,
     channels: Vec<String>,
+    share: bool,
     started_ms: i64,
     cancel: CancellationToken,
     state: InflightState,
@@ -114,9 +122,12 @@ enum CompletionState {
     Finished,
 }
 
-#[derive(Clone, Copy)]
 enum StoreKind {
-    Fresh,
+    /// A new sign-in, bound to these channels and held by these nodes.
+    Fresh {
+        channels: Vec<String>,
+        nodes: Vec<String>,
+    },
     Refresh,
 }
 
@@ -127,7 +138,14 @@ struct Note {
     updated_ms: i64,
 }
 
-type OnRefreshed = Box<dyn Fn(&str, &Credential) + Send + Sync>;
+/// What a refresh did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refreshed {
+    Renewed,
+    /// Another holder of the shared credential renews this version; its copy
+    /// arrives by handoff.
+    LeftToAnotherHolder,
+}
 
 pub struct Providers {
     cfg: Arc<Config>,
@@ -142,7 +160,7 @@ pub struct Providers {
     next_generation: AtomicU64,
     on_connected: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
     on_publish: std::sync::OnceLock<Box<dyn Fn(Vec<serde_json::Value>) + Send + Sync>>,
-    on_refreshed: std::sync::OnceLock<OnRefreshed>,
+    mesh: std::sync::OnceLock<Arc<dyn CredentialMesh>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -198,7 +216,7 @@ impl Providers {
             next_generation: AtomicU64::new(1),
             on_connected: std::sync::OnceLock::new(),
             on_publish: std::sync::OnceLock::new(),
-            on_refreshed: std::sync::OnceLock::new(),
+            mesh: std::sync::OnceLock::new(),
         })
     }
 
@@ -210,10 +228,35 @@ impl Providers {
         let _ = self.on_publish.set(f);
     }
 
-    /// Called with a credential this node has just refreshed, so the nodes it
-    /// was shared with receive the rotated tokens: the refresh revoked theirs.
-    pub fn set_on_refreshed(&self, f: OnRefreshed) {
-        let _ = self.on_refreshed.set(f);
+    /// The mesh a credential is shared, claimed and handed off through.
+    /// Without one, this node is the only holder of anything it signs in to.
+    pub fn set_mesh(&self, mesh: Arc<dyn CredentialMesh>) {
+        let _ = self.mesh.set(mesh);
+    }
+
+    /// A handoff stored these credentials: what the node says about its
+    /// providers follows, and a provider waiting on a new sign-in no longer is.
+    pub fn handoff_received(&self, credential_names: &[String]) {
+        let arrived: Vec<String> = self
+            .cfg
+            .providers
+            .iter()
+            .filter(|(_, provider)| credential_names.contains(&provider.credential))
+            .map(|(name, _)| name.clone())
+            .collect();
+        if arrived.is_empty() {
+            return;
+        }
+        {
+            let mut notes = self.notes.lock();
+            for name in &arrived {
+                notes.remove(name);
+            }
+        }
+        if let Some(callback) = self.on_connected.get() {
+            callback();
+        }
+        self.publish();
     }
 
     pub fn list_private(&self) -> Vec<Value> {
@@ -351,10 +394,14 @@ impl Providers {
     /// Start a sign-in. `local_callback` means the browser is on this node's
     /// host, so a loopback redirect reaches it; otherwise the provider's own
     /// page shows a code (Anthropic) or the device flow runs (Codex).
+    ///
+    /// `share` hands the credential, once signed in, to every other member
+    /// bound to one of `channels`: one sign-in for the mesh.
     pub async fn connect(
         self: &Arc<Self>,
         name: &str,
         channels: Vec<String>,
+        share: bool,
         owner: LoginOwner,
         local_callback: bool,
     ) -> Result<ConnectResult, ProviderError> {
@@ -377,6 +424,7 @@ impl Providers {
                     generation,
                     owner,
                     channels,
+                    share,
                     started_ms: now_ms(),
                     cancel: cancel.clone(),
                     state: InflightState::Starting,
@@ -801,10 +849,32 @@ impl Providers {
         };
         stop_capture(&slot);
         slot.cancel.cancel();
-        let stored = self.store(name, tokens, slot.channels, StoreKind::Fresh);
+        let mesh = self.mesh.get();
+        let mut nodes = vec![self.node_id.clone()];
+        if slot.share {
+            for member in mesh
+                .map(|mesh| mesh.members_in(&slot.channels))
+                .unwrap_or_default()
+            {
+                if !nodes.contains(&member) {
+                    nodes.push(member);
+                }
+            }
+        }
+        let stored = self.store(
+            name,
+            tokens,
+            StoreKind::Fresh {
+                channels: slot.channels,
+                nodes,
+            },
+        );
         match &stored {
-            Ok(_) => {
+            Ok((credential_name, credential)) => {
                 self.notes.lock().remove(name);
+                if let Some(mesh) = mesh {
+                    self.hand_off(mesh.as_ref(), credential_name, credential);
+                }
                 if let Some(callback) = self.on_connected.get() {
                     callback();
                 }
@@ -813,6 +883,19 @@ impl Providers {
         }
         self.publish();
         stored.map(|_| ())
+    }
+
+    /// Hand a credential to every node it lists but this one.
+    fn hand_off(&self, mesh: &dyn CredentialMesh, credential_name: &str, credential: &Credential) {
+        let others: Vec<String> = credential
+            .nodes
+            .iter()
+            .filter(|node| **node != self.node_id)
+            .cloned()
+            .collect();
+        if !others.is_empty() {
+            mesh.hand_off(credential_name, credential, &others);
+        }
     }
 
     pub async fn disconnect(&self, name: &str, owner: &LoginOwner) -> Result<(), ProviderError> {
@@ -891,16 +974,17 @@ impl Providers {
         &self,
         name: &str,
         tokens: Tokens,
-        channels: Vec<String>,
         kind: StoreKind,
-    ) -> Result<Credential, ProviderError> {
+    ) -> Result<(String, Credential), ProviderError> {
         let credential_name = self.credential_name(name)?;
+        let fresh = matches!(kind, StoreKind::Fresh { .. });
         let mut broker = self.broker.write().unwrap();
         let mut staged = broker.clone();
         let mut credential = match kind {
-            StoreKind::Fresh => Credential {
+            StoreKind::Fresh { channels, nodes } => Credential {
                 channels,
-                nodes: vec![self.node_id.clone()],
+                nodes,
+                grant_id: Some(uuid::Uuid::now_v7().to_string()),
                 ..Default::default()
             },
             // A refresh keeps where the credential may be used and who it was
@@ -916,26 +1000,34 @@ impl Providers {
                         "the existing credential for {name} is not the same OAuth provider"
                     )));
                 }
+                let mut credential = credential;
+                // A credential from before sign-ins were tracked gets its
+                // identity at its first renewal, from the one node that may
+                // renew it then.
+                if credential.grant_id.is_none() {
+                    credential.grant_id = Some(uuid::Uuid::now_v7().to_string());
+                }
+                credential.grant_version += 1;
                 credential
             }
         };
         credential.kind = KIND_OAUTH.into();
         credential.provider = Some(name.to_string());
         credential.expires_ms = tokens.expires_ms;
-        if tokens.identity.is_some() || matches!(kind, StoreKind::Fresh) {
+        if tokens.identity.is_some() || fresh {
             credential.identity = tokens.identity;
         }
         credential.env.insert("ACCESS_TOKEN".into(), tokens.access);
         if let Some(refresh) = tokens.refresh {
             credential.env.insert("REFRESH_TOKEN".into(), refresh);
-        } else if matches!(kind, StoreKind::Fresh) {
+        } else if fresh {
             credential.env.remove("REFRESH_TOKEN");
         }
         if let Some(account_id) = tokens.account_id {
             credential
                 .env
                 .insert("CHATGPT_ACCOUNT_ID".into(), account_id);
-        } else if matches!(kind, StoreKind::Fresh) {
+        } else if fresh {
             credential.env.remove("CHATGPT_ACCOUNT_ID");
         }
         staged.put(&credential_name, credential.clone());
@@ -943,25 +1035,51 @@ impl Providers {
             .save(&self.store_key)
             .map_err(|error| ProviderError::Failed(error.to_string()))?;
         *broker = staged;
-        Ok(credential)
+        Ok((credential_name, credential))
     }
 
-    pub async fn refresh(&self, name: &str) -> Result<(), ProviderError> {
+    /// Renew a credential's tokens.
+    ///
+    /// A refresh rotates the refresh token and revokes the access token it
+    /// replaced, so a credential held by several nodes is renewed by one of
+    /// them per version: whichever wins the hub's claim, which then hands the
+    /// renewed copy to the rest. Without a claim — no hub, a hub that predates
+    /// claims, or one that cannot be reached — only the node that signed in,
+    /// first in `nodes`, renews.
+    pub async fn refresh(&self, name: &str) -> Result<Refreshed, ProviderError> {
         let flow = self.flow(name)?;
         let credential_name = self.credential_name(name)?;
-        let refresh_token = self
+        let held = self
             .broker
             .read()
             .unwrap()
             .get(&credential_name)
-            .and_then(|credential| credential.env.get("REFRESH_TOKEN").cloned());
+            .cloned()
+            .ok_or_else(|| ProviderError::Failed(format!("no {name} credential to refresh")))?;
         // A token minted without one (`claude setup-token`'s) runs its
         // course and is replaced by signing in.
-        let Some(refresh_token) = refresh_token else {
+        let Some(refresh_token) = held.env.get("REFRESH_TOKEN").cloned() else {
             return Err(ProviderError::ReconnectRequired(format!(
                 "the {name} token cannot be renewed in place; connect the provider again"
             )));
         };
+        if held.nodes.iter().any(|node| *node != self.node_id) {
+            let first = held.nodes.first() == Some(&self.node_id);
+            let claimed = match (self.mesh.get(), held.grant_id.as_deref()) {
+                (Some(mesh), Some(grant)) => {
+                    mesh.claim(&claim_key(grant), held.grant_version).await
+                }
+                _ => ClaimResult::Unsupported,
+            };
+            match claimed {
+                ClaimResult::Won => {}
+                ClaimResult::Lost => return Ok(Refreshed::LeftToAnotherHolder),
+                ClaimResult::Unsupported | ClaimResult::Unreachable(_) if !first => {
+                    return Ok(Refreshed::LeftToAnotherHolder)
+                }
+                ClaimResult::Unsupported | ClaimResult::Unreachable(_) => {}
+            }
+        }
         let refreshed = match flow {
             Flow::Anthropic => {
                 anthropic::refresh(&self.http, &self.endpoints, &refresh_token).await
@@ -974,20 +1092,16 @@ impl Providers {
             }
             OAuthError::Unavailable(reason) => ProviderError::Failed(reason),
         })?;
-        let credential = self.store(name, tokens, Vec::new(), StoreKind::Refresh)?;
-        if let Some(callback) = self.on_refreshed.get() {
-            callback(&credential_name, &credential);
+        let (credential_name, credential) = self.store(name, tokens, StoreKind::Refresh)?;
+        if let Some(mesh) = self.mesh.get() {
+            self.hand_off(mesh.as_ref(), &credential_name, &credential);
         }
         self.publish();
-        Ok(())
+        Ok(Refreshed::Renewed)
     }
 
-    /// Providers whose token expires soon and that this node renews.
-    ///
-    /// A refresh rotates the refresh token and revokes the access token it
-    /// replaced, so a shared credential has exactly one renewer: the node that
-    /// signed in, which is first in its `nodes` (a share appends). A node it
-    /// was handed to waits for the renewed copy rather than racing it.
+    /// Providers whose token expires soon enough that this node should try to
+    /// renew it. Whether it actually does is [`Providers::refresh`]'s claim.
     pub fn due_for_refresh(&self, now: i64) -> Vec<String> {
         let broker = self.broker.read().unwrap();
         let notes = self.notes.lock();
@@ -1013,15 +1127,16 @@ impl Providers {
                 broker
                     .model_credential_for(name, &self.node_id)
                     .map(|(_, credential): (&str, &Credential)| {
+                        let shared = credential.nodes.iter().any(|node| *node != self.node_id);
+                        let ahead = if self.cfg.mesh.renew_credentials || !shared {
+                            REFRESH_AHEAD_MS
+                        } else {
+                            FALLBACK_REFRESH_AHEAD_MS
+                        };
                         credential.kind == KIND_OAUTH
                             && credential
-                                .nodes
-                                .first()
-                                .is_none_or(|renewer| renewer == &self.node_id)
-                            && credential
                                 .expires_ms
-                                .map(|expires| expires - now < REFRESH_AHEAD_MS)
-                                .unwrap_or(false)
+                                .is_some_and(|expires| expires - now < ahead)
                     })
                     .unwrap_or(false)
             })
@@ -1035,7 +1150,10 @@ impl Providers {
             tick.tick().await;
             for name in self.due_for_refresh(now_ms()) {
                 match self.refresh(&name).await {
-                    Ok(()) => tracing::info!(provider = %name, "token refreshed"),
+                    Ok(Refreshed::Renewed) => tracing::info!(provider = %name, "token refreshed"),
+                    Ok(Refreshed::LeftToAnotherHolder) => {
+                        tracing::debug!(provider = %name, "another holder renews this token")
+                    }
                     // Nothing will change on its own: the note is what stops
                     // this being asked again, and it is cleared by the next
                     // successful connect.

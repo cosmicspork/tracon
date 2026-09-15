@@ -425,10 +425,11 @@ export const api = {
   shareCredential: (name: string, to: string) =>
     call<{ shared: string; to: string }>('POST', `/api/credentials/${name}/share`, { to }),
   providers: () => call<ProviderInfo[]>('GET', '/api/providers'),
-  connectProvider: (name: string, channels: string[], localCallback = false) =>
+  connectProvider: (name: string, channels: string[], localCallback = false, share = true) =>
     call<ProviderConnectResult>('POST', `/api/providers/${name}/connect`, {
       channels,
       local_callback: localCallback,
+      share,
     }),
   providerCode: (name: string, code: string) =>
     call<void>('POST', `/api/providers/${name}/code`, { code }),
@@ -441,10 +442,12 @@ export const api = {
     name: string,
     channels: string[],
     localCallback = false,
+    share = true,
   ) =>
     call<ProviderConnectResult>(`POST`, `/api/nodes/${nodeId}/providers/${name}/connect`, {
       channels,
       local_callback: localCallback,
+      share,
     }),
   nodeProviderCode: (nodeId: string, name: string, code: string) =>
     call<{ ok: boolean }>('POST', `/api/nodes/${nodeId}/providers/${name}/code`, { code }),
