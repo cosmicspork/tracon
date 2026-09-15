@@ -249,7 +249,7 @@
     </div>
     <label class="confirm"><input type="checkbox" bind:checked={shareConfirmed} disabled={busy !== '' || shareChannels.length === 0} /> I understand the selected channel keys are being handed to this hub replica.</label>
     <button class="btn p" onclick={shareWithHub} disabled={busy !== '' || !shareConfirmed || shareChannels.length === 0}>{busy === 'share' ? 'Sharing selected keys…' : 'Share selected channels with hub'}</button>
-    <p class="dim">{data.capabilities.edit_member_channels.reason}</p>
+    <small class="footnote">{data.capabilities.edit_member_channels.reason}</small>
     {#if feedbackFor('share')}
       {#if error}<p class="error" role="alert">{error}</p>{/if}
       {#if note}<p class="note" role="status">{note}</p>{/if}
@@ -274,19 +274,23 @@
   .qr :global(svg) { display: block; width: 132px; height: 132px; }
   .actions, .remove-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
   .members { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 8px; }
-  .member-title { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  .member-title { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
   .member-title span { color: var(--ok); font: 12px var(--mono); }
   .member-title span.offline { color: var(--dim); }
   dl { margin: 0; display: grid; gap: 3px; }
-  dl div { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 8px; }
+  dl div { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+  article > .lnk { justify-self: start; }
+  article p code { font-size: 11.5px; color: var(--dim); }
   dd { overflow-wrap: anywhere; }
   dd.mismatch { color: var(--wait); }
   dd.unknown { color: var(--dim); }
-  dt { color: var(--dim); }
+  dt { color: var(--dim); font: 12px var(--mono); }
+  dd { font-size: 13px; }
   .remove-confirm { margin-top: 4px; border-top: 1px solid var(--rule); padding-top: 9px; }
   .remove-confirm p { color: var(--crit); }
   .choices + .btn, .confirm + .btn { justify-self: start; }
   .btn.d { background: var(--crit); color: var(--bg); }
+  .footnote { font: 12.5px var(--sans); color: var(--dim); }
   .empty { padding: 14px; border-radius: 4px; color: var(--dim); }
   @media (max-width: 700px) {
     .choices { flex-direction: column; align-items: flex-start; }

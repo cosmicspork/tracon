@@ -226,14 +226,17 @@
     {:else if !status.installed}
       <details class="initialize">
         <summary>Initialize the shipped policy</summary>
+        <div class="details-body">
         <p>This creates this node’s first signing identity and installs the shipped policy. Existing keys, signatures, and bundles are never replaced.</p>
         <label class="confirm"><input type="checkbox" bind:checked={setupConfirmed} /> I understand this creates a new local signing identity.</label>
         <button class="btn primary" onclick={initialize} disabled={busy || !setupConfirmed || !local}>{busy ? 'Initializing…' : 'Create initial signed policy'}</button>
         {#if !local}<p class="helper">Open this node locally to initialize its policy.</p>{/if}
+        </div>
       </details>
     {:else}
       <details class="edit-policy">
         <summary>Edit policy</summary>
+        <div class="details-body">
         <p class="helper">{!local ? 'Open the signing node locally to edit its policy.' : !status.signing_key_present ? 'This node has no signing key. Edit on the node that signed this policy, then roll it out here.' : 'Preview with the existing signing key, then apply the exact signed bytes. The key never leaves this node.'}</p>
         <label class="policy-editor">
           <span>Policy TOML</span>
@@ -268,6 +271,7 @@
             Apply exact preview{selected.length ? ` & roll out to ${selected.length}` : ''}
           </button>
           <small>Applying replaces the local bundle only if verified installed files still match the baseline captured for this preview. A changed baseline requires a fresh preview. It never rotates a key.</small>
+        </div>
         </div>
       </details>
     {/if}
@@ -324,7 +328,8 @@
   .identity { min-width: 0; }
   .identity > span { color: var(--ink2); font: 500 11px/1.3 var(--mono); text-transform: uppercase; letter-spacing: .08em; }
   .identity code { overflow-wrap: anywhere; font-size: .8rem; }
-  details { display: grid; gap: .8rem; }
+  .details-body { display: grid; gap: 12px; margin-top: 12px; }
+  .details-body > .btn { justify-self: start; }
   summary { color: var(--acc); cursor: pointer; font-weight: 600; }
   .confirm { display: flex; align-items: center; gap: .6rem; min-height: 36px; color: var(--ink); }
   .policy-editor { display: grid; gap: .5rem; }

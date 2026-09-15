@@ -147,54 +147,60 @@
       {#if data.service.container}<div><dt>Runtime</dt><dd>{data.service.container}</dd></div>{/if}
     </dl>
     {#if install}
-      <details class="capability" class:unavailable={!install.available}>
-        <summary>{install.available ? 'Installation available' : 'Installation unavailable'}</summary>
-        <p>{install.reason}</p>
-        <small>{install.recovery}</small>
-      </details>
-      {#if confirmInstall}
-        <div class="restart-confirm">
-          <p>Install or replace this serving node's fixed {data.service.supervisor} unit? This starts or restarts the service after the response; active sessions are refused before the request.</p>
-          <button class="btn d" onclick={requestInstall} disabled={busy !== '' || !local || !install.available}>{busy === 'install' ? (desktopLocal ? 'Installing and waiting…' : 'Scheduling installation…') : 'Confirm service install'}</button>
-          <button class="lnk" onclick={() => (confirmInstall = false)} disabled={busy !== ''}>Cancel</button>
-        </div>
-      {:else}
-        <button class="btn" onclick={requestInstall} disabled={busy !== '' || !local || !install.available}>{desktopLocal ? 'Install or repair desktop service…' : 'Install user service…'}</button>
-      {/if}
+      <div class="cap">
+        <details class="capability" class:unavailable={!install.available}>
+          <summary>{install.available ? 'Installation available' : 'Installation unavailable'}</summary>
+          <p>{install.reason}</p>
+          <small>{install.recovery}</small>
+        </details>
+        {#if confirmInstall}
+          <div class="restart-confirm">
+            <p>Install or replace this serving node's fixed {data.service.supervisor} unit? This starts or restarts the service after the response; active sessions are refused before the request.</p>
+            <button class="btn d" onclick={requestInstall} disabled={busy !== '' || !local || !install.available}>{busy === 'install' ? (desktopLocal ? 'Installing and waiting…' : 'Scheduling installation…') : 'Confirm service install'}</button>
+            <button class="lnk" onclick={() => (confirmInstall = false)} disabled={busy !== ''}>Cancel</button>
+          </div>
+        {:else}
+          <button class="btn" onclick={requestInstall} disabled={busy !== '' || !local || !install.available}>{desktopLocal ? 'Install or repair desktop service…' : 'Install user service…'}</button>
+        {/if}
+      </div>
     {/if}
 
     {#if restart}
-      <details class="capability" class:unavailable={!restart.available}>
-        <summary>{restart.available ? 'Restart available' : 'Restart unavailable'}</summary>
-        <p>{restart.reason}</p>
-        <small>{restart.recovery}</small>
-      </details>
-      {#if confirmRestart}
-        <div class="restart-confirm">
-          <p>Restart this serving node's fixed {data.service.supervisor} service now? {desktopLocal ? 'The desktop controller waits for the node to answer.' : 'The node schedules the request after replying; this is not proof that the supervisor restarted it.'}</p>
-          <button class="btn d" onclick={requestRestart} disabled={busy !== '' || !local || !restart.available}>{busy === 'restart' ? (desktopLocal ? 'Restarting and waiting…' : 'Scheduling restart…') : 'Confirm restart of this node'}</button>
-          <button class="lnk" onclick={() => (confirmRestart = false)} disabled={busy !== ''}>Cancel</button>
-        </div>
-      {:else}
-        <button class="btn" onclick={requestRestart} disabled={busy !== '' || !local || !restart.available}>Restart this serving node…</button>
-      {/if}
+      <div class="cap">
+        <details class="capability" class:unavailable={!restart.available}>
+          <summary>{restart.available ? 'Restart available' : 'Restart unavailable'}</summary>
+          <p>{restart.reason}</p>
+          <small>{restart.recovery}</small>
+        </details>
+        {#if confirmRestart}
+          <div class="restart-confirm">
+            <p>Restart this serving node's fixed {data.service.supervisor} service now? {desktopLocal ? 'The desktop controller waits for the node to answer.' : 'The node schedules the request after replying; this is not proof that the supervisor restarted it.'}</p>
+            <button class="btn d" onclick={requestRestart} disabled={busy !== '' || !local || !restart.available}>{busy === 'restart' ? (desktopLocal ? 'Restarting and waiting…' : 'Scheduling restart…') : 'Confirm restart of this node'}</button>
+            <button class="lnk" onclick={() => (confirmRestart = false)} disabled={busy !== ''}>Cancel</button>
+          </div>
+        {:else}
+          <button class="btn" onclick={requestRestart} disabled={busy !== '' || !local || !restart.available}>Restart this serving node…</button>
+        {/if}
+      </div>
     {/if}
 
     {#if uninstall}
-      <details class="capability" class:unavailable={!uninstall.available}>
-        <summary>{uninstall.available ? 'Removal available' : 'Removal unavailable'}</summary>
-        <p>{uninstall.reason}</p>
-        <small>{uninstall.recovery}</small>
-      </details>
-      {#if confirmUninstall}
-        <div class="restart-confirm">
-          <p>Remove this serving node's fixed user service? The interface disconnects after acceptance. Node state and credentials stay on disk.</p>
-          <button class="btn d" onclick={requestUninstall} disabled={busy !== '' || !local || !uninstall.available}>{busy === 'uninstall' ? 'Scheduling removal…' : 'Confirm service removal'}</button>
-          <button class="lnk" onclick={() => (confirmUninstall = false)} disabled={busy !== ''}>Cancel</button>
-        </div>
-      {:else}
-        <button class="lnk d" onclick={requestUninstall} disabled={busy !== '' || !local || !uninstall.available}>Remove fixed user service…</button>
-      {/if}
+      <div class="cap">
+        <details class="capability" class:unavailable={!uninstall.available}>
+          <summary>{uninstall.available ? 'Removal available' : 'Removal unavailable'}</summary>
+          <p>{uninstall.reason}</p>
+          <small>{uninstall.recovery}</small>
+        </details>
+        {#if confirmUninstall}
+          <div class="restart-confirm">
+            <p>Remove this serving node's fixed user service? The interface disconnects after acceptance. Node state and credentials stay on disk.</p>
+            <button class="btn d" onclick={requestUninstall} disabled={busy !== '' || !local || !uninstall.available}>{busy === 'uninstall' ? 'Scheduling removal…' : 'Confirm service removal'}</button>
+            <button class="lnk" onclick={() => (confirmUninstall = false)} disabled={busy !== ''}>Cancel</button>
+          </div>
+        {:else}
+          <button class="lnk d" onclick={requestUninstall} disabled={busy !== '' || !local || !uninstall.available}>Remove fixed user service…</button>
+        {/if}
+      </div>
     {/if}
   {/if}
 
@@ -206,16 +212,19 @@
   .recheck { display: grid; gap: 8px; justify-items: start; padding-top: 12px; border-top: 1px solid var(--rule); }
   .recheck p { margin: 0; color: var(--ink2); }
   dl { margin: 0; display: grid; gap: 5px; }
-  dl div { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px; }
+  dl div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; align-items: baseline; }
   dt { color: var(--dim); font: 12px var(--mono); }
-  dd { margin: 0; color: var(--ink2); overflow-wrap: anywhere; }
+  dd { margin: 0; color: var(--ink2); font-size: 13px; overflow-wrap: anywhere; }
   dd.unknown { color: var(--wait); }
-  .capability { display: grid; gap: 3px; border-left: 3px solid var(--ok); background: var(--wash-ok); padding: 9px 11px; }
+  .cap { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px 12px; border-left: 3px solid var(--ok); border-radius: 4px; background: var(--s2); padding: 9px 12px; }
+  .cap:has(.capability.unavailable) { border-left-color: var(--dim); }
+  .cap > .btn, .cap > .lnk { align-self: center; }
+  .cap .restart-confirm { grid-column: 1 / -1; }
+  .capability { display: grid; gap: 3px; }
   .capability summary { color: var(--ink); cursor: pointer; }
   .capability p { color: var(--ink2); margin: 6px 0; }
   .capability small { color: var(--dim); }
-  .capability.unavailable { border-left-color: var(--dim); background: var(--wash-dim); }
-  .restart-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; background: var(--wash-crit); border-left: 3px solid var(--crit); padding: 10px 11px; }
+  .restart-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; background: var(--wash-crit); border-radius: 4px; padding: 10px 11px; }
   .restart-confirm p { flex-basis: 100%; color: var(--ink2); margin: 0; }
   .btn.d { background: var(--crit); color: var(--bg); }
   .source, .dim, .note, .error { margin: 0; font: 12px var(--mono); }
