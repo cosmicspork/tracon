@@ -31,6 +31,14 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.18.0](https://github.com/cosmicspork/tracon/compare/v0.17.0...v0.18.0) (2026-09-15)
+
+
+### Features
+
+* **mesh:** sign in once for the mesh and renew shared credentials by claim ([#233](https://github.com/cosmicspork/tracon/issues/233)) ([6cc0747](https://github.com/cosmicspork/tracon/commit/6cc07477ec38459604055a3c97ed26492312aae3))
+* **providers:** sign in to Anthropic and ChatGPT subscriptions natively ([#230](https://github.com/cosmicspork/tracon/issues/230)) ([cb23cb5](https://github.com/cosmicspork/tracon/commit/cb23cb5e0f546aa5642b1254f45eeac94381a3fc))
+
 ## [0.17.0](https://github.com/cosmicspork/tracon/compare/v0.16.2...v0.17.0) (2026-09-15)
 
 
