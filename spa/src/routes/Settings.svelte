@@ -12,6 +12,7 @@
   import Credentials from '../components/Credentials.svelte'
   import Notifications from '../components/Notifications.svelte'
   import ProviderCard from '../components/ProviderCard.svelte'
+  import { connectableProviders } from '../lib/providers'
   import HubRollups from '../components/HubRollups.svelte'
   import TransferInbox from '../components/TransferInbox.svelte'
   import AdminAccess from '../components/settings/AdminAccess.svelte'
@@ -59,7 +60,7 @@
   )
   const selectedNodeId = $derived(selectedNode?.id ?? '')
   const selectedProviders = $derived(
-    selectedNode?.is_self ? store.providers : (selectedNode?.providers ?? []),
+    connectableProviders(selectedNode?.is_self ? store.providers : (selectedNode?.providers ?? [])),
   )
   const selectedNodeName = $derived(selectedNode?.name ?? 'the serving node')
   const selectedNodeIsServing = $derived(selectedNode?.id === store.node?.id)

@@ -91,7 +91,7 @@ work that does not need it, and nothing on it may be described elsewhere as prov
 - [ ] **Anthropic subscription** signed in through `claude setup-token` in the login image,
       the token lifted into the broker, and the gateway's subscription shaping serving an
       OpenCode `anthropic` provider unchanged.
-- [ ] **Codex subscription** signed in through `opencode auth login openai`, and with it
+- [ ] **Codex subscription** signed in through `opencode auth login -p openai` (device code), and with it
       whether the ChatGPT backend accepts a Codex request whose system prompt stays in the
       message array.
 - [ ] **Hosted API keys** — Anthropic and OpenAI — end to end through the gateway.

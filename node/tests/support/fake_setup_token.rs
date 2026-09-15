@@ -4,9 +4,9 @@
 //! It reproduces the two things about the real command that the adapter has to
 //! cope with and that a plain `println!` would hide: the URL arrives wrapped in
 //! an OSC 8 hyperlink and SGR colour, and the prompt is answered by a pty in
-//! raw mode, where Enter is CR. A code that arrives terminated by LF is
-//! rejected rather than accepted, so a test cannot pass without the adapter
-//! having translated it.
+//! raw mode, where Enter is CR. A code that arrives terminated by LF, or with
+//! its CR in the same write, is rejected rather than accepted, so a test cannot
+//! pass without the adapter having translated and separated it.
 
 use std::io::{Read, Write};
 
@@ -39,21 +39,30 @@ fn main() {
     let _ = out.flush();
 
     let mut code = String::new();
-    let mut byte = [0u8; 1];
+    // Past stdin's own buffer, so each read is one write from the adapter.
+    let mut chunk = [0u8; 16 * 1024];
     loop {
-        match stdin.read(&mut byte) {
-            Ok(1) => {}
+        let n = match stdin.read(&mut chunk) {
+            Ok(n) if n > 0 => n,
             _ => std::process::exit(2),
+        };
+        let read = &chunk[..n];
+        if read.contains(&b'\n') {
+            let _ = writeln!(out, "the code arrived terminated by LF, not Enter\r");
+            let _ = out.flush();
+            std::process::exit(3);
         }
-        match byte[0] {
-            b'\r' => break,
-            b'\n' => {
-                let _ = writeln!(out, "the code arrived terminated by LF, not Enter\r");
-                let _ = out.flush();
-                std::process::exit(3);
-            }
-            other => code.push(other as char),
+        if read == b"\r" {
+            break;
         }
+        if read.contains(&b'\r') {
+            // The real CLI reads a multi-byte chunk as a paste and keeps a CR
+            // inside it as text, so nothing is submitted.
+            let _ = writeln!(out, "Enter arrived inside the pasted code\r");
+            let _ = out.flush();
+            std::process::exit(3);
+        }
+        code.push_str(&String::from_utf8_lossy(read));
     }
     if code.is_empty() {
         std::process::exit(4);
@@ -69,8 +78,8 @@ fn main() {
 
     // The real command's last screen waits on a keypress; so does this, which
     // is what makes the adapter's answer to it part of the test.
-    match stdin.read(&mut byte) {
-        Ok(1) => {}
+    match stdin.read(&mut chunk) {
+        Ok(n) if n > 0 => {}
         _ => std::process::exit(5),
     }
 }

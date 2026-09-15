@@ -241,7 +241,7 @@ URL and paste-back through the interface, and lifts the resulting token into its
 sealed store. The vendor logic stays in the vendor's binary; the node owns everything
 around it. Which binary is a property of the flow rather than of the configured
 harness: the Anthropic subscription has one client, `claude setup-token`, and the
-Codex subscription another, `opencode auth login openai`, so a node runs whichever
+Codex subscription another, `opencode auth login -p openai`, so a node runs whichever
 image carries the one it needs and the credential lands in the same broker either
 way.
 

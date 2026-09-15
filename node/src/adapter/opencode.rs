@@ -83,7 +83,7 @@ impl OpenCodeAdapter {
     /// The logins this adapter runs, by the provider id in `[providers]`.
     ///
     /// Only the Codex subscription, and the two spellings a node might carry
-    /// for it: `openai` is what `opencode auth login` calls the flow, and
+    /// for it: `openai` is what `opencode auth login -p` calls the flow, and
     /// `openai-codex` is what the retired harness called it, which an
     /// operator's `node.toml` may still say.
     pub const LOGIN_PROVIDERS: [&'static str; 2] = ["openai", "openai-codex"];
@@ -990,9 +990,23 @@ impl HarnessAdapter for OpenCodeAdapter {
     }
 }
 
-/// `opencode auth login openai`: prints a URL for the operator and waits for
-/// the code to be pasted back. It runs in the login helper's context, against
-/// the store that context mounts, so nothing it writes is visible to a session.
+/// The login method `opencode auth login -p openai` offers that a helper
+/// container can finish: a device code. The browser method waits for a
+/// redirect to `localhost:1455` inside the container, which the operator's
+/// browser cannot reach and which takes no pasted code instead.
+const CODEX_LOGIN_METHOD: &str = "ChatGPT Pro/Plus (headless)";
+
+/// How long the login is given to print its device page and code.
+const CODEX_LOGIN_PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// `opencode auth login -p openai`, device-code method: prints a page and a
+/// code for the operator, then polls until the sign-in is approved and writes
+/// the credential. It runs in the login helper's context, against the store
+/// that context mounts, so nothing it writes is visible to a session.
+///
+/// Both flags matter. Without `-p` the first positional is read as the URL of
+/// an auth well-known document, and `openai` fails as one; without `-m` it
+/// stops at a method menu that nothing will answer.
 async fn login_flow(
     runner: &dyn Runner,
     name: &str,
@@ -1002,12 +1016,7 @@ async fn login_flow(
     use tokio::io::AsyncBufReadExt;
     let spawned = runner
         .spawn(RunnerCommand {
-            argv: vec![
-                "opencode".into(),
-                "auth".into(),
-                "login".into(),
-                "openai".into(),
-            ],
+            argv: codex_login_argv(),
             env: OpenCodeAdapter::login_env(state_dir),
             image,
             name: name.into(),
@@ -1016,7 +1025,7 @@ async fn login_flow(
         .await?;
     let output = Arc::new(Mutex::new(String::new()));
     let mut lines = tokio::io::BufReader::new(spawned.stdout).lines();
-    let found = tokio::time::timeout(Duration::from_secs(60), async {
+    let found = tokio::time::timeout(CODEX_LOGIN_PROMPT_TIMEOUT, async {
         let mut url = None;
         let mut device_code = None;
         while let Ok(Some(line)) = lines.next_line().await {
@@ -1025,24 +1034,10 @@ async fn login_flow(
                 sink.push_str(&line);
                 sink.push('\n');
             }
-            if url.is_none() {
-                url = line
-                    .split_whitespace()
-                    .find(|token| {
-                        (token.starts_with("https://") || token.starts_with("http://"))
-                            && !token.starts_with("http://localhost")
-                            && !token.starts_with("http://127.0.0.1")
-                    })
-                    .map(|url| url.trim_end_matches(['.', ',']).to_string());
-            }
-            if device_code.is_none() {
-                device_code = line
-                    .split_once("code:")
-                    .map(|(_, code)| code.trim().to_string())
-                    .filter(|code| !code.is_empty());
-            }
-            if let Some(url) = url.clone() {
-                return Some((url, device_code));
+            url = url.or_else(|| device_page(&line));
+            device_code = device_code.or_else(|| entered_code(&line));
+            if let (Some(url), Some(code)) = (&url, &device_code) {
+                return Some((url.clone(), Some(code.clone())));
             }
         }
         None
@@ -1051,7 +1046,10 @@ async fn login_flow(
     .ok()
     .flatten();
     let (url, device_code) = found.ok_or_else(|| {
-        AdapterError::Protocol("login printed no usable authorization URL".into())
+        AdapterError::Protocol(format!(
+            "login printed no device sign-in page and code: {}",
+            last_line(&output)
+        ))
     })?;
     let drain = output.clone();
     tokio::spawn(async move {
@@ -1072,6 +1070,49 @@ async fn login_flow(
         done: spawned.done,
         output,
     })
+}
+
+fn codex_login_argv() -> Vec<String> {
+    [
+        "opencode",
+        "auth",
+        "login",
+        "-p",
+        "openai",
+        "-m",
+        CODEX_LOGIN_METHOD,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+/// The device sign-in page on a line of the login's output
+/// (`●  Go to: https://auth.openai.com/codex/device`).
+fn device_page(line: &str) -> Option<String> {
+    line.split_whitespace()
+        .find(|token| token.starts_with("https://"))
+        .map(|url| url.trim_end_matches(['.', ',']).to_string())
+}
+
+/// The code the operator enters on that page (`●  Enter code: ABCD-12345`).
+fn entered_code(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once("code:")?;
+    rest.split_whitespace()
+        .next()
+        .map(str::to_string)
+        .filter(|code| code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+}
+
+fn last_line(output: &Arc<Mutex<String>>) -> String {
+    output
+        .lock()
+        .unwrap()
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("nothing")
+        .to_string()
 }
 
 async fn drain_logs(
@@ -2277,6 +2318,39 @@ mod tests {
             .await
             .expect_err("no store at all");
         assert!(missing.to_string().contains("no auth store"), "{missing}");
+    }
+
+    /// What 1.18.30 prints for the device-code method, byte for byte apart
+    /// from the code: clack's bullets, the reset before the first line, and a
+    /// spinner that never ends its line.
+    #[test]
+    fn the_codex_login_reads_the_device_page_and_code_off_separate_lines() {
+        let screen = "\u{1b}[0m\n\u{250c}  Add credential\n\u{2502}\n\
+                      \u{25cf}  Go to: https://auth.openai.com/codex/device\n\u{2502}\n\
+                      \u{25cf}  Enter code: EWMT-4NC0Q\n\u{1b}[?25l\u{2502}\n";
+        let pages: Vec<_> = screen.lines().filter_map(device_page).collect();
+        let codes: Vec<_> = screen.lines().filter_map(entered_code).collect();
+        assert_eq!(pages, ["https://auth.openai.com/codex/device"]);
+        assert_eq!(codes, ["EWMT-4NC0Q"]);
+        assert_eq!(entered_code("Enter code: \u{1b}[1m"), None);
+    }
+
+    /// `openai` as a positional is an auth well-known URL to 1.18.30, and
+    /// without a method the login stops at a menu.
+    #[test]
+    fn the_codex_login_names_its_provider_and_device_method_by_flag() {
+        assert_eq!(
+            codex_login_argv(),
+            [
+                "opencode",
+                "auth",
+                "login",
+                "-p",
+                "openai",
+                "-m",
+                "ChatGPT Pro/Plus (headless)"
+            ]
+        );
     }
 
     /// The Anthropic subscription has no OpenCode login — upstream removed the

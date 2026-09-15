@@ -46,7 +46,7 @@ const NEEDS_RECONNECT: &str = "needs_reconnect";
 /// The login client and the session harness are independent, and each
 /// subscription has exactly one client that can mint it. `claude setup-token`
 /// is the whole of the Anthropic path, so `anthropic` resolves to the Claude
-/// adapter whatever `[harness] id` names; `opencode auth login openai` is the
+/// adapter whatever `[harness] id` names; `opencode auth login -p openai` is the
 /// whole of the Codex path, so `openai`/`openai-codex` resolve to the
 /// OpenCode adapter the same way. The retired harness used to broker Codex
 /// for a node running anything else, which is why this table names it now.
@@ -526,6 +526,10 @@ impl Providers {
             }
         };
 
+        // A login client whose only flow is a device code (OpenCode's Codex
+        // login) says so by returning one, whatever the provider's table
+        // names.
+        let device_login = device_login || flow.device_code.is_some();
         let mut completion = if device_login {
             LoginCompletion::DeviceCode
         } else {
@@ -559,6 +563,9 @@ impl Providers {
                         }
                     }
                 }
+                // A redirect to the provider's own page is a login designed
+                // around the paste-back, not a callback that went missing.
+                Err(_) if callback::redirects_to_hosted_page(&flow.url) => {}
                 Err(_) => {
                     completion_note = Some(
                         "This provider did not offer a usable localhost callback; paste the redirect URL or code."

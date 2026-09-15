@@ -197,6 +197,22 @@ pub fn migrate_config(text: &str) -> Option<ConfigMigration> {
     Some(ConfigMigration { text, changed })
 }
 
+/// Replace the Codex login ids the retired harness wrote into `[providers]`
+/// with OpenCode's, in memory. A file migrated before this ran still names
+/// them, and that migration only runs while `[harness] id` is omp.
+pub fn retire_login_ids(
+    providers: &mut std::collections::BTreeMap<String, crate::config::Provider>,
+) {
+    for provider in providers.values_mut() {
+        if provider.login.as_deref() == Some("openai-codex") {
+            provider.login = Some("openai".into());
+        }
+        if provider.device_login.as_deref() == Some("openai-codex-device") {
+            provider.device_login = None;
+        }
+    }
+}
+
 /// Where the original of a migrated `node.toml` is kept.
 pub fn config_backup_path(path: &Path) -> PathBuf {
     let name = path

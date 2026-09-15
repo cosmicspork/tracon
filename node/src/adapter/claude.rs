@@ -44,6 +44,10 @@ const LOGIN_URL_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the login is given to end on its own once the token is in hand.
 const LOGIN_EXIT_GRACE: Duration = Duration::from_secs(10);
 
+/// How long a pasted code is left to land before Enter follows it. 2.1.247
+/// submitted with a 50 ms gap and did not with none.
+const PASTE_SETTLE: Duration = Duration::from_millis(250);
+
 /// The width the login's pty is set to before the CLI starts. At the default
 /// 80 the sign-in URL is wrapped across rows by cursor moves and no line
 /// contains it whole; wide enough, it is printed once, on one line.
@@ -1016,13 +1020,7 @@ impl HarnessAdapter for ClaudeAdapter {
                         if n == 0 {
                             break;
                         }
-                        let mut chunk = buf[..n].to_vec();
-                        for byte in chunk.iter_mut() {
-                            if *byte == b'\n' {
-                                *byte = b'\r';
-                            }
-                        }
-                        if stdin.write_all(&chunk).await.is_err() || stdin.flush().await.is_err() {
+                        if forward_typed(&mut stdin, &buf[..n]).await.is_err() {
                             break;
                         }
                     }
@@ -1093,6 +1091,29 @@ impl HarnessAdapter for ClaudeAdapter {
             ))
         })
     }
+}
+
+/// Write what the node sent to the login's pty, each line's text and its Enter
+/// as separate writes.
+///
+/// The CLI's input reads a multi-byte chunk as a paste, and a CR inside a
+/// paste is taken as text rather than as Enter: code and CR in one write sit
+/// in the prompt and are never submitted. An LF is also only ever one more
+/// character to a pty in raw mode, so Enter is sent as CR.
+async fn forward_typed<W: AsyncWrite + Unpin>(stdin: &mut W, chunk: &[u8]) -> std::io::Result<()> {
+    let mut lines = chunk.split(|byte| *byte == b'\n').peekable();
+    while let Some(text) = lines.next() {
+        if !text.is_empty() {
+            stdin.write_all(text).await?;
+            stdin.flush().await?;
+        }
+        if lines.peek().is_some() {
+            tokio::time::sleep(PASTE_SETTLE).await;
+            stdin.write_all(b"\r").await?;
+            stdin.flush().await?;
+        }
+    }
+    Ok(())
 }
 
 /// Keep what a login said, for the reason when it fails, bounded so a chatty

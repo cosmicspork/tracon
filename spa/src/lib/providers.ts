@@ -1,4 +1,4 @@
-import type { LoginCompletion } from './types'
+import type { LoginCompletion, ProviderInfo } from './types'
 
 export function providerLabel(name: string): string {
   if (name === 'openai') return 'OpenAI API'
@@ -15,4 +15,10 @@ export function completionInstruction(completion: LoginCompletion | null): strin
     return 'Open the provider page and enter the code below.'
   }
   return 'Complete sign-in, then paste the redirect URL or code.'
+}
+
+// An API-key-only provider has nothing to connect from its card; its key is
+// imported under credentials, and its card appears once one is.
+export function connectableProviders(providers: ProviderInfo[]): ProviderInfo[] {
+  return providers.filter((provider) => provider.can_login || provider.state === 'connected')
 }

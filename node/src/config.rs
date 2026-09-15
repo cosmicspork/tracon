@@ -1728,9 +1728,9 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 shape: SHAPE_OPENAI_CODEX.into(),
                 // OpenCode's own id for the Codex OAuth flow, which is what
                 // runs it now that the retired harness's `openai-codex` and
-                // `openai-codex-device` ids are gone. It prints a URL and
-                // waits for a pasted code, so there is no separate device
-                // flow and no localhost callback to receive.
+                // `openai-codex-device` ids are gone. Its only flow is a
+                // device code, which the login reports itself, so there is no
+                // separate device id and no localhost callback to receive.
                 login: Some("openai".into()),
                 device_login: None,
                 requires_local_callback: false,
@@ -2083,6 +2083,7 @@ impl Config {
                 for (name, provider) in default_providers() {
                     config.providers.entry(name).or_insert(provider);
                 }
+                crate::legacy::retire_login_ids(&mut config.providers);
                 config
                     .docs
                     .preview_origin()
@@ -2248,6 +2249,38 @@ shape = "openai"
         assert_eq!(codex.shape, SHAPE_OPENAI_CODEX);
         // OpenCode's own id for the Codex OAuth flow: the login runs
         // `opencode auth login openai`.
+        assert_eq!(codex.login.as_deref(), Some("openai"));
+        assert_eq!(codex.device_login, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A file an omp-era node wrote in full, already moved to OpenCode, still
+    /// names omp's Codex login ids. OpenCode has no `openai-codex-device`, and
+    /// a browser connect would ask it for one.
+    #[test]
+    fn the_retired_harnesss_codex_login_ids_are_not_loaded() {
+        let dir =
+            std::env::temp_dir().join(format!("tracon-cfg-codex-ids-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node.toml");
+        std::fs::write(
+            &path,
+            r#"
+[harness]
+id = "opencode"
+
+[providers.openai-codex]
+credential = "openai-codex"
+device_login = "openai-codex-device"
+login = "openai-codex"
+requires_local_callback = false
+shape = "openai-codex"
+upstream = "https://chatgpt.com/backend-api"
+"#,
+        )
+        .unwrap();
+        let config = Config::try_load_from(&path).unwrap();
+        let codex = &config.providers["openai-codex"];
         assert_eq!(codex.login.as_deref(), Some("openai"));
         assert_eq!(codex.device_login, None);
         let _ = std::fs::remove_dir_all(dir);

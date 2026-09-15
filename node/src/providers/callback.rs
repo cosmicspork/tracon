@@ -119,6 +119,25 @@ impl CallbackTarget {
     }
 }
 
+/// Whether an authorization URL sends its code to a page on the provider's own
+/// site (`https://platform.claude.com/oauth/code/callback`) rather than to a
+/// local listener. Such a login shows the operator the code to paste back.
+pub fn redirects_to_hosted_page(authorization_url: &str) -> bool {
+    let Ok(authorization) = Url::parse(authorization_url) else {
+        return false;
+    };
+    let redirects = values(&authorization, "redirect_uri");
+    let [redirect] = redirects.as_slice() else {
+        return false;
+    };
+    Url::parse(redirect).is_ok_and(|redirect| {
+        redirect.scheme() == "https"
+            && redirect
+                .host_str()
+                .is_some_and(|host| !matches!(host, "localhost" | "127.0.0.1" | "[::1]"))
+    })
+}
+
 fn values(url: &Url, key: &str) -> Vec<String> {
     url.query_pairs()
         .filter(|(name, _)| name == key)
@@ -420,6 +439,21 @@ mod tests {
             "https://provider.example/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=a&state=b",
         ] {
             assert!(CallbackTarget::parse(value).is_err(), "accepted {value}");
+        }
+    }
+
+    #[test]
+    fn a_hosted_redirect_is_told_apart_from_a_loopback_one() {
+        assert!(redirects_to_hosted_page(
+            "https://claude.com/cai/oauth/authorize?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=s"
+        ));
+        for value in [
+            "https://provider.example/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A18443%2Fcb&state=s",
+            "https://provider.example/authorize?redirect_uri=https%3A%2F%2Flocalhost%3A1%2Fcb&state=s",
+            "https://provider.example/authorize?state=s",
+            "not a url",
+        ] {
+            assert!(!redirects_to_hosted_page(value), "{value}");
         }
     }
 
