@@ -1,97 +1,112 @@
-//! Connecting a provider: the harness's login runs as a node-owned subprocess,
-//! the operator's paste-back reaches its stdin, and what it stores is lifted
-//! into the broker as an `oauth` credential pinned to this node.
+//! Connecting a provider: the node runs the subscription's OAuth sign-in
+//! itself, against a fake of the provider's endpoints, and keeps the tokens in
+//! the broker as an `oauth` credential pinned to this node.
 
 #[path = "support/mod.rs"]
 mod support;
-use support::login_fake::LoginFake;
+use support::oauth_fake::{self, OAuthFake};
 use support::state;
 
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tracon::{
-    broker::{Broker, Credential, KIND_OAUTH},
+    broker::{Broker, Credential, SharedBroker, KIND_OAUTH},
     config::Config,
-    providers::{LoginAdapters, LoginCompletion, LoginOwner, Providers},
-    runner::local::LocalBackend,
+    oauth::Endpoints,
+    providers::{LoginCompletion, LoginOwner, ProviderError, Providers},
     stream::Bus,
 };
 
-fn providers(
-    name: &str,
-    fake: Arc<LoginFake>,
-) -> (Arc<Providers>, tracon::broker::SharedBroker, Bus) {
+fn providers(endpoints: Endpoints) -> (Arc<Providers>, SharedBroker, Bus) {
     let bus = Bus::new();
     let broker = Broker::default().shared();
-    let cfg = Arc::new(Config::default()); // anthropic has a login; openai does not
-    let p = Providers::new_in(
-        state::scratch(name),
-        cfg,
+    let p = Providers::with_endpoints(
+        Arc::new(Config::default()),
         broker.clone(),
         proto::envelope::DataKey::from_bytes([9u8; 32]),
-        LoginAdapters::all(fake),
-        Arc::new(LocalBackend),
+        endpoints,
         "n1".into(),
         bus.clone(),
     );
     (p, broker, bus)
 }
 
+fn listed(p: &Providers, name: &str) -> serde_json::Value {
+    p.list_private()
+        .into_iter()
+        .find(|value| value["name"] == name)
+        .unwrap()
+}
+
+fn env(broker: &SharedBroker, credential: &str, key: &str) -> Option<String> {
+    broker
+        .read()
+        .unwrap()
+        .get(credential)
+        .and_then(|c| c.env.get(key).cloned())
+}
+
+async fn eventually(what: &str, mut ready: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !ready() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
+/// A node the operator's browser is not on: the redirect goes to Anthropic's
+/// own page, which shows `code#state`, and the paste is exchanged by the node.
+/// A refresh then renews in place and keeps the bindings.
 #[tokio::test]
-async fn connect_paste_back_lifts_the_token_into_the_broker() {
+async fn an_anthropic_sign_in_from_another_device_completes_by_paste_and_refreshes() {
     state::isolate();
-    let fake = Arc::new(LoginFake::default());
-    let (p, broker, bus) = providers("connect_paste_back", fake.clone());
-    *fake.account_id.lock().unwrap() = Some("acct-new".into());
-    let mut previous = Credential {
+    let fake = OAuthFake::start().await;
+    let (p, broker, bus) = providers(fake.endpoints());
+    let mut frames = bus.subscribe();
+    let phone = LoginOwner::Peer("phone".into());
+    let mut stale = Credential {
         kind: KIND_OAUTH.into(),
         provider: Some("anthropic".into()),
-        channels: vec!["old".into()],
-        nodes: vec!["old-node".into()],
         ..Default::default()
     };
-    previous
-        .env
-        .insert("ACCESS_TOKEN".into(), "old-access".into());
-    previous
-        .env
-        .insert("REFRESH_TOKEN".into(), "old-refresh".into());
-    previous
-        .env
-        .insert("CHATGPT_ACCOUNT_ID".into(), "acct-old".into());
-    previous.env.insert("STALE".into(), "must-go".into());
-    broker.write().unwrap().put("anthropic", previous);
-    let mut frames = bus.subscribe();
+    stale.env.insert("STALE".into(), "must-go".into());
+    broker.write().unwrap().put("anthropic", stale);
 
     let result = p
-        .connect("anthropic", vec!["work".into()], LoginOwner::Local, true)
+        .connect("anthropic", vec!["work".into()], phone.clone(), false)
         .await
         .unwrap();
-    assert_eq!(result.url, "https://login.example/anthropic");
     assert_eq!(result.completion, LoginCompletion::Paste);
-    let pending = p
-        .list_private()
-        .into_iter()
-        .find(|value| value["name"] == "anthropic")
-        .unwrap();
-    assert_eq!(pending["state"], "pending");
-    assert_eq!(pending["url"], result.url);
-    let resumed = p
-        .connect("anthropic", vec![], LoginOwner::Local, true)
-        .await
-        .unwrap();
-    assert_eq!(resumed, result);
+    assert_eq!(result.completion_note, None);
+    let authorized = fake.authorize(&result.url);
+    assert_eq!(
+        authorized.redirect,
+        tracon::oauth::anthropic::HOSTED_REDIRECT
+    );
+    assert_eq!(authorized.scope, "user:inference");
+    assert!(!result.url.contains("expires_in"), "{}", result.url);
+
+    // Resuming returns the same sign-in; anyone else is refused.
+    assert_eq!(
+        p.connect("anthropic", vec![], phone.clone(), false)
+            .await
+            .unwrap(),
+        result
+    );
     assert!(matches!(
-        p.connect("anthropic", vec![], LoginOwner::Peer("n2".into()), true,)
+        p.connect("anthropic", vec![], LoginOwner::Local, true)
             .await
             .unwrap_err(),
-        tracon::providers::ProviderError::Busy(_)
+        ProviderError::Busy(_)
     ));
     assert!(matches!(
-        p.code("anthropic", "code", &LoginOwner::Peer("n2".into()))
+        p.code("anthropic", "x", &LoginOwner::Local)
             .await
             .unwrap_err(),
-        tracon::providers::ProviderError::WrongOwner
+        ProviderError::WrongOwner
     ));
     let public = p
         .list_public()
@@ -100,321 +115,464 @@ async fn connect_paste_back_lifts_the_token_into_the_broker() {
         .unwrap();
     assert_eq!(public["state"], "pending");
     assert!(public.get("url").is_none());
-    assert!(public.get("completion").is_none());
-    assert!(public.get("completion_note").is_none());
-    assert!(public.get("error").is_none());
 
-    p.code("anthropic", "  the-code \n", &LoginOwner::Local)
+    // A code from another sign-in, and one the provider refuses, both leave
+    // this one waiting for the right paste.
+    let refused = p
+        .code(
+            "anthropic",
+            &format!("{}#not-this-state", oauth_fake::GOOD_CODE),
+            &phone,
+        )
         .await
-        .unwrap();
-    // The subprocess ends and the lift happens off the request path.
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            if broker
-                .read()
-                .unwrap()
-                .get("anthropic")
-                .and_then(|credential| credential.env.get("ACCESS_TOKEN"))
-                .is_some_and(|token| token == "anthropic:the-code")
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("different sign-in"),
+        "{refused}"
+    );
+    let refused = p
+        .code(
+            "anthropic",
+            &format!("wrong-code#{}", authorized.state),
+            &phone,
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("invalid_grant"), "{refused}");
+    assert_eq!(listed(&p, "anthropic")["state"], "pending");
+
+    p.code(
+        "anthropic",
+        &format!("  {}#{} \n", oauth_fake::GOOD_CODE, authorized.state),
+        &phone,
+    )
     .await
-    .expect("credential lifted");
+    .unwrap();
     {
         let b = broker.read().unwrap();
         let c = b.get("anthropic").unwrap();
         assert_eq!(c.kind, "oauth");
-        assert_eq!(c.provider.as_deref(), Some("anthropic"));
-        assert_eq!(c.channels, vec!["work".to_string()]);
-        assert_eq!(c.nodes, vec!["n1".to_string()]);
-        assert_eq!(
-            c.env.get("ACCESS_TOKEN").map(String::as_str),
-            Some("anthropic:the-code")
-        );
-        assert_eq!(
-            c.env.get("CHATGPT_ACCOUNT_ID").map(String::as_str),
-            Some("acct-new")
-        );
+        assert_eq!(c.channels, ["work"]);
+        assert_eq!(c.nodes, ["n1"]);
+        assert_eq!(c.identity.as_deref(), Some(oauth_fake::EMAIL));
         assert!(!c.env.contains_key("STALE"));
-        assert_eq!(c.env.get("REFRESH_TOKEN").map(String::as_str), Some("rt"));
-        assert_eq!(c.identity.as_deref(), Some("op@example"));
+        assert!(!c.env.contains_key("CHATGPT_ACCOUNT_ID"));
     }
-    let listed = p
-        .list_private()
-        .into_iter()
-        .find(|v| v["name"] == "anthropic")
-        .unwrap();
-    assert_eq!(listed["state"], "connected");
-    assert_eq!(listed["identity"], "op@example");
-    // The interface heard about it both times.
+    assert_eq!(
+        env(&broker, "anthropic", "ACCESS_TOKEN").as_deref(),
+        Some("sk-ant-access-1")
+    );
+    assert_eq!(
+        env(&broker, "anthropic", "REFRESH_TOKEN").as_deref(),
+        Some("sk-ant-refresh-1")
+    );
+    assert_eq!(listed(&p, "anthropic")["state"], "connected");
     let mut seen = 0;
-    while let Ok(f) = frames.try_recv() {
-        if matches!(f, tracon::stream::Frame::Providers { .. }) {
+    while let Ok(frame) = frames.try_recv() {
+        if matches!(frame, tracon::stream::Frame::Providers { .. }) {
             seen += 1;
         }
     }
     assert!(seen >= 2, "providers frames: {seen}");
 
-    // Refresh runs the harness's refresh and lifts again, keeping bindings.
-    // The lifted token expires in two hours; it is due half an hour ahead.
-    assert!(p.due_for_refresh(tracon::store::now_ms()).is_empty());
-    *fake.account_id.lock().unwrap() = None;
-    assert!(p
-        .due_for_refresh(tracon::store::now_ms() + 100 * 60 * 1000)
-        .contains(&"anthropic".to_string()));
+    // Two hours left: not due now, due inside the half hour ahead.
+    let refreshed: Arc<Mutex<Vec<(String, Credential)>>> = Arc::default();
+    let sink = refreshed.clone();
+    p.set_on_refreshed(Box::new(move |name, credential| {
+        sink.lock()
+            .unwrap()
+            .push((name.to_string(), credential.clone()));
+    }));
+    let now = tracon::store::now_ms();
+    assert!(p.due_for_refresh(now).is_empty());
+    assert_eq!(p.due_for_refresh(now + 100 * 60 * 1000), ["anthropic"]);
     p.refresh("anthropic").await.unwrap();
-    assert_eq!(*fake.refreshed.lock().unwrap(), 1);
+    assert_eq!(
+        env(&broker, "anthropic", "ACCESS_TOKEN").as_deref(),
+        Some("sk-ant-access-2")
+    );
+    assert_eq!(
+        env(&broker, "anthropic", "REFRESH_TOKEN").as_deref(),
+        Some("sk-ant-refresh-2")
+    );
     {
-        let b = broker.read().unwrap();
-        let c = b.get("anthropic").unwrap();
+        let handed = refreshed.lock().unwrap();
+        assert_eq!(handed.len(), 1);
+        assert_eq!(handed[0].0, "anthropic");
+        assert_eq!(handed[0].1.channels, ["work"]);
         assert_eq!(
-            c.env.get("ACCESS_TOKEN").map(String::as_str),
-            Some("anthropic:the-code+r")
+            handed[0].1.env.get("ACCESS_TOKEN").map(String::as_str),
+            Some("sk-ant-access-2")
         );
-        assert_eq!(
-            c.env.get("CHATGPT_ACCOUNT_ID").map(String::as_str),
-            Some("acct-new")
-        );
-        assert_eq!(c.channels, vec!["work".to_string()]);
     }
-    assert!(matches!(
-        p.disconnect("anthropic", &LoginOwner::Peer("n2".into()))
-            .await
-            .unwrap_err(),
-        tracon::providers::ProviderError::RemoteDisconnect
-    ));
-    assert!(broker.read().unwrap().get("anthropic").is_some());
 
+    assert!(matches!(
+        p.disconnect("anthropic", &phone).await.unwrap_err(),
+        ProviderError::RemoteDisconnect
+    ));
     p.disconnect("anthropic", &LoginOwner::Local).await.unwrap();
     assert!(broker.read().unwrap().get("anthropic").is_none());
 }
 
+/// The browser is on this node's host: Anthropic redirects to a loopback
+/// listener the node opened, and the sign-in finishes without a paste.
 #[tokio::test]
-async fn invalid_provider_and_manual_completion_are_refused() {
+async fn an_anthropic_sign_in_on_this_host_returns_to_a_local_listener() {
     state::isolate();
-    let fake = Arc::new(LoginFake::default());
-    let (p, broker, _bus) = providers("failures", fake);
+    let fake = OAuthFake::start().await;
+    let (p, broker, _bus) = providers(fake.endpoints());
+
+    let result = p
+        .connect("anthropic", vec!["work".into()], LoginOwner::Local, true)
+        .await
+        .unwrap();
+    assert_eq!(result.completion, LoginCompletion::LocalCallback);
+    let authorized = fake.authorize(&result.url);
+    let redirect = reqwest::Url::parse(&authorized.redirect).unwrap();
+    assert_eq!(redirect.host_str(), Some("localhost"));
+    assert_eq!(redirect.path(), "/callback");
+    let port = redirect.port().unwrap();
+
+    let callback = |code: &str, state: &str| {
+        reqwest::get(format!(
+            "http://127.0.0.1:{port}/callback?code={code}&state={state}"
+        ))
+    };
+    let forged = callback(oauth_fake::GOOD_CODE, "forged").await.unwrap();
+    assert_eq!(forged.status(), reqwest::StatusCode::FORBIDDEN);
+    let done = callback(oauth_fake::GOOD_CODE, &authorized.state)
+        .await
+        .unwrap();
+    assert_eq!(done.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        env(&broker, "anthropic", "ACCESS_TOKEN").as_deref(),
+        Some("sk-ant-access-1")
+    );
+    assert_eq!(listed(&p, "anthropic")["state"], "connected");
+    // The listener goes with the sign-in.
+    assert!(callback(oauth_fake::GOOD_CODE, &authorized.state)
+        .await
+        .is_err());
+}
+
+/// Codex on this host: the browser returns to OpenAI's one registered loopback
+/// port, and the account id every Codex request carries is read from the
+/// tokens.
+#[tokio::test]
+async fn a_codex_sign_in_on_this_host_returns_to_a_local_listener() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, broker, _bus) = providers(fake.endpoints());
+
+    let result = p
+        .connect("openai-codex", vec!["work".into()], LoginOwner::Local, true)
+        .await
+        .unwrap();
+    assert_eq!(result.completion, LoginCompletion::LocalCallback);
+    assert!(result
+        .url
+        .starts_with(&format!("{}/openai/oauth/authorize?", fake.base)));
+    let authorized = fake.authorize(&result.url);
+    let redirect = reqwest::Url::parse(&authorized.redirect).unwrap();
+    assert_eq!(redirect.path(), "/auth/callback");
+
+    // What the browser's address bar shows is pasteable too.
+    p.code(
+        "openai-codex",
+        &format!(
+            "{}?code={}&state={}",
+            authorized.redirect,
+            oauth_fake::GOOD_CODE,
+            authorized.state
+        ),
+        &LoginOwner::Local,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        env(&broker, "openai-codex", "CHATGPT_ACCOUNT_ID").as_deref(),
+        Some(oauth_fake::ACCOUNT)
+    );
+    assert_eq!(
+        env(&broker, "openai-codex", "REFRESH_TOKEN").as_deref(),
+        Some("codex-refresh-1")
+    );
+    assert_eq!(listed(&p, "openai-codex")["identity"], oauth_fake::EMAIL);
+
+    p.refresh("openai-codex").await.unwrap();
+    assert_eq!(
+        env(&broker, "openai-codex", "REFRESH_TOKEN").as_deref(),
+        Some("codex-refresh-2")
+    );
+    assert_eq!(
+        env(&broker, "openai-codex", "CHATGPT_ACCOUNT_ID").as_deref(),
+        Some(oauth_fake::ACCOUNT)
+    );
+}
+
+/// Codex anywhere else: a device code, which the node polls for until the
+/// operator approves it. There is nothing to paste.
+#[tokio::test]
+async fn a_codex_sign_in_from_another_device_completes_by_device_code() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, broker, _bus) = providers(fake.endpoints());
+    let phone = LoginOwner::Peer("phone".into());
+
+    let result = p
+        .connect("openai-codex", vec!["work".into()], phone.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(result.completion, LoginCompletion::DeviceCode);
+    assert_eq!(result.url, format!("{}/openai/codex/device", fake.base));
+    assert_eq!(result.device_code.as_deref(), Some(oauth_fake::DEVICE_CODE));
+    assert!(p
+        .code("openai-codex", "anything", &phone)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("nothing to paste"));
+
+    eventually("a pending poll", || fake.with(|f| f.device_polls) >= 1).await;
+    assert!(broker.read().unwrap().get("openai-codex").is_none());
+    fake.with(|f| f.device_approved = true);
+    eventually("the device grant", || {
+        env(&broker, "openai-codex", "ACCESS_TOKEN").is_some()
+    })
+    .await;
+    assert_eq!(
+        env(&broker, "openai-codex", "CHATGPT_ACCOUNT_ID").as_deref(),
+        Some(oauth_fake::ACCOUNT)
+    );
+    assert_eq!(listed(&p, "openai-codex")["state"], "connected");
+}
+
+/// OpenAI's app registers one loopback port. When something else holds it,
+/// the sign-in is still offered, by device code, and says why.
+#[tokio::test]
+async fn a_codex_sign_in_whose_port_is_taken_falls_back_to_a_device_code() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let occupier = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = occupier.local_addr().unwrap().port();
+    let (p, _broker, _bus) = providers(Endpoints {
+        codex_callback_port: port,
+        ..fake.endpoints()
+    });
+
+    let result = p
+        .connect("openai-codex", vec![], LoginOwner::Local, true)
+        .await
+        .unwrap();
+    assert_eq!(result.completion, LoginCompletion::DeviceCode);
+    assert!(
+        result
+            .completion_note
+            .as_deref()
+            .is_some_and(|note| note.contains(&port.to_string())),
+        "{result:?}"
+    );
+    p.disconnect("openai-codex", &LoginOwner::Local)
+        .await
+        .unwrap();
+    drop(occupier);
+}
+
+/// A denied device sign-in fails, and a cancelled one stops polling and keeps
+/// nothing even if it is approved afterwards.
+#[tokio::test]
+async fn a_denied_or_cancelled_device_sign_in_keeps_nothing() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, broker, _bus) = providers(fake.endpoints());
+
+    p.connect("openai-codex", vec![], LoginOwner::Local, false)
+        .await
+        .unwrap();
+    fake.with(|f| f.device_denied = true);
+    eventually("the denial", || {
+        listed(&p, "openai-codex")["state"] == "failed"
+    })
+    .await;
+    assert!(listed(&p, "openai-codex")["error"]
+        .as_str()
+        .unwrap()
+        .contains("not authorized"));
+
+    fake.with(|f| {
+        f.device_denied = false;
+        f.device_polls = 0;
+    });
+    p.connect("openai-codex", vec![], LoginOwner::Local, false)
+        .await
+        .unwrap();
+    eventually("a pending poll", || fake.with(|f| f.device_polls) >= 1).await;
+    p.disconnect("openai-codex", &LoginOwner::Local)
+        .await
+        .unwrap();
+    let polls = fake.with(|f| {
+        f.device_approved = true;
+        f.device_polls
+    });
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(fake.with(|f| f.device_polls) <= polls + 1);
+    assert!(broker.read().unwrap().get("openai-codex").is_none());
+    assert_eq!(listed(&p, "openai-codex")["state"], "disconnected");
+}
+
+#[tokio::test]
+async fn invalid_providers_and_malformed_pastes_are_refused() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, broker, _bus) = providers(fake.endpoints());
     assert!(matches!(
         p.connect("openai", vec![], LoginOwner::Local, false)
             .await
             .unwrap_err(),
-        tracon::providers::ProviderError::NoLogin(_)
+        ProviderError::NoLogin(_)
     ));
     assert!(matches!(
         p.connect("nope", vec![], LoginOwner::Local, false)
             .await
             .unwrap_err(),
-        tracon::providers::ProviderError::Unknown(_)
+        ProviderError::Unknown(_)
     ));
     assert!(matches!(
         p.code("anthropic", "x", &LoginOwner::Local)
             .await
             .unwrap_err(),
-        tracon::providers::ProviderError::NotPending(_)
+        ProviderError::NotPending(_)
     ));
 
-    assert!(matches!(
-        p.connect("anthropic", vec![], LoginOwner::Local, false)
-            .await
-            .unwrap_err(),
-        tracon::providers::ProviderError::RequiresLocalCallback(_)
-    ));
-    p.connect("anthropic", vec![], LoginOwner::Local, true)
+    p.connect("anthropic", vec![], LoginOwner::Local, false)
         .await
         .unwrap();
-    assert!(matches!(
-        p.code("anthropic", "", &LoginOwner::Local)
-            .await
-            .unwrap_err(),
-        tracon::providers::ProviderError::Failed(_)
-    ));
-    assert!(matches!(
-        p.code("anthropic", "one\ntwo", &LoginOwner::Local)
-            .await
-            .unwrap_err(),
-        tracon::providers::ProviderError::Failed(_)
-    ));
+    for bad in ["", "one\ntwo", "two words", "#only-state"] {
+        assert!(
+            matches!(
+                p.code("anthropic", bad, &LoginOwner::Local)
+                    .await
+                    .unwrap_err(),
+                ProviderError::Failed(_)
+            ),
+            "{bad:?}"
+        );
+    }
     p.disconnect("anthropic", &LoginOwner::Local).await.unwrap();
     assert!(broker.read().unwrap().is_empty());
-}
 
-/// A Codex login from a phone still works, and it is a device code whatever
-/// the provider's table says.
-///
-/// `opencode auth login -p openai` has one flow a helper container can finish:
-/// it prints a page and a code, then polls until the operator approves. It
-/// reads nothing back, so offering a paste would be offering a box that does
-/// nothing, and the login is not refused for want of a callback this node
-/// cannot receive.
-#[tokio::test]
-async fn a_codex_login_that_prints_a_device_code_completes_by_device_code() {
-    state::isolate();
-    let fake = Arc::new(LoginFake::default());
-    *fake.device_code.lock().unwrap() = Some("ABCD-12345".into());
-    let (p, _broker, _bus) = providers("device_login", fake);
-
-    for (owner, local_callback) in [
-        (LoginOwner::Peer("phone".into()), false),
-        (LoginOwner::Local, true),
-    ] {
-        let result = p
-            .connect("openai-codex", vec![], owner.clone(), local_callback)
-            .await
-            .unwrap();
-        assert_eq!(result.completion, LoginCompletion::DeviceCode);
-        assert_eq!(result.url, "https://login.example/openai");
-        assert_eq!(result.device_code.as_deref(), Some("ABCD-12345"));
-        assert_eq!(result.completion_note, None);
-        p.disconnect("openai-codex", &owner).await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn a_cancelled_startup_cannot_remove_the_next_login_generation() {
-    state::isolate();
-    let fake = Arc::new(LoginFake::default());
-    fake.login_delay_ms.store(100, Ordering::SeqCst);
-    let (p, _broker, _bus) = providers("startup_generation", fake.clone());
-
-    let first = {
-        let p = p.clone();
-        tokio::spawn(async move {
-            p.connect("anthropic", vec!["old".into()], LoginOwner::Local, true)
-                .await
-        })
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        while fake.login_calls.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-
-    assert!(matches!(
-        p.connect("anthropic", vec![], LoginOwner::Peer("peer".into()), true,)
-            .await
-            .unwrap_err(),
-        tracon::providers::ProviderError::Busy(_)
-    ));
-    p.disconnect("anthropic", &LoginOwner::Local).await.unwrap();
-
-    let second = p
-        .connect("anthropic", vec!["new".into()], LoginOwner::Local, true)
+    // A newer sign-in replaces a cancelled one; the old code is not its code.
+    let first = p
+        .connect("anthropic", vec![], LoginOwner::Local, false)
         .await
         .unwrap();
-    assert!(first.await.unwrap().is_err());
-    let pending = p
-        .list_private()
-        .into_iter()
-        .find(|value| value["name"] == "anthropic")
-        .unwrap();
-    assert_eq!(pending["state"], "pending");
-    assert_eq!(pending["url"], second.url);
+    let old_state = fake.authorize(&first.url).state;
     p.disconnect("anthropic", &LoginOwner::Local).await.unwrap();
+    let second = p
+        .connect("anthropic", vec![], LoginOwner::Local, false)
+        .await
+        .unwrap();
+    assert_ne!(first.url, second.url);
+    fake.authorize(&second.url);
+    assert!(p
+        .code(
+            "anthropic",
+            &format!("{}#{old_state}", oauth_fake::GOOD_CODE),
+            &LoginOwner::Local
+        )
+        .await
+        .is_err());
 }
 
-/// The login client and the session harness are independent. Each
-/// subscription has exactly one client that can mint it: `claude setup-token`
-/// for Anthropic, `opencode auth login -p openai` for Codex. So each login goes
-/// to its own adapter whatever `[harness] id` names, and the harness the node
-/// runs sessions with keeps only the logins nothing else claims.
-///
-/// The retired harness used to broker Codex for a node running anything else.
-/// With it gone, a Claude Code node that could not sign in to Codex at all
-/// would be the regression, which is what the second half asserts.
-#[test]
-fn each_subscription_login_runs_through_the_one_client_that_mints_it() {
-    state::isolate();
-    let mut cfg = Config::default();
-    cfg.harness.id = "opencode".into();
-    let opencode: Arc<dyn tracon::adapter::HarnessAdapter> =
-        Arc::new(tracon::adapter::opencode::OpenCodeAdapter::new("1.18.30"));
-    let logins = LoginAdapters::for_node(&cfg, opencode.clone(), &LocalBackend);
-    assert_eq!(logins.get("anthropic").id(), "claude");
-    // Codex is this node's own harness, so it is the same instance rather
-    // than a second one built for the login.
-    assert!(Arc::ptr_eq(logins.get("openai-codex"), &opencode));
-    // The login client's own state layout comes with it, not the harness's.
-    assert_eq!(logins.get("anthropic").layout().env, "CLAUDE_CONFIG_DIR");
-
-    // A node already running Claude Code signs in to Anthropic with the
-    // harness it has — the same instance, because `setup-token` leaves its
-    // token in the adapter that ran the login and nowhere else — and reaches
-    // for OpenCode to sign in to Codex.
-    cfg.harness.id = "claude".into();
-    let claude: Arc<dyn tracon::adapter::HarnessAdapter> =
-        Arc::new(tracon::adapter::claude::ClaudeAdapter::new("2.1.247"));
-    let logins = LoginAdapters::for_node(&cfg, claude.clone(), &LocalBackend);
-    assert!(Arc::ptr_eq(logins.get("anthropic"), &claude));
-    assert_eq!(logins.get("openai-codex").id(), "opencode");
-    assert_eq!(logins.get("openai").id(), "opencode");
-    assert_eq!(logins.get("openai-codex").layout().dir, ".opencode");
-}
-
-/// A credential nothing can renew must stop the refresh loop rather than be
-/// retried every five minutes for the rest of the node's life, and it must not
-/// go on reading as connected while it cannot be used.
+/// A refresh the provider refuses — the refresh token expired, was revoked, or
+/// was already rotated by another holder — stops the loop and asks for a new
+/// sign-in; so does a token that never had a refresh token.
 #[tokio::test]
 async fn a_credential_that_cannot_be_renewed_asks_for_a_new_sign_in() {
     state::isolate();
-    let fake = Arc::new(LoginFake::default());
-    // Already inside the refresh-ahead window, so the loop acts on its first
-    // tick rather than in half an hour.
-    *fake.expires_in_ms.lock().unwrap() = Some(60 * 1000);
-    let (p, broker, _bus) = providers("needs_reconnect", fake.clone());
+    let fake = OAuthFake::start().await;
+    fake.with(|f| f.expires_in = 60);
+    let (p, broker, _bus) = providers(fake.endpoints());
 
-    p.connect("anthropic", vec!["work".into()], LoginOwner::Local, true)
+    let result = p
+        .connect("anthropic", vec!["work".into()], LoginOwner::Local, false)
         .await
         .unwrap();
-    p.code("anthropic", "the-code", &LoginOwner::Local)
-        .await
-        .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        while broker.read().unwrap().get("anthropic").is_none() {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
+    let authorized = fake.authorize(&result.url);
+    p.code(
+        "anthropic",
+        &format!("{}#{}", oauth_fake::GOOD_CODE, authorized.state),
+        &LoginOwner::Local,
+    )
     .await
-    .expect("credential lifted");
-    assert!(p
-        .due_for_refresh(tracon::store::now_ms())
-        .contains(&"anthropic".to_string()));
+    .unwrap();
+    assert_eq!(p.due_for_refresh(tracon::store::now_ms()), ["anthropic"]);
 
-    fake.reconnect_required.store(true, Ordering::SeqCst);
+    fake.with(|f| f.reject_refresh = true);
     let loop_task = tokio::spawn(p.clone().refresh_loop());
-    let state = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let listed = p
-                .list_private()
-                .into_iter()
-                .find(|value| value["name"] == "anthropic")
-                .unwrap();
-            if listed["state"] != "connected" {
-                return listed;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+    eventually("the loop to notice", || {
+        listed(&p, "anthropic")["state"] != "connected"
     })
-    .await
-    .expect("the loop noticed");
+    .await;
     loop_task.abort();
-
+    let state = listed(&p, "anthropic");
     assert_eq!(state["state"], "needs_reconnect");
     assert!(state["error"]
         .as_str()
         .unwrap()
-        .contains("signing in again"));
-    // Asked once, and never again until the operator reconnects.
-    assert_eq!(*fake.refreshed.lock().unwrap(), 1);
+        .contains("connect the provider again"));
+    assert_eq!(fake.with(|f| f.refreshes), 1);
     assert!(p.due_for_refresh(tracon::store::now_ms()).is_empty());
-    // Nothing was thrown away: the token is still there, it just cannot be
-    // renewed, and the operator decides what to do about that.
     assert!(broker.read().unwrap().get("anthropic").is_some());
+
+    // A year-long `claude setup-token` credential has no refresh token.
+    {
+        let mut b = broker.write().unwrap();
+        let mut c = b.get("anthropic").unwrap().clone();
+        c.env.remove("REFRESH_TOKEN");
+        b.put("anthropic", c);
+    }
+    assert!(matches!(
+        p.refresh("anthropic").await.unwrap_err(),
+        ProviderError::ReconnectRequired(_)
+    ));
+}
+
+/// A refresh rotates the refresh token and revokes the access token it
+/// replaced, so a credential shared across nodes has one renewer: the node
+/// that signed in, first in `nodes`. Another holder waits for its copy.
+#[test]
+fn only_the_node_that_signed_in_renews_a_shared_credential() {
+    state::isolate();
+    let (p, broker, _bus) = providers(Endpoints::default());
+    let soon = tracon::store::now_ms() + 60 * 1000;
+    let credential = |nodes: &[&str]| {
+        let mut c = Credential {
+            kind: KIND_OAUTH.into(),
+            provider: Some("anthropic".into()),
+            channels: vec!["work".into()],
+            nodes: nodes.iter().map(|n| n.to_string()).collect(),
+            expires_ms: Some(soon),
+            ..Default::default()
+        };
+        c.env.insert("ACCESS_TOKEN".into(), "at".into());
+        c.env.insert("REFRESH_TOKEN".into(), "rt".into());
+        c
+    };
+    let now = tracon::store::now_ms();
+
+    broker
+        .write()
+        .unwrap()
+        .put("anthropic", credential(&["n1", "n2"]));
+    assert_eq!(p.due_for_refresh(now), ["anthropic"]);
+    broker
+        .write()
+        .unwrap()
+        .put("anthropic", credential(&["n2", "n1"]));
+    assert!(p.due_for_refresh(now).is_empty());
+    broker.write().unwrap().put("anthropic", credential(&[]));
+    assert_eq!(p.due_for_refresh(now), ["anthropic"]);
 }
 
 /// The catalogue a node with only a Codex subscription connected can offer:

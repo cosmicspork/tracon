@@ -194,20 +194,6 @@ impl Backend for KubeBackend {
         self.cfg.runtime.kubernetes.harness_home.clone()
     }
 
-    fn login_image(&self) -> Option<String> {
-        super::login_image(
-            &self.cfg.runtime.kubernetes.login_image,
-            &self.cfg.runtime.kubernetes.harness_image,
-        )
-    }
-
-    fn codex_login_image(&self) -> Option<String> {
-        super::login_image(
-            &self.cfg.runtime.kubernetes.codex_login_image,
-            &self.cfg.runtime.kubernetes.harness_image,
-        )
-    }
-
     fn proxy_port(&self) -> Option<u16> {
         Some(self.cfg.gateway.proxy_port)
     }

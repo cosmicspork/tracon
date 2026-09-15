@@ -641,18 +641,29 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         state.node_id.clone(),
         cfg.clone(),
     ));
-    // Provider logins run through the same backend as sessions, against a
-    // store the node keeps; a connected provider re-runs the model probe.
+    // Provider sign-in runs in the node; a connected provider re-runs the
+    // model probe.
     {
         let providers = crate::providers::Providers::new(
             cfg.clone(),
             broker.clone(),
             store_key,
-            state.adapter.clone(),
-            backend.clone(),
             state.node_id.clone(),
             bus.clone(),
         );
+        // A refresh revoked the tokens every node this credential was shared
+        // with holds, so each is handed the renewed copy.
+        if let Some(mesh) = state.mesh.clone() {
+            let self_id = state.node_id.clone();
+            providers.set_on_refreshed(Box::new(move |name, credential| {
+                let rows = crate::broker::Broker::handoff_rows(&[(name.to_string(), credential.clone())]);
+                for node in credential.nodes.iter().filter(|node| **node != self_id) {
+                    if let Err(error) = mesh.send_credential_handoff(node, rows.clone()) {
+                        tracing::warn!(credential = %name, to = %node, %error, "could not hand off a refreshed credential");
+                    }
+                }
+            }));
+        }
         let probe_state = state.clone();
         let probe_backend = backend.clone();
         providers.set_on_connected(Box::new(move || {

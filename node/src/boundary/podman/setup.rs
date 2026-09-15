@@ -42,24 +42,10 @@ pub fn harness_dir(cfg: &Config) -> &'static str {
 
 /// Each image the node runs, with the directory it is built from.
 pub fn images(cfg: &Config) -> Vec<(&str, &'static str)> {
-    let mut images = vec![
+    vec![
         (cfg.boundary.gateway_image.as_str(), "gateway"),
         (cfg.boundary.harness_image.as_str(), harness_dir(cfg)),
-    ];
-    // Each subscription login runs in the one image that carries its CLI:
-    // `claude setup-token` in the Claude Code image, `opencode auth login
-    // openai` in the OpenCode one. A node whose sessions run the other harness
-    // still has to be able to sign in, so the image is built alongside rather
-    // than only when it is also the session harness.
-    for (configured, dir) in [
-        (&cfg.boundary.login_image, "harness-claude"),
-        (&cfg.boundary.codex_login_image, "harness-opencode"),
-    ] {
-        if crate::boundary::login_image(configured, &cfg.boundary.harness_image).is_some() {
-            images.push((configured.as_str(), dir));
-        }
-    }
-    images
+    ]
 }
 
 /// A digest of one image's embedded definitions: every file under `dir`, in
@@ -364,25 +350,6 @@ mod tests {
         cfg.harness.id = "claude".into();
         assert_eq!(harness_dir(&cfg), "harness-claude");
         assert_eq!(definitions_digest("harness"), definitions_digest("gone"));
-    }
-
-    /// A node running Claude Code still has to be able to sign in to both
-    /// subscriptions, and neither login runs in its own harness image:
-    /// `claude setup-token` needs the Claude image, `opencode auth login
-    /// openai` needs the OpenCode one. Both are built alongside.
-    #[test]
-    fn a_claude_node_builds_both_login_images() {
-        let mut cfg = Config::default();
-        cfg.harness.id = "claude".into();
-        cfg.boundary.harness_image = "localhost/tracon-harness-claude".into();
-        let built: Vec<&str> = images(&cfg).into_iter().map(|(_, dir)| dir).collect();
-        assert_eq!(built, ["gateway", "harness-claude", "harness-opencode"]);
-
-        // On an OpenCode node the Codex login is the harness image, so
-        // nothing extra is built for it.
-        let cfg = Config::default();
-        let built: Vec<&str> = images(&cfg).into_iter().map(|(_, dir)| dir).collect();
-        assert_eq!(built, ["gateway", "harness-opencode", "harness-claude"]);
     }
 
     /// The recipes are carried; the artefact never is.

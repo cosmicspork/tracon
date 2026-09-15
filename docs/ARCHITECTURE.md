@@ -234,16 +234,22 @@ because a harness offers the whole model catalogue of every provider it is hande
 and a provider with no credential behind it fills the picker with models whose only
 possible answer is a refusal.
 
-**The node does not implement the vendors' OAuth.** Subscription flows are the
-harnesses' own clients — undocumented and churn-prone — so the node runs the
-harness's login and refresh as owned subprocesses inside the boundary, surfaces the
-URL and paste-back through the interface, and lifts the resulting token into its own
-sealed store. The vendor logic stays in the vendor's binary; the node owns everything
-around it. Which binary is a property of the flow rather than of the configured
-harness: the Anthropic subscription has one client, `claude setup-token`, and the
-Codex subscription another, `opencode auth login -p openai`, so a node runs whichever
-image carries the one it needs and the credential lands in the same broker either
-way.
+**The node runs subscription sign-in itself.** Each subscription is minted by its
+first-party client's OAuth app — Claude Code's for Anthropic, the Codex CLI's for
+ChatGPT — and the node speaks those flows directly (`node/src/oauth/`): PKCE, a
+loopback listener the node opens when the operator's browser is on its host, and
+otherwise Anthropic's hosted code page for a paste or OpenAI's device code. Nothing
+runs in a container and nothing is scraped from a terminal. The client ids and
+endpoints were read out of Claude Code 2.1.247 and OpenCode 1.18.30 and confirmed
+against the live services; they are the providers' to change.
+
+Anthropic tokens are the refreshable kind asking only for `user:inference`: an
+eight-hour access token and a refresh token that rotates on every use and expires on
+a fixed date about a month after sign-in, so the operator signs in again roughly
+monthly. A refresh revokes the access token it replaces at once. ChatGPT access
+tokens last ten days, and their refresh token rotates too. Both therefore have one
+renewer — the node that signed in, first in the credential's `nodes` — which hands the
+renewed copy to every other node the credential was shared with.
 
 ## The gate
 
@@ -572,8 +578,9 @@ Invariants on top of the wire:
   receiver, never believed from the sender.
 - **Commands execute as local requests.** A command for a session or provider
   another node owns is sealed to the owner and runs there under the owner's own
-  policy, store, and subprocesses; only the ack travels back. A provider login's
-  subprocess, its stdin, and the lifted credential never leave the owner.
+  policy, store, and subprocesses; only the ack travels back. A provider sign-in's
+  PKCE verifier, the code it exchanges, and the resulting credential never leave the
+  owner.
 - **The hello may carry state, not secrets.** A node's models and its provider
   summary (names, states, identities — and a pending login URL) ride the hello,
   sealed to the operator's own mesh. Credential values never do; those move only as

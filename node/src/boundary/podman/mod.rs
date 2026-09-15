@@ -203,20 +203,6 @@ impl Backend for PodmanBackend {
         crate::session::materialize::PODMAN_HARNESS_HOME.into()
     }
 
-    fn login_image(&self) -> Option<String> {
-        super::login_image(
-            &self.cfg.boundary.login_image,
-            &self.cfg.boundary.harness_image,
-        )
-    }
-
-    fn codex_login_image(&self) -> Option<String> {
-        super::login_image(
-            &self.cfg.boundary.codex_login_image,
-            &self.cfg.boundary.harness_image,
-        )
-    }
-
     async fn reconcile(&self, names: &[String]) {
         for name in names {
             let _ = podman(&["rm", "-f", "-i", name]).await;

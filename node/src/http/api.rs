@@ -3566,7 +3566,6 @@ fn provider_err(e: crate::providers::ProviderError) -> ApiError {
     let status = match &e {
         Unknown(_) => StatusCode::NOT_FOUND,
         NoLogin(_)
-        | RequiresLocalCallback(_)
         | NotPending(_)
         | Busy(_)
         | WrongOwner

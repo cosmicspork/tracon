@@ -9,7 +9,6 @@ pub mod claude;
 pub mod opencode;
 pub mod types;
 
-use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -360,44 +359,6 @@ pub enum AdapterError {
     Protocol(String),
 }
 
-/// A provider login the harness is running: the URL for the operator, the
-/// subprocess's stdin for the paste-back, and its exit.
-pub struct LoginFlow {
-    pub url: String,
-    /// Device authorization code, when the provider uses a browser-independent flow.
-    pub device_code: Option<String>,
-    pub stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
-    pub done: futures_core::future::BoxFuture<'static, Result<i32, crate::runner::RunnerError>>,
-    /// Everything the login printed, for the reason when it fails.
-    pub output: std::sync::Arc<std::sync::Mutex<String>>,
-}
-
-/// What a login left in the harness's store, as the broker keeps it.
-#[derive(Clone, Default, PartialEq)]
-pub struct LiftedToken {
-    pub access: String,
-    pub refresh: Option<String>,
-    pub expires_ms: Option<i64>,
-    pub identity: Option<String>,
-    pub account_id: Option<String>,
-}
-
-impl std::fmt::Debug for LiftedToken {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("LiftedToken")
-            .field("access", &"<redacted>")
-            .field("refresh", &self.refresh.as_ref().map(|_| "<redacted>"))
-            .field("expires_ms", &self.expires_ms)
-            .field("identity", &self.identity)
-            .field(
-                "account_id",
-                &self.account_id.as_ref().map(|_| "<redacted>"),
-            )
-            .finish()
-    }
-}
-
 #[async_trait]
 pub trait HarnessAdapter: Send + Sync {
     fn id(&self) -> &'static str;
@@ -443,41 +404,6 @@ pub trait HarnessAdapter: Send + Sync {
         runner: &dyn Runner,
         spec: LaunchSpec,
     ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError>;
-
-    /// Run the harness's own login for `provider` inside the runner, against
-    /// the store the runner mounts. Returns once the URL is known.
-    ///
-    /// `state_dir` is where the runner mounted this adapter's state, in the
-    /// runner's own namespace. A login that leaves its credential in a file
-    /// has to be told to leave it *there*, because that volume is the only
-    /// thing the node exports afterwards and hands to [`HarnessAdapter::lift`];
-    /// anything written elsewhere dies with the helper container.
-    async fn login(
-        &self,
-        _runner: &dyn Runner,
-        _provider: &str,
-        _name: &str,
-        _state_dir: &str,
-    ) -> Result<LoginFlow, AdapterError> {
-        Err(AdapterError::Protocol(
-            "this harness has no login flow".into(),
-        ))
-    }
-
-    /// Refresh the stored token for `provider` in place.
-    async fn refresh(
-        &self,
-        _runner: &dyn Runner,
-        _provider: &str,
-        _name: &str,
-    ) -> Result<(), AdapterError> {
-        Err(AdapterError::Protocol("this harness has no refresh".into()))
-    }
-
-    /// Read the token a login or refresh left in `store_dir`.
-    async fn lift(&self, _store_dir: &Path, _provider: &str) -> Result<LiftedToken, AdapterError> {
-        Err(AdapterError::Protocol("this harness has no lift".into()))
-    }
 }
 
 /// A running harness's own HTTP API, as the gateway that mediates it needs to
@@ -691,19 +617,5 @@ mod tests {
         };
         assert!(span.accepts(2));
         assert_eq!(span.versions(), "1-3");
-    }
-
-    #[test]
-    fn lifted_token_debug_redacts_secrets() {
-        let token = LiftedToken {
-            access: "access-secret".into(),
-            refresh: Some("refresh-secret".into()),
-            account_id: Some("account-secret".into()),
-            ..Default::default()
-        };
-        let debug = format!("{token:?}");
-        for secret in ["access-secret", "refresh-secret", "account-secret"] {
-            assert!(!debug.contains(secret), "{debug}");
-        }
     }
 }

@@ -1335,12 +1335,6 @@ pub struct Kubernetes {
     /// Namespace for harness pods. Empty: the pod's own.
     pub namespace: String,
     pub harness_image: String,
-    /// The image the Anthropic subscription login runs in when the session
-    /// harness cannot run it; see `Boundary::login_image`.
-    pub login_image: String,
-    /// The same for the Codex subscription login; see
-    /// `Boundary::codex_login_image`.
-    pub codex_login_image: String,
     /// The PersistentVolumeClaim both the node and every harness mount.
     pub state_claim: String,
     /// Where that claim is mounted, in the node and in every harness pod —
@@ -1361,14 +1355,6 @@ impl Default for Kubernetes {
         Self {
             namespace: String::new(),
             harness_image: format!(
-                "ghcr.io/cosmicspork/tracon-harness-opencode:{}",
-                env!("CARGO_PKG_VERSION")
-            ),
-            login_image: format!(
-                "ghcr.io/cosmicspork/tracon-harness-claude:{}",
-                env!("CARGO_PKG_VERSION")
-            ),
-            codex_login_image: format!(
                 "ghcr.io/cosmicspork/tracon-harness-opencode:{}",
                 env!("CARGO_PKG_VERSION")
             ),
@@ -1513,18 +1499,6 @@ pub struct Boundary {
     pub gateway_container: String,
     pub gateway_image: String,
     pub harness_image: String,
-    /// The image the Anthropic subscription login runs in when the session
-    /// harness cannot run it: only Claude Code mints one (`claude
-    /// setup-token`), so a node whose sessions run another harness still
-    /// needs this one. Equal to `harness_image` (or empty) means there is no
-    /// second image.
-    pub login_image: String,
-    /// The same, for the Codex subscription login: only OpenCode runs it
-    /// (`opencode auth login openai`), so a node whose sessions run Claude
-    /// Code needs this image to sign in to one. Equal to `harness_image` (or
-    /// empty) means there is no second image — which is the answer on a node
-    /// whose sessions already run OpenCode.
-    pub codex_login_image: String,
     /// Podman needs `label=disable` for bind mounts on SELinux hosts.
     pub selinux_label_disable: Option<bool>,
     /// macOS: start the podman machine when the boundary finds it stopped.
@@ -1597,17 +1571,11 @@ pub struct Provider {
     pub upstream: String,
     /// `anthropic`, `openai`, or `openai-codex`: which headers and paths the credential becomes.
     pub shape: String,
-    /// The login client's own provider id for a subscription login
-    /// (`opencode auth login <id>`, `claude setup-token`); none means API key
-    /// only. Which adapter runs it is `providers::LoginAdapters`.
+    /// The subscription sign-in the node runs for it (`anthropic`, or
+    /// `openai` for ChatGPT/Codex; see `oauth::Flow`); none means API key
+    /// only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login: Option<String>,
-    /// Device-code provider id used when this node cannot receive localhost callbacks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device_login: Option<String>,
-    /// Subscription OAuth cannot run remotely unless a device login is configured.
-    #[serde(default)]
-    pub requires_local_callback: bool,
     /// What a token costs through this provider, when the credential is
     /// metered. Absent means a subscription: tokens are counted, dollars are
     /// not derived.
@@ -1684,8 +1652,6 @@ impl Default for Provider {
             upstream: String::new(),
             shape: SHAPE_OPENAI.into(),
             login: None,
-            device_login: None,
-            requires_local_callback: false,
             price: None,
             models: Vec::new(),
         }
@@ -1701,8 +1667,6 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 upstream: "https://api.anthropic.com".into(),
                 shape: SHAPE_ANTHROPIC.into(),
                 login: Some("anthropic".into()),
-                device_login: None,
-                requires_local_callback: true,
                 price: None,
                 models: Vec::new(),
             },
@@ -1714,8 +1678,6 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 upstream: "https://api.openai.com".into(),
                 shape: SHAPE_OPENAI.into(),
                 login: None,
-                device_login: None,
-                requires_local_callback: false,
                 price: None,
                 models: Vec::new(),
             },
@@ -1726,14 +1688,7 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 credential: "openai-codex".into(),
                 upstream: "https://chatgpt.com/backend-api".into(),
                 shape: SHAPE_OPENAI_CODEX.into(),
-                // OpenCode's own id for the Codex OAuth flow, which is what
-                // runs it now that the retired harness's `openai-codex` and
-                // `openai-codex-device` ids are gone. Its only flow is a
-                // device code, which the login reports itself, so there is no
-                // separate device id and no localhost callback to receive.
                 login: Some("openai".into()),
-                device_login: None,
-                requires_local_callback: false,
                 price: None,
                 models: Vec::new(),
             },
@@ -1810,8 +1765,6 @@ impl Default for Config {
                 gateway_container: "tracon-gw".into(),
                 gateway_image: "localhost/tracon-gateway".into(),
                 harness_image: "localhost/tracon-harness-opencode".into(),
-                login_image: "localhost/tracon-harness-claude".into(),
-                codex_login_image: "localhost/tracon-harness-opencode".into(),
                 selinux_label_disable: None,
                 start_machine: true,
                 stop_timeout_secs: 10,
@@ -1819,12 +1772,6 @@ impl Default for Config {
             gateway: Gateway {
                 allow_hosts: vec![
                     r"^api\.anthropic\.com$".into(),
-                    // `claude setup-token` exchanges the pasted code at
-                    // `platform.claude.com/v1/oauth/token` and reads its
-                    // client metadata from `claude.ai`; the authorize page
-                    // itself opens in the operator's own browser, never here.
-                    r"^platform\.claude\.com$".into(),
-                    r"^claude\.ai$".into(),
                     r"^api\.openai\.com$".into(),
                     r"^chatgpt\.com$".into(),
                     r"^auth\.openai\.com$".into(),
@@ -2083,7 +2030,6 @@ impl Config {
                 for (name, provider) in default_providers() {
                     config.providers.entry(name).or_insert(provider);
                 }
-                crate::legacy::retire_login_ids(&mut config.providers);
                 config
                     .docs
                     .preview_origin()
@@ -2247,44 +2193,10 @@ shape = "openai"
         assert_eq!(codex.credential, "openai-codex");
         assert_eq!(codex.upstream, "https://chatgpt.com/backend-api");
         assert_eq!(codex.shape, SHAPE_OPENAI_CODEX);
-        // OpenCode's own id for the Codex OAuth flow: the login runs
-        // `opencode auth login openai`.
         assert_eq!(codex.login.as_deref(), Some("openai"));
-        assert_eq!(codex.device_login, None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// A file an omp-era node wrote in full, already moved to OpenCode, still
-    /// names omp's Codex login ids. OpenCode has no `openai-codex-device`, and
-    /// a browser connect would ask it for one.
-    #[test]
-    fn the_retired_harnesss_codex_login_ids_are_not_loaded() {
-        let dir =
-            std::env::temp_dir().join(format!("tracon-cfg-codex-ids-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("node.toml");
-        std::fs::write(
-            &path,
-            r#"
-[harness]
-id = "opencode"
-
-[providers.openai-codex]
-credential = "openai-codex"
-device_login = "openai-codex-device"
-login = "openai-codex"
-requires_local_callback = false
-shape = "openai-codex"
-upstream = "https://chatgpt.com/backend-api"
-"#,
-        )
-        .unwrap();
-        let config = Config::try_load_from(&path).unwrap();
-        let codex = &config.providers["openai-codex"];
-        assert_eq!(codex.login.as_deref(), Some("openai"));
-        assert_eq!(codex.device_login, None);
-        let _ = std::fs::remove_dir_all(dir);
-    }
     #[test]
     fn preview_origin_is_separate_and_origin_only() {
         let mut docs = Docs::default();

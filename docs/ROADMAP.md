@@ -20,8 +20,7 @@ reference documents under `docs/reference/` carry the history.
 
 **Decided 2026-09-13, cut over 2026-09-14.** OpenCode is the primary managed harness,
 driven through its native server API, with its native web UI offered as an optional
-advanced view. Claude Code is retained as a second supported harness and as the
-Anthropic subscription login client (`claude setup-token`). omp is gone — adapter,
+advanced view. Claude Code is retained as a second supported harness. omp is gone — adapter,
 image, ACP layer, provider wiring and catalogue workarounds — and its sessions are
 archived read-only. No new agent loop was added; the isolated execution boundary is
 unchanged.
@@ -88,12 +87,14 @@ Everything here is built and covered by test; what is missing is a real credenti
 real device, a real cluster or a published release. Nothing on this list is a blocker for
 work that does not need it, and nothing on it may be described elsewhere as proven.
 
-- [ ] **Anthropic subscription** signed in through `claude setup-token` in the login image,
-      the token lifted into the broker, and the gateway's subscription shaping serving an
-      OpenCode `anthropic` provider unchanged.
-- [ ] **Codex subscription** signed in through `opencode auth login -p openai` (device code), and with it
-      whether the ChatGPT backend accepts a Codex request whose system prompt stays in the
-      message array.
+- [ ] **Anthropic subscription** signed in through the node's own OAuth flow, by local
+      callback and by paste, refreshed by the refresh loop, and the gateway's subscription
+      shaping serving an OpenCode `anthropic` provider unchanged. The flow's exchange,
+      refresh and an inference call were confirmed by hand against the live service on
+      2026-09-15; the node doing it is not yet proven.
+- [ ] **Codex subscription** signed in through the node's own OAuth flow, by local callback
+      and by device code, and with it whether the ChatGPT backend accepts a Codex request
+      whose system prompt stays in the message array.
 - [ ] **Hosted API keys** — Anthropic and OpenAI — end to end through the gateway.
 - [ ] **`OPENCODE_SERVER_PASSWORD` refused live**: an unauthenticated probe of a running
       session server, rather than of the fake.
@@ -202,9 +203,19 @@ additional guarantees of the current release.
 - [ ] Converge credential handoff status: after durable receiver acceptance, recompute
       provider availability and republish the local and mesh summaries. A successful
       enqueue proves neither receipt nor use.
-- [ ] Preserve deliberate sharing through OAuth renewal: keep channel and recipient
-      bindings across refresh, name one refresh owner, never race a rotating token, and
-      do not treat removed local bindings as evidence a copied token was revoked.
+- [ ] Sign in once for the whole mesh. Today a shared OAuth credential keeps its bindings
+      across refresh and has one renewer, the node that signed in, which hands the renewed
+      copy to the other holders. Next: a credential version, so a stale copy never
+      overwrites a newer one; any holder may renew, after claiming that version through
+      the hub, so a rotating token is never raced; an optionally preferred renewer (an
+      always-on node) with the others as fallback; and a holder whose token was rotated
+      away waiting for the new copy rather than failing. Do not treat removed local
+      bindings as evidence a copied token was revoked.
+- [ ] Sync node configuration across the mesh the way credentials will be: set once and
+      carried to every member, with secrets only ever in direct-sealed handoffs and
+      everything else on the hub's ordered replication (last writer wins per record).
+      Define which settings are mesh-wide, per channel, and per node — a node's own
+      runtime, boundary and paths stay its own.
 - [ ] Choose a provider-exhaustion policy, per channel with a per-run override — pause and
       resume after reset, fall back to a named provider, or fall back then wait —
       defaulting to pause. Distinguish exhaustion from throttling, auth failure and
