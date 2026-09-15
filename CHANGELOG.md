@@ -31,6 +31,18 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.17.0](https://github.com/cosmicspork/tracon/compare/v0.16.2...v0.17.0) (2026-09-15)
+
+
+### Features
+
+* group settings into cards and move desktop preferences into Settings ([#227](https://github.com/cosmicspork/tracon/issues/227)) ([fa65008](https://github.com/cosmicspork/tracon/commit/fa650082722a33a411733c2f2b54836c1820d4c6))
+
+
+### Bug Fixes
+
+* **providers:** submit the pasted Anthropic code, sign in to Codex by device code, hide API-key-only cards ([#228](https://github.com/cosmicspork/tracon/issues/228)) ([474c4c8](https://github.com/cosmicspork/tracon/commit/474c4c8f8ee8b51c1ffad8e73f671622c60730e3))
+
 ## [0.16.2](https://github.com/cosmicspork/tracon/compare/v0.16.1...v0.16.2) (2026-09-15)
 
 
