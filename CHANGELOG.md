@@ -31,6 +31,13 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.16.2](https://github.com/cosmicspork/tracon/compare/v0.16.1...v0.16.2) (2026-09-15)
+
+
+### Bug Fixes
+
+* stop forcing Secure on the loopback operator cookie ([#225](https://github.com/cosmicspork/tracon/issues/225)) ([377aeda](https://github.com/cosmicspork/tracon/commit/377aedaa2d006e7379ca2e3009328e4ada336aaa))
+
 ## [0.16.1](https://github.com/cosmicspork/tracon/compare/v0.16.0...v0.16.1) (2026-09-14)
 
 
