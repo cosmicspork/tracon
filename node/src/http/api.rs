@@ -3813,12 +3813,30 @@ where
     }
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 pub struct ConnectBody {
     #[serde(default)]
     pub channels: Vec<String>,
     #[serde(default)]
     pub local_callback: bool,
+    /// Share the credential with every other node in `channels` once signed
+    /// in. On unless asked otherwise.
+    #[serde(default = "share_by_default")]
+    pub share: bool,
+}
+
+fn share_by_default() -> bool {
+    true
+}
+
+impl Default for ConnectBody {
+    fn default() -> Self {
+        Self {
+            channels: Vec::new(),
+            local_callback: false,
+            share: share_by_default(),
+        }
+    }
 }
 
 /// Start the harness's login for a provider; the response carries the URL to
@@ -3831,7 +3849,7 @@ pub async fn connect_provider(
 ) -> ApiResult<Json<serde_json::Value>> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
     let local_callback = callback_allowed(&s, peer, body.local_callback);
-    connect_local(&s, &name, body.channels, local_callback)
+    connect_local(&s, &name, body.channels, body.share, local_callback)
         .await
         .map(Json)
 }
@@ -3845,12 +3863,14 @@ async fn connect_local(
     s: &AppState,
     name: &str,
     channels: Vec<String>,
+    share: bool,
     local_callback: bool,
 ) -> ApiResult<serde_json::Value> {
     let result = providers_of(s)?
         .connect(
             name,
             channels,
+            share,
             crate::providers::LoginOwner::Local,
             local_callback,
         )
@@ -3941,7 +3961,7 @@ pub async fn node_connect_provider(
     let body = body.map(|Json(body)| body).unwrap_or_default();
     if node_id == s.node_id {
         let local_callback = callback_allowed(&s, peer, body.local_callback);
-        return connect_local(&s, &name, body.channels, local_callback)
+        return connect_local(&s, &name, body.channels, body.share, local_callback)
             .await
             .map(Json);
     }
@@ -3951,6 +3971,7 @@ pub async fn node_connect_provider(
         proto::frame::Command::ProviderConnect {
             name,
             channels: body.channels,
+            share: body.share,
         },
         PROVIDER_CONNECT_TIMEOUT,
     )
@@ -4281,11 +4302,16 @@ impl crate::mesh::forward::CommandExecutor for AppState {
             // The provider commands run exactly what a local request would:
             // the login subprocess, its stdin, and the lifted credential all
             // stay on this node. Only the URL and the ack travel.
-            C::ProviderConnect { name, channels } => match providers_of(self) {
+            C::ProviderConnect {
+                name,
+                channels,
+                share,
+            } => match providers_of(self) {
                 Ok(providers) => providers
                     .connect(
                         &name,
                         channels,
+                        share,
                         crate::providers::LoginOwner::Peer(sender.to_string()),
                         false,
                     )

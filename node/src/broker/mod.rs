@@ -91,6 +91,19 @@ pub struct Credential {
     /// Shown, never used for anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
+    /// For `oauth`: the sign-in these tokens descend from, a UUIDv7, so a
+    /// later sign-in sorts after an earlier one. Absent on a credential
+    /// written before sign-ins were tracked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+    /// For `oauth`: how many refreshes this sign-in has been through. Every
+    /// holder of a shared credential keeps the highest it has seen.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub grant_version: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl std::fmt::Debug for Credential {
@@ -104,6 +117,8 @@ impl std::fmt::Debug for Credential {
             .field("provider", &self.provider)
             .field("expires_ms", &self.expires_ms)
             .field("identity", &self.identity)
+            .field("grant_id", &self.grant_id)
+            .field("grant_version", &self.grant_version)
             .finish()
     }
 }
@@ -122,6 +137,8 @@ impl Default for Credential {
             provider: None,
             expires_ms: None,
             identity: None,
+            grant_id: None,
+            grant_version: 0,
         }
     }
 }
@@ -129,6 +146,14 @@ impl Default for Credential {
 impl Credential {
     pub fn allows(&self, channel: &str) -> bool {
         self.channels.iter().any(|c| c == channel)
+    }
+
+    /// Whether this copy of a shared OAuth credential is newer than `other`:
+    /// a later sign-in, or the same sign-in refreshed more times. A copy that
+    /// names no sign-in orders before one that does.
+    pub fn supersedes(&self, other: &Credential) -> bool {
+        (self.grant_id.as_deref(), self.grant_version)
+            > (other.grant_id.as_deref(), other.grant_version)
     }
 
     pub fn allows_node(&self, node_id: &str) -> bool {
@@ -372,9 +397,11 @@ impl Broker {
 
     /// Apply a handoff. Each row is `{ "name", "credential" }`; a row not
     /// pinned to this node is dropped — the sender's bindings are a claim, the
-    /// receiver's are the rule. Returns how many were stored.
-    pub fn apply_handoff(&mut self, self_id: &str, rows: &[Value]) -> usize {
-        let mut n = 0;
+    /// receiver's are the rule. A tracked sign-in replaces what is here only
+    /// when it supersedes it, so a delayed or replayed copy never undoes a
+    /// refresh. Returns the names stored.
+    pub fn apply_handoff(&mut self, self_id: &str, rows: &[Value]) -> Vec<String> {
+        let mut stored = Vec::new();
         for row in rows {
             let Some(name) = row["name"].as_str() else {
                 continue;
@@ -387,10 +414,22 @@ impl Broker {
                 tracing::warn!(name, "credential handoff not pinned to this node; dropped");
                 continue;
             }
+            if cred.grant_id.is_some()
+                && self
+                    .credentials
+                    .get(name)
+                    .is_some_and(|held| !cred.supersedes(held))
+            {
+                tracing::info!(
+                    name,
+                    "credential handoff is not newer than the copy held; dropped"
+                );
+                continue;
+            }
             self.credentials.insert(name.to_string(), cred);
-            n += 1;
+            stored.push(name.to_string());
         }
-        n
+        stored
     }
 
     /// Rows for [`Broker::apply_handoff`] on the other side.
@@ -770,10 +809,48 @@ mod tests {
             ..Default::default()
         };
         let rows = Broker::handoff_rows(&[("p".into(), pinned), ("l".into(), loose)]);
-        assert_eq!(b.apply_handoff("node-b", &rows), 1);
+        assert_eq!(b.apply_handoff("node-b", &rows), ["p"]);
         assert!(b.get("p").is_some() && b.get("l").is_none());
-        assert_eq!(Broker::default().apply_handoff("node-a", &rows), 0);
+        assert!(Broker::default().apply_handoff("node-a", &rows).is_empty());
         assert_eq!(b.bound_to("node-b").len(), 1);
+    }
+
+    /// A refreshed copy arrives after, or is replayed behind, a newer one: only
+    /// a later sign-in or more refreshes of the same one replaces what is held.
+    #[test]
+    fn a_handoff_never_replaces_a_newer_sign_in_or_refresh() {
+        let copy = |grant: &str, version: u64, token: &str| {
+            let mut c = Credential {
+                kind: KIND_OAUTH.into(),
+                nodes: vec!["node-a".into(), "node-b".into()],
+                grant_id: Some(grant.into()),
+                grant_version: version,
+                ..Default::default()
+            };
+            c.env.insert("ACCESS_TOKEN".into(), token.into());
+            Broker::handoff_rows(&[("anthropic".into(), c)])
+        };
+        let token = |b: &Broker| b.get("anthropic").unwrap().env["ACCESS_TOKEN"].clone();
+        let mut b = Broker::default();
+        assert_eq!(b.apply_handoff("node-b", &copy("0190-a", 2, "v2")).len(), 1);
+        assert!(b
+            .apply_handoff("node-b", &copy("0190-a", 1, "v1"))
+            .is_empty());
+        assert!(b
+            .apply_handoff("node-b", &copy("0190-a", 2, "v2-again"))
+            .is_empty());
+        assert_eq!(token(&b), "v2");
+        assert_eq!(b.apply_handoff("node-b", &copy("0190-a", 3, "v3")).len(), 1);
+        // A new sign-in wins over any refresh of an older one, and an older
+        // sign-in never comes back.
+        assert_eq!(
+            b.apply_handoff("node-b", &copy("0191-b", 0, "new")).len(),
+            1
+        );
+        assert!(b
+            .apply_handoff("node-b", &copy("0190-a", 9, "old"))
+            .is_empty());
+        assert_eq!(token(&b), "new");
     }
 
     #[cfg(unix)]

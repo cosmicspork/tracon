@@ -1389,6 +1389,9 @@ pub struct Mesh {
     pub stream_max_response_bytes: u64,
     /// How many owner streams this node may have open at once.
     pub stream_max_concurrent: usize,
+    /// Renew shared subscription credentials first. Set it on a node that is
+    /// always on; every other holder steps in only if this one has not.
+    pub renew_credentials: bool,
 }
 impl Default for Mesh {
     fn default() -> Self {
@@ -1402,6 +1405,7 @@ impl Default for Mesh {
             stream_max_body_bytes: 8 * 1024 * 1024,
             stream_max_response_bytes: 256 * 1024 * 1024,
             stream_max_concurrent: 16,
+            renew_credentials: false,
         }
     }
 }

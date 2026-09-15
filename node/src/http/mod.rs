@@ -651,18 +651,12 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             state.node_id.clone(),
             bus.clone(),
         );
-        // A refresh revoked the tokens every node this credential was shared
-        // with holds, so each is handed the renewed copy.
+        // Sign-ins are shared, refreshes claimed and renewed copies handed off
+        // through the hub; a copy that arrives updates what this node says.
         if let Some(mesh) = state.mesh.clone() {
-            let self_id = state.node_id.clone();
-            providers.set_on_refreshed(Box::new(move |name, credential| {
-                let rows = crate::broker::Broker::handoff_rows(&[(name.to_string(), credential.clone())]);
-                for node in credential.nodes.iter().filter(|node| **node != self_id) {
-                    if let Err(error) = mesh.send_credential_handoff(node, rows.clone()) {
-                        tracing::warn!(credential = %name, to = %node, %error, "could not hand off a refreshed credential");
-                    }
-                }
-            }));
+            providers.set_mesh(mesh.clone());
+            let receiver = providers.clone();
+            mesh.set_on_handoff(Box::new(move |names| receiver.handoff_received(names)));
         }
         let probe_state = state.clone();
         let probe_backend = backend.clone();

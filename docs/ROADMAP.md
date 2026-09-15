@@ -204,14 +204,10 @@ cross-node transfer follow the first proven loop, not the other way around.
 - [ ] Converge credential handoff status: after durable receiver acceptance, recompute
       provider availability and republish the local and mesh summaries. A successful
       enqueue proves neither receipt nor use.
-- [ ] Sign in once for the whole mesh. Today a shared OAuth credential keeps its bindings
-      across refresh and has one renewer, the node that signed in, which hands the renewed
-      copy to the other holders. Next: a credential version, so a stale copy never
-      overwrites a newer one; any holder may renew, after claiming that version through
-      the hub, so a rotating token is never raced; an optionally preferred renewer (an
-      always-on node) with the others as fallback; and a holder whose token was rotated
-      away waiting for the new copy rather than failing. Do not treat removed local
-      bindings as evidence a copied token was revoked.
+- [ ] Re-offer a shared credential to a holder that missed its handoff: one offline past
+      hub retention (a cursor that jumps ahead on `410`) never receives the renewed copy,
+      and nothing sends it again. Do not treat removed local bindings as evidence a
+      copied token was revoked.
 - [ ] Sync node configuration across the mesh the way credentials will be: set once and
       carried to every member, with secrets only ever in direct-sealed handoffs and
       everything else on the hub's ordered replication (last writer wins per record).

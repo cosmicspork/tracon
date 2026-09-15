@@ -59,6 +59,9 @@ pub enum HubError {
     Local(String),
 }
 
+/// Told the names of the credentials a handoff stored.
+pub type OnHandoff = Box<dyn Fn(&[String]) + Send + Sync>;
+
 pub struct MeshClient {
     identity: Arc<Identity>,
     hub_url: String,
@@ -89,6 +92,9 @@ pub struct MeshClient {
     /// The credential store a handoff writes into. Set once the broker
     /// exists; a handoff arriving before then is dropped and logged.
     broker: std::sync::OnceLock<(crate::broker::SharedBroker, std::path::PathBuf)>,
+    /// Told the names of the credentials a handoff stored, so what the node
+    /// publishes about its providers follows.
+    on_handoff: std::sync::OnceLock<OnHandoff>,
     /// The non-durable half: bounded owner streams relayed by the hub.
     pub(super) streams: Arc<super::stream::StreamRouter>,
 }
@@ -138,6 +144,7 @@ impl MeshClient {
             pending: Mutex::new(HashMap::new()),
             executor: std::sync::OnceLock::new(),
             broker: std::sync::OnceLock::new(),
+            on_handoff: std::sync::OnceLock::new(),
             streams: Arc::new(super::stream::StreamRouter::new(weak.clone())),
         })
     }
@@ -145,6 +152,10 @@ impl MeshClient {
     /// Give handoffs somewhere to land.
     pub fn set_broker(&self, broker: crate::broker::SharedBroker, path: std::path::PathBuf) {
         let _ = self.broker.set((broker, path));
+    }
+
+    pub fn set_on_handoff(&self, f: OnHandoff) {
+        let _ = self.on_handoff.set(f);
     }
 
     pub fn set_executor(&self, executor: Arc<dyn super::forward::CommandExecutor>) {
@@ -619,18 +630,23 @@ impl MeshClient {
                     tracing::warn!(from = %sender, "credential handoff before the broker exists; dropped");
                     return Opened::Ignored;
                 };
-                let n = {
+                let stored = {
                     let mut b = broker.write().unwrap();
-                    let n = b.apply_handoff(&self.node_id(), credentials);
-                    if n > 0 {
+                    let stored = b.apply_handoff(&self.node_id(), credentials);
+                    if !stored.is_empty() {
                         if let Err(e) = b.save_at(path, &self.identity.credential_store_key()) {
                             tracing::error!(error = %e, "credential store could not be written");
                         }
                     }
-                    n
+                    stored
                 };
-                tracing::info!(from = %sender, credentials = n, "credential handoff received");
-                return Opened::from(n > 0);
+                tracing::info!(from = %sender, credentials = stored.len(), "credential handoff received");
+                if !stored.is_empty() {
+                    if let Some(callback) = self.on_handoff.get() {
+                        callback(&stored);
+                    }
+                }
+                return Opened::from(!stored.is_empty());
             }
             Payload::PolicyBundle {
                 toml,

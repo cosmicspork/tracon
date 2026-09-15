@@ -247,9 +247,20 @@ Anthropic tokens are the refreshable kind asking only for `user:inference`: an
 eight-hour access token and a refresh token that rotates on every use and expires on
 a fixed date about a month after sign-in, so the operator signs in again roughly
 monthly. A refresh revokes the access token it replaces at once. ChatGPT access
-tokens last ten days, and their refresh token rotates too. Both therefore have one
-renewer — the node that signed in, first in the credential's `nodes` — which hands the
-renewed copy to every other node the credential was shared with.
+tokens last ten days, and their refresh token rotates too.
+
+One sign-in serves the mesh. Signing in shares the credential, by default, with every
+member bound to one of its channels, as a direct-sealed handoff. The credential carries
+the sign-in it came from (a UUIDv7) and how many refreshes it has been through, and a
+holder only ever replaces its copy with a newer one, so a delayed or replayed handoff
+cannot undo a refresh. Because a refresh revokes every other holder's tokens, each
+version is renewed once: any holder may try, but only after the hub grants it the
+claim on that version (`POST /v0/claims`, keyed by a hash of the sign-in so the hub
+learns nothing about it), and the winner hands the renewed copy to the rest. A node
+with `[mesh] renew_credentials` tries half an hour before expiry and every other holder
+a quarter of an hour, so an always-on node renews in practice and any holder covers for
+it. Without a claim to be had — no hub, a hub older than claims, one that cannot be
+reached — only the node that signed in, first in `nodes`, renews.
 
 ## The gate
 
