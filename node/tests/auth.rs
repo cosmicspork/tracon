@@ -318,12 +318,12 @@ async fn a_loopback_login_omits_secure_so_a_local_webview_keeps_the_cookie() {
     assert!(raw.contains("HttpOnly"), "{raw}");
     assert!(raw.contains("SameSite=Lax"), "{raw}");
 
-    // And it still works to reach the operator API with, same as remote.
+    // The status endpoint deliberately requires the cookie even on loopback.
     let cookie = cookie_of(&cookies);
-    let (s, _, _) = call(
+    let (s, _, v) = call(
         &n,
         "GET",
-        "/api/node",
+        "/api/admin/access",
         LOCAL,
         "127.0.0.1:7420",
         &[("cookie", &cookie)],
@@ -331,6 +331,51 @@ async fn a_loopback_login_omits_secure_so_a_local_webview_keeps_the_cookie() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["authenticated"], true, "{v}");
+
+    let (s, cleared, _) = call(
+        &n,
+        "POST",
+        "/api/logout",
+        LOCAL,
+        "127.0.0.1:7420",
+        &[("cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let raw = cleared
+        .iter()
+        .find(|c| c.starts_with("tracon_session="))
+        .expect("a clearing cookie");
+    assert!(!raw.contains("Secure"), "{raw}");
+    assert!(raw.contains("Max-Age=0"), "{raw}");
+}
+
+/// A TLS-terminating proxy may itself connect over loopback. Its external host
+/// still needs a Secure cookie even though the node sees a local TCP peer.
+#[tokio::test]
+async fn a_loopback_reverse_proxy_keeps_the_remote_cookie_secure() {
+    state::isolate();
+    let n = node();
+    set_token(&n, "trc1.secret").await;
+
+    let (s, cookies, _) = call(
+        &n,
+        "POST",
+        "/api/login",
+        LOCAL,
+        "tracon.example",
+        &[("origin", "https://tracon.example")],
+        Some(json!({ "token": "trc1.secret" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let raw = cookies
+        .iter()
+        .find(|c| c.starts_with("tracon_session="))
+        .expect("a session cookie");
+    assert!(raw.contains("Secure"), "{raw}");
 }
 
 /// A non-browser client (the CLI over the ingress) presents the token itself.
