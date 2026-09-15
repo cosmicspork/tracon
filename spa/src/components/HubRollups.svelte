@@ -5,6 +5,7 @@
   import { formatAge } from '../lib/format'
   import { store } from '../lib/store.svelte'
   import type { HubRollups } from '../lib/types'
+  import Card from './settings/Card.svelte'
 
   let summaries = $state<Record<string, HubRollups>>({})
   let unavailable = $state<string | null>(null)
@@ -65,11 +66,7 @@
 </script>
 
 {#if enabled && (Object.keys(summaries).length || unavailable)}
-  <section class="rollups">
-    <header>
-      <span>Hub summaries</span>
-      <small>optional · aggregates only</small>
-    </header>
+  <Card title="Hub summaries" note="Optional aggregates the hub computes for channels shared with it.">
     {#if unavailable}
       <p class="off">Hub summary unavailable · {unavailable}. Local metrics and work remain on this node.</p>
     {/if}
@@ -97,14 +94,12 @@
         {/each}
       </article>
     {/each}
-  </section>
+  </Card>
 {/if}
 
 <style>
-  .rollups { margin-top: 16px; display: grid; gap: 7px; }
-  header { display: flex; gap: 9px; align-items: baseline; font: 600 13px var(--sans); }
-  header small, p { font: 12px var(--mono); color: var(--ink2); }
-  article { border-left: 3px solid var(--wait); background: var(--s1); padding: 8px 10px; }
+  p { font: 12px var(--mono); color: var(--ink2); }
+  article { border-left: 3px solid var(--wait); border-radius: 4px; background: var(--s2); padding: 10px 12px; }
   article.complete { border-left-color: var(--ok); }
   .head { display: flex; gap: 8px; align-items: baseline; }
   .head small { margin-left: auto; color: var(--dim); }

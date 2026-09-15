@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { admin, type AdminAccess as Access } from '../../lib/admin'
+  import Card from './Card.svelte'
 
   let { onunlock }: { onunlock?: () => void } = $props()
 
@@ -40,25 +41,24 @@
   })
 </script>
 
-<div class="access">
-  <div class="heading">
-    <span>Administrator access</span>
+<Card title="Administrator access" tone="acc">
+  {#snippet actions()}
     {#if access?.authenticated}
       <span class="chip">unlocked for this browser</span>
     {:else}
       <span class="chip off">locked</span>
     {/if}
-  </div>
+  {/snippet}
 
   {#if !access?.authenticated && access?.token_configured}
-    <p>Sign in with this node’s operator token to unlock administration in this browser.</p>
     <form onsubmit={(event) => { event.preventDefault(); void unlock() }}>
       <label>
         <span>Operator token</span>
         <input type="password" autocomplete="current-password" bind:value={token} disabled={busy} />
       </label>
-      <button class="btn p" type="submit" disabled={busy || !token.trim()}>{busy ? 'Unlocking…' : 'Unlock administrator actions'}</button>
+      <button class="btn p" type="submit" disabled={busy || !token.trim()}>{busy ? 'Unlocking…' : 'Unlock'}</button>
     </form>
+    <p>Sign in with this node’s operator token to unlock administration in this browser.</p>
   {:else if !access?.authenticated}
     <p>Create an operator token on this node to unlock administration. Remote clients cannot create the first token.</p>
     {#if access?.local}<a class="lnk" href="/settings#maintenance">Create operator access in Maintenance</a>{/if}
@@ -68,37 +68,23 @@
     <p class="note">Remote administration: mesh and rollout status are available here. Open the node locally for host recovery or signing.</p>
   {/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
-</div>
+</Card>
 
 <style>
-  .access {
-    display: grid;
-    gap: 8px;
-    background: var(--s1);
-    border-left: 3px solid var(--acc);
-    border-radius: 4px;
-    padding: 12px 14px;
-  }
-  .heading {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 10px;
-    font-weight: 600;
-  }
-  p { margin: 0; color: var(--ink2); max-width: 68ch; }
-  form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
-  label { display: grid; gap: 4px; min-width: min(100%, 280px); }
-  label span { color: var(--ink2); font: 12px var(--mono); }
+  p { margin: 0; color: var(--ink2); font-size: 13px; max-width: 90ch; }
+  form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+  label { display: grid; gap: 5px; flex: 1 1 280px; max-width: 420px; }
+  label span { font: 500 11px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink2); }
   input {
-    min-height: 44px;
+    min-height: 36px;
     padding: 8px 10px;
     background: var(--s2);
     color: var(--ink);
-    border: 1px solid var(--rule);
+    border: 0;
     border-radius: 4px;
+    font: 13.5px var(--sans);
   }
-  button { min-height: 44px; }
+  button { min-height: 36px; }
   .note { font: 12.5px var(--mono); color: var(--dim); }
   .error { color: var(--crit); font: 12.5px var(--mono); }
 </style>

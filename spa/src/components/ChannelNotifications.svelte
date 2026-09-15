@@ -2,6 +2,7 @@
   // A channel binding is shared with its members; it is never a per-device filter.
   import { api } from '../lib/api'
   import { store } from '../lib/store.svelte'
+  import Card from './settings/Card.svelte'
 
   type Delivery = Awaited<ReturnType<typeof api.putChannelBindings>>['delivery']
 
@@ -47,12 +48,7 @@
   }
 </script>
 
-<div class="shared-notifications">
-  <div class="title">Shared channel notifications</div>
-  <p>
-    This is a <strong>shared channel</strong> setting. It changes which channel events every member node
-    may send to its registered devices; it does not subscribe, filter, or remove any particular device.
-  </p>
+<Card title="Shared notifications" note="Whether a channel's member nodes push its events to their registered devices. Shared with every member; this browser's own subscription is under Devices.">
   {#if failure}<small class="delivery bad" role="alert">{failure}</small>{/if}
   {#if channels.length === 0}
     <small>No active channels yet.</small>
@@ -100,20 +96,9 @@
       {/each}
     </div>
   {/if}
-</div>
+</Card>
 
 <style>
-  .shared-notifications {
-    display: grid;
-    gap: 8px;
-    border-top: 1px solid var(--rule);
-    padding-top: 12px;
-  }
-  .title {
-    color: var(--ink);
-    font: 500 13px var(--sans);
-  }
-  p,
   small {
     margin: 0;
     color: var(--dim);
@@ -162,19 +147,6 @@
   }
   .delivery.bad {
     color: var(--crit);
-  }
-  .lnk {
-    background: none;
-    border: 0;
-    padding: 0;
-    color: var(--acc);
-    cursor: pointer;
-    font: inherit;
-    text-decoration: underline;
-  }
-  .lnk:disabled {
-    color: var(--dim);
-    cursor: default;
   }
   @media (max-width: 700px) {
     .channel {

@@ -245,9 +245,9 @@
   }
   .forge-row {
     display: grid;
-    grid-template-columns: 3px 118px minmax(0, 1fr);
+    grid-template-columns: 3px 140px minmax(0, 1fr);
     gap: 0 14px;
-    background: var(--s1);
+    background: var(--s2);
     border-radius: 4px;
     padding: 10px 14px 10px 0;
     overflow: hidden;
@@ -309,7 +309,7 @@
     gap: 8px 12px;
   }
   .generic-import {
-    margin-top: 12px;
+    margin-top: 4px;
   }
   .generic-import summary {
     cursor: pointer;

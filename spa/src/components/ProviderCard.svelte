@@ -111,13 +111,9 @@
     >
   </span>
   <span class="pst">
-    <span class="scope">
-      {#if isSelf}
-        Connection and credential state are held by the node serving this page.
-      {:else}
-        Remote node {nodeName}: commands are sealed to it. Its provider credential stays there and this browser cannot claim its local callback.
-      {/if}
-    </span>
+    {#if !isSelf}
+      <span class="scope">Remote node {nodeName}: commands are sealed to it. Its provider credential stays there and this browser cannot claim its local callback.</span>
+    {/if}
     {#if p.state === 'connected'}
       <span class="l"><span class="chip">connected</span>{#if p.channels.length} · {p.channels.join(', ')}{/if}{#if expiry()} · {expiry()}{/if}</span>
       {#if isSelf}
@@ -189,11 +185,11 @@
 <style>
   .prov {
     display: grid;
-    grid-template-columns: 3px 133px minmax(0, 1fr);
+    grid-template-columns: 3px 140px minmax(0, 1fr);
     gap: 0 14px;
-    background: var(--s1);
+    background: var(--s2);
     border-radius: 4px;
-    padding: 9px 14px 9px 0;
+    padding: 10px 14px 10px 0;
     overflow: hidden;
   }
   .pbar {
@@ -205,7 +201,7 @@
     background: var(--wait);
   }
   .prov.pending {
-    background: linear-gradient(90deg, var(--wash-wait), var(--s1) 42%);
+    background: linear-gradient(90deg, var(--wash-wait), var(--s2) 42%);
   }
   .prov.bad .pbar {
     background: var(--crit);
@@ -259,7 +255,7 @@
     flex: 1;
     min-width: 12rem;
     font: 12.5px var(--mono);
-    background: var(--s2);
+    background: var(--s1);
     color: var(--ink);
     border: 0;
     border-radius: 3px;

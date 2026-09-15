@@ -209,6 +209,28 @@ async fn desktop_restart_node() -> Result<setup::SetupStatus, String> {
 }
 
 #[tauri::command]
+fn desktop_preferences(preferences: tauri::State<'_, Arc<prefs::Store>>) -> prefs::Prefs {
+    preferences.get()
+}
+
+#[tauri::command]
+fn desktop_set_preferences(
+    app: tauri::AppHandle,
+    preferences: tauri::State<'_, Arc<prefs::Store>>,
+    update: prefs::PrefsUpdate,
+) -> prefs::Prefs {
+    let p = preferences.update(|p| update.apply(p));
+    // The dock follows immediately: a preference that waits for a restart
+    // reads as one that did nothing.
+    let visible = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    set_dock_policy(&app, visible, p.hide_dock_when_closed);
+    p
+}
+
+#[tauri::command]
 fn desktop_open_node(app: tauri::AppHandle) {
     open_at(&app, "/");
 }
@@ -257,6 +279,8 @@ fn main() {
             desktop_install_service,
             desktop_install_cli,
             desktop_restart_node,
+            desktop_preferences,
+            desktop_set_preferences,
             desktop_open_node,
             opencode::desktop_open_opencode,
         ])

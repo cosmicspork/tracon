@@ -1,6 +1,7 @@
 <script lang="ts">
   import { formatTokens } from '../lib/format'
   import { store } from '../lib/store.svelte'
+  import Card from './settings/Card.svelte'
 
   // An archived channel with nothing spent today is history, not a meter.
   const channels = $derived(
@@ -12,7 +13,8 @@
   }
 </script>
 
-<div class="h4">Today per channel <b>gateway tokens · resets at local midnight</b><a class="lnk r" href="/metrics">Usage</a></div>
+<Card title="Usage today" note="Gateway tokens per channel. Resets at local midnight.">
+{#snippet actions()}<a class="lnk" href="/metrics">Full usage</a>{/snippet}
 <div class="meters">
   {#each channels as c (c.name)}
     <div class="meter {c.ceiling.state}">
@@ -36,20 +38,13 @@
     <div class="empty">No channels yet.</div>
   {/if}
 </div>
+</Card>
 
 <style>
-  .h4 .r {
-    margin-left: auto;
-    letter-spacing: 0;
-    text-transform: none;
-  }
   .meters {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    background: var(--s1);
-    border-radius: 4px;
-    padding: 12px 14px;
   }
   .meter {
     display: grid;

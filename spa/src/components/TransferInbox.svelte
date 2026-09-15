@@ -125,13 +125,7 @@
 </details>
 
 <style>
-  .inbox {
-    margin: 14px 0;
-    padding: 9px 11px;
-    background: var(--s1);
-    border-left: 3px solid var(--ink2);
-  }
-  summary { cursor: pointer; font: 600 13px var(--sans); }
+  summary { cursor: pointer; color: var(--acc); font: 500 13px var(--sans); }
   .consequence, .transfer-meta, .model, .upload, .inbox > p {
     font: 12px var(--mono);
     color: var(--ink2);

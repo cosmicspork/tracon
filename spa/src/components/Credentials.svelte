@@ -5,6 +5,7 @@
   import { api } from '../lib/api'
   import { store } from '../lib/store.svelte'
   import type { CredentialSummary } from '../lib/types'
+  import Card from './settings/Card.svelte'
 
   let creds = $state<CredentialSummary[]>([])
   let to = $state<Record<string, string>>({})
@@ -54,7 +55,8 @@
 </script>
 
 {#if creds.length > 0}
-  <div class="h4">Sealed credential copies <b>{creds.length} held by the serving node</b></div>
+  <Card title="Credential copies" note="Every credential the serving node holds, by name and key only. Sharing sends a sealed copy to one named peer; no value is ever read back.">
+  {#snippet actions()}<span class="count">{creds.length} held</span>{/snippet}
   <div class="rows">
     {#each creds as c (c.name)}
       <div class="cred">
@@ -96,11 +98,13 @@
       </div>
     {/each}
   </div>
+  </Card>
 {/if}
 
 <style>
-  .h4 {
-    margin-top: 8px;
+  .count {
+    font: 12px var(--mono);
+    color: var(--dim);
   }
   .rows {
     display: flex;
@@ -109,11 +113,11 @@
   }
   .cred {
     display: grid;
-    grid-template-columns: 3px 150px minmax(0, 1fr);
+    grid-template-columns: 3px 140px minmax(0, 1fr);
     gap: 0 14px;
-    background: var(--s1);
+    background: var(--s2);
     border-radius: 4px;
-    padding: 9px 14px 9px 0;
+    padding: 10px 14px 10px 0;
     overflow: hidden;
   }
   .bar {
@@ -163,7 +167,7 @@
     white-space: normal;
   }
   .share select {
-    background: var(--s2);
+    background: var(--s1);
     border: 0;
     border-radius: 3px;
     color: var(--ink);

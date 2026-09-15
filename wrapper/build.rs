@@ -9,6 +9,8 @@ fn main() {
             "desktop_install_service",
             "desktop_install_cli",
             "desktop_restart_node",
+            "desktop_preferences",
+            "desktop_set_preferences",
             "desktop_open_node",
             "desktop_open_opencode",
         ]),

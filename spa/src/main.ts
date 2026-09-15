@@ -1,6 +1,9 @@
 import { mount } from 'svelte'
 import './app.css'
 import App from './App.svelte'
+import { applyTheme, storedTheme } from './lib/theme'
+
+applyTheme(storedTheme())
 
 // Registered so the interface can be installed and opens fast. It caches the
 // shell and nothing else; see public/sw.js. A browser that refuses (private

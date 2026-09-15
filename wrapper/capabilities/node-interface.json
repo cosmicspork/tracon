@@ -16,6 +16,8 @@
     "allow-desktop-setup-status",
     "allow-desktop-install-cli",
     "allow-desktop-restart-node",
+    "allow-desktop-preferences",
+    "allow-desktop-set-preferences",
     "allow-desktop-open-opencode",
     {
       "identifier": "opener:allow-open-url",
