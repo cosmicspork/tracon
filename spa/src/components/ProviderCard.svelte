@@ -145,7 +145,7 @@
               <button class="btn p" onclick={paste} disabled={busy || !code.trim()}>Paste back</button>
             </span>
           </details>
-        {:else}
+        {:else if completion !== 'device_code'}
           <span class="paste">
             <input
               aria-label="Redirect URL or code"

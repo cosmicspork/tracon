@@ -242,37 +242,35 @@ async fn invalid_provider_and_manual_completion_are_refused() {
     assert!(broker.read().unwrap().is_empty());
 }
 
-/// A Codex login from a phone still works, and it needs no device-code flow
-/// of its own to do it.
+/// A Codex login from a phone still works, and it is a device code whatever
+/// the provider's table says.
 ///
-/// The retired harness had two login ids for this provider — one that wanted a
-/// localhost callback and a `-device` one for everything else. `opencode auth
-/// login openai` has neither problem: it prints a URL and waits for a code to
-/// be pasted back, which is exactly what a remote owner can supply. So the
-/// completion is a paste, and the login is not refused for want of a callback
-/// this node cannot receive.
+/// `opencode auth login -p openai` has one flow a helper container can finish:
+/// it prints a page and a code, then polls until the operator approves. It
+/// reads nothing back, so offering a paste would be offering a box that does
+/// nothing, and the login is not refused for want of a callback this node
+/// cannot receive.
 #[tokio::test]
-async fn a_remote_codex_login_completes_by_paste_rather_than_a_callback() {
+async fn a_codex_login_that_prints_a_device_code_completes_by_device_code() {
     state::isolate();
     let fake = Arc::new(LoginFake::default());
+    *fake.device_code.lock().unwrap() = Some("ABCD-12345".into());
     let (p, _broker, _bus) = providers("device_login", fake);
 
-    let result = p
-        .connect(
-            "openai-codex",
-            vec![],
-            LoginOwner::Peer("phone".into()),
-            false,
-        )
-        .await
-        .unwrap();
-    assert_eq!(result.completion, LoginCompletion::Paste);
-    assert_eq!(result.url, "https://login.example/openai");
-    assert_eq!(result.device_code, None);
-
-    p.disconnect("openai-codex", &LoginOwner::Peer("phone".into()))
-        .await
-        .unwrap();
+    for (owner, local_callback) in [
+        (LoginOwner::Peer("phone".into()), false),
+        (LoginOwner::Local, true),
+    ] {
+        let result = p
+            .connect("openai-codex", vec![], owner.clone(), local_callback)
+            .await
+            .unwrap();
+        assert_eq!(result.completion, LoginCompletion::DeviceCode);
+        assert_eq!(result.url, "https://login.example/openai");
+        assert_eq!(result.device_code.as_deref(), Some("ABCD-12345"));
+        assert_eq!(result.completion_note, None);
+        p.disconnect("openai-codex", &owner).await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -322,7 +320,7 @@ async fn a_cancelled_startup_cannot_remove_the_next_login_generation() {
 
 /// The login client and the session harness are independent. Each
 /// subscription has exactly one client that can mint it: `claude setup-token`
-/// for Anthropic, `opencode auth login openai` for Codex. So each login goes
+/// for Anthropic, `opencode auth login -p openai` for Codex. So each login goes
 /// to its own adapter whatever `[harness] id` names, and the harness the node
 /// runs sessions with keeps only the logins nothing else claims.
 ///

@@ -545,7 +545,7 @@ harness_image = "localhost/tracon-harness-opencode"  # "localhost/tracon-harness
 login_image = "localhost/tracon-harness-claude"  # the Anthropic subscription login runs `claude
                                     # setup-token`, which only this image carries.
 codex_login_image = "localhost/tracon-harness-opencode"  # and the Codex subscription login runs
-                                    # `opencode auth login openai`, which only that one carries.
+                                    # `opencode auth login -p openai`, which only that one carries.
                                     # `tracon setup` builds whichever of these is not already the
                                     # harness image; set either to the same string as harness_image
                                     # (or empty) when they are one image.

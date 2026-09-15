@@ -33,6 +33,8 @@ pub struct LoginFake {
     pub expires_in_ms: Arc<Mutex<Option<i64>>>,
     /// Answer a refresh the way a harness with no refresh token does.
     pub reconnect_required: AtomicBool,
+    /// Print this device code with the URL, the way a device-code login does.
+    pub device_code: Arc<Mutex<Option<String>>>,
 }
 
 #[async_trait]
@@ -86,7 +88,7 @@ impl HarnessAdapter for LoginFake {
         let stored = self.stored.clone();
         let provider = provider.to_string();
         let url = format!("https://login.example/{provider}");
-        let device_code = (provider == "openai-codex-device").then(|| "ABCD-1234".to_string());
+        let device_code = self.device_code.lock().unwrap().clone();
         let output = Arc::new(Mutex::new(String::new()));
         let done = Box::pin(async move {
             let mut lines = tokio::io::BufReader::new(server).lines();
