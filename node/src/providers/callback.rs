@@ -84,6 +84,16 @@ impl CallbackTarget {
         })
     }
 
+    /// The target for a listener this node chose itself: `http://localhost:{port}{path}`.
+    pub fn loopback(port: u16, path: &str, state: &str) -> Self {
+        Self {
+            redirect: Url::parse(&format!("http://localhost:{port}{path}"))
+                .expect("loopback redirect"),
+            state: state.to_string(),
+            port,
+        }
+    }
+
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -117,25 +127,6 @@ impl CallbackTarget {
             _ => Err(Rejection::Invalid),
         }
     }
-}
-
-/// Whether an authorization URL sends its code to a page on the provider's own
-/// site (`https://platform.claude.com/oauth/code/callback`) rather than to a
-/// local listener. Such a login shows the operator the code to paste back.
-pub fn redirects_to_hosted_page(authorization_url: &str) -> bool {
-    let Ok(authorization) = Url::parse(authorization_url) else {
-        return false;
-    };
-    let redirects = values(&authorization, "redirect_uri");
-    let [redirect] = redirects.as_slice() else {
-        return false;
-    };
-    Url::parse(redirect).is_ok_and(|redirect| {
-        redirect.scheme() == "https"
-            && redirect
-                .host_str()
-                .is_some_and(|host| !matches!(host, "localhost" | "127.0.0.1" | "[::1]"))
-    })
 }
 
 fn values(url: &Url, key: &str) -> Vec<String> {
@@ -234,6 +225,41 @@ impl CallbackCapture {
             .map_err(|error| listener_error(&error, port))?;
         let (ipv4, ipv6) = bind_ipv6_beside(ipv4, port)?;
         Self::serve(target, ipv4, ipv6)
+    }
+
+    /// Bind both loopback families on `port` and serve `path` for `state`.
+    /// Port zero takes any free port; the port bound comes back with the
+    /// capture, since it is what the redirect has to name.
+    pub fn listen(
+        port: u16,
+        path: &str,
+        state: &str,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<CaptureEvent>, u16), CallbackError> {
+        // An ephemeral IPv4 port can already be held on IPv6 loopback; a
+        // fixed port cannot be tried again any differently.
+        let attempts = if port == 0 { 8 } else { 1 };
+        let mut last = CallbackError::Listener;
+        for _ in 0..attempts {
+            let ipv4 = std::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+                .map_err(|error| listener_error(&error, port))?;
+            let bound = ipv4
+                .local_addr()
+                .map_err(|_| CallbackError::Listener)?
+                .port();
+            match bind_ipv6_beside(ipv4, bound) {
+                Ok((ipv4, ipv6)) => {
+                    let (capture, events) =
+                        Self::serve(Self::target_for(bound, path, state), ipv4, ipv6)?;
+                    return Ok((capture, events, bound));
+                }
+                Err(error) => last = error,
+            }
+        }
+        Err(last)
+    }
+
+    fn target_for(port: u16, path: &str, state: &str) -> CallbackTarget {
+        CallbackTarget::loopback(port, path, state)
     }
 
     /// Serve a callback on loopback listeners that are already bound.
@@ -439,21 +465,6 @@ mod tests {
             "https://provider.example/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=a&state=b",
         ] {
             assert!(CallbackTarget::parse(value).is_err(), "accepted {value}");
-        }
-    }
-
-    #[test]
-    fn a_hosted_redirect_is_told_apart_from_a_loopback_one() {
-        assert!(redirects_to_hosted_page(
-            "https://claude.com/cai/oauth/authorize?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=s"
-        ));
-        for value in [
-            "https://provider.example/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A18443%2Fcb&state=s",
-            "https://provider.example/authorize?redirect_uri=https%3A%2F%2Flocalhost%3A1%2Fcb&state=s",
-            "https://provider.example/authorize?state=s",
-            "not a url",
-        ] {
-            assert!(!redirects_to_hosted_page(value), "{value}");
         }
     }
 

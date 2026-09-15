@@ -101,12 +101,6 @@ const RETIRED_IMAGES: &[&str] = &[
     "ghcr.io/cosmicspork/tracon-harness",
 ];
 
-/// Egress the harness logins need that files written before those logins
-/// existed do not allow: `claude setup-token` exchanges its code at
-/// `platform.claude.com` and reads client metadata from `claude.ai`. Both are
-/// in the default `gateway.allow_hosts`.
-const LOGIN_HOSTS: &[&str] = &[r"^platform\.claude\.com$", r"^claude\.ai$"];
-
 /// The suffix of the untouched original kept beside a migrated `node.toml`.
 pub const CONFIG_BACKUP_SUFFIX: &str = ".pre-opencode";
 
@@ -178,39 +172,8 @@ pub fn migrate_config(text: &str) -> Option<ConfigMigration> {
         &defaults.runtime.kubernetes.harness_image,
         &mut changed,
     );
-    if let Some(hosts) = table(&mut doc, &["gateway"])
-        .and_then(|t| t.get_mut("allow_hosts"))
-        .and_then(toml::Value::as_array_mut)
-    {
-        let before = hosts.len();
-        for host in LOGIN_HOSTS {
-            if !hosts.iter().any(|h| h.as_str() == Some(host)) {
-                hosts.push(toml::Value::String((*host).into()));
-            }
-        }
-        if hosts.len() != before {
-            changed.push("gateway.allow_hosts".into());
-        }
-    }
-
     let text = toml::to_string_pretty(&doc).ok()?;
     Some(ConfigMigration { text, changed })
-}
-
-/// Replace the Codex login ids the retired harness wrote into `[providers]`
-/// with OpenCode's, in memory. A file migrated before this ran still names
-/// them, and that migration only runs while `[harness] id` is omp.
-pub fn retire_login_ids(
-    providers: &mut std::collections::BTreeMap<String, crate::config::Provider>,
-) {
-    for provider in providers.values_mut() {
-        if provider.login.as_deref() == Some("openai-codex") {
-            provider.login = Some("openai".into());
-        }
-        if provider.device_login.as_deref() == Some("openai-codex-device") {
-            provider.device_login = None;
-        }
-    }
 }
 
 /// Where the original of a migrated `node.toml` is kept.
@@ -305,7 +268,6 @@ tools = []
 network = "tracon-int"
 gateway_image = "localhost/tracon-gateway"
 harness_image = "localhost/tracon-harness"
-login_image = "localhost/tracon-harness-claude"
 
 [gateway]
 allow_hosts = ['^api\.anthropic\.com$', '^api\.openai\.com$', '^chatgpt\.com$', '^auth\.openai\.com$', '^git\.internal\.example$']
@@ -332,11 +294,9 @@ state_claim = "tracon-state"
         // The migrated config resolves to an adapter: the node starts.
         assert!(crate::adapter::adapter_for(&cfg).is_ok());
 
-        // The logins' hosts are added after what was there, which keeps its
-        // order and the operator's own host.
-        let hosts = &cfg.gateway.allow_hosts;
+        // The operator's egress, their own host included, is left as it was.
         assert_eq!(
-            hosts[..5],
+            cfg.gateway.allow_hosts,
             [
                 r"^api\.anthropic\.com$",
                 r"^api\.openai\.com$",
@@ -345,15 +305,9 @@ state_claim = "tracon-state"
                 r"^git\.internal\.example$",
             ]
         );
-        for host in LOGIN_HOSTS {
-            assert!(hosts.iter().any(|h| h == host), "{host} missing: {hosts:?}");
-            assert!(defaults.gateway.allow_hosts.iter().any(|h| h == host));
-        }
-        assert_eq!(hosts.len(), 7);
 
         // What the migration had no business with is exactly as it was.
         assert_eq!(cfg.node_name, "laptop");
-        assert_eq!(cfg.boundary.login_image, "localhost/tracon-harness-claude");
         assert_eq!(cfg.gateway.proxy_port, 8888);
 
         assert_eq!(
@@ -363,7 +317,6 @@ state_claim = "tracon-state"
                 "harness.version",
                 "boundary.harness_image",
                 "runtime.kubernetes.harness_image",
-                "gateway.allow_hosts",
             ]
         );
         // And the result is not migrated a second time.
@@ -481,8 +434,6 @@ state_claim = "tracon-state"
                 r"^api\.openai\.com$",
                 r"^chatgpt\.com$",
                 r"^auth\.openai\.com$",
-                r"^platform\.claude\.com$",
-                r"^claude\.ai$",
             ]
         );
 

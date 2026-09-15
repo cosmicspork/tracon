@@ -107,16 +107,12 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
         enroll: Default::default(),
     };
     client.set_executor(Arc::new(state.clone()));
-    // Providers wired the way `serve` wires them: the login fake instead of a
-    // real harness, and every published summary carried into the node row so
-    // it rides the hello.
-    let providers = tracon::providers::Providers::new_in(
-        state::scratch(&format!("e2e-providers-{name}")),
+    // Providers wired the way `serve` wires them, with every published
+    // summary carried into the node row so it rides the hello.
+    let providers = tracon::providers::Providers::new(
         state.cfg.clone(),
         broker.clone(),
         DataKey::from_bytes([seed; 32]),
-        tracon::providers::LoginAdapters::all(Arc::new(support::login_fake::LoginFake::default())),
-        Arc::new(tracon::runner::local::LocalBackend),
         id.node_id(),
         bus.clone(),
     );
@@ -294,8 +290,8 @@ async fn a_peers_providers_are_driven_from_here() {
     let (a, b) = pair().await;
     let bi = b.id.node_id();
 
-    // A remote node cannot receive the browser's localhost callback. Anthropic
-    // offers no device flow, so reject this before starting an unfinishable login.
+    // A remote node signs in to Anthropic by paste: the redirect is
+    // Anthropic's own page, not this browser's localhost.
     let (st, v) = call(
         &a.app,
         "POST",
@@ -303,14 +299,14 @@ async fn a_peers_providers_are_driven_from_here() {
         Some(json!({ "channels": ["personal"] })),
     )
     .await;
-    assert_eq!(st, StatusCode::CONFLICT, "{v}");
-    assert!(v["error"]["message"]
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["completion"], "paste", "{v}");
+    assert!(v["url"]
         .as_str()
         .unwrap()
-        .contains("local callback"));
-    // The node-addressed route is intentionally treated as remote even when
-    // the target id is this node; only the direct provider route can capture
-    // its browser callback.
+        .contains("platform.claude.com%2Foauth%2Fcode%2Fcallback"));
+    // The node-addressed route is treated as remote even when the target id
+    // is this node; only the direct provider route claims a local callback.
     let ai = a.id.node_id();
     let (st, v) = call(
         &a.app,
@@ -319,7 +315,8 @@ async fn a_peers_providers_are_driven_from_here() {
         Some(json!({ "local_callback": true })),
     )
     .await;
-    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["completion"], "paste", "{v}");
 
     // An unreachable owner is refused up front, not timed out.
     a.store.set_reachable(&bi, false).unwrap();

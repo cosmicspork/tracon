@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod mesh;
 pub mod metrics;
 pub mod notify;
+pub mod oauth;
 pub mod policy;
 pub mod process;
 pub mod providers;

@@ -57,10 +57,9 @@ does not offer it. A terminal comes with that view as a capability you grant to 
 session and one workspace: default-denied, revocable, and never a general shell on
 the node. **Claude Code** is retained as a second supported harness over the
 stream-json control protocol. It has no native UI, so the advanced view, the
-terminal, and streaming either of them to another node are OpenCode-only; it is
-also the Anthropic subscription login client, because `claude setup-token` is the
-only client for that flow, and its image runs that step whichever harness the node
-is configured for. One node runs one harness image, chosen by `[harness] id`.
+terminal, and streaming either of them to another node are OpenCode-only. One node
+runs one harness image, chosen by `[harness] id`. Subscription sign-in does not run
+in either: the node speaks the Anthropic and ChatGPT OAuth flows itself.
 
 What is built but not yet proven against a real credential, device, cluster, or
 published release is listed in one place:
@@ -542,21 +541,12 @@ gateway_container = "tracon-gw"
 gateway_image = "localhost/tracon-gateway"
 harness_image = "localhost/tracon-harness-opencode"  # "localhost/tracon-harness-claude" with
                                     # [harness] id = "claude"
-login_image = "localhost/tracon-harness-claude"  # the Anthropic subscription login runs `claude
-                                    # setup-token`, which only this image carries.
-codex_login_image = "localhost/tracon-harness-opencode"  # and the Codex subscription login runs
-                                    # `opencode auth login -p openai`, which only that one carries.
-                                    # `tracon setup` builds whichever of these is not already the
-                                    # harness image; set either to the same string as harness_image
-                                    # (or empty) when they are one image.
 start_machine = true                # macOS: start the podman machine when it is stopped
 # selinux_label_disable = true      # only if the boundary check says the labels fight you
 
 [gateway]
-allow_hosts = ['^api\.anthropic\.com$', '^platform\.claude\.com$', '^claude\.ai$',
-               '^api\.openai\.com$', '^chatgpt\.com$', '^auth\.openai\.com$']
-                                    # platform.claude.com and claude.ai are the subscription
-                                    # login's own endpoints, not the model API's
+allow_hosts = ['^api\.anthropic\.com$', '^api\.openai\.com$', '^chatgpt\.com$',
+               '^auth\.openai\.com$']  # harness egress; subscription sign-in runs in the node
 proxy_port = 8888
 forward_port = 7421
 # harness_listen = "127.0.0.1:7421" # or a socket path; the platform default is right
@@ -570,7 +560,7 @@ claim_grace_secs = 60               # a review claim lapses this long after the 
 
 [runtime]
 kind = "podman"                     # or "kubernetes", for a pod-hosted node
-# [runtime.kubernetes]              # namespace, harness_image, login_image, codex_login_image,
+# [runtime.kubernetes]              # namespace, harness_image,
                                     # state_claim, state_mount, harness_home, uid, gateway_host
 # approved_images = []              # digest-pinned project images preparation may use besides the harness image
 
@@ -581,7 +571,7 @@ shape = "anthropic"                 # or "openai", "openai-codex"; the shape als
                                     # methods and paths the gateway will lend the credential to:
                                     # inference, token counting, embeddings and the models list,
                                     # never the provider account behind the key
-# login = "…"                       # the harness's login flow, if it has one
+# login = "anthropic"               # the subscription sign-in the node runs: "anthropic", or "openai" for ChatGPT/Codex
 # [providers.anthropic.price]
 # input_per_mtok = 3.0
 # output_per_mtok = 15.0

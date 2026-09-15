@@ -1,10 +1,11 @@
-//! Connecting a model provider through the harness's own login flow.
+//! Connecting a model provider: the node runs the provider's own OAuth sign-in
+//! (`crate::oauth`) and keeps the tokens in the broker as an `oauth`
+//! credential.
 
 pub mod callback;
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -15,98 +16,26 @@ use parking_lot::Mutex;
 use proto::envelope::DataKey;
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::io::AsyncWriteExt;
+use tokio_util::sync::CancellationToken;
 
-use self::callback::{
-    CallbackCapture, CallbackError, CallbackOutcome, CallbackTarget, CaptureEvent, CaptureReply,
-};
+use self::callback::{CallbackCapture, CallbackError, CallbackOutcome, CaptureEvent, CaptureReply};
 use crate::{
-    adapter::{claude::ClaudeAdapter, opencode::OpenCodeAdapter, HarnessAdapter, LiftedToken},
-    boundary::Backend,
     broker::{Credential, SharedBroker, KIND_OAUTH},
     config::Config,
-    runner::Mount,
-    session::materialize::state_target,
+    oauth::{self, anthropic, codex, Endpoints, Flow, OAuthError, Pkce, Tokens},
     store::now_ms,
     stream::{Bus, Frame},
 };
 
 const REFRESH_AHEAD_MS: i64 = 30 * 60 * 1000;
 pub const REFRESH_TICK_SECS: u64 = 5 * 60;
-const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const MAX_MANUAL_INPUT: usize = 8 * 1024;
 
 /// The provider state for a credential that can only be replaced by signing in
 /// again. Not "failed": nothing went wrong and nothing is going to be retried,
 /// the operator simply has to reconnect.
 const NEEDS_RECONNECT: &str = "needs_reconnect";
-
-/// Which adapter runs which provider's login.
-///
-/// The login client and the session harness are independent, and each
-/// subscription has exactly one client that can mint it. `claude setup-token`
-/// is the whole of the Anthropic path, so `anthropic` resolves to the Claude
-/// adapter whatever `[harness] id` names; `opencode auth login -p openai` is the
-/// whole of the Codex path, so `openai`/`openai-codex` resolve to the
-/// OpenCode adapter the same way. The retired harness used to broker Codex
-/// for a node running anything else, which is why this table names it now.
-/// Every other login stays with the harness the node runs sessions with.
-///
-/// The table also decides who lifts: `setup-token` prints its token once and
-/// leaves nothing in a store directory, so the instance that ran the login is
-/// the only place the token exists until the broker has it. Login and lift
-/// must therefore reach the same `Arc`, which is why this is held rather than
-/// rebuilt per call.
-pub struct LoginAdapters {
-    session: Arc<dyn HarnessAdapter>,
-    per_provider: HashMap<String, Arc<dyn HarnessAdapter>>,
-}
-
-impl LoginAdapters {
-    /// The table a node runs with.
-    pub fn for_node(cfg: &Config, session: Arc<dyn HarnessAdapter>, backend: &dyn Backend) -> Self {
-        let mut per_provider = HashMap::new();
-        if session.id() != ClaudeAdapter::ID {
-            let claude = ClaudeAdapter::new(crate::adapter::image_version(ClaudeAdapter::ID))
-                .with_login_image(backend.login_image());
-            per_provider.insert(
-                ClaudeAdapter::LOGIN_PROVIDER.to_string(),
-                Arc::new(claude) as Arc<dyn HarnessAdapter>,
-            );
-        }
-        if session.id() != OpenCodeAdapter::ID {
-            let opencode = Arc::new(
-                OpenCodeAdapter::new(crate::adapter::image_version(OpenCodeAdapter::ID))
-                    .with_login_image(backend.codex_login_image()),
-            ) as Arc<dyn HarnessAdapter>;
-            for provider in OpenCodeAdapter::LOGIN_PROVIDERS {
-                per_provider.insert(provider.to_string(), opencode.clone());
-            }
-        }
-        // Named so an unconfigured provider cannot silently acquire a login
-        // client it was never meant to have.
-        per_provider.retain(|name, _| cfg.providers.contains_key(name));
-        Self {
-            session,
-            per_provider,
-        }
-    }
-
-    /// Every login through one adapter: what a node whose harness brokers all
-    /// of its own logins uses, and what the tests drive.
-    pub fn all(session: Arc<dyn HarnessAdapter>) -> Self {
-        Self {
-            session,
-            per_provider: HashMap::new(),
-        }
-    }
-
-    pub fn get(&self, provider: &str) -> &Arc<dyn HarnessAdapter> {
-        self.per_provider.get(provider).unwrap_or(&self.session)
-    }
-}
-
-type Stdin = Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginOwner {
@@ -136,6 +65,7 @@ struct Inflight {
     owner: LoginOwner,
     channels: Vec<String>,
     started_ms: i64,
+    cancel: CancellationToken,
     state: InflightState,
 }
 
@@ -146,9 +76,35 @@ enum InflightState {
 
 struct PendingLogin {
     result: ConnectResult,
-    stdin: Stdin,
+    grant: Grant,
     capture: Option<CallbackCapture>,
     completion: Arc<Mutex<CompletionState>>,
+}
+
+/// What finishing a sign-in needs that the operator never sees.
+#[derive(Clone)]
+enum Grant {
+    /// An authorization code comes back, by callback or paste, and is
+    /// exchanged against this verifier at this redirect.
+    Browser {
+        flow: Flow,
+        redirect: String,
+        state: String,
+        verifier: String,
+    },
+    /// The node polls until the operator approves; nothing comes back.
+    Device,
+}
+
+/// A sign-in the provider has accepted the start of, before it is installed.
+struct Started {
+    result: ConnectResult,
+    grant: Grant,
+    capture: Option<(
+        CallbackCapture,
+        tokio::sync::mpsc::UnboundedReceiver<CaptureEvent>,
+    )>,
+    device: Option<codex::DeviceStart>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,7 +115,7 @@ enum CompletionState {
 }
 
 #[derive(Clone, Copy)]
-enum LiftKind {
+enum StoreKind {
     Fresh,
     Refresh,
 }
@@ -171,20 +127,22 @@ struct Note {
     updated_ms: i64,
 }
 
+type OnRefreshed = Box<dyn Fn(&str, &Credential) + Send + Sync>;
+
 pub struct Providers {
     cfg: Arc<Config>,
     broker: SharedBroker,
     store_key: DataKey,
-    logins: LoginAdapters,
-    backend: Arc<dyn Backend>,
+    endpoints: Endpoints,
+    http: reqwest::Client,
     node_id: String,
     bus: Bus,
-    store_root: PathBuf,
     inflight: Mutex<HashMap<String, Inflight>>,
     notes: Mutex<HashMap<String, Note>>,
     next_generation: AtomicU64,
     on_connected: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
     on_publish: std::sync::OnceLock<Box<dyn Fn(Vec<serde_json::Value>) + Send + Sync>>,
+    on_refreshed: std::sync::OnceLock<OnRefreshed>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -193,8 +151,6 @@ pub enum ProviderError {
     Unknown(String),
     #[error("provider {0} has no login flow; import an API key with `tracon credential import`")]
     NoLogin(String),
-    #[error("provider {0} needs a local callback; connect it on a local node, then share the credential")]
-    RequiresLocalCallback(String),
     #[error("a login for {0} is already in progress")]
     Busy(String),
     #[error("no login in progress for {0}")]
@@ -211,37 +167,21 @@ pub enum ProviderError {
 }
 
 impl Providers {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cfg: Arc<Config>,
         broker: SharedBroker,
         store_key: DataKey,
-        adapter: Arc<dyn HarnessAdapter>,
-        backend: Arc<dyn Backend>,
         node_id: String,
         bus: Bus,
     ) -> Arc<Self> {
-        let logins = LoginAdapters::for_node(&cfg, adapter, backend.as_ref());
-        Self::new_in(
-            Self::store_root(),
-            cfg,
-            broker,
-            store_key,
-            logins,
-            backend,
-            node_id,
-            bus,
-        )
+        Self::with_endpoints(cfg, broker, store_key, Endpoints::default(), node_id, bus)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_in(
-        store_root: PathBuf,
+    pub fn with_endpoints(
         cfg: Arc<Config>,
         broker: SharedBroker,
         store_key: DataKey,
-        logins: LoginAdapters,
-        backend: Arc<dyn Backend>,
+        endpoints: Endpoints,
         node_id: String,
         bus: Bus,
     ) -> Arc<Self> {
@@ -249,16 +189,16 @@ impl Providers {
             cfg,
             broker,
             store_key,
-            logins,
-            backend,
+            endpoints,
+            http: oauth::client(),
             node_id,
             bus,
-            store_root,
             inflight: Mutex::new(HashMap::new()),
             notes: Mutex::new(HashMap::new()),
             next_generation: AtomicU64::new(1),
             on_connected: std::sync::OnceLock::new(),
             on_publish: std::sync::OnceLock::new(),
+            on_refreshed: std::sync::OnceLock::new(),
         })
     }
 
@@ -270,50 +210,10 @@ impl Providers {
         let _ = self.on_publish.set(f);
     }
 
-    pub fn store_root() -> PathBuf {
-        Config::state_dir().join("providers")
-    }
-
-    pub fn store_dir(&self, provider: &str) -> PathBuf {
-        self.store_root.join(provider)
-    }
-
-    fn state_volume(&self, provider: &str) -> String {
-        format!(
-            "tracon-provider-{}",
-            provider
-                .bytes()
-                .map(|b| if b.is_ascii_alphanumeric() {
-                    b as char
-                } else {
-                    '-'
-                })
-                .collect::<String>()
-        )
-    }
-
-    async fn clear_state_volume(&self, provider: &str) -> Result<(), ProviderError> {
-        let empty = self
-            .store_root
-            .join(format!(".{}-empty-{}", provider, uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&empty)
-            .map_err(|error| ProviderError::Failed(error.to_string()))?;
-        let volume = self.state_volume(provider);
-        let result = {
-            // A clear replaces the volume wholesale. Held against the same
-            // lock the lift's export takes, so a refresh or a finishing login
-            // can never read the volume during the window where it does not
-            // exist; without it the reader fails with "source does not exist"
-            // and the credential is silently never lifted.
-            let lock = crate::workspace::volume_lock(&volume);
-            let _guard = lock.lock().await;
-            self.backend
-                .import_volume(&volume, &empty)
-                .await
-                .map_err(|error| ProviderError::Failed(error.to_string()))
-        };
-        let _ = std::fs::remove_dir_all(empty);
-        result
+    /// Called with a credential this node has just refreshed, so the nodes it
+    /// was shared with receive the rotated tokens: the refresh revoked theirs.
+    pub fn set_on_refreshed(&self, f: OnRefreshed) {
+        let _ = self.on_refreshed.set(f);
     }
 
     pub fn list_private(&self) -> Vec<Value> {
@@ -368,7 +268,7 @@ impl Providers {
                     "name": name,
                     "state": state,
                     "kind": cred.map(|(_, c)| c.kind.clone()),
-                    "can_login": provider.login.is_some(),
+                    "can_login": provider.login.as_deref().and_then(Flow::for_login).is_some(),
                     "identity": cred.and_then(|(_, c)| c.identity.clone()),
                     "expires_ms": cred.and_then(|(_, c)| c.expires_ms),
                     "channels": cred.map(|(_, c)| c.channels.clone()).unwrap_or_default(),
@@ -435,40 +335,22 @@ impl Providers {
         );
     }
 
-    fn login_id(&self, name: &str, local_callback: bool) -> Result<(String, bool), ProviderError> {
+    fn flow(&self, name: &str) -> Result<Flow, ProviderError> {
         let provider = self
             .cfg
             .providers
             .get(name)
             .ok_or_else(|| ProviderError::Unknown(name.to_string()))?;
-        if !local_callback {
-            if let Some(login) = &provider.device_login {
-                return Ok((login.clone(), true));
-            }
-            if provider.requires_local_callback {
-                return Err(ProviderError::RequiresLocalCallback(name.to_string()));
-            }
-        }
         provider
             .login
-            .clone()
-            .map(|login| (login, false))
+            .as_deref()
+            .and_then(Flow::for_login)
             .ok_or_else(|| ProviderError::NoLogin(name.to_string()))
     }
 
-    fn runner_for(&self, provider: &str) -> std::io::Result<Arc<dyn crate::runner::Runner>> {
-        // The layout is the login client's, not the session harness's: a login
-        // run by another adapter keeps its state where that adapter looks.
-        Ok(self.backend.runner(vec![Mount::volume(
-            self.state_volume(provider),
-            state_target(
-                &self.backend.harness_home(),
-                self.logins.get(provider).layout(),
-            ),
-            false,
-        )]))
-    }
-
+    /// Start a sign-in. `local_callback` means the browser is on this node's
+    /// host, so a loopback redirect reaches it; otherwise the provider's own
+    /// page shows a code (Anthropic) or the device flow runs (Codex).
     pub async fn connect(
         self: &Arc<Self>,
         name: &str,
@@ -476,8 +358,9 @@ impl Providers {
         owner: LoginOwner,
         local_callback: bool,
     ) -> Result<ConnectResult, ProviderError> {
-        let (login, device_login) = self.login_id(name, local_callback)?;
+        let flow = self.flow(name)?;
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        let cancel = CancellationToken::new();
         {
             let mut inflight = self.inflight.lock();
             if let Some(existing) = inflight.get(name) {
@@ -495,106 +378,29 @@ impl Providers {
                     owner,
                     channels,
                     started_ms: now_ms(),
+                    cancel: cancel.clone(),
                     state: InflightState::Starting,
                 },
             );
         }
-        if let Err(error) = self.clear_state_volume(name).await {
-            self.remove_generation(name, generation);
-            return Err(error);
-        }
-        let login_process = format!("tracon-login-{name}-{generation}");
 
-        let runner = match self.runner_for(name) {
-            Ok(runner) => runner,
+        let started = match self.start(flow, local_callback).await {
+            Ok(started) => started,
             Err(error) => {
                 self.remove_generation(name, generation);
-                return Err(ProviderError::Failed(error.to_string()));
+                return Err(error);
             }
         };
-        let state_dir = state_target(&self.backend.harness_home(), self.logins.get(name).layout());
-        let flow = match self
-            .logins
-            .get(name)
-            .login(runner.as_ref(), &login, &login_process, &state_dir)
-            .await
-        {
-            Ok(flow) => flow,
-            Err(error) => {
-                self.remove_generation(name, generation);
-                return Err(ProviderError::Failed(error.to_string()));
-            }
+        let Started {
+            result,
+            grant,
+            capture,
+            device,
+        } = started;
+        let (capture, capture_events) = match capture {
+            Some((capture, events)) => (Some(capture), Some(events)),
+            None => (None, None),
         };
-
-        // A login client whose only flow is a device code (OpenCode's Codex
-        // login) says so by returning one, whatever the provider's table
-        // names.
-        let device_login = device_login || flow.device_code.is_some();
-        let mut completion = if device_login {
-            LoginCompletion::DeviceCode
-        } else {
-            LoginCompletion::Paste
-        };
-        let mut completion_note = None;
-        let mut capture = None;
-        let mut capture_events = None;
-        if local_callback && !device_login {
-            match CallbackTarget::parse(&flow.url) {
-                Ok(target) => {
-                    let port = target.port();
-                    match CallbackCapture::start(target).await {
-                        Ok((listener, events)) => {
-                            completion = LoginCompletion::LocalCallback;
-                            capture = Some(listener);
-                            capture_events = Some(events);
-                        }
-                        Err(CallbackError::AddrInUse(_)) => {
-                            completion_note = Some(format!(
-                                "Local callback port {port} is unavailable; paste the redirect URL or code."
-                            ));
-                        }
-                        Err(CallbackError::InvalidTarget(_)) => unreachable!(),
-                        Err(CallbackError::Listener) => {
-                            self.remove_generation(name, generation);
-                            self.kill_login(name, generation).await;
-                            return Err(ProviderError::Failed(
-                                "Local callback listener could not start; connect again.".into(),
-                            ));
-                        }
-                    }
-                }
-                // A redirect to the provider's own page is a login designed
-                // around the paste-back, not a callback that went missing.
-                Err(_) if callback::redirects_to_hosted_page(&flow.url) => {}
-                Err(_) => {
-                    completion_note = Some(
-                        "This provider did not offer a usable localhost callback; paste the redirect URL or code."
-                            .into(),
-                    );
-                }
-            }
-        }
-        let device_code = if device_login {
-            match flow.device_code.clone() {
-                Some(code) => Some(code),
-                None => {
-                    self.remove_generation(name, generation);
-                    self.kill_login(name, generation).await;
-                    return Err(ProviderError::Failed(
-                        "device sign-in did not provide a code; connect again.".into(),
-                    ));
-                }
-            }
-        } else {
-            None
-        };
-        let result = ConnectResult {
-            url: flow.url.clone(),
-            completion,
-            completion_note,
-            device_code,
-        };
-        let stdin = Arc::new(tokio::sync::Mutex::new(flow.stdin));
         let installed = {
             let mut inflight = self.inflight.lock();
             match inflight.get_mut(name) {
@@ -604,7 +410,7 @@ impl Providers {
                 {
                     slot.state = InflightState::Pending(PendingLogin {
                         result: result.clone(),
-                        stdin: stdin.clone(),
+                        grant,
                         capture: capture.clone(),
                         completion: Arc::new(Mutex::new(CompletionState::Open)),
                     });
@@ -617,7 +423,6 @@ impl Providers {
             if let Some(capture) = &capture {
                 capture.stop();
             }
-            self.kill_login(name, generation).await;
             return Err(ProviderError::NotPending(name.to_string()));
         }
         self.notes.lock().remove(name);
@@ -672,48 +477,184 @@ impl Providers {
             });
         }
 
-        let providers = self.clone();
-        let provider = name.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(LOGIN_TIMEOUT).await;
-            providers
-                .terminal(&provider, generation, "Sign-in timed out; connect again.")
-                .await;
-        });
+        if let Some(device) = device {
+            let providers = self.clone();
+            let provider = name.to_string();
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                providers
+                    .poll_device(&provider, generation, device, cancel)
+                    .await;
+            });
+        }
 
         let providers = self.clone();
         let provider = name.to_string();
-        let done = flow.done;
         tokio::spawn(async move {
-            let exit = done.await;
-            let removed = providers.take_generation(&provider, generation);
-            let Some(slot) = removed else {
-                return;
-            };
-            stop_capture(&slot);
-            match exit {
-                Ok(0) => match providers
-                    .lift(&provider, &login, slot.channels, LiftKind::Fresh)
-                    .await
-                {
-                    Ok(()) => {
-                        providers.notes.lock().remove(&provider);
-                        if let Some(callback) = providers.on_connected.get() {
-                            callback();
-                        }
-                    }
-                    Err(error) => providers.note(&provider, "failed", Some(error.to_string())),
-                },
-                _ => providers.note(
-                    &provider,
-                    "failed",
-                    Some("Sign-in failed; connect again.".into()),
-                ),
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                _ = tokio::time::sleep(LOGIN_TIMEOUT) => {
+                    providers
+                        .terminal(&provider, generation, "Sign-in timed out; connect again.")
+                        .await;
+                }
             }
-            providers.publish();
         });
 
         Ok(result)
+    }
+
+    async fn start(&self, flow: Flow, local_callback: bool) -> Result<Started, ProviderError> {
+        match flow {
+            Flow::Anthropic => {
+                let pkce = Pkce::new();
+                let state = oauth::random_token(32);
+                let mut completion_note = None;
+                let listened = if local_callback {
+                    match CallbackCapture::listen(0, "/callback", &state) {
+                        Ok(listened) => Some(listened),
+                        Err(_) => {
+                            completion_note = Some(
+                                "The local callback could not start; paste the code the sign-in page shows."
+                                    .into(),
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                let (redirect, completion, capture) = match listened {
+                    Some((capture, events, port)) => (
+                        anthropic::loopback_redirect(port),
+                        LoginCompletion::LocalCallback,
+                        Some((capture, events)),
+                    ),
+                    None => (
+                        anthropic::HOSTED_REDIRECT.to_string(),
+                        LoginCompletion::Paste,
+                        None,
+                    ),
+                };
+                Ok(Started {
+                    result: ConnectResult {
+                        url: anthropic::authorize_url(
+                            &self.endpoints,
+                            &redirect,
+                            &pkce.challenge,
+                            &state,
+                        ),
+                        completion,
+                        completion_note,
+                        device_code: None,
+                    },
+                    grant: Grant::Browser {
+                        flow,
+                        redirect,
+                        state,
+                        verifier: pkce.verifier,
+                    },
+                    capture,
+                    device: None,
+                })
+            }
+            Flow::Codex => {
+                let mut completion_note = None;
+                if local_callback {
+                    let pkce = Pkce::new();
+                    let state = oauth::random_token(32);
+                    match CallbackCapture::listen(
+                        self.endpoints.codex_callback_port,
+                        "/auth/callback",
+                        &state,
+                    ) {
+                        Ok((capture, events, port)) => {
+                            let redirect = codex::loopback_redirect(port);
+                            return Ok(Started {
+                                result: ConnectResult {
+                                    url: codex::authorize_url(
+                                        &self.endpoints,
+                                        &redirect,
+                                        &pkce.challenge,
+                                        &state,
+                                    ),
+                                    completion: LoginCompletion::LocalCallback,
+                                    completion_note: None,
+                                    device_code: None,
+                                },
+                                grant: Grant::Browser {
+                                    flow,
+                                    redirect,
+                                    state,
+                                    verifier: pkce.verifier,
+                                },
+                                capture: Some((capture, events)),
+                                device: None,
+                            });
+                        }
+                        Err(CallbackError::AddrInUse(port)) => {
+                            completion_note = Some(format!(
+                                "Local callback port {port} is in use; enter the code at the provider page instead."
+                            ));
+                        }
+                        Err(_) => {
+                            completion_note = Some(
+                                "The local callback could not start; enter the code at the provider page instead."
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+                let device = codex::start_device(&self.http, &self.endpoints)
+                    .await
+                    .map_err(|error| ProviderError::Failed(error.to_string()))?;
+                Ok(Started {
+                    result: ConnectResult {
+                        url: codex::device_page(&self.endpoints),
+                        completion: LoginCompletion::DeviceCode,
+                        completion_note,
+                        device_code: Some(device.user_code.clone()),
+                    },
+                    grant: Grant::Device,
+                    capture: None,
+                    device: Some(device),
+                })
+            }
+        }
+    }
+
+    async fn poll_device(
+        &self,
+        name: &str,
+        generation: u64,
+        device: codex::DeviceStart,
+        cancel: CancellationToken,
+    ) {
+        let wait = device.interval
+            + std::time::Duration::from_secs(self.endpoints.device_poll_margin_secs);
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(wait) => {}
+            }
+            match codex::poll_device(&self.http, &self.endpoints, &device).await {
+                Ok(None) => {}
+                Ok(Some(tokens)) => {
+                    let _ = self.finish(name, generation, tokens).await;
+                    return;
+                }
+                // A poll that did not arrive is asked again; the sign-in's
+                // own timeout is what bounds it.
+                Err(OAuthError::Unavailable(error)) => {
+                    tracing::debug!(provider = %name, %error, "device sign-in poll failed");
+                }
+                Err(OAuthError::Rejected(_)) => {
+                    self.terminal(name, generation, "Sign-in was not authorized.")
+                        .await;
+                    return;
+                }
+            }
+        }
     }
 
     pub async fn code(
@@ -739,6 +680,8 @@ impl Providers {
             .await
     }
 
+    /// Exchange a returned authorization code, whether the callback carried it
+    /// or the operator pasted it.
     async fn submit(
         &self,
         name: &str,
@@ -756,7 +699,7 @@ impl Providers {
                 "the redirect URL or code must be one non-empty line no longer than 8 KiB".into(),
             ));
         }
-        let (stdin, capture, completion) = {
+        let (grant, completion) = {
             let inflight = self.inflight.lock();
             let slot = inflight
                 .get(name)
@@ -765,6 +708,11 @@ impl Providers {
             let InflightState::Pending(pending) = &slot.state else {
                 return Err(ProviderError::NotPending(name.to_string()));
             };
+            if matches!(pending.grant, Grant::Device) {
+                return Err(ProviderError::Failed(
+                    "this sign-in finishes on the provider page; there is nothing to paste".into(),
+                ));
+            }
             let mut state = pending.completion.lock();
             if *state != CompletionState::Open {
                 return Err(ProviderError::Failed(
@@ -772,33 +720,99 @@ impl Providers {
                 ));
             }
             *state = CompletionState::Claimed(source);
-            (
-                pending.stdin.clone(),
-                pending.capture.clone(),
-                pending.completion.clone(),
-            )
+            (pending.grant.clone(), pending.completion.clone())
         };
-
-        let mut line = trimmed.to_string();
-        line.push('\n');
-        let write = async {
-            let mut writer = stdin.lock().await;
-            writer.write_all(line.as_bytes()).await?;
-            writer.flush().await
-        }
-        .await;
-        if let Err(error) = write {
+        let reopen = || {
             let mut state = completion.lock();
             if *state == CompletionState::Claimed(source) {
                 *state = CompletionState::Open;
             }
-            return Err(ProviderError::Failed(error.to_string()));
+        };
+        let Grant::Browser {
+            flow,
+            redirect,
+            state,
+            verifier,
+        } = grant
+        else {
+            unreachable!("a device grant is refused above");
+        };
+        let Some(pasted) = oauth::parse_pasted(trimmed) else {
+            reopen();
+            return Err(ProviderError::Failed(
+                "that is not a redirect URL or sign-in code".into(),
+            ));
+        };
+        if pasted
+            .state
+            .as_deref()
+            .is_some_and(|pasted| pasted != state)
+        {
+            reopen();
+            return Err(ProviderError::Failed(
+                "that code belongs to a different sign-in; use the one this sign-in's link shows"
+                    .into(),
+            ));
         }
-        *completion.lock() = CompletionState::Finished;
-        if let Some(capture) = capture {
-            capture.stop();
+        let exchanged = match flow {
+            Flow::Anthropic => {
+                anthropic::exchange(
+                    &self.http,
+                    &self.endpoints,
+                    &pasted.code,
+                    &state,
+                    &redirect,
+                    &verifier,
+                )
+                .await
+            }
+            Flow::Codex => {
+                codex::exchange(
+                    &self.http,
+                    &self.endpoints,
+                    &pasted.code,
+                    &redirect,
+                    &verifier,
+                )
+                .await
+            }
+        };
+        match exchanged {
+            Ok(tokens) => {
+                *completion.lock() = CompletionState::Finished;
+                self.finish(name, generation, tokens).await
+            }
+            Err(error) => {
+                reopen();
+                Err(ProviderError::Failed(error.to_string()))
+            }
         }
-        Ok(())
+    }
+
+    /// Keep what a sign-in produced, if that sign-in is still the one waiting.
+    async fn finish(
+        &self,
+        name: &str,
+        generation: u64,
+        tokens: Tokens,
+    ) -> Result<(), ProviderError> {
+        let Some(slot) = self.take_generation(name, generation) else {
+            return Err(ProviderError::NotPending(name.to_string()));
+        };
+        stop_capture(&slot);
+        slot.cancel.cancel();
+        let stored = self.store(name, tokens, slot.channels, StoreKind::Fresh);
+        match &stored {
+            Ok(_) => {
+                self.notes.lock().remove(name);
+                if let Some(callback) = self.on_connected.get() {
+                    callback();
+                }
+            }
+            Err(error) => self.note(name, "failed", Some(error.to_string())),
+        }
+        self.publish();
+        stored.map(|_| ())
     }
 
     pub async fn disconnect(&self, name: &str, owner: &LoginOwner) -> Result<(), ProviderError> {
@@ -812,8 +826,7 @@ impl Providers {
         };
         if let Some(slot) = pending {
             stop_capture(&slot);
-            self.kill_login(name, slot.generation).await;
-            shutdown_stdin(&slot).await;
+            slot.cancel.cancel();
             self.notes.lock().remove(name);
             self.publish();
             return Ok(());
@@ -843,22 +856,15 @@ impl Providers {
             return;
         };
         stop_capture(&slot);
-        self.kill_login(name, generation).await;
-        shutdown_stdin(&slot).await;
+        slot.cancel.cancel();
         self.note(name, "failed", Some(message.into()));
         self.publish();
     }
 
-    async fn kill_login(&self, name: &str, generation: u64) {
-        let _ = self
-            .backend
-            .runner(Vec::new())
-            .kill(&format!("tracon-login-{name}-{generation}"))
-            .await;
-    }
-
     fn remove_generation(&self, name: &str, generation: u64) {
-        let _ = self.take_generation(name, generation);
+        if let Some(slot) = self.take_generation(name, generation) {
+            slot.cancel.cancel();
+        }
     }
 
     fn take_generation(&self, name: &str, generation: u64) -> Option<Inflight> {
@@ -881,36 +887,25 @@ impl Providers {
             .ok_or_else(|| ProviderError::Unknown(name.to_string()))
     }
 
-    async fn lift(
+    fn store(
         &self,
         name: &str,
-        login: &str,
+        tokens: Tokens,
         channels: Vec<String>,
-        kind: LiftKind,
-    ) -> Result<(), ProviderError> {
-        let state = self.store_dir(name);
-        let volume = self.state_volume(name);
-        {
-            let lock = crate::workspace::volume_lock(&volume);
-            let _guard = lock.lock().await;
-            self.backend
-                .export_volume(&volume, &state)
-                .await
-                .map_err(|error| ProviderError::Failed(error.to_string()))?;
-        }
-        let lifted = self.logins.get(name).lift(&state, login).await;
-        let _ = std::fs::remove_dir_all(&state);
-        let token: LiftedToken =
-            lifted.map_err(|error| ProviderError::Failed(error.to_string()))?;
+        kind: StoreKind,
+    ) -> Result<Credential, ProviderError> {
         let credential_name = self.credential_name(name)?;
         let mut broker = self.broker.write().unwrap();
         let mut staged = broker.clone();
         let mut credential = match kind {
-            LiftKind::Fresh => Credential {
+            StoreKind::Fresh => Credential {
                 channels,
+                nodes: vec![self.node_id.clone()],
                 ..Default::default()
             },
-            LiftKind::Refresh => {
+            // A refresh keeps where the credential may be used and who it was
+            // shared with; only the tokens change.
+            StoreKind::Refresh => {
                 let credential = staged.get(&credential_name).cloned().ok_or_else(|| {
                     ProviderError::Failed(format!(
                         "no existing OAuth credential for {name} to refresh"
@@ -926,61 +921,89 @@ impl Providers {
         };
         credential.kind = KIND_OAUTH.into();
         credential.provider = Some(name.to_string());
-        credential.nodes = vec![self.node_id.clone()];
-        credential.expires_ms = token.expires_ms;
-        credential.identity = token.identity;
-        credential.env.insert("ACCESS_TOKEN".into(), token.access);
-        if let Some(refresh) = token.refresh {
+        credential.expires_ms = tokens.expires_ms;
+        if tokens.identity.is_some() || matches!(kind, StoreKind::Fresh) {
+            credential.identity = tokens.identity;
+        }
+        credential.env.insert("ACCESS_TOKEN".into(), tokens.access);
+        if let Some(refresh) = tokens.refresh {
             credential.env.insert("REFRESH_TOKEN".into(), refresh);
-        } else if matches!(kind, LiftKind::Fresh) {
+        } else if matches!(kind, StoreKind::Fresh) {
             credential.env.remove("REFRESH_TOKEN");
         }
-        if let Some(account_id) = token.account_id {
+        if let Some(account_id) = tokens.account_id {
             credential
                 .env
                 .insert("CHATGPT_ACCOUNT_ID".into(), account_id);
-        } else if matches!(kind, LiftKind::Fresh) {
+        } else if matches!(kind, StoreKind::Fresh) {
             credential.env.remove("CHATGPT_ACCOUNT_ID");
         }
-        staged.put(&credential_name, credential);
+        staged.put(&credential_name, credential.clone());
         staged
             .save(&self.store_key)
             .map_err(|error| ProviderError::Failed(error.to_string()))?;
         *broker = staged;
-        Ok(())
+        Ok(credential)
     }
 
     pub async fn refresh(&self, name: &str) -> Result<(), ProviderError> {
-        let login = self.login_id(name, true)?.0;
-        let runner = self
-            .runner_for(name)
-            .map_err(|error| ProviderError::Failed(error.to_string()))?;
-        self.logins
-            .get(name)
-            .refresh(runner.as_ref(), &login, &format!("tracon-refresh-{name}"))
-            .await
-            .map_err(|error| match error {
-                crate::adapter::AdapterError::ReconnectRequired(reason) => {
-                    ProviderError::ReconnectRequired(reason)
-                }
-                other => ProviderError::Failed(other.to_string()),
-            })?;
-        self.lift(name, &login, Vec::new(), LiftKind::Refresh)
-            .await?;
+        let flow = self.flow(name)?;
+        let credential_name = self.credential_name(name)?;
+        let refresh_token = self
+            .broker
+            .read()
+            .unwrap()
+            .get(&credential_name)
+            .and_then(|credential| credential.env.get("REFRESH_TOKEN").cloned());
+        // A token minted without one (`claude setup-token`'s) runs its
+        // course and is replaced by signing in.
+        let Some(refresh_token) = refresh_token else {
+            return Err(ProviderError::ReconnectRequired(format!(
+                "the {name} token cannot be renewed in place; connect the provider again"
+            )));
+        };
+        let refreshed = match flow {
+            Flow::Anthropic => {
+                anthropic::refresh(&self.http, &self.endpoints, &refresh_token).await
+            }
+            Flow::Codex => codex::refresh(&self.http, &self.endpoints, &refresh_token).await,
+        };
+        let tokens = refreshed.map_err(|error| match error {
+            OAuthError::Rejected(reason) => {
+                ProviderError::ReconnectRequired(format!("{reason}; connect the provider again"))
+            }
+            OAuthError::Unavailable(reason) => ProviderError::Failed(reason),
+        })?;
+        let credential = self.store(name, tokens, Vec::new(), StoreKind::Refresh)?;
+        if let Some(callback) = self.on_refreshed.get() {
+            callback(&credential_name, &credential);
+        }
         self.publish();
         Ok(())
     }
 
+    /// Providers whose token expires soon and that this node renews.
+    ///
+    /// A refresh rotates the refresh token and revokes the access token it
+    /// replaced, so a shared credential has exactly one renewer: the node that
+    /// signed in, which is first in its `nodes` (a share appends). A node it
+    /// was handed to waits for the renewed copy rather than racing it.
     pub fn due_for_refresh(&self, now: i64) -> Vec<String> {
         let broker = self.broker.read().unwrap();
         let notes = self.notes.lock();
         self.cfg
             .providers
             .iter()
-            .filter(|(_, provider)| provider.login.is_some())
-            // A credential whose adapter has already said it cannot be renewed
-            // is not due for anything: asking again every tick would be a loop
-            // that only stops when the operator reconnects.
+            .filter(|(_, provider)| {
+                provider
+                    .login
+                    .as_deref()
+                    .and_then(Flow::for_login)
+                    .is_some()
+            })
+            // A credential already known not to renew is not due for
+            // anything: asking again every tick would be a loop that only
+            // stops when the operator reconnects.
             .filter(|(name, _)| {
                 notes
                     .get(name.as_str())
@@ -991,6 +1014,10 @@ impl Providers {
                     .model_credential_for(name, &self.node_id)
                     .map(|(_, credential): (&str, &Credential)| {
                         credential.kind == KIND_OAUTH
+                            && credential
+                                .nodes
+                                .first()
+                                .is_none_or(|renewer| renewer == &self.node_id)
                             && credential
                                 .expires_ms
                                 .map(|expires| expires - now < REFRESH_AHEAD_MS)
@@ -1009,9 +1036,9 @@ impl Providers {
             for name in self.due_for_refresh(now_ms()) {
                 match self.refresh(&name).await {
                     Ok(()) => tracing::info!(provider = %name, "token refreshed"),
-                    // Nothing went wrong and nothing will change on its own:
-                    // the note is what stops this being asked again, and it is
-                    // cleared by the next successful connect.
+                    // Nothing will change on its own: the note is what stops
+                    // this being asked again, and it is cleared by the next
+                    // successful connect.
                     Err(ProviderError::ReconnectRequired(reason)) => {
                         tracing::warn!(provider = %name, reason = %reason, "token needs a new sign-in");
                         self.note(&name, NEEDS_RECONNECT, Some(reason));
@@ -1033,11 +1060,5 @@ fn stop_capture(slot: &Inflight) {
         if let Some(capture) = &pending.capture {
             capture.stop();
         }
-    }
-}
-
-async fn shutdown_stdin(slot: &Inflight) {
-    if let InflightState::Pending(pending) = &slot.state {
-        let _ = pending.stdin.lock().await.shutdown().await;
     }
 }

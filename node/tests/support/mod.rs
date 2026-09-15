@@ -9,7 +9,7 @@ pub mod fake;
 pub mod fake_opencode;
 pub mod harness;
 pub mod http;
-pub mod login_fake;
 pub mod mesh;
+pub mod oauth_fake;
 pub mod rows;
 pub mod state;

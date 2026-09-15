@@ -106,8 +106,6 @@ async fn harness() -> Harness {
             upstream: format!("http://127.0.0.1:{port}"),
             shape: SHAPE_ANTHROPIC.into(),
             login: None,
-            device_login: None,
-            requires_local_callback: false,
             price: None,
             models: Vec::new(),
         },
