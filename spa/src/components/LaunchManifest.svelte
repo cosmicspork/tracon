@@ -11,6 +11,7 @@
   import { api } from '../lib/api'
   import { store } from '../lib/store.svelte'
   import type { ManifestView } from '../lib/types'
+  import Card from './settings/Card.svelte'
 
   let channel = $state('')
   let view = $state<ManifestView | null>(null)
@@ -69,14 +70,11 @@
     })
 </script>
 
-<section>
-  <div class="h5">
-    Customization <b>skills, instructions and agents this channel's sessions launch with</b>
-  </div>
+<Card title="Customization" note="Skills, instructions and agents a channel's sessions launch with. A change applies at the next launch, never to a running session.">
 
   <label class="pick">
     <span>Channel</span>
-    <select bind:value={channel}>
+    <select value={current} onchange={(event) => (channel = event.currentTarget.value)}>
       {#each channels as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
     </select>
   </label>
@@ -92,7 +90,6 @@
       {#if view.recorded}
         <span class="mono dim">last recorded r{view.recorded.revision}</span>
       {/if}
-      <span class="dim">A new revision never changes a running session.</span>
     </div>
 
     {#if view.error}
@@ -165,31 +162,17 @@
   {:else}
     <div class="empty">Reading the manifest…</div>
   {/if}
-</section>
+</Card>
 
 <style>
-  section {
-    display: grid;
-    gap: 8px;
-    background: var(--s1);
-    border-radius: 4px;
-    padding: 14px 16px;
-    max-width: 720px;
-  }
-  .h5 {
-    font: 500 13px var(--sans);
-    color: var(--ink);
-  }
-  .h5 b {
-    font-weight: 400;
-    color: var(--dim);
-    margin-left: 6px;
-  }
-  label,
-  .pick {
+  label {
     display: grid;
     gap: 5px;
     min-width: 0;
+    max-width: 560px;
+  }
+  .pick {
+    max-width: 320px;
   }
   label > span {
     font: 500 11px var(--mono);

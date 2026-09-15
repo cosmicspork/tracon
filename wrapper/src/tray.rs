@@ -6,12 +6,12 @@
 use std::sync::Arc;
 
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{TrayIcon, TrayIconBuilder},
     AppHandle, Manager,
 };
 
-use crate::{open_at, prefs, queue, updater, State};
+use crate::{open_at, queue, updater, State};
 
 const TRAY_ID: &str = "tracon";
 /// The menu bar glyph, rendered from `icons/tray.svg`. A template icon is
@@ -197,53 +197,16 @@ fn build_menu(
         }
     }
 
-    // Three checkboxes, in the tray, because this is the whole of the app's
-    // own interface and they do not earn a window.
-    let p = app.state::<Arc<prefs::Store>>().get();
-    let settings = Submenu::new(app, "Preferences", true)?;
-    settings.append(&CheckMenuItem::with_id(
+    menu.append(&MenuItem::with_id(
         app,
-        "pref:launch",
-        "Open the window at launch",
+        "open:/settings#general",
+        "Settings…",
         true,
-        p.open_window_at_launch,
         None::<&str>,
     )?)?;
-    settings.append(&CheckMenuItem::with_id(
-        app,
-        "pref:cmdq",
-        "⌘Q quits",
-        true,
-        p.cmd_q_quits,
-        None::<&str>,
-    )?)?;
-    settings.append(&CheckMenuItem::with_id(
-        app,
-        "pref:dock",
-        "Hide the dock icon while closed",
-        true,
-        p.hide_dock_when_closed,
-        None::<&str>,
-    )?)?;
-    menu.append(&settings)?;
 
     menu.append(&MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?)?;
     Ok(menu)
-}
-
-/// Flip one preference and rebuild the menu, so the tick matches the file.
-fn set_pref(app: &AppHandle, f: impl FnOnce(&mut prefs::Prefs)) {
-    let p = app.state::<Arc<prefs::Store>>().update(f);
-    // The dock follows immediately: a preference that waits for a restart
-    // reads as one that did nothing.
-    let visible = app
-        .get_webview_window("main")
-        .and_then(|w| w.is_visible().ok())
-        .unwrap_or(false);
-    crate::set_dock_policy(app, visible, p.hide_dock_when_closed);
-    if let Some(st) = app.try_state::<Arc<State>>() {
-        refresh(app, &st);
-    }
 }
 
 /// A menu is not a place for a paragraph.
@@ -261,9 +224,6 @@ fn on_menu(app: &AppHandle, id: &str) {
         "open" => crate::show_window(app),
         "quit" => crate::quit(app),
         "noop" => {}
-        "pref:launch" => set_pref(app, |p| p.open_window_at_launch = !p.open_window_at_launch),
-        "pref:cmdq" => set_pref(app, |p| p.cmd_q_quits = !p.cmd_q_quits),
-        "pref:dock" => set_pref(app, |p| p.hide_dock_when_closed = !p.hide_dock_when_closed),
         "update:install" => {
             let updater = app.state::<Arc<updater::Updater>>().inner().clone();
             let handle = app.clone();

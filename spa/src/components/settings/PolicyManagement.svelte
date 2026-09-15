@@ -3,6 +3,7 @@
   import { ApiError } from '../../lib/api'
   import { policyAdmin, type PolicyRollout, type PolicyStatus, type SignedPolicyBundle } from '../../lib/policy-admin'
   import { store } from '../../lib/store.svelte'
+  import Card from './Card.svelte'
 
   let { onapplied }: { onapplied?: () => Promise<void> } = $props()
 
@@ -181,15 +182,10 @@
   })
 </script>
 
-<section class="policy-management" aria-labelledby="policy-title">
-  <header>
-    <div>
-      <p class="eyebrow">Managing node · signed policy</p>
-      <h2 id="policy-title">Permissions &amp; policies</h2>
-      <p>Review verified installed files and the policy this node is actually running. Editing and mesh distribution apply only the exact signed preview you choose.</p>
-    </div>
-    <button class="quiet" onclick={() => refresh(false)} disabled={loading || busy}>Refresh</button>
-  </header>
+<Card title="Signed policy" note="What this node has installed and is actually running. Edits apply only the exact signed preview you choose.">
+  {#snippet actions()}
+    <button class="lnk" onclick={() => refresh(false)} disabled={loading || busy}>Refresh</button>
+  {/snippet}
 
   {#if loading}
     <p class="dim">Reading installed files and the running policy…</p>
@@ -230,14 +226,17 @@
     {:else if !status.installed}
       <details class="initialize">
         <summary>Initialize the shipped policy</summary>
+        <div class="details-body">
         <p>This creates this node’s first signing identity and installs the shipped policy. Existing keys, signatures, and bundles are never replaced.</p>
         <label class="confirm"><input type="checkbox" bind:checked={setupConfirmed} /> I understand this creates a new local signing identity.</label>
         <button class="btn primary" onclick={initialize} disabled={busy || !setupConfirmed || !local}>{busy ? 'Initializing…' : 'Create initial signed policy'}</button>
         {#if !local}<p class="helper">Open this node locally to initialize its policy.</p>{/if}
+        </div>
       </details>
     {:else}
       <details class="edit-policy">
         <summary>Edit policy</summary>
+        <div class="details-body">
         <p class="helper">{!local ? 'Open the signing node locally to edit its policy.' : !status.signing_key_present ? 'This node has no signing key. Edit on the node that signed this policy, then roll it out here.' : 'Preview with the existing signing key, then apply the exact signed bytes. The key never leaves this node.'}</p>
         <label class="policy-editor">
           <span>Policy TOML</span>
@@ -273,94 +272,91 @@
           </button>
           <small>Applying replaces the local bundle only if verified installed files still match the baseline captured for this preview. A changed baseline requires a fresh preview. It never rotates a key.</small>
         </div>
+        </div>
       </details>
     {/if}
   {/if}
 
   {#if notice}<p class="ok" role="status">{notice}</p>{/if}
   {#if error}<p class="bad" role="alert">{error}</p>{/if}
+</Card>
 
-  {#if status?.rollouts.length}
-    <section class="rollouts" aria-labelledby="rollout-title">
-      <div>
-        <p class="eyebrow">Selected nodes · durable receipts</p>
-        <h3 id="rollout-title">Rollout history</h3>
-      </div>
-      {#each status.rollouts as rollout (rollout.id)}
-        <article>
-          <header>
-            <div>
-              <strong>Policy {short(rollout.bundle_sha256)}</strong>
-              <small>v{rollout.policy_version} · created {when(rollout.created_ms)}</small>
-            </div>
-            <button class="quiet" onclick={() => retry(rollout)} disabled={retrying === rollout.id}>
-              {retrying === rollout.id ? 'Retrying…' : 'Retry unconfirmed'}
-            </button>
-          </header>
-          <ul>
-            {#each rollout.targets as target (target.node_id)}
-              {@const node = peers.find((candidate) => candidate.id === target.node_id)}
-              <li class:applied={target.confirmation === 'applied'} class:rejected={target.confirmation === 'rejected'}>
-                <div>
-                  <strong>{node?.name || short(target.node_id)}</strong>
-                  <small>{short(target.node_id)} · attempts {target.attempts} · last sent {when(target.last_sent_ms)}</small>
-                </div>
-                <div class="receipt">
-                  <span>{target.confirmation === 'applied' ? 'Applied' : target.confirmation === 'rejected' ? 'Rejected' : target.status === 'offline' ? 'Offline / unconfirmed' : 'Sent / unconfirmed'}</span>
-                  <small>{target.compatibility === 'receipt_capable' ? 'Receipt-capable peer' : 'Legacy or unknown peer — no authenticated receipt yet.'}</small>
-                  {#if target.detail}<small>{target.detail}</small>{/if}
-                </div>
-              </li>
-            {/each}
-          </ul>
-        </article>
-      {/each}
-    </section>
-  {/if}
-</section>
+{#if status?.rollouts.length}
+<Card title="Rollout history" note="Durable receipts from the nodes each policy was sent to.">
+  <div class="rollouts">
+    {#each status.rollouts as rollout (rollout.id)}
+      <article>
+        <header>
+          <div>
+            <strong>Policy {short(rollout.bundle_sha256)}</strong>
+            <small>v{rollout.policy_version} · created {when(rollout.created_ms)}</small>
+          </div>
+          <button class="lnk" onclick={() => retry(rollout)} disabled={retrying === rollout.id}>
+            {retrying === rollout.id ? 'Retrying…' : 'Retry unconfirmed'}
+          </button>
+        </header>
+        <ul>
+          {#each rollout.targets as target (target.node_id)}
+            {@const node = peers.find((candidate) => candidate.id === target.node_id)}
+            <li class:applied={target.confirmation === 'applied'} class:rejected={target.confirmation === 'rejected'}>
+              <div>
+                <strong>{node?.name || short(target.node_id)}</strong>
+                <small>{short(target.node_id)} · attempts {target.attempts} · last sent {when(target.last_sent_ms)}</small>
+              </div>
+              <div class="receipt">
+                <span>{target.confirmation === 'applied' ? 'Applied' : target.confirmation === 'rejected' ? 'Rejected' : target.status === 'offline' ? 'Offline / unconfirmed' : 'Sent / unconfirmed'}</span>
+                <small>{target.compatibility === 'receipt_capable' ? 'Receipt-capable peer' : 'Legacy or unknown peer — no authenticated receipt yet.'}</small>
+                {#if target.detail}<small>{target.detail}</small>{/if}
+              </div>
+            </li>
+          {/each}
+        </ul>
+      </article>
+    {/each}
+  </div>
+</Card>
+{/if}
 
 <style>
-  .policy-management { display: grid; gap: 1rem; max-width: 72rem; color: var(--ink); }
-  header, .actions, .apply-row, .identity, .rollouts article > header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
-  h2, h3, p { margin: 0; }
-  h2 { font-size: 1.25rem; }
-  h3 { font-size: 1rem; }
-  .eyebrow { color: var(--ink2); font: 0.75rem/1.3 var(--mono); text-transform: uppercase; letter-spacing: .08em; }
-  header p:not(.eyebrow), .helper, small { color: var(--ink2); line-height: 1.45; }
-  .policy-summary, .identity, .policy-editor, fieldset, .rollouts article, details { border: 1px solid var(--rule); border-radius: .5rem; background: var(--s1); padding: 1rem; }
-  .policy-summary { display: flex; justify-content: space-between; align-items: start; gap: 1rem; }
-  .policy-summary > div { display: grid; gap: .3rem; }
-  .identity { align-items: baseline; flex-wrap: wrap; min-width: min(100%, 20rem); }
+  h3, p { margin: 0; }
+  h3 { font: 600 14px var(--sans); }
+  .eyebrow { color: var(--ink2); font: 500 11px/1.3 var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+  .helper, small { color: var(--ink2); line-height: 1.45; font-size: 12.5px; }
+  .policy-summary, fieldset, .rollouts article, details { border: 0; border-radius: 4px; background: var(--s2); padding: 12px 14px; }
+  .policy-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 14px; }
+  .policy-summary > div { display: grid; gap: .3rem; align-content: start; }
+  .identity { min-width: 0; }
+  .identity > span { color: var(--ink2); font: 500 11px/1.3 var(--mono); text-transform: uppercase; letter-spacing: .08em; }
   .identity code { overflow-wrap: anywhere; font-size: .8rem; }
-  .identity small { width: 100%; }
-  details { display: grid; gap: .8rem; }
+  .details-body { display: grid; gap: 12px; margin-top: 12px; }
+  .details-body > .btn { justify-self: start; }
   summary { color: var(--acc); cursor: pointer; font-weight: 600; }
-  .initialize { background: var(--s1); }
-  .confirm { display: flex; align-items: center; gap: .6rem; min-height: 44px; color: var(--ink); }
-  .policy-editor { display: grid; gap: .5rem; border: 0; background: var(--s2); }
-  textarea { min-height: 16rem; width: 100%; resize: vertical; border: 1px solid var(--rule); border-radius: .3rem; background: var(--s2); color: var(--ink); padding: .75rem; font: .82rem/1.45 var(--mono); }
-  textarea:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
-  fieldset { display: grid; gap: .75rem; }
-  legend { color: var(--ink); font-weight: 700; padding: 0 .25rem; }
+  .confirm { display: flex; align-items: center; gap: .6rem; min-height: 36px; color: var(--ink); }
+  .policy-editor { display: grid; gap: .5rem; }
+  .policy-editor > span { color: var(--ink2); font: 500 11px/1.3 var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+  textarea { min-height: 16rem; width: 100%; resize: vertical; border: 0; border-radius: 4px; background: var(--s1); color: var(--ink); padding: .75rem; font: .82rem/1.45 var(--mono); }
+  fieldset { display: grid; gap: .75rem; background: none; padding: 0; margin: 0; }
+  legend { color: var(--ink); font-weight: 600; padding: 0 0 .4rem; }
   .targets { display: grid; gap: .5rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
-  .target { display: flex; align-items: center; gap: .7rem; min-height: 44px; padding: .45rem; border: 1px solid var(--rule); border-radius: .3rem; background: var(--s2); }
+  .target { display: flex; align-items: center; gap: .7rem; min-height: 44px; padding: .45rem .6rem; border-radius: 4px; background: var(--s1); }
   .target span { display: grid; }
-  button { min-height: 44px; padding: .55rem .85rem; border-radius: .3rem; cursor: pointer; }
-  .btn { border: 1px solid var(--rule); background: var(--s3); color: var(--ink); }
-  .primary { background: var(--acc); border-color: var(--acc); color: var(--acc-ink); }
-  .quiet { border: 0; background: transparent; color: var(--acc); text-decoration: underline; }
-  button:disabled { cursor: not-allowed; opacity: .55; }
-  .chip { align-self: center; border: 1px solid var(--rule); border-radius: 99px; padding: .28rem .55rem; color: var(--ink2); font: .75rem var(--mono); }
+  .actions, .apply-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+  .apply-row small { flex: 1 1 20rem; }
+  .btn.primary { background: var(--acc); color: var(--acc-ink); }
+  .chip { font: 12px var(--mono); color: var(--ink2); }
+  .chip::before { display: none; }
   .ok { color: var(--ok); }
   .bad { color: var(--crit); }
   .dim { color: var(--ink2); }
   .rollouts { display: grid; gap: .75rem; }
   .rollouts article { display: grid; gap: .75rem; }
+  .rollouts article > header { display: flex; flex-wrap: wrap; align-items: start; justify-content: space-between; gap: 8px 16px; }
+  .rollouts article > header > div { display: grid; }
   .rollouts ul { display: grid; gap: .5rem; list-style: none; margin: 0; padding: 0; }
   .rollouts li { display: flex; justify-content: space-between; gap: 1rem; border-left: 3px solid var(--ink2); padding: .4rem .6rem; }
   .rollouts li.applied { border-color: var(--ok); }
   .rollouts li.rejected { border-color: var(--crit); }
   .rollouts li div { display: grid; }
   .receipt { text-align: right; max-width: 30rem; }
-  @media (max-width: 42rem) { header, .policy-summary, .apply-row, .rollouts li { align-items: stretch; flex-direction: column; } .receipt { text-align: left; } }
+  @media (max-width: 42rem) { .rollouts li { align-items: stretch; flex-direction: column; } .receipt { text-align: left; } }
 </style>

@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, type Snippet } from 'svelte'
+  import Card from './Card.svelte'
   import { desktopUpdatesAvailable } from '../../lib/desktop-update'
   import {
     inDesktopApp,
@@ -8,6 +9,8 @@
   } from '../../lib/desktop-setup'
   import { admin, type Maintenance as MaintenanceState } from '../../lib/admin'
   import { store } from '../../lib/store.svelte'
+
+  let { boundary }: { boundary?: Snippet } = $props()
 
   let data = $state<MaintenanceState | null>(null)
   let busy = $state('')
@@ -110,35 +113,41 @@
   })
 </script>
 
-<div class="maintenance">
-  <div class="heading">
-    <span>Service &amp; recovery</span>
-    <button class="lnk" onclick={() => void load()} disabled={busy !== ''}>Refresh diagnostics</button>
-  </div>
-  <p class="lede">Manage the service on this node. Runtime details stay with the machine that reported them.</p>
+<Card title="Runtime boundary" note="The isolated network, gateway and images sessions run inside, on the serving node.">
+  {@render boundary?.()}
+  {#if data}
+    <div class="recheck">
+      <p>Isolation checks: {data.boundary.state === 'ready' ? 'passed' : data.boundary.state}.</p>
+      <button class="btn" onclick={recheckBoundary} disabled={busy !== '' || !local}>{busy === 'boundary' ? 'Checking boundary…' : 'Recheck runtime boundary'}</button>
+      {#if data.boundary && typeof data.boundary === 'object'}
+        <p class="source">Checks describe this node only. <a href="/settings#mesh">Compare mesh versions and policies</a>.</p>
+      {:else}
+        <p class="dim">No current boundary report is available.</p>
+      {/if}
+    </div>
+  {/if}
+</Card>
 
+<Card title="Service &amp; recovery" note="The user service that keeps this node running. Runtime details stay with the machine that reported them.">
+  {#snippet actions()}
+    <button class="lnk" onclick={() => void load()} disabled={busy !== ''}>Refresh diagnostics</button>
+  {/snippet}
   {#if !data}
     <p class="dim">Unlock administrator access to inspect this serving node.</p>
   {:else}
     {#if !local}
       <p class="blocked">Host recovery and runtime checks must be opened on the node itself.</p>
     {/if}
-    {#if desktop}
-      <p class="source">Desktop actions wait for the node to answer before reporting completion.</p>
-    {:else}
-      <p class="source">Service changes can disconnect this page. A scheduled action is not a completed restart.</p>
-    {/if}
-
-    <section class="service">
-      <h3>User service</h3>
-      <dl>
-        <div><dt>Platform</dt><dd>{data.service.platform} · {data.service.supervisor}</dd></div>
-        <div><dt>Unit</dt><dd>{data.service.unit_installed ? data.service.unit_path ?? 'installed at an unknown path' : 'not installed'}</dd></div>
-        <div><dt>State</dt><dd class:unknown={data.service.state.state === 'unknown'}>{data.service.state.state} · {data.service.state.detail}</dd></div>
-        <div><dt>Active sessions</dt><dd>{data.active_sessions}</dd></div>
-        {#if data.service.container}<div><dt>Runtime</dt><dd>{data.service.container}</dd></div>{/if}
-      </dl>
-      {#if install}
+    <p class="source">{desktop ? 'Desktop actions wait for the node to answer before reporting completion.' : 'Service changes can disconnect this page. A scheduled action is not a completed restart.'}</p>
+    <dl>
+      <div><dt>Platform</dt><dd>{data.service.platform} · {data.service.supervisor}</dd></div>
+      <div><dt>Unit</dt><dd>{data.service.unit_installed ? data.service.unit_path ?? 'installed at an unknown path' : 'not installed'}</dd></div>
+      <div><dt>State</dt><dd class:unknown={data.service.state.state === 'unknown'}>{data.service.state.state} · {data.service.state.detail}</dd></div>
+      <div><dt>Active sessions</dt><dd>{data.active_sessions}</dd></div>
+      {#if data.service.container}<div><dt>Runtime</dt><dd>{data.service.container}</dd></div>{/if}
+    </dl>
+    {#if install}
+      <div class="cap">
         <details class="capability" class:unavailable={!install.available}>
           <summary>{install.available ? 'Installation available' : 'Installation unavailable'}</summary>
           <p>{install.reason}</p>
@@ -153,9 +162,11 @@
         {:else}
           <button class="btn" onclick={requestInstall} disabled={busy !== '' || !local || !install.available}>{desktopLocal ? 'Install or repair desktop service…' : 'Install user service…'}</button>
         {/if}
-      {/if}
+      </div>
+    {/if}
 
-      {#if restart}
+    {#if restart}
+      <div class="cap">
         <details class="capability" class:unavailable={!restart.available}>
           <summary>{restart.available ? 'Restart available' : 'Restart unavailable'}</summary>
           <p>{restart.reason}</p>
@@ -170,9 +181,11 @@
         {:else}
           <button class="btn" onclick={requestRestart} disabled={busy !== '' || !local || !restart.available}>Restart this serving node…</button>
         {/if}
-      {/if}
+      </div>
+    {/if}
 
-      {#if uninstall}
+    {#if uninstall}
+      <div class="cap">
         <details class="capability" class:unavailable={!uninstall.available}>
           <summary>{uninstall.available ? 'Removal available' : 'Removal unavailable'}</summary>
           <p>{uninstall.reason}</p>
@@ -187,45 +200,32 @@
         {:else}
           <button class="lnk d" onclick={requestUninstall} disabled={busy !== '' || !local || !uninstall.available}>Remove fixed user service…</button>
         {/if}
-      {/if}
-
-    </section>
-
-    <section>
-      <h3>Runtime and boundary</h3>
-      <p>Isolation checks: {data.boundary.state === 'ready' ? 'passed' : data.boundary.state}.</p>
-      <button class="btn" onclick={recheckBoundary} disabled={busy !== '' || !local}>{busy === 'boundary' ? 'Checking boundary…' : 'Recheck runtime boundary'}</button>
-      {#if data.boundary && typeof data.boundary === 'object'}
-        <p class="source">Checks describe this node only. <a href="/settings#mesh">Compare mesh versions and policies</a>.</p>
-      {:else}
-        <p class="dim">No current boundary report is available.</p>
-      {/if}
-    </section>
+      </div>
+    {/if}
   {/if}
 
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if note}<p class="note" role="status">{note}</p>{/if}
-</div>
+</Card>
 
 <style>
-  .maintenance { display: grid; gap: 14px; }
-  .heading { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; font-weight: 600; }
-  .lede, section > p { margin: 0; color: var(--ink2); max-width: 72ch; }
-  section { display: grid; gap: 9px; padding-top: 12px; border-top: 1px solid var(--rule); }
-  h3 { margin: 0; font-size: 14px; }
+  .recheck { display: grid; gap: 8px; justify-items: start; padding-top: 12px; border-top: 1px solid var(--rule); }
+  .recheck p { margin: 0; color: var(--ink2); }
   dl { margin: 0; display: grid; gap: 5px; }
-  dl div { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px; }
+  dl div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; align-items: baseline; }
   dt { color: var(--dim); font: 12px var(--mono); }
-  dd { margin: 0; color: var(--ink2); overflow-wrap: anywhere; }
+  dd { margin: 0; color: var(--ink2); font-size: 13px; overflow-wrap: anywhere; }
   dd.unknown { color: var(--wait); }
-  .capability { display: grid; gap: 3px; border-left: 3px solid var(--ok); background: var(--wash-ok); padding: 9px 11px; }
+  .cap { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px 12px; border-left: 3px solid var(--ok); border-radius: 4px; background: var(--s2); padding: 9px 12px; }
+  .cap:has(.capability.unavailable) { border-left-color: var(--dim); }
+  .cap > .btn, .cap > .lnk { align-self: center; }
+  .cap .restart-confirm { grid-column: 1 / -1; }
+  .capability { display: grid; gap: 3px; }
   .capability summary { color: var(--ink); cursor: pointer; }
   .capability p { color: var(--ink2); margin: 6px 0; }
   .capability small { color: var(--dim); }
-  .capability.unavailable { border-left-color: var(--dim); background: var(--wash-dim); }
-  .restart-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; background: var(--wash-crit); border-left: 3px solid var(--crit); padding: 10px 11px; }
+  .restart-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; background: var(--wash-crit); border-radius: 4px; padding: 10px 11px; }
   .restart-confirm p { flex-basis: 100%; color: var(--ink2); margin: 0; }
-  .btn, .lnk { min-height: 44px; }
   .btn.d { background: var(--crit); color: var(--bg); }
   .source, .dim, .note, .error { margin: 0; font: 12px var(--mono); }
   .source, .dim { color: var(--dim); }

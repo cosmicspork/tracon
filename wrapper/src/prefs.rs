@@ -3,8 +3,8 @@
 //! These are not node settings and do not belong in `node.toml`: they are how
 //! one person's desktop behaves, and the node's configuration is replicated,
 //! shared, and read by a phone that has no dock and no ⌘Q. They live beside
-//! it rather than in it, and the tray menu is the whole of the interface —
-//! three checkboxes do not earn a window.
+//! it rather than in it, and are edited from Settings › General, which only
+//! the desktop window's loopback page can reach.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -26,6 +26,28 @@ pub struct Prefs {
     /// bar either way; this decides whether it is also in the dock and the
     /// app switcher when there is no window to switch to.
     pub hide_dock_when_closed: bool,
+}
+
+/// The preferences a caller wants changed; anything left out stays as it is.
+#[derive(Debug, Default, Deserialize)]
+pub struct PrefsUpdate {
+    pub open_window_at_launch: Option<bool>,
+    pub cmd_q_quits: Option<bool>,
+    pub hide_dock_when_closed: Option<bool>,
+}
+
+impl PrefsUpdate {
+    pub fn apply(self, p: &mut Prefs) {
+        if let Some(v) = self.open_window_at_launch {
+            p.open_window_at_launch = v;
+        }
+        if let Some(v) = self.cmd_q_quits {
+            p.cmd_q_quits = v;
+        }
+        if let Some(v) = self.hide_dock_when_closed {
+            p.hide_dock_when_closed = v;
+        }
+    }
 }
 
 impl Default for Prefs {
@@ -133,6 +155,16 @@ mod tests {
         assert!(!back.open_window_at_launch);
         assert!(back.hide_dock_when_closed);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn an_update_changes_only_what_it_names() {
+        let mut p = Prefs::default();
+        let update: PrefsUpdate = serde_json::from_str(r#"{"cmd_q_quits":false}"#).unwrap();
+        update.apply(&mut p);
+        assert!(!p.cmd_q_quits);
+        assert!(p.open_window_at_launch);
+        assert!(p.hide_dock_when_closed);
     }
 
     #[test]

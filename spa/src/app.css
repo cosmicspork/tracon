@@ -26,8 +26,10 @@
   color-scheme: dark;
 }
 
+/* Light follows the system unless this browser chose dark; an explicit choice
+   wins either way (lib/theme.ts). */
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme='dark']) {
     --bg: #f2f2f0;
     --s1: #ffffff;
     --s2: #ebebe8;
@@ -48,6 +50,28 @@
     --wash-dim: rgba(138, 140, 144, 0.12);
     color-scheme: light;
   }
+}
+
+:root[data-theme='light'] {
+  --bg: #f2f2f0;
+  --s1: #ffffff;
+  --s2: #ebebe8;
+  --s3: #dededa;
+  --ink: #1d1e21;
+  --ink2: #54565b;
+  --dim: #5c5e63;
+  --rule: #d6d6d2;
+  --acc: #315f89;
+  --acc-ink: #ffffff;
+  --wait: #83570d;
+  --crit: #a0342b;
+  --ok: #286344;
+  --wash-wait: rgba(168, 115, 26, 0.1);
+  --wash-crit: rgba(184, 70, 59, 0.09);
+  --wash-run: rgba(61, 110, 154, 0.07);
+  --wash-ok: rgba(59, 127, 94, 0.09);
+  --wash-dim: rgba(138, 140, 144, 0.12);
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }
