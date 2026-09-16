@@ -425,12 +425,26 @@ export interface CandidateCheckRun {
 
 export interface ReviewDetails {
   review: Review
+  /**
+   * What this screen is showing. A verdict names it, and the node refuses one
+   * that names a revision the review has moved past — the commit alone cannot
+   * say, because a resubmission may carry the same one with different
+   * requirements or prose. Null for a narrative report, and for a legacy row
+   * that has no revision recorded.
+   */
+  revision: ReviewRevisionRef | null
   stale: string[]
   /** Pinned to the revision at submit time; never the live work item. */
   requirements: PinnedRequirements | null
   surrounding_code: ReviewContext[]
   evidence: CandidateEvidence | null
   legacy_check_events: CandidateCheckRun[]
+}
+
+export interface ReviewRevisionRef {
+  id: string
+  head_sha: string
+  created_ms: number
 }
 
 export interface PinnedRequirements {

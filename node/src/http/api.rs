@@ -1753,7 +1753,21 @@ pub struct VerdictBody {
     /// cannot name one; the interface always sends it.
     #[serde(default)]
     pub head_sha: Option<String>,
+    /// The review revision the operator actually inspected. The commit alone
+    /// does not identify it — a resubmission may carry the same `head_sha`
+    /// with different requirements or prose — so this, not the commit, is
+    /// what the decision is bound to, compared atomically as it is recorded.
+    /// Optional for compatibility with a caller that cannot name one; the
+    /// interface always sends it.
+    #[serde(default)]
+    pub revision_id: Option<String>,
 }
+
+/// What an old tab is told when the review it is showing has been superseded.
+/// The commit may well be unchanged, so the message does not lean on it.
+const SUPERSEDED: &str = "this review moved to a new revision while it was being decided; the \
+     same commit may have been resubmitted with different requirements or prose, so reload it \
+     and decide again";
 
 pub async fn get_review(
     State(s): State<AppState>,
@@ -1773,6 +1787,10 @@ pub async fn get_review(
         s.manager.publish_queue().await;
         return Ok(Json(json!({
             "review": r,
+            // A report's version is its content hash, carried on the row and
+            // compared atomically by the report transitions. It has no code
+            // revision, and none is invented here.
+            "revision": null,
             "stale": [],
             "requirements": null,
             "surrounding_code": [],
@@ -1813,8 +1831,20 @@ pub async fn get_review(
     // attempt is visible here — including the `uncertain` one an operator has
     // to verify on the forge — rather than only in the log.
     let publications = s.store().publications_for_review(&id)?;
+    // The identity a verdict from this screen must name. The commit is not
+    // it: a resubmission may carry the same one with different requirements
+    // or prose, and a decision written against this screen must not settle
+    // that one.
+    let revision_ref = revision.as_ref().map(|revision| {
+        json!({
+            "id": revision.id,
+            "head_sha": revision.head_sha,
+            "created_ms": revision.created_ms,
+        })
+    });
     Ok(Json(json!({
         "review": r,
+        "revision": revision_ref,
         "stale": stale,
         "requirements": requirements,
         "surrounding_code": surrounding_code,
@@ -2080,6 +2110,10 @@ pub async fn decide_review(
                     body: b.body.clone(),
                     patch: b.patch.clone(),
                     head_sha: b.head_sha.clone(),
+                    // Carried, not re-derived on the owner: what the deciding
+                    // operator inspected is theirs to name, and the owning
+                    // node compares it against its own latest revision.
+                    revision_id: b.revision_id.clone(),
                 },
                 timeout,
             )
@@ -2117,26 +2151,35 @@ pub(crate) async fn decide_local(
             format!("this review was already {}", r.state),
         ));
     }
-    // A verdict is about the bytes the operator read. If they named the
-    // commit they were looking at and the review has moved on since — the
-    // agent resubmitted while they were deciding — the verdict is refused,
-    // not carried over to a revision nobody reviewed.
-    if let Some(seen) = b.head_sha.as_deref().filter(|seen| !seen.is_empty()) {
-        if seen != r.head_sha {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                format!(
-                    "this review moved to a new revision ({}) while it was being decided; \
-                     reload it and decide again",
-                    &r.head_sha[..12.min(r.head_sha.len())]
-                ),
-            ));
-        }
-    }
     // Bound once, here: every branch below records its decision against
     // exactly the revision the operator saw when the verdict was decided,
     // never a revision a concurrent resubmit created afterward.
     let revision = s.store().latest_review_revision(&id)?;
+    // A verdict is about the screen the operator read, and the revision — not
+    // the commit — is what identifies that screen. A resubmission may carry
+    // the same `head_sha` with different requirements or prose, so an old tab
+    // naming a superseded revision is refused here and, should one land in
+    // the moments after this read, again atomically in the write below.
+    let decided_revision = match b.revision_id.as_deref().filter(|seen| !seen.is_empty()) {
+        Some(seen) => {
+            if Some(seen) != revision.as_ref().map(|revision| revision.id.as_str()) {
+                return Err(ApiError(StatusCode::CONFLICT, SUPERSEDED.into()));
+            }
+            Some(seen.to_string())
+        }
+        // A caller that cannot name a revision — an older client, or a peer
+        // on an older build — is held to the commit alone, as before. It
+        // binds to the revision carrying that commit, so the atomic check
+        // below still refuses a resubmission that lands from here on.
+        None => {
+            if let Some(seen) = b.head_sha.as_deref().filter(|seen| !seen.is_empty()) {
+                if seen != r.head_sha {
+                    return Err(ApiError(StatusCode::CONFLICT, SUPERSEDED.into()));
+                }
+            }
+            revision.as_ref().map(|revision| revision.id.clone())
+        }
+    };
 
     match b.verdict.as_str() {
         "revise" => {
@@ -2155,15 +2198,11 @@ pub(crate) async fn decide_local(
             // Not trimmed: a patch's trailing newline is part of it, and
             // `git apply` calls a patch without one corrupt.
             let patch = b.patch.as_deref().filter(|p| !p.trim().is_empty());
-            if !s.store().request_changes(&id, notes, patch)? {
-                let now = s.store().get_review(&id)?.map(|r| r.state);
-                return Err(ApiError(
-                    StatusCode::CONFLICT,
-                    format!(
-                        "this review is no longer awaiting a verdict ({})",
-                        now.as_deref().unwrap_or("gone")
-                    ),
-                ));
+            if !s
+                .store()
+                .request_changes(&id, notes, patch, decided_revision.as_deref())?
+            {
+                return Err(verdict_refused(&s, &id, decided_revision.as_deref()));
             }
             let waiting_ms = record_evidence_decision(
                 s.store(),
@@ -2190,20 +2229,21 @@ pub(crate) async fn decide_local(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "a rejection needs a reason".into(),
                 ))?;
-            // The guard is in the UPDATE: if the row is no longer awaiting a
-            // verdict, say so rather than reporting a rejection that did not land.
-            let resolved =
-                s.store()
-                    .resolve_review(&id, "rejected", Some(reason), None, None, None, 0)?;
+            // The guards are in the UPDATE — still awaiting a verdict, and
+            // still on the revision that was read — so a rejection that did
+            // not land is reported as what it is rather than as a decision.
+            let resolved = s.store().resolve_review(
+                &id,
+                "rejected",
+                Some(reason),
+                None,
+                None,
+                None,
+                0,
+                decided_revision.as_deref(),
+            )?;
             if !resolved {
-                let now = s.store().get_review(&id)?.map(|r| r.state);
-                return Err(ApiError(
-                    StatusCode::CONFLICT,
-                    format!(
-                        "this review is no longer awaiting a verdict ({})",
-                        now.as_deref().unwrap_or("gone")
-                    ),
-                ));
+                return Err(verdict_refused(&s, &id, decided_revision.as_deref()));
             }
             let waiting_ms = record_evidence_decision(
                 s.store(),
@@ -2236,10 +2276,10 @@ pub(crate) async fn decide_local(
                     body: &body,
                     require_evidence: false,
                     recheck_authority: None,
-                    // What the operator decided on, read above: a resubmit
+                    // What the operator decided on, bound above: a resubmit
                     // landing from here on loses, rather than having its
                     // bytes published under this approval.
-                    decided_revision_id: revision.as_ref().map(|revision| revision.id.as_str()),
+                    decided_revision_id: decided_revision.as_deref(),
                 },
             )
             .await
@@ -2274,6 +2314,30 @@ pub(crate) async fn decide_local(
     }
 }
 
+/// Why a verdict did not land. The decision was already refused atomically by
+/// the statement that would have recorded it; this only reads back enough to
+/// say which precondition failed, so the operator learns whether to reload the
+/// review or that someone else has already settled it.
+fn verdict_refused(s: &AppState, id: &str, decided_revision: Option<&str>) -> ApiError {
+    let current = s
+        .store()
+        .latest_review_revision(id)
+        .ok()
+        .flatten()
+        .map(|revision| revision.id);
+    if decided_revision.is_some() && current.as_deref() != decided_revision {
+        return ApiError(StatusCode::CONFLICT, SUPERSEDED.into());
+    }
+    let state = s.store().get_review(id).ok().flatten().map(|r| r.state);
+    ApiError(
+        StatusCode::CONFLICT,
+        format!(
+            "this review is no longer awaiting a verdict ({})",
+            state.as_deref().unwrap_or("gone")
+        ),
+    )
+}
+
 /// Resolve a standalone narrative report. This bypasses every code-review
 /// publication and evidence path: acknowledgement is a durable receipt, not
 /// an approval to run a brokered forge operation.
@@ -2293,6 +2357,15 @@ async fn decide_report_local(
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "a report decision cannot alter or attach code; request changes with a note instead",
+        ));
+    }
+    // A report has no code revision. A caller that names one is deciding
+    // something other than this, and is told so rather than having the
+    // precondition it sent quietly ignored.
+    if b.revision_id.is_some() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a report has no code revision; name the content version it was read at instead",
         ));
     }
     let seen = b
@@ -4269,6 +4342,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 body,
                 patch,
                 head_sha,
+                revision_id,
             } => {
                 async {
                     let review = self
@@ -4292,6 +4366,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                                 body,
                                 patch,
                                 head_sha,
+                                revision_id,
                             },
                         )
                         .await

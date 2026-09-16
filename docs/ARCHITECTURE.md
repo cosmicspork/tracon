@@ -492,7 +492,14 @@ record. Diff size is capped at submit, because complexity accretes when nothing
 says no at submission time. An operator's hand-edit travels back as a request for
 changes: the agent applies it and resubmits, and **the agent remains the only
 writer to the worktree.** Every decision is recorded against the revision it
-decided, with the requirements pinned as they were at submission.
+decided, with the requirements pinned as they were at submission — and bound to
+it: approve, reject and request-changes all name the revision the operator
+inspected, compared inside the statement that records the decision, locally and
+for a verdict forwarded from another node. The commit cannot stand in for the
+revision, because a resubmission may carry the same `head_sha` with different
+requirements or prose; a verdict from a tab that read the revision it replaced
+is refused and the review waits for a fresh reading. Unchanged code may reuse
+its checks, never an unseen human decision.
 
 **Narrative reports are not publication candidates.** `submit_report` creates an
 owner/channel/session-bound report without Git or a repository. Acknowledgement

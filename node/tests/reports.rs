@@ -97,6 +97,19 @@ async fn report_feedback_and_acknowledgement_are_bound_to_the_content_read() {
     let h = node().await;
     let (id, old_version) = submit(&h).await;
     let path = format!("/api/reviews/{id}/verdict");
+    // A report's version is its content hash. It has no code revision, and a
+    // caller that names one is told so rather than having the precondition it
+    // sent silently ignored.
+    let (_, details) = call(&h.operator, "GET", &format!("/api/reviews/{id}"), None).await;
+    assert!(details["revision"].is_null(), "{details}");
+    let (status, result) = call(
+        &h.operator,
+        "POST",
+        &path,
+        Some(json!({ "verdict": "acknowledge", "head_sha": old_version, "revision_id": "rev-1" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{result}");
     let note = "Include the affected machines.";
     let (status, result) = call(
         &h.operator,

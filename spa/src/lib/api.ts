@@ -272,6 +272,11 @@ export const api = {
       /** The commit the operator was reading. The node refuses the verdict if
        * the review has moved to a newer revision since. */
       head_sha?: string
+      /** The revision this screen was showing. What the verdict is actually
+       * bound to: a resubmission may carry the same commit with different
+       * requirements or prose, and the node compares this as it records the
+       * decision. */
+      revision_id?: string
     },
   ) => call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/verdict`, verdict),
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),

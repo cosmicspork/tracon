@@ -14,6 +14,7 @@
     type PinnedRequirements,
     type Review,
     type ReviewContext,
+    type ReviewRevisionRef,
   } from '../lib/types'
   import { baseFromDiff, buildPatch, fileSection } from '../lib/patch'
   import { isNarrativeReport } from '../lib/reports'
@@ -21,6 +22,8 @@
   let { id }: { id: string } = $props()
 
   let review = $state<Review | null>(null)
+  /** The revision this screen is showing; the verdict names it. */
+  let revision = $state<ReviewRevisionRef | null>(null)
   let stale = $state<string[]>([])
   let evidence = $state<CandidateEvidence | null>(null)
   let requirements = $state<PinnedRequirements | null>(null)
@@ -40,6 +43,7 @@
       .review(id)
       .then((d) => {
         review = d.review
+        revision = d.revision
         stale = d.stale
         evidence = d.evidence
         requirements = d.requirements
@@ -71,7 +75,12 @@
   /** path → { original: before the change, head: as submitted, now: edited } */
   let editable = $state<Map<string, { original: string; head: string; now: string }>>(new Map())
 
-  const draftKey = $derived(review ? `tracon-edit-${review.id}-${review.head_sha}` : '')
+  // Keyed on the revision, not the commit: a resubmission may carry the same
+  // commit, and an edit written against the revision it replaced is not an
+  // edit of this one.
+  const draftKey = $derived(
+    review ? `tracon-edit-${review.id}-${revision?.id ?? review.head_sha}` : '',
+  )
   const patch = $derived.by(() =>
     buildPatch(
       [...editable.entries()]
@@ -202,8 +211,11 @@
         patch: verdict === 'revise' && patch ? patch : undefined,
         // What this screen is showing. If the agent resubmitted while the
         // verdict was being written, the node refuses it rather than
-        // applying it to a diff that was never read.
+        // applying it to a screen that was never read. The revision is the
+        // identity that carries: a resubmission may repeat the commit with
+        // different requirements or prose.
         head_sha: review.head_sha,
+        revision_id: revision?.id,
       })
       if (verdict !== 'approve') {
         try {

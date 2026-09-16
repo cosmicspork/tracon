@@ -41,11 +41,6 @@ remains separately tracked under [Live proofs still the operator's](#live-proofs
 
 ### 1. Trust and attention
 
-- [ ] Bind every approve, reject and request-changes verdict to the exact review revision
-      the operator inspected, not only its commit SHA. Compare that identity atomically
-      when recording the decision, locally and across forwarded requests. Test an old
-      tab after a same-SHA resubmission with changed requirements or prose; require fresh
-      review. Unchanged code may reuse checks, never an unseen human decision.
 - [ ] Reserve orientation space for current intent, constraints and operator directives
       before discretionary guides and background context. Name omitted or truncated
       context. Test multiple long guides without losing the task, plan's essential
