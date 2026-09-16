@@ -319,6 +319,15 @@ pub enum Command {
         /// peer on an older build simply names none.
         #[serde(default)]
         head_sha: Option<String>,
+        /// The review revision the deciding operator actually inspected. The
+        /// commit alone does not identify it: a resubmission may carry the
+        /// same `head_sha` with different requirements or prose, and a
+        /// verdict written against the old screen must not settle the new
+        /// one. The owning node compares this atomically as it records the
+        /// decision. Additive and optional: a peer on an older build names
+        /// none and is held to the commit alone, as before.
+        #[serde(default)]
+        revision_id: Option<String>,
     },
     /// Contract 3: a peer's providers, driven from another node's interface.
     /// The paste-back flow is request/response shaped — start the login and
@@ -867,6 +876,44 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v["op"], "prompt");
+    }
+
+    /// A verdict names the revision the deciding operator inspected, and a
+    /// peer on an older build names none. The field is additive on both
+    /// sides: this node reads an older peer's verdict as naming no revision
+    /// — held to the commit alone, as it was — and an older peer ignores the
+    /// one this node sends rather than failing to parse it.
+    #[test]
+    fn a_verdict_carries_the_inspected_revision_and_older_peers_carry_none() {
+        let v = serde_json::to_value(Command::Verdict {
+            review_id: "rv1".into(),
+            verdict: "approve".into(),
+            reason: None,
+            title: None,
+            body: None,
+            patch: None,
+            head_sha: Some("abc".into()),
+            revision_id: Some("rev-2".into()),
+        })
+        .unwrap();
+        assert_eq!(v["op"], "verdict");
+        assert_eq!(v["revision_id"], "rev-2");
+
+        let older: Command = serde_json::from_value(serde_json::json!({
+            "op": "verdict", "review_id": "rv1", "verdict": "approve", "head_sha": "abc"
+        }))
+        .unwrap();
+        match older {
+            Command::Verdict {
+                revision_id,
+                head_sha,
+                ..
+            } => {
+                assert_eq!(revision_id, None);
+                assert_eq!(head_sha.as_deref(), Some("abc"));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     /// The contract-3 command ops, round-tripped: the wire names are pinned,

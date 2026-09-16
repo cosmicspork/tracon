@@ -110,9 +110,13 @@ and (version 3) `provider_connect`, `provider_code`, `provider_disconnect` — a
 providers driven from another node's interface, executed by the owner exactly as a
 local request; `provider_connect` acks with the sign-in URL.
 A `verdict` command may carry an optional `patch`: a unified diff the operator edited
-by hand, applied by the agent on the owning node. Additive and defaulted, so a node on
-an older build reads the rest of the verdict unchanged and the contract version is
-unmoved. Version 3 also adds an optional `providers` field to the `node` payload's
+by hand, applied by the agent on the owning node. It may also carry `head_sha` and
+`revision_id`: the commit and the review revision the deciding operator inspected. The
+revision is the identity the owning node binds the decision to, compared as it records
+it — the commit cannot stand in for it, because a resubmission may carry the same
+`head_sha` with different requirements or prose. Both are additive and defaulted, so a
+node on an older build reads the rest of the verdict unchanged, a peer that names no
+revision is held to the commit alone as before, and the contract version is unmoved. Version 3 also adds an optional `providers` field to the `node` payload's
 row (absent on older builds); a new command op fails whole-payload deserialization on
 an older node, which drops the frame — the sender times out rather than erring, hence
 the version bump.

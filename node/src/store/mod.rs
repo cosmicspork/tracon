@@ -94,6 +94,25 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// The `WHERE` clause that binds a verdict to the exact review revision the
+/// operator inspected, compared inside the statement that records the
+/// decision rather than read first and trusted afterwards. `param` is the
+/// bound revision id and `?1` is the review id.
+///
+/// A `NULL` revision means the caller named none — an older client or a peer
+/// on an older build — and is held to the commit alone, as before. Otherwise
+/// the named revision must still be the review's latest, so a resubmission
+/// landing between the operator reading the screen and this write loses
+/// rather than inheriting a verdict decided against the revision it replaced.
+/// The commit cannot stand in for the revision: a resubmission may carry the
+/// same `head_sha` with different requirements or prose.
+fn decided_revision_is_current(param: u8) -> String {
+    format!(
+        "AND (?{param} IS NULL OR ?{param} = (SELECT rr.id FROM review_revision rr \
+         WHERE rr.review_id=?1 ORDER BY rr.created_ms DESC, rr.id DESC LIMIT 1))"
+    )
+}
+
 /// Register `sqlite-vec` with SQLite itself, once per process, before any
 /// connection is opened. It is compiled in rather than loaded at run time, so
 /// there is no `.so` to ship beside the binary and nothing to go missing on a
@@ -2673,8 +2692,9 @@ impl Store {
     }
 
     /// Resolve a review exactly once. Returns false if it was already decided,
-    /// so a second verdict cannot overwrite the first. Used for rejection; an
-    /// approval goes through `begin_publish` → `finish_publish`.
+    /// so a second verdict cannot overwrite the first, or if `revision_id`
+    /// names a revision the review has since moved past. Used for rejection;
+    /// an approval goes through `begin_publish` → `finish_publish`.
     #[allow(clippy::too_many_arguments)]
     pub fn resolve_review(
         &self,
@@ -2685,16 +2705,20 @@ impl Store {
         edited_body: Option<&str>,
         publish_result: Option<&str>,
         resolved_mono_ms: i64,
+        revision_id: Option<&str>,
     ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
-            "UPDATE review SET state=?2, verdict_reason=?3, edited_title=COALESCE(?4, edited_title),
-                edited_body=COALESCE(?5, edited_body), publish_result=?6, resolved_mono_ms=?7,
-                updated_ms=?8
-             WHERE id=?1 AND state IN ('new','claimed','revising')",
+            &format!(
+                "UPDATE review SET state=?2, verdict_reason=?3, edited_title=COALESCE(?4, edited_title),
+                    edited_body=COALESCE(?5, edited_body), publish_result=?6, resolved_mono_ms=?7,
+                    updated_ms=?8
+                 WHERE id=?1 AND state IN ('new','claimed','revising') {}",
+                decided_revision_is_current(9),
+            ),
             rusqlite::params![
                 id, state, reason, edited_title, edited_body, publish_result, resolved_mono_ms,
-                now_ms()
+                now_ms(), revision_id
             ],
         )?;
         Ok(n == 1)
@@ -2811,13 +2835,24 @@ impl Store {
 
     /// Changes requested: the review stays in the queue, marked so the operator
     /// can see it is waiting on the agent rather than on them. Returns false if
-    /// the review was no longer awaiting a verdict.
-    pub fn request_changes(&self, id: &str, notes: &str, patch: Option<&str>) -> Result<bool> {
+    /// the review was no longer awaiting a verdict, or if `revision_id` names a
+    /// revision the review has since moved past.
+    pub fn request_changes(
+        &self,
+        id: &str,
+        notes: &str,
+        patch: Option<&str>,
+        revision_id: Option<&str>,
+    ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
-            "UPDATE review SET state='revising', verdict_reason=?2, revision_patch=?4, updated_ms=?3
-             WHERE id=?1 AND state IN ('new','claimed')",
-            rusqlite::params![id, notes, now_ms(), patch],
+            &format!(
+                "UPDATE review SET state='revising', verdict_reason=?2, revision_patch=?4,
+                    updated_ms=?3
+                 WHERE id=?1 AND state IN ('new','claimed') {}",
+                decided_revision_is_current(5),
+            ),
+            rusqlite::params![id, notes, now_ms(), patch, revision_id],
         )?;
         Ok(n == 1)
     }

@@ -2343,6 +2343,219 @@ async fn an_approval_is_refused_when_a_resubmission_replaced_what_was_reviewed()
     assert_ne!(decided.revision_id, first_revision.id);
 }
 
+/// The agent resubmits the same commit with different prose and different
+/// requirements while the operator's tab is open.
+///
+/// Nothing about the code moved, so `head_sha` cannot tell the two readings
+/// apart — but the operator was shown a different title, a different
+/// description and a different pinned requirement, and never read the ones
+/// now on the card. A verdict is bound to the revision that was inspected,
+/// not to the commit underneath it, so every verdict from the stale tab is
+/// refused and the review is left waiting on a fresh reading.
+#[tokio::test]
+async fn a_same_commit_resubmission_with_new_prose_requires_a_fresh_reading() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let item = tracon::corpus::work::create(
+        &f.store,
+        &Bus::new(),
+        "n1",
+        tracon::corpus::work::NewWork {
+            channel: "work".into(),
+            project_id: None,
+            title: "Original requirement".into(),
+            body: "do the original thing".into(),
+            deps: vec![],
+            priority: 0,
+            discovered_from: None,
+            discovered_by_session: None,
+        },
+    )
+    .unwrap();
+    f.store
+        .conn()
+        .execute(
+            "UPDATE session SET work_item_id = ?1 WHERE id = 's1'",
+            [&item.id],
+        )
+        .unwrap();
+
+    let submitted = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = submitted["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{submitted}"))
+        .to_string();
+
+    // What the operator's tab is showing: the screen names its own revision,
+    // so a verdict written from it can say which reading it was.
+    let (status, screen) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{screen}");
+    let read_revision = screen["revision"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the review screen must name its revision: {screen}"))
+        .to_string();
+    let read_sha = screen["revision"]["head_sha"].as_str().unwrap().to_string();
+    assert_eq!(screen["requirements"]["title"], "Original requirement");
+
+    // The work item is re-scoped and the agent resubmits the very same
+    // commit under rewritten prose.
+    tracon::corpus::work::update(
+        &f.store,
+        f.manager.bus(),
+        "n1",
+        &item.id,
+        tracon::corpus::work::Patch {
+            title: Some("Rewritten requirement".into()),
+            body: Some("do something else entirely".into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let mut resubmit = f.submit_args();
+    resubmit["review_id"] = json!(id);
+    resubmit["title"] = json!("feat: something else entirely");
+    resubmit["body"] = json!("a different case for a different change");
+    let again = f.tool("s1", "submit_review", resubmit).await;
+    assert_eq!(again["state"], "new", "{again}");
+
+    let current = f
+        .store
+        .latest_review_revision(&id)
+        .unwrap()
+        .expect("the resubmission recorded its own revision");
+    assert_eq!(
+        current.head_sha, read_sha,
+        "the commit is deliberately unchanged: it is what cannot tell these apart"
+    );
+    assert_ne!(
+        current.id, read_revision,
+        "but the revision did move, and that is what a verdict is bound to"
+    );
+
+    // Every verdict the stale tab can write is refused, including the two
+    // that never reach publication.
+    for verdict in [
+        json!({ "verdict": "approve" }),
+        json!({ "verdict": "reject", "reason": "not this" }),
+        json!({ "verdict": "revise", "reason": "change this" }),
+    ] {
+        let mut body = verdict.clone();
+        body["head_sha"] = json!(read_sha);
+        body["revision_id"] = json!(read_revision);
+        let (status, answer) = f
+            .call("POST", &format!("/api/reviews/{id}/verdict"), Some(body))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{verdict}: {answer}");
+        assert!(
+            answer["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("moved to a new revision"),
+            "{verdict}: {answer}"
+        );
+        assert_eq!(
+            f.store.get_review(&id).unwrap().unwrap().state,
+            "new",
+            "a refused verdict decides nothing: {verdict}"
+        );
+    }
+    assert!(
+        f.store.review_decisions(&id).unwrap().is_empty(),
+        "and records no decision against either revision"
+    );
+    assert!(
+        !f.gh_log().contains("pr create"),
+        "and publishes nothing: {}",
+        f.gh_log()
+    );
+
+    // Reading the card again and deciding on what it now says works.
+    let (status, screen) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{screen}");
+    assert_eq!(screen["revision"]["id"], current.id.as_str());
+    assert_eq!(screen["requirements"]["title"], "Rewritten requirement");
+    let (status, answer) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({
+                "verdict": "revise", "reason": "now that I have read it",
+                "head_sha": read_sha, "revision_id": current.id,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let decided = f.store.review_decisions(&id).unwrap();
+    assert_eq!(decided.len(), 1);
+    assert_eq!(
+        decided[0].revision_id, current.id,
+        "the decision is recorded against the revision that was actually read"
+    );
+}
+
+/// The resubmission lands after the node has read the review and before it
+/// writes the verdict down.
+///
+/// The check that the operator's reading is still current cannot be a read
+/// followed by a trusting write: the store compares the decided revision
+/// inside the statement that records the decision, so a revision that arrives
+/// in that window loses rather than inheriting a verdict decided against the
+/// one it replaced.
+#[tokio::test]
+async fn a_verdict_is_compared_against_its_revision_as_it_is_recorded() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let submitted = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = submitted["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{submitted}"))
+        .to_string();
+    let read = f.store.latest_review_revision(&id).unwrap().unwrap();
+
+    let mut resubmit = f.submit_args();
+    resubmit["review_id"] = json!(id);
+    resubmit["title"] = json!("feat: rewritten while the verdict was in flight");
+    f.tool("s1", "submit_review", resubmit).await;
+    let current = f.store.latest_review_revision(&id).unwrap().unwrap();
+    assert_ne!(current.id, read.id);
+
+    // Straight at the store, as the write itself sees it.
+    assert!(
+        !f.store
+            .request_changes(&id, "note", None, Some(&read.id))
+            .unwrap(),
+        "a request for changes bound to a superseded revision must not land"
+    );
+    assert!(
+        !f.store
+            .resolve_review(
+                &id,
+                "rejected",
+                Some("no"),
+                None,
+                None,
+                None,
+                0,
+                Some(&read.id)
+            )
+            .unwrap(),
+        "nor a rejection"
+    );
+    assert_eq!(
+        f.store.get_review(&id).unwrap().unwrap().state,
+        "new",
+        "and neither changed the row"
+    );
+    assert!(
+        f.store
+            .request_changes(&id, "note", None, Some(&current.id))
+            .unwrap(),
+        "the revision that is actually current decides"
+    );
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "revising");
+}
+
 /// Whether a process id still names something on this host. `kill -0` is the
 /// portable ask; shelling out keeps it working on macOS as well as Linux.
 fn alive(pid: &str) -> bool {
