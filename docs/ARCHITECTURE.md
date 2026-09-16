@@ -668,6 +668,19 @@ page. Session orientation is assembled per session from the corpus, the node's o
 facts, and the policy's deny reasons, delivered as a read-only file and recorded as
 an event, so the transcript shows what the agent was told.
 
+**Orientation reserves its space for the work before the conventions.** What the
+session is for and what bounds it — the node it runs on, the item and phase, the
+plan or the diff under review, the enforced agreements, the operator's directives
+and launch customization — is assembled first and is never dropped to make room for
+anything else. Shared guides and other ready work are discretionary and get what is
+left of the context cap, shortest first. The cap used to be enforced by truncating
+the assembled text, which cut from the end, where the task and the constraints were:
+long guides could leave a session a wall of conventions and no job. Whatever does not
+fit is named — which document, how much is missing, and the call that fetches the
+rest — in the orientation the agent reads and on the event the operator reads. A bare
+`trimmed` flag is not enough for either of them: neither can tell from it whether the
+thing they needed was one of the things that was left out.
+
 ## Work ledger
 
 Beads-inspired, not Beads: ready-work as a deterministic topological order every

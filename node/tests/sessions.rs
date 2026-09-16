@@ -2100,12 +2100,18 @@ struct Orientation {
 }
 
 async fn orientation(tag: &str) -> Orientation {
-    orientation_with(tag, None).await
+    orientation_with(tag, None, 0).await
 }
 
 /// Same, but with the adapter the session is started against — for the cases
-/// where what is under test is a launch that must not succeed.
-async fn orientation_with(tag: &str, launch_with: Option<Arc<dyn HarnessAdapter>>) -> Orientation {
+/// where what is under test is a launch that must not succeed — and with
+/// `long_guides` oversized `guide` documents on the channel, for the cases
+/// where what is under test is the cap.
+async fn orientation_with(
+    tag: &str,
+    launch_with: Option<Arc<dyn HarnessAdapter>>,
+    long_guides: usize,
+) -> Orientation {
     state::isolate();
     let dir = state::scratch(&format!("orientation-{tag}"));
     let repo = dir.join("repo");
@@ -2170,6 +2176,22 @@ async fn orientation_with(tag: &str, launch_with: Option<Arc<dyn HarnessAdapter>
                "confidence": 1.0, "state": "active", "created_ms": now_ms(), "updated_ms": now_ms()}),
     )
     .unwrap();
+    // Conventions that alone are several times the whole orientation cap.
+    for i in 0..long_guides {
+        tracon::corpus::write(
+            &store,
+            &Bus::new(),
+            "n1",
+            "personal",
+            "document",
+            tracon_sync::ChangeOp::Upsert,
+            &format!("guide{i}"),
+            json!({"channel": "personal", "slug": format!("guide-{i}"), "kind": "guide",
+                   "title": format!("Guide {i}"), "body": "y".repeat(16_000),
+                   "hash": format!("h{i}"), "created_ms": now_ms(), "updated_ms": now_ms()}),
+        )
+        .unwrap();
+    }
     let adapter = Arc::new(FakeAdapter {
         tx: Arc::new(Mutex::new(None)),
         tokens: Arc::new(Mutex::new(100)),
@@ -2320,6 +2342,72 @@ async fn a_session_starts_with_its_orientation_recorded() {
     // file (see `materialize`), and the scratch directory is cleaned with the
     // session, so only the repository is asserted here.
     assert!(!repo.join("orientation.md").exists());
+
+    tracon::session::materialize::remove(&row.id);
+}
+
+/// The cap is spent on the task before the conventions. A channel whose
+/// guides are several times the whole orientation used to leave the session a
+/// wall of conventions and a bare `trimmed` flag: no work item, no phase, no
+/// working agreements, no operator directive. What the cap cannot fit is now
+/// named, document by document, in the text and on the event.
+#[tokio::test]
+async fn long_guides_do_not_cost_a_session_its_task_or_its_directives() {
+    state::isolate();
+    let Orientation {
+        store, item, row, ..
+    } = orientation_with("crowded", None, 4).await;
+
+    let mut found = None;
+    for _ in 0..300 {
+        if let Some(e) = store
+            .events_after(&row.id, 0, 500)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == "orientation")
+        {
+            found = Some(e);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let e = found.expect("no orientation event");
+    let text = e.payload["text"].as_str().unwrap();
+
+    // Sixty-four thousand characters of guide, and the session still knows
+    // what it is doing, under whose rules, and what the operator told it.
+    assert!(text.contains("## Work"), "{text}");
+    assert!(text.contains("**Add the ledger**"), "{text}");
+    assert!(text.contains("plan session"), "{text}");
+    assert!(
+        text.contains(&tracon::corpus::work::plan_slug(&item.id)),
+        "{text}"
+    );
+    assert!(text.contains("no-merge"), "{text}");
+    assert!(
+        text.contains("(directive) run just test before every commit"),
+        "{text}"
+    );
+    assert!(text.contains("Your worktree is"), "{text}");
+
+    // And it is told what it did not get, by name, with the call that fetches
+    // it — not a flag saying that something somewhere was cut.
+    assert_eq!(e.payload["trimmed"], true);
+    let missing = e.payload["missing"].as_array().unwrap();
+    assert!(missing.len() >= 3, "{missing:#?}");
+    assert!(text.contains("## Not in this orientation"), "{text}");
+    for m in missing {
+        let what = m["what"].as_str().unwrap();
+        assert!(what.contains("guide-"), "{m:#?}");
+        assert!(text.contains(what), "{what} is not named in the text");
+        assert!(m["fetch"].as_str().unwrap().contains("doc_read"), "{m:#?}");
+    }
+    // At least one guide did not fit at all, and says so rather than
+    // appearing as a document that was merely shortened.
+    assert!(
+        missing.iter().any(|m| m["partial"] == false),
+        "{missing:#?}"
+    );
 
     tracon::session::materialize::remove(&row.id);
 }
@@ -2907,7 +2995,7 @@ impl HarnessAdapter for IncompatibleAdapter {
 async fn a_harness_speaking_an_unsupported_protocol_fails_the_session_with_the_reason() {
     state::isolate();
     let Orientation { store, row, .. } =
-        orientation_with("incompatible", Some(Arc::new(IncompatibleAdapter))).await;
+        orientation_with("incompatible", Some(Arc::new(IncompatibleAdapter)), 0).await;
     let mut ended = None;
     for _ in 0..300 {
         let s = store.get_session(&row.id).unwrap().unwrap();

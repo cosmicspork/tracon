@@ -1233,10 +1233,11 @@ impl Manager {
         )?;
         wiring.manifest = manifest.clone();
 
-        // What the session is told first: conventions from the corpus, this
-        // node's facts, the channel's policy, and what is known. Recorded as
-        // an event so the transcript shows what the agent was told.
-        let (orientation, trimmed) = {
+        // What the session is told first: this node's facts, the work and its
+        // constraints, the channel's policy and what is known, and then
+        // whatever conventions fit under the cap. Recorded as an event so the
+        // transcript shows what the agent was told — and what it was not.
+        let (orientation, missing) = {
             let session_row = self.store.get_session(id)?;
             let project = session_row
                 .as_ref()
@@ -1295,7 +1296,15 @@ impl Manager {
             work_item_id: None,
             kind: ek::ORIENTATION.into(),
             ref_id: None,
-            payload: json!({ "text": orientation, "trimmed": trimmed, "chars": orientation.len() }),
+            // `missing` names each piece the cap kept out, so the operator
+            // reading the log sees what the session was not told rather than
+            // a bare flag that something, somewhere, was cut.
+            payload: json!({
+                "text": orientation,
+                "trimmed": !missing.is_empty(),
+                "missing": missing,
+                "chars": orientation.len(),
+            }),
             at_ms: now_ms(),
             mono_ms: started.elapsed().as_millis() as i64,
         });

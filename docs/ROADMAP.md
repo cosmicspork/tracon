@@ -41,10 +41,6 @@ remains separately tracked under [Live proofs still the operator's](#live-proofs
 
 ### 1. Trust and attention
 
-- [ ] Reserve orientation space for current intent, constraints and operator directives
-      before discretionary guides and background context. Name omitted or truncated
-      context. Test multiple long guides without losing the task, plan's essential
-      constraints or directives; a generic trimmed flag is not sufficient.
 - [ ] Normalize managed-harness permissions into canonical action, kind and resource or
       command independently of display titles. Prove actual OpenCode adapter-shaped read
       events pass through the supervisor and receive the shipped read exemptions; unknown
