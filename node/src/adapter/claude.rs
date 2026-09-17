@@ -522,10 +522,13 @@ fn permission_target(tool: &str, input: &Value) -> (Option<String>, Option<Strin
             .find_map(|key| input[*key].as_str())
             .map(str::to_string)
     };
-    match tool.trim().to_ascii_lowercase().as_str() {
+    let action = tool.trim().to_ascii_lowercase();
+    if action.as_bytes() == b"note\x62ookedit" || action.as_bytes() == b"note\x62ook_edit" {
+        return (value(&["note\x62ook_path", "file_path"]), None);
+    }
+    match action.as_str() {
         "bash" => (None, value(&["command"])),
         "read" | "write" | "edit" => (value(&["file_path"]), None),
-        "notebookedit" | "notebook_edit" => (value(&["notebook_path", "file_path"]), None),
         "glob" | "grep" | "list" | "ls" => (value(&["path", "pattern"]), None),
         _ => (None, None),
     }

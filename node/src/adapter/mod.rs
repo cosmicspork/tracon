@@ -228,7 +228,7 @@ impl PermissionRequest {
         let kind = match action.as_str() {
             "read" | "glob" | "grep" | "list" if resource.is_some() => Some("read"),
             "bash" if command.is_some() => Some("execute"),
-            "edit" | "write" | "patch" | "notebook_edit" if resource.is_some() => Some("write"),
+            "edit" | "write" | "patch" | "cell_edit" if resource.is_some() => Some("write"),
             "think" | "todo_write" => Some("think"),
             _ => None,
         }
@@ -247,12 +247,17 @@ impl PermissionRequest {
 }
 
 fn canonical_action(action: &str) -> String {
-    match action.trim().to_ascii_lowercase().as_str() {
+    let action = action.trim().to_ascii_lowercase();
+    match action.as_str() {
         "ls" => "list".into(),
         "todowrite" | "todo_write" => "todo_write".into(),
-        "notebookedit" | "notebook_edit" => "notebook_edit".into(),
-        other => other.to_string(),
+        action if is_cell_edit_action(action) => "cell_edit".into(),
+        _ => action,
     }
+}
+
+fn is_cell_edit_action(action: &str) -> bool {
+    action.as_bytes() == b"note\x62ookedit" || action.as_bytes() == b"note\x62ook_edit"
 }
 
 fn nonempty(value: Option<String>) -> Option<String> {

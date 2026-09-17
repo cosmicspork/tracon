@@ -12,6 +12,7 @@
 //! and stops rather than looking for another way round.
 
 pub mod bundle;
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
@@ -156,10 +157,26 @@ pub struct Request<'a> {
 
 impl Request<'_> {
     fn haystack(&self) -> String {
-        let arguments = self
+        let mut arguments = self
             .arguments
             .map(serde_json::Value::to_string)
             .unwrap_or_default();
+        if let Some(fields) = self.arguments.and_then(serde_json::Value::as_object) {
+            for (key, value) in fields {
+                match value {
+                    serde_json::Value::String(value) => {
+                        let _ = write!(arguments, " {key}={value}");
+                    }
+                    serde_json::Value::Number(value) => {
+                        let _ = write!(arguments, " {key}={value}");
+                    }
+                    serde_json::Value::Bool(value) => {
+                        let _ = write!(arguments, " {key}={value}");
+                    }
+                    _ => {}
+                }
+            }
+        }
         format!(
             "{} {} {} {}",
             self.action,
