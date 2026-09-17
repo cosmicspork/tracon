@@ -14,6 +14,8 @@ import type {
   Frame,
   MeshState,
   NodeInfo,
+  OperatorIssue,
+  OperatorQuestion,
   Permission,
   ProviderInfo,
   Queue,
@@ -23,6 +25,11 @@ import type {
 
 const MAX_LIVE_EVENTS = 3000
 const RECONNECTED_BANNER_MS = 8000
+// Questions and issue drafts have no stream frame of their own, and they are
+// part of what waits on the operator: the count in the rail would be wrong
+// without them. Polled here rather than on the home screen, so the badge and
+// the list it links to are never counting different things.
+const INTERVENTION_POLL_MS = 5000
 
 class Store {
   /** Every node this one knows, itself first. */
@@ -40,6 +47,10 @@ class Store {
   /** Set briefly after the hub comes back: how many queued items went out. */
   reconnected = $state<number | null>(null)
   queue = $state<Queue>({ waiting: [], reviews: [], promotions: [], running: [], ended: [] })
+  /** Questions an agent put to the operator, unanswered. */
+  questions = $state<OperatorQuestion[]>([])
+  /** Issue drafts awaiting authorization, publication or reconciliation. */
+  issues = $state<OperatorIssue[]>([])
   sessions = $state<Map<string, Session>>(new Map())
   /** Persisted events for the session that is open on screen. */
   events = $state<Event[]>([])
@@ -56,6 +67,7 @@ class Store {
   private source: EventSource | null = null
   private wasConnected = false
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
+  private interventionTimer: ReturnType<typeof setInterval> | undefined
 
   /** The node that served this interface. */
   get node(): NodeInfo | null {
@@ -65,6 +77,8 @@ class Store {
   connect() {
     if (this.source) return
     void this.refetch()
+    clearInterval(this.interventionTimer)
+    this.interventionTimer = setInterval(() => void this.refreshInterventions(), INTERVENTION_POLL_MS)
     // A tapped notification reuses this window and says where to go.
     if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
       navigator.serviceWorker.addEventListener('message', (m) => {
@@ -141,9 +155,23 @@ class Store {
     }
     if (!allAnswered(load)) return
     if (this.openSession) await this.loadEvents(this.openSession).catch(() => {})
+    await this.refreshInterventions()
     this.authRequired = false
     // The cookie may be new; the device follows it.
     void push.resync()
+  }
+
+  /**
+   * Questions and issue drafts, which arrive by polling rather than by frame.
+   * Settled independently: an issue endpoint that fails must not blank the
+   * questions, because a blanked list reads as "nothing waiting on you".
+   */
+  async refreshInterventions() {
+    // Nothing to poll at a door that will not open; `refetch` resumes it.
+    if (this.authRequired) return
+    const [questions, issues] = await Promise.allSettled([api.operatorQuestions(), api.operatorIssues()])
+    if (questions.status === 'fulfilled') this.questions = questions.value.questions
+    if (issues.status === 'fulfilled') this.issues = issues.value.issues
   }
 
   /** Distinguish "log in" from "unreachable" after the stream drops. */
@@ -177,8 +205,12 @@ class Store {
     // keeps the browser from holding a subscription nothing will use.
     await push.disable().catch(() => {})
     await api.logout()
+    clearInterval(this.interventionTimer)
+    this.interventionTimer = undefined
     this.source?.close()
     this.source = null
+    this.questions = []
+    this.issues = []
     this.authRequired = true
   }
 

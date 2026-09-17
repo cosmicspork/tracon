@@ -326,7 +326,7 @@ impl Notifier {
     /// Re-read the queue from the store and diff, for when the bus has run
     /// ahead of us and frames were dropped.
     fn resync(&mut self) {
-        if let Ok(rows) = self.store.open_permissions() {
+        if let Ok(rows) = self.store.open_permission_views() {
             self.diff_permissions(&rows);
         }
         if let Ok(rows) = self.store.open_reviews() {
@@ -337,7 +337,7 @@ impl Notifier {
         }
     }
 
-    fn diff_permissions(&mut self, waiting: &[crate::store::PermissionRow]) {
+    fn diff_permissions(&mut self, waiting: &[crate::store::PermissionView]) {
         let mut present = HashSet::with_capacity(waiting.len());
         for p in waiting {
             present.insert(p.id.clone());

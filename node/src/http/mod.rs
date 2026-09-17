@@ -765,9 +765,17 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         .with_context(|| format!("bind {listen}"))?;
     // A claim measures attention. One left behind by a client that vanished
     // would report a review as attended forever, so claims lapse.
+    //
+    // The same tick applies deny-by-default to requests their supervisor never
+    // got to. A session that ended with the process — or that was already
+    // terminal when `reconcile_after_restart` walked past it — leaves its open
+    // requests behind, and no answer can reach a harness that is gone. Left
+    // alone they sit in the queue as decisions the operator cannot make, which
+    // is exactly what the attention count must not contain.
     {
         let store = store.clone();
         let manager = state.manager.clone();
+        let node_id = state.node_id.clone();
         let grace = std::time::Duration::from_secs(cfg.session.claim_grace_secs);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
@@ -776,11 +784,31 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                 let stale = store
                     .stale_claims(grace.as_millis() as i64)
                     .unwrap_or_default();
-                if stale.is_empty() {
-                    continue;
+                for id in &stale {
+                    let _ = store.release_review(id);
                 }
-                for id in stale {
-                    let _ = store.release_review(&id);
+                let orphaned = store.orphaned_permissions(&node_id).unwrap_or_default();
+                for p in &orphaned {
+                    // The monotonic clock the request was created against may
+                    // belong to a process that is gone, so resolve at the
+                    // created reading: duration 0 means not measured, which is
+                    // the truth, rather than a negative span.
+                    let _ = store.resolve_permission(&p.id, "expired", None, p.created_mono_ms);
+                    let _ = store.append_event(&crate::store::NewEvent {
+                        session_id: p.session_id.clone(),
+                        work_item_id: None,
+                        kind: crate::session::state::event_kind::PERMISSION_EXPIRED.into(),
+                        ref_id: Some(p.id.clone()),
+                        payload: serde_json::json!({
+                            "permission_id": p.id,
+                            "reason": "denied: session ended without answering",
+                        }),
+                        at_ms: crate::store::now_ms(),
+                        mono_ms: 0,
+                    });
+                }
+                if stale.is_empty() && orphaned.is_empty() {
+                    continue;
                 }
                 manager.publish_queue().await;
             }

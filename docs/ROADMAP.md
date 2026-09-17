@@ -41,10 +41,6 @@ remains separately tracked under [Live proofs still the operator's](#live-proofs
 
 ### 1. Trust and attention
 
-- [ ] Make the attention count mean actionable human decisions. Separate needs-your-decision,
-      agent-revising and external-operation/recovery states without losing their durable
-      threads. Show work intent and session links on permission cards; preserve explicit
-      expiry and deny-by-default behavior rather than treating deferral as consent.
 - [ ] Explain authority in task terms: node, harness, image, effective access, grants,
       limits and what still needs approval, derived from current policy, not a parallel
       model. Reduce low-value interruptions without broadening external-write authority.

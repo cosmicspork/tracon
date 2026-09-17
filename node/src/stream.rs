@@ -11,7 +11,7 @@ use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::store::{PermissionRow, SessionRow};
+use crate::store::{PermissionView, SessionRow};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -40,7 +40,9 @@ pub enum Frame {
     },
     Session(Box<SessionRow>),
     Queue {
-        waiting: Vec<PermissionRow>,
+        /// Each request with the intent of the session that raised it: the
+        /// card the operator answers is built from this frame alone.
+        waiting: Vec<PermissionView>,
     },
     Reviews {
         waiting: Vec<crate::store::ReviewRow>,

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { attention } from '../lib/attention'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { nodeReadiness } from '../lib/nodes'
@@ -12,9 +13,16 @@
     return store.queue.running.filter((session) => session.node_id === id).length
   }
 
+  // Decisions only, for the same reason the rail counts decisions: a review
+  // the agent is revising on that node is not an operator waiting.
   function waiting(id: string): number {
-    return store.queue.waiting.filter((permission) => permission.node_id === id).length +
-      store.queue.reviews.filter((review) => review.node_id === id).length
+    return attention({
+      permissions: store.queue.waiting.filter((permission) => permission.node_id === id),
+      reviews: store.queue.reviews.filter((review) => review.node_id === id),
+      nodes: store.nodes,
+      mesh: store.mesh,
+      now: clock.now,
+    }).count
   }
 
   function settingsLink(id: string): string {

@@ -588,6 +588,140 @@ async fn the_queue_orders_waiting_before_running() {
     assert_eq!(body["running"].as_array().unwrap().len(), 1);
 }
 
+/// A request arrives as "may I run this" and nothing else. Answering it used
+/// to mean opening the session to find out what it was for, which is most of
+/// the cost of the interruption: the queue carries that intent instead.
+#[tokio::test]
+async fn a_waiting_request_carries_the_intent_of_the_session_that_asked() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    let item = tracon::corpus::work::create(
+        &h.store,
+        &Bus::new(),
+        "n1",
+        tracon::corpus::work::NewWork {
+            channel: "personal".into(),
+            project_id: None,
+            title: "Make the attention count mean something".into(),
+            body: String::new(),
+            deps: Vec::new(),
+            priority: 0,
+            discovered_from: None,
+            discovered_by_session: None,
+        },
+    )
+    .unwrap();
+    let id = insert_session_for_item(&h.store, 1000, Some(&item.id));
+    h.store
+        .insert_permission(&permission_row("p1", &id))
+        .unwrap();
+
+    let (status, body) = h.call("GET", "/api/queue", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let waiting = &body["waiting"][0];
+    // The request itself is unchanged; the intent sits beside it.
+    assert_eq!(waiting["title"], "run just test");
+    assert_eq!(waiting["session_id"], id.as_str());
+    assert_eq!(
+        waiting["intent"]["work_item_title"],
+        "Make the attention count mean something"
+    );
+    assert_eq!(waiting["intent"]["work_item_id"], item.id.as_str());
+    assert_eq!(waiting["intent"]["channel"], "personal");
+    assert_eq!(waiting["intent"]["phase"], "execute");
+    assert_eq!(waiting["intent"]["branch"], "feat/x");
+    assert_eq!(waiting["intent"]["session_state"], "running");
+    // The same intent reaches the session screen, where the card is inline.
+    let (_, session) = h.call("GET", &format!("/api/sessions/{id}"), None).await;
+    assert_eq!(
+        session["waiting"][0]["intent"]["work_item_title"],
+        "Make the attention count mean something"
+    );
+}
+
+/// A session with no item still explains itself as far as it can, and a
+/// request that arrives before its session does is still listed.
+#[tokio::test]
+async fn intent_is_partial_rather_than_absent_when_the_ledger_is_not_involved() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    let id = insert_running_session(&h.store, 1000);
+    h.store
+        .insert_permission(&permission_row("p1", &id))
+        .unwrap();
+    let (_, body) = h.call("GET", "/api/queue", None).await;
+    let intent = &body["waiting"][0]["intent"];
+    assert_eq!(intent["work_item_id"], Value::Null);
+    assert_eq!(intent["work_item_title"], Value::Null);
+    assert_eq!(intent["channel"], "personal");
+}
+
+/// Deny-by-default is the contract for an unanswered request. A supervisor
+/// that went down with the process never got to apply it, and the row it left
+/// behind is not a decision anyone can make: no answer reaches a harness that
+/// is gone. The sweep the node runs finds exactly those.
+#[tokio::test]
+async fn requests_outliving_their_session_are_denied_rather_than_left_waiting() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    let live = insert_running_session(&h.store, 1000);
+    let ended = insert_running_session(&h.store, 1000);
+    h.store
+        .insert_permission(&permission_row("live", &live))
+        .unwrap();
+    h.store
+        .insert_permission(&permission_row("orphan", &ended))
+        .unwrap();
+    h.store
+        .update_session(
+            &ended,
+            tracon::store::SessionPatch {
+                state: Some("closed".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let orphaned = h.store.orphaned_permissions("n1").unwrap();
+    assert_eq!(
+        orphaned.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+        vec!["orphan"]
+    );
+    // Another node's row is that node's to close, however its session looks.
+    assert!(h.store.orphaned_permissions("n2").unwrap().is_empty());
+
+    for p in &orphaned {
+        assert!(h
+            .store
+            .resolve_permission(&p.id, "expired", None, p.created_mono_ms)
+            .unwrap());
+    }
+    let (_, body) = h.call("GET", "/api/queue", None).await;
+    let waiting = body["waiting"].as_array().unwrap();
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0]["id"], "live");
+}
+
+fn permission_row(id: &str, session_id: &str) -> tracon::store::PermissionRow {
+    tracon::store::PermissionRow {
+        id: id.into(),
+        session_id: session_id.into(),
+        node_id: "n1".into(),
+        rpc_id: 0,
+        tool_call_id: None,
+        title: "run just test".into(),
+        kind: Some("execute".into()),
+        raw_input: None,
+        options: "[]".into(),
+        state: "new".into(),
+        answer_option_id: None,
+        created_ms: now_ms(),
+        created_mono_ms: 0,
+        resolved_mono_ms: None,
+        expires_ms: now_ms() + 60_000,
+    }
+}
+
 #[tokio::test]
 async fn prompting_a_session_that_is_not_running_is_refused() {
     state::isolate();
@@ -642,13 +776,17 @@ async fn events_are_readable_after_a_given_seq() {
 }
 
 fn insert_running_session(store: &Arc<Store>, budget: i64) -> String {
+    insert_session_for_item(store, budget, None)
+}
+
+fn insert_session_for_item(store: &Arc<Store>, budget: i64, item: Option<&str>) -> String {
     let id = uuid::Uuid::now_v7().to_string();
     store
         .insert_session(&tracon::store::SessionRow {
             id: id.clone(),
             node_id: "n1".into(),
             channel: "personal".into(),
-            work_item_id: None,
+            work_item_id: item.map(str::to_string),
             repo_path: "/nonexistent/repo".into(),
             worktree_path: None,
             branch: "feat/x".into(),

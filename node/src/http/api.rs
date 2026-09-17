@@ -1347,9 +1347,9 @@ pub async fn get_session(
     }
     let waiting: Vec<_> = s
         .store()
-        .open_permissions()?
+        .open_permission_views()?
         .into_iter()
-        .filter(|p| p.session_id == id)
+        .filter(|p| p.request.session_id == id)
         .collect();
     let questions = s.store().session_operator_questions(&id)?;
     // Both usage sources and the verdict between them. The session row's
@@ -2456,7 +2456,7 @@ pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::V
 /// The queue, ordered on the node: waiting-on-you first, oldest first within
 /// it. The interface renders this order rather than deciding it.
 pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    let waiting = s.store().open_permissions()?;
+    let waiting = s.store().open_permission_views()?;
     // Permission requests before reviews: requests expire, reviews do not.
     let reviews = s.store().open_reviews()?;
     // Bounded and filtered in SQL: the home shows what landed lately, not
