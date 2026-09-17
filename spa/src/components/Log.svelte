@@ -5,6 +5,9 @@
     groupSummary,
     providerErrorLine,
     repetitionLine,
+    missingContext,
+    missingLine,
+    orientationLine,
     usageMismatchLine,
     usageUnmeteredLine,
   } from '../lib/log'
@@ -122,9 +125,21 @@
       {:else if e.kind === 'usage_unmetered'}
         <div class="mark wait">{usageUnmeteredLine(e.payload)}</div>
       {:else if e.kind === 'orientation'}
+        {@const missing = missingContext(e.payload)}
         <details class="fold">
-          <summary>orientation · {e.payload.chars} chars{e.payload.trimmed ? ' · trimmed' : ''}</summary>
-          <div>{e.payload.text}</div>
+          <summary class:wait={missing.length > 0}>{orientationLine(e.payload)}</summary>
+          <div>
+            {#if missing.length > 0}
+              <!-- Named, not flagged: the operator can see whether the guide
+                   the session needed was one of the ones it did not get. -->
+              <ul class="missing">
+                {#each missing as m (m.what)}
+                  <li>{missingLine(m)}</li>
+                {/each}
+              </ul>
+            {/if}
+            {e.payload.text}
+          </div>
         </details>
       {:else if e.kind === 'state'}
         <div class="sys">→ {e.payload.state}</div>
@@ -195,6 +210,16 @@
   .tool.crit,
   .fold summary.crit {
     color: var(--crit);
+  }
+  .fold summary.wait {
+    color: var(--wait);
+  }
+  /* What the session was not told, named above the text it was told. */
+  .missing {
+    margin: 0 0 10px;
+    padding-left: 16px;
+    color: var(--wait);
+    font-size: 12px;
   }
   .mark.ok {
     color: var(--ok);

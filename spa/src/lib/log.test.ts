@@ -1,6 +1,9 @@
 import { expect, test } from 'bun:test'
 import {
   groupLog,
+  missingContext,
+  missingLine,
+  orientationLine,
   groupOpen,
   groupSummary,
   providerErrorLine,
@@ -114,4 +117,39 @@ test('an unmetered turn is named as unknown, never as zero', () => {
   expect(line).toContain('3 model calls')
   expect(line).toContain('unknown rather than zero')
   expect(usageUnmeteredLine({ gateway: { requests: 1 } })).toContain('1 model call')
+})
+
+test('an orientation that lost context names how many pieces, not just that it was cut', () => {
+  const payload = {
+    chars: 22812,
+    trimmed: true,
+    missing: [
+      { what: 'guide "Workspace" (`guide-workspace`)', partial: true, chars: 8000, fetch: 'call `doc_read` for `guide-workspace`' },
+      { what: 'guide "Release" (`guide-release`)', partial: false, chars: 16000, fetch: 'call `doc_read` for `guide-release`' },
+    ],
+  }
+  expect(orientationLine(payload)).toBe('orientation · 23k chars · 2 pieces not included in full')
+  expect(orientationLine({ chars: 900 })).toBe('orientation · 900 chars')
+  expect(orientationLine({ chars: 1, missing: [{ what: 'the diff', partial: true, chars: 40 }] })).toContain(
+    '1 piece not included in full',
+  )
+
+  // Each omission names the document and how to fetch it: an operator cannot
+  // act on "something was trimmed".
+  const [cut, absent] = missingContext(payload)
+  expect(missingLine(cut)).toBe(
+    'guide "Workspace" (`guide-workspace`) cut short, 8k chars — call `doc_read` for `guide-workspace`',
+  )
+  expect(missingLine(absent)).toContain('not included, 16k chars')
+  expect(missingLine({ what: '3 more directives and facts', partial: false, chars: 8000 })).toBe(
+    '3 more directives and facts not included, 8k chars',
+  )
+})
+
+test('an orientation event from an older node carries no omissions', () => {
+  expect(missingContext({ chars: 100, trimmed: false })).toEqual([])
+  expect(missingContext({ missing: 'not a list' })).toEqual([])
+  expect(missingContext({ missing: [null, 7, { what: 'the plan', partial: true, chars: 5 }] })).toHaveLength(1)
+  expect(orientationLine({ chars: 100, trimmed: true })).toBe('orientation · 100 chars · trimmed')
+  expect(orientationLine({ chars: 100, trimmed: false })).toBe('orientation · 100 chars')
 })

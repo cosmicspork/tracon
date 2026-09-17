@@ -139,3 +139,47 @@ export function groupSummary(tools: ToolEntry[]): string {
   const capitalised = text.charAt(0).toUpperCase() + text.slice(1)
   return failed > 0 ? `${capitalised} · ${failed} failed` : capitalised
 }
+
+/** One piece of context the node's cap kept out of a session's orientation. */
+export interface MissingContext {
+  what: string
+  partial: boolean
+  chars: number
+  fetch?: string
+}
+
+export function missingContext(payload: Record<string, unknown>): MissingContext[] {
+  const raw = payload.missing
+  if (!Array.isArray(raw)) return []
+  return raw.filter(
+    (m): m is MissingContext =>
+      !!m && typeof m === 'object' && typeof (m as MissingContext).what === 'string',
+  )
+}
+
+/// "orientation · 22,812 chars · 4 not included" — the count is the operator's
+/// cue to open the fold, where each omission is named. A bare "trimmed" told
+/// them something was cut but never what, which is not something anyone can
+/// act on.
+export function orientationLine(payload: Record<string, unknown>): string {
+  const chars = typeof payload.chars === 'number' ? payload.chars : 0
+  const missing = missingContext(payload)
+  // An event recorded before the node named its omissions has the old flag and
+  // nothing else. Keep showing it: a vague signal still beats none, and it
+  // marks the event as one whose detail is genuinely unavailable rather than
+  // one where nothing was cut.
+  const cut = missing.length
+    ? ` · ${missing.length} ${missing.length === 1 ? 'piece' : 'pieces'} not included in full`
+    : payload.trimmed
+      ? ' · trimmed'
+      : ''
+  return `orientation · ${formatTokens(chars)} chars${cut}`
+}
+
+/// "guide \"Workspace\" (`guide-workspace`) cut short, 8,000 chars — call
+/// `doc_read` for `guide-workspace`".
+export function missingLine(m: MissingContext): string {
+  const scope = m.partial ? 'cut short' : 'not included'
+  const size = m.chars > 0 ? `, ${formatTokens(m.chars)} chars` : ''
+  return `${m.what} ${scope}${size}${m.fetch ? ` — ${m.fetch}` : ''}`
+}
