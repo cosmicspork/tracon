@@ -141,8 +141,8 @@ test('an orientation that lost context names how many pieces, not just that it w
     'guide "Workspace" (`guide-workspace`) cut short, 8k chars — call `doc_read` for `guide-workspace`',
   )
   expect(missingLine(absent)).toContain('not included, 16k chars')
-  expect(missingLine({ what: '3 more directives and facts', partial: true, chars: 0 })).toBe(
-    '3 more directives and facts cut short',
+  expect(missingLine({ what: '3 more directives and facts', partial: false, chars: 8000 })).toBe(
+    '3 more directives and facts not included, 8k chars',
   )
 })
 

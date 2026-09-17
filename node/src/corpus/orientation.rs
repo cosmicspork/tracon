@@ -10,7 +10,8 @@
 //!
 //! **Discretionary** is everything the node offers because it might help:
 //! shared conventions (documents of kind `guide` on the channel) and the other
-//! ready work on the project. It gets what is left of the cap, shortest first.
+//! ready work on the project. It gets what is left of the cap: guides shortest
+//! first, then ready work in ledger order.
 //!
 //! The cap exists because oversized context degrades the session it was meant
 //! to help. It used to be enforced by truncating the assembled text, which cut
@@ -18,7 +19,7 @@
 //! session told the conventions but not the job is worse off than one told
 //! neither, so the cap now binds the discretionary tier and nothing else.
 //!
-//! Whatever does not fit is *named*: which guide, how much of it is missing,
+//! Whatever does not fit is *named*: which piece, how much of it is missing,
 //! and the call that fetches the rest. A bare "trimmed" flag cannot be acted
 //! on, because the agent cannot tell whether the thing it needs was one of the
 //! things it did not get.
@@ -47,8 +48,9 @@ const REQUIREMENTS_CHARS: usize = 4_000;
 const KNOWN_CHARS: usize = 4_000;
 /// The channel's launch manifest, rendered.
 const CUSTOMIZATION_CHARS: usize = 6_000;
-/// Held back from the cap so that naming what was left out cannot itself be
-/// the thing that does not fit.
+/// Initial room held back from discretionary context for omission notices.
+/// The notice may exceed this so that it never hides one omission behind
+/// another generic truncation flag.
 const NOTICE_CHARS: usize = 1_500;
 
 pub struct Facts<'a> {
@@ -156,8 +158,8 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, Vec<M
     // Discretionary. Whatever the reserved tier left under the cap, minus the
     // room held back to name what does not fit.
     let left = CAP_CHARS.saturating_sub(out.len() + NOTICE_CHARS);
-    push_conventions(&mut out, store, facts, left, &mut missing);
-    push_ready(&mut out, facts);
+    let left = push_conventions(&mut out, store, facts, left, &mut missing);
+    push_ready(&mut out, facts, left, &mut missing);
 
     push_notice(&mut out, &missing);
     (out, missing)
@@ -337,6 +339,7 @@ fn push_known(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<
     out.push_str("## Known\n\n");
     let mut used = 0;
     let mut dropped = 0;
+    let mut dropped_chars = 0;
     for m in &known {
         let tag = if m.kind == "directive" {
             "directive"
@@ -344,20 +347,26 @@ fn push_known(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<
             "fact"
         };
         let line = format!("- ({tag}) {}\n", m.body.trim());
-        // A directive is the operator speaking. Whole ones, never a
-        // half-sentence that reverses what it was asking for.
-        if used + line.len() > KNOWN_CHARS && used > 0 {
+        // A directive is the operator speaking. Keep it whole or leave it
+        // out: a half-sentence can reverse what the operator asked for.
+        if used + line.len() > KNOWN_CHARS {
             dropped += 1;
+            dropped_chars += line.len();
             continue;
         }
         used += line.len();
         out.push_str(&line);
     }
     if dropped > 0 {
+        let noun = if dropped == 1 {
+            "directive or fact"
+        } else {
+            "directives and facts"
+        };
         missing.push(Missing {
-            what: format!("{dropped} more directives and facts"),
-            partial: true,
-            chars: 0,
+            what: format!("{dropped} more {noun}"),
+            partial: false,
+            chars: dropped_chars,
             fetch: Some("call `recall` for them".into()),
         });
     }
@@ -391,7 +400,7 @@ fn push_conventions(
     facts: &Facts,
     mut left: usize,
     missing: &mut Vec<Missing>,
-) {
+) -> usize {
     let mut guides: Vec<_> = store
         .doc_list(Some(facts.channel))
         .unwrap_or_default()
@@ -400,7 +409,7 @@ fn push_conventions(
         .filter_map(|d| store.doc_by_id(&d.id).ok().flatten())
         .collect();
     if guides.is_empty() {
-        return;
+        return left;
     }
     guides.sort_by_key(|d| d.body.len());
     let mut opened = false;
@@ -444,26 +453,60 @@ fn push_conventions(
         out.push_str("\n\n");
         left = left.saturating_sub(out.len() - before + heading.len());
     }
+    left
 }
 
 /// Background: what else is ready on this project, for `work_discover` deps.
-fn push_ready(out: &mut String, facts: &Facts) {
+/// It is discretionary too: keep complete entries inside the remaining
+/// budget and name the rest as one fetchable piece.
+fn push_ready(out: &mut String, facts: &Facts, mut left: usize, missing: &mut Vec<Missing>) {
     if facts.item.is_none() || facts.ready.is_empty() {
         return;
     }
-    out.push_str("## Ready work on this project\n\n");
-    for v in facts.ready.iter().take(10) {
-        out.push_str(&format!(
+    let heading = "## Ready work on this project\n\n";
+    let mut opened = false;
+    let mut included = 0;
+    let mut omitted = 0;
+    let mut omitted_chars = 0;
+    for v in facts.ready {
+        let line = format!(
             "- `{}…` {}\n",
             &v.item.id[..8.min(v.item.id.len())],
             v.item.title
-        ));
+        );
+        let header = if opened { 0 } else { heading.len() };
+        if included < 10 && header + line.len() < left {
+            if !opened {
+                out.push_str(heading);
+                left -= header;
+                opened = true;
+            }
+            left -= line.len();
+            out.push_str(&line);
+            included += 1;
+        } else {
+            omitted += 1;
+            omitted_chars += line.len();
+        }
     }
-    out.push('\n');
+    if opened {
+        out.push('\n');
+    }
+    if omitted > 0 {
+        let noun = if omitted == 1 { "item" } else { "items" };
+        missing.push(Missing {
+            what: format!("ready work on this project ({omitted} {noun})"),
+            partial: opened,
+            chars: omitted_chars,
+            fetch: Some("call `work_ready` for the full list".into()),
+        });
+    }
 }
 
-/// Name what did not fit. The session is owed this: it cannot ask for a
-/// document it does not know was withheld.
+/// Name everything that did not fit. The session is owed this: it cannot ask
+/// for a document it does not know was withheld. Notices may exceed their
+/// initial allowance rather than silently reducing named omissions to
+/// another generic flag.
 fn push_notice(out: &mut String, missing: &[Missing]) {
     if missing.is_empty() {
         return;
@@ -472,19 +515,8 @@ fn push_notice(out: &mut String, missing: &[Missing]) {
         "## Not in this orientation\n\nThe node's context cap kept the following out, not \
          policy. Ask for any of it you need:\n\n",
     );
-    let mut shown = 0;
-    let mut room = NOTICE_CHARS.saturating_sub(200);
     for m in missing {
-        let line = m.line();
-        if line.len() > room {
-            break;
-        }
-        room -= line.len();
-        out.push_str(&line);
-        shown += 1;
-    }
-    if shown < missing.len() {
-        out.push_str(&format!("- and {} more\n", missing.len() - shown));
+        out.push_str(&m.line());
     }
 }
 
@@ -500,7 +532,7 @@ fn floor_char(s: &str, at: usize) -> usize {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tracon_sync::ChangeOp;
+    use tracon_sync::{work::Readiness, ChangeOp};
 
     #[test]
     fn three_layers_and_the_known_in_order_under_the_cap() {
@@ -824,6 +856,116 @@ mod tests {
         );
         assert!(!missing.is_empty());
         assert!(text.find("## Customization") < text.find("## Conventions"));
+    }
+
+    #[test]
+    fn every_omission_is_named_even_when_the_notice_is_long() {
+        let store = Store::open_in_memory().unwrap();
+        guides(&store, 40, GUIDE_CHARS * 2);
+        let facts = Facts {
+            node_name: "n",
+            node_id: "id",
+            backend: "local",
+            harness: "fake",
+            harness_version: "1",
+            channel: "personal",
+            project_id: None,
+            project_name: None,
+            tools: &[],
+            worktree: "/work",
+            phase: "execute",
+            item: None,
+            plan_body: None,
+            ready: &[],
+            review: None,
+            manifest: &crate::manifest::LaunchManifest::default(),
+        };
+        let (text, missing) = assemble(&store, &Policy::default(), &facts);
+        assert!(missing.len() > 20, "{missing:?}");
+        for m in &missing {
+            assert!(text.contains(&m.what), "{} not named in:\n{text}", m.what);
+        }
+        assert!(!text.contains("- and "), "{text}");
+    }
+
+    #[test]
+    fn an_oversized_directive_does_not_break_the_known_bound() {
+        let store = Store::open_in_memory().unwrap();
+        for (id, body, created_ms) in [
+            ("large", "x".repeat(KNOWN_CHARS * 2), 2),
+            ("small", "keep this directive".into(), 1),
+        ] {
+            store
+                .write_change("n", "personal", "memory", ChangeOp::Upsert, id, json!({
+                    "channel": "personal", "scope": "global", "scope_ref": null, "kind": "directive",
+                    "body": body, "source_session": null, "source_node": null, "confidence": 1.0,
+                    "state": "active", "created_ms": created_ms, "updated_ms": created_ms}))
+                .unwrap();
+        }
+        let facts = Facts {
+            node_name: "n",
+            node_id: "id",
+            backend: "local",
+            harness: "fake",
+            harness_version: "1",
+            channel: "personal",
+            project_id: None,
+            project_name: None,
+            tools: &[],
+            worktree: "/work",
+            phase: "execute",
+            item: None,
+            plan_body: None,
+            ready: &[],
+            review: None,
+            manifest: &crate::manifest::LaunchManifest::default(),
+        };
+        let (text, missing) = assemble(&store, &Policy::default(), &facts);
+        assert!(!text.contains(&"x".repeat(KNOWN_CHARS)), "{text}");
+        assert!(text.contains("(directive) keep this directive"), "{text}");
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert!(!missing[0].partial, "{missing:?}");
+        assert!(missing[0].chars > KNOWN_CHARS, "{missing:?}");
+    }
+
+    #[test]
+    fn ready_work_stays_inside_the_discretionary_budget() {
+        let store = Store::open_in_memory().unwrap();
+        let current = item("Current item", "");
+        let ready_title = "r".repeat(CAP_CHARS * 2);
+        let ready = [WorkView {
+            item: WorkItem {
+                id: "ready001deadbeef".into(),
+                title: ready_title.clone(),
+                ..item("", "")
+            },
+            readiness: Readiness::Ready,
+            session_id: None,
+        }];
+        let facts = Facts {
+            node_name: "n",
+            node_id: "id",
+            backend: "local",
+            harness: "fake",
+            harness_version: "1",
+            channel: "personal",
+            project_id: None,
+            project_name: None,
+            tools: &[],
+            worktree: "/work",
+            phase: "execute",
+            item: Some(&current),
+            plan_body: None,
+            ready: &ready,
+            review: None,
+            manifest: &crate::manifest::LaunchManifest::default(),
+        };
+        let (text, missing) = assemble(&store, &Policy::default(), &facts);
+        assert!(!text.contains(&ready_title), "ready work bypassed the cap");
+        assert!(
+            missing.iter().any(|m| m.what.contains("ready work")),
+            "{missing:?}"
+        );
     }
 
     #[test]
