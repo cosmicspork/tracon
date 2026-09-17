@@ -32,6 +32,21 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.19.0](https://github.com/cosmicspork/tracon/compare/v0.18.0...v0.19.0) (2026-09-17)
+
+
+### Features
+
+* **attention:** count actionable decisions, and say what each request is for ([#239](https://github.com/cosmicspork/tracon/issues/239)) ([b60b87f](https://github.com/cosmicspork/tracon/commit/b60b87ff06aad411b2db6819916ee08ab3c180c6))
+* **authority:** let the gate explain itself, in the terms the task is in ([#240](https://github.com/cosmicspork/tracon/issues/240)) ([f9343bc](https://github.com/cosmicspork/tracon/commit/f9343bcc72132faca8bce19694ab847f6e4fba82))
+* **orientation:** reserve a session's context for its task before its guides ([#236](https://github.com/cosmicspork/tracon/issues/236)) ([47fb192](https://github.com/cosmicspork/tracon/commit/47fb192b20fd1bf8e74a5732049e90a4b4fa7c20))
+* **review:** bind every verdict to the revision the operator inspected ([#234](https://github.com/cosmicspork/tracon/issues/234)) ([3286f5b](https://github.com/cosmicspork/tracon/commit/3286f5b2fbaab832bef9b33e956b1959811d3772))
+
+
+### Bug Fixes
+
+* normalize managed harness permissions ([#238](https://github.com/cosmicspork/tracon/issues/238)) ([29c4134](https://github.com/cosmicspork/tracon/commit/29c413428683ceb30c2ac3efd2db966679e71cad))
+
 ## [0.18.0](https://github.com/cosmicspork/tracon/compare/v0.17.0...v0.18.0) (2026-09-15)
 
 
