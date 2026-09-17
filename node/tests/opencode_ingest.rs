@@ -15,7 +15,7 @@
 #[path = "support/mod.rs"]
 mod support;
 use support::events::{drain_until, DEADLINE};
-use support::fake_opencode::{start, Fake, HttpApi, PERMISSION, SESSION};
+use support::fake_opencode::{start, wait_for_reply, Fake, HttpApi, PERMISSION, SESSION};
 use support::state;
 
 use std::sync::Arc;
@@ -67,6 +67,7 @@ fn store_with_session(state: &str) -> Arc<Store> {
     let mut row = support::rows::session_row(SESSION_ID, "n1", "personal");
     row.harness_id = "opencode".into();
     row.harness_version = "1.18.30".into();
+    row.budget_tokens = 10_000;
     row.state = state.into();
     store.insert_session(&row).unwrap();
     store
@@ -123,6 +124,107 @@ async fn await_true(what: &str, mut check: impl FnMut() -> bool) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("{what} never happened before the deadline");
+}
+
+/// A pinned OpenCode v2 read ask, through the adapter's server-wide stream and
+/// the real supervisor policy path. The harness stays all-ask; the node is the
+/// component that exempts this one request and answers it `once`.
+#[tokio::test]
+async fn an_opencode_read_is_normalized_and_allowed_by_the_supervisor() {
+    state::isolate();
+    let store = store_with_session("starting");
+    let (tx, cmd_rx) = mpsc::channel(16);
+    let ingest = Ingest::new(
+        store.clone(),
+        Bus::new(),
+        "n1".into(),
+        SESSION_ID.into(),
+        Instant::now(),
+        tx.clone(),
+        NativeEvents::new(),
+    );
+    let (runner, seen) =
+        start(Fake::new("1.18.30", usize::MAX).permission("read", &["/work/src/lib.rs"])).await;
+    let (handle, mut adapter_events) = OpenCodeAdapter::new("1.18.30")
+        .launch(&runner, launch_spec(ingest.clone()))
+        .await
+        .unwrap();
+    // This proof is about the adapter's permission event, not whether an
+    // unrelated stream pump stays connected under a saturated test runner.
+    // Relay the exact event while keeping the supervisor's input alive.
+    let (permission_tx, permission_events) = mpsc::channel(1);
+    let _event_lifetime = permission_tx.clone();
+    tokio::spawn(async move {
+        while let Some(event) = adapter_events.recv().await {
+            if matches!(&event, HarnessEvent::Permission { .. }) {
+                let _ = permission_tx.send(event).await;
+                return;
+            }
+        }
+    });
+    let supervisor = Supervisor::new(
+        SESSION_ID.into(),
+        "n1".into(),
+        store.clone(),
+        Bus::new(),
+        Arc::from(handle),
+        Instant::now(),
+        Duration::from_secs(60),
+        tx.clone(),
+        Arc::new(NoRunner),
+        "tracon-h-test".into(),
+        tracon::policy::Policy::shipped_shared(),
+        "personal".into(),
+    )
+    .with_ingest(ingest);
+    tokio::spawn(supervisor.run(permission_events, cmd_rx));
+    let started = store.clone();
+    await_true("the session starts", move || {
+        started
+            .get_session(SESSION_ID)
+            .unwrap()
+            .is_some_and(|session| session.state == "running")
+    })
+    .await;
+
+    let (ack, admitted) = oneshot::channel();
+    tx.send(Command::Prompt {
+        text: "read the file".into(),
+        ack,
+    })
+    .await
+    .unwrap();
+    admitted.await.unwrap().unwrap();
+
+    let replies = wait_for_reply(&seen).await;
+    let diagnostics = store.events_after(SESSION_ID, 0, 500).unwrap();
+    assert_eq!(
+        replies[0]["body"]["reply"],
+        "once",
+        "{replies:?}; state={:?}; events={diagnostics:?}",
+        store.get_session(SESSION_ID).unwrap()
+    );
+    assert_ne!(replies[0]["body"]["reply"], "always");
+    assert!(
+        store.open_permissions().unwrap().is_empty(),
+        "a shipped read exemption interrupted the operator"
+    );
+    let allowed = diagnostics
+        .iter()
+        .find(|event| event.kind == "policy_allowed")
+        .expect("the node records its automatic decision");
+    assert_eq!(allowed.payload["action"], "read");
+    assert_eq!(allowed.payload["kind"], "read");
+    assert_eq!(allowed.payload["resource"], "/work/src/lib.rs");
+    assert_eq!(allowed.payload["command"], serde_json::Value::Null);
+    assert_eq!(allowed.payload["rule"], "reads-and-thoughts");
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|event| event.kind == "permission_request"),
+        "the read took a second path around the supervisor"
+    );
+    let _ = tx.send(Command::Kill).await;
 }
 
 /// A server that re-delivers everything on every connection — which the real
@@ -275,6 +377,10 @@ async fn a_permission_pending_upstream_is_reraised_after_a_reconnect() {
     };
     assert!(request.title.contains("bash"), "{}", request.title);
     assert_eq!(request.tool_call_id.as_deref(), Some("call_1"));
+    assert_eq!(request.action, "bash");
+    assert_eq!(request.kind.as_deref(), Some("execute"));
+    assert_eq!(request.resource, None);
+    assert_eq!(request.command.as_deref(), Some("just test"));
     assert_eq!(request.raw_input.unwrap()["reraised"], true);
     reply
         .send(PermissionReply::Selected("allow_once".into()))

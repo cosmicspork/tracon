@@ -107,7 +107,10 @@ async fn launch_prompt_permission_and_turn_result() {
     };
     // The queue renders this, so it has to say what would actually happen.
     assert_eq!(request.title, "Bash: git status");
-    assert_eq!(request.kind.as_deref(), Some("tool"));
+    assert_eq!(request.action, "bash");
+    assert_eq!(request.kind.as_deref(), Some("execute"));
+    assert_eq!(request.resource, None);
+    assert_eq!(request.command.as_deref(), Some("git status"));
     // Exactly the two option ids the supervisor and the policy layer assume.
     let ids: Vec<&str> = request
         .options

@@ -19,6 +19,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use parking_lot::Mutex as FastMutex;
 use serde_json::{json, Value};
 use tracon::adapter::{AdapterError, HarnessSnapshots, LaunchSpec};
 use tracon::runner::{Runner, RunnerCommand, RunnerError, Spawned};
@@ -101,6 +102,9 @@ pub struct Fake {
     reply_hangs: Arc<AtomicBool>,
     /// Whether the server-wide stream raises the scripted permission ask.
     asks: Arc<AtomicBool>,
+    /// The permission vocabulary emitted on the server-wide stream.
+    permission_action: Arc<FastMutex<String>>,
+    permission_resources: Arc<FastMutex<Vec<String>>>,
     /// Permission requests the harness reports as still pending.
     pending: Arc<Mutex<Vec<Value>>>,
     /// The messages the session snapshot holds.
@@ -134,6 +138,8 @@ impl Fake {
             prompt_times_out: Arc::new(AtomicBool::new(false)),
             reply_hangs: Arc::new(AtomicBool::new(false)),
             asks: Arc::new(AtomicBool::new(true)),
+            permission_action: Arc::new(FastMutex::new("bash".into())),
+            permission_resources: Arc::new(FastMutex::new(vec!["just test".into()])),
             pending: Arc::new(Mutex::new(Vec::new())),
             messages: Arc::new(Mutex::new(Vec::new())),
             live_tickets: Arc::new(Mutex::new(Vec::new())),
@@ -166,6 +172,16 @@ impl Fake {
     /// something other than the queue.
     pub fn never_asks(self) -> Self {
         self.asks.store(false, Ordering::SeqCst);
+        self
+    }
+
+    /// Emit one permission with the exact v2 shape OpenCode uses.
+    pub fn permission(self, action: &str, resources: &[&str]) -> Self {
+        *self.permission_action.lock() = action.to_string();
+        *self.permission_resources.lock() = resources
+            .iter()
+            .map(|resource| resource.to_string())
+            .collect();
         self
     }
 
@@ -790,14 +806,16 @@ async fn server_stream(State(fake): State<Fake>, headers: HeaderMap) -> Response
                 && fake.prompted.load(Ordering::SeqCst) > 0
             {
                 asked = true;
+                let action = fake.permission_action.lock().clone();
+                let resources = fake.permission_resources.lock().clone();
                 let event = json!({
                     "id": "evt_perm",
                     "type": "permission.v2.asked",
                     "data": {
                         "id": PERMISSION,
                         "sessionID": SESSION,
-                        "action": "bash",
-                        "resources": ["just test"],
+                        "action": action,
+                        "resources": resources,
                         "source": { "type": "tool", "messageID": "msg_1", "callID": "call_1" },
                     },
                 });

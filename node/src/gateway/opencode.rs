@@ -1402,8 +1402,9 @@ async fn mediate(
                 let policy = s.manager.policy().read();
                 policy.decide(&PolicyRequest {
                     channel,
+                    action,
                     kind: Some(API_KIND),
-                    title: action,
+                    resource: None,
                     command: None,
                     arguments: None,
                 })

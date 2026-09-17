@@ -12,6 +12,7 @@
 //! and stops rather than looking for another way round.
 
 pub mod bundle;
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
@@ -86,16 +87,15 @@ impl Rule {
     /// shell chaining, redirection, or substitution, whose leading token is one
     /// of the patterns.
     fn allows(&self, req: &Request) -> bool {
-        // A brokered tool call is allowed by its name, exactly: its arguments
-        // are not a shell line and carry no chaining to guard against. The
-        // guard that matters for a tool is the tool's own (the SQL guard, the
-        // review capture), which runs after policy says yes.
+        // Brokered tools and scoped authority are named actions with typed
+        // arguments. Their display titles are deliberately not policy input:
+        // changing UI prose must never widen or narrow authority.
         if req.kind == Some(crate::mcp::TOOL_KIND) || req.kind == Some("authority") {
             let named = self.matches.is_empty()
                 || self
                     .matches
                     .iter()
-                    .any(|pat| pat.trim().eq_ignore_ascii_case(req.title.trim()));
+                    .any(|pat| pat.trim().eq_ignore_ascii_case(req.action.trim()));
             return named
                 && self.args.iter().all(|(key, globs)| {
                     req.arguments
@@ -104,7 +104,10 @@ impl Rule {
                         .is_some_and(|v| globs.iter().any(|g| glob(g, v)))
                 });
         }
-        let cmd = req.command.unwrap_or(req.title).trim().to_ascii_lowercase();
+        let Some(command) = req.command else {
+            return false;
+        };
+        let cmd = command.trim().to_ascii_lowercase();
         // A shell metacharacter means the line does more than its leading token
         // says; such a command is asked, not auto-allowed.
         if cmd.contains(['&', '|', ';', '`', '>', '<', '$', '\n', '\r']) {
@@ -136,12 +139,17 @@ fn glob(pattern: &str, value: &str) -> bool {
     true
 }
 
-/// What is being asked for.
+/// The canonical subject policy decides. Human-facing titles are absent on
+/// purpose: adapters may improve their prose without changing authority.
 pub struct Request<'a> {
     pub channel: &'a str,
+    /// Exact adapter-normalized action (`read`, `bash`, `doc_read`).
+    pub action: &'a str,
+    /// Semantic class used by broad rules (`read`, `execute`, `tool`).
     pub kind: Option<&'a str>,
-    pub title: &'a str,
-    /// The command, when the tool has one.
+    /// The resource an action addresses, when it is not a command.
+    pub resource: Option<&'a str>,
+    /// The exact command for an execution action.
     pub command: Option<&'a str>,
     /// A brokered tool call's arguments, for allow rules scoped by them.
     pub arguments: Option<&'a serde_json::Value>,
@@ -149,7 +157,34 @@ pub struct Request<'a> {
 
 impl Request<'_> {
     fn haystack(&self) -> String {
-        format!("{} {}", self.title, self.command.unwrap_or_default()).to_ascii_lowercase()
+        let mut arguments = self
+            .arguments
+            .map(serde_json::Value::to_string)
+            .unwrap_or_default();
+        if let Some(fields) = self.arguments.and_then(serde_json::Value::as_object) {
+            for (key, value) in fields {
+                match value {
+                    serde_json::Value::String(value) => {
+                        let _ = write!(arguments, " {key}={value}");
+                    }
+                    serde_json::Value::Number(value) => {
+                        let _ = write!(arguments, " {key}={value}");
+                    }
+                    serde_json::Value::Bool(value) => {
+                        let _ = write!(arguments, " {key}={value}");
+                    }
+                    _ => {}
+                }
+            }
+        }
+        format!(
+            "{} {} {} {}",
+            self.action,
+            self.resource.unwrap_or_default(),
+            self.command.unwrap_or_default(),
+            arguments
+        )
+        .to_ascii_lowercase()
     }
 }
 
@@ -248,19 +283,21 @@ mod tests {
     fn req<'a>(command: &'a str, channel: &'a str) -> Request<'a> {
         Request {
             channel,
+            action: "bash",
             kind: Some("execute"),
-            title: command,
+            resource: None,
             command: Some(command),
             arguments: None,
         }
     }
 
-    fn tool<'a>(name: &'a str, args: &'a serde_json::Value, summary: &'a str) -> Request<'a> {
+    fn tool<'a>(name: &'a str, args: &'a serde_json::Value, _summary: &'a str) -> Request<'a> {
         Request {
             channel: "work",
+            action: name,
             kind: Some(crate::mcp::TOOL_KIND),
-            title: name,
-            command: Some(summary),
+            resource: None,
+            command: None,
             arguments: Some(args),
         }
     }
@@ -404,6 +441,7 @@ mod tests {
                 "{cmd}"
             );
         }
+
         // A bare read is still auto-allowed, and a token that is only a prefix of
         // a longer word does not match.
         assert_eq!(
@@ -414,6 +452,26 @@ mod tests {
             policy().decide(&req("catnip --sniff", "work")).verdict,
             Verdict::Ask
         );
+    }
+    #[test]
+    fn unknown_managed_actions_are_asked_or_explicitly_denied() {
+        let benign = Request {
+            channel: "work",
+            action: "future_capability",
+            kind: None,
+            resource: Some("/work/file"),
+            command: None,
+            arguments: None,
+        };
+        assert_eq!(policy().decide(&benign).verdict, Verdict::Ask);
+
+        let dangerous = Request {
+            resource: Some("git push origin main"),
+            ..benign
+        };
+        let decision = policy().decide(&dangerous);
+        assert_eq!(decision.verdict, Verdict::Deny);
+        assert_eq!(decision.rule_id.as_deref(), Some("review-before-publish"));
     }
 
     #[test]
@@ -494,16 +552,18 @@ mod tests {
         .unwrap();
         let read = Request {
             channel: "work",
+            action: "read",
             kind: Some("read"),
-            title: "x",
+            resource: Some("/work/x"),
             command: None,
             arguments: None,
         };
         let exec = Request {
             channel: "work",
+            action: "bash",
             kind: Some("execute"),
-            title: "x",
-            command: None,
+            resource: None,
+            command: Some("x"),
             arguments: None,
         };
         assert_eq!(p.decide(&read).verdict, Verdict::Allow);

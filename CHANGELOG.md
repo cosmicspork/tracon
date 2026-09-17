@@ -24,6 +24,7 @@
 
 ### Bug Fixes
 
+* **permissions:** normalize managed-harness requests before applying read exemptions
 * **mesh:** carry the authenticated work-item change with peer compose requests so session creation cannot race work-item replication
 * **review:** reject cross-owner/channel report mirrors, stale decisions, and invalid review-session context; bind remote evidence reads to the actual owner and shared channel
 * **models:** filter channel choices by the connected provider that owns each model, including legacy peers without provider-scope metadata

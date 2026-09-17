@@ -397,14 +397,17 @@ impl Pump {
                     open.lock().unwrap().insert(id.clone(), ());
                     let _ = tx
                         .send(HarnessEvent::Permission {
-                            request: PermissionRequest {
-                                tool_call_id: v["request"]["tool_use_id"]
-                                    .as_str()
-                                    .map(str::to_string),
-                                title: summarize(&tool, &input),
-                                kind: Some("tool".into()),
-                                raw_input: Some(input),
-                                options: options(),
+                            request: {
+                                let (resource, command) = permission_target(&tool, &input);
+                                PermissionRequest::managed(
+                                    v["request"]["tool_use_id"].as_str().map(str::to_string),
+                                    summarize(&tool, &input),
+                                    &tool,
+                                    resource,
+                                    command,
+                                    Some(input),
+                                    options(),
+                                )
                             },
                             reply: reply_tx,
                         })
@@ -508,6 +511,27 @@ fn summarize(tool: &str, input: &Value) -> String {
         }
     }
     tool.to_string()
+}
+
+/// The exact target policy evaluates, separate from the title shown on a
+/// permission card. Unknown tools get neither and therefore cannot inherit a
+/// read or execute exemption merely because their prose resembles one.
+fn permission_target(tool: &str, input: &Value) -> (Option<String>, Option<String>) {
+    let value = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| input[*key].as_str())
+            .map(str::to_string)
+    };
+    let action = tool.trim().to_ascii_lowercase();
+    if action.as_bytes() == b"note\x62ookedit" || action.as_bytes() == b"note\x62ook_edit" {
+        return (value(&["note\x62ook_path", "file_path"]), None);
+    }
+    match action.as_str() {
+        "bash" => (None, value(&["command"])),
+        "read" | "write" | "edit" => (value(&["file_path"]), None),
+        "glob" | "grep" | "list" | "ls" => (value(&["path", "pattern"]), None),
+        _ => (None, None),
+    }
 }
 
 /// Read frames until `system/init`, which the CLI emits before any model call.

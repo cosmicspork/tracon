@@ -62,6 +62,10 @@ async fn a_prompt_yields_message_tool_and_usage_events() {
     };
     assert_eq!(request.title, "bash: just test");
     assert_eq!(request.tool_call_id.as_deref(), Some("call_1"));
+    assert_eq!(request.action, "bash");
+    assert_eq!(request.kind.as_deref(), Some("execute"));
+    assert_eq!(request.resource, None);
+    assert_eq!(request.command.as_deref(), Some("just test"));
     reply
         .send(PermissionReply::Selected("allow_once".into()))
         .unwrap();
