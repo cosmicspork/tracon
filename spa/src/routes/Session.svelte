@@ -2,6 +2,7 @@
   import Log from '../components/Log.svelte'
   import OperatorQuestionCard from '../components/OperatorQuestionCard.svelte'
   import PermissionCard from '../components/PermissionCard.svelte'
+  import SessionAuthorityPanel from '../components/SessionAuthorityPanel.svelte'
   import TransferExport from '../components/TransferExport.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
@@ -11,6 +12,7 @@
   import { humanizeError } from '../lib/errors'
   import { formatAge, formatBudget, formatTokens } from '../lib/format'
   import { repetitionHint } from '../lib/log'
+  import { router } from '../lib/router.svelte'
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
   import {
     isTerminal,
@@ -419,6 +421,10 @@
   {#each waiting as p (p.id)}
     <PermissionCard permission={p} inline />
   {/each}
+
+  <!-- Opened by the "why is this asked" link on a permission card, so the
+       answer is one tap from the request rather than a screen away. -->
+  <SessionAuthorityPanel {id} open={router.hash === '#authority'} />
 
   {#if error}
     <div class="banner crit">refused <b>· {error}</b></div>

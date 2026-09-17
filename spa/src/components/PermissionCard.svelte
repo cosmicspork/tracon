@@ -82,7 +82,8 @@
     <small class="intent"
       >{intent} · <a href="/sessions/{permission.session_id}">open the session</a
       >{#if permission.intent?.work_item_id}
-        · <a href="/work/{permission.intent.work_item_id}">the work item</a>{/if}</small
+        · <a href="/work/{permission.intent.work_item_id}">the work item</a>{/if} ·
+      <a href="/sessions/{permission.session_id}#authority">why this is asked</a></small
     >
   </span>
   <span class="act">

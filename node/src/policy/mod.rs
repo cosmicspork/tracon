@@ -83,6 +83,23 @@ impl Rule {
         }
     }
 
+    /// Whether this rule names the request's action, ignoring its arguments.
+    /// Used only to explain an Ask: the rule that would allow the action if
+    /// its arguments were in scope. It never decides anything.
+    fn names(&self, req: &Request) -> bool {
+        if !self.channels.is_empty() && !self.channels.iter().any(|c| c == req.channel) {
+            return false;
+        }
+        if !self.kinds.is_empty() && !self.kinds.iter().any(|k| Some(k.as_str()) == req.kind) {
+            return false;
+        }
+        self.matches.is_empty()
+            || self
+                .matches
+                .iter()
+                .any(|pat| pat.trim().eq_ignore_ascii_case(req.action.trim()))
+    }
+
     /// Whether this allow rule covers the request: a single command, with no
     /// shell chaining, redirection, or substitution, whose leading token is one
     /// of the patterns.
@@ -251,6 +268,86 @@ impl Policy {
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
+
+    /// What the node would answer for this request right now, and the narrower
+    /// allows that would change that answer.
+    ///
+    /// `decide` is called rather than reimplemented. An explanation assembled
+    /// from a second reading of the rules is a second policy, and the two
+    /// drift: the operator would be told what a parallel model believes the
+    /// gate does, which is exactly the claim that cannot be checked when it
+    /// matters. What is added here is only what a verdict alone cannot carry —
+    /// that `doc_write` is asked in general but unattended for a working
+    /// note — and that comes from the same rules, named so the operator can
+    /// go and read them.
+    pub fn explain(&self, req: &Request) -> Standing {
+        let decision = self.decide(req);
+        // Only an Ask has a narrower answer to report. An allow is already the
+        // whole answer, and a denial is not softened by a scope elsewhere:
+        // deny wins over allow whatever the rule order.
+        let scoped = if decision.verdict == Verdict::Ask {
+            self.rules
+                .iter()
+                .filter(|rule| rule.verdict == Verdict::Allow && !rule.args.is_empty())
+                .filter(|rule| rule.names(req))
+                .map(|rule| ScopedAllow {
+                    rule_id: rule.id.clone(),
+                    reason: rule.reason.clone(),
+                    args: rule.args.clone(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Standing {
+            verdict: decision.verdict,
+            rule_id: decision.rule_id,
+            reason: decision.reason,
+            scoped,
+        }
+    }
+
+    /// Every allow rule that auto-approves a command outright, as the patterns
+    /// it names. This is what "unattended" means for execution, and it is the
+    /// bundle's own list rather than a description of it.
+    pub fn unattended_commands(&self, channel: &str) -> Vec<UnattendedCommands> {
+        self.rules
+            .iter()
+            .filter(|rule| rule.verdict == Verdict::Allow && rule.args.is_empty())
+            .filter(|rule| rule.kinds.iter().any(|kind| kind == "execute"))
+            .filter(|rule| rule.channels.is_empty() || rule.channels.iter().any(|c| c == channel))
+            .map(|rule| UnattendedCommands {
+                rule_id: rule.id.clone(),
+                reason: rule.reason.clone(),
+                commands: rule.matches.clone(),
+            })
+            .collect()
+    }
+}
+
+/// One action's standing under the rules as they are now.
+#[derive(Debug, Clone, Serialize)]
+pub struct Standing {
+    pub verdict: Verdict,
+    pub rule_id: Option<String>,
+    pub reason: Option<String>,
+    /// Allow rules that name this action but are scoped by their arguments: it
+    /// is asked, unless the arguments match one of these.
+    pub scoped: Vec<ScopedAllow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopedAllow {
+    pub rule_id: String,
+    pub reason: String,
+    pub args: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UnattendedCommands {
+    pub rule_id: String,
+    pub reason: String,
+    pub commands: Vec<String>,
 }
 
 /// The five working agreements, as the node would enforce them. Shipped as the

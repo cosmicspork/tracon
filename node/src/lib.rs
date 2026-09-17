@@ -9,6 +9,7 @@ pub mod config;
 pub mod corpus;
 pub mod embed;
 pub mod environment;
+pub mod explain;
 pub mod forge;
 pub mod gateway;
 pub mod git_remote;

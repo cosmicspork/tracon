@@ -28,10 +28,12 @@ reference documents under `docs/reference/` carry the history.
 
 ## Planned
 
-Delivery order: fix trust and attention defects; prove one loop from customer context to
-accepted outcome; strengthen reliability and portable ownership; then invest in richer diff
-reading and optional automation. Pull forward infrastructure fixes needed by that real
-workflow, rather than waiting for every platform or integration to be complete.
+Delivery order: prove one loop from customer context to accepted outcome; strengthen
+reliability and portable ownership; then invest in richer diff reading and optional
+automation. Pull forward infrastructure fixes needed by that real workflow, rather than
+waiting for every platform or integration to be complete. The trust and attention
+defects that came first are done: the attention count is actionable decisions, and a
+session's authority is explained by the gate that enforces it.
 
 Build on the existing ledger, documents, workspace snapshots, evidence, scoped grants
 and launch manifests. Do not replace the store or introduce another agent loop. These
@@ -39,13 +41,7 @@ are intended changes, including a future revision of the diff-first design princ
 not additional guarantees of the current release. Live validation of existing features
 remains separately tracked under [Live proofs still the operator's](#live-proofs-still-the-operators).
 
-### 1. Trust and attention
-
-- [ ] Explain authority in task terms: node, harness, image, effective access, grants,
-      limits and what still needs approval, derived from current policy, not a parallel
-      model. Reduce low-value interruptions without broadening external-write authority.
-
-### 2. One complete product loop
+### 1. One complete product loop
 
 The first product slice is one real user problem carried through implementation,
 an evaluable candidate, specific feedback, a revised attempt and explicit acceptance.
@@ -173,7 +169,7 @@ item; broader export and cross-node commitments remain below.
       obvious continuation path. Only the later explicit acceptance counts as acceptance.
       Reuse the private-repository and live-QA proofs below; fixtures are not substitutes.
 
-### 3. Reliability and portable ownership
+### 2. Reliability and portable ownership
 
 Fix prerequisites for the product loop as they arise. Broader platform parity and
 cross-node transfer follow the first proven loop, not the other way around.
@@ -264,7 +260,7 @@ working files a session accumulates outside the workspace.
       duplicate import, dirty workspace and incompatible harness state, with one active
       owner and no budget reset.
 
-### 4. Richer review and optional automation
+### 3. Richer review and optional automation
 
 These commitments remain, but follow a working product-evaluation loop. More agent
 coordination or richer code rendering is not a substitute for better product judgment.

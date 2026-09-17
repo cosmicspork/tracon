@@ -278,6 +278,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/unarchive", post(api::unarchive_session))
         .route("/api/sessions/{id}", get(api::get_session))
         .route("/api/sessions/{id}/events", get(api::session_events))
+        .route("/api/sessions/{id}/authority", get(api::session_authority))
         .route("/api/sessions/{id}/prompt", post(api::prompt))
         .route("/api/sessions/{id}/kill", post(api::kill))
         .route("/api/sessions/{id}/pause", post(api::pause))

@@ -29,6 +29,7 @@ import type {
   Queue,
   RecallHit,
   RecentRepo,
+  SessionAuthority,
   Session,
   SessionUsage,
   ReviewDetails,
@@ -185,6 +186,10 @@ export const api = {
       ceiling: Ceiling
       toolchain: ToolchainStatus | null
     }>('GET', `/api/sessions/${id}`),
+  /** What this session may do, and what it would still have to ask about.
+      Read-only: the node answers it by running its own policy and grants. */
+  sessionAuthority: (id: string) =>
+    call<SessionAuthority>('GET', `/api/sessions/${id}/authority`),
   /** Mint a single-use capability for this session's OpenCode view. The URL
       that comes back carries it in a fragment and belongs in exactly one
       place: an iframe's `src`, or the desktop window. Never log it. */

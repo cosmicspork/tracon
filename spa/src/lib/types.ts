@@ -526,6 +526,73 @@ export type Readiness = { state: 'ready' } | { state: 'blocked'; by: Blocker[] }
 /** The ledger view: the item, its derived readiness, and the session holding it. */
 export type WorkView = WorkItem & { readiness: Readiness; session_id: string | null }
 
+/** One allow rule that would cover an action if its arguments were in scope. */
+export interface ScopedAllow {
+  rule_id: string
+  reason: string
+  args: Record<string, string[]>
+}
+
+/** Commands the bundle auto-approves, as the rule that approves them names them. */
+export interface UnattendedCommands {
+  rule_id: string
+  reason: string
+  commands: string[]
+}
+
+/** One named action and what the node would answer for it right now. */
+export interface ActionStanding {
+  name: string
+  /** `tool`, `authority` or `capability`. */
+  surface: string
+  verdict: 'allow' | 'deny' | 'ask'
+  rule_id: string | null
+  reason: string | null
+  /** Present on an `ask`: the narrower allows that would cover it. */
+  scoped: ScopedAllow[]
+  /** Authority actions only. */
+  grants?: AuthorityGrant[]
+}
+
+/**
+ * What a session may do, from `/api/sessions/{id}/authority`. Every verdict is
+ * produced by the functions that decide the real call, so this is the gate
+ * answering about itself rather than a description kept beside it.
+ */
+export interface SessionAuthority {
+  session_id: string
+  channel: string
+  node: {
+    id: string
+    name: string | null
+    is_self: boolean
+    reachable: boolean
+    isolation: string | null
+    failed_check: string | null
+    failed_detail: string | null
+  }
+  harness: { id: string; expected: string; found: string | null; agent: string | null; protocol: string | null }
+  image: { runtime: string; execution: string; manifest_digest: string | null }
+  access: {
+    credentials: string[]
+    egress: string[]
+    workspace: string
+    repo: string
+    branch: string
+    external_broker: boolean
+  }
+  limits: {
+    budget_tokens: number
+    tokens_used: number
+    permission_timeout_secs: number
+    ceiling: CeilingInfo
+  }
+  policy: { version: number; trusted: boolean; rules: number }
+  actions: ActionStanding[]
+  unattended_commands: UnattendedCommands[]
+  grants: AuthorityGrant[]
+}
+
 export interface CeilingInfo {
   usage_today: number
   ceiling: number | null
