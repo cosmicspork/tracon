@@ -16,6 +16,7 @@
   import Enroll from './routes/Enroll.svelte'
   import Login from './routes/Login.svelte'
   import Qa from './routes/Qa.svelte'
+  import { attention } from './lib/attention'
   import { stashToken, tokenFromHash } from './lib/auth'
   import { shellSessionId } from './lib/opencode'
   import { clock } from './lib/clock.svelte'
@@ -55,8 +56,20 @@
     }
   }
 
+  // Actionable human decisions only. A review the agent is revising and a
+  // publication in flight are still on the home, in their own lanes; counting
+  // them here would make the badge a number nobody can act on.
   const waiting = $derived(
-    store.queue.waiting.length + store.queue.reviews.length + (store.queue.promotions?.length ?? 0),
+    attention({
+      questions: store.questions,
+      permissions: store.queue.waiting,
+      reviews: store.queue.reviews,
+      issues: store.issues,
+      promotions: store.queue.promotions,
+      nodes: store.nodes,
+      mesh: store.mesh,
+      now: clock.now,
+    }).count,
   )
   const sessionId = $derived(router.path.match(/^\/sessions\/([^/]+)/)?.[1] ?? null)
   /** OpenCode's own view, hosted here rather than handed to the system

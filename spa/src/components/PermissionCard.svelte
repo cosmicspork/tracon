@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api'
+  import { intentLabel } from '../lib/attention'
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
@@ -17,6 +18,13 @@
   const fields = $derived(editableFields(permission))
   const owner = $derived(nodeById(store.nodes, permission.node_id))
   const held = $derived(unreachableReason(store.nodes, store.mesh, permission.node_id))
+  // What the session was started to do. Answering "may I run this" without it
+  // means opening the session to find out, which is most of the interruption.
+  const intent = $derived(intentLabel(permission))
+  // An unanswered request is denied when it expires: that is the contract the
+  // node keeps, and once it has lapsed there is no decision left to offer.
+  // Leaving the buttons live would let a deferral be recorded as consent.
+  const lapsed = $derived(permission.expires_ms <= clock.now)
   const request = $derived.by(() => {
     if (!permission.raw_input) return null
     try {
@@ -55,7 +63,7 @@
   }
 </script>
 
-<div class="card" class:inline class:held={held !== null}>
+<div class="card" class:inline class:held={held !== null || lapsed}>
   <span class="bar"></span>
   {#if !inline}
     <span class="mono head">{formatAge(permission.created_ms, clock.now)}</span>
@@ -64,15 +72,24 @@
     <em>Permission</em>
     {permission.title}
     <small
-      ><span class="chip" class:self={owner?.is_self} class:off={held !== null}>{chipLabel(store.nodes, permission.node_id)}</span> · {permission.kind ?? 'tool'} · {formatExpiry(permission.expires_ms, clock.now)}{command &&
+      ><span class="chip" class:self={owner?.is_self} class:off={held !== null}>{chipLabel(store.nodes, permission.node_id)}</span> · {permission.kind ?? 'tool'} · {lapsed
+        ? 'expired · denied by default'
+        : formatExpiry(permission.expires_ms, clock.now)}{command &&
       command !== permission.title
         ? ` · ${command}`
         : ''}{error ? ` · ${error}` : ''}</small
+    >
+    <small class="intent"
+      >{intent} · <a href="/sessions/{permission.session_id}">open the session</a
+      >{#if permission.intent?.work_item_id}
+        · <a href="/work/{permission.intent.work_item_id}">the work item</a>{/if}</small
     >
   </span>
   <span class="act">
     {#if held !== null}
       <span class="why">{held} · cannot be decided until it returns</span>
+    {:else if lapsed}
+      <span class="why">denied by default · the session was not made to wait</span>
     {:else}
       {#each options.filter((o) => o.kind === 'reject_once') as o (o.option_id)}
         <button class="lnk d" disabled={busy} onclick={() => answer(o.option_id)}
@@ -86,7 +103,7 @@
       {/each}
     {/if}
   </span>
-  {#if fields.length && held === null}
+  {#if fields.length && held === null && !lapsed}
     <div class="fields">
       {#each fields as f (f.key)}
         <label>
@@ -209,6 +226,14 @@
     overflow: hidden;
     text-overflow: ellipsis;
     margin-top: 2px;
+  }
+  /* What the session is for, and the way into it. A request answered without
+     this is answered blind. */
+  .t small.intent {
+    font-size: 11.5px;
+  }
+  .t small.intent a {
+    color: var(--acc);
   }
   .act {
     display: flex;

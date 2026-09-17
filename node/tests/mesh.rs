@@ -284,7 +284,7 @@ async fn queue_frames_expire_answered_requests_and_snapshots_close_lost_sessions
     };
     a.store.insert_permission(&perm).unwrap();
     a.client.on_frame(&Frame::Queue {
-        waiting: vec![perm.clone()],
+        waiting: vec![perm.clone().into()],
     });
     a.client.drain_once().await.unwrap();
     b.client.pull_once().await.unwrap();

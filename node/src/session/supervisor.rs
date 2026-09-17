@@ -303,7 +303,7 @@ impl Supervisor {
     }
 
     fn publish_queue(&self) {
-        if let Ok(open) = self.store.open_permissions() {
+        if let Ok(open) = self.store.open_permission_views() {
             self.bus.publish(Frame::Queue { waiting: open });
         }
     }

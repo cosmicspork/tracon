@@ -14,32 +14,41 @@
   import SessionRow from '../components/SessionRow.svelte'
   import SetupCard from '../components/SetupCard.svelte'
   import { api } from '../lib/api'
+  import { attention, type Thread } from '../lib/attention'
   import { defaultChannel, rememberedChannel } from '../lib/channel'
+  import { clock } from '../lib/clock.svelte'
   import { eligibleNodes, modelsForChannel } from '../lib/nodes'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
-  import type { OperatorIssue, OperatorQuestion, Session, WorkView } from '../lib/types'
+  import type { Session, WorkView } from '../lib/types'
 
-  const waiting = $derived(store.queue.waiting)
-  const reviews = $derived(store.queue.reviews)
-  const promotions = $derived(store.queue.promotions ?? [])
   const running = $derived(store.queue.running)
   // The home shows what landed lately; the whole history has its own screen.
   const landed = $derived(store.queue.ended.slice(0, 6))
-  let questions = $state<OperatorQuestion[]>([])
-  let issues = $state<OperatorIssue[]>([])
+  // One classification for the whole page, and the same one the rail counts.
+  // Everything waiting is here; the lanes say who it is waiting on.
+  const bay = $derived(
+    attention({
+      questions: store.questions,
+      permissions: store.queue.waiting,
+      reviews: store.queue.reviews,
+      issues: store.issues,
+      promotions: store.queue.promotions,
+      nodes: store.nodes,
+      mesh: store.mesh,
+      now: clock.now,
+    }),
+  )
+  const refreshInterventions = () => void store.refreshInterventions()
   let notifications = $state<{ notification_id: string; attempts: { device_id: string; outcome: string }[] }[]>([])
-  async function refreshInterventions() {
-    const [questionResult, issueResult, notificationResult] = await Promise.allSettled([
-      api.operatorQuestions(), api.operatorIssues(), api.operatorNotifications(),
-    ])
-    if (questionResult.status === 'fulfilled') questions = questionResult.value.questions
-    if (issueResult.status === 'fulfilled') issues = issueResult.value.issues
-    if (notificationResult.status === 'fulfilled') notifications = notificationResult.value.notifications
-  }
   onMount(() => {
-    void refreshInterventions()
-    const timer = setInterval(() => void refreshInterventions(), 2000)
+    const refresh = () =>
+      api
+        .operatorNotifications()
+        .then((d) => (notifications = d.notifications))
+        .catch(() => {})
+    void refresh()
+    const timer = setInterval(refresh, 5000)
     return () => clearInterval(timer)
   })
   // A browser can control a ready peer without configuring a local model.
@@ -147,28 +156,37 @@
   <SetupCard />
 {/if}
 
-{#if questions.length || waiting.length || reviews.length || promotions.length || issues.some((issue) => issue.state !== 'published')}
-  <div class="h4">
-    Waiting on you <b>{questions.length + waiting.length + reviews.length + promotions.length + issues.filter((issue) => issue.state !== 'published').length} · questions and requests before reviews · oldest first</b>
-  </div>
-  <div class="rows">
-    {#each questions as question (question.id)}
-      <OperatorQuestionCard {question} done={refreshInterventions} />
-    {/each}
-    {#each waiting as p (p.id)}
-      <PermissionCard permission={p} />
-    {/each}
-    {#each reviews as r (r.id)}
-      <ReviewCard review={r} />
-    {/each}
-    {#each issues.filter((issue) => issue.state !== 'published') as issue (issue.id)}
-      <OperatorIssueCard {issue} done={refreshInterventions} />
-    {/each}
-    {#each promotions as p (p.id)}
-      <PromotionCard promotion={p} />
-    {/each}
-  </div>
-{/if}
+{#snippet card(thread: Thread)}
+  {#if thread.kind === 'question'}
+    <OperatorQuestionCard question={thread.question} done={refreshInterventions} />
+  {:else if thread.kind === 'permission'}
+    <PermissionCard permission={thread.permission} />
+  {:else if thread.kind === 'review'}
+    <ReviewCard review={thread.review} />
+  {:else if thread.kind === 'issue'}
+    <OperatorIssueCard issue={thread.issue} done={refreshInterventions} />
+  {:else}
+    <PromotionCard promotion={thread.promotion} />
+  {/if}
+{/snippet}
+
+{#snippet lane(threads: Thread[], heading: string, note: string)}
+  {#if threads.length}
+    <div class="h4">{heading} <b>{threads.length} · {note}</b></div>
+    <div class="rows">
+      {#each threads as thread (thread.key)}
+        <div class="thread">
+          {#if thread.reason}<span class="why">{thread.reason}</span>{/if}
+          {@render card(thread)}
+        </div>
+      {/each}
+    </div>
+  {/if}
+{/snippet}
+
+{@render lane(bay.decisions, 'Waiting on you', 'questions and requests before reviews · oldest first')}
+{@render lane(bay.agent, 'With the agent', 'nothing to decide until it comes back')}
+{@render lane(bay.external, 'Outside this node', 'in flight, or waiting on something to return')}
 
 {#if notifications.length}
   <details class="deliveries">
@@ -209,6 +227,17 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+  /* A thread off the decision lane keeps its card and says why it is there;
+     nothing is hidden to make the count smaller. */
+  .thread {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .thread .why {
+    font: 11.5px var(--mono);
+    color: var(--dim);
   }
   .h4 .r {
     margin-left: auto;

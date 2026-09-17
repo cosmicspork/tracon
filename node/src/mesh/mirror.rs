@@ -284,7 +284,7 @@ impl Mirror {
     }
 
     fn publish_queue(&self) {
-        if let Ok(waiting) = self.store.open_permissions() {
+        if let Ok(waiting) = self.store.open_permission_views() {
             self.bus.publish_untapped(Frame::Queue { waiting });
         }
         if let Ok(reviews) = self.store.open_reviews() {

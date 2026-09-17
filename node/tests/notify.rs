@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use tracon::{
     config::Config,
     notify::{webpush, Options},
-    store::{now_ms, PermissionRow, PushSubscriptionRow, ReviewRow, Store},
+    store::{now_ms, PermissionRow, PermissionView, PushSubscriptionRow, ReviewRow, Store},
     stream::{Bus, Frame},
 };
 
@@ -192,7 +192,7 @@ fn session(store: &Store, id: &str) {
     store.insert_session(&r).unwrap();
 }
 
-fn permission(id: &str) -> PermissionRow {
+fn permission(id: &str) -> PermissionView {
     PermissionRow {
         id: id.into(),
         session_id: "s1".into(),
@@ -210,6 +210,7 @@ fn permission(id: &str) -> PermissionRow {
         resolved_mono_ms: None,
         expires_ms: now_ms() + 60_000,
     }
+    .into()
 }
 
 fn review(id: &str, state: &str) -> ReviewRow {

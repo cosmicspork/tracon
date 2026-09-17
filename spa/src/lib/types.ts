@@ -264,6 +264,19 @@ export interface Event {
   mono_ms: number
 }
 
+/** What the session holding a request was started to do, joined on by the node.
+ *  Every field is optional: a mirrored request can arrive before its session. */
+export interface PermissionIntent {
+  channel: string | null
+  phase: string | null
+  branch: string | null
+  work_item_id: string | null
+  work_item_title: string | null
+  /** The state of the session that raised it; a request whose session ended
+   *  can no longer reach a running harness, whatever is answered. */
+  session_state: SessionState | null
+}
+
 export interface Permission {
   id: string
   session_id: string
@@ -275,6 +288,8 @@ export interface Permission {
   state: 'new' | 'answered' | 'expired'
   created_ms: number
   expires_ms: number
+  /** Absent on a row from a node that predates the join. */
+  intent?: PermissionIntent | null
 }
 
 export interface OperatorQuestion {

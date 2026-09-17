@@ -675,7 +675,7 @@ impl Manager {
     /// Republish the waiting bay. Called when a review arrives or is decided,
     /// so the queue updates without the operator refetching.
     pub async fn publish_queue(&self) {
-        let waiting = self.store.open_permissions().unwrap_or_default();
+        let waiting = self.store.open_permission_views().unwrap_or_default();
         self.bus.publish(Frame::Queue { waiting });
         if let Ok(reviews) = self.store.open_reviews() {
             self.bus.publish(Frame::Reviews { waiting: reviews });

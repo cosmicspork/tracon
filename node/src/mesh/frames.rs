@@ -5,7 +5,7 @@
 use proto::frame::{Payload, MESH_CHANNEL};
 use serde_json::{json, Value};
 
-use crate::store::{PermissionRow, ReviewRow, Store};
+use crate::store::{PermissionView, ReviewRow, Store};
 use crate::stream::Frame;
 
 /// Changes per frame, well under the 4 MiB frame cap for ordinary rows.
@@ -47,10 +47,12 @@ pub fn to_payloads(frame: &Frame, store: &Store, self_id: &str) -> Vec<(String, 
         Frame::Queue { waiting } => {
             // One payload per member channel, possibly empty: an empty list is
             // how a peer learns a request it mirrored has been answered.
-            grouped(store, self_id, waiting, |p: &PermissionRow| &p.session_id)
-                .into_iter()
-                .map(|(c, rows)| (c, Payload::Queue { waiting: rows }))
-                .collect()
+            grouped(store, self_id, waiting, |p: &PermissionView| {
+                &p.request.session_id
+            })
+            .into_iter()
+            .map(|(c, rows)| (c, Payload::Queue { waiting: rows }))
+            .collect()
         }
         Frame::Reviews { .. } => {
             // The UI frame only lists waiting reviews. The mesh additionally

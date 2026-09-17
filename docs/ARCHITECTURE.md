@@ -808,6 +808,22 @@ Every node serves the same embedded SPA; a client is a matter of shell.
 - The interface talks only to the node that served it; that node mirrors peers and
   forwards commands to owners. A verdict executes on the owner, because staleness
   and publishing need the owner's worktree and broker.
+- **The attention count is actionable human decisions, and nothing else.** Everything
+  parked in the operator's bay is sorted into three lanes before it is counted: what a
+  person can decide now; what the agent holds (a review being revised, a request that
+  lapsed into its default denial); and what something outside this node holds (a
+  publication in flight, an outcome to reconcile, a node that has to come back first).
+  Only the first lane is counted, in the rail, on the home and per node, from one
+  classification so those three can never disagree. The other two keep their threads,
+  each stating why it is not yours: a smaller number earned by hiding work would be
+  the same defect in a new place.
+- **A permission card carries the intent of the session that asked.** The node joins
+  each waiting request to its session and work item — item, phase, channel, branch,
+  the session's own state — and the card links into both. Answering "may I run this"
+  by first opening the session to find out what it was for is most of the cost of the
+  interruption. Expiry is shown as what it is: once a request lapses the card offers
+  no answer, because the node has already denied it and recording a deferral as
+  consent is the one thing the gate must not do.
 
 ## Reaching a node
 

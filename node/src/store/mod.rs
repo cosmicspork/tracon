@@ -755,6 +755,51 @@ impl Store {
         Ok(rows)
     }
 
+    /// The same bay, each request carrying the intent of the session that
+    /// raised it. This is what the operator's queue is built from: answering
+    /// "may I run this" without knowing what the session was started to do is
+    /// the interruption this is meant to stop being.
+    pub fn open_permission_views(&self) -> Result<Vec<PermissionView>> {
+        let conn = self.conn.lock().unwrap();
+        // Left joins throughout: a mirrored request can land before the
+        // session that explains it, and a missing explanation must not remove
+        // the request from the queue.
+        let mut stmt = conn.prepare(
+            "SELECT p.*, s.channel AS intent_channel, s.phase AS intent_phase,
+                    s.branch AS intent_branch, s.state AS intent_session_state,
+                    s.work_item_id AS intent_work_item_id,
+                    w.title AS intent_work_item_title
+             FROM permission_request p
+             LEFT JOIN session s ON s.id = p.session_id
+             LEFT JOIN work_item w ON w.id = s.work_item_id AND w.deleted = 0
+             WHERE p.state='new' ORDER BY p.created_ms ASC",
+        )?;
+        let rows = stmt
+            .query_map([], PermissionView::from_joined_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// This node's requests whose session has ended. Deny-by-default is the
+    /// contract for an unanswered request, and a supervisor that died with the
+    /// process never got to apply it; the row is left open, counted as a
+    /// decision, and no answer can reach a harness that is gone. The sweeper
+    /// closes them so the count means what it says.
+    pub fn orphaned_permissions(&self, node_id: &str) -> Result<Vec<PermissionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT p.* FROM permission_request p
+             JOIN session s ON s.id = p.session_id
+             WHERE p.state='new' AND p.node_id=?1
+               AND s.state IN ('closed','killed_budget','failed')
+             ORDER BY p.created_ms ASC",
+        )?;
+        let rows = stmt
+            .query_map([node_id], PermissionRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     // ---- model usage ----
 
     /// The turn a call belongs to is resolved here rather than passed in: the
@@ -2113,6 +2158,67 @@ mod records {
                 created_mono_ms: r.get("created_mono_ms")?,
                 resolved_mono_ms: r.get("resolved_mono_ms")?,
                 expires_ms: r.get("expires_ms")?,
+            })
+        }
+    }
+
+    /// What the session holding a request was started to do. Derived at read
+    /// time from the session and its work item rather than stored on the
+    /// request: the request is about one call, the intent is about the session
+    /// that made it, and the two change independently. Every field is
+    /// optional because a mirrored request can arrive before its session does.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct PermissionIntent {
+        pub channel: Option<String>,
+        pub phase: Option<String>,
+        pub branch: Option<String>,
+        pub work_item_id: Option<String>,
+        pub work_item_title: Option<String>,
+        /// The state of the session that raised it. A request whose session
+        /// has ended can no longer reach a running harness, whatever the
+        /// operator answers.
+        pub session_state: Option<String>,
+    }
+
+    /// A waiting request with that intent beside it. The interface reads this;
+    /// the row alone says what is being asked and nothing about why.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PermissionView {
+        #[serde(flatten)]
+        pub request: PermissionRow,
+        pub intent: PermissionIntent,
+    }
+
+    impl std::ops::Deref for PermissionView {
+        type Target = PermissionRow;
+        fn deref(&self) -> &PermissionRow {
+            &self.request
+        }
+    }
+
+    impl From<PermissionRow> for PermissionView {
+        /// A request with nothing known about the session behind it. The
+        /// queue always joins; this is for a caller holding a bare row.
+        fn from(request: PermissionRow) -> Self {
+            Self {
+                request,
+                intent: PermissionIntent::default(),
+            }
+        }
+    }
+
+    impl PermissionView {
+        pub(in crate::store) fn from_joined_row(r: &rusqlite::Row) -> rusqlite::Result<Self> {
+            Ok(Self {
+                request: PermissionRow::from_row(r)?,
+                intent: PermissionIntent {
+                    channel: r.get("intent_channel")?,
+                    phase: r.get("intent_phase")?,
+                    branch: r.get("intent_branch")?,
+                    work_item_id: r.get("intent_work_item_id")?,
+                    work_item_title: r.get("intent_work_item_title")?,
+                    session_state: r.get("intent_session_state")?,
+                },
             })
         }
     }
