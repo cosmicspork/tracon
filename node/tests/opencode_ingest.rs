@@ -67,6 +67,7 @@ fn store_with_session(state: &str) -> Arc<Store> {
     let mut row = support::rows::session_row(SESSION_ID, "n1", "personal");
     row.harness_id = "opencode".into();
     row.harness_version = "1.18.30".into();
+    row.budget_tokens = 10_000;
     row.state = state.into();
     store.insert_session(&row).unwrap();
     store
@@ -144,10 +145,23 @@ async fn an_opencode_read_is_normalized_and_allowed_by_the_supervisor() {
     );
     let (runner, seen) =
         start(Fake::new("1.18.30", usize::MAX).permission("read", &["/work/src/lib.rs"])).await;
-    let (handle, events) = OpenCodeAdapter::new("1.18.30")
+    let (handle, mut adapter_events) = OpenCodeAdapter::new("1.18.30")
         .launch(&runner, launch_spec(ingest.clone()))
         .await
         .unwrap();
+    // This proof is about the adapter's permission event, not whether an
+    // unrelated stream pump stays connected under a saturated test runner.
+    // Relay the exact event while keeping the supervisor's input alive.
+    let (permission_tx, permission_events) = mpsc::channel(1);
+    let _event_lifetime = permission_tx.clone();
+    tokio::spawn(async move {
+        while let Some(event) = adapter_events.recv().await {
+            if matches!(&event, HarnessEvent::Permission { .. }) {
+                let _ = permission_tx.send(event).await;
+                return;
+            }
+        }
+    });
     let supervisor = Supervisor::new(
         SESSION_ID.into(),
         "n1".into(),
@@ -163,7 +177,7 @@ async fn an_opencode_read_is_normalized_and_allowed_by_the_supervisor() {
         "personal".into(),
     )
     .with_ingest(ingest);
-    tokio::spawn(supervisor.run(events, cmd_rx));
+    tokio::spawn(supervisor.run(permission_events, cmd_rx));
     let started = store.clone();
     await_true("the session starts", move || {
         started
@@ -183,16 +197,20 @@ async fn an_opencode_read_is_normalized_and_allowed_by_the_supervisor() {
     admitted.await.unwrap().unwrap();
 
     let replies = wait_for_reply(&seen).await;
-    assert_eq!(replies[0]["body"]["reply"], "once", "{replies:?}");
+    let diagnostics = store.events_after(SESSION_ID, 0, 500).unwrap();
+    assert_eq!(
+        replies[0]["body"]["reply"],
+        "once",
+        "{replies:?}; state={:?}; events={diagnostics:?}",
+        store.get_session(SESSION_ID).unwrap()
+    );
     assert_ne!(replies[0]["body"]["reply"], "always");
     assert!(
         store.open_permissions().unwrap().is_empty(),
         "a shipped read exemption interrupted the operator"
     );
-    let allowed = store
-        .events_after(SESSION_ID, 0, 500)
-        .unwrap()
-        .into_iter()
+    let allowed = diagnostics
+        .iter()
         .find(|event| event.kind == "policy_allowed")
         .expect("the node records its automatic decision");
     assert_eq!(allowed.payload["action"], "read");
@@ -201,9 +219,7 @@ async fn an_opencode_read_is_normalized_and_allowed_by_the_supervisor() {
     assert_eq!(allowed.payload["command"], serde_json::Value::Null);
     assert_eq!(allowed.payload["rule"], "reads-and-thoughts");
     assert!(
-        !store
-            .events_after(SESSION_ID, 0, 500)
-            .unwrap()
+        !diagnostics
             .iter()
             .any(|event| event.kind == "permission_request"),
         "the read took a second path around the supervisor"
