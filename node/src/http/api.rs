@@ -1375,6 +1375,32 @@ pub async fn get_session(
     })))
 }
 
+/// What this session may do, and what it would still have to ask about.
+///
+/// Read-only, and deliberately so: every verdict in it is produced by calling
+/// the functions that decide the real request, so the answer cannot drift from
+/// enforcement, and nothing on this path can widen authority.
+pub async fn session_authority(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::explain::SessionAuthority>> {
+    let session = s
+        .store()
+        .get_session(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such session".into()))?;
+    // The node row is the owner's, mirrored here for a peer's session. Absent
+    // only for a row whose node this one has never heard of, which the view
+    // reports rather than hiding.
+    let node = s.store().get_node(&session.node_id)?;
+    Ok(Json(crate::explain::session_authority(
+        s.store(),
+        &s.tools,
+        &s.cfg,
+        &session,
+        node.as_ref(),
+    )))
+}
+
 #[derive(Deserialize)]
 pub struct EventsQuery {
     #[serde(default)]

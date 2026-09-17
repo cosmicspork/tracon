@@ -477,6 +477,35 @@ the output to the session log is a deliberate configuration (`pty_capture_output
 off by default, and labelled as what it is: a record of what the operator
 happened to run, not of what tracon decided.
 
+### Explaining authority
+
+The question behind most low-value interruptions is not "may this call go
+ahead" — it is "what is this session allowed to do at all, and why is *this* the
+thing it has to ask me about". `GET /api/sessions/{id}/authority` answers it in
+task terms: the node and its isolation state, the harness and image the session
+actually runs under, what it can reach (workspace, egress allowlist, the
+credentials bound to its channel), its limits, the grants live for it right
+now, what runs unattended, and what it would still have to ask about.
+
+**It is the gate answering about itself.** Every verdict in it is produced by
+calling `Policy::explain`, which calls the same `decide` that answers the real
+request, and by reading the same grants table `authority::decide` reads at
+dispatch. A description maintained beside the enforcement would drift, and drift
+is worse than silence here: the operator would be told what a parallel model
+believes the gate does, at exactly the moment they cannot check. For the same
+reason the unattended-command list is the bundle's own allow rules rather than a
+summary of them, and each entry carries the rule id that produced it.
+
+Three things it deliberately does not do. It does not collapse policy and grants
+into one verdict — a grant can only narrow the gap between an ask and an allow,
+never override a denial, so they are reported side by side. It does not report
+an argument-scoped allow as an allow: `doc_write` is asked, *unless* the slug is
+a working note, and saying either half alone is a lie the operator would act on.
+And it grants nothing — the route is a read of state that already exists, and
+nothing on it widens what a session may do unattended, least of all an external
+write. Reducing interruptions is the operator's decision to make, with this in
+front of them and Settings → Permissions & policies to make it in.
+
 ### Review
 
 **Review the diff with a session that never saw the implementation.** A model that
