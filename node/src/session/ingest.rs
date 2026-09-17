@@ -776,27 +776,35 @@ impl Ingest {
     /// is different is only that the answer is posted from here, because the
     /// adapter that raised it originally is no longer waiting for it.
     async fn reraise(&self, upstream: &str, id: &str, request: &Value) -> bool {
-        let action = request["action"].as_str().unwrap_or("a tool").to_string();
+        let action = request["action"].as_str().unwrap_or("unknown").to_string();
         let resources: Vec<String> = request["resources"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(|r| r.as_str().map(str::to_string))
             .collect();
+        let target = (!resources.is_empty()).then(|| resources.join("\n"));
+        let (resource, command) = if action.eq_ignore_ascii_case("bash") {
+            (None, target)
+        } else {
+            (target, None)
+        };
         let (reply_tx, reply_rx) = oneshot::channel();
         let ask = Command::Permission {
-            request: PermissionRequest {
-                tool_call_id: request["source"]["callID"].as_str().map(str::to_string),
-                title: format!("{action}: {}", resources.join(", ")),
-                kind: Some("tool".into()),
-                raw_input: Some(json!({
+            request: PermissionRequest::managed(
+                request["source"]["callID"].as_str().map(str::to_string),
+                format!("{action}: {}", resources.join(", ")),
+                &action,
+                resource,
+                command,
+                Some(json!({
                     "action": action,
                     "resources": resources,
                     "metadata": request["metadata"].clone(),
                     "reraised": true,
                 })),
-                options: allow_or_reject(),
-            },
+                allow_or_reject(),
+            ),
             reply: reply_tx,
         };
         if self.commands.send(ask).await.is_err() {

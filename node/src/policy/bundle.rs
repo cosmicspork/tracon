@@ -369,8 +369,9 @@ mod tests {
         let p: Policy = toml::from_str(WORKING_AGREEMENTS).unwrap();
         let d = p.decide(&Request {
             channel: "work",
+            action: "bash",
             kind: Some("execute"),
-            title: "gh pr merge 12",
+            resource: None,
             command: Some("gh pr merge 12"),
             arguments: None,
         });

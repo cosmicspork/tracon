@@ -233,13 +233,13 @@ impl Tools {
             };
             let (action, target, revision) = consequential(name, args)
                 .expect("consequential action record has canonical arguments");
-            let summary = summarize(name, args);
             let policy = self.policy.read();
             let tool = policy.decide(&Request {
                 channel: &ctx.channel,
+                action: name,
                 kind: Some(TOOL_KIND),
-                title: name,
-                command: Some(&summary),
+                resource: None,
+                command: None,
                 arguments: Some(args),
             });
             if tool.verdict == Verdict::Deny {
@@ -689,7 +689,7 @@ impl Tools {
     /// arguments the operator rewrote on the card, when they did.
     async fn gate(&self, ctx: &CallContext, name: &str, args: &Value) -> Result<GatedCall, String> {
         let summary = summarize(name, args);
-        let decision = self.decide(ctx, name, &summary, args);
+        let decision = self.decide(ctx, name, args);
         match decision.verdict {
             Verdict::Allow => Ok(GatedCall {
                 arguments: None,
@@ -704,7 +704,10 @@ impl Tools {
                 let request = PermissionRequest {
                     tool_call_id: None,
                     title: summary,
+                    action: name.to_string(),
                     kind: Some(TOOL_KIND.into()),
+                    resource: None,
+                    command: None,
                     raw_input: Some(json!({ "tool": name, "arguments": args })),
                     options: vec![
                         PermissionOption {
@@ -735,8 +738,7 @@ impl Tools {
                         option_id,
                         arguments,
                     } if option_id == OPTION_ALLOW_ONCE => {
-                        let edited =
-                            self.decide(ctx, name, &summarize(name, &arguments), &arguments);
+                        let edited = self.decide(ctx, name, &arguments);
                         if edited.verdict == Verdict::Deny {
                             return Err(refusal(edited));
                         }
@@ -751,12 +753,13 @@ impl Tools {
         }
     }
 
-    fn decide(&self, ctx: &CallContext, name: &str, summary: &str, args: &Value) -> Decision {
+    fn decide(&self, ctx: &CallContext, name: &str, args: &Value) -> Decision {
         let tool = self.policy.read().decide(&Request {
             channel: &ctx.channel,
+            action: name,
             kind: Some(TOOL_KIND),
-            title: name,
-            command: Some(summary),
+            resource: None,
+            command: None,
             arguments: Some(args),
         });
         if tool.verdict == Verdict::Deny {
@@ -797,12 +800,12 @@ impl Tools {
         name: &str,
         args: &Value,
     ) -> Result<(), String> {
-        let summary = summarize(name, args);
         let decision = self.policy.read().decide(&Request {
             channel: &ctx.channel,
+            action: name,
             kind: Some(TOOL_KIND),
-            title: name,
-            command: Some(&summary),
+            resource: None,
+            command: None,
             arguments: Some(args),
         });
         if decision.verdict == Verdict::Deny {

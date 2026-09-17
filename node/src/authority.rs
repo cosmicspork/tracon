@@ -75,9 +75,10 @@ pub fn policy_decision(
 ) -> Decision {
     policy.decide(&Request {
         channel,
+        action,
         kind: Some(kind_of(action)),
-        title: action,
-        command: Some(target),
+        resource: Some(target),
+        command: None,
         arguments: Some(args),
     })
 }

@@ -194,10 +194,69 @@ pub struct ModelOption {
 #[derive(Debug, Clone)]
 pub struct PermissionRequest {
     pub tool_call_id: Option<String>,
+    /// Human-facing summary only. Policy never reads this field.
     pub title: String,
+    /// Adapter-normalized action (`read`, `bash`, `todo_write`, ...).
+    pub action: String,
+    /// Semantic class understood by policy. Unknown or malformed actions have
+    /// no kind and therefore cannot match an allow rule by accident.
     pub kind: Option<String>,
+    /// Exact non-command target, when the adapter can identify one.
+    pub resource: Option<String>,
+    /// Exact shell command, only for a recognized execution action.
+    pub command: Option<String>,
     pub raw_input: Option<Value>,
     pub options: Vec<crate::adapter::types::PermissionOption>,
+}
+
+impl PermissionRequest {
+    /// Normalize a managed harness's permission vocabulary into the node's.
+    /// The mapping is deliberately closed: a new harness capability is asked
+    /// until this node version names its semantics.
+    pub fn managed(
+        tool_call_id: Option<String>,
+        title: String,
+        action: &str,
+        resource: Option<String>,
+        command: Option<String>,
+        raw_input: Option<Value>,
+        options: Vec<crate::adapter::types::PermissionOption>,
+    ) -> Self {
+        let action = canonical_action(action);
+        let resource = nonempty(resource);
+        let command = nonempty(command);
+        let kind = match action.as_str() {
+            "read" | "glob" | "grep" | "list" if resource.is_some() => Some("read"),
+            "bash" if command.is_some() => Some("execute"),
+            "edit" | "write" | "patch" | "notebook_edit" if resource.is_some() => Some("write"),
+            "think" | "todo_write" => Some("think"),
+            _ => None,
+        }
+        .map(str::to_string);
+        Self {
+            tool_call_id,
+            title,
+            action,
+            kind,
+            resource,
+            command,
+            raw_input,
+            options,
+        }
+    }
+}
+
+fn canonical_action(action: &str) -> String {
+    match action.trim().to_ascii_lowercase().as_str() {
+        "ls" => "list".into(),
+        "todowrite" | "todo_write" => "todo_write".into(),
+        "notebookedit" | "notebook_edit" => "notebook_edit".into(),
+        other => other.to_string(),
+    }
+}
+
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 /// The operator's answer to a permission request, or the request being withdrawn.
@@ -596,6 +655,26 @@ mod tests {
                 "{id} has no Containerfile"
             );
         }
+    }
+
+    #[test]
+    fn unknown_or_malformed_managed_actions_have_no_exempt_kind() {
+        let unknown = PermissionRequest::managed(
+            None,
+            "friendly display title".into(),
+            "future-capability",
+            Some("/work/file".into()),
+            None,
+            None,
+            Vec::new(),
+        );
+        assert_eq!(unknown.action, "future-capability");
+        assert_eq!(unknown.kind, None);
+        assert_eq!(unknown.resource.as_deref(), Some("/work/file"));
+
+        let targetless_read =
+            PermissionRequest::managed(None, "read".into(), "read", None, None, None, Vec::new());
+        assert_eq!(targetless_read.kind, None);
     }
 
     #[test]

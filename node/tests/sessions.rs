@@ -855,7 +855,10 @@ impl Rig {
                 request: tracon::adapter::PermissionRequest {
                     tool_call_id: Some("call|fc".into()),
                     title: "run just test".into(),
+                    action: "bash".into(),
                     kind: Some("execute".into()),
+                    resource: None,
+                    command: Some("just test".into()),
                     raw_input: None,
                     options: vec![],
                 },
@@ -911,7 +914,10 @@ async fn a_brokered_tool_call_the_policy_does_not_cover_waits_on_the_operator() 
             request: tracon::adapter::PermissionRequest {
                 tool_call_id: None,
                 title: "issue_comment {\"key\":\"WRK-1\"}".into(),
+                action: "issue_comment".into(),
                 kind: Some(tracon::mcp::TOOL_KIND.into()),
+                resource: None,
+                command: None,
                 raw_input: Some(json!({ "tool": "issue_comment" })),
                 options: vec![],
             },
@@ -951,7 +957,10 @@ async fn a_brokered_tool_call_can_be_allowed_with_the_operators_edits() {
             request: tracon::adapter::PermissionRequest {
                 tool_call_id: None,
                 title: "issue_comment {\"key\":\"WRK-1\"}".into(),
+                action: "issue_comment".into(),
                 kind: Some(tracon::mcp::TOOL_KIND.into()),
+                resource: None,
+                command: None,
                 raw_input: Some(json!({ "tool": "issue_comment" })),
                 options: vec![],
             },

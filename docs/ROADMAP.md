@@ -41,11 +41,6 @@ remains separately tracked under [Live proofs still the operator's](#live-proofs
 
 ### 1. Trust and attention
 
-- [ ] Normalize managed-harness permissions into canonical action, kind and resource or
-      command independently of display titles. Prove actual OpenCode adapter-shaped read
-      events pass through the supervisor and receive the shipped read exemptions; unknown
-      capabilities remain asked or denied. Keep every harness call node-mediated and
-      never substitute a blanket harness-level always-allow grant.
 - [ ] Make the attention count mean actionable human decisions. Separate needs-your-decision,
       agent-revising and external-operation/recovery states without losing their durable
       threads. Show work intent and session links on permission cards; preserve explicit

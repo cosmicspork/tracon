@@ -124,6 +124,10 @@ own runner, and everything between it and anyone else is node-owned. In order:
   asks for every tool class. Policy is evaluated on the node and the reply is always
   `once`; an `always` is rewritten and the attempted broadening recorded, and the route
   that would edit the ruleset is refused.
+  Adapters normalize each request into a canonical action, semantic kind and resource
+  or command before that policy decision. Display titles never participate in policy;
+  an unknown action or a known action without its required target has no exempt kind
+  and therefore remains an operator decision unless an explicit deny matches.
 - **Session events are synthesised, not proxied.** The harness's only server-wide stream
   has no durable replay and no scoping, so the node never opens one on a browser's
   behalf: it serves that route itself from its own bus, filtered to the one session the

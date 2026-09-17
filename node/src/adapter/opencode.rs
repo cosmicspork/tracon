@@ -1362,29 +1362,37 @@ impl Pump {
         if self.open.lock().unwrap().insert(id.clone(), ()).is_some() {
             return;
         }
-        let action = request["action"].as_str().unwrap_or("a tool").to_string();
+        let action = request["action"].as_str().unwrap_or("unknown").to_string();
         let resources: Vec<String> = request["resources"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(|r| r.as_str().map(str::to_string))
             .collect();
+        let target = (!resources.is_empty()).then(|| resources.join("\n"));
+        let (resource, command) = if action.eq_ignore_ascii_case("bash") {
+            (None, target)
+        } else {
+            (target, None)
+        };
         let (reply_tx, reply_rx) = oneshot::channel();
         let sent = tx
             .send(HarnessEvent::Permission {
-                request: PermissionRequest {
+                request: PermissionRequest::managed(
                     // OpenCode's call id is the provider's own string: it is
                     // mapped, never adopted as a tracon identity.
-                    tool_call_id: request["source"]["callID"].as_str().map(str::to_string),
-                    title: summarize(&action, &resources),
-                    kind: Some("tool".into()),
-                    raw_input: Some(json!({
+                    request["source"]["callID"].as_str().map(str::to_string),
+                    summarize(&action, &resources),
+                    &action,
+                    resource,
+                    command,
+                    Some(json!({
                         "action": action,
                         "resources": resources,
                         "metadata": request["metadata"].clone(),
                     })),
-                    options: options(),
-                },
+                    options(),
+                ),
                 reply: reply_tx,
             })
             .await;
@@ -1421,8 +1429,11 @@ impl Pump {
             .send(HarnessEvent::Permission {
                 request: PermissionRequest {
                     tool_call_id: None,
-                    title: summarize("question", &[text]),
+                    title: summarize("question", std::slice::from_ref(&text)),
+                    action: "question".into(),
                     kind: Some("question".into()),
+                    resource: Some(text),
+                    command: None,
                     raw_input: Some(request.clone()),
                     options: options(),
                 },

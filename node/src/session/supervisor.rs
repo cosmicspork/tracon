@@ -768,23 +768,19 @@ impl Supervisor {
         request: PermissionRequest,
         reply: oneshot::Sender<PermissionReply>,
     ) {
-        // Policy first. An auto-answered request never reaches the queue, so
-        // the operator is interrupted only by what actually needs them.
-        let command = request
-            .raw_input
-            .as_ref()
-            .and_then(|v| v.get("command"))
-            .and_then(|c| c.as_str())
-            .map(str::to_string);
+        // Policy sees the adapter's canonical subject, never the display
+        // title. An unknown action has no semantic kind and falls through to
+        // Ask unless an explicit denial catches its target.
         if self.is_fenced() {
             let _ = reply.send(PermissionReply::Cancelled);
             return;
         }
         let decision = self.policy.read().decide(&crate::policy::Request {
             channel: &self.channel,
+            action: &request.action,
             kind: request.kind.as_deref(),
-            title: &request.title,
-            command: command.as_deref(),
+            resource: request.resource.as_deref(),
+            command: request.command.as_deref(),
             arguments: None,
         });
         match decision.verdict {
@@ -805,7 +801,10 @@ impl Supervisor {
                     None,
                     json!({
                         "title": request.title,
+                        "action": request.action,
                         "kind": request.kind,
+                        "resource": request.resource,
+                        "command": request.command,
                         "rule": decision.rule_id,
                         "reason": decision.reason,
                     }),
@@ -835,7 +834,8 @@ impl Supervisor {
             ek::PERMISSION_REQUEST,
             Some(id.clone()),
             json!({
-                "permission_id": id, "title": request.title, "kind": request.kind,
+                "permission_id": id, "title": request.title, "action": request.action,
+                "kind": request.kind, "resource": request.resource, "command": request.command,
                 "raw_input": request.raw_input, "options": request.options,
                 "expires_ms": row.expires_ms
             }),
