@@ -19,7 +19,6 @@
   let busy = $state(false)
   let error = $state('')
   let justResult = $state<ProviderConnectResult | null>(null)
-  let modelNote = $state('')
   let managedLocal = $state(false)
   let sameHostBrowser = $state(false)
   let shareSignIn = $state(true)
@@ -36,7 +35,6 @@
 
   $effect(() => {
     if (p.state === 'connected' || p.state === 'failed') justResult = null
-    if (p.state !== 'connected') modelNote = ''
   })
 
   onMount(() => {
@@ -48,7 +46,6 @@
   async function act(f: () => Promise<unknown>) {
     busy = true
     error = ''
-    modelNote = ''
     try {
       await f()
     } catch (caught) {
@@ -91,21 +88,6 @@
     })
   }
 
-  // Connecting a provider re-probes the catalogue, but a probe can miss: the
-  // harness may not have been up yet, or the credential arrived by handoff from
-  // another node rather than through a sign-in here. This asks again without
-  // making the operator disconnect and sign in a second time. It re-probes the
-  // serving node — one catalogue, not one per provider — so it is offered only
-  // on that node's own cards.
-  function refreshModels() {
-    return act(async () => {
-      const models = await api.refreshModels()
-      modelNote = models.length
-        ? `catalogue refreshed · ${models.length} model${models.length === 1 ? '' : 's'}`
-        : 'catalogue refreshed · the harness listed no models through the gateway'
-    })
-  }
-
   function disconnect() {
     return act(async () => {
       await api.nodeDisconnectProvider(nodeId, p.name)
@@ -138,11 +120,7 @@
     {#if p.state === 'connected'}
       <span class="l"><span class="chip">connected</span>{#if p.channels.length} · {p.channels.join(', ')}{/if}{#if expiry()} · {expiry()}{/if}</span>
       {#if isSelf}
-        <span class="actions">
-          <button class="lnk" onclick={refreshModels} disabled={busy}>Refresh models</button>
-          <button class="lnk d" onclick={disconnect} disabled={busy}>Disconnect</button>
-        </span>
-        {#if modelNote}<span class="l off">{modelNote}</span>{/if}
+        <span><button class="lnk d" onclick={disconnect} disabled={busy}>Disconnect</button></span>
       {:else}
         <span><button class="lnk d" onclick={disconnect} disabled={busy}>Disconnect on {nodeName}</button></span>
       {/if}
