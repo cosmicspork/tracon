@@ -17,6 +17,7 @@ import type {
   HubRollups,
   ManagedRepo,
   MeshState,
+  ModelOption,
   NodeConfig,
   NodeInfo,
   OperatorIssue,
@@ -444,6 +445,9 @@ export const api = {
   providerCode: (name: string, code: string) =>
     call<void>('POST', `/api/providers/${name}/code`, { code }),
   disconnectProvider: (name: string) => call<void>('POST', `/api/providers/${name}/disconnect`),
+  /** Ask this node's harness for its model list again. The probe runs on the
+      serving node — a peer's catalogue is refreshed by that peer. */
+  refreshModels: () => call<ModelOption[]>('POST', '/api/node/refresh-models'),
   // Node-scoped provider actions: the serving node runs them itself or seals
   // the command to the owner. Automatic callback capture is accepted only
   // when this is the serving node and the request itself arrived on loopback.
