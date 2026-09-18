@@ -32,7 +32,14 @@ export function setupSteps(s: {
     {
       href: '/settings#connections',
       title: 'Offer a model',
-      detail: 'A connected provider must offer a model before this node can accept a task.',
+      // Connected and still not offering is the confusing state, and it has two
+      // causes: the catalogue was never probed, or the credential is not scoped
+      // to a live channel. Refreshing fixes the first and says nothing about the
+      // second, so name both rather than send the operator round one loop twice.
+      detail:
+        s.anyProviderConnected && !s.modelOffered
+          ? 'Connected, but no model reaches a live channel. Refresh models, or check the credential’s channel scope.'
+          : 'A connected provider must offer a model before this node can accept a task.',
       done: s.modelOffered,
     },
     {

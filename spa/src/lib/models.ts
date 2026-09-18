@@ -47,7 +47,14 @@ export function filterModels(models: ModelOption[], query: string): ModelOption[
     A model belongs to the provider named before its first `/`; an adapter-owned
     alias carries no provider it can be reverse-engineered from, so it is
     counted apart rather than guessed at. Providers lead in their own order, not
-    the harness's, so a second probe reads the same way as the first. */
+    the harness's, so a second probe reads the same way as the first.
+
+    A CONNECTED provider that contributed nothing is named at zero, because that
+    is the whole point of counting per provider: a credential that signs in and
+    still offers no model is the failure this line exists to show, and it would
+    otherwise be indistinguishable from a provider that is simply absent. A
+    provider that was never connected is left out — it has no credential to
+    answer with, so its nothing means nothing. */
 export function modelSummary(models: ModelOption[], providers: ProviderInfo[]): string {
   if (models.length === 0) return 'the harness listed no models through the gateway'
   const known = new Set(providers.map((provider) => provider.name))
@@ -60,8 +67,8 @@ export function modelSummary(models: ModelOption[], providers: ProviderInfo[]): 
     else counts.set(name, (counts.get(name) ?? 0) + 1)
   }
   const parts = providers
-    .filter((provider) => counts.has(provider.name))
-    .map((provider) => `${providerLabel(provider.name)} ${counts.get(provider.name)}`)
+    .filter((provider) => counts.has(provider.name) || provider.state === 'connected')
+    .map((provider) => `${providerLabel(provider.name)} ${counts.get(provider.name) ?? 0}`)
   if (aliases > 0) parts.push(`${aliases} adapter alias${aliases === 1 ? '' : 'es'}`)
   return [`${models.length} model${models.length === 1 ? '' : 's'}`, ...parts].join(' · ')
 }

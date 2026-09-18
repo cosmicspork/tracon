@@ -36,8 +36,8 @@ test('filtering matches every word against name and value', () => {
   expect(matchesQuery('GitLab group/sub/project', 'SUB proj')).toBe(true)
 })
 
-function provider(name: string): ProviderInfo {
-  return { name, state: 'connected' } as ProviderInfo
+function provider(name: string, state: ProviderInfo['state'] = 'connected'): ProviderInfo {
+  return { name, state } as ProviderInfo
 }
 
 const connected = [provider('anthropic'), provider('openai-codex')]
@@ -63,16 +63,29 @@ test('an alias no provider name explains is counted apart, never guessed at', ()
 })
 
 test('one of each reads as one, not as a bare plural', () => {
+  const only = [provider('anthropic')]
   const one = [{ value: 'anthropic/claude-opus-5', name: 'Claude Opus 5' }, { value: 'sonnet', name: 'Sonnet' }]
-  expect(modelSummary(one, connected)).toBe('2 models · Anthropic 1 · 1 adapter alias')
-  expect(modelSummary([one[0]], connected)).toBe('1 model · Anthropic 1')
+  expect(modelSummary(one, only)).toBe('2 models · Anthropic 1 · 1 adapter alias')
+  expect(modelSummary([one[0]], only)).toBe('1 model · Anthropic 1')
 })
 
 test('an empty catalogue says the probe worked and the harness had nothing', () => {
   expect(modelSummary([], connected)).toBe('the harness listed no models through the gateway')
 })
 
-test('a provider with no models of its own is left out of the breakdown', () => {
+test('a connected provider that contributed nothing is named at zero', () => {
   const summary = modelSummary(models, [...connected, provider('openai')])
+  expect(summary).toBe('3 models · Anthropic 2 · OpenAI Codex 1 · OpenAI API 0')
+})
+
+test('a provider that was never connected is left out, not zeroed', () => {
+  const summary = modelSummary(models, [...connected, provider('openai', 'disconnected')])
   expect(summary).toBe('3 models · Anthropic 2 · OpenAI Codex 1')
+})
+
+test('a catalogue of nothing but aliases still names its connected providers', () => {
+  const aliases = [{ value: 'sonnet', name: 'Sonnet' }, { value: 'opus', name: 'Opus' }]
+  expect(modelSummary(aliases, connected)).toBe(
+    '2 models · Anthropic 0 · OpenAI Codex 0 · 2 adapter aliases',
+  )
 })
