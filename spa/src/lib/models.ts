@@ -3,7 +3,8 @@
 // recency this node knows is which of them it has run: those come first,
 // newest use first, and the rest keep the order they arrived in.
 
-import type { ModelOption, Session } from './types'
+import type { ModelOption, ProviderInfo, Session } from './types'
+import { providerLabel } from './providers'
 
 /** Distinct model values from sessions on this node, most recently started first. */
 export function recentModelValues(sessions: Iterable<Session>): string[] {
@@ -39,4 +40,35 @@ export function matchesQuery(text: string, query: string): boolean {
 export function filterModels(models: ModelOption[], query: string): ModelOption[] {
   if (query.trim() === '') return models
   return models.filter((m) => matchesQuery(`${m.name} ${m.value}`, query))
+}
+
+/** What a probe came back with, attributed to the providers that could have
+    served it: `12 models · Anthropic 8 · OpenAI Codex 3 · 1 adapter alias`.
+    A model belongs to the provider named before its first `/`; an adapter-owned
+    alias carries no provider it can be reverse-engineered from, so it is
+    counted apart rather than guessed at. Providers lead in their own order, not
+    the harness's, so a second probe reads the same way as the first.
+
+    A CONNECTED provider that contributed nothing is named at zero, because that
+    is the whole point of counting per provider: a credential that signs in and
+    still offers no model is the failure this line exists to show, and it would
+    otherwise be indistinguishable from a provider that is simply absent. A
+    provider that was never connected is left out — it has no credential to
+    answer with, so its nothing means nothing. */
+export function modelSummary(models: ModelOption[], providers: ProviderInfo[]): string {
+  if (models.length === 0) return 'the harness listed no models through the gateway'
+  const known = new Set(providers.map((provider) => provider.name))
+  const counts = new Map<string, number>()
+  let aliases = 0
+  for (const model of models) {
+    const slash = model.value.indexOf('/')
+    const name = slash < 0 ? null : model.value.slice(0, slash)
+    if (name === null || !known.has(name)) aliases += 1
+    else counts.set(name, (counts.get(name) ?? 0) + 1)
+  }
+  const parts = providers
+    .filter((provider) => counts.has(provider.name) || provider.state === 'connected')
+    .map((provider) => `${providerLabel(provider.name)} ${counts.get(provider.name) ?? 0}`)
+  if (aliases > 0) parts.push(`${aliases} adapter alias${aliases === 1 ? '' : 'es'}`)
+  return [`${models.length} model${models.length === 1 ? '' : 's'}`, ...parts].join(' · ')
 }

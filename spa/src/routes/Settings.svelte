@@ -42,7 +42,7 @@
   import { formatAge } from '../lib/format'
   import { remedy } from '../lib/refusal'
   import { modelPatch, phaseDefaults } from '../lib/bindings'
-  import { recentModelValues } from '../lib/models'
+  import { modelSummary, recentModelValues } from '../lib/models'
   import { changedSubset, hashToken, loginUrl, mintToken } from '../lib/settings'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
@@ -106,6 +106,23 @@
   function setup(rebuild: boolean) {
     return act('setup', async () => {
       checks = (await api.runSetup(rebuild)).checks.checks
+    })
+  }
+
+  // --- the model catalogue ----------------------------------------------
+  // One catalogue per node, probed when a provider connects — and that probe
+  // can miss: the harness may not have been up yet, or the credential arrived
+  // by handoff rather than through a sign-in here. Asking again beats making
+  // the operator disconnect and sign in a second time. It sits under the
+  // provider rows because it belongs to all of them at once, and it reports
+  // the count per provider so an absent one is visible rather than merely
+  // subtracted from a total.
+  let modelNote = $state('')
+
+  function refreshModels() {
+    modelNote = ''
+    return act('models', async () => {
+      modelNote = modelSummary(await api.refreshModels(), selectedProviders)
     })
   }
 
@@ -631,6 +648,14 @@
       <div class="empty">{selectedNodeName} has not advertised provider capability. It may be an older peer; update it or manage providers on that node directly.</div>
     {:else}
       <div class="empty">No provider connections are configured for {selectedNodeName}.</div>
+    {/if}
+    {#if selectedNodeIsServing}
+      <div class="acts">
+        <button class="lnk" onclick={refreshModels} disabled={busy !== ''}>
+          {busy === 'models' ? 'Asking the harness…' : 'Refresh models'}
+        </button>
+        <small>{modelNote || 'The catalogue is probed when a provider connects. Ask again when a connected provider’s models never appeared.'}</small>
+      </div>
     {/if}
   </Card>
 

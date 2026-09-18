@@ -214,6 +214,11 @@ session needs something other than the usual. The session is killed at its budge
 checked at each turn's end; a channel at its daily ceiling starts no session at all.
 
 The model picker uses the selected runner's connected, channel-bound providers.
+A connected provider whose models never appear has a stale catalogue — the probe
+runs when the provider connects, and can miss if the harness was not up yet or the
+credential arrived by handoff: **Settings → Connections → Refresh models**, under the
+provider rows, asks the harness again without disconnecting and signing in a second
+time, and reports what came back per provider.
 When a peer runs the task, enter a repository path on that peer: local clones and
 browser imports are not transferred. Changing runner or channel clears the old
 repository selection; changing model scope clears stale model and budget overrides.

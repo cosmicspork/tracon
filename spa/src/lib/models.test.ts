@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
-import { filterModels, matchesQuery, orderModels, recentModelValues } from './models'
-import type { Session } from './types'
+import { filterModels, matchesQuery, modelSummary, orderModels, recentModelValues } from './models'
+import type { ProviderInfo, Session } from './types'
 
 const models = [
   { value: 'openai-codex/gpt-5.6-sol', name: 'GPT-5.6-Sol' },
@@ -34,4 +34,58 @@ test('filtering matches every word against name and value', () => {
   expect(filterModels(models, 'codex').map((m) => m.name)).toEqual(['GPT-5.6-Sol'])
   expect(filterModels(models, 'opus sonnet')).toEqual([])
   expect(matchesQuery('GitLab group/sub/project', 'SUB proj')).toBe(true)
+})
+
+function provider(name: string, state: ProviderInfo['state'] = 'connected'): ProviderInfo {
+  return { name, state } as ProviderInfo
+}
+
+const connected = [provider('anthropic'), provider('openai-codex')]
+
+test('a probe is attributed to the providers that could have served it', () => {
+  expect(modelSummary(models, connected)).toBe('3 models · Anthropic 2 · OpenAI Codex 1')
+})
+
+test('providers lead in their own order, so a second probe reads like the first', () => {
+  const reversed = [...models].reverse()
+  expect(modelSummary(reversed, connected)).toBe(modelSummary(models, connected))
+})
+
+test('an alias no provider name explains is counted apart, never guessed at', () => {
+  const withAliases = [
+    ...models,
+    { value: 'sonnet', name: 'Sonnet' },
+    { value: 'mystery/thing', name: 'Thing' },
+  ]
+  expect(modelSummary(withAliases, connected)).toBe(
+    '5 models · Anthropic 2 · OpenAI Codex 1 · 2 adapter aliases',
+  )
+})
+
+test('one of each reads as one, not as a bare plural', () => {
+  const only = [provider('anthropic')]
+  const one = [{ value: 'anthropic/claude-opus-5', name: 'Claude Opus 5' }, { value: 'sonnet', name: 'Sonnet' }]
+  expect(modelSummary(one, only)).toBe('2 models · Anthropic 1 · 1 adapter alias')
+  expect(modelSummary([one[0]], only)).toBe('1 model · Anthropic 1')
+})
+
+test('an empty catalogue says the probe worked and the harness had nothing', () => {
+  expect(modelSummary([], connected)).toBe('the harness listed no models through the gateway')
+})
+
+test('a connected provider that contributed nothing is named at zero', () => {
+  const summary = modelSummary(models, [...connected, provider('openai')])
+  expect(summary).toBe('3 models · Anthropic 2 · OpenAI Codex 1 · OpenAI API 0')
+})
+
+test('a provider that was never connected is left out, not zeroed', () => {
+  const summary = modelSummary(models, [...connected, provider('openai', 'disconnected')])
+  expect(summary).toBe('3 models · Anthropic 2 · OpenAI Codex 1')
+})
+
+test('a catalogue of nothing but aliases still names its connected providers', () => {
+  const aliases = [{ value: 'sonnet', name: 'Sonnet' }, { value: 'opus', name: 'Opus' }]
+  expect(modelSummary(aliases, connected)).toBe(
+    '2 models · Anthropic 0 · OpenAI Codex 0 · 2 adapter aliases',
+  )
 })
