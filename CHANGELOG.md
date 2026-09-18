@@ -32,6 +32,13 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.20.0](https://github.com/cosmicspork/tracon/compare/v0.19.0...v0.20.0) (2026-09-18)
+
+
+### Features
+
+* **spa:** re-probe the model catalogue, counted per provider ([#241](https://github.com/cosmicspork/tracon/issues/241)) ([c71cb61](https://github.com/cosmicspork/tracon/commit/c71cb61684c499118e443c4a576adad1d908ecfd))
+
 ## [0.19.0](https://github.com/cosmicspork/tracon/compare/v0.18.0...v0.19.0) (2026-09-17)
 
 
