@@ -89,6 +89,7 @@ pub const TABLES: &[(&str, &[&str])] = &[
             "discovered_from",
             "discovered_by_session",
             "phase_plan_slug",
+            "brief_slug",
             "closed_by_session",
             "created_ms",
             "updated_ms",

@@ -99,6 +99,9 @@ impl Tools {
         memory::RECALL,
         docs::DOC_READ,
         docs::DOC_SEARCH,
+        // What good was agreed to be, where the item said so. A reviewer
+        // asked to judge against criteria it cannot read is judging its own.
+        work::BRIEF_READ,
         review::VERDICT,
     ];
 
@@ -328,7 +331,11 @@ impl Tools {
                     .ok_or("memory is not available on this node")?;
                 memory::call(self, access, ctx, name, args).await
             }
-            work::WORK_READY | work::WORK_DISCOVER | work::WORK_CLOSE => {
+            work::WORK_READY
+            | work::WORK_DISCOVER
+            | work::WORK_CLOSE
+            | work::BRIEF_READ
+            | work::BRIEF_NOTE => {
                 let access = self
                     .session
                     .get()

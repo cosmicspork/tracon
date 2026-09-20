@@ -60,6 +60,7 @@ pub fn create(store: &Store, bus: &Bus, site: &str, w: NewWork) -> Result<WorkIt
         discovered_from: w.discovered_from,
         discovered_by_session: w.discovered_by_session,
         phase_plan_slug: None,
+        brief_slug: None,
         closed_by_session: None,
         created_ms: now,
         updated_ms: now,
@@ -163,6 +164,25 @@ pub fn set_plan(
         .work_get(id)?
         .ok_or_else(|| WorkError::Missing(id.into()))?;
     item.phase_plan_slug = Some(slug.to_string());
+    item.updated_ms = now_ms();
+    put(store, bus, site, &item)?;
+    Ok(item)
+}
+
+/// Link an item to the brief document that carries its product brief, or
+/// unlink it. Unlinking leaves the document alone: it is the operator's
+/// artifact, and a removed link is not a reason to delete prose.
+pub fn set_brief(
+    store: &Store,
+    bus: &Bus,
+    site: &str,
+    id: &str,
+    slug: Option<&str>,
+) -> Result<WorkItem, WorkError> {
+    let mut item = store
+        .work_get(id)?
+        .ok_or_else(|| WorkError::Missing(id.into()))?;
+    item.brief_slug = slug.map(str::to_string);
     item.updated_ms = now_ms();
     put(store, bus, site, &item)?;
     Ok(item)

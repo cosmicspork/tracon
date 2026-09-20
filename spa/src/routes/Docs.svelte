@@ -7,7 +7,7 @@
   import { store } from '../lib/store.svelte'
   import type { Document, RecallHit } from '../lib/types'
 
-  const KINDS = ['guide', 'ref', 'architecture', 'plan', 'proposal', 'repo', 'note', 'meeting', 'inbox', 'other']
+  const KINDS = ['guide', 'ref', 'architecture', 'brief', 'plan', 'proposal', 'repo', 'note', 'meeting', 'inbox', 'other']
 
   let channel = $state<string>('')
   let docs = $state<Document[]>([])

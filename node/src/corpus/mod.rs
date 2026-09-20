@@ -1,7 +1,9 @@
 //! The node's corpus: documents, memories, and work items written through the sync layer
-//! and published to the mesh, project identity, and the orientation a session
-//! starts with. Reads are always local; see `store::corpus`.
+//! and published to the mesh, project identity, the optional product brief a
+//! work item may point at, and the orientation a session starts with. Reads
+//! are always local; see `store::corpus`.
 
+pub mod brief;
 pub mod chunk;
 pub mod export;
 pub mod html;

@@ -3,6 +3,12 @@
 //! mid-session linked to its origin instead of evaporating with the
 //! session, and `work_close` closes the item this session holds — or, for a
 //! harness the operator runs, which holds none, the item it names.
+//!
+//! `brief_read` and `brief_note` are the item's product brief, when it has
+//! one: who the work is for and what would make it good, as the operator
+//! recorded it. Reading is free; writing a line is asked, and the node holds
+//! a session to what a session can honestly claim — never a decision, and
+//! never an observation with nothing to point at.
 
 use serde_json::{json, Value};
 
@@ -14,6 +20,8 @@ use crate::{
 pub const WORK_READY: &str = "work_ready";
 pub const WORK_DISCOVER: &str = "work_discover";
 pub const WORK_CLOSE: &str = "work_close";
+pub const BRIEF_READ: &str = "brief_read";
+pub const BRIEF_NOTE: &str = "brief_note";
 
 pub fn definitions() -> Vec<Value> {
     vec![
@@ -43,6 +51,47 @@ pub fn definitions() -> Vec<Value> {
                     "priority": { "type": "integer", "default": 0 },
                 },
                 "required": ["title"],
+            },
+        }),
+        json!({
+            "name": BRIEF_READ,
+            "description": "The product brief of the item this session holds, when it has one: intended \
+                            user, problem, source references, constraints, success criteria and open \
+                            questions. Every line says whether the customer was observed saying it, \
+                            someone inferred it, or the operator decided it, and what it points at. \
+                            An item without a brief is normal; the tool says so.",
+            "inputSchema": { "type": "object", "properties": {} },
+        }),
+        json!({
+            "name": BRIEF_NOTE,
+            "description": "Add a line to the brief of the item this session holds. Say which section, \
+                            and point at what the line rests on. You may record `inferred` (you reasoned \
+                            to it) or `observed` (the customer said or did it) — an observation must cite \
+                            a doc, url, evidence id or session. You may not record a decision: that is \
+                            the operator's. The line is written with a reference to this session.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "field": {
+                        "type": "string",
+                        "enum": ["intended_user", "problem", "source_references", "constraints", "success_criteria", "unresolved_questions"],
+                    },
+                    "provenance": { "type": "string", "enum": ["observed", "inferred"], "default": "inferred" },
+                    "text": { "type": "string" },
+                    "refs": {
+                        "type": "array",
+                        "description": "What the line rests on, as {kind, value} with kind one of doc, session, evidence, work, url, file.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "type": "string", "enum": crate::corpus::brief::REF_KINDS },
+                                "value": { "type": "string" },
+                            },
+                            "required": ["kind", "value"],
+                        },
+                    },
+                },
+                "required": ["field", "text"],
             },
         }),
         json!({
@@ -182,6 +231,54 @@ pub async fn call(
                 .item_closed(&ctx.session_id, args["summary"].as_str().unwrap_or(""))
                 .await;
             Ok(json!({ "id": item.id, "state": item.state }))
+        }
+        BRIEF_READ => {
+            let Some(id) = item_id else {
+                return Err("this session holds no work item, so it has no brief".into());
+            };
+            let view = corpus::brief::for_item(&access.store, &id).map_err(|e| e.to_string())?;
+            match view {
+                Some(view) => {
+                    let summary = corpus::brief::summary(&view);
+                    Ok(json!({ "brief": view, "summary": summary }))
+                }
+                None => Ok(json!({
+                    "brief": null,
+                    "summary": format!("{} has no brief; work from the item and the plan", &id[..12.min(id.len())]),
+                })),
+            }
+        }
+        BRIEF_NOTE => {
+            let Some(id) = item_id else {
+                return Err("this session holds no work item, so it has no brief".into());
+            };
+            let field = args["field"].as_str().unwrap_or("").trim().to_string();
+            let text = args["text"].as_str().unwrap_or("").trim().to_string();
+            if text.is_empty() {
+                return Err("brief_note needs the line's text".into());
+            }
+            let refs: Vec<corpus::brief::RefInput> =
+                serde_json::from_value(args.get("refs").cloned().unwrap_or_else(|| json!([])))
+                    .map_err(|e| format!("refs must be {{kind, value}} objects: {e}"))?;
+            let view = corpus::brief::append_for_item(
+                &access.store,
+                access.manager.bus(),
+                &ctx.node_id,
+                &id,
+                vec![corpus::brief::SectionInput {
+                    field,
+                    notes: None,
+                    replace: false,
+                    entries: Some(vec![corpus::brief::EntryInput {
+                        provenance: args["provenance"].as_str().map(str::to_string),
+                        text,
+                        refs,
+                    }]),
+                }],
+                &corpus::brief::Author::Session(ctx.session_id.clone()),
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(json!({ "slug": view.slug, "summary": corpus::brief::summary(&view) }))
         }
         other => Err(format!("no work tool named {other}")),
     }

@@ -104,7 +104,10 @@ is the last-writer-wins key; `row` is the whole record for an upsert and null fo
 delete. Version 2 added these three kinds. The replicated tables are `document`,
 `memory`, `promotion`, and (sync schema step 2, no contract change) `work_item`, whose
 id is `hex(sha256("tracon/work-item" ‖ 0x1f ‖ channel ‖ 0x1f ‖ project ‖ 0x1f ‖ site ‖
-0x1f ‖ created_ms ‖ 0x1f ‖ title))` — pinned in `sync/src/work.rs`.
+0x1f ‖ created_ms ‖ 0x1f ‖ title))` — pinned in `sync/src/work.rs`. Sync schema step 5
+adds the nullable `brief_slug` to that row, additively and with no contract change: a
+peer that predates it leaves the field out, and an omitted field keeps whatever the
+receiving replica holds rather than clearing the link.
 Commands are discriminated on `op`: `create`, `prompt`, `answer`, `kill`, `verdict`,
 and (version 3) `provider_connect`, `provider_code`, `provider_disconnect` — a peer's
 providers driven from another node's interface, executed by the owner exactly as a

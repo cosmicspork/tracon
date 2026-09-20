@@ -22,6 +22,7 @@ pub const KINDS: &[&str] = &[
     "inbox",
     "proposal",
     "plan",
+    "brief",
     "guide",
     "ref",
     "architecture",

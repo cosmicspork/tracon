@@ -194,6 +194,14 @@ const STEPS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS document_bundle_chunk_file
         ON document_bundle_chunk(channel, document_id, document_hash, file_id, chunk_ix);
     "#,
+    // Step 5: the document slug of an item's product brief, when it has one.
+    // Null is the ordinary case and stays the ordinary case: a brief extends
+    // an item, and an item that never gets one is not incomplete. A peer that
+    // predates the column leaves the field out of its rows, so a row from one
+    // keeps whatever link this replica already holds rather than clearing it.
+    r#"
+    ALTER TABLE work_item ADD COLUMN brief_slug TEXT;
+    "#,
 ];
 
 /// Install or upgrade the replicated schema. Safe to call on every open.
