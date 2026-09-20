@@ -49,10 +49,11 @@ It must also preserve what was learned after the intended user encountered the r
 
 **Customer context and definition of good**
 
-- [ ] Extend existing work and documents with an optional product brief: intended user,
-      problem, source references, constraints, success criteria and unresolved questions.
-      Distinguish customer observations, agent inferences and operator decisions; connect
-      evidence to the problem and chosen approach without requiring a research database.
+Work items and documents already carry the optional product brief: intended user,
+problem, source references, constraints, success criteria and open questions, with
+every line marked observed, inferred or decided and pointing at the evidence it rests
+on. What remains is the context that follows an attempt, and criteria bound to checks.
+
 - [ ] Let the operator select a versioned, work-specific context bundle that follows
       subsequent attempts: brief, research, decisions, constraints and relevant documents.
       Record what each attempt actually received and make changes or omissions visible;

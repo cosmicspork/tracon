@@ -9,6 +9,7 @@ const KINDS = [
   'inbox',
   'proposal',
   'plan',
+  'brief',
   'guide',
   'ref',
   'architecture',

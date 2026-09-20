@@ -731,6 +731,41 @@ binding can waive that), and closing the item ends the session that held it.
 Context rot is mitigated by mechanism where the workflow opts in, not by a line
 in a markdown file a plain session never claimed to follow.
 
+### The product brief
+
+An item may point at one document that says what the work is for: intended user,
+problem, source references, constraints, success criteria, open questions. It is
+an extension of the item and the corpus, not a second store — the brief is a
+document of kind `brief`, the link is one nullable column on the item, and the
+evidence it rests on is referenced, never copied. An item without a brief is not
+an incomplete item; no phase asks for one.
+
+**Every line says who is behind it, and the node enforces the part an agent
+cannot be trusted to keep about itself.** A line is `observed` (the customer said
+or did this), `inferred` (someone reasoned to it), `decided` (the operator chose
+it), or, written by hand with no marker, `unattributed` — which stays
+unattributed rather than being promoted to one of the three. A session may not
+record a decision, because deciding is the operator's, and may not record an
+observation citing nothing, because an observation no one can check is an
+inference; a line a session does write carries a reference to that session, in
+the document. The shipped agreements name `brief_read` and do not name
+`brief_note`, so reading is free and every line an agent would add is asked.
+
+**Lines point at evidence rather than holding it.** A reference is
+`[doc:slug]`, `[session:id]`, `[evidence:id]`, `[work:id]`, `[url:…]` or
+`[file:path]`, and reading a brief resolves what this node can: a reference it
+has never seen is marked unknown, the way an unknown dependency is, instead of
+being rendered as a link that goes nowhere. A bracket in an unknown shape is
+prose, not a broken link.
+
+The document is the record. It is Markdown that round-trips: the structure is a
+reading of the file, not a schema the file depends on, so a brief can be written
+or edited by hand with no node running, and a section or a heading this node does
+not recognize is kept and written back rather than dropped for not fitting. A
+section with no lines says what it does not say — an empty success-criteria
+section reads as "no success criteria stated" — because a brief that has never
+heard from the customer should look like one rather than like a tidy form.
+
 ## Sessions, phases, budgets
 
 Plan, execute, and review are **separate sessions the node spawns**, not phases

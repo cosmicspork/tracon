@@ -6,7 +6,7 @@
 # Anything not matched here is asked, so adding a rule can only ever reduce the
 # number of interruptions, never widen what an agent may do unattended.
 
-version = 7
+version = 8
 
 # --- 1. Worktree, not the main checkout -------------------------------------
 # Structurally true already: the harness only ever sees its own worktree at
@@ -142,9 +142,25 @@ matches = [
 [[rule]]
 id = "corpus-and-ledger"
 verdict = "allow"
-reason = "Recalling what is known, reading a document, retaining a fact, or recording and closing work changes nothing the operator has not agreed to."
+reason = "Recalling what is known, reading a document or a brief, retaining a fact, or recording and closing work changes nothing the operator has not agreed to."
 kinds = ["tool"]
-matches = ["recall", "retain", "doc_read", "doc_search", "work_ready", "work_discover", "work_close"]
+matches = [
+    "recall",
+    "retain",
+    "doc_read",
+    "doc_search",
+    "brief_read",
+    "work_ready",
+    "work_discover",
+    "work_close",
+]
+
+# A brief line is not a working note: `brief_note` is named nowhere here, so
+# every line a session would add to a brief is put to the operator first. The
+# node already refuses a session's decision and a session's uncited
+# observation; what is left is a claim about the customer, in the operator's
+# own record of what the work is for, and one look before it lands costs less
+# than finding it there later.
 
 # Working notes are the agent's to keep current. A plan, a guide, a proposal or
 # a reference is not, and stays asked. A document's kind is its slug's prefix,

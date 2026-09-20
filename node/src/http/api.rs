@@ -2853,6 +2853,9 @@ pub async fn get_doc(
     if doc.format == "html" {
         value["bundle_files"] = json!(s.store().html_bundle_metadata(&doc)?);
     }
+    if doc.kind == crate::corpus::brief::KIND && doc.format == "markdown" {
+        value["brief"] = json!(crate::corpus::brief::view_of(s.store(), &doc));
+    }
     Ok(Json(value))
 }
 
@@ -3472,11 +3475,83 @@ pub async fn get_work(
         .filter(|w| w.discovered_from.as_deref() == Some(id.as_str()))
         .map(|w| json!({ "id": w.id, "title": w.title, "state": w.state }))
         .collect();
+    let brief = crate::corpus::brief::for_item(s.store(), &id).map_err(brief_err)?;
     Ok(Json(json!({
         "item": view,
         "sessions": sessions,
         "discovered": discovered,
+        "brief": brief,
     })))
+}
+
+/// `GET /api/work/{id}/brief`: the item's product brief, if it has one.
+/// Absent is an answer, not an error: most items never get one.
+pub async fn get_brief(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let item = s.store().work_get(&id)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        format!("no work item {id}"),
+    ))?;
+    let brief = crate::corpus::brief::for_item(s.store(), &id).map_err(brief_err)?;
+    // `linked_slug` without a brief is a link this node cannot follow: the
+    // document may be on another node, or it may have been deleted. Said,
+    // rather than shown as an item with no brief.
+    match brief {
+        Some(view) => Ok(Json(json!({
+            "brief": view,
+            "linked_slug": item.brief_slug,
+            "summary": crate::corpus::brief::summary(&view),
+        }))),
+        None => Ok(Json(
+            json!({ "brief": null, "linked_slug": item.brief_slug }),
+        )),
+    }
+}
+
+/// `PUT /api/work/{id}/brief`: start a brief, add lines to it, or replace its
+/// Markdown. The operator writes here, so a line may be a decision; a session
+/// writes through the brief tool, which holds it to what it can claim.
+pub async fn put_brief(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::corpus::brief::BriefInput>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let view = crate::corpus::brief::write_for_item(
+        s.store(),
+        s.manager.bus(),
+        &s.node_id,
+        &id,
+        input,
+        &crate::corpus::brief::Author::Operator,
+    )
+    .map_err(brief_err)?;
+    let summary = crate::corpus::brief::summary(&view);
+    Ok(Json(json!({ "brief": view, "summary": summary })))
+}
+
+/// `DELETE /api/work/{id}/brief`: unlink the brief from the item. The
+/// document stays where it is and says so.
+pub async fn unlink_brief(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let slug = crate::corpus::brief::unlink_item(s.store(), s.manager.bus(), &s.node_id, &id)
+        .map_err(brief_err)?;
+    Ok(Json(
+        json!({ "ok": true, "slug": slug, "document_kept": true }),
+    ))
+}
+
+fn brief_err(e: crate::corpus::brief::BriefError) -> ApiError {
+    use crate::corpus::brief::BriefError::*;
+    match e {
+        MissingItem(_) | NoBrief(_) => ApiError(StatusCode::NOT_FOUND, e.to_string()),
+        Conflict { .. } => ApiError(StatusCode::CONFLICT, e.to_string()),
+        Store(e) => ApiError::from(e),
+        other => ApiError(StatusCode::BAD_REQUEST, other.to_string()),
+    }
 }
 
 /// `PUT /api/work/{id}` with any of title, body, deps, priority, state.

@@ -27,6 +27,8 @@ pub struct WorkItem {
     pub discovered_from: Option<String>,
     pub discovered_by_session: Option<String>,
     pub phase_plan_slug: Option<String>,
+    /// The slug of this item's product brief, when the operator started one.
+    pub brief_slug: Option<String>,
     pub closed_by_session: Option<String>,
     pub created_ms: i64,
     pub updated_ms: i64,
@@ -212,6 +214,7 @@ mod tests {
             discovered_from: None,
             discovered_by_session: None,
             phase_plan_slug: None,
+            brief_slug: None,
             closed_by_session: None,
             created_ms,
             updated_ms: created_ms,

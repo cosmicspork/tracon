@@ -168,6 +168,12 @@ pub fn router(state: AppState) -> Router {
                 .put(api::put_work)
                 .delete(api::delete_work),
         )
+        .route(
+            "/api/work/{id}/brief",
+            get(api::get_brief)
+                .put(api::put_brief)
+                .delete(api::unlink_brief),
+        )
         .route("/api/docs", get(api::list_docs))
         .route("/api/docs/reindex", post(api::reindex_docs))
         .route(

@@ -3,10 +3,10 @@
 //! point.
 //!
 //! **Reserved** is what this session is for and what bounds it: the node it
-//! runs on, the work item and its phase, the plan or the diff under review,
-//! the agreements the node enforces, and the operator's standing directives
-//! and customization. It is assembled first and is never dropped to make room
-//! for anything below it.
+//! runs on, the work item and its phase, the brief it points at, the plan or
+//! the diff under review, the agreements the node enforces, and the operator's
+//! standing directives and customization. It is assembled first and is never
+//! dropped to make room for anything below it.
 //!
 //! **Discretionary** is everything the node offers because it might help:
 //! shared conventions (documents of kind `guide` on the channel) and the other
@@ -224,6 +224,15 @@ fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
             missing,
         );
         out.push_str("\n\n");
+    }
+    if let Some(slug) = &item.brief_slug {
+        // A pointer, not the brief: what the work is for is worth 25 tokens
+        // of the reserved space, and the brief itself is a call away.
+        out.push_str(&format!(
+            "This item has a product brief (`{slug}`): who the work is for, what would make it \
+             good, and what is still open. `brief_read` returns it, with every line marked \
+             observed, inferred or decided.\n\n"
+        ));
     }
     if let Some(from) = &item.discovered_from {
         out.push_str(&format!(
@@ -624,6 +633,7 @@ mod tests {
             discovered_from: None,
             discovered_by_session: None,
             phase_plan_slug: None,
+            brief_slug: None,
             closed_by_session: None,
             created_ms: 1,
             updated_ms: 1,
@@ -1009,5 +1019,49 @@ mod tests {
         assert!(text.contains("[cut here"));
         assert!(text.contains("call `doc_read` for `guide-long`"));
         assert!(text.len() < CAP_CHARS);
+    }
+
+    /// An item's brief is named in the reserved tier, and only when there is
+    /// one: a session whose item has no brief is told nothing about briefs.
+    #[test]
+    fn a_brief_is_pointed_at_from_the_task_and_is_silent_when_there_is_none() {
+        let store = Store::open_in_memory().unwrap();
+        let mut item = item("Overnight alert triage", "");
+        let manifest = crate::manifest::LaunchManifest::default();
+        fn facts<'a>(
+            item: &'a WorkItem,
+            manifest: &'a crate::manifest::LaunchManifest,
+        ) -> Facts<'a> {
+            Facts {
+                node_name: "n",
+                node_id: "id",
+                backend: "local",
+                harness: "fake",
+                harness_version: "1",
+                channel: "personal",
+                project_id: None,
+                project_name: None,
+                tools: &[],
+                worktree: "/work",
+                phase: "execute",
+                item: Some(item),
+                plan_body: None,
+                ready: &[],
+                review: None,
+                manifest,
+            }
+        }
+        let (bare, _) = assemble(&store, &Policy::default(), &facts(&item, &manifest));
+        assert!(!bare.contains("brief"), "no brief, nothing said: {bare}");
+
+        item.brief_slug = Some("brief-item0001dead".into());
+        let (text, missing) = assemble(&store, &Policy::default(), &facts(&item, &manifest));
+        assert!(text.contains("`brief-item0001dead`"), "{text}");
+        assert!(text.contains("`brief_read`"), "and how to read it: {text}");
+        assert!(
+            text.find("Overnight alert triage") < text.find("brief-item0001dead"),
+            "the pointer sits with the task"
+        );
+        assert!(missing.is_empty(), "a pointer costs nothing: {missing:?}");
     }
 }

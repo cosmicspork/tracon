@@ -37,6 +37,9 @@ import type {
   TransferImport,
   TransferInboxItem,
   TransferStage,
+  Brief,
+  BriefEntryInput,
+  BriefField,
   WorkItem,
   WorkView,
   QaEvidence,
@@ -503,10 +506,31 @@ export const api = {
     return call<{ items: WorkView[] }>('GET', `/api/work/ready?${q}`)
   },
   workItem: (id: string) =>
-    call<{ item: WorkView | null; sessions: Session[]; discovered: { id: string; title: string; state: string }[] }>(
-      'GET',
-      `/api/work/${id}`,
-    ),
+    call<{
+      item: WorkView | null
+      sessions: Session[]
+      discovered: { id: string; title: string; state: string }[]
+      brief: Brief | null
+    }>('GET', `/api/work/${id}`),
+  /** The item's product brief. `brief` is null when it has none, which is not an error. */
+  workBrief: (id: string) =>
+    call<{ brief: Brief | null; linked_slug: string | null; summary?: string }>('GET', `/api/work/${id}/brief`),
+  /**
+   * Start a brief, add lines to it, or replace its Markdown. `if_hash` is the
+   * hash last read: an edit against a brief that moved is refused, not merged.
+   */
+  putBrief: (
+    id: string,
+    input: {
+      title?: string
+      preamble?: string
+      sections?: { field: BriefField; notes?: string; entries?: BriefEntryInput[] }[]
+      markdown?: string
+      if_hash?: string
+    },
+  ) => call<{ brief: Brief; summary: string }>('PUT', `/api/work/${id}/brief`, input),
+  /** Unlink the brief from the item. The document stays. */
+  unlinkBrief: (id: string) => call<{ ok: boolean; slug: string; document_kept: boolean }>('DELETE', `/api/work/${id}/brief`),
   addWork: (w: { channel: string; title: string; body?: string; deps?: string[]; priority?: number; project_id?: string; discovered_from?: string }) =>
     call<WorkItem>('POST', '/api/work', w),
   putWork: (id: string, patch: { title?: string; body?: string; deps?: string[]; priority?: number; state?: 'open' | 'closed' }) =>

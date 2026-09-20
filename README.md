@@ -213,6 +213,19 @@ already in its catalogue and records which source actually won as the session's
 session needs something other than the usual. The session is killed at its budget,
 checked at each turn's end; a channel at its daily ceiling starts no session at all.
 
+**A work item may carry a brief, and most never will.** It is one document —
+`brief-<item>` on the Documents screen, linked from the item — saying who the work
+is for, what their problem is, what was read to reach that belief, what bounds the
+answer, what would make it good, and what is still open. Every line is marked
+`observed` (the customer said or did this), `inferred` (someone reasoned to it) or
+`decided` (you chose it), and points at what it rests on: a document, a session, a
+piece of evidence, another item, a URL. The node resolves those and says which ones
+it has never seen rather than showing a link that goes nowhere. A session reads the
+brief with `brief_read`; a line it wants to add goes through `brief_note`, which
+comes to you for approval, and which refuses outright to record a decision in your
+name or an observation with nothing to point at. Nothing requires a brief: an item
+without one is worked from its description and its plan, exactly as before.
+
 The model picker uses the selected runner's connected, channel-bound providers.
 A connected provider whose models never appear has a stale catalogue — the probe
 runs when the provider connects, and can miss if the harness was not up yet or the
@@ -811,9 +824,10 @@ args = { slug = ["note-*", "repo-*", "meeting-*", "inbox-*"] }
 ```
 
 The shipped bundle runs the reads unattended — queries, lookups, searches,
-pipeline and check status, job logs, documents, memory, the ledger — and asks
-before every write that others see: a comment, an edited or new ticket, a
-pipeline run, a document other than working notes.
+pipeline and check status, job logs, documents, memory, the ledger, an item's
+brief — and asks before every write that others see: a comment, an edited or new
+ticket, a pipeline run, a document other than working notes, a line added to a
+brief.
 
 ### Granting authority
 

@@ -515,9 +515,67 @@ export interface WorkItem {
   discovered_from: string | null
   discovered_by_session: string | null
   phase_plan_slug: string | null
+  /** The document holding this item's product brief, when it has one. */
+  brief_slug: string | null
   closed_by_session: string | null
   created_ms: number
   updated_ms: number
+}
+
+/** Who is behind a brief line. An unmarked line stays `unattributed`. */
+export type Provenance = 'observed' | 'inferred' | 'decided' | 'unattributed'
+
+export type BriefField =
+  | 'intended_user'
+  | 'problem'
+  | 'source_references'
+  | 'constraints'
+  | 'success_criteria'
+  | 'unresolved_questions'
+
+export type RefKind = 'doc' | 'session' | 'evidence' | 'work' | 'url' | 'file'
+
+/** What a line points at. `known` is absent where the node cannot tell. */
+export interface BriefRef {
+  kind: RefKind
+  value: string
+  label?: string
+  known?: boolean
+}
+
+export interface BriefEntry {
+  provenance: Provenance
+  text: string
+  refs: BriefRef[]
+}
+
+export interface BriefSection {
+  field: BriefField
+  heading: string
+  notes: string
+  entries: BriefEntry[]
+}
+
+/** A brief as the node reads it out of its document. */
+export interface Brief {
+  channel: string
+  slug: string
+  work_item_id?: string
+  hash: string
+  updated_ms: number
+  title: string
+  preamble: string
+  sections: BriefSection[]
+  extra: string
+  counts: { observed: number; inferred: number; decided: number; unattributed: number }
+  absent: { field: BriefField; heading: string; says: string }[]
+}
+
+/** One line, as the interface sends it. */
+export interface BriefEntryInput {
+  provenance?: Provenance
+  text: string
+  refs: { kind: RefKind; value: string }[]
 }
 
 export type Blocker = { kind: 'open'; id: string } | { kind: 'unknown'; id: string } | { kind: 'cycle' }
