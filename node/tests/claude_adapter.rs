@@ -193,13 +193,18 @@ async fn an_expired_permission_denies_rather_than_hanging() {
 /// This layer is the one most likely to break silently, so it fails closed:
 /// the pin is checked against the harness's own report, not only a
 /// `--version` call that may have run against a different image.
+///
+/// The CLI reports itself only in the init frame, and the pinned CLI emits
+/// that frame only after the first user message, so the refusal lands on the
+/// first turn rather than on the launch.
 #[tokio::test]
-async fn a_version_the_node_did_not_pin_refuses_to_launch() {
+async fn a_version_the_node_did_not_pin_refuses_the_first_turn() {
     state::isolate();
     let a = ClaudeAdapter::new("2.1.247");
     let spec = spec_env(vec![("FAKE_CLAUDE_VERSION".into(), "2.0.1".into())]);
-    let err = match a.launch(&FakeRunner, spec).await {
-        Ok(_) => panic!("an unpinned version must not launch"),
+    let (handle, _rx) = a.launch(&FakeRunner, spec).await.unwrap();
+    let err = match handle.prompt("do the thing".into()).await {
+        Ok(_) => panic!("an unpinned version must not run a turn"),
         Err(e) => e,
     };
     match err {
@@ -214,15 +219,28 @@ async fn a_version_the_node_did_not_pin_refuses_to_launch() {
 /// A session whose MCP server did not connect has no tools, and would fail in
 /// a way that looks like the model being unhelpful rather than a broken node.
 #[tokio::test]
-async fn an_unreachable_mcp_server_refuses_to_launch() {
+async fn an_unreachable_mcp_server_refuses_the_first_turn() {
     state::isolate();
     let a = ClaudeAdapter::new("2.1.247");
     let spec = spec_env(vec![("FAKE_CLAUDE_MCP_STATUS".into(), "failed".into())]);
-    let err = match a.launch(&FakeRunner, spec).await {
-        Ok(_) => panic!("a session with no tools must not launch"),
+    let (handle, mut rx) = a.launch(&FakeRunner, spec).await.unwrap();
+    let err = match handle.prompt("do the thing".into()).await {
+        Ok(_) => panic!("a session with no tools must not run a turn"),
         Err(e) => e,
     };
     assert!(err.to_string().contains("MCP"), "{err}");
+    // The harness is ended rather than driven: the stream closes.
+    let exited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(ev) = rx.recv().await {
+            if matches!(ev, HarnessEvent::Exited { .. }) {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    assert!(exited, "the refused harness was not ended");
 }
 
 /// The session id the node wrote on the row and the one the harness uses have
@@ -268,12 +286,13 @@ async fn a_session_takes_more_than_one_turn() {
 /// one is refused with both sides in the reason rather than decoded on the
 /// chance that nothing moved.
 #[tokio::test]
-async fn a_stream_json_revision_the_node_does_not_speak_refuses_to_launch() {
+async fn a_stream_json_revision_the_node_does_not_speak_refuses_the_first_turn() {
     state::isolate();
     let a = ClaudeAdapter::new("2.1.247");
     let spec = spec_env(vec![("FAKE_CLAUDE_PROTOCOL".into(), "4".into())]);
-    let err = match a.launch(&FakeRunner, spec).await {
-        Ok(_) => panic!("an unsupported protocol must not launch"),
+    let (handle, _rx) = a.launch(&FakeRunner, spec).await.unwrap();
+    let err = match handle.prompt("do the thing".into()).await {
+        Ok(_) => panic!("an unsupported protocol must not run a turn"),
         Err(e) => e,
     };
     assert!(

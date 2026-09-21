@@ -26,11 +26,6 @@ use super::{
 use crate::adapter::types::{self, PermissionOption, ToolCall, ToolCallUpdate, Usage};
 use crate::runner::{Runner, RunnerCommand, RunnerError, Spawned};
 
-/// How long to wait for the `system/init` frame before giving up on a launch.
-/// It is emitted before any model call, so this only has to cover process
-/// start inside a container.
-const INIT_TIMEOUT_SECS: u64 = 60;
-
 /// The models this adapter offers. Claude Code has no catalogue endpoint of
 /// its own; these are the aliases it resolves to whatever is current, which is
 /// also what keeps a pinned node from silently following a model change.
@@ -229,7 +224,14 @@ pub struct ClaudeHandle {
     session_id: String,
     turn: Arc<Mutex<Option<oneshot::Sender<TurnResult>>>>,
     compat: HarnessCompat,
+    /// What the pump found wrong with the `system/init` frame, for the turn
+    /// that elicited it to fail with rather than with "ended mid-turn".
+    fault: Fault,
 }
+
+/// The handshake refusal, held between the pump that read the init frame and
+/// the prompt that is waiting on it. See `Pump::check_init`.
+type Fault = Arc<Mutex<Option<AdapterError>>>;
 
 #[async_trait]
 impl HarnessHandle for ClaudeHandle {
@@ -242,6 +244,9 @@ impl HarnessHandle for ClaudeHandle {
     }
 
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError> {
+        if let Some(fault) = self.fault.lock().unwrap().take() {
+            return Err(fault);
+        }
         let (tx, rx) = oneshot::channel();
         *self.turn.lock().unwrap() = Some(tx);
         self.writer
@@ -250,8 +255,18 @@ impl HarnessHandle for ClaudeHandle {
                 "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
             }))
             .await?;
-        rx.await
-            .map_err(|_| AdapterError::Protocol("the harness ended mid-turn".into()))
+        match rx.await {
+            Ok(result) => Ok(result),
+            // The first user message is what makes the CLI emit `system/init`
+            // (see `launch`), so a handshake refusal surfaces here, on the
+            // turn that elicited it, and not as a launch failure.
+            Err(_) => Err(self
+                .fault
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| AdapterError::Protocol("the harness ended mid-turn".into()))),
+        }
     }
 
     async fn cancel(&self) -> Result<(), AdapterError> {
@@ -288,6 +303,10 @@ struct Pump {
     /// Permission requests still waiting on the operator, by the CLI's own
     /// request id, so a cancelled ask can be answered rather than orphaned.
     open: Arc<Mutex<HashMap<String, ()>>>,
+    /// The version this node pins, checked against the init frame's own
+    /// report when it arrives.
+    pinned: String,
+    fault: Fault,
 }
 
 fn text_of(block: &Value) -> String {
@@ -295,6 +314,42 @@ fn text_of(block: &Value) -> String {
 }
 
 impl Pump {
+    /// The handshake, read off the `system/init` frame: the pin enforced a
+    /// second time from the harness's own report rather than from a
+    /// `--version` call that may have run against a different image (a
+    /// missing version is a mismatch, not a pass), the stream-json revision
+    /// these frames are decoded as, and the MCP servers — a server the
+    /// harness could not reach means the session has no tools and would fail
+    /// in a way that looks like the model being unhelpful.
+    fn check_init(pinned: &str, init: &Value) -> Result<(), AdapterError> {
+        let found = init["claude_code_version"].as_str().unwrap_or("unknown");
+        if found != pinned {
+            return Err(AdapterError::VersionMismatch {
+                found: found.to_string(),
+                pinned: pinned.to_string(),
+            });
+        }
+        let protocol = init_protocol(init);
+        if !ClaudeAdapter::PROTOCOL.accepts(protocol) {
+            return Err(AdapterError::IncompatibleProtocol {
+                agent: ClaudeAdapter::ID.into(),
+                protocol: ClaudeAdapter::PROTOCOL.name,
+                found: protocol.to_string(),
+                supported: ClaudeAdapter::PROTOCOL.versions(),
+            });
+        }
+        for s in init["mcp_servers"].as_array().into_iter().flatten() {
+            if s["status"].as_str().is_some_and(|st| st != "connected") {
+                return Err(AdapterError::Protocol(format!(
+                    "the harness could not connect to the {} MCP server ({})",
+                    s["name"].as_str().unwrap_or("tracon"),
+                    s["status"].as_str().unwrap_or("unknown")
+                )));
+            }
+        }
+        Ok(())
+    }
+
     async fn run(self, tx: mpsc::Sender<HarnessEvent>) {
         let Pump {
             stdout,
@@ -302,6 +357,8 @@ impl Pump {
             writer,
             turn,
             open,
+            pinned,
+            fault,
         } = self;
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
@@ -313,6 +370,19 @@ impl Pump {
                 continue;
             };
             match v["type"].as_str().unwrap_or_default() {
+                "system" if v["subtype"] == "init" => {
+                    if let Err(refused) = Self::check_init(&pinned, &v) {
+                        tracing::error!(error = %refused, "harness handshake refused");
+                        *fault.lock().unwrap() = Some(refused);
+                        // The turn that elicited the frame fails with the
+                        // fault; the process is ended rather than driven.
+                        drop(turn.lock().unwrap().take());
+                        drop(done);
+                        let _ = tx.send(HarnessEvent::Exited { code: None }).await;
+                        return;
+                    }
+                    let _ = tx.send(HarnessEvent::Other(v.clone())).await;
+                }
                 "assistant" => {
                     let id = v["message"]["id"].as_str().map(str::to_string);
                     for block in v["message"]["content"].as_array().into_iter().flatten() {
@@ -534,50 +604,6 @@ fn permission_target(tool: &str, input: &Value) -> (Option<String>, Option<Strin
     }
 }
 
-/// Read frames until `system/init`, which the CLI emits before any model call.
-/// Returns the init frame and the reader positioned after it.
-type Started = (
-    Value,
-    Box<dyn tokio::io::AsyncRead + Send + Unpin>,
-    Writer,
-    futures_core::future::BoxFuture<'static, Result<i32, RunnerError>>,
-);
-
-async fn read_init(spawned: Spawned) -> Result<Started, AdapterError> {
-    let Spawned {
-        stdin,
-        stdout,
-        done,
-        ..
-    } = spawned;
-    let writer = Writer::spawn(stdin);
-    let mut reader = BufReader::new(stdout);
-    let deadline = std::time::Duration::from_secs(INIT_TIMEOUT_SECS);
-    let init = tokio::time::timeout(deadline, async {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let n = reader
-                .read_line(&mut line)
-                .await
-                .map_err(|e| AdapterError::Protocol(e.to_string()))?;
-            if n == 0 {
-                return Err(AdapterError::Protocol(
-                    "the harness exited before it started a session".into(),
-                ));
-            }
-            if let Ok(v) = serde_json::from_str::<Value>(line.trim()) {
-                if v["type"] == "system" && v["subtype"] == "init" {
-                    return Ok(v);
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|_| AdapterError::Protocol("the harness never started a session".into()))??;
-    Ok((init, Box::new(reader), writer, done))
-}
-
 #[async_trait]
 impl HarnessAdapter for ClaudeAdapter {
     fn id(&self) -> &'static str {
@@ -611,51 +637,21 @@ impl HarnessAdapter for ClaudeAdapter {
     }
 
     /// Claude Code has no model catalogue to ask for, so this reports the
-    /// aliases it accepts with the one it would default to first. Launching to
-    /// read `system/init` costs a process and no model call.
+    /// aliases it accepts. Nothing is launched: the pinned CLI emits its
+    /// `system/init` frame only after a first user message, and a user
+    /// message is a model call.
     async fn probe_models(
         &self,
-        runner: &dyn Runner,
-        wiring: &crate::gateway::model::Wiring,
+        _runner: &dyn Runner,
+        _wiring: &crate::gateway::model::Wiring,
     ) -> Result<Vec<ModelOption>, AdapterError> {
-        let spec = LaunchSpec {
-            cwd_in_runner: "/".into(),
-            model: "sonnet".into(),
-            container_name: "claude-probe".into(),
-            harness_home: String::new(),
-            mcp_servers: Vec::new(),
-            tools: Vec::new(),
-            env: wiring.env.clone(),
-            system_prompt_file: None,
-            cursor: None,
-        };
-        let session_id = uuid::Uuid::now_v7().to_string();
-        let spawned = runner
-            .spawn(Self::cmd("claude-probe", &spec, &session_id))
-            .await?;
-        let (init, _reader, writer, done) = read_init(spawned).await?;
-        let default = init["model"].as_str().unwrap_or_default().to_string();
-        // The probe has what it came for; closing stdin ends the run cleanly
-        // rather than leaving the kill to a dropped handle.
-        drop(writer);
-        drop(done);
-        let mut out: Vec<ModelOption> = ALIASES
+        Ok(ALIASES
             .iter()
             .map(|a| ModelOption {
                 value: (*a).to_string(),
                 name: (*a).to_string(),
             })
-            .collect();
-        if !default.is_empty() && !ALIASES.iter().any(|a| default.starts_with(a)) {
-            out.insert(
-                0,
-                ModelOption {
-                    value: default.clone(),
-                    name: format!("{default} (this node's default)"),
-                },
-            );
-        }
-        Ok(out)
+            .collect())
     }
 
     async fn launch(
@@ -667,66 +663,48 @@ impl HarnessAdapter for ClaudeAdapter {
         // it has already written and the harness's own id are the same string
         // even if the handshake fails.
         let session_id = uuid::Uuid::now_v7().to_string();
-        let spawned = runner
+        let Spawned {
+            stdin,
+            stdout,
+            done,
+            ..
+        } = runner
             .spawn(Self::cmd(&spec.container_name, &spec, &session_id))
             .await?;
-        let (init, reader, writer, done) = read_init(spawned).await?;
+        let writer = Writer::spawn(stdin);
 
-        // Enforce the pin a second time, from the harness's own report rather
-        // than from a `--version` call that may have run against a different
-        // image. A missing version is a mismatch, not a pass.
-        let found = init["claude_code_version"].as_str().unwrap_or("unknown");
-        if found != self.pinned {
-            return Err(AdapterError::VersionMismatch {
-                found: found.to_string(),
-                pinned: self.pinned.clone(),
-            });
-        }
-        // Everything below decodes stream-json frames of one revision. A CLI
-        // that starts naming another one is refused rather than driven.
-        let protocol = init_protocol(&init);
-        if !Self::PROTOCOL.accepts(protocol) {
-            return Err(AdapterError::IncompatibleProtocol {
-                agent: Self::ID.into(),
-                protocol: Self::PROTOCOL.name,
-                found: protocol.to_string(),
-                supported: Self::PROTOCOL.versions(),
-            });
-        }
-        // A server the harness could not reach means the session has no tools
-        // and would fail in a way that looks like the model being unhelpful.
-        for s in init["mcp_servers"].as_array().into_iter().flatten() {
-            if s["status"].as_str().is_some_and(|st| st != "connected") {
-                return Err(AdapterError::Protocol(format!(
-                    "the harness could not connect to the {} MCP server ({})",
-                    s["name"].as_str().unwrap_or("tracon"),
-                    s["status"].as_str().unwrap_or("unknown")
-                )));
-            }
-        }
-
+        // Nothing is read here. The pinned CLI emits `system/init` only once
+        // the first user message has arrived on stdin (observed against
+        // 2.1.247: with stdin open and silent it prints nothing for as long
+        // as it is left alone), so a launch that waited for the frame before
+        // writing anything waited forever. The frame is checked by the pump
+        // when the first turn elicits it (`Pump::check_init`), and that turn
+        // is what fails if the harness is not the one this node pins. Until
+        // then the handle reports the pin, which `version()` already checked
+        // against the image at startup.
+        let fault: Fault = Arc::new(Mutex::new(None));
         let turn = Arc::new(Mutex::new(None));
         let (tx, rx) = mpsc::channel(256);
         let handle = ClaudeHandle {
             writer: writer.clone(),
-            session_id: init["session_id"]
-                .as_str()
-                .unwrap_or(&session_id)
-                .to_string(),
+            session_id,
             turn: turn.clone(),
             compat: HarnessCompat {
                 agent: Self::ID.into(),
-                version: found.to_string(),
-                protocol: Self::PROTOCOL.tag(protocol),
+                version: self.pinned.clone(),
+                protocol: Self::PROTOCOL.tag(Self::PROTOCOL.max),
             },
+            fault: fault.clone(),
         };
         tokio::spawn(
             Pump {
-                stdout: reader,
+                stdout,
                 done,
                 writer,
                 turn,
                 open: Arc::new(Mutex::new(HashMap::new())),
+                pinned: self.pinned.clone(),
+                fault,
             }
             .run(tx),
         );

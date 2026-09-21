@@ -142,6 +142,21 @@ pub fn base_url(host: &str, port: u16, provider: &str) -> String {
     format!("http://{host}:{port}/model/{provider}")
 }
 
+/// The environment variable that carries a provider's placeholder key into
+/// the harness, named so the catalogue entry for that provider can point at
+/// it and no other: `TRACON_PROVIDER_KEY_OPENAI_CODEX` for `openai-codex`.
+pub fn key_env_name(provider: &str) -> String {
+    let mut name = String::from("TRACON_PROVIDER_KEY_");
+    name.extend(provider.chars().map(|c| {
+        if c.is_ascii_alphanumeric() {
+            c.to_ascii_uppercase()
+        } else {
+            '_'
+        }
+    }));
+    name
+}
+
 /// Wire the providers `servable` accepts to the gateway with `token` as the
 /// placeholder key. The token doubles as the gateway's authentication, so the
 /// only secret the harness ever holds is one that names its own session.
@@ -180,6 +195,14 @@ pub fn harness_wiring(
             env.push(("ANTHROPIC_BASE_URL".to_string(), base));
             env.push(("ANTHROPIC_API_KEY".to_string(), token.to_string()));
         }
+        // The same placeholder under a name the catalogue can point at.
+        // OpenCode's session runner takes a provider's credential from a
+        // connection it builds out of the environment variables the
+        // catalogue names for that provider, and sends nothing at all when
+        // the key is only in the provider's `options` (observed against the
+        // pinned binary: no `x-api-key`, no `Authorization`). One variable per
+        // provider, so a catalogue entry names exactly its own.
+        env.push((key_env_name(name), token.to_string()));
     }
     Wiring {
         env,
@@ -249,6 +272,28 @@ const OPENAI_CODEX_ROUTES: &[Route] = &[
     ("GET", &["codex", "models"]),
     ("GET", &["v1", "models"]),
 ];
+
+/// The path the upstream is asked for, given the path the harness sent. The
+/// same for every shape but Codex, whose harness speaks the OpenAI surface
+/// (`v1/responses`, the only path an `@ai-sdk/openai` client emits) while the
+/// ChatGPT backend serves it at `codex/responses` and answers `404 Not Found`
+/// for anything under `v1/`. The rewrite lives here, on the gateway, because
+/// it is the gateway that knows which upstream it is lending the credential
+/// to; the Codex plugin that would have done it in the harness is never armed
+/// (finding 9).
+fn upstream_tail(shape: &str, allowed: &str) -> String {
+    if shape != SHAPE_OPENAI_CODEX {
+        return allowed.to_string();
+    }
+    match allowed.strip_prefix("v1/") {
+        Some(rest) => format!("codex/{rest}"),
+        None if allowed == "responses" || allowed.starts_with("responses/") => {
+            format!("codex/{allowed}")
+        }
+        None if allowed == "models" => "codex/models".to_string(),
+        None => allowed.to_string(),
+    }
+}
 
 /// The allowlist for a shape. A shape this build does not know is held to the
 /// OpenAI surface rather than waved through: an unknown shape is wired as an
@@ -402,6 +447,21 @@ pub async fn handle(
     } else if let Some((id, channel)) = s.manager.session_for_token(&presented).await {
         Caller::Session { id, channel }
     } else {
+        // What arrived, never what it said: enough to tell a harness that sent
+        // no credential from one whose session the node no longer holds.
+        let live_sessions = s.manager.live_token_count().await;
+        tracing::warn!(
+            provider,
+            method = %method,
+            x_api_key = headers.contains_key("x-api-key"),
+            bearer = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.starts_with("Bearer ")),
+            presented_len = presented.len(),
+            live_sessions,
+            "model call refused: no live session holds the presented credential"
+        );
         return refuse(StatusCode::UNAUTHORIZED, "unauthorized");
     };
     let Some(p) = s.cfg.providers.get(&provider).cloned() else {
@@ -480,7 +540,12 @@ pub async fn handle(
     };
 
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
-    let target = format!("{}/{}{}", p.upstream.trim_end_matches('/'), rest, query);
+    let target = format!(
+        "{}/{}{}",
+        p.upstream.trim_end_matches('/'),
+        upstream_tail(&p.shape, &rest),
+        query
+    );
     let mut req = s.tools.http.request(method.clone(), &target);
     for (k, v) in headers.iter() {
         if matches!(
@@ -1043,10 +1108,11 @@ mod tests {
         assert!(probe("GET", "v1/responses/resp_1").is_err());
     }
 
-    /// Only Claude Code reads a base URL out of the environment. Every other
-    /// provider reaches the gateway through the table its adapter writes, so
-    /// the environment must carry nothing else — a stray key here is a
-    /// credential-shaped string in a harness's process for no reason.
+    /// Only Claude Code reads a base URL out of the environment. Every
+    /// provider also gets its placeholder under the one name its catalogue
+    /// entry points at, and the environment carries nothing else — a stray
+    /// key here is a credential-shaped string in a harness's process for no
+    /// reason.
     #[test]
     fn only_the_anthropic_shape_is_wired_by_environment() {
         let cfg = Config::default();
@@ -1059,6 +1125,15 @@ mod tests {
                     "http://tracon-gw:7421/model/anthropic".to_string()
                 ),
                 ("ANTHROPIC_API_KEY".to_string(), "tok".to_string()),
+                (
+                    "TRACON_PROVIDER_KEY_ANTHROPIC".to_string(),
+                    "tok".to_string()
+                ),
+                ("TRACON_PROVIDER_KEY_OPENAI".to_string(), "tok".to_string()),
+                (
+                    "TRACON_PROVIDER_KEY_OPENAI_CODEX".to_string(),
+                    "tok".to_string()
+                ),
             ]
         );
         let codex = w
@@ -1085,7 +1160,45 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["openai-codex"]
         );
-        assert!(w.env.is_empty());
+        assert_eq!(
+            w.env,
+            vec![(
+                "TRACON_PROVIDER_KEY_OPENAI_CODEX".to_string(),
+                "tok".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn the_codex_upstream_is_asked_under_its_own_prefix() {
+        assert_eq!(
+            upstream_tail(SHAPE_OPENAI_CODEX, "v1/responses"),
+            "codex/responses"
+        );
+        assert_eq!(
+            upstream_tail(SHAPE_OPENAI_CODEX, "responses"),
+            "codex/responses"
+        );
+        assert_eq!(
+            upstream_tail(SHAPE_OPENAI_CODEX, "codex/responses"),
+            "codex/responses"
+        );
+        assert_eq!(
+            upstream_tail(SHAPE_OPENAI_CODEX, "v1/models"),
+            "codex/models"
+        );
+        assert_eq!(upstream_tail(SHAPE_ANTHROPIC, "v1/messages"), "v1/messages");
+        assert_eq!(upstream_tail("openai", "v1/responses"), "v1/responses");
+    }
+
+    #[test]
+    fn the_key_variable_is_one_name_per_provider() {
+        assert_eq!(key_env_name("anthropic"), "TRACON_PROVIDER_KEY_ANTHROPIC");
+        assert_eq!(
+            key_env_name("openai-codex"),
+            "TRACON_PROVIDER_KEY_OPENAI_CODEX"
+        );
+        assert_eq!(key_env_name("my.local"), "TRACON_PROVIDER_KEY_MY_LOCAL");
     }
 
     #[test]

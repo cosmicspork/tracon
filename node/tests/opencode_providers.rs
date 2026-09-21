@@ -378,9 +378,13 @@ fn the_pinned_catalogue_is_exactly_the_declared_models() {
     let mut ids: Vec<String> = Vec::new();
     for (name, entry) in catalogue {
         assert_eq!(entry["id"], name.as_str());
-        // No environment variable supplies a key for any of them: the
-        // placeholder is in the config and the credential is the gateway's.
-        assert_eq!(entry["env"], json!([]));
+        // Each names exactly its own key variable, which the wiring sets to
+        // the placeholder: the runner takes a provider's credential from the
+        // variables its catalogue entry lists and from nowhere else.
+        assert_eq!(
+            entry["env"],
+            json!([tracon::gateway::model::key_env_name(name)])
+        );
         for model in entry["models"].as_object().unwrap().keys() {
             ids.push(format!("{name}/{model}"));
         }
@@ -1127,6 +1131,13 @@ async fn launch(node: &Node, name: &str, model: &str, env: Vec<(String, String)>
     let work = root.join("work");
     std::fs::create_dir_all(&work).unwrap();
     let wiring = harness_wiring(&node.cfg, &node.host, &node.token, |_, _| true);
+    // What the node hands the harness: the wiring's environment first (the
+    // per-provider key variables the catalogue names), then the test's own.
+    let env = {
+        let mut merged = wiring.env.clone();
+        merged.extend(env);
+        merged
+    };
     let state_dir = root.join(".opencode");
     std::fs::create_dir_all(state_dir.join("run")).unwrap();
     for (file, body) in OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION).scratch_files(&wiring)
