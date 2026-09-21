@@ -253,6 +253,35 @@ and of the v2 surface only `/api/health`, `/api/reference` and `/api/agent`. The
 in the matrix are not dead — the node's own adapter drives them — but nothing the native
 UI does depends on them.
 
+### Finding 21 — the session runner takes a provider's key from the variables the catalogue names, never from `options.apiKey`
+
+Found on the operator's node, after the first real session turns (2026-09-20): every
+model call arrived at the gateway with **no credential header at all** and was refused
+`401`, while the same provider entry had passed `the_runner_presents_its_session_token_and_never_a_provider_key`.
+Reproduced in the bare image against a header-logging sink. The v2 runner
+(`SessionRunnerModel.resolve`, the path `POST /api/session/{id}/prompt` takes) resolves
+the model, then asks the integration layer for an **active connection** for the provider
+and builds the request's auth from that connection (`x-api-key` for `@ai-sdk/anthropic`,
+`Bearer` for `@ai-sdk/openai` and `@ai-sdk/openai-compatible`). A connection is created
+from the environment variables the provider's catalogue entry lists in `env`; the
+provider's `options.apiKey` is stripped before it reaches the request body
+(`pn(options)` drops `apiKey` and `headers`), so with `env: []` there is no connection and
+nothing is sent. Observed on the wire, same config shape as the adapter writes:
+
+| catalogue `env` | variable set | sent |
+|---|---|---|
+| `[]` | — (key only in `options.apiKey`) | nothing |
+| `[]` | `ANTHROPIC_API_KEY` | nothing |
+| `["ANTHROPIC_API_KEY"]` | `ANTHROPIC_API_KEY` | `x-api-key: <value>` |
+| `["TRACON_PROVIDER_KEY_ANTHROPIC"]` | that name | `x-api-key: <value>` |
+| `["TRACON_PROVIDER_KEY_OPENAI_CODEX"]` (`@ai-sdk/openai`) | that name | `Authorization: Bearer <value>` on `POST /v1/responses` |
+
+Any variable name works. The adapter therefore names one per provider in the catalogue
+(`TRACON_PROVIDER_KEY_<NAME>`, `gateway::model::key_env_name`) and the wiring sets each to
+the session's placeholder token; `options.apiKey` stays for the v1 path. The value in the
+runner is still only the token that names its own session. The earlier proof passed
+because it drove the v1 message route, which the native UI uses and the node does not.
+
 ### Still the operator's (no credential for them exists on a test machine)
 
 - Hosted Anthropic and OpenAI API keys end to end.

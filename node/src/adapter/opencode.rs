@@ -218,8 +218,15 @@ impl OpenCodeAdapter {
                 "opencode".into(),
                 "serve".into(),
                 "--pure".into(),
+                // Every interface of the runner, not its loopback: the node
+                // reaches a published podman port through the container's
+                // bridge address and a pod through its cluster IP, and a
+                // server bound to 127.0.0.1 inside either answers neither.
+                // The runner is what keeps the port private (a loopback-only
+                // publish; the pod's own network), and the per-launch
+                // password guards what the runner cannot.
                 "--hostname".into(),
-                "127.0.0.1".into(),
+                "0.0.0.0".into(),
                 "--port".into(),
                 port.to_string(),
                 "--print-logs".into(),
@@ -473,9 +480,14 @@ fn catalogue_document(wiring: &Wiring) -> Value {
                 // session runner resolves a model's endpoint from, so leaving
                 // this out is not "unset" — it is the provider's own host.
                 "api": provider_base_url(&provider.base_url),
-                // No environment variable supplies a key: the placeholder is
-                // in the config and the real credential is the gateway's.
-                "env": Vec::<String>::new(),
+                // The one variable the runner may take this provider's key
+                // from. It has to be named here: the session runner builds
+                // the provider's credential from the variables its catalogue
+                // entry lists, and a key that sits only in the provider's
+                // `options` is never sent (observed against the pinned
+                // binary). The value is the same placeholder as `apiKey`;
+                // the real credential stays the gateway's.
+                "env": vec![crate::gateway::model::key_env_name(&provider.name)],
                 "models": Value::Object(models),
             }),
         );
@@ -947,7 +959,7 @@ async fn handshake(
             // A server that answered at all and refused the credential is not
             // a server that is still starting: retrying would only wait out
             // the timeout on a launch that can never succeed.
-            Err(e) if e.to_string().contains("401") => {
+            Err(e) if refused_credential(&e) => {
                 return Err(AdapterError::Protocol(format!(
                     "the harness refused this node's credential: {e}"
                 )))
@@ -956,6 +968,15 @@ async fn handshake(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Whether the harness answered the request with 401. Matched on the status
+/// `json_of` renders, not on the bare digits: a server that is not listening
+/// yet fails with its address in the message, and a published port such as
+/// 40159 would otherwise read as a refusal and end the launch on its first
+/// attempt.
+fn refused_credential(e: &AdapterError) -> bool {
+    e.to_string().contains("harness answered 401")
 }
 
 /// How often the catalogue is re-asked while it settles.
@@ -1894,7 +1915,7 @@ mod tests {
                 "serve",
                 "--pure",
                 "--hostname",
-                "127.0.0.1",
+                "0.0.0.0",
                 "--port",
                 "41234",
                 "--print-logs",
@@ -1924,6 +1945,18 @@ mod tests {
     }
 
     #[test]
+    fn a_connection_error_naming_a_port_with_401_in_it_is_not_a_refusal() {
+        let not_up = AdapterError::Protocol(
+            "GET /global/health: error sending request for url (http://127.0.0.1:40159/global/health)"
+                .into(),
+        );
+        assert!(!refused_credential(&not_up));
+        let refused =
+            AdapterError::Protocol("/global/health: harness answered 401 Unauthorized: ".into());
+        assert!(refused_credential(&refused));
+    }
+
+    #[test]
     fn declared_models_are_what_the_picker_offers() {
         let models = declared_models(&wiring());
         let values: Vec<_> = models.iter().map(|m| m.value.as_str()).collect();
@@ -1944,7 +1977,10 @@ mod tests {
     fn the_catalogue_is_the_declared_models_and_nothing_else() {
         let catalogue = catalogue_document(&wiring());
         assert_eq!(catalogue["anthropic"]["id"], "anthropic");
-        assert!(catalogue["anthropic"]["env"].as_array().unwrap().is_empty());
+        assert_eq!(
+            catalogue["anthropic"]["env"],
+            json!(["TRACON_PROVIDER_KEY_ANTHROPIC"])
+        );
         let models = catalogue["anthropic"]["models"].as_object().unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models["claude-opus-5"]["limit"]["output"], 64_000);

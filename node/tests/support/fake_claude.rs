@@ -62,7 +62,9 @@ fn main() {
     if let Some(protocol) = protocol {
         init["protocol_version"] = serde_json::json!(protocol);
     }
-    emit(init);
+    // Like the pinned CLI (2.1.247), the init frame is emitted only once the
+    // first user message has arrived, never on its own.
+    let mut init = Some(init);
 
     // One turn per user message on stdin, and the process stays alive between
     // them: that is what makes a session multi-turn rather than one shot.
@@ -73,7 +75,12 @@ fn main() {
             continue;
         };
         match v["type"].as_str().unwrap_or_default() {
-            "user" => turn(&session_id),
+            "user" => {
+                if let Some(init) = init.take() {
+                    emit(init);
+                }
+                turn(&session_id)
+            }
             // An interrupt is acknowledged and ends the turn.
             "control_request" => emit(serde_json::json!({
                 "type": "control_response",

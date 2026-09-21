@@ -483,6 +483,12 @@ impl Manager {
 
     /// The session a gateway request belongs to, from the placeholder key it
     /// carries: `(session_id, channel)`.
+    /// How many sessions currently hold a capability token, for a refusal to
+    /// say whether the node had forgotten this one or never knew any.
+    pub async fn live_token_count(&self) -> usize {
+        self.tokens.lock().await.len()
+    }
+
     pub async fn session_for_token(&self, presented: &str) -> Option<(String, String)> {
         let found = {
             let tokens = self.tokens.lock().await;
