@@ -959,6 +959,25 @@ export interface BoundaryResult {
 }
 
 /** The settings the interface writes, and the context it needs to explain them. */
+/** One model a node declares under a provider: what the picker offers and a declaring harness is told. */
+export interface ModelDecl {
+  id: string
+  name?: string
+  context?: number
+  output?: number
+  reasoning?: boolean
+  attachment?: boolean
+}
+
+/** A provider entry as the settings pane sees it: the catalogue is writable, the rest is context. */
+export interface ProviderConfig {
+  shape: string
+  upstream: string
+  credential: string
+  login: string | null
+  models: ModelDecl[]
+}
+
 export interface NodeConfig {
   node_name: string
   harness: { id: string; version: string; tools: string[] }
@@ -969,6 +988,7 @@ export interface NodeConfig {
   boundary: { podman: string }
   external: { enabled: boolean; idle_timeout_secs: number }
   launch: { plugins: string[] }
+  providers: Record<string, ProviderConfig>
   readonly: { hub_url: string | null; runtime: string; config_path: string }
   running: { harness_id: string; harness_version: string; node_name: string }
 }

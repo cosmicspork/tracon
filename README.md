@@ -231,7 +231,11 @@ A connected provider whose models never appear has a stale catalogue — the pro
 runs when the provider connects, and can miss if the harness was not up yet or the
 credential arrived by handoff: **Settings → Connections → Refresh models**, under the
 provider rows, asks the harness again without disconnecting and signing in a second
-time, and reports what came back per provider.
+time, and reports what came back per provider. The catalogue itself is
+declared, not discovered: **Settings → Connections → Declared models** edits each
+provider's model list (id, picker name, context and output limits, reasoning,
+attachments) and writes it to `node.toml`; sessions started after the next restart
+see the change.
 When a peer runs the task, enter a repository path on that peer: local clones and
 browser imports are not transferred. Changing runner or channel clears the old
 repository selection; changing model scope clears stale model and budget overrides.
