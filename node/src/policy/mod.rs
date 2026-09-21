@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn transitioning_a_ticket_is_refused() {
-        let d = policy().decide(&req("acli jira workitem transition NUDEV-25", "work"));
+        let d = policy().decide(&req("acli jira workitem transition PROJ-25", "work"));
         assert_eq!(d.verdict, Verdict::Deny);
     }
 

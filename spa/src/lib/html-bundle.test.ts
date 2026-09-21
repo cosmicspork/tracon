@@ -70,7 +70,7 @@ test('folder paths strip one root and reject unsafe normalization', () => {
 })
 
 test('slug suggestions preserve document kinds and otherwise use ref', () => {
-  expect(suggestSlug('plan-NUDEV 22')).toBe('plan-nudev-22')
+  expect(suggestSlug('plan-PROJ 22')).toBe('plan-proj-22')
   expect(suggestSlug('Quarterly Report')).toBe('ref-quarterly-report')
   expect(suggestSlug('***')).toBe('ref-document')
 })

@@ -5,7 +5,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 # Match pager as a word, not across the Page/Request boundary in an identifier.
-pattern='homelab|(^|[^[:alnum:]_])pager([^[:alnum:]_]|$)|kritee|svastha|notebook|switchboard|dotfiles|hounddog|0x69\.xyz|bazzite|digitalocean|do-nyc1|~/src/docs|/home/jd|joshbowen|cd ~/src'
+pattern='homelab|(^|[^[:alnum:]_])pager([^[:alnum:]_]|$)|kritee|svastha|notebook|switchboard|dotfiles|hounddog|0x69\.xyz|bazzite|digitalocean|do-nyc1|~/src/docs|/home/jd|joshbowen|cd ~/src|nudev'
 hits="$(git grep -niIE "$pattern" -- . ':!CHANGELOG.md' ':!scripts/scrub-check.sh' | grep -vE -- '--no-pager' || true)"
 if [ -n "$hits" ]; then
   echo "scrub-check: references to other projects or personal hosts:" >&2
