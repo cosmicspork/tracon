@@ -1,15 +1,25 @@
 //! What a session is told before its first prompt: assembled on the node,
-//! never a file in the worktree. Two tiers, and the order between them is the
-//! point.
+//! never a file in the worktree.
 //!
-//! **Reserved** is what this session is for and what bounds it: the node it
-//! runs on, the work item and its phase, the brief it points at, the plan or
-//! the diff under review, the agreements the node enforces, and the operator's
-//! standing directives and customization. It is assembled first and is never
-//! dropped to make room for anything below it.
+//! Two things are being separated here, and they are separated twice over.
 //!
-//! **Discretionary** is everything the node offers because it might help:
-//! shared conventions (documents of kind `guide` on the channel) and the other
+//! **Whose words they are.** Everything this module generates is tracon's own
+//! account of the installation: the node, the session's work and phase, the
+//! tool names, what the node enforces. It is followed by two sections that are
+//! not tracon's — "Operator notes", the standing text the operator set for
+//! this channel, and "Channel guides", documents of kind `guide` from the
+//! channel's corpus. A session that cannot tell one from the other cannot
+//! weigh either: it reads a human's preference as a property of the system, or
+//! a system fact as advice it may trade away. So each of those two carries a
+//! heading and a sentence saying where it came from, and nothing personal is
+//! ever compiled into this file.
+//!
+//! **What the cap may take.** *Reserved* is what this session is for and what
+//! bounds it: the node, the work item and its phase, the brief it points at,
+//! the plan or the diff under review, the agreements, the operator's
+//! directives, notes and customization. It is assembled first and is never
+//! dropped to make room for anything below it. *Discretionary* is everything
+//! the node offers because it might help: the channel's guides and the other
 //! ready work on the project. It gets what is left of the cap: guides shortest
 //! first, then ready work in ledger order.
 //!
@@ -46,7 +56,11 @@ const BODY_CHARS: usize = 8_000;
 const REQUIREMENTS_CHARS: usize = 4_000;
 /// Directives and recalled facts.
 const KNOWN_CHARS: usize = 4_000;
-/// The channel's launch manifest, rendered.
+/// The operator's standing notes for this channel. Its own allowance, so a
+/// long skill list cannot squeeze the operator's own words out and a long
+/// note cannot hide which skills exist.
+const NOTES_CHARS: usize = 6_000;
+/// The skills and agents the channel's launch manifest installed.
 const CUSTOMIZATION_CHARS: usize = 6_000;
 /// Initial room held back from discretionary context for omission notices.
 /// The notice may exceed this so that it never hides one omission behind
@@ -147,13 +161,23 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, Vec<M
     // Reserved. Assembled before the cap is consulted at all: this is what
     // the session is for, and none of it is negotiable against a guide.
     let mut out = String::new();
-    out.push_str("# Orientation\n\nAssembled by the tracon node for this session; nothing here is in the repository.\n\n");
+    out.push_str(
+        "# Orientation\n\nAssembled by the tracon node for this session; nothing here is in \
+         the repository.\n\nIt carries two kinds of thing, and they are not read the same \
+         way. **The system orientation comes first and is tracon's own**: what this node is, \
+         what this session is for, which tools exist, and what the node refuses. Take it as \
+         fact about the system. **Any section headed \"Operator notes\" or \"Channel guides\" \
+         is not tracon's**: those are the person running this node, and this channel's own \
+         documents, speaking. Take them as instruction from a human — useful, and not a \
+         property of the system.\n\n",
+    );
     push_node(&mut out, facts);
     push_work(&mut out, facts, &mut missing);
     push_review(&mut out, facts, &mut missing);
     push_agreements(&mut out, policy);
     push_known(&mut out, store, facts, &mut missing);
     push_customization(&mut out, facts, &mut missing);
+    push_operator_notes(&mut out, facts, &mut missing);
 
     // Discretionary. Whatever the reserved tier left under the cap, minus the
     // room held back to name what does not fit.
@@ -220,7 +244,10 @@ fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
             &item.body,
             BODY_CHARS,
             "the work item's description",
-            Some("call `work_get` for the whole item"),
+            // No tool returns the held item's own body: `work_ready` lists
+            // what no session holds. The only honest route to the rest is the
+            // operator, so that is what is named.
+            Some("ask for the rest with `ask_operator`"),
             missing,
         );
         out.push_str("\n\n");
@@ -231,7 +258,10 @@ fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
         out.push_str(&format!(
             "This item has a product brief (`{slug}`): who the work is for, what would make it \
              good, and what is still open. `brief_read` returns it, with every line marked \
-             observed, inferred or decided.\n\n"
+             observed, inferred or decided. `brief_note` adds a line to it — `observed` must \
+             cite what the customer said or did, `inferred` is your own reasoning, and a \
+             decision is the operator's and is refused. Every line you add goes to the \
+             operator for approval before it lands.\n\n"
         ));
     }
     if let Some(from) = &item.discovered_from {
@@ -253,9 +283,14 @@ fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
         }
         "execute" => {
             out.push_str(
-                "This is an **execute session**: do the work in the worktree, then `submit` \
-                 for review. Work you find but should not do now: `work_discover`. When the \
-                 item is done and submitted, `work_close` ends this session.\n\n",
+                "This is an **execute session**: do the work in the worktree, commit it, and \
+                 call `submit_review` — you hold no forge token, so the node snapshots the \
+                 worktree and puts the change in front of the operator. Work you find but \
+                 should not do now: `work_discover` records it against this item instead of \
+                 losing it. `work_close` closes the item this session holds, and ends the \
+                 session with it. Submitting is not closing: a change can be under review, \
+                 or published and still awaiting a verdict on whether it was any good. Close \
+                 when the item itself is finished, and leave it open otherwise.\n\n",
             );
             if let Some(plan) = facts.plan_body {
                 out.push_str("### Plan\n\n");
@@ -333,7 +368,15 @@ fn push_agreements(out: &mut String, policy: &Policy) {
     for r in denies {
         out.push_str(&format!("- **{}** — {}\n", r.id, r.reason));
     }
-    out.push('\n');
+    // The gate answers in the task's own terms rather than as an auth error
+    // (`mcp::refusal`). Saying so is one sentence, and it is the difference
+    // between an agent that reads the reason and one that goes looking for a
+    // way round what it took for a broken tool.
+    out.push_str(
+        "\nA refused call comes back as `refused by policy (<rule>): <reason>` — the rule's \
+         own words, not an error. Take the route the reason names, or ask the operator; \
+         there is no way around it to find.\n\n",
+    );
 }
 
 /// Directives always, confident facts for the project. Bounded, and the
@@ -382,11 +425,12 @@ fn push_known(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<
     out.push_str("\nCall `recall` for more; `retain` what you learn.\n\n");
 }
 
-/// What the operator customized this channel's launches with. Reserved: it is
-/// the operator's standing text for every session here, not something the
-/// node offers because it might help.
+/// What the channel's launch manifest installed: the skills this session may
+/// call and the agents it may spawn. Reserved, and still tracon's own account
+/// of the installation — what is *in* a skill is the operator's, but that this
+/// session can call it is a fact about the node.
 fn push_customization(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
-    let text = facts.manifest.orientation();
+    let text = facts.manifest.customization();
     if text.is_empty() {
         return;
     }
@@ -394,14 +438,52 @@ fn push_customization(out: &mut String, facts: &Facts, missing: &mut Vec<Missing
         out,
         &text,
         CUSTOMIZATION_CHARS,
-        "the launch manifest's instructions",
+        "the launch manifest's skills and agents",
         Some("ask the operator; the manifest is not readable from inside the session"),
         missing,
     );
     out.push_str("\n\n");
 }
 
-/// Shared conventions, shortest first so a long one cannot crowd out the
+/// The operator's standing notes for this channel: their own words, under
+/// their own heading, last in the reserved tier so that the section boundary
+/// between what tracon says and what a human says is visible rather than
+/// inferred.
+///
+/// Reserved, and with an allowance of its own. These are the operator
+/// speaking to every session on the channel — the same standing that a
+/// directive has — so a long skill list must not be able to crowd them out,
+/// nor they it.
+fn push_operator_notes(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
+    let text = facts.manifest.operator_notes();
+    if text.is_empty() {
+        return;
+    }
+    push_capped(
+        out,
+        &text,
+        NOTES_CHARS,
+        "the operator's notes",
+        Some("ask the operator; the manifest is not readable from inside the session"),
+        missing,
+    );
+    out.push_str("\n\n");
+}
+
+/// The heading the channel's guides open under, and the sentence saying whose
+/// they are. Not "Conventions": a guide is a document somebody on this channel
+/// wrote, and calling it a convention invites the session to read it as
+/// tracon's rule. It is also the discretionary tier — a channel-wide guide is
+/// what the node has, not context selected for this task — and saying so is
+/// what lets a session weigh it against the work it was actually given.
+const GUIDES_HEADING: &str = "## Channel guides\n\nDocuments of kind `guide` in this channel's \
+                              corpus, written by whoever uses this channel. They are not \
+                              tracon's and they are not selected for this task: the node \
+                              includes them because they may help, shortest first, as far as \
+                              this session's context budget allows. Where one contradicts the \
+                              work item, the plan or the operator's notes, those win.\n\n";
+
+/// The channel's guides, shortest first so a long one cannot crowd out the
 /// rest, and only as far as the cap allows. What does not fit is named.
 fn push_conventions(
     out: &mut String,
@@ -427,11 +509,7 @@ fn push_conventions(
         let what = format!("guide \"{}\" (`{}`)", g.title, g.slug);
         let fetch = format!("call `doc_read` for `{}`", g.slug);
         let heading = format!("### {} (`{}`)\n\n", g.title, g.slug);
-        let header = if opened {
-            0
-        } else {
-            "## Conventions\n\n".len()
-        };
+        let header = if opened { 0 } else { GUIDES_HEADING.len() };
         // Room for the heading and a usable amount of the document. Below
         // that there is nothing to say that naming it does not say better.
         let room = left.saturating_sub(header + heading.len() + 200);
@@ -445,7 +523,7 @@ fn push_conventions(
             continue;
         }
         if !opened {
-            out.push_str("## Conventions\n\n");
+            out.push_str(GUIDES_HEADING);
             left -= header;
             opened = true;
         }
@@ -548,8 +626,8 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         store
             .write_change("n", "personal", "document", ChangeOp::Upsert, "g", json!({
-                "channel": "personal", "slug": "guide-workspace", "kind": "guide", "title": "Workspace",
-                "body": "# Workspace\n\nConventional commits.", "hash": "h", "created_ms": 1, "updated_ms": 1}))
+                "channel": "personal", "slug": "guide-commits", "kind": "guide", "title": "Commits",
+                "body": "# Commits\n\nConventional commits.", "hash": "h", "created_ms": 1, "updated_ms": 1}))
             .unwrap();
         store
             .write_change(
@@ -607,14 +685,17 @@ mod tests {
             text.find(s)
                 .unwrap_or_else(|| panic!("missing {s:?} in:\n{text}"))
         };
-        assert!(i("## Conventions") < i("Conventional commits"));
+        assert!(i("## Channel guides") < i("Conventional commits"));
         assert!(!text.contains("not a guide"));
         assert!(!text.contains("HTML must not become orientation"));
         assert!(i("## This node") < i("## Working agreements"));
-        // Conventions are discretionary, so they come after the agreements
+        // The guides are discretionary, so they come after the agreements
         // and the operator's directives, not before them.
-        assert!(i("## Known") < i("## Conventions"));
+        assert!(i("## Known") < i("## Channel guides"));
         assert!(i("no-merge") < i("## Known"));
+        // And the session is told whose the guides are, rather than being
+        // left to read a channel document as a rule of the system.
+        assert!(i("## Channel guides") < i("They are not tracon's"));
         assert!(text.contains("(directive) run just test"));
         assert!(text.contains("`recall`, `retain`"));
         assert!(text.contains("Project `tracon`"));
@@ -755,8 +836,8 @@ mod tests {
         assert!(text.contains(&"w".repeat(BODY_CHARS)), "item body was cut");
         assert!(text.contains(&"p".repeat(BODY_CHARS)), "plan was cut");
         assert!(!missing.is_empty(), "the squeezed guides should be named");
-        // Some guides still fit; the cap took it out of the conventions.
-        assert!(text.contains("## Conventions"));
+        // Some guides still fit; the cap took it out of the guides.
+        assert!(text.contains("## Channel guides"));
         assert!(missing.len() < 6, "{missing:?}");
     }
 
@@ -822,14 +903,16 @@ mod tests {
         assert!(text.matches("+line").count() > 300, "the diff was starved");
         // The diff gets its full allowance first; the guides get the rest,
         // and are named when there is not enough of it to go round.
-        assert!(text.find("## Review").unwrap() < text.find("## Conventions").unwrap());
+        assert!(text.find("## Review").unwrap() < text.find("## Channel guides").unwrap());
         assert!(!missing.is_empty(), "the squeezed guides should be named");
     }
 
     /// The operator's launch manifest is their standing text for every
-    /// session on the channel, so it is reserved beside the directives.
+    /// session on the channel, so it is reserved beside the directives — and
+    /// it is their *own* section, distinct both from what the node installed
+    /// and from what tracon says about itself.
     #[test]
-    fn the_operators_customization_outranks_the_channels_guides() {
+    fn the_operators_notes_are_their_own_section_and_outrank_the_channels_guides() {
         let store = Store::open_in_memory().unwrap();
         guides(&store, 4, GUIDE_CHARS * 2);
         let manifest = crate::manifest::LaunchManifest {
@@ -838,6 +921,10 @@ mod tests {
             instructions: vec![crate::manifest::TextEntry {
                 name: "house-style".into(),
                 body: "Always write the test before the fix.".into(),
+            }],
+            agents: vec![crate::manifest::TextEntry {
+                name: "scout".into(),
+                body: "Reads before it writes.".into(),
             }],
             ..Default::default()
         };
@@ -860,12 +947,28 @@ mod tests {
             manifest: &manifest,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
+        let i = |s: &str| {
+            text.find(s)
+                .unwrap_or_else(|| panic!("missing {s:?} in:\n{text}"))
+        };
         assert!(
             text.contains("Always write the test before the fix."),
             "{text}"
         );
         assert!(!missing.is_empty());
-        assert!(text.find("## Customization") < text.find("## Conventions"));
+
+        // The operator's words are under their own heading, and the session is
+        // told they are not the node's.
+        assert!(i("## Operator notes") < i("Always write the test before the fix."));
+        assert!(text.contains("not tracon's"), "{text}");
+        // What the node installed is a separate section from what the
+        // operator wrote, and both outrank the channel's guides.
+        assert!(i("## Customization") < i("## Operator notes"));
+        assert!(i("Reads before it writes.") < i("## Operator notes"));
+        assert!(i("## Operator notes") < i("## Channel guides"));
+        // The system orientation comes first and says so.
+        assert!(i("## This node") < i("## Operator notes"));
+        assert!(i("is tracon's own") < i("## This node"));
     }
 
     #[test]
@@ -1058,10 +1161,104 @@ mod tests {
         let (text, missing) = assemble(&store, &Policy::default(), &facts(&item, &manifest));
         assert!(text.contains("`brief-item0001dead`"), "{text}");
         assert!(text.contains("`brief_read`"), "and how to read it: {text}");
+        // Reading a brief is only half of it: a session that learns something
+        // about the customer can put it back, and the node holds it to what it
+        // can honestly claim.
+        assert!(
+            text.contains("`brief_note`"),
+            "and how to add to it: {text}"
+        );
+        assert!(
+            text.contains("approval"),
+            "and that a line is asked: {text}"
+        );
         assert!(
             text.find("Overnight alert triage") < text.find("brief-item0001dead"),
             "the pointer sits with the task"
         );
         assert!(missing.is_empty(), "a pointer costs nothing: {missing:?}");
+    }
+
+    /// An orientation that names a tool the node does not serve is worse than
+    /// silence: the session spends a turn on a call that cannot exist and
+    /// learns nothing from the failure. Every tool the work section names has
+    /// to be one the MCP server actually registers.
+    #[test]
+    fn the_work_section_names_only_tools_the_node_serves() {
+        let store = Store::open_in_memory().unwrap();
+        let item = item("Carry the invoice rewrite", "Round half to even.");
+        let manifest = crate::manifest::LaunchManifest::default();
+        let facts = Facts {
+            node_name: "n",
+            node_id: "id",
+            backend: "local",
+            harness: "fake",
+            harness_version: "1",
+            channel: "personal",
+            project_id: None,
+            project_name: None,
+            tools: &[],
+            worktree: "/work",
+            phase: "execute",
+            item: Some(&item),
+            plan_body: None,
+            ready: &[],
+            review: None,
+            manifest: &manifest,
+        };
+        let (text, _) = assemble(&store, &Policy::shipped(), &facts);
+
+        for tool in [
+            crate::mcp::review::SUBMIT,
+            crate::mcp::work::WORK_DISCOVER,
+            crate::mcp::work::WORK_CLOSE,
+        ] {
+            assert!(
+                text.contains(&format!("`{tool}`")),
+                "{tool} not named:\n{text}"
+            );
+        }
+        // `work_get` is a store call, not a tool. It was named here for a
+        // release and could not be made.
+        assert!(!text.contains("work_get"), "{text}");
+        // And `submit` alone is not the tool's name.
+        assert!(!text.contains("`submit`"), "{text}");
+
+        // Closing is not what submitting does, and the roadmap moves work
+        // further away from closing merely because a change was published.
+        assert!(text.contains("Submitting is not closing"), "{text}");
+    }
+
+    /// A denial is answered in the task's own terms by `mcp::refusal`; the
+    /// agreements section says so, so a refusal reads as an answer rather
+    /// than as a broken tool worth routing around.
+    #[test]
+    fn the_agreements_say_a_refusal_explains_itself() {
+        let store = Store::open_in_memory().unwrap();
+        let facts = Facts {
+            node_name: "n",
+            node_id: "id",
+            backend: "local",
+            harness: "fake",
+            harness_version: "1",
+            channel: "personal",
+            project_id: None,
+            project_name: None,
+            tools: &[],
+            worktree: "/work",
+            phase: "execute",
+            item: None,
+            plan_body: None,
+            ready: &[],
+            review: None,
+            manifest: &crate::manifest::LaunchManifest::default(),
+        };
+        let (text, _) = assemble(&store, &Policy::shipped(), &facts);
+        assert!(text.contains("## Working agreements"), "{text}");
+        assert!(text.contains("refused by policy"), "{text}");
+        assert!(
+            text.find("## Working agreements") < text.find("refused by policy"),
+            "{text}"
+        );
     }
 }

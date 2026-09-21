@@ -268,6 +268,33 @@ isolated cache: a `devcontainer.json` may name a digest-pinned image, but hooks,
 mounts, sockets, and privilege in it are refused rather than partly honoured, and
 `[runtime] approved_images` is the operator's list of anything else acceptable.
 
+### What a session is told
+
+Before its first prompt every session is handed one orientation, assembled by the
+node and mounted read-only. Nothing about it is a file in the worktree, and nothing
+in it can be edited from inside the session.
+
+It has two parts, and the split is the point. The **system orientation** is
+tracon's own account of the installation: this node and its harness, the work item
+and its phase, the brief it points at, the plan or the diff under review, the tool
+names this channel actually serves, and the working agreements the node enforces —
+including the fact that a refusal comes back as the rule's reason rather than as an
+auth error. It is generated from the node's own state, so it cannot describe a tool
+that does not exist or an agreement that is not enforced.
+
+**Operator notes** are the other part: your standing text for a channel, under its
+own heading, marked as yours rather than tracon's. Set them in **Settings →
+Customization → Operator notes** — a name and a note; saving under an existing name
+replaces it — or over the API with `PUT /api/manifest/text` (`kind =
+"instruction"`). They reach every session launched on that channel from the next
+launch onward; a running session keeps the manifest revision it staged.
+
+Documents of kind `guide` in a channel's corpus follow as **Channel guides**. They
+are discretionary: the node includes them, shortest first, only as far as the
+session's context budget allows, and says so. Everything the budget kept out is
+named at the end of the orientation with the call that fetches it, so a session can
+ask for what it did not get.
+
 ### Review before publish
 
 An agent has no forge token and never runs `gh` or `glab`. To publish it commits,
@@ -750,7 +777,7 @@ identity_header = "x-tracon-deployment-id"
 [qa.targets.cloud-qa.deployment]
 kind = "command"
 env_credential = "laravel-cloud"      # broker entry, injected as environment, never in argv
-args = { app = "hounddogreading" }    # supplies {app} below
+args = { app = "my-app" }             # supplies {app} below
 command = []                          # nothing is triggered: the PR automation builds the branch
 deploy_timeout_secs = 1800
 poll_interval_secs = 15

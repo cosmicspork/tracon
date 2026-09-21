@@ -467,6 +467,39 @@ mod tests {
         }
     }
 
+    /// Leaving the worktree is refused by the *shape* of the attempt, not by
+    /// a list of one operator's directories. The rule used to name `~/src`,
+    /// which protected exactly one machine and published its layout in a
+    /// signed bundle everyone else receives.
+    #[test]
+    fn leaving_the_worktree_is_refused_whatever_the_host_layout() {
+        let p = policy();
+        for cmd in [
+            "cd ~/projects && git log",
+            "cd ~",
+            "cd $HOME/code",
+            "cd /home/someone/checkout",
+            "cd /Users/someone/checkout",
+            "cd /root/repo",
+            "git --git-dir=/elsewhere/.git status",
+            "git --work-tree=/elsewhere status",
+            "git -c core.hooksPath=/tmp status",
+        ] {
+            let d = p.decide(&req(cmd, "work"));
+            assert_eq!(d.verdict, Verdict::Deny, "{cmd}");
+            assert_eq!(d.rule_id.as_deref(), Some("worktree-only"), "{cmd}");
+        }
+        // And nothing in the rule names a particular person's checkout.
+        assert!(
+            !WORKING_AGREEMENTS.contains("~/src"),
+            "the layout leaked back in"
+        );
+        // Work inside the worktree is untouched.
+        for cmd in ["cd src && ls", "git status --short"] {
+            assert_ne!(p.decide(&req(cmd, "work")).verdict, Verdict::Deny, "{cmd}");
+        }
+    }
+
     #[test]
     fn merging_is_refused() {
         for cmd in ["gh pr merge 12", "glab mr merge 12", "GLAB MR MERGE 12"] {

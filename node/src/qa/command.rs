@@ -423,7 +423,7 @@ mod tests {
         QaTarget {
             deployment: QaDeployment {
                 kind: QA_KIND_COMMAND.into(),
-                args: BTreeMap::from([("app".to_string(), "hounddog".to_string())]),
+                args: BTreeMap::from([("app".to_string(), "my-app".to_string())]),
                 ..QaDeployment::default()
             },
             ..QaTarget::default()
@@ -453,7 +453,7 @@ mod tests {
             vec![
                 "cloud",
                 "deploy",
-                "hounddog",
+                "my-app",
                 "qa-0123456789ab",
                 "--branch=feat/thing"
             ]

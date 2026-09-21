@@ -378,8 +378,10 @@ impl LaunchManifest {
         files
     }
 
-    /// What the session is told, appended to the node's orientation the way
-    /// the other adapters' system prompts already are.
+    /// The operator's standing notes for this channel, as their own section of
+    /// the orientation. They are separated from everything tracon generates
+    /// because a session that cannot tell the node's account of itself from a
+    /// human's standing advice cannot weigh either one correctly.
     ///
     /// Instructions are *not* written into the harness's `instructions` config
     /// key. That key takes globs resolved against the project and re-rooted
@@ -387,14 +389,35 @@ impl LaunchManifest {
     /// owns one place a session's standing text goes, and two would be one too
     /// many. Instruction content grants no permission here either — it is
     /// text, and every tool class is still `ask`.
-    pub fn orientation(&self) -> String {
-        if self.instructions.is_empty() && self.agents.is_empty() && self.skills.is_empty() {
+    pub fn operator_notes(&self) -> String {
+        if self.instructions.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("## Operator notes\n\n");
+        out.push_str(&format!(
+            "Standing notes from the operator of this node, read by every session on this \
+             channel (launch manifest revision {}, `{}`). They are the operator's words, not \
+             tracon's, and nothing here can be changed from inside the session.\n\n",
+            self.revision,
+            &self.digest[..8.min(self.digest.len())]
+        ));
+        for entry in &self.instructions {
+            out.push_str(&format!("### {}\n\n{}\n\n", entry.name, entry.body.trim()));
+        }
+        out
+    }
+
+    /// What the operator installed for this channel's launches: skills the
+    /// session may call, agents it may spawn. Mechanics — the advice lives in
+    /// [`Self::operator_notes`].
+    pub fn customization(&self) -> String {
+        if self.agents.is_empty() && self.skills.is_empty() {
             return String::new();
         }
         let mut out = String::from("## Customization\n\n");
         out.push_str(&format!(
-            "This channel's launch manifest is revision {} (`{}`). It is the operator's, \
-             not yours: nothing here can be changed from inside the session.\n\n",
+            "What this channel's launch manifest installed (revision {}, `{}`). It is the \
+             operator's, not yours: nothing here can be changed from inside the session.\n\n",
             self.revision,
             &self.digest[..8.min(self.digest.len())]
         ));
@@ -410,9 +433,6 @@ impl LaunchManifest {
             for agent in &self.agents {
                 out.push_str(&format!("### {}\n\n{}\n\n", agent.name, agent.body.trim()));
             }
-        }
-        for entry in &self.instructions {
-            out.push_str(&format!("### {}\n\n{}\n\n", entry.name, entry.body.trim()));
         }
         out
     }
@@ -568,19 +588,44 @@ mod tests {
         );
     }
 
+    /// The operator's own words and the mechanics the node installed are two
+    /// sections, not one: an instruction is advice a session weighs, and a
+    /// skill list is a fact about what it can call.
     #[test]
-    fn the_orientation_names_the_revision_and_the_skills() {
+    fn the_operators_notes_and_the_installed_customization_are_separate_sections() {
         let mut manifest = build(inputs(vec![skill("alpha", "a")])).unwrap();
         manifest.revision = 7;
         manifest.instructions.push(TextEntry {
             name: "House style".into(),
             body: "Small commits.".into(),
         });
-        let text = manifest.orientation();
-        assert!(text.contains("revision 7"), "{text}");
-        assert!(text.contains("`alpha`"), "{text}");
-        assert!(text.contains("Small commits."), "{text}");
-        assert!(text.contains("It is the operator's"), "{text}");
+
+        let notes = manifest.operator_notes();
+        assert!(notes.starts_with("## Operator notes"), "{notes}");
+        assert!(notes.contains("revision 7"), "{notes}");
+        assert!(notes.contains("Small commits."), "{notes}");
+        assert!(notes.contains("not tracon's"), "{notes}");
+        assert!(!notes.contains("`alpha`"), "{notes}");
+
+        let custom = manifest.customization();
+        assert!(custom.starts_with("## Customization"), "{custom}");
+        assert!(custom.contains("revision 7"), "{custom}");
+        assert!(custom.contains("`alpha`"), "{custom}");
+        assert!(custom.contains("It is the operator's"), "{custom}");
+        assert!(!custom.contains("Small commits."), "{custom}");
+    }
+
+    /// A channel with notes but nothing installed renders one section, not an
+    /// empty "Customization" heading the session has to read past.
+    #[test]
+    fn notes_without_skills_render_no_customization_section() {
+        let mut manifest = build(inputs(Vec::new())).unwrap();
+        manifest.instructions.push(TextEntry {
+            name: "House style".into(),
+            body: "Small commits.".into(),
+        });
+        assert!(manifest.customization().is_empty());
+        assert!(manifest.operator_notes().contains("Small commits."));
     }
 
     #[test]
@@ -588,7 +633,8 @@ mod tests {
         let manifest = build(inputs(Vec::new())).unwrap();
         assert!(manifest.skills.is_empty());
         assert!(manifest.skill_files().is_empty());
-        assert!(manifest.orientation().is_empty());
+        assert!(manifest.operator_notes().is_empty());
+        assert!(manifest.customization().is_empty());
         // It still has a digest: "nothing customized" is a fact worth
         // recording on a session, and it must differ per channel.
         assert!(!manifest.digest.is_empty());
