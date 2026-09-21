@@ -399,6 +399,7 @@ async fn the_config_is_readable_and_carries_no_secrets() {
             "harness",
             "launch",
             "node_name",
+            "providers",
             "publish",
             "readonly",
             "review",
@@ -407,6 +408,12 @@ async fn the_config_is_readable_and_carries_no_secrets() {
             "supervision",
         ]
     );
+    // A provider entry is its catalogue and its context, never a value: the
+    // credential is named, not shown.
+    let anthropic = &v["providers"]["anthropic"];
+    assert_eq!(anthropic["credential"], "anthropic");
+    assert!(anthropic["models"].is_array());
+    assert!(anthropic.get("key").is_none() && anthropic.get("token").is_none());
 }
 
 /// The line this feature draws: a phone may run the node, but what the node
