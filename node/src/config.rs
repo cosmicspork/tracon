@@ -1588,8 +1588,10 @@ pub struct Provider {
     /// The models this node declares under this provider, for a harness that
     /// is told its catalogue rather than asked for one (OpenCode; see
     /// `docs/reference/opencode-v1.18.30/providers.md` §7.4). A harness that
-    /// probes its own catalogue ignores this, so it is empty by default and
-    /// only the declaring harness is affected by leaving it so.
+    /// probes its own catalogue ignores this. A built-in provider written
+    /// without any gets `default_models` for its name on load, so a node that
+    /// names no models still has a catalogue; write `models = []` to declare
+    /// none on purpose.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelDecl>,
 }
@@ -1672,7 +1674,7 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 shape: SHAPE_ANTHROPIC.into(),
                 login: Some("anthropic".into()),
                 price: None,
-                models: Vec::new(),
+                models: default_models("anthropic"),
             },
         ),
         (
@@ -1683,7 +1685,7 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 shape: SHAPE_OPENAI.into(),
                 login: None,
                 price: None,
-                models: Vec::new(),
+                models: default_models("openai"),
             },
         ),
         (
@@ -1694,13 +1696,47 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
                 shape: SHAPE_OPENAI_CODEX.into(),
                 login: Some("openai".into()),
                 price: None,
-                models: Vec::new(),
+                models: default_models("openai-codex"),
             },
         ),
     ]
     .into_iter()
     .map(|(n, p)| (n.to_string(), p))
     .collect()
+}
+
+/// The models a built-in provider declares when the operator names none: the
+/// current generation, so a fresh node has a catalogue the moment a provider
+/// is connected. A declaring harness (OpenCode) serves exactly this list and
+/// the gateway lends the credential for exactly these ids; a probing harness
+/// ignores it. The limits are what the harness is told, not what is enforced.
+pub fn default_models(provider: &str) -> Vec<ModelDecl> {
+    let model = |id: &str, name: &str, context: u64, output: u64, attachment: bool| ModelDecl {
+        id: id.into(),
+        name: name.into(),
+        context,
+        output,
+        reasoning: true,
+        attachment,
+    };
+    match provider {
+        "anthropic" => vec![
+            model("claude-opus-5", "Claude Opus 5", 200_000, 64_000, true),
+            model("claude-sonnet-5", "Claude Sonnet 5", 200_000, 64_000, true),
+            model(
+                "claude-haiku-4-5",
+                "Claude Haiku 4.5",
+                200_000,
+                64_000,
+                true,
+            ),
+        ],
+        "openai" | "openai-codex" => vec![
+            model("gpt-5.5", "GPT-5.5", 400_000, 128_000, false),
+            model("gpt-5.5-codex", "GPT-5.5 Codex", 400_000, 128_000, false),
+        ],
+        _ => Vec::new(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2034,6 +2070,16 @@ impl Config {
                 for (name, provider) in default_providers() {
                     config.providers.entry(name).or_insert(provider);
                 }
+                // A built-in provider the operator wrote without models is
+                // not one with none: the section is usually there to set a
+                // credential name or an upstream, and an empty catalogue
+                // behind it starts no session. `models = []` is preserved as
+                // written only where the operator's file says so.
+                for (name, provider) in config.providers.iter_mut() {
+                    if provider.models.is_empty() {
+                        provider.models = default_models(name);
+                    }
+                }
                 config
                     .docs
                     .preview_origin()
@@ -2198,6 +2244,47 @@ shape = "openai"
         assert_eq!(codex.upstream, "https://chatgpt.com/backend-api");
         assert_eq!(codex.shape, SHAPE_OPENAI_CODEX);
         assert_eq!(codex.login.as_deref(), Some("openai"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A fresh node, or one whose provider sections name no models, still
+    /// has a catalogue: the built-in providers declare the current
+    /// generation. Models the operator writes are the whole list.
+    #[test]
+    fn built_in_providers_declare_models_unless_the_operator_does() {
+        let dir = std::env::temp_dir().join(format!("tracon-cfg-models-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node.toml");
+        std::fs::write(
+            &path,
+            r#"
+[providers.anthropic]
+credential = "custom-anthropic"
+
+[providers.openai-codex]
+models = [{ id = "gpt-6" }]
+"#,
+        )
+        .unwrap();
+        let config = Config::try_load_from(&path).unwrap();
+        let ids = |name: &str| -> Vec<String> {
+            config.providers[name]
+                .models
+                .iter()
+                .map(|m| m.id.clone())
+                .collect()
+        };
+        assert_eq!(config.providers["anthropic"].credential, "custom-anthropic");
+        assert_eq!(
+            ids("anthropic"),
+            ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
+        );
+        assert_eq!(ids("openai-codex"), ["gpt-6"]);
+        assert_eq!(ids("openai"), ["gpt-5.5", "gpt-5.5-codex"]);
+        assert_eq!(
+            Config::default().providers["anthropic"].models,
+            default_models("anthropic")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
