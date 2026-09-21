@@ -590,6 +590,9 @@ shape = "anthropic"                 # or "openai", "openai-codex"; the shape als
                                     # inference, token counting, embeddings and the models list,
                                     # never the provider account behind the key
 # login = "anthropic"               # the subscription sign-in the node runs: "anthropic", or "openai" for ChatGPT/Codex
+# models = [                        # what the picker offers and OpenCode is told; a built-in provider
+#   { id = "claude-opus-5", name = "Claude Opus 5", context = 200000, output = 64000, reasoning = true, attachment = true },
+# ]                                 # left without models gets the current generation; `models = []` declares none
 # [providers.anthropic.price]
 # input_per_mtok = 3.0
 # output_per_mtok = 15.0
