@@ -6,18 +6,33 @@
 # Anything not matched here is asked, so adding a rule can only ever reduce the
 # number of interruptions, never widen what an agent may do unattended.
 
-version = 8
+version = 9
 
 # --- 1. Worktree, not the main checkout -------------------------------------
 # Structurally true already: the harness only ever sees its own worktree at
 # /work. The rule exists so an attempt to reach outside it is refused with a
 # reason rather than failing as a missing path.
+#
+# What is named here is the *shape* of leaving the worktree — pointing git at
+# another repository, or changing into a home directory — and never one
+# installation's directory layout. A rule that hard-codes where a particular
+# operator keeps their checkouts protects nobody else's, and ships that
+# operator's filesystem in a signed bundle everyone receives.
 
 [[rule]]
 id = "worktree-only"
 verdict = "deny"
-reason = "Sessions work in their own worktree. The main checkout may hold work that is not yours."
-matches = ["git -c ", "git --git-dir", "cd /users/", "cd ~/src"]
+reason = "Sessions work in their own worktree at /work. Another checkout may hold work that is not yours."
+matches = [
+    "git -c ",
+    "git --git-dir",
+    "git --work-tree",
+    "cd ~",
+    "cd $home",
+    "cd /home/",
+    "cd /users/",
+    "cd /root",
+]
 
 # --- 2. Review before publish ------------------------------------------------
 # The agent holds no forge token, so these would fail anyway. Denying them makes

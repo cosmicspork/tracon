@@ -1,21 +1,31 @@
 <script lang="ts">
   // What a channel's sessions launch with, beyond what the node decides for
-  // them: skills, standing instructions, agents, and the plugins and language
-  // servers the harness image made available.
+  // them: the operator's standing notes, skills, agents, and the plugins and
+  // language servers the harness image made available.
   //
   // The pane shows two things on purpose. The *selection* is what is imported
   // now; the *manifest* is the revision and digest a launch would build from
   // it. They are not the same fact — a running session holds the revision it
   // staged, and nothing here reaches it — so saying "applies at the next
   // launch" is the honest thing to put in front of an operator.
+  //
+  // Notes are edited here rather than only over the API because they are the
+  // one part of a session's orientation the node does not write for itself:
+  // everything else it is told is tracon's account of the installation, and a
+  // standing note is the operator's own. Something that reaches every session
+  // on a channel needs a place the operator can find it and read it back.
   import { api } from '../lib/api'
   import { store } from '../lib/store.svelte'
   import type { ManifestView } from '../lib/types'
   import Card from './settings/Card.svelte'
 
+  const INSTRUCTION = 'instruction'
+
   let channel = $state('')
   let view = $state<ManifestView | null>(null)
   let source = $state('')
+  let noteName = $state('')
+  let noteBody = $state('')
   let busy = $state('')
   let error = $state('')
   let note = $state('')
@@ -68,9 +78,28 @@
       warnings = []
       note = `${name} removed. Running sessions keep the manifest they launched with.`
     })
+
+  const notes = $derived(view?.items.filter((i) => i.kind === INSTRUCTION) ?? [])
+  const installed = $derived(view?.items.filter((i) => i.kind !== INSTRUCTION) ?? [])
+
+  // Saving under an existing name replaces that note, which is also how one is
+  // edited: the store keys a manifest item by (channel, kind, name).
+  const saveNote = () =>
+    act('note', async () => {
+      const name = noteName.trim()
+      await api.putManifestText(current, INSTRUCTION, name, noteBody)
+      note = `${name} saved. Sessions already running keep the notes they launched with.`
+      noteName = ''
+      noteBody = ''
+    })
+
+  function editNote(name: string, body: string) {
+    noteName = name
+    noteBody = body
+  }
 </script>
 
-<Card title="Customization" note="Skills, instructions and agents a channel's sessions launch with. A change applies at the next launch, never to a running session.">
+<Card title="Customization" note="The operator notes, skills and agents a channel's sessions launch with. A change applies at the next launch, never to a running session.">
 
   <label class="pick">
     <span>Channel</span>
@@ -96,9 +125,9 @@
       <p class="why"><b>This manifest would be refused at launch</b><i>{view.error}</i></p>
     {/if}
 
-    {#if view.items.length}
+    {#if installed.length}
       <div class="items">
-        {#each view.items as item (item.kind + item.name)}
+        {#each installed as item (item.kind + item.name)}
           <div class="item">
             <span class="chip">{item.kind}</span>
             <span class="name">{item.name}</span>
@@ -114,8 +143,53 @@
         {/each}
       </div>
     {:else}
-      <div class="empty">Nothing imported. Sessions here launch with the node's orientation only.</div>
+      <div class="empty">
+        No skills or agents imported. Sessions here launch with the node's orientation and
+        whatever notes are below.
+      </div>
     {/if}
+
+    <div class="notes">
+      <h4>Operator notes</h4>
+      <small>
+        Standing notes every session on this channel reads. They are their own section of a
+        session's orientation, kept apart from what the node says about itself: tracon's half is
+        the node, the work, the tools and what is refused; this half is yours. Saving under an
+        existing name replaces that note.
+      </small>
+      {#each notes as n (n.name)}
+        <div class="note-row">
+          <span class="name">{n.name}</span>
+          <button class="btn" disabled={!local || busy !== ''} onclick={() => editNote(n.name, n.body)}
+            >Edit</button
+          >
+          <button class="btn" disabled={!local || busy !== ''} onclick={() => remove(n.kind, n.name)}
+            >Remove</button
+          >
+          <p class="body">{n.body}</p>
+        </div>
+      {/each}
+      <label>
+        <span>Name</span>
+        <input bind:value={noteName} disabled={!local} spellcheck="false" placeholder="house-style" />
+      </label>
+      <label>
+        <span>Note</span>
+        <textarea
+          bind:value={noteBody}
+          disabled={!local}
+          rows="4"
+          placeholder="Prefer small commits. Ask before adding a dependency."
+        ></textarea>
+      </label>
+      <div class="acts">
+        <button
+          class="btn p"
+          disabled={!local || busy !== '' || noteName.trim() === '' || noteBody.trim() === ''}
+          onclick={saveNote}>{busy === 'note' ? 'Saving…' : 'Save note'}</button
+        >
+      </div>
+    </div>
 
     <label>
       <span>Import a skill</span>
@@ -181,7 +255,8 @@
     color: var(--ink2);
   }
   input,
-  select {
+  select,
+  textarea {
     background: var(--s2);
     border: 0;
     border-radius: 4px;
@@ -189,6 +264,37 @@
     padding: 8px 10px;
     font: 13.5px var(--sans);
     min-width: 0;
+  }
+  textarea {
+    resize: vertical;
+  }
+  .notes {
+    display: grid;
+    gap: 8px;
+    max-width: 560px;
+    min-width: 0;
+  }
+  .notes h4 {
+    margin: 0;
+    font: 500 11px var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink2);
+  }
+  .note-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 6px 0;
+    border-top: 1px solid var(--rule);
+  }
+  .note-row .body {
+    flex-basis: 100%;
+    margin: 0;
+    white-space: pre-wrap;
+    font: 12.5px var(--sans);
+    color: var(--dim);
   }
   .rev,
   .image,

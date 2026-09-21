@@ -701,15 +701,25 @@ page. Session orientation is assembled per session from the corpus, the node's o
 facts, and the policy's deny reasons, delivered as a read-only file and recorded as
 an event, so the transcript shows what the agent was told.
 
-**Orientation reserves its space for the work before the conventions.** What the
+**Orientation separates tracon's account of itself from the operator's.** The
+system orientation is generated from the node's own state: the node and harness,
+the item and phase, the tool names this channel serves, the enforced agreements.
+It is followed by two sections that carry a heading saying they are not tracon's —
+*Operator notes*, the standing text on the channel's launch manifest, and *Channel
+guides*, documents of kind `guide` from the corpus. A session that cannot tell a
+system fact from a human's preference weighs neither correctly, so the boundary is
+stated rather than left to be inferred.
+
+**Orientation also reserves its space for the work before the guides.** What the
 session is for and what bounds it — the node it runs on, the item and phase, the
-plan or the diff under review, the enforced agreements, the operator's directives
-and launch customization — is assembled first and is never dropped to make room for
-anything else. Shared guides and other ready work are discretionary and get what is
-left of the context cap: guides shortest first, then ready work in ledger order.
+plan or the diff under review, the enforced agreements, the operator's directives,
+notes and launch customization — is assembled first and is never dropped to make
+room for anything else. Channel guides and other ready work are discretionary and
+get what is left of the context cap: guides shortest first, then ready work in
+ledger order.
 The cap used to be enforced by truncating
 the assembled text, which cut from the end, where the task and the constraints were:
-long guides could leave a session a wall of conventions and no job. Whatever does not
+long guides could leave a session a wall of advice and no job. Whatever does not
 fit is named — which piece, how much is missing, and the call that fetches the rest —
 in the orientation the agent reads and on the event the operator reads. A bare
 `trimmed` flag is not enough for either of them: neither can tell from it whether the

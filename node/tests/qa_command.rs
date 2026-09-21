@@ -137,7 +137,7 @@ fn discovery_target(cli: &FakeCli, with_deploy_command: bool) -> QaTarget {
                 false => Vec::new(),
             },
             env_credential: "laravel-cloud".into(),
-            args: BTreeMap::from([("app".to_string(), "hounddog".to_string())]),
+            args: BTreeMap::from([("app".to_string(), "my-app".to_string())]),
             discover: Some(QaDiscover {
                 command: vec![
                     cli.path.clone(),
@@ -250,7 +250,7 @@ fn fixture(target: QaTarget, published: bool, granted: bool) -> Fixture {
                 channel: CHANNEL,
                 node_id: NODE,
                 provider: "github",
-                project: "cosmicspork/hounddog",
+                project: "example/my-app",
                 base: "main",
                 branch: BRANCH,
                 head_sha: SHA,
@@ -527,12 +527,12 @@ fn a_discovery_target_attests_a_suffix_instead_of_an_origin_and_is_held_to_it() 
     let mut laravel = target.clone();
     laravel.deployment.discover.as_mut().unwrap().origin_suffix = "laravel.cloud".into();
     let resolved = laravel
-        .resolved(Some("https://qa-abc.hounddog.laravel.cloud/"))
+        .resolved(Some("https://qa-abc.my-app.laravel.cloud/"))
         .unwrap();
-    assert_eq!(resolved.origin, "https://qa-abc.hounddog.laravel.cloud");
+    assert_eq!(resolved.origin, "https://qa-abc.my-app.laravel.cloud");
     assert_eq!(
         resolved.identity_url,
-        "https://qa-abc.hounddog.laravel.cloud/_tracon/identity"
+        "https://qa-abc.my-app.laravel.cloud/_tracon/identity"
     );
     for hostile in [
         "https://evil-laravel.cloud/",
@@ -583,13 +583,10 @@ async fn a_candidate_deploys_through_the_command_and_the_credential_never_leaves
     // the operator's `{app}` with them.
     let argv = cli.argv_log();
     assert!(
-        argv.contains(&format!("deploy hounddog {BRANCH} -n")),
+        argv.contains(&format!("deploy my-app {BRANCH} -n")),
         "{argv}"
     );
-    assert!(
-        argv.contains("environment:list hounddog --json -n"),
-        "{argv}"
-    );
+    assert!(argv.contains("environment:list my-app --json -n"), "{argv}");
     assert!(
         argv.contains("deployment:list env-auto --json -n"),
         "{argv}"
@@ -636,7 +633,7 @@ async fn a_target_whose_host_builds_the_branch_itself_runs_no_deploy_command_at_
     assert_eq!(row.outcome, "succeeded", "{}", row.detail_json);
     let argv = cli.argv_log();
     assert!(
-        !argv.contains("deploy hounddog"),
+        !argv.contains("deploy my-app"),
         "nothing was triggered: {argv}"
     );
     assert!(argv.contains("environment:list"), "{argv}");
