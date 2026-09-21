@@ -8,7 +8,7 @@
 
 use serde_json::{json, Value};
 
-use crate::config::Config;
+use crate::config::{Config, ModelDecl};
 
 /// Config as the interface sees it: the writable keys, plus a little context
 /// it needs to explain itself. No secrets — the broker owns those, and none
@@ -41,6 +41,18 @@ pub fn config_view(cfg: &Config) -> Value {
         // The per-channel half — skills, instructions, agents — lives in the
         // store, behind `/api/manifest`.
         "launch": { "plugins": cfg.launch.plugins },
+        // The catalogue, per provider: what the picker offers and what a
+        // declaring harness is told. The rest of a provider entry — its
+        // credential name, upstream, shape — is shown so the models can be
+        // read in context, and is written only in node.toml: it decides where
+        // a credential is sent.
+        "providers": cfg.providers.iter().map(|(name, p)| (name.clone(), json!({
+            "shape": p.shape,
+            "upstream": p.upstream,
+            "credential": p.credential,
+            "login": p.login,
+            "models": p.models,
+        }))).collect::<serde_json::Map<String, Value>>(),
         "supervision": {
             "checks": cfg.supervision.checks,
             "timeout_secs": cfg.supervision.timeout_secs,
@@ -254,6 +266,28 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
                     }
                 }
             }
+            "providers" => {
+                for (name, entry) in object(value, "providers")? {
+                    let Some(provider) = cfg.providers.get_mut(name) else {
+                        return Err(format!(
+                            "`providers.{name}` is not a provider on this node; add it to node.toml first"
+                        ));
+                    };
+                    for (k, v) in object(entry, &format!("providers.{name}"))? {
+                        match k.as_str() {
+                            "models" => {
+                                let key = format!("providers.{name}.models");
+                                let models = model_list(v, &key)?;
+                                if provider.models != models {
+                                    provider.models = models;
+                                    changed.push(key);
+                                }
+                            }
+                            other => return Err(unknown(&format!("providers.{name}.{other}"))),
+                        }
+                    }
+                }
+            }
             other => return Err(unknown(other)),
         }
     }
@@ -297,6 +331,34 @@ fn string_list(v: &Value, key: &str) -> Result<Vec<String>, String> {
                 .ok_or_else(|| format!("`{key}` expects a list of strings"))
         })
         .collect()
+}
+
+/// A catalogue as the form sends it: every entry needs an id, ids are unique,
+/// and the limits are whole numbers. An empty list is accepted and means the
+/// operator declared none — a declaring harness then offers nothing under
+/// this provider, which is what `models = []` in node.toml means too.
+fn model_list(v: &Value, key: &str) -> Result<Vec<ModelDecl>, String> {
+    let items = v
+        .as_array()
+        .ok_or_else(|| format!("`{key}` expects a list of models"))?;
+    let mut out: Vec<ModelDecl> = Vec::with_capacity(items.len());
+    for item in items {
+        let model: ModelDecl = serde_json::from_value(item.clone())
+            .map_err(|e| format!("`{key}` has a model this node cannot read: {e}"))?;
+        let id = model.id.trim();
+        if id.is_empty() {
+            return Err(format!("`{key}` has a model without an id"));
+        }
+        if out.iter().any(|m| m.id == id) {
+            return Err(format!("`{key}` names `{id}` twice"));
+        }
+        out.push(ModelDecl {
+            id: id.to_string(),
+            name: model.name.trim().to_string(),
+            ..model
+        });
+    }
+    Ok(out)
 }
 
 fn string_map(v: &Value, key: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
@@ -390,6 +452,7 @@ mod tests {
                 "harness",
                 "launch",
                 "node_name",
+                "providers",
                 "publish",
                 "readonly",
                 "review",
@@ -397,6 +460,73 @@ mod tests {
                 "supervision",
             ]
         );
+        // The catalogue is there per provider, with the entry's context and
+        // never a credential value.
+        assert_eq!(v["providers"]["anthropic"]["shape"], "anthropic");
+        assert!(v["providers"]["anthropic"]["models"].is_array());
+        assert!(v["providers"]["anthropic"].get("key").is_none());
+    }
+
+    /// The catalogue is written per provider: ids trimmed and unique, limits
+    /// whole numbers, and the rest of the provider entry untouched.
+    #[test]
+    fn provider_models_are_written_and_the_rest_of_the_entry_is_not() {
+        let mut cfg = Config::default();
+        let changed = apply(
+            &mut cfg,
+            &json!({ "providers": { "openai-codex": { "models": [
+                { "id": " gpt-6 ", "name": "GPT-6", "context": 1_000_000, "output": 200_000, "reasoning": true },
+                { "id": "gpt-6-mini" }
+            ] } } }),
+        )
+        .unwrap();
+        assert_eq!(changed, ["providers.openai-codex.models"]);
+        let models = &cfg.providers["openai-codex"].models;
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "gpt-6");
+        assert_eq!(models[0].context, 1_000_000);
+        assert_eq!(models[1].label(), "gpt-6-mini");
+        assert_eq!(
+            cfg.providers["openai-codex"].upstream,
+            "https://chatgpt.com/backend-api"
+        );
+
+        // Re-applying is a no-op; an empty list is a decision, not an error.
+        let again = apply(&mut cfg, &json!({ "providers": { "openai-codex": { "models": [
+            { "id": "gpt-6", "name": "GPT-6", "context": 1_000_000, "output": 200_000, "reasoning": true },
+            { "id": "gpt-6-mini" }
+        ] } } })).unwrap();
+        assert!(again.is_empty());
+        let cleared = apply(
+            &mut cfg,
+            &json!({ "providers": { "anthropic": { "models": [] } } }),
+        )
+        .unwrap();
+        assert_eq!(cleared, ["providers.anthropic.models"]);
+        assert!(cfg.providers["anthropic"].models.is_empty());
+
+        let dup = apply(
+            &mut cfg,
+            &json!({ "providers": { "anthropic": { "models": [{ "id": "a" }, { "id": "a" }] } } }),
+        );
+        assert!(dup.unwrap_err().contains("twice"));
+        let blank = apply(
+            &mut cfg,
+            &json!({ "providers": { "anthropic": { "models": [{ "id": "  " }] } } }),
+        );
+        assert!(blank.unwrap_err().contains("without an id"));
+        let nobody = apply(
+            &mut cfg,
+            &json!({ "providers": { "nobody": { "models": [] } } }),
+        );
+        assert!(nobody.unwrap_err().contains("not a provider"));
+        let upstream = apply(
+            &mut cfg,
+            &json!({ "providers": { "anthropic": { "upstream": "http://x" } } }),
+        );
+        assert!(upstream
+            .unwrap_err()
+            .contains("providers.anthropic.upstream"));
     }
 
     #[test]

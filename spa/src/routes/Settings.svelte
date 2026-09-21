@@ -165,6 +165,36 @@
   }
 
 
+  // --- the declared catalogue -------------------------------------------
+  // Per provider, the models this node declares: what the picker offers and
+  // what a declaring harness is told. Edited on the same form as the rest of
+  // node.toml and saved through the same patch, so a change owes the same
+  // restart. Rows are edited in place; ids are what the provider is asked
+  // for, names are what a person reads.
+  const providerNames = $derived(form ? Object.keys(form.providers ?? {}) : [])
+  function addModel(provider: string) {
+    if (!form) return
+    form.providers[provider].models.push({ id: '', name: '', reasoning: true })
+  }
+  function removeModel(provider: string, index: number) {
+    if (!form) return
+    form.providers[provider].models.splice(index, 1)
+  }
+  const catalogueDirty = $derived(
+    cfg && form
+      ? JSON.stringify(cfg.providers ?? {}) !== JSON.stringify(form.providers ?? {})
+      : false,
+  )
+  const catalogueValid = $derived.by(() => {
+    if (!form) return false
+    for (const p of Object.values(form.providers ?? {})) {
+      const ids = p.models.map((m) => m.id.trim())
+      if (ids.some((id) => !id)) return false
+      if (new Set(ids).size !== ids.length) return false
+    }
+    return true
+  })
+
   // --- channels ---------------------------------------------------------
   let channelName = $state('')
   let channelNote = $state('')
@@ -659,6 +689,47 @@
     {/if}
   </Card>
 
+  {#if selectedNodeIsServing}
+    <Card title="Declared models" note="What the picker offers under each provider, and what an OpenCode harness is told its catalogue is. Written to node.toml; sessions started after the next restart see the change.">
+      {#if form && cfg}
+        {#each providerNames as name (name)}
+          {@const p = form.providers[name]}
+          <div class="catalogue">
+            <div class="catalogue-head">
+              <b>{name}</b>
+              <small>{p.shape} · {p.upstream}{p.login ? ` · signs in as ${p.login}` : ''}</small>
+              <button class="lnk" type="button" onclick={() => addModel(name)} disabled={!local || busy !== ''}>Add model</button>
+            </div>
+            {#if p.models.length === 0}
+              <div class="empty">No models declared: nothing is offered under {name}.</div>
+            {:else}
+              <div class="models">
+                <div class="mrow head" aria-hidden="true"><span>Model id</span><span>Name</span><span>Context</span><span>Output</span><span>Reasons</span><span>Attachments</span><span></span></div>
+                {#each p.models as m, i (i)}
+                  <div class="mrow">
+                    <input bind:value={m.id} placeholder="the provider's model id" aria-label="Model id" disabled={!local} spellcheck="false" />
+                    <input bind:value={m.name} placeholder="shown in the picker" aria-label="Model name" disabled={!local} spellcheck="false" />
+                    <input type="number" min="0" bind:value={m.context} placeholder="harness default" aria-label="Context tokens" disabled={!local} />
+                    <input type="number" min="0" bind:value={m.output} placeholder="harness default" aria-label="Output tokens" disabled={!local} />
+                    <input type="checkbox" bind:checked={m.reasoning} aria-label="Reasoning" disabled={!local} />
+                    <input type="checkbox" bind:checked={m.attachment} aria-label="Attachments" disabled={!local} />
+                    <button class="lnk" type="button" onclick={() => removeModel(name, i)} disabled={!local || busy !== ''} aria-label={`Remove ${m.id || 'model'}`}>Remove</button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/each}
+        <div class="acts">
+          <button class="btn p" onclick={saveConfig} disabled={!local || !catalogueDirty || !catalogueValid || busy !== ''}>{busy === 'config' ? 'Saving…' : 'Save models'}</button>
+          {#if catalogueDirty && !catalogueValid}<small>Every model needs an id, and each id once.</small>{:else if restartOwed}<small>Saved to node.toml; restart the node for new sessions to see it.</small>{/if}
+        </div>
+      {:else if configError}
+        <p class="why"><b>node.toml could not be read</b><i>{configError}</i></p>
+      {:else}<div class="empty">Reading serving-node configuration…</div>{/if}
+    </Card>
+  {/if}
+
   <Card title="Forge tokens" note={`GitHub and GitLab tokens on ${store.node?.name ?? 'the serving node'}, and the channels each may serve. Values are never shown.`}>
     <CredentialSettings />
   </Card>
@@ -985,6 +1056,18 @@
   .panel:focus {
     outline: none;
   }
+  .catalogue { margin: 0.75rem 0; }
+  .catalogue-head { display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.35rem; }
+  .catalogue-head small { flex: 1; opacity: 0.7; overflow-wrap: anywhere; }
+  .models { display: grid; gap: 0.25rem; }
+  .mrow { display: grid; grid-template-columns: minmax(10rem, 2fr) minmax(8rem, 2fr) 6rem 6rem 4rem 5.5rem auto; gap: 0.4rem; align-items: center; }
+  .mrow.head { font-size: 0.8em; opacity: 0.7; }
+  .mrow input[type='checkbox'] { justify-self: start; }
+  @media (max-width: 720px) {
+    .mrow { grid-template-columns: 1fr 1fr; }
+    .mrow.head { display: none; }
+  }
+
   .section-nav {
     display: flex;
     flex-wrap: wrap;
