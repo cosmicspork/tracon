@@ -3,6 +3,7 @@
   import Doc from './routes/Doc.svelte'
   import DocPreview from './routes/DocPreview.svelte'
   import Docs from './routes/Docs.svelte'
+  import Memories from './routes/Memories.svelte'
   import Metrics from './routes/Metrics.svelte'
   import Work from './routes/Work.svelte'
   import WorkItem from './routes/WorkItem.svelte'
@@ -91,10 +92,12 @@
         ? 'nodes'
         : router.path.startsWith('/docs')
           ? 'docs'
-          : router.path.startsWith('/work') || router.path.startsWith('/sessions') ||
-              router.path.startsWith('/qa') || router.path === '/metrics'
-            ? 'work'
-            : 'home'
+          : router.path.startsWith('/memories')
+            ? 'memories'
+            : router.path.startsWith('/work') || router.path.startsWith('/sessions') ||
+                router.path.startsWith('/qa') || router.path === '/metrics'
+              ? 'work'
+              : 'home'
   )
   const hubDown = $derived(store.mesh?.hub.state === 'unreachable')
   /** No hub is a thing to do something about, so it links to doing it. */
@@ -140,6 +143,10 @@
     <a href="/docs" class:on={nav === 'docs'}>
       <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
       <span class="lbl">Documents</span>
+    </a>
+    <a href="/memories" class:on={nav === 'memories'}>
+      <svg viewBox="0 0 24 24"><path d="M12 3c-4 2-7 5-7 9a7 7 0 0 0 14 0c0-4-3-7-7-9z" /><path d="M12 8v8M9 12h6" /></svg>
+      <span class="lbl">Memories</span>
     </a>
     <a href="/nodes" class:on={nav === 'nodes'}>
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14.5v2.5" /></svg>
@@ -216,6 +223,8 @@
       <Doc channel={docRef[1]} slug={docRef[2]} edit={docEdit} />
     {:else if nav === 'docs'}
       <Docs />
+    {:else if nav === 'memories'}
+      <Memories />
     {:else if settings}
       <Settings />
     {:else}

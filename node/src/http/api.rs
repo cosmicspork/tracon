@@ -2739,7 +2739,9 @@ pub async fn get_promotion(
 
 #[derive(Deserialize)]
 pub struct PromotionVerdicts {
-    /// `memory_id → "promote" | "reject"`.
+    /// `memory_id → "promote" | "reject"` (legacy), or
+    /// `memory_id → {"verdict": "promote" | "reject", "body": "edited text"}`
+    /// to carry an edited body alongside a promoted item's verdict.
     pub verdicts: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -3232,6 +3234,9 @@ pub struct PutDoc {
     /// Archive or restore it with this write; absent keeps it as it was.
     #[serde(default)]
     pub archived: Option<bool>,
+    /// Pin or unpin it with this write; absent keeps it as it was.
+    #[serde(default)]
+    pub pinned: Option<bool>,
 }
 
 /// `PUT /api/docs/{channel}/{slug}` with `If-Match: <hash>` to refuse
@@ -3274,37 +3279,63 @@ pub async fn put_doc(
             )
             .into_response();
         }
-        let Some(archived) = body.archived else {
+        if body.archived.is_none() && body.pinned.is_none() {
             return ApiError(
                 StatusCode::BAD_REQUEST,
-                "archived is required when an HTML document body is omitted".into(),
+                "archived or pinned is required when an HTML document body is omitted".into(),
             )
             .into_response();
-        };
+        }
         if create_only {
             let document = existing.expect("checked above");
             return document_conflict_response(document.hash, document.body);
         }
-        return match s.store().set_document_archived_change(
-            &s.node_id,
-            &channel,
-            &slug,
-            archived,
-            if_match.as_deref(),
-        ) {
-            Ok(crate::store::DocumentWrite::Written { row, change }) => {
-                s.manager.bus().publish(crate::stream::Frame::Changes {
-                    channel,
-                    changes: vec![change],
-                });
-                Json(json!(*row)).into_response()
+        let mut last_row = None;
+        let mut last_change = None;
+        if let Some(archived) = body.archived {
+            match s.store().set_document_archived_change(
+                &s.node_id,
+                &channel,
+                &slug,
+                archived,
+                if_match.as_deref(),
+            ) {
+                Ok(crate::store::DocumentWrite::Written { row, change }) => {
+                    last_row = Some(*row);
+                    last_change = Some(change);
+                }
+                Ok(crate::store::DocumentWrite::Conflict { hash, body }) => {
+                    return document_conflict_response(hash, body);
+                }
+                Ok(crate::store::DocumentWrite::HtmlDocument) => unreachable!(),
+                Err(error) => return ApiError::from(error).into_response(),
             }
-            Ok(crate::store::DocumentWrite::Conflict { hash, body }) => {
-                document_conflict_response(hash, body)
+        }
+        if let Some(pinned) = body.pinned {
+            match s.store().set_document_pinned_change(
+                &s.node_id,
+                &channel,
+                &slug,
+                pinned,
+                if_match.as_deref(),
+            ) {
+                Ok(crate::store::DocumentWrite::Written { row, change }) => {
+                    last_row = Some(*row);
+                    last_change = Some(change);
+                }
+                Ok(crate::store::DocumentWrite::Conflict { hash, body }) => {
+                    return document_conflict_response(hash, body);
+                }
+                Ok(crate::store::DocumentWrite::HtmlDocument) => unreachable!(),
+                Err(error) => return ApiError::from(error).into_response(),
             }
-            Ok(crate::store::DocumentWrite::HtmlDocument) => unreachable!(),
-            Err(error) => ApiError::from(error).into_response(),
-        };
+        }
+        let row = last_row.expect("archived or pinned checked above");
+        s.manager.bus().publish(crate::stream::Frame::Changes {
+            channel,
+            changes: vec![last_change.expect("a row implies its change")],
+        });
+        return Json(json!(row)).into_response();
     }
     let Some(markdown) = body.body.as_deref() else {
         return ApiError(
@@ -3323,6 +3354,7 @@ pub async fn put_doc(
         if_match.as_deref(),
         create_only,
         body.archived,
+        body.pinned,
     ) {
         Ok(doc) => Json(json!(doc)).into_response(),
         Err(crate::mcp::docs::WriteError::Conflict { hash, body }) => {
@@ -3722,6 +3754,42 @@ pub async fn delete_memory(
         tracon_sync::ChangeOp::Delete,
         &id,
         serde_json::Value::Null,
+    )?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct PatchMemory {
+    pub body: String,
+}
+
+/// `PATCH /api/memories/{id}`: edit an existing memory's body in place.
+/// Narrow by design — kind, scope, confidence, and state are unaffected;
+/// retiring or changing a memory's lifecycle goes through the other routes.
+pub async fn edit_memory(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(m): Json<PatchMemory>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if m.body.trim().is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "body is required".into()));
+    }
+    let row = s
+        .store()
+        .memory_get(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such memory".into()))?;
+    let mut change_row = row.to_change_row();
+    change_row["body"] = json!(m.body.trim());
+    change_row["updated_ms"] = json!(crate::store::now_ms());
+    crate::corpus::write(
+        s.store(),
+        s.manager.bus(),
+        &s.node_id,
+        &row.channel,
+        "memory",
+        tracon_sync::ChangeOp::Upsert,
+        &id,
+        change_row,
     )?;
     Ok(Json(json!({ "ok": true })))
 }

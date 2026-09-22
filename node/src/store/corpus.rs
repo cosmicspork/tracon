@@ -54,6 +54,10 @@ pub struct DocumentRow {
     /// Kept and readable by slug, but out of listings and search unless asked.
     #[serde(default)]
     pub archived: i64,
+    /// Operator-set only. Included in full, uncapped, in every session's
+    /// orientation.
+    #[serde(default)]
+    pub pinned: i64,
     pub created_ms: i64,
     pub updated_ms: i64,
 }
@@ -228,6 +232,7 @@ impl DocumentRow {
             hlc_ms: r.get("hlc_ms")?,
             deleted: r.get("deleted")?,
             archived: r.get("archived")?,
+            pinned: r.get("pinned")?,
             created_ms: r.get("created_ms")?,
             updated_ms: r.get("updated_ms")?,
         })
@@ -237,7 +242,7 @@ impl DocumentRow {
     pub fn to_change_row(&self) -> Value {
         json!({
             "channel": self.channel, "slug": self.slug, "kind": self.kind, "title": self.title,
-            "body": self.body, "hash": self.hash, "archived": self.archived,
+            "body": self.body, "hash": self.hash, "archived": self.archived, "pinned": self.pinned,
             "format": self.format, "entry_path": self.entry_path, "source_name": self.source_name,
             "created_ms": self.created_ms, "updated_ms": self.updated_ms,
         })
@@ -518,8 +523,8 @@ impl Store {
     }
 
     /// Check a document edit precondition and write its replicated change
-    /// while holding the store's single writer transaction. `archived` of
-    /// `None` keeps whatever the document already was.
+    /// while holding the store's single writer transaction. `archived` and
+    /// `pinned` of `None` keep whatever the document already was.
     #[allow(clippy::too_many_arguments)]
     pub fn write_document_change(
         &self,
@@ -534,6 +539,7 @@ impl Store {
         create_only: bool,
         new_id: &str,
         archived: Option<bool>,
+        pinned: Option<bool>,
     ) -> Result<DocumentWrite> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -576,6 +582,10 @@ impl Store {
             archived: archived
                 .map(i64::from)
                 .or(existing.as_ref().map(|d| d.archived))
+                .unwrap_or(0),
+            pinned: pinned
+                .map(i64::from)
+                .or(existing.as_ref().map(|d| d.pinned))
                 .unwrap_or(0),
             created_ms: existing.as_ref().map(|d| d.created_ms).unwrap_or(now),
             updated_ms: now,
@@ -632,6 +642,59 @@ impl Store {
             });
         }
         row.archived = i64::from(archived);
+        row.updated_ms = now_ms();
+        let change = tracon_sync::apply::write_change_in_tx(
+            &tx,
+            site,
+            channel,
+            "document",
+            ChangeOp::Upsert,
+            &row.id,
+            row.to_change_row(),
+            row.updated_ms,
+        )
+        .map_err(sync_err)?;
+        row.hlc_ms = change.hlc_ms;
+        tx.commit()?;
+        Ok(DocumentWrite::Written {
+            row: Box::new(row),
+            change,
+        })
+    }
+
+    /// Change only an existing document's pinned flag, preserving its format,
+    /// content identity, and bundle generation.
+    pub fn set_document_pinned_change(
+        &self,
+        site: &str,
+        channel: &str,
+        slug: &str,
+        pinned: bool,
+        if_hash: Option<&str>,
+    ) -> Result<DocumentWrite> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let Some(mut row) = tx
+            .query_row(
+                "SELECT * FROM document WHERE channel = ?1 AND slug = ?2 AND deleted = 0
+                 ORDER BY hlc_ms DESC, hlc_ctr DESC LIMIT 1",
+                params![channel, slug],
+                DocumentRow::from_row,
+            )
+            .optional()?
+        else {
+            return Ok(DocumentWrite::Conflict {
+                hash: String::new(),
+                body: String::new(),
+            });
+        };
+        if if_hash.is_some_and(|want| want != row.hash) {
+            return Ok(DocumentWrite::Conflict {
+                hash: row.hash,
+                body: row.body,
+            });
+        }
+        row.pinned = i64::from(pinned);
         row.updated_ms = now_ms();
         let change = tracon_sync::apply::write_change_in_tx(
             &tx,
@@ -790,6 +853,7 @@ impl Store {
             hlc_ms: 0,
             deleted: 0,
             archived: existing.as_ref().map(|doc| doc.archived).unwrap_or(0),
+            pinned: existing.as_ref().map(|doc| doc.pinned).unwrap_or(0),
             created_ms: existing.as_ref().map(|doc| doc.created_ms).unwrap_or(now),
             updated_ms: now,
         };
@@ -1143,7 +1207,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, channel, slug, kind, title, '' AS body, hash, site, hlc_ms, deleted,
-                    archived, format, entry_path, source_name, created_ms, updated_ms
+                    archived, pinned, format, entry_path, source_name, created_ms, updated_ms
              FROM document WHERE deleted = 0 AND (?1 IS NULL OR channel = ?1)
              ORDER BY channel, kind, slug",
         )?;
@@ -2009,6 +2073,117 @@ mod tests {
             )
             .unwrap();
         assert_eq!(live_generation_rows, 0);
+    }
+
+    #[test]
+    fn pinned_is_preserved_across_edits_and_html_reimports() {
+        let store = Store::open_in_memory().unwrap();
+        let DocumentWrite::Written { row, .. } = store
+            .write_document_change(
+                "node-a",
+                "personal",
+                "guide-pinned",
+                "guide",
+                "Pinned",
+                "# Pinned\n\noriginal",
+                "h1",
+                None,
+                true,
+                "d1",
+                None,
+                Some(true),
+            )
+            .unwrap()
+        else {
+            panic!("expected a write");
+        };
+        assert_eq!(row.pinned, 1);
+
+        // An edit that says nothing about it keeps it pinned.
+        let DocumentWrite::Written { row, .. } = store
+            .write_document_change(
+                "node-a",
+                "personal",
+                "guide-pinned",
+                "guide",
+                "Pinned",
+                "# Pinned\n\nedited",
+                "h2",
+                Some(&row.hash),
+                false,
+                "d1",
+                None,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("expected a write");
+        };
+        assert_eq!(row.pinned, 1);
+
+        // Saying so unpins it.
+        let DocumentWrite::Written { row, .. } = store
+            .write_document_change(
+                "node-a",
+                "personal",
+                "guide-pinned",
+                "guide",
+                "Pinned",
+                "# Pinned\n\nedited again",
+                "h3",
+                Some(&row.hash),
+                false,
+                "d1",
+                None,
+                Some(false),
+            )
+            .unwrap()
+        else {
+            panic!("expected a write");
+        };
+        assert_eq!(row.pinned, 0);
+
+        // An HTML bundle re-import preserves pinned across generations, the
+        // same way it already preserves archived.
+        let (created, _) = store
+            .write_html_document_change(
+                "node-a",
+                "personal",
+                "ref-html-pinned",
+                "demo",
+                "index.html",
+                vec![HtmlFile {
+                    path: "index.html".into(),
+                    bytes: b"<title>First</title>".to_vec(),
+                }],
+                None,
+                true,
+            )
+            .unwrap();
+        assert_eq!(created.pinned, 0);
+        let set = store
+            .set_document_pinned_change("node-a", "personal", "ref-html-pinned", true, None)
+            .unwrap();
+        let DocumentWrite::Written { row: set, .. } = set else {
+            panic!("expected a write");
+        };
+        assert_eq!(set.pinned, 1);
+        let (reimported, _) = store
+            .write_html_document_change(
+                "node-a",
+                "personal",
+                "ref-html-pinned",
+                "demo",
+                "index.html",
+                vec![HtmlFile {
+                    path: "index.html".into(),
+                    bytes: b"<title>Second</title>".to_vec(),
+                }],
+                Some(&set.hash),
+                false,
+            )
+            .unwrap();
+        assert_eq!(reimported.pinned, 1);
     }
 
     #[test]

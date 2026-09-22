@@ -161,6 +161,7 @@ pub async fn call(
                 args["if_hash"].as_str(),
                 false,
                 None,
+                None,
             )
             .map_err(|e| e.to_string())?;
             // The plan artifact: record it on the item and end the plan
@@ -201,8 +202,8 @@ pub enum WriteError {
 
 /// Create or replace a document at a slug, on this node, as a sync write.
 /// `if_hash` is the edit's precondition: the hash the caller last read.
-/// `create_only` is the HTTP `If-None-Match: *` precondition. `archived` of
-/// `None` leaves the document as archived or live as it was.
+/// `create_only` is the HTTP `If-None-Match: *` precondition. `archived` and
+/// `pinned` of `None` leave the document as it was.
 #[allow(clippy::too_many_arguments)]
 pub fn write_document(
     store: &crate::store::Store,
@@ -214,6 +215,7 @@ pub fn write_document(
     if_hash: Option<&str>,
     create_only: bool,
     archived: Option<bool>,
+    pinned: Option<bool>,
 ) -> Result<DocumentRow, WriteError> {
     if !valid_slug(slug) {
         return Err(WriteError::Slug(slug.to_string()));
@@ -237,6 +239,7 @@ pub fn write_document(
         create_only,
         &corpus::new_id(),
         archived,
+        pinned,
     )? {
         DocumentWrite::Written { row, change } => {
             let row = *row;
@@ -274,6 +277,30 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
 
+    /// `pinned`, like `archived`, `kind`, and `title`, is operator-only: an
+    /// agent calling `doc_write` must never be able to set it.
+    #[test]
+    fn doc_write_schema_has_no_operator_only_fields() {
+        let defs = definitions();
+        let write = defs
+            .iter()
+            .find(|d| d["name"] == DOC_WRITE)
+            .expect("doc_write is defined");
+        let props = write["inputSchema"]["properties"]
+            .as_object()
+            .expect("doc_write has properties");
+        assert_eq!(
+            props
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["slug", "body", "if_hash"].into_iter().collect(),
+            "{props:?}"
+        );
+        assert!(!props.contains_key("pinned"), "{props:?}");
+        assert!(!props.contains_key("archived"), "{props:?}");
+    }
+
     #[test]
     fn kinds_and_titles_follow_the_prefix_scheme() {
         assert_eq!(kind_of("guide-workspace"), "guide");
@@ -302,6 +329,7 @@ mod tests {
             None,
             true,
             None,
+            None,
         )
         .unwrap();
         assert!(matches!(
@@ -314,6 +342,7 @@ mod tests {
                 "# Blind overwrite",
                 None,
                 true,
+                None,
                 None,
             ),
             Err(WriteError::Conflict { .. })
@@ -336,6 +365,7 @@ mod tests {
                     body,
                     Some(&hash),
                     false,
+                    None,
                     None,
                 )
             }));

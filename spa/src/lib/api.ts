@@ -16,6 +16,7 @@ import type {
   ForgeList,
   HubRollups,
   ManagedRepo,
+  Memory,
   MeshState,
   ModelOption,
   NodeConfig,
@@ -24,6 +25,7 @@ import type {
   OperatorQuestion,
   Promotion,
   PromotionItem,
+  PromotionVerdict,
   ProviderConnectResult,
   ProviderInfo,
   PushDevice,
@@ -312,6 +314,7 @@ export const api = {
     body: string,
     ifMatch?: string,
     archived?: boolean,
+    pinned?: boolean,
   ): Promise<Document> => {
     const res = await fetch(`/api/docs/${channel}/${slug}`, {
       method: 'PUT',
@@ -319,7 +322,11 @@ export const api = {
         'content-type': 'application/json',
         ...(ifMatch ? { 'if-match': ifMatch } : { 'if-none-match': '*' }),
       },
-      body: JSON.stringify(archived === undefined ? { body } : { body, archived }),
+      body: JSON.stringify({
+        body,
+        ...(archived === undefined ? {} : { archived }),
+        ...(pinned === undefined ? {} : { pinned }),
+      }),
     })
     const text = await res.text()
     let json: { error?: { message?: string }; hash?: string; body?: string } | null = null
@@ -378,14 +385,24 @@ export const api = {
   },
   archiveDoc: (channel: string, slug: string, archived: boolean) =>
     call<Document>('PUT', `/api/docs/${channel}/${slug}`, { archived }),
+  pinDoc: (channel: string, slug: string, pinned: boolean) =>
+    call<Document>('PUT', `/api/docs/${channel}/${slug}`, { pinned }),
   deleteDoc: (channel: string, slug: string) => call<void>('DELETE', `/api/docs/${channel}/${slug}`),
+  // Memories: browse a channel's, edit one's body in place, or retire it.
+  memories: (channel: string, state?: string) => {
+    const q = new URLSearchParams({ channel })
+    if (state) q.set('state', state)
+    return call<{ memories: Memory[] }>('GET', `/api/memories?${q}`)
+  },
+  editMemory: (id: string, body: string) => call<{ ok: boolean }>('PATCH', `/api/memories/${id}`, { body }),
+  retireMemory: (id: string) => call<{ ok: boolean }>('DELETE', `/api/memories/${id}`),
   // Promotion batches: read, decide per item, or build tonight's now.
   promotion: (id: string) =>
-    call<{ promotion: Promotion; items: PromotionItem[]; verdicts: Record<string, string> }>(
+    call<{ promotion: Promotion; items: PromotionItem[]; verdicts: Record<string, PromotionVerdict> }>(
       'GET',
       `/api/promotions/${id}`,
     ),
-  decidePromotion: (id: string, verdicts: Record<string, 'promote' | 'reject'>) =>
+  decidePromotion: (id: string, verdicts: Record<string, PromotionVerdict>) =>
     call<{ state: string }>('POST', `/api/promotions/${id}/verdict`, { verdicts }),
   batchPromotions: () => call<{ created: string[] }>('POST', '/api/promotions/batch'),
   // Providers: connect through the harness's own login, paste the code back.

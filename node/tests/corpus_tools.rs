@@ -567,3 +567,116 @@ async fn a_document_export_imports_into_a_fresh_node_unchanged() {
     }
     assert_eq!(corpus_of(&into.operator, "personal").await, before);
 }
+
+#[tokio::test]
+async fn active_memories_are_browsed_edited_in_place_and_retired() {
+    state::isolate();
+    let h = harness().await;
+    let (st, v) = call_with(
+        &h.operator,
+        "POST",
+        "/api/memories",
+        Some(json!({"channel": "personal", "body": "run just test before every commit"})),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+
+    let (st, v) = call_with(
+        &h.operator,
+        "GET",
+        "/api/memories?channel=personal&state=active",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(
+        v["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == id),
+        "{v}"
+    );
+
+    // Editing changes only the body.
+    let (st, v) = call_with(
+        &h.operator,
+        "PATCH",
+        &format!("/api/memories/{id}"),
+        Some(json!({"body": "run just test --compact before every commit"})),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (_, v) = call_with(
+        &h.operator,
+        "GET",
+        "/api/memories?channel=personal&state=active",
+        None,
+        &[],
+    )
+    .await;
+    let row = v["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == id)
+        .unwrap();
+    assert_eq!(row["body"], "run just test --compact before every commit");
+    assert_eq!(
+        row["kind"], "directive",
+        "editing the body leaves the rest alone"
+    );
+
+    // An empty body is refused.
+    let (st, _) = call_with(
+        &h.operator,
+        "PATCH",
+        &format!("/api/memories/{id}"),
+        Some(json!({"body": "   "})),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // Editing a memory that does not exist is a 404.
+    let (st, _) = call_with(
+        &h.operator,
+        "PATCH",
+        "/api/memories/does-not-exist",
+        Some(json!({"body": "x"})),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    // Retiring removes it from the active list.
+    let (st, _) = call_with(
+        &h.operator,
+        "DELETE",
+        &format!("/api/memories/{id}"),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, v) = call_with(
+        &h.operator,
+        "GET",
+        "/api/memories?channel=personal&state=active",
+        None,
+        &[],
+    )
+    .await;
+    assert!(
+        !v["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == id),
+        "{v}"
+    );
+}

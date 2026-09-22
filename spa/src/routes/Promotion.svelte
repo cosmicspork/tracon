@@ -4,17 +4,24 @@
   import { formatAge } from '../lib/format'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
-  import type { Promotion, PromotionItem } from '../lib/types'
+  import type { Promotion, PromotionItem, PromotionVerdict } from '../lib/types'
 
   let { id }: { id: string } = $props()
 
   let promotion = $state<Promotion | null>(null)
   let items = $state<PromotionItem[]>([])
-  let verdicts = $state<Record<string, 'promote' | 'reject'>>({})
-  let saved = $state<Record<string, string>>({})
+  let verdicts = $state<Record<string, { verdict: 'promote' | 'reject'; body?: string }>>({})
+  let saved = $state<Record<string, PromotionVerdict>>({})
   let busy = $state(false)
   let error = $state<string | null>(null)
   let loaded = $state(false)
+
+  function verdictOf(v: PromotionVerdict | undefined): 'promote' | 'reject' | undefined {
+    return typeof v === 'string' ? v : v?.verdict
+  }
+  function bodyOf(v: PromotionVerdict | undefined): string | undefined {
+    return typeof v === 'object' ? v.body : undefined
+  }
 
   $effect(() => {
     void id
@@ -36,12 +43,18 @@
   const pending = $derived(items.filter((i) => !saved[i.memory_id]))
   const chosen = $derived(Object.keys(verdicts).length)
 
-  function pick(memoryId: string, v: 'promote' | 'reject') {
-    verdicts = { ...verdicts, [memoryId]: v }
+  function pick(memoryId: string, v: 'promote' | 'reject', defaultBody: string) {
+    const current = verdicts[memoryId]
+    verdicts = { ...verdicts, [memoryId]: { verdict: v, body: current?.body ?? defaultBody } }
+  }
+  function editBody(memoryId: string, body: string) {
+    const current = verdicts[memoryId]
+    if (!current) return
+    verdicts = { ...verdicts, [memoryId]: { ...current, body } }
   }
   function all(v: 'promote' | 'reject') {
-    const next: Record<string, 'promote' | 'reject'> = {}
-    for (const i of pending) next[i.memory_id] = v
+    const next: typeof verdicts = {}
+    for (const i of pending) next[i.memory_id] = { verdict: v, body: i.body }
     verdicts = next
   }
 
@@ -89,12 +102,22 @@
   <div class="rows">
     {#each items as it (it.memory_id)}
       {@const done = saved[it.memory_id]}
-      {@const v = verdicts[it.memory_id]}
-      <div class="item" class:promote={v === 'promote' || done === 'promote'} class:reject={v === 'reject' || done === 'reject'}>
+      {@const doneVerdict = verdictOf(done)}
+      {@const entry = verdicts[it.memory_id]}
+      {@const v = entry?.verdict}
+      <div class="item" class:promote={v === 'promote' || doneVerdict === 'promote'} class:reject={v === 'reject' || doneVerdict === 'reject'}>
         <span class="bar"></span>
         <span class="body">
           <em>{it.kind}</em>
-          {it.body}
+          {#if !done && v === 'promote'}
+            <textarea
+              value={entry?.body ?? it.body}
+              oninput={(e) => editBody(it.memory_id, (e.currentTarget as HTMLTextAreaElement).value)}
+              spellcheck="false"
+            ></textarea>
+          {:else}
+            {bodyOf(done) ?? it.body}
+          {/if}
           <small
             >{it.scope}{it.scope_ref ? ` · ${it.scope_ref.slice(0, 8)}` : ''} · {Math.round(it.confidence * 100)}% ·
             {formatAge(it.created_ms, clock.now)}{it.source_session ? ` · session ${it.source_session.slice(-6)}` : ''}</small
@@ -102,10 +125,10 @@
         </span>
         <span class="act">
           {#if done}
-            <span class="chip" class:bad={done === 'reject'}>{done === 'promote' ? 'promoted' : 'rejected'}</span>
+            <span class="chip" class:bad={doneVerdict === 'reject'}>{doneVerdict === 'promote' ? 'promoted' : 'rejected'}</span>
           {:else}
-            <button class="lnk d" class:on={v === 'reject'} onclick={() => pick(it.memory_id, 'reject')}>Reject</button>
-            <button class="btn" class:p={v === 'promote'} onclick={() => pick(it.memory_id, 'promote')}>Promote</button>
+            <button class="lnk d" class:on={v === 'reject'} onclick={() => pick(it.memory_id, 'reject', it.body)}>Reject</button>
+            <button class="btn" class:p={v === 'promote'} onclick={() => pick(it.memory_id, 'promote', it.body)}>Promote</button>
           {/if}
         </span>
       </div>
@@ -179,6 +202,19 @@
     color: var(--dim);
     margin-top: 3px;
     white-space: normal;
+  }
+  .body textarea {
+    display: block;
+    width: 100%;
+    min-height: 4.5em;
+    font: inherit;
+    color: inherit;
+    background: var(--s2);
+    border: 0;
+    border-radius: 3px;
+    padding: 6px 8px;
+    resize: vertical;
+    box-sizing: border-box;
   }
   .act {
     display: flex;

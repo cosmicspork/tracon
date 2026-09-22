@@ -143,3 +143,50 @@ async fn candidates_are_batched_decided_and_only_promoted_ones_become_context() 
     .await;
     assert_eq!(st, StatusCode::CONFLICT);
 }
+
+/// A verdict may be an object carrying an edit: `{"verdict": ..., "body": ...}`.
+/// The edit lands on a promoted memory's body; a rejected item's edit is
+/// dropped, never applied.
+#[tokio::test]
+async fn an_object_verdict_edits_the_body_of_a_promoted_memory() {
+    state::isolate();
+    let (app, store) = operator().await;
+    for body in [
+        "flaky tests hide behind retries",
+        "the deploy needs the VPN",
+    ] {
+        let (st, _) = call(&app, "POST", "/api/memories", Some(json!({"channel": "personal", "kind": "lesson", "body": body, "state": "candidate", "confidence": 0.8}))).await;
+        assert_eq!(st, StatusCode::OK);
+    }
+    let (st, v) = call(&app, "POST", "/api/promotions/batch", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let pid = v["created"][0].as_str().unwrap().to_string();
+    let (_, p) = call(&app, "GET", &format!("/api/promotions/{pid}"), None).await;
+    let items = p["items"].as_array().unwrap();
+    let (flaky, vpn) = (
+        items[0]["memory_id"].as_str().unwrap().to_string(),
+        items[1]["memory_id"].as_str().unwrap().to_string(),
+    );
+    let (st, v) = call(
+        &app,
+        "POST",
+        &format!("/api/promotions/{pid}/verdict"),
+        Some(json!({"verdicts": {
+            flaky.clone(): {"verdict": "promote", "body": "flaky tests hide behind retries; quarantine and file a ticket"},
+            vpn.clone(): {"verdict": "reject", "body": "should never be applied"},
+        }})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["state"], "decided");
+    assert_eq!(
+        store.memory_get(&flaky).unwrap().unwrap().body,
+        "flaky tests hide behind retries; quarantine and file a ticket"
+    );
+    let rejected = store.memory_get(&vpn).unwrap().unwrap();
+    assert_eq!(rejected.state, "rejected");
+    assert_eq!(
+        rejected.body, "the deploy needs the VPN",
+        "a rejected item's body is never edited"
+    );
+}

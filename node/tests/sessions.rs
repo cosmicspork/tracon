@@ -2252,12 +2252,13 @@ async fn orientation(tag: &str) -> Orientation {
 
 /// Same, but with the adapter the session is started against — for the cases
 /// where what is under test is a launch that must not succeed — and with
-/// `long_guides` oversized `guide` documents on the channel, for the cases
-/// where what is under test is the cap.
+/// `pinned_docs` oversized pinned documents on the channel, for the cases
+/// where what is under test is that pinned content reaches the session in
+/// full, uncapped.
 async fn orientation_with(
     tag: &str,
     launch_with: Option<Arc<dyn HarnessAdapter>>,
-    long_guides: usize,
+    pinned_docs: usize,
 ) -> Orientation {
     state::isolate();
     let dir = state::scratch(&format!("orientation-{tag}"));
@@ -2323,8 +2324,8 @@ async fn orientation_with(
                "confidence": 1.0, "state": "active", "created_ms": now_ms(), "updated_ms": now_ms()}),
     )
     .unwrap();
-    // Conventions that alone are several times the whole orientation cap.
-    for i in 0..long_guides {
+    // Pinned documents that alone are several times the whole orientation cap.
+    for i in 0..pinned_docs {
         tracon::corpus::write(
             &store,
             &Bus::new(),
@@ -2334,7 +2335,7 @@ async fn orientation_with(
             tracon_sync::ChangeOp::Upsert,
             &format!("guide{i}"),
             json!({"channel": "personal", "slug": format!("guide-{i}"), "kind": "guide",
-                   "title": format!("Guide {i}"), "body": "y".repeat(16_000),
+                   "title": format!("Guide {i}"), "body": "y".repeat(16_000), "pinned": true,
                    "hash": format!("h{i}"), "created_ms": now_ms(), "updated_ms": now_ms()}),
         )
         .unwrap();
@@ -2493,13 +2494,13 @@ async fn a_session_starts_with_its_orientation_recorded() {
     tracon::session::materialize::remove(&row.id);
 }
 
-/// The cap is spent on the task before the conventions. A channel whose
-/// guides are several times the whole orientation used to leave the session a
-/// wall of conventions and a bare `trimmed` flag: no work item, no phase, no
-/// working agreements, no operator directive. What the cap cannot fit is now
-/// named, document by document, in the text and on the event.
+/// A pinned document is reserved and uncapped: the operator's own curation
+/// is the limit, not a byte cap. A channel whose pinned documents are
+/// several times the whole orientation cap does not cost a session its
+/// task, its phase, its working agreements, or its operator directive — and
+/// none of the pinned content itself is trimmed or left out either.
 #[tokio::test]
-async fn long_guides_do_not_cost_a_session_its_task_or_its_directives() {
+async fn pinned_documents_do_not_cost_a_session_its_task_or_its_directives() {
     state::isolate();
     let Orientation {
         store, item, row, ..
@@ -2521,8 +2522,9 @@ async fn long_guides_do_not_cost_a_session_its_task_or_its_directives() {
     let e = found.expect("no orientation event");
     let text = e.payload["text"].as_str().unwrap();
 
-    // Sixty-four thousand characters of guide, and the session still knows
-    // what it is doing, under whose rules, and what the operator told it.
+    // Sixty-four thousand characters of pinned document, and the session
+    // still knows what it is doing, under whose rules, and what the
+    // operator told it.
     assert!(text.contains("## Work"), "{text}");
     assert!(text.contains("**Add the ledger**"), "{text}");
     assert!(text.contains("plan session"), "{text}");
@@ -2537,22 +2539,23 @@ async fn long_guides_do_not_cost_a_session_its_task_or_its_directives() {
     );
     assert!(text.contains("Your worktree is"), "{text}");
 
-    // And it is told what it did not get, by name, with the call that fetches
-    // it — not a flag saying that something somewhere was cut.
-    assert_eq!(e.payload["trimmed"], true);
-    let missing = e.payload["missing"].as_array().unwrap();
-    assert!(missing.len() >= 3, "{missing:#?}");
-    assert!(text.contains("## Not in this orientation"), "{text}");
-    for m in missing {
-        let what = m["what"].as_str().unwrap();
-        assert!(what.contains("guide-"), "{m:#?}");
-        assert!(text.contains(what), "{what} is not named in the text");
-        assert!(m["fetch"].as_str().unwrap().contains("doc_read"), "{m:#?}");
+    // None of the pinned documents were trimmed or left out: the operator's
+    // own curation is the limit, not a byte cap, so nothing here is named
+    // as missing.
+    assert!(text.contains("## Pinned documents"), "{text}");
+    for i in 0..4 {
+        assert!(text.contains(&format!("Guide {i}")), "{text}");
     }
-    // At least one guide did not fit at all, and says so rather than
-    // appearing as a document that was merely shortened.
     assert!(
-        missing.iter().any(|m| m["partial"] == false),
+        text.contains(&"y".repeat(16_000)),
+        "a pinned document was cut short"
+    );
+    assert!(!text.contains("[cut here"), "{text}");
+    let missing = e.payload["missing"].as_array().cloned().unwrap_or_default();
+    assert!(
+        missing
+            .iter()
+            .all(|m| !m["what"].as_str().unwrap_or("").contains("guide-")),
         "{missing:#?}"
     );
 

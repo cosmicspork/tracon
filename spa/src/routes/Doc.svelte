@@ -139,6 +139,24 @@
     }
   }
 
+  async function setPinned(pinned: boolean) {
+    if (!doc) return
+    busy = true
+    error = null
+    try {
+      const d =
+        doc.format === 'html'
+          ? await api.pinDoc(channel, slug, pinned)
+          : await api.putDoc(channel, slug, doc.body, doc.hash, undefined, pinned)
+      doc = d
+      hash = d.hash
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e)
+    } finally {
+      busy = false
+    }
+  }
+
   async function mintPreview() {
     previewUrl = null
     previewError = null
@@ -193,10 +211,13 @@
     <a class="lnk" href="/docs">Documents</a>
     <span class="sep">/</span>
     {slug}
-    <b>{channel}{doc ? ` · ${formatAge(doc.updated_ms, clock.now)}` : ' · new'}{doc ? ` · ${doc.hash.slice(0, 8)}` : ''}{doc?.archived ? ' · archived' : ''}{error && !editing ? ` · ${error}` : ''}</b>
+    <b>{channel}{doc ? ` · ${formatAge(doc.updated_ms, clock.now)}` : ' · new'}{doc ? ` · ${doc.hash.slice(0, 8)}` : ''}{doc?.archived ? ' · archived' : ''}{doc?.pinned ? ' · pinned' : ''}{error && !editing ? ` · ${error}` : ''}</b>
     {#if doc?.format === 'html' && !loadError}
       <span class="r">
         <button class="lnk" onclick={() => (replacing = !replacing)}>{replacing ? 'Cancel replace' : 'Replace bundle'}</button>
+        <button class="lnk" onclick={() => setPinned(!doc?.pinned)} disabled={busy}>
+          {doc.pinned ? 'Unpin' : 'Pin'}
+        </button>
         <button class="lnk" onclick={() => setArchived(!doc?.archived)} disabled={busy}>
           {doc.archived ? 'Unarchive' : 'Archive'}
         </button>
@@ -206,6 +227,9 @@
       <span class="r">
         <button class="lnk" onclick={() => (editing = true)}>{doc ? 'Edit' : 'Write it'}</button>
         {#if doc}
+          <button class="lnk" onclick={() => setPinned(!doc?.pinned)} disabled={busy}>
+            {doc.pinned ? 'Unpin' : 'Pin'}
+          </button>
           <button class="lnk" onclick={() => setArchived(!doc?.archived)} disabled={busy}>
             {doc.archived ? 'Unarchive' : 'Archive'}
           </button>
