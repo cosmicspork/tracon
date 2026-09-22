@@ -41,6 +41,7 @@ pub const TABLES: &[(&str, &[&str])] = &[
             "body",
             "hash",
             "archived",
+            "pinned",
             "format",
             "entry_path",
             "source_name",

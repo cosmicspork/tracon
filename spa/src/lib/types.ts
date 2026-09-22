@@ -861,6 +861,27 @@ export interface Document {
   deleted: number
   /** 1 when archived: kept and readable, but out of listings and search. */
   archived?: number
+  /** 1 when pinned: included in full in every session's orientation. */
+  pinned?: number
+  created_ms: number
+  updated_ms: number
+}
+
+/** A memory as the node keeps it. */
+export interface Memory {
+  id: string
+  channel: string
+  scope: string
+  scope_ref: string | null
+  kind: 'directive' | 'fact' | 'lesson' | 'episode' | string
+  body: string
+  source_session: string | null
+  source_node: string | null
+  confidence: number
+  state: 'candidate' | 'proposed' | 'active' | 'promoted' | 'rejected' | string
+  site: string
+  hlc_ms: number
+  deleted: number
   created_ms: number
   updated_ms: number
 }
@@ -903,6 +924,10 @@ export interface PromotionItem {
   source_node: string | null
   created_ms: number
 }
+
+/** A verdict on one item: the bare legacy form, or an object carrying an
+ * edited body alongside a promoted item's verdict. */
+export type PromotionVerdict = 'promote' | 'reject' | { verdict: 'promote' | 'reject'; body?: string }
 
 export function promotionItems(p: Promotion): PromotionItem[] {
   try {

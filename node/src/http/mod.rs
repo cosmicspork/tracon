@@ -210,7 +210,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/memories/{id}",
-            axum::routing::delete(api::delete_memory),
+            axum::routing::delete(api::delete_memory).patch(api::edit_memory),
         )
         .route("/api/credentials", get(api::list_credentials))
         .route("/api/credentials/{name}/share", post(api::share_credential))

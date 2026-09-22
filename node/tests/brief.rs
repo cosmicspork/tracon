@@ -231,6 +231,7 @@ async fn each_line_says_who_is_behind_it_and_what_it_rests_on() {
         None,
         false,
         None,
+        None,
     )
     .unwrap();
 

@@ -74,7 +74,7 @@ pub fn batch_now(store: &Store, bus: &Bus, site: &str, min_age_ms: i64) -> Vec<S
         for item in &plan.items {
             let row = {
                 let conn = store.conn();
-                batch::memory_row_with_state(&conn, &item.memory_id, "proposed", now_ms())
+                batch::memory_row_with_state(&conn, &item.memory_id, "proposed", None, now_ms())
             };
             if let Ok(Some(row)) = row {
                 let _ = corpus::write(
@@ -114,10 +114,11 @@ pub fn decide(
         return Ok(false);
     };
     let channel = row["channel"].as_str().unwrap_or("").to_string();
-    for (id, state) in memories {
+    for (id, state, body_override) in memories {
         let mrow = {
             let conn = store.conn();
-            batch::memory_row_with_state(&conn, &id, state, now_ms()).map_err(|e| e.to_string())?
+            batch::memory_row_with_state(&conn, &id, state, body_override.as_deref(), now_ms())
+                .map_err(|e| e.to_string())?
         };
         if let Some(mrow) = mrow {
             corpus::write(

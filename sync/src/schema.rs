@@ -202,6 +202,13 @@ const STEPS: &[&str] = &[
     r#"
     ALTER TABLE work_item ADD COLUMN brief_slug TEXT;
     "#,
+    // Step 6: a pinned document is included in every session's orientation,
+    // in full, with no budget cap. Operator-set only. A peer that predates
+    // the column leaves the field out of its rows, so a row from one keeps
+    // whatever flag this replica already holds rather than clearing it.
+    r#"
+    ALTER TABLE document ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 /// Install or upgrade the replicated schema. Safe to call on every open.

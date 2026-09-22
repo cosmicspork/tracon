@@ -775,6 +775,7 @@ pub fn write_for_item(
         current.as_ref().and(if_hash.as_deref()),
         false,
         None,
+        None,
     )
     .map_err(write_err)?;
     if item.brief_slug.as_deref() != Some(slug.as_str()) {

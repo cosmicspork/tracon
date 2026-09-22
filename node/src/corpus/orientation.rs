@@ -7,21 +7,23 @@
 //! account of the installation: the node, the session's work and phase, the
 //! tool names, what the node enforces. It is followed by two sections that are
 //! not tracon's — "Operator notes", the standing text the operator set for
-//! this channel, and "Channel guides", documents of kind `guide` from the
-//! channel's corpus. A session that cannot tell one from the other cannot
-//! weigh either: it reads a human's preference as a property of the system, or
-//! a system fact as advice it may trade away. So each of those two carries a
-//! heading and a sentence saying where it came from, and nothing personal is
-//! ever compiled into this file.
+//! this channel, and "Pinned documents", the documents the operator has chosen
+//! to have every session start with, in full. A session that cannot tell one
+//! from the other cannot weigh either: it reads a human's preference as a
+//! property of the system, or a system fact as advice it may trade away. So
+//! each of those two carries a heading and a sentence saying where it came
+//! from, and nothing personal is ever compiled into this file.
 //!
 //! **What the cap may take.** *Reserved* is what this session is for and what
 //! bounds it: the node, the work item and its phase, the brief it points at,
 //! the plan or the diff under review, the agreements, the operator's
-//! directives, notes and customization. It is assembled first and is never
-//! dropped to make room for anything below it. *Discretionary* is everything
-//! the node offers because it might help: the channel's guides and the other
-//! ready work on the project. It gets what is left of the cap: guides shortest
-//! first, then ready work in ledger order.
+//! directives, notes, customization, and any document the operator has
+//! pinned to the channel. It is assembled first and is never dropped to make
+//! room for anything below it — a pinned document goes in whole or not at
+//! all, never truncated; the operator's own curation is the limit, not a
+//! byte cap. *Discretionary* is everything else the node offers because it
+//! might help: the other ready work on the project, in ledger order, with
+//! whatever the reserved tier left of the cap.
 //!
 //! The cap exists because oversized context degrades the session it was meant
 //! to help. It used to be enforced by truncating the assembled text, which cut
@@ -45,8 +47,6 @@ use crate::{
 /// discretionary tier; see the module note on why it no longer truncates the
 /// whole text.
 pub const CAP_CHARS: usize = 24_000;
-/// A single guide document may take at most this much of what is left.
-const GUIDE_CHARS: usize = 8_000;
 /// A diff longer than this is cut; the reviewer has the worktree and git.
 const DIFF_CHARS: usize = 12_000;
 /// Each reserved piece is bounded too, so that nothing inside the reserved
@@ -178,11 +178,12 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, Vec<M
     push_known(&mut out, store, facts, &mut missing);
     push_customization(&mut out, facts, &mut missing);
     push_operator_notes(&mut out, facts, &mut missing);
+    push_pinned_documents(&mut out, store, facts);
 
-    // Discretionary. Whatever the reserved tier left under the cap, minus the
-    // room held back to name what does not fit.
+    // Discretionary. Whatever the reserved tier — including every pinned
+    // document, in full — left under the cap, minus the room held back to
+    // name what does not fit.
     let left = CAP_CHARS.saturating_sub(out.len() + NOTICE_CHARS);
-    let left = push_conventions(&mut out, store, facts, left, &mut missing);
     push_ready(&mut out, facts, left, &mut missing);
 
     push_notice(&mut out, &missing);
@@ -446,9 +447,11 @@ fn push_customization(out: &mut String, facts: &Facts, missing: &mut Vec<Missing
 }
 
 /// The operator's standing notes for this channel: their own words, under
-/// their own heading, last in the reserved tier so that the section boundary
-/// between what tracon says and what a human says is visible rather than
-/// inferred.
+/// their own heading, the first of the reserved tier's human-authored
+/// sections so the boundary between what tracon says and what a human says
+/// is visible rather than inferred. The channel's pinned documents — other
+/// documents the operator chose to include, not necessarily their own words
+/// — follow it.
 ///
 /// Reserved, and with an allowance of its own. These are the operator
 /// speaking to every session on the channel — the same standing that a
@@ -470,77 +473,40 @@ fn push_operator_notes(out: &mut String, facts: &Facts, missing: &mut Vec<Missin
     out.push_str("\n\n");
 }
 
-/// The heading the channel's guides open under, and the sentence saying whose
-/// they are. Not "Conventions": a guide is a document somebody on this channel
-/// wrote, and calling it a convention invites the session to read it as
-/// tracon's rule. It is also the discretionary tier — a channel-wide guide is
-/// what the node has, not context selected for this task — and saying so is
-/// what lets a session weigh it against the work it was actually given.
-const GUIDES_HEADING: &str = "## Channel guides\n\nDocuments of kind `guide` in this channel's \
-                              corpus, written by whoever uses this channel. They are not \
-                              tracon's and they are not selected for this task: the node \
-                              includes them because they may help, shortest first, as far as \
-                              this session's context budget allows. Where one contradicts the \
+/// The heading the channel's pinned documents open under, and the sentence
+/// saying whose they are. Not "Conventions": a pinned document is one the
+/// operator chose, not one tracon selected, and calling it a convention
+/// invites the session to read it as tracon's rule. It carries no budget
+/// sentence, unlike every other section here that names one: there is none.
+const PINNED_HEADING: &str = "## Pinned documents\n\nDocuments the operator has pinned to this \
+                              channel's orientation. They are not tracon's and they are not \
+                              selected for this task by the session: the operator chose to have \
+                              every session start with them, in full. Where one contradicts the \
                               work item, the plan or the operator's notes, those win.\n\n";
 
-/// The channel's guides, shortest first so a long one cannot crowd out the
-/// rest, and only as far as the cap allows. What does not fit is named.
-fn push_conventions(
-    out: &mut String,
-    store: &Store,
-    facts: &Facts,
-    mut left: usize,
-    missing: &mut Vec<Missing>,
-) -> usize {
-    let mut guides: Vec<_> = store
+/// The channel's pinned documents, alphabetically by title, each in full.
+/// Reserved, not discretionary, and uncapped: an archived document is never
+/// included even if its pinned flag is still set from before it was
+/// archived, and an HTML document is never included — this is markdown text
+/// compiled into a session's orientation, not a bundle a session can render.
+fn push_pinned_documents(out: &mut String, store: &Store, facts: &Facts) {
+    let mut docs: Vec<_> = store
         .doc_list(Some(facts.channel))
         .unwrap_or_default()
         .into_iter()
-        .filter(|d| d.kind == "guide" && d.format == "markdown")
+        .filter(|d| d.pinned != 0 && d.format == "markdown" && d.archived == 0)
         .filter_map(|d| store.doc_by_id(&d.id).ok().flatten())
         .collect();
-    if guides.is_empty() {
-        return left;
+    if docs.is_empty() {
+        return;
     }
-    guides.sort_by_key(|d| d.body.len());
-    let mut opened = false;
-    for g in guides {
-        let body = g.body.trim();
-        let what = format!("guide \"{}\" (`{}`)", g.title, g.slug);
-        let fetch = format!("call `doc_read` for `{}`", g.slug);
-        let heading = format!("### {} (`{}`)\n\n", g.title, g.slug);
-        let header = if opened { 0 } else { GUIDES_HEADING.len() };
-        // Room for the heading and a usable amount of the document. Below
-        // that there is nothing to say that naming it does not say better.
-        let room = left.saturating_sub(header + heading.len() + 200);
-        if room == 0 {
-            missing.push(Missing {
-                what,
-                partial: false,
-                chars: body.len(),
-                fetch: Some(fetch),
-            });
-            continue;
-        }
-        if !opened {
-            out.push_str(GUIDES_HEADING);
-            left -= header;
-            opened = true;
-        }
-        out.push_str(&heading);
-        let before = out.len();
-        push_capped(
-            out,
-            body,
-            room.min(GUIDE_CHARS),
-            &what,
-            Some(&fetch),
-            missing,
-        );
+    docs.sort_by(|a, b| a.title.cmp(&b.title));
+    out.push_str(PINNED_HEADING);
+    for d in docs {
+        out.push_str(&format!("### {} (`{}`)\n\n", d.title, d.slug));
+        out.push_str(d.body.trim());
         out.push_str("\n\n");
-        left = left.saturating_sub(out.len() - before + heading.len());
     }
-    left
 }
 
 /// Background: what else is ready on this project, for `work_discover` deps.
@@ -627,7 +593,8 @@ mod tests {
         store
             .write_change("n", "personal", "document", ChangeOp::Upsert, "g", json!({
                 "channel": "personal", "slug": "guide-commits", "kind": "guide", "title": "Commits",
-                "body": "# Commits\n\nConventional commits.", "hash": "h", "created_ms": 1, "updated_ms": 1}))
+                "body": "# Commits\n\nConventional commits.", "pinned": true,
+                "hash": "h", "created_ms": 1, "updated_ms": 1}))
             .unwrap();
         store
             .write_change(
@@ -638,7 +605,7 @@ mod tests {
                 "r",
                 json!({
                 "channel": "personal", "slug": "ref-x", "kind": "ref", "title": "X",
-                "body": "not a guide", "hash": "h", "created_ms": 1, "updated_ms": 1}),
+                "body": "not pinned", "hash": "h", "created_ms": 1, "updated_ms": 1}),
             )
             .unwrap();
         store
@@ -651,7 +618,7 @@ mod tests {
                 json!({
                 "channel": "personal", "slug": "guide-html", "kind": "guide", "title": "HTML",
                 "body": "<p>HTML must not become orientation</p>", "hash": "html", "format": "html",
-                "entry_path": "index.html", "source_name": "index.html",
+                "entry_path": "index.html", "source_name": "index.html", "pinned": true,
                 "created_ms": 1, "updated_ms": 1}),
             )
             .unwrap();
@@ -685,17 +652,17 @@ mod tests {
             text.find(s)
                 .unwrap_or_else(|| panic!("missing {s:?} in:\n{text}"))
         };
-        assert!(i("## Channel guides") < i("Conventional commits"));
-        assert!(!text.contains("not a guide"));
+        assert!(i("## Pinned documents") < i("Conventional commits"));
+        assert!(!text.contains("not pinned"));
         assert!(!text.contains("HTML must not become orientation"));
         assert!(i("## This node") < i("## Working agreements"));
-        // The guides are discretionary, so they come after the agreements
-        // and the operator's directives, not before them.
-        assert!(i("## Known") < i("## Channel guides"));
+        // Pinned documents are reserved, but they come after the agreements
+        // and the operator's directives in the reserved tier, not before them.
+        assert!(i("## Known") < i("## Pinned documents"));
         assert!(i("no-merge") < i("## Known"));
-        // And the session is told whose the guides are, rather than being
-        // left to read a channel document as a rule of the system.
-        assert!(i("## Channel guides") < i("They are not tracon's"));
+        // And the session is told whose the pinned documents are, rather than
+        // being left to read a channel document as a rule of the system.
+        assert!(i("## Pinned documents") < i("They are not tracon's"));
         assert!(text.contains("(directive) run just test"));
         assert!(text.contains("`recall`, `retain`"));
         assert!(text.contains("Project `tracon`"));
@@ -721,7 +688,7 @@ mod tests {
         }
     }
 
-    fn guides(store: &Store, n: usize, chars: usize) {
+    fn pinned_docs(store: &Store, n: usize, chars: usize) {
         for i in 0..n {
             store
                 .write_change(
@@ -732,189 +699,21 @@ mod tests {
                     &format!("g{i}"),
                     json!({
                     "channel": "personal", "slug": format!("guide-{i}"), "kind": "guide",
-                    "title": format!("Guide {i}"), "body": "y".repeat(chars),
+                    "title": format!("Guide {i}"), "body": "y".repeat(chars), "pinned": true,
                     "hash": format!("h{i}"), "created_ms": 1, "updated_ms": 1}),
                 )
                 .unwrap();
         }
     }
 
-    /// The defect this reserved tier exists for. Four guides, each twice the
-    /// per-guide cap, used to fill the whole orientation and push the task,
-    /// the plan, the agreements and the operator's directives off the end —
-    /// leaving the session a wall of conventions and a bare "trimmed" flag.
-    #[test]
-    fn long_guides_never_crowd_out_the_task_its_constraints_or_the_directives() {
-        let store = Store::open_in_memory().unwrap();
-        guides(&store, 4, GUIDE_CHARS * 2);
-        for (i, body) in ["never touch the production database", "deploy on Thursdays"]
-            .iter()
-            .enumerate()
-        {
-            store
-                .write_change("n", "personal", "memory", ChangeOp::Upsert, &format!("m{i}"), json!({
-                    "channel": "personal", "scope": "global", "scope_ref": null, "kind": "directive",
-                    "body": body, "source_session": null, "source_node": null, "confidence": 1.0,
-                    "state": "active", "created_ms": 1, "updated_ms": 1}))
-                .unwrap();
-        }
-        let item = item("Fix the billing rounding error", "Round half to even.");
-        let facts = Facts {
-            node_name: "laptop",
-            node_id: "0123456789abcdef",
-            backend: "podman",
-            harness: "opencode",
-            harness_version: "18.0.4",
-            channel: "personal",
-            project_id: None,
-            project_name: None,
-            tools: &["recall".into()],
-            worktree: "/work",
-            phase: "execute",
-            item: Some(&item),
-            plan_body: Some("Essential constraint: do not change the public API."),
-            ready: &[],
-            review: None,
-            manifest: &crate::manifest::LaunchManifest::default(),
-        };
-        let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
-
-        // The task, the plan's constraint, the node's agreements and both
-        // operator directives all survive four guides that together are five
-        // times the cap.
-        assert!(text.contains("Fix the billing rounding error"), "{text}");
-        assert!(text.contains("Round half to even."));
-        assert!(text.contains("do not change the public API"));
-        assert!(text.contains("## Working agreements"));
-        assert!(text.contains("no-merge"));
-        assert!(text.contains("(directive) never touch the production database"));
-        assert!(text.contains("(directive) deploy on Thursdays"));
-        assert!(text.contains("Your worktree is `/work`"));
-
-        // And the omission is named, guide by guide, not flagged.
-        assert!(text.contains("## Not in this orientation"));
-        assert!(missing.len() >= 3, "{missing:?}");
-        for m in &missing {
-            assert!(m.what.contains("guide-"), "{m:?}");
-            assert!(m.chars > 0, "{m:?}");
-            assert!(m.fetch.as_deref().unwrap().contains("doc_read"), "{m:?}");
-            // A generic flag is not sufficient: the slug has to be in the
-            // text the session actually reads, not only in the event.
-            assert!(text.contains(&m.what), "{} not named in:\n{text}", m.what);
-        }
-        // Whole guides that never fit are named as absent, not as cut short.
-        assert!(missing.iter().any(|m| !m.partial), "{missing:?}");
-    }
-
-    /// The cap binds the guides, not the work. An execute session with a
-    /// large item and a large plan keeps both, and simply gets fewer guides.
-    #[test]
-    fn the_cap_is_spent_on_the_work_before_the_conventions() {
-        let store = Store::open_in_memory().unwrap();
-        guides(&store, 6, 3_000);
-        let item = item("Carry the invoice rewrite", &"w".repeat(BODY_CHARS));
-        let plan = "p".repeat(BODY_CHARS);
-        let facts = Facts {
-            node_name: "n",
-            node_id: "id",
-            backend: "local",
-            harness: "fake",
-            harness_version: "1",
-            channel: "personal",
-            project_id: None,
-            project_name: None,
-            tools: &[],
-            worktree: "/work",
-            phase: "execute",
-            item: Some(&item),
-            plan_body: Some(&plan),
-            ready: &[],
-            review: None,
-            manifest: &crate::manifest::LaunchManifest::default(),
-        };
-        let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
-        assert!(text.contains(&"w".repeat(BODY_CHARS)), "item body was cut");
-        assert!(text.contains(&"p".repeat(BODY_CHARS)), "plan was cut");
-        assert!(!missing.is_empty(), "the squeezed guides should be named");
-        // Some guides still fit; the cap took it out of the guides.
-        assert!(text.contains("## Channel guides"));
-        assert!(missing.len() < 6, "{missing:?}");
-    }
-
-    /// A review session keeps the diff and the requirements it is there to
-    /// judge, whatever the channel's guides weigh.
-    #[test]
-    fn a_review_session_keeps_its_diff_over_the_conventions() {
-        let store = Store::open_in_memory().unwrap();
-        guides(&store, 3, GUIDE_CHARS);
-        let review = ReviewRow {
-            id: "r1".into(),
-            session_id: "s1".into(),
-            node_id: "n".into(),
-            channel: "personal".into(),
-            kind: "code".into(),
-            title: "Rewrite the invoice totals".into(),
-            body: "Totals must round half to even.".into(),
-            edited_title: None,
-            edited_body: None,
-            provider: "github".into(),
-            target: "t".into(),
-            diff: format!("--- a/x\n+++ b/x\n{}", "+line\n".repeat(400)),
-            files: "[]".into(),
-            head_sha: "abc".into(),
-            base_ref: "main".into(),
-            added: 400,
-            removed: 0,
-            state: "new".into(),
-            verdict_reason: None,
-            publish_result: None,
-            claimed_ms: None,
-            created_ms: 1,
-            created_mono_ms: 1,
-            resolved_mono_ms: None,
-            updated_ms: 1,
-            checks_json: None,
-            review_session_id: None,
-            ai_verdict_json: None,
-            revision_patch: None,
-        };
-        let facts = Facts {
-            node_name: "n",
-            node_id: "id",
-            backend: "local",
-            harness: "fake",
-            harness_version: "1",
-            channel: "personal",
-            project_id: None,
-            project_name: None,
-            tools: &[],
-            worktree: "/work",
-            phase: "review",
-            item: None,
-            plan_body: None,
-            ready: &[],
-            review: Some(&review),
-            manifest: &crate::manifest::LaunchManifest::default(),
-        };
-        let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
-        assert!(text.contains("Totals must round half to even."));
-        assert!(text.contains("Rewrite the invoice totals"));
-        assert!(text.contains("```diff"));
-        assert!(text.matches("+line").count() > 300, "the diff was starved");
-        // The diff gets its full allowance first; the guides get the rest,
-        // and are named when there is not enough of it to go round.
-        assert!(text.find("## Review").unwrap() < text.find("## Channel guides").unwrap());
-        assert!(!missing.is_empty(), "the squeezed guides should be named");
-    }
-
     /// The operator's launch manifest is their standing text for every
     /// session on the channel, so it is reserved beside the directives — and
     /// it is their *own* section, distinct both from what the node installed
-    /// and from what tracon says about itself.
+    /// and from what the channel's pinned documents are.
     #[test]
-    fn the_operators_notes_are_their_own_section_and_outrank_the_channels_guides() {
+    fn the_operators_notes_are_their_own_section_and_come_before_pinned_documents() {
         let store = Store::open_in_memory().unwrap();
-        guides(&store, 4, GUIDE_CHARS * 2);
+        pinned_docs(&store, 2, 200);
         let manifest = crate::manifest::LaunchManifest {
             revision: 3,
             digest: "deadbeefcafe".into(),
@@ -955,50 +754,20 @@ mod tests {
             text.contains("Always write the test before the fix."),
             "{text}"
         );
-        assert!(!missing.is_empty());
+        assert!(missing.is_empty(), "{missing:?}");
 
         // The operator's words are under their own heading, and the session is
         // told they are not the node's.
         assert!(i("## Operator notes") < i("Always write the test before the fix."));
         assert!(text.contains("not tracon's"), "{text}");
         // What the node installed is a separate section from what the
-        // operator wrote, and both outrank the channel's guides.
+        // operator wrote, and both precede the channel's pinned documents.
         assert!(i("## Customization") < i("## Operator notes"));
         assert!(i("Reads before it writes.") < i("## Operator notes"));
-        assert!(i("## Operator notes") < i("## Channel guides"));
+        assert!(i("## Operator notes") < i("## Pinned documents"));
         // The system orientation comes first and says so.
         assert!(i("## This node") < i("## Operator notes"));
         assert!(i("is tracon's own") < i("## This node"));
-    }
-
-    #[test]
-    fn every_omission_is_named_even_when_the_notice_is_long() {
-        let store = Store::open_in_memory().unwrap();
-        guides(&store, 40, GUIDE_CHARS * 2);
-        let facts = Facts {
-            node_name: "n",
-            node_id: "id",
-            backend: "local",
-            harness: "fake",
-            harness_version: "1",
-            channel: "personal",
-            project_id: None,
-            project_name: None,
-            tools: &[],
-            worktree: "/work",
-            phase: "execute",
-            item: None,
-            plan_body: None,
-            ready: &[],
-            review: None,
-            manifest: &crate::manifest::LaunchManifest::default(),
-        };
-        let (text, missing) = assemble(&store, &Policy::default(), &facts);
-        assert!(missing.len() > 20, "{missing:?}");
-        for m in &missing {
-            assert!(text.contains(&m.what), "{} not named in:\n{text}", m.what);
-        }
-        assert!(!text.contains("- and "), "{text}");
     }
 
     #[test]
@@ -1081,10 +850,13 @@ mod tests {
         );
     }
 
+    /// An archived document is never included even if its pinned flag is
+    /// still set from before it was archived — retiring a document retires
+    /// it from orientation too, without the operator having to remember to
+    /// unpin it first.
     #[test]
-    fn a_long_guide_is_trimmed_not_dropped() {
+    fn a_pinned_but_archived_document_is_excluded() {
         let store = Store::open_in_memory().unwrap();
-        let long = "x".repeat(GUIDE_CHARS * 2);
         store
             .write_change(
                 "n",
@@ -1093,8 +865,9 @@ mod tests {
                 ChangeOp::Upsert,
                 "g",
                 json!({
-                "channel": "personal", "slug": "guide-long", "kind": "guide", "title": "Long",
-                "body": long, "hash": "h", "created_ms": 1, "updated_ms": 1}),
+                "channel": "personal", "slug": "guide-retired", "kind": "guide", "title": "Retired",
+                "body": "# Retired\n\nold guidance", "pinned": true, "archived": true,
+                "hash": "h", "created_ms": 1, "updated_ms": 1}),
             )
             .unwrap();
         let facts = Facts {
@@ -1116,12 +889,150 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
-        assert_eq!(missing.len(), 1, "{missing:?}");
-        assert!(missing[0].partial);
-        assert!(missing[0].what.contains("guide-long"), "{missing:?}");
-        assert!(text.contains("[cut here"));
-        assert!(text.contains("call `doc_read` for `guide-long`"));
-        assert!(text.len() < CAP_CHARS);
+        assert!(!text.contains("old guidance"), "{text}");
+        assert!(!text.contains("## Pinned documents"), "{text}");
+        assert!(missing.is_empty(), "{missing:?}");
+    }
+
+    /// The operator's own curation is the limit on a pinned document, not a
+    /// byte cap: one many times the size of the whole orientation cap still
+    /// goes in whole, uncut and unnamed as missing.
+    #[test]
+    fn a_very_large_pinned_document_appears_in_full_regardless_of_the_cap() {
+        let store = Store::open_in_memory().unwrap();
+        let long = "y".repeat(CAP_CHARS * 3);
+        store
+            .write_change(
+                "n",
+                "personal",
+                "document",
+                ChangeOp::Upsert,
+                "g",
+                json!({
+                "channel": "personal", "slug": "guide-long", "kind": "guide", "title": "Long",
+                "body": long, "pinned": true,
+                "hash": "h", "created_ms": 1, "updated_ms": 1}),
+            )
+            .unwrap();
+        let facts = Facts {
+            node_name: "n",
+            node_id: "id",
+            backend: "local",
+            harness: "fake",
+            harness_version: "1",
+            channel: "personal",
+            project_id: None,
+            project_name: None,
+            tools: &[],
+            worktree: "/work",
+            phase: "execute",
+            item: None,
+            plan_body: None,
+            ready: &[],
+            review: None,
+            manifest: &crate::manifest::LaunchManifest::default(),
+        };
+        let (text, missing) = assemble(&store, &Policy::default(), &facts);
+        assert!(text.len() > CAP_CHARS * 3, "the pinned document was cut short");
+        assert!(!text.contains("[cut here"), "{text}");
+        assert!(
+            missing.iter().all(|m| !m.what.contains("guide-long")),
+            "{missing:?}"
+        );
+    }
+
+    /// A pinned document only takes effect when it is markdown: an HTML
+    /// bundle is a document, but not text a session's orientation can carry.
+    #[test]
+    fn a_pinned_html_document_is_excluded() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .write_change(
+                "n",
+                "personal",
+                "document",
+                ChangeOp::Upsert,
+                "g",
+                json!({
+                "channel": "personal", "slug": "guide-html", "kind": "guide", "title": "HTML",
+                "body": "<p>should not appear</p>", "pinned": true, "format": "html",
+                "entry_path": "index.html", "source_name": "index.html",
+                "hash": "h", "created_ms": 1, "updated_ms": 1}),
+            )
+            .unwrap();
+        let facts = Facts {
+            node_name: "n",
+            node_id: "id",
+            backend: "local",
+            harness: "fake",
+            harness_version: "1",
+            channel: "personal",
+            project_id: None,
+            project_name: None,
+            tools: &[],
+            worktree: "/work",
+            phase: "execute",
+            item: None,
+            plan_body: None,
+            ready: &[],
+            review: None,
+            manifest: &crate::manifest::LaunchManifest::default(),
+        };
+        let (text, _) = assemble(&store, &Policy::default(), &facts);
+        assert!(!text.contains("should not appear"), "{text}");
+        assert!(!text.contains("## Pinned documents"), "{text}");
+    }
+
+    /// Pinned documents are reserved: they are never capped or squeezed out
+    /// by the discretionary tier, and their own size comes out of what is
+    /// left for it, exactly as any other reserved content would.
+    #[test]
+    fn pinned_documents_are_never_capped_even_when_ready_work_is_squeezed() {
+        let store = Store::open_in_memory().unwrap();
+        pinned_docs(&store, 3, CAP_CHARS);
+        let current = item("Current item", "");
+        let ready_title = "r".repeat(500);
+        let ready = [WorkView {
+            item: WorkItem {
+                id: "ready001deadbeef".into(),
+                title: ready_title.clone(),
+                ..item("", "")
+            },
+            readiness: Readiness::Ready,
+            session_id: None,
+        }];
+        let facts = Facts {
+            node_name: "n",
+            node_id: "id",
+            backend: "local",
+            harness: "fake",
+            harness_version: "1",
+            channel: "personal",
+            project_id: None,
+            project_name: None,
+            tools: &[],
+            worktree: "/work",
+            phase: "execute",
+            item: Some(&current),
+            plan_body: None,
+            ready: &ready,
+            review: None,
+            manifest: &crate::manifest::LaunchManifest::default(),
+        };
+        let (text, missing) = assemble(&store, &Policy::default(), &facts);
+        // All three pinned documents survive in full: none was capped,
+        // trimmed, or named as missing.
+        for i in 0..3 {
+            assert!(text.contains(&format!("Guide {i}")), "{text}");
+        }
+        assert!(!text.contains("[cut here"), "{text}");
+        assert!(missing.iter().all(|m| !m.what.contains("Guide")), "{missing:?}");
+        // Ready work, genuinely discretionary, is what gets squeezed instead.
+        assert!(!text.contains(&ready_title), "ready work should have been squeezed: too long");
+        assert!(
+            missing.iter().any(|m| m.what.contains("ready work")),
+            "{missing:?}"
+        );
     }
 
     /// An item's brief is named in the reserved tier, and only when there is

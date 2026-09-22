@@ -616,6 +616,7 @@ impl Replica {
                         &conn,
                         &item.memory_id,
                         "proposed",
+                        None,
                         now_ms(),
                     )
                 };

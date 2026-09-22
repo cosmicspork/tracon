@@ -87,10 +87,13 @@ pub fn plan_promotion(
 
 /// A memory row as it should read once it is part of a batch, or decided.
 /// Reads the current row so the change carries the whole record.
+/// `body_override` replaces the row's own body when given — an edit sent
+/// alongside a promotion verdict — and is otherwise ignored.
 pub fn memory_row_with_state(
     conn: &Connection,
     memory_id: &str,
     state: &str,
+    body_override: Option<&str>,
     now_ms: i64,
 ) -> Result<Option<Value>> {
     let row: Option<Value> = conn
@@ -99,10 +102,11 @@ pub fn memory_row_with_state(
              FROM memory WHERE id = ?1 AND deleted = 0",
             [memory_id],
             |r| {
+                let body: String = r.get(4)?;
                 Ok(json!({
                     "channel": r.get::<_, String>(0)?, "scope": r.get::<_, String>(1)?,
                     "scope_ref": r.get::<_, Option<String>>(2)?, "kind": r.get::<_, String>(3)?,
-                    "body": r.get::<_, String>(4)?, "source_session": r.get::<_, Option<String>>(5)?,
+                    "body": body_override.unwrap_or(&body), "source_session": r.get::<_, Option<String>>(5)?,
                     "source_node": r.get::<_, Option<String>>(6)?, "confidence": r.get::<_, f64>(7)?,
                     "state": state, "created_ms": r.get::<_, i64>(8)?, "updated_ms": now_ms,
                 }))
@@ -112,13 +116,15 @@ pub fn memory_row_with_state(
     Ok(row)
 }
 
-/// The decided `promotion` row and each memory's new state.
-pub type VerdictPlan = (Value, Vec<(String, &'static str)>);
+/// The decided `promotion` row and each memory's new state, with the edited
+/// body a promoted item's verdict carried, if any.
+pub type VerdictPlan = (Value, Vec<(String, &'static str, Option<String>)>);
 
-/// The verdicts on a batch: `memory_id → "promote" | "reject"`. Returns the
-/// decided `promotion` row and each memory's new state, for the caller to
-/// write. An item not named keeps waiting: the batch stays open until every
-/// item is decided.
+/// The verdicts on a batch: `memory_id → "promote" | "reject"`, or
+/// `memory_id → {"verdict": "promote" | "reject", "body": "edited text"}` to
+/// carry an edit alongside the verdict. Returns the decided `promotion` row
+/// and each memory's new state, for the caller to write. An item not named
+/// keeps waiting: the batch stays open until every item is decided.
 pub fn plan_verdict(
     conn: &Connection,
     promotion_id: &str,
@@ -147,13 +153,27 @@ pub fn plan_verdict(
         if !items.iter().any(|i| &i.memory_id == id) {
             continue;
         }
-        let state = match v.as_str() {
-            Some("promote") => "promoted",
-            Some("reject") => "rejected",
+        // The legacy bare string, or the edit-carrying object form.
+        let (verdict, edited_body) = match v {
+            Value::String(s) => (s.as_str(), None),
+            Value::Object(obj) => (
+                obj.get("verdict").and_then(Value::as_str).unwrap_or(""),
+                obj.get("body").and_then(Value::as_str),
+            ),
+            _ => continue,
+        };
+        let state = match verdict {
+            "promote" => "promoted",
+            "reject" => "rejected",
             _ => continue,
         };
         all.insert(id.clone(), v.clone());
-        memories.push((id.clone(), state));
+        // A rejected item's body edit, if any was sent, is never applied.
+        let body_override = (state == "promoted")
+            .then_some(edited_body)
+            .flatten()
+            .map(str::to_string);
+        memories.push((id.clone(), state, body_override));
     }
     let complete = items.iter().all(|i| all.contains_key(&i.memory_id));
     let row = json!({
@@ -241,7 +261,7 @@ mod tests {
             5_000,
         )
         .unwrap();
-        let row = memory_row_with_state(&c, "m-old", "proposed", 5_000)
+        let row = memory_row_with_state(&c, "m-old", "proposed", None, 5_000)
             .unwrap()
             .unwrap();
         write_change(
@@ -262,7 +282,7 @@ mod tests {
         let (prow, mems) = plan_verdict(&c, "p1", &v, "n", 6_000).unwrap().unwrap();
         assert_eq!(prow["state"], "decided");
         assert_eq!(prow["decided_by"], "n");
-        assert_eq!(mems, vec![("m-old".to_string(), "promoted")]);
+        assert_eq!(mems, vec![("m-old".to_string(), "promoted", None)]);
         write_change(
             &mut c,
             "n",
@@ -278,5 +298,112 @@ mod tests {
             plan_verdict(&c, "p1", &v, "n", 6_001).unwrap().is_none(),
             "decided batches are closed"
         );
+    }
+
+    /// The legacy bare-string verdict keeps working unchanged.
+    #[test]
+    fn a_bare_string_verdict_still_works() {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::schema::install(&c).unwrap();
+        write_change(
+            &mut c,
+            "n",
+            "personal",
+            "memory",
+            ChangeOp::Upsert,
+            "m1",
+            mem("proposed", 1_000),
+            5_000,
+        )
+        .unwrap();
+        write_change(
+            &mut c,
+            "n",
+            "personal",
+            "promotion",
+            ChangeOp::Upsert,
+            "p1",
+            json!({
+                "channel": "personal",
+                "items_json": serde_json::to_string(&[Item {
+                    memory_id: "m1".into(), kind: "lesson".into(), scope: "global".into(),
+                    scope_ref: None, body: "b".into(), confidence: 0.8, source_session: None,
+                    source_node: None, created_ms: 1_000,
+                }]).unwrap(),
+                "state": "open", "verdicts_json": Value::Null, "decided_by": Value::Null,
+                "decided_ms": Value::Null, "created_ms": 1_000,
+            }),
+            5_000,
+        )
+        .unwrap();
+        let mut v = serde_json::Map::new();
+        v.insert("m1".into(), json!("promote"));
+        let (prow, mems) = plan_verdict(&c, "p1", &v, "n", 6_000).unwrap().unwrap();
+        assert_eq!(prow["state"], "decided");
+        assert_eq!(mems, vec![("m1".to_string(), "promoted", None)]);
+    }
+
+    /// An object verdict with an edited body carries it through as the
+    /// promoted item's body override; a rejected item's body edit is
+    /// dropped, never applied.
+    #[test]
+    fn an_object_verdict_carries_an_edited_body_only_when_promoted() {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::schema::install(&c).unwrap();
+        for id in ["m1", "m2"] {
+            write_change(
+                &mut c,
+                "n",
+                "personal",
+                "memory",
+                ChangeOp::Upsert,
+                id,
+                mem("proposed", 1_000),
+                5_000,
+            )
+            .unwrap();
+        }
+        write_change(
+            &mut c,
+            "n",
+            "personal",
+            "promotion",
+            ChangeOp::Upsert,
+            "p1",
+            json!({
+                "channel": "personal",
+                "items_json": serde_json::to_string(&[
+                    Item { memory_id: "m1".into(), kind: "lesson".into(), scope: "global".into(),
+                        scope_ref: None, body: "b".into(), confidence: 0.8, source_session: None,
+                        source_node: None, created_ms: 1_000 },
+                    Item { memory_id: "m2".into(), kind: "lesson".into(), scope: "global".into(),
+                        scope_ref: None, body: "b".into(), confidence: 0.8, source_session: None,
+                        source_node: None, created_ms: 1_000 },
+                ]).unwrap(),
+                "state": "open", "verdicts_json": Value::Null, "decided_by": Value::Null,
+                "decided_ms": Value::Null, "created_ms": 1_000,
+            }),
+            5_000,
+        )
+        .unwrap();
+        let mut v = serde_json::Map::new();
+        v.insert("m1".into(), json!({"verdict": "promote", "body": "edited text"}));
+        v.insert("m2".into(), json!({"verdict": "reject", "body": "should be ignored"}));
+        let (_, mems) = plan_verdict(&c, "p1", &v, "n", 6_000).unwrap().unwrap();
+        assert_eq!(
+            mems,
+            vec![
+                ("m1".to_string(), "promoted", Some("edited text".to_string())),
+                ("m2".to_string(), "rejected", None),
+            ]
+        );
+        let row = memory_row_with_state(&c, "m1", "promoted", Some("edited text"), 6_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row["body"], "edited text");
+        let row = memory_row_with_state(&c, "m2", "rejected", None, 6_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row["body"], "b", "a rejected item's body is never edited");
     }
 }
