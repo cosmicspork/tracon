@@ -14,6 +14,8 @@ use support::state;
 use tracon::adapter::{
     claude::ClaudeAdapter, AdapterError, HarnessAdapter, HarnessEvent, LaunchSpec, PermissionReply,
 };
+use tracon::config::{Config, ModelDecl, Provider, SHAPE_ANTHROPIC};
+use tracon::gateway::model::harness_wiring;
 use tracon::runner::{local::LocalRunner, Runner, RunnerCommand};
 
 struct FakeRunner;
@@ -315,4 +317,52 @@ async fn a_compatible_handshake_reports_what_it_ran() {
     assert_eq!(compat.agent, "claude");
     assert_eq!(compat.version, "2.1.247");
     assert_eq!(compat.protocol, "claude-stream-json/1");
+}
+
+/// A `probe_models` no longer ignores its wiring: an anthropic-shaped
+/// provider's declared models come back as-is, bare ids rather than
+/// `provider/id` — Claude Code's `--model` forwards `spec.model` verbatim, so
+/// there is no addressing prefix to add.
+#[tokio::test]
+async fn probe_models_reflects_declared_anthropic_models() {
+    state::isolate();
+    let mut cfg = Config::default();
+    cfg.providers.clear();
+    cfg.providers.insert(
+        "anthropic".into(),
+        Provider {
+            credential: "anthropic".into(),
+            upstream: "https://api.anthropic.com".into(),
+            shape: SHAPE_ANTHROPIC.into(),
+            models: vec![ModelDecl {
+                id: "claude-x".into(),
+                name: "Claude X".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    let wiring = harness_wiring(&cfg, "gw", "tok", |_, _| true);
+
+    let a = ClaudeAdapter::new("2.1.247");
+    let models = a.probe_models(&FakeRunner, &wiring).await.unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].value, "claude-x");
+    assert_eq!(models[0].name, "Claude X");
+}
+
+/// No anthropic-shaped provider with declared models: the fixed alias list
+/// comes back unchanged, exactly as it did before this adapter read its
+/// wiring at all.
+#[tokio::test]
+async fn probe_models_falls_back_to_aliases_when_none_declared() {
+    state::isolate();
+    let empty = tracon::gateway::model::Wiring::default();
+    let a = ClaudeAdapter::new("2.1.247");
+    let models = a.probe_models(&FakeRunner, &empty).await.unwrap();
+    assert_eq!(
+        models.iter().map(|m| m.value.as_str()).collect::<Vec<_>>(),
+        ["opus", "sonnet", "haiku"]
+    );
+    assert!(models.iter().all(|m| m.value == m.name));
 }

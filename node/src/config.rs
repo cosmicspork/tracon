@@ -1705,12 +1705,41 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
     .collect()
 }
 
-/// The models a built-in provider declares when the operator names none: the
-/// current generation, so a fresh node has a catalogue the moment a provider
-/// is connected. A declaring harness (OpenCode) serves exactly this list and
-/// the gateway lends the credential for exactly these ids; a probing harness
-/// ignores it. The limits are what the harness is told, not what is enforced.
+/// The models a provider declares when the operator names none, so a fresh
+/// node — or a provider the operator just added — has a catalogue the moment
+/// it is connected. A declaring harness (OpenCode) serves exactly this list
+/// and the gateway lends the credential for exactly these ids; a probing
+/// harness ignores it. The limits are what the harness is told, not what is
+/// enforced.
+///
+/// Three tiers, tried in order:
+///
+/// 1. An exact match on the cached OpenCode model catalogue's provider key
+///    (`models_catalogue::provider_models`). Generic on the provider name —
+///    a custom provider like `openrouter` gets real defaults the moment the
+///    catalogue knows that key, not only the three built-ins below.
+/// 2. The hardcoded list below for `anthropic`/`openai`/`openai-codex`, kept
+///    as the safety net for a locked-down node whose `allow_hosts` refuses
+///    the catalogue host, or one that has not fetched yet.
+/// 3. An empty list.
 pub fn default_models(provider: &str) -> Vec<ModelDecl> {
+    default_models_tiered(provider, crate::models_catalogue::provider_models(provider))
+}
+
+/// The tiered lookup itself, taking the catalogue hit (or its absence) as a
+/// parameter so it is testable without touching the process-wide catalogue
+/// cache `models_catalogue` holds.
+fn default_models_tiered(provider: &str, catalogue_hit: Option<Vec<ModelDecl>>) -> Vec<ModelDecl> {
+    if let Some(models) = catalogue_hit {
+        return models;
+    }
+    hardcoded_default_models(provider)
+}
+
+/// Tier 2: the fixed list this node falls back to when the catalogue has no
+/// entry for `provider` — either because it names none of these three, or
+/// because the catalogue itself is unavailable.
+fn hardcoded_default_models(provider: &str) -> Vec<ModelDecl> {
     let model = |id: &str, name: &str, context: u64, output: u64, attachment: bool| ModelDecl {
         id: id.into(),
         name: name.into(),
@@ -2286,6 +2315,46 @@ models = [{ id = "gpt-6" }]
             default_models("anthropic")
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Tier 1: any provider name the catalogue knows gets its exact models,
+    /// not only the three built-ins — the pure lookup, exercised directly so
+    /// it needs no process-wide catalogue state.
+    #[test]
+    fn default_models_tier1_matches_any_catalogue_provider_key() {
+        let catalogue = vec![ModelDecl {
+            id: "some/model".into(),
+            name: "Some Model".into(),
+            context: 128_000,
+            output: 8_000,
+            reasoning: false,
+            attachment: false,
+        }];
+        assert_eq!(
+            default_models_tiered("openrouter", Some(catalogue.clone())),
+            catalogue
+        );
+    }
+
+    /// Tier 2: no catalogue hit falls back to the hardcoded three-entry
+    /// match, so a locked-down node (or one that has not fetched yet) never
+    /// regresses to zero models for a built-in provider.
+    #[test]
+    fn default_models_tier2_falls_back_to_hardcoded_entries() {
+        assert_eq!(
+            default_models_tiered("anthropic", None),
+            hardcoded_default_models("anthropic")
+        );
+        assert_eq!(default_models_tiered("anthropic", None).len(), 3);
+        assert_eq!(default_models_tiered("openai", None).len(), 2);
+        assert_eq!(default_models_tiered("openai-codex", None).len(), 2);
+    }
+
+    /// Tier 3: neither the catalogue nor the hardcoded match knows this
+    /// name, so it declares nothing rather than guessing.
+    #[test]
+    fn default_models_tier3_is_empty_for_an_unknown_provider() {
+        assert!(default_models_tiered("totally-unknown", None).is_empty());
     }
 
     #[test]

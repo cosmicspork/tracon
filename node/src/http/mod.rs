@@ -81,6 +81,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/boundary/check", post(api::recheck_boundary))
         .route("/api/boundary/setup", post(api::run_setup))
         .route("/api/config", get(api::get_config).put(api::put_config))
+        .route("/api/model-catalogue", get(api::get_model_catalogue))
         // The launch manifest: what an operator customizes a channel's
         // sessions with. Reading it is an ordinary operator read; every write
         // is loopback-only at the handler, because all three put code where a
@@ -695,6 +696,12 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         state.manager.set_providers(providers.clone());
         tokio::spawn(providers.refresh_loop());
     }
+    // The OpenCode model catalogue this node's own `default_models` tier 1
+    // draws on. The disk cache is read synchronously on first use — this
+    // spawn only starts the periodic refetch, so a node that has never
+    // reached the network yet still starts on whatever is cached or the
+    // hardcoded fallback tier.
+    tokio::spawn(crate::models_catalogue::refresh_loop(cfg.clone()));
 
     // The harness listener is separate from the operator's: it carries only the
     // MCP surface, and the gateway forwards to it from the internal network.

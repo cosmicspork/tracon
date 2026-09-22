@@ -4874,6 +4874,19 @@ pub async fn put_config(
     })))
 }
 
+/// The cached OpenCode model catalogue `default_models` draws its tier-1
+/// defaults from — what the Connections pane offers as suggestions, not what
+/// any provider is currently declared to serve. Loopback only, the same
+/// guard `put_config` uses: it is a detail of this node's own fetch/cache
+/// state, not something a remote peer's operator should read off it.
+pub async fn get_model_catalogue(_: super::auth::Loopback) -> ApiResult<Json<serde_json::Value>> {
+    let catalogue = crate::models_catalogue::cached();
+    Ok(Json(json!({
+        "fetched_ms": catalogue.fetched_ms,
+        "providers": catalogue.providers,
+    })))
+}
+
 /// The launch manifest an operator customizes a channel with, and what the
 /// next launch would build from it.
 ///
