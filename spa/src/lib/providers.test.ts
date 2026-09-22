@@ -32,15 +32,17 @@ test('a provider is only a row once something has actually happened to it', () =
     channels: [],
     updated_ms: null,
   })
-  // Untouched — even a loginable one — stays out of the list; the "Add a
+  // An untouched loginable provider stays out of the list; the "Add a
   // provider" chooser is the only thing that starts a sign-in now, so a
-  // never-started subscription provider has nothing to show.
+  // never-started subscription provider has nothing to show. An API-key
+  // provider has no such untouched state to hide — it exists the moment it
+  // is created, disconnected or not, and there is no connect step for it.
   const listed = connectableProviders([
     provider('anthropic', true, 'disconnected'),
     provider('openai', false, 'disconnected'),
     provider('openai-codex', true, 'failed'),
   ])
-  expect(listed.map((p) => p.name)).toEqual(['openai-codex'])
+  expect(listed.map((p) => p.name)).toEqual(['openai', 'openai-codex'])
   expect(connectableProviders([provider('openai', false, 'connected')]).map((p) => p.name)).toEqual(['openai'])
   expect(connectableProviders([provider('anthropic', true, 'pending')]).map((p) => p.name)).toEqual(['anthropic'])
 })

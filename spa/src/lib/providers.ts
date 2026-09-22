@@ -18,13 +18,16 @@ export function completionInstruction(completion: LoginCompletion | null): strin
 }
 
 // A card appears once there is something to show: a sign-in in flight, a
-// failed attempt to retry, or a live connection. A loginable provider that
-// has never been touched is not shown disconnected — the Connections pane's
-// "Add a provider" chooser is the only entry point that starts one, so an
-// entry that has not been started stays out of the row list entirely rather
-// than sitting there as a card with nothing on it but a Connect button.
+// failed attempt to retry, a live connection, or an API-key provider (which
+// has no "not yet started" state to hide — it exists the moment it is
+// created and there is no separate connect step for it). A loginable
+// provider that has never been touched is the only one hidden while
+// disconnected — the Connections pane's "Add a provider" chooser is its only
+// entry point, so an entry that has not been started stays out of the row
+// list entirely rather than sitting there as a card with nothing on it but a
+// Connect button.
 export function connectableProviders(providers: ProviderInfo[]): ProviderInfo[] {
-  return providers.filter((provider) => provider.state !== 'disconnected')
+  return providers.filter((provider) => provider.state !== 'disconnected' || !provider.can_login)
 }
 
 /** The shapes `POST /api/providers` accepts, and what the Shape dropdown offers. */

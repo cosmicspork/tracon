@@ -19,13 +19,21 @@
     if (!channel && channels.length) channel = channels.includes('personal') ? 'personal' : channels[0]
   })
 
+  // No single `state` filter covers "live": a promoted memory is as live as
+  // an active one (the corpus recalls and injects both the same way), it
+  // just carries the state promotion left it in rather than being rewritten
+  // to "active". Fetch every state for the channel and keep only the two
+  // that are actually live, leaving the promotion queue (candidate/proposed)
+  // and rejected items out of this browse view.
+  const LIVE_STATES = new Set(['active', 'promoted'])
+
   function load() {
     if (!channel) return
     loaded = false
     api
-      .memories(channel, 'active')
+      .memories(channel)
       .then((d) => {
-        memories = d.memories
+        memories = d.memories.filter((m) => LIVE_STATES.has(m.state))
         loaded = true
       })
       .catch((e) => {
