@@ -32,6 +32,25 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.21.0](https://github.com/cosmicspork/tracon/compare/v0.20.0...v0.21.0) (2026-09-22)
+
+
+### Features
+
+* **brief:** record who said what a work item is for ([#243](https://github.com/cosmicspork/tracon/issues/243)) ([6ccea84](https://github.com/cosmicspork/tracon/commit/6ccea849b90cd88c209f468a55e31f9d3828aa79))
+* pin documents into orientation, make memory promotion editable ([#252](https://github.com/cosmicspork/tracon/issues/252)) ([1b814b6](https://github.com/cosmicspork/tracon/commit/1b814b68c0d3137643ba2bb5159a3f24d06a6015))
+* **providers:** declare models from OpenCode's own catalogue, not a hardcoded list ([#250](https://github.com/cosmicspork/tracon/issues/250)) ([8bb15c6](https://github.com/cosmicspork/tracon/commit/8bb15c6e7347a595ae17a6b4bddf28a3f21b35d2))
+* **providers:** declare the current models for the built-in providers by default ([#246](https://github.com/cosmicspork/tracon/issues/246)) ([18e0cb0](https://github.com/cosmicspork/tracon/commit/18e0cb08f6f3e7715acc448ba4457680b92d0cb0))
+* redesign Connections around an add-a-provider flow ([#251](https://github.com/cosmicspork/tracon/issues/251)) ([62c224b](https://github.com/cosmicspork/tracon/commit/62c224b6c6f90bde3e779e01d3cd173c3344db14))
+* **settings:** edit each provider's declared models from the Connections pane ([#247](https://github.com/cosmicspork/tracon/issues/247)) ([63b5114](https://github.com/cosmicspork/tracon/commit/63b51149197d1477ed2bd690c2c40780a2c5806d))
+
+
+### Bug Fixes
+
+* **harness:** make real sessions start and reach their providers on both harnesses ([#245](https://github.com/cosmicspork/tracon/issues/245)) ([5e8a06a](https://github.com/cosmicspork/tracon/commit/5e8a06a74ae5c96f8d583f1ec94c6c74185ef2a9))
+* **orientation:** separate tracon's own orientation from the operator's notes ([#248](https://github.com/cosmicspork/tracon/issues/248)) ([b3c42b1](https://github.com/cosmicspork/tracon/commit/b3c42b16b5652c0db6d72377bf6714aeb9433a68))
+* **spa:** show API-key providers in Connections, promoted memories in the browse view ([#253](https://github.com/cosmicspork/tracon/issues/253)) ([b60bbe3](https://github.com/cosmicspork/tracon/commit/b60bbe300509affa2ce1f3b4af9892967d24b37c))
+
 ## [0.20.0](https://github.com/cosmicspork/tracon/compare/v0.19.0...v0.20.0) (2026-09-18)
 
 
