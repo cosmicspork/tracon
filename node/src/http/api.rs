@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 use crate::{
     adapter::HarnessAdapter,
-    config::Config,
+    config::{Config, Provider},
     session::{Manager, NewSession, Phase, SessionError},
     store::Store,
     transfers::{self, ContextSelection, SignedTransfer, TransferError},
@@ -4720,6 +4720,117 @@ pub async fn import_credentials(
     };
     // Names only: a value that went in never comes back out.
     Ok(Json(json!({ "imported": names })))
+}
+
+#[derive(Deserialize)]
+pub struct CreateProviderBody {
+    pub name: String,
+    pub upstream: String,
+    pub shape: String,
+    /// The already-sealed credential this provider injects — seal it first
+    /// through `/api/credentials/import`, then create the provider naming it.
+    pub credential: String,
+    #[serde(default)]
+    pub login: Option<String>,
+}
+
+/// The shapes the gateway knows how to inject a credential for. Kept in sync
+/// with `Config::Provider::shape`'s doc comment, not derived from it: there
+/// is no enum to match on, just the three strings the gateway understands.
+const KNOWN_SHAPES: &[&str] = &[
+    crate::config::SHAPE_ANTHROPIC,
+    crate::config::SHAPE_OPENAI,
+    crate::config::SHAPE_OPENAI_CODEX,
+];
+
+/// Register a new provider naming an already-sealed credential. Loopback
+/// only, for the reason `put_config` is: this decides which upstream the
+/// gateway forwards to and, on a new host, adds to the allowlist it dials.
+pub async fn create_provider(
+    _: super::auth::Loopback,
+    Json(body): Json<CreateProviderBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "name is required".into(),
+        ));
+    }
+    if body.credential.trim().is_empty() {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "credential is required".into(),
+        ));
+    }
+    if !KNOWN_SHAPES.contains(&body.shape.as_str()) {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "unknown shape {:?}; expected one of {KNOWN_SHAPES:?}",
+                body.shape
+            ),
+        ));
+    }
+    let url = reqwest::Url::parse(&body.upstream).map_err(|e| {
+        ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("upstream is not a valid URL: {e}"),
+        )
+    })?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "upstream has no host".into(),
+            )
+        })?
+        .to_string();
+
+    // try_load, never load: a node.toml that does not parse must be
+    // reported, not silently replaced with defaults plus this provider.
+    let mut cfg = Config::try_load().map_err(|e| {
+        ApiError(
+            StatusCode::CONFLICT,
+            format!("node.toml does not parse, so it will not be rewritten: {e}"),
+        )
+    })?;
+    if cfg.providers.contains_key(name) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("providers.{name} already exists"),
+        ));
+    }
+
+    // The upstream must also pass the egress allowlist, same as every other
+    // gateway call — but here the operator is *adding* the provider, so a
+    // host that isn't allowed yet is added rather than refused.
+    let allowed = crate::gateway::proxy::Allowlist::new(&cfg.gateway.allow_hosts)
+        .map(|a| a.allows(&host))
+        .unwrap_or(false);
+    if !allowed {
+        cfg.gateway
+            .allow_hosts
+            .push(crate::boundary::podman::setup::anchor_literal_host(&host));
+    }
+
+    let provider = Provider {
+        credential: body.credential.clone(),
+        upstream: body.upstream.clone(),
+        shape: body.shape.clone(),
+        login: body.login.clone(),
+        price: None,
+        models: crate::config::default_models(name),
+    };
+    cfg.providers.insert(name.to_string(), provider);
+    cfg.save()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({
+        "created": name,
+        "restart_required": true,
+    })))
 }
 
 /// The configuration this interface writes.

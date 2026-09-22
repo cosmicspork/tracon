@@ -218,7 +218,10 @@ pub fn router(state: AppState) -> Router {
             "/api/credentials/forge/{forge}",
             put(api::put_forge_credential).delete(api::delete_forge_credential),
         )
-        .route("/api/providers", get(api::list_providers))
+        .route(
+            "/api/providers",
+            get(api::list_providers).post(api::create_provider),
+        )
         .route("/api/providers/{name}/connect", post(api::connect_provider))
         .route("/api/providers/{name}/code", post(api::provider_code))
         .route(

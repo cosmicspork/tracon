@@ -431,6 +431,149 @@ async fn writing_the_config_is_refused_off_the_machine() {
     assert_eq!(s, StatusCode::FORBIDDEN);
 }
 
+/// The onboarding path a custom/API-key provider takes: seal the credential
+/// first, then register the provider naming it. Every case shares one node so
+/// the sequence — and the duplicate/bad-shape refusals against what the first
+/// call actually created — runs in order; `config_lock` keeps it that way
+/// against any other test writing the same `node.toml` (one file per test
+/// binary; see `support/state.rs`).
+#[tokio::test]
+async fn provider_creation_seals_a_credential_first_then_registers_the_provider() {
+    let _guard = state::config_lock().await;
+    let n = node();
+
+    let toml = r#"
+[credentials.openrouter]
+kind = "api_key"
+channels = ["work"]
+env = { API_KEY = "sk-or-not-a-real-key" }
+"#;
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/credentials/import",
+        Some(LOCAL),
+        Some(json!({ "toml": toml })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["imported"], json!(["openrouter"]));
+
+    // Success: a new provider, on a host not yet in the allowlist.
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/providers",
+        Some(LOCAL),
+        Some(json!({
+            "name": "openrouter",
+            "upstream": "https://openrouter.ai/api/v1",
+            "shape": "openai",
+            "credential": "openrouter",
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["created"], json!("openrouter"));
+    assert_eq!(v["restart_required"], json!(true));
+
+    let (s, v) = call(&n, "GET", "/api/config", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let openrouter = &v["providers"]["openrouter"];
+    assert_eq!(openrouter["credential"], "openrouter");
+    assert_eq!(openrouter["upstream"], "https://openrouter.ai/api/v1");
+    assert_eq!(openrouter["shape"], "openai");
+    // Added to the egress allowlist automatically, as an anchored, escaped
+    // literal — not the operator's own hand-authored pattern syntax.
+    let allow_hosts = v["gateway"]["allow_hosts"].as_array().unwrap();
+    assert!(
+        allow_hosts
+            .iter()
+            .any(|h| h == r"^openrouter\.ai$"),
+        "{allow_hosts:?}"
+    );
+
+    // Duplicate name: refused, and the existing entry is untouched.
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/providers",
+        Some(LOCAL),
+        Some(json!({
+            "name": "anthropic",
+            "upstream": "https://api.anthropic.com",
+            "shape": "anthropic",
+            "credential": "anthropic",
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+
+    // Bad shape: refused before anything is written.
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/providers",
+        Some(LOCAL),
+        Some(json!({
+            "name": "sketchy",
+            "upstream": "https://sketchy.example.com",
+            "shape": "not-a-real-shape",
+            "credential": "openrouter",
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    let (s, v) = call(&n, "GET", "/api/config", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(v["providers"].get("sketchy").is_none());
+
+    // A host already on the allowlist is not appended a second time.
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/providers",
+        Some(LOCAL),
+        Some(json!({
+            "name": "openai-eu",
+            "upstream": "https://api.openai.com",
+            "shape": "openai",
+            "credential": "openrouter",
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, v) = call(&n, "GET", "/api/config", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let allow_hosts = v["gateway"]["allow_hosts"].as_array().unwrap();
+    let openai_entries = allow_hosts
+        .iter()
+        .filter(|h| h.as_str() == Some(r"^api\.openai\.com$"))
+        .count();
+    assert_eq!(openai_entries, 1, "{allow_hosts:?}");
+}
+
+/// The same line `writing_the_config_is_refused_off_the_machine` draws, for
+/// the sibling endpoint: adding a provider decides what the gateway forwards
+/// to and dials, so it is set at the node too.
+#[tokio::test]
+async fn provider_creation_is_refused_off_the_machine() {
+    let n = node();
+    let body = json!({
+        "name": "openrouter",
+        "upstream": "https://openrouter.ai/api/v1",
+        "shape": "openai",
+        "credential": "openrouter",
+    });
+
+    let (s, v) = call(&n, "POST", "/api/providers", Some(REMOTE), Some(body.clone())).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+
+    // No peer address at all is remote: the extractor fails closed.
+    let (s, _) = call(&n, "POST", "/api/providers", None, Some(body)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn mesh_init_and_enroll_are_loopback_only_too() {
     let n = node();
@@ -657,6 +800,9 @@ async fn an_archived_channel_can_be_deleted_and_a_live_one_cannot() {
 /// the next join is a join, and a node with no hub answers that too.
 #[tokio::test]
 async fn unpairing_clears_the_hub_and_keeps_the_mesh_channel() {
+    // Asserts what actually landed in `node.toml`, one file for the whole
+    // binary; see `config_lock`'s doc comment.
+    let _guard = state::config_lock().await;
     let n = node();
     let (s, _) = call(&n, "POST", "/api/mesh/unpair", Some(LOCAL), None).await;
     assert_eq!(s, StatusCode::OK);

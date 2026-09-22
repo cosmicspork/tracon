@@ -439,6 +439,11 @@ export const api = {
   shareCredential: (name: string, to: string) =>
     call<{ shared: string; to: string }>('POST', `/api/credentials/${name}/share`, { to }),
   providers: () => call<ProviderInfo[]>('GET', '/api/providers'),
+  /** Register a new provider naming an already-sealed credential (seal it
+      first with `importCredentials`). Loopback only; the serving node always,
+      since a peer's node.toml is not this browser's to write. */
+  createProvider: (body: { name: string; upstream: string; shape: string; credential: string; login?: string | null }) =>
+    call<{ created: string; restart_required: boolean }>('POST', '/api/providers', body),
   connectProvider: (name: string, channels: string[], localCallback = false, share = true) =>
     call<ProviderConnectResult>('POST', `/api/providers/${name}/connect`, {
       channels,

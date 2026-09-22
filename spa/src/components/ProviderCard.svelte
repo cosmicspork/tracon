@@ -11,9 +11,25 @@
   import { formatDuration } from '../lib/format'
   import { completionInstruction, providerLabel } from '../lib/providers'
   import { store } from '../lib/store.svelte'
-  import type { ProviderConnectResult, ProviderInfo } from '../lib/types'
+  import type { ModelDecl, ProviderConfig, ProviderConnectResult, ProviderInfo } from '../lib/types'
 
-  let { p, nodeId }: { p: ProviderInfo; nodeId: string } = $props()
+  let {
+    p,
+    nodeId,
+    config = null,
+    editable = false,
+    saveModels,
+  }: {
+    p: ProviderInfo
+    nodeId: string
+    /** This provider's entry from `/api/config`: shape, upstream, and its
+        declared models. Only ever passed for the serving node — a peer's
+        node.toml is not something this browser reads directly, so its cards
+        show no meta line and no declared-models section. */
+    config?: ProviderConfig | null
+    editable?: boolean
+    saveModels?: (name: string, models: ModelDecl[]) => Promise<unknown>
+  } = $props()
 
   let code = $state('')
   let busy = $state(false)
@@ -22,6 +38,45 @@
   let managedLocal = $state(false)
   let sameHostBrowser = $state(false)
   let shareSignIn = $state(true)
+
+  // The declared-models editor's own local copy: edited freely, saved on
+  // request. Re-seeded whenever the node's own config changes under it
+  // (a fresh load elsewhere on the page, or this card's own save landing).
+  let models = $state<ModelDecl[]>([])
+  let modelsBusy = $state(false)
+  let modelsError = $state('')
+  let modelsSaved = $state(false)
+  $effect(() => {
+    models = config ? structuredClone(config.models) : []
+    modelsSaved = false
+  })
+  const modelsValid = $derived.by(() => {
+    const ids = models.map((m) => m.id.trim())
+    if (ids.some((id) => !id)) return false
+    return new Set(ids).size === ids.length
+  })
+  const modelsDirty = $derived(config ? JSON.stringify(config.models) !== JSON.stringify(models) : false)
+
+  function addModel() {
+    models.push({ id: '', name: '', reasoning: true })
+  }
+  function removeModel(index: number) {
+    models.splice(index, 1)
+  }
+  async function saveDeclaredModels() {
+    if (!saveModels || !modelsValid || modelsBusy) return
+    modelsBusy = true
+    modelsError = ''
+    modelsSaved = false
+    try {
+      await saveModels(p.name, models)
+      modelsSaved = true
+    } catch (e) {
+      modelsError = e instanceof Error ? e.message : String(e)
+    } finally {
+      modelsBusy = false
+    }
+  }
 
   const isSelf = $derived(nodeId === store.node?.id)
   const nodeName = $derived(store.nodes.find((node) => node.id === nodeId)?.name ?? nodeId.slice(0, 8))
@@ -118,11 +173,56 @@
       <span class="scope">Remote node {nodeName}: commands are sealed to it. Its provider credential stays there and this browser cannot claim its local callback.</span>
     {/if}
     {#if p.state === 'connected'}
-      <span class="l"><span class="chip">connected</span>{#if p.channels.length} · {p.channels.join(', ')}{/if}{#if expiry()} · {expiry()}{/if}</span>
+      <span class="l"><span class="chip">connected</span>{#if p.channels.length} · {p.channels.join(', ')}{/if}</span>
       {#if isSelf}
         <span><button class="lnk d" onclick={disconnect} disabled={busy}>Disconnect</button></span>
       {:else}
         <span><button class="lnk d" onclick={disconnect} disabled={busy}>Disconnect on {nodeName}</button></span>
+      {/if}
+      {#if config}
+        <span class="meta">
+          {#if p.kind === 'oauth'}
+            {expiry() ? `Renews automatically · ${expiry()}` : 'Renews automatically'}
+          {:else}
+            {config.shape}-compatible · {config.upstream}
+          {/if}
+        </span>
+        <details class="declared" open={models.length > 0 && models.length <= 4}>
+          <summary>Declared models · {models.length}</summary>
+          <div class="models">
+            {#if models.length}
+              <div class="mrow mhead" aria-hidden="true">
+                <span>Model id</span><span>Name</span><span>Context</span><span>Output</span><span>Reasons</span><span>Attach</span><span></span>
+              </div>
+              {#each models as m, i (i)}
+                <div class="mrow">
+                  <input bind:value={m.id} placeholder="the provider's model id" aria-label="Model id" disabled={!editable} spellcheck="false" />
+                  <input bind:value={m.name} placeholder="shown in the picker" aria-label="Model name" disabled={!editable} spellcheck="false" />
+                  <input type="number" min="0" bind:value={m.context} placeholder="default" aria-label="Context tokens" disabled={!editable} />
+                  <input type="number" min="0" bind:value={m.output} placeholder="default" aria-label="Output tokens" disabled={!editable} />
+                  <input type="checkbox" bind:checked={m.reasoning} aria-label="Reasoning" disabled={!editable} />
+                  <input type="checkbox" bind:checked={m.attachment} aria-label="Attachments" disabled={!editable} />
+                  <button class="lnk" type="button" onclick={() => removeModel(i)} disabled={!editable} aria-label={`Remove ${m.id || 'model'}`}>Remove</button>
+                </div>
+              {/each}
+            {:else}
+              <div class="empty">No models declared: nothing is offered under {p.name}.</div>
+            {/if}
+            {#if editable}
+              <div class="model-acts">
+                <button class="lnk" type="button" onclick={addModel} disabled={modelsBusy}>+ Add model</button>
+                {#if modelsDirty}
+                  <button class="btn p" type="button" onclick={saveDeclaredModels} disabled={!modelsValid || modelsBusy}>
+                    {modelsBusy ? 'Saving…' : 'Save models'}
+                  </button>
+                {/if}
+                {#if modelsDirty && !modelsValid}<small class="bad">Every model needs an id, and each id once.</small>
+                {:else if modelsSaved}<small class="ok">Saved to node.toml; restart the node for new sessions to see it.</small>
+                {:else if modelsError}<small class="bad">{modelsError}</small>{/if}
+              </div>
+            {/if}
+          </div>
+        </details>
       {/if}
     {:else if shownState === 'pending'}
       {#if shownUrl}
@@ -287,6 +387,66 @@
     color: var(--dim);
     width: fit-content;
   }
+  .meta {
+    color: var(--ink2);
+  }
+  .declared {
+    border-top: 1px solid var(--rule);
+    margin-top: 2px;
+    padding-top: 8px;
+  }
+  .declared > summary {
+    cursor: pointer;
+    font: 500 12.5px var(--sans);
+    color: var(--ink2);
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: fit-content;
+  }
+  .declared > summary::-webkit-details-marker {
+    display: none;
+  }
+  .declared > summary::before {
+    content: '▸';
+    font-size: 10px;
+    color: var(--dim);
+  }
+  .declared[open] > summary::before {
+    content: '▾';
+  }
+  .models {
+    display: grid;
+    gap: 0.3rem;
+    margin-top: 8px;
+  }
+  .mrow {
+    display: grid;
+    grid-template-columns: minmax(9rem, 2fr) minmax(7rem, 2fr) 5.5rem 5.5rem 4rem 5rem auto;
+    gap: 0.4rem;
+    align-items: center;
+  }
+  .mrow.mhead {
+    font-size: 0.8em;
+    opacity: 0.7;
+  }
+  .mrow input[type='checkbox'] {
+    justify-self: start;
+  }
+  .model-acts {
+    display: flex;
+    align-items: center;
+    gap: 10px 14px;
+    flex-wrap: wrap;
+    margin-top: 2px;
+  }
+  .model-acts .ok {
+    color: var(--ok);
+  }
+  .model-acts .bad {
+    color: var(--crit);
+  }
   @media (max-width: 700px) {
     .prov {
       grid-template-columns: 3px minmax(0, 1fr);
@@ -299,6 +459,12 @@
       flex-basis: 100%;
       min-width: 0;
       font-size: 16px;
+    }
+    .mrow {
+      grid-template-columns: 1fr 1fr;
+    }
+    .mrow.mhead {
+      display: none;
     }
   }
 </style>
