@@ -487,9 +487,7 @@ env = { API_KEY = "sk-or-not-a-real-key" }
     // literal — not the operator's own hand-authored pattern syntax.
     let allow_hosts = v["gateway"]["allow_hosts"].as_array().unwrap();
     assert!(
-        allow_hosts
-            .iter()
-            .any(|h| h == r"^openrouter\.ai$"),
+        allow_hosts.iter().any(|h| h == r"^openrouter\.ai$"),
         "{allow_hosts:?}"
     );
 
@@ -566,7 +564,14 @@ async fn provider_creation_is_refused_off_the_machine() {
         "credential": "openrouter",
     });
 
-    let (s, v) = call(&n, "POST", "/api/providers", Some(REMOTE), Some(body.clone())).await;
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/providers",
+        Some(REMOTE),
+        Some(body.clone()),
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
 
     // No peer address at all is remote: the extractor fails closed.
