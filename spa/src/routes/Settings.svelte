@@ -684,7 +684,7 @@
         <button class="lnk" onclick={refreshModels} disabled={busy !== ''}>
           {busy === 'models' ? 'Asking the harness…' : 'Refresh models'}
         </button>
-        <small>{modelNote || 'The catalogue is probed when a provider connects. Ask again when a connected provider’s models never appeared.'}</small>
+        <small>{modelNote || 'Models are declared, not probed: the harness is told exactly this list. Refresh re-reads what’s currently declared — ask again when a connected provider’s models never appeared.'}</small>
       </div>
     {/if}
   </Card>
