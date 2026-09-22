@@ -290,7 +290,10 @@ mod tests {
             .as_object()
             .expect("doc_write has properties");
         assert_eq!(
-            props.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(),
+            props
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
             ["slug", "body", "if_hash"].into_iter().collect(),
             "{props:?}"
         );

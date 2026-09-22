@@ -387,13 +387,23 @@ mod tests {
         )
         .unwrap();
         let mut v = serde_json::Map::new();
-        v.insert("m1".into(), json!({"verdict": "promote", "body": "edited text"}));
-        v.insert("m2".into(), json!({"verdict": "reject", "body": "should be ignored"}));
+        v.insert(
+            "m1".into(),
+            json!({"verdict": "promote", "body": "edited text"}),
+        );
+        v.insert(
+            "m2".into(),
+            json!({"verdict": "reject", "body": "should be ignored"}),
+        );
         let (_, mems) = plan_verdict(&c, "p1", &v, "n", 6_000).unwrap().unwrap();
         assert_eq!(
             mems,
             vec![
-                ("m1".to_string(), "promoted", Some("edited text".to_string())),
+                (
+                    "m1".to_string(),
+                    "promoted",
+                    Some("edited text".to_string())
+                ),
                 ("m2".to_string(), "rejected", None),
             ]
         );

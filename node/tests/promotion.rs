@@ -151,7 +151,10 @@ async fn candidates_are_batched_decided_and_only_promoted_ones_become_context() 
 async fn an_object_verdict_edits_the_body_of_a_promoted_memory() {
     state::isolate();
     let (app, store) = operator().await;
-    for body in ["flaky tests hide behind retries", "the deploy needs the VPN"] {
+    for body in [
+        "flaky tests hide behind retries",
+        "the deploy needs the VPN",
+    ] {
         let (st, _) = call(&app, "POST", "/api/memories", Some(json!({"channel": "personal", "kind": "lesson", "body": body, "state": "candidate", "confidence": 0.8}))).await;
         assert_eq!(st, StatusCode::OK);
     }
@@ -182,5 +185,8 @@ async fn an_object_verdict_edits_the_body_of_a_promoted_memory() {
     );
     let rejected = store.memory_get(&vpn).unwrap().unwrap();
     assert_eq!(rejected.state, "rejected");
-    assert_eq!(rejected.body, "the deploy needs the VPN", "a rejected item's body is never edited");
+    assert_eq!(
+        rejected.body, "the deploy needs the VPN",
+        "a rejected item's body is never edited"
+    );
 }

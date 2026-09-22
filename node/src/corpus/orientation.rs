@@ -591,10 +591,17 @@ mod tests {
     fn three_layers_and_the_known_in_order_under_the_cap() {
         let store = Store::open_in_memory().unwrap();
         store
-            .write_change("n", "personal", "document", ChangeOp::Upsert, "g", json!({
+            .write_change(
+                "n",
+                "personal",
+                "document",
+                ChangeOp::Upsert,
+                "g",
+                json!({
                 "channel": "personal", "slug": "guide-commits", "kind": "guide", "title": "Commits",
                 "body": "# Commits\n\nConventional commits.", "pinned": true,
-                "hash": "h", "created_ms": 1, "updated_ms": 1}))
+                "hash": "h", "created_ms": 1, "updated_ms": 1}),
+            )
             .unwrap();
         store
             .write_change(
@@ -933,7 +940,10 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
-        assert!(text.len() > CAP_CHARS * 3, "the pinned document was cut short");
+        assert!(
+            text.len() > CAP_CHARS * 3,
+            "the pinned document was cut short"
+        );
         assert!(!text.contains("[cut here"), "{text}");
         assert!(
             missing.iter().all(|m| !m.what.contains("guide-long")),
@@ -1026,9 +1036,15 @@ mod tests {
             assert!(text.contains(&format!("Guide {i}")), "{text}");
         }
         assert!(!text.contains("[cut here"), "{text}");
-        assert!(missing.iter().all(|m| !m.what.contains("Guide")), "{missing:?}");
+        assert!(
+            missing.iter().all(|m| !m.what.contains("Guide")),
+            "{missing:?}"
+        );
         // Ready work, genuinely discretionary, is what gets squeezed instead.
-        assert!(!text.contains(&ready_title), "ready work should have been squeezed: too long");
+        assert!(
+            !text.contains(&ready_title),
+            "ready work should have been squeezed: too long"
+        );
         assert!(
             missing.iter().any(|m| m.what.contains("ready work")),
             "{missing:?}"

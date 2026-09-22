@@ -593,7 +593,11 @@ async fn active_memories_are_browsed_edited_in_place_and_retired() {
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert!(
-        v["memories"].as_array().unwrap().iter().any(|m| m["id"] == id),
+        v["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == id),
         "{v}"
     );
 
@@ -622,7 +626,10 @@ async fn active_memories_are_browsed_edited_in_place_and_retired() {
         .find(|m| m["id"] == id)
         .unwrap();
     assert_eq!(row["body"], "run just test --compact before every commit");
-    assert_eq!(row["kind"], "directive", "editing the body leaves the rest alone");
+    assert_eq!(
+        row["kind"], "directive",
+        "editing the body leaves the rest alone"
+    );
 
     // An empty body is refused.
     let (st, _) = call_with(
@@ -665,7 +672,11 @@ async fn active_memories_are_browsed_edited_in_place_and_retired() {
     )
     .await;
     assert!(
-        !v["memories"].as_array().unwrap().iter().any(|m| m["id"] == id),
+        !v["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == id),
         "{v}"
     );
 }
