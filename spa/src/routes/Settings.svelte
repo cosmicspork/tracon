@@ -12,6 +12,8 @@
   import Credentials from '../components/Credentials.svelte'
   import Notifications from '../components/Notifications.svelte'
   import ProviderCard from '../components/ProviderCard.svelte'
+  import AddProviderChooser from '../components/settings/AddProviderChooser.svelte'
+  import AddCustomProvider from '../components/settings/AddCustomProvider.svelte'
   import { connectableProviders } from '../lib/providers'
   import HubRollups from '../components/HubRollups.svelte'
   import TransferInbox from '../components/TransferInbox.svelte'
@@ -167,33 +169,52 @@
 
   // --- the declared catalogue -------------------------------------------
   // Per provider, the models this node declares: what the picker offers and
-  // what a declaring harness is told. Edited on the same form as the rest of
-  // node.toml and saved through the same patch, so a change owes the same
-  // restart. Rows are edited in place; ids are what the provider is asked
-  // for, names are what a person reads.
-  const providerNames = $derived(form ? Object.keys(form.providers ?? {}) : [])
-  function addModel(provider: string) {
-    if (!form) return
-    form.providers[provider].models.push({ id: '', name: '', reasoning: true })
+  // what a declaring harness is told. Each provider's consolidated card in
+  // the Connections tab owns its own editable copy and its own save; this is
+  // just the one call a card's save reaches, so it PUTs the same shape
+  // `put_config` already validates (`providers.<name>.models`) and reloads
+  // the canonical config afterward, the same way `saveConfig` does.
+  async function saveProviderModels(name: string, models: NodeConfig['providers'][string]['models']) {
+    const res = await api.putConfig({ providers: { [name]: { models } } })
+    restartOwed = restartOwed || res.restart_required
+    await loadConfig()
   }
-  function removeModel(provider: string, index: number) {
-    if (!form) return
-    form.providers[provider].models.splice(index, 1)
+
+  // --- adding a provider --------------------------------------------------
+  // The chooser is the only way a provider is added: the two subscriptions
+  // trigger the harness's own sign-in immediately (no new endpoint needed —
+  // `anthropic`/`openai-codex` are always in `cfg.providers`); the API-key/
+  // custom path seals a credential, then registers a provider naming it.
+  let addProvider = $state<'closed' | 'chooser' | 'custom'>('closed')
+  let addProviderNote = $state('')
+
+  function openAddProvider() {
+    addProvider = 'chooser'
+    addProviderNote = ''
   }
-  const catalogueDirty = $derived(
-    cfg && form
-      ? JSON.stringify(cfg.providers ?? {}) !== JSON.stringify(form.providers ?? {})
-      : false,
-  )
-  const catalogueValid = $derived.by(() => {
-    if (!form) return false
-    for (const p of Object.values(form.providers ?? {})) {
-      const ids = p.models.map((m) => m.id.trim())
-      if (ids.some((id) => !id)) return false
-      if (new Set(ids).size !== ids.length) return false
-    }
-    return true
-  })
+  function closeAddProvider() {
+    addProvider = 'closed'
+  }
+  function connectBuiltin(name: 'anthropic' | 'openai-codex') {
+    if (!selectedNode) return
+    return act(`connect-${name}`, async () => {
+      await api.nodeConnectProvider(
+        selectedNode.id,
+        name,
+        store.channels.filter((c) => !c.archived).map((c) => c.name),
+        false,
+        true,
+      )
+      await store.refetch()
+      addProvider = 'closed'
+    })
+  }
+  function onCustomProviderCreated(name: string) {
+    addProvider = 'closed'
+    restartOwed = true
+    addProviderNote = `${name} saved to node.toml. Restart the node for it to be available.`
+    void loadConfig()
+  }
 
   // --- channels ---------------------------------------------------------
   let channelName = $state('')
@@ -647,9 +668,9 @@
 
 {#if activeSection === 'connections'}
   <Card
-    title="Model providers"
+    title="Providers"
     note={selectedNodeIsServing
-      ? `Sign-ins held by ${selectedNodeName}, the node serving this page.`
+      ? `Sign-ins and keys held by ${selectedNodeName}, the node serving this page.`
       : `Managing ${selectedNodeName}. Commands are sealed to that peer; its credentials stay on it.`}
   >
     {#snippet actions()}
@@ -663,22 +684,48 @@
           </select>
         </label>
       {/if}
+      {#if selectedNode?.reachable && addProvider === 'closed' && selectedProviders.length > 0}
+        <button class="lnk" onclick={openAddProvider}>Add a provider</button>
+      {/if}
     {/snippet}
     {#if !selectedNode}
       <div class="empty">Waiting for a node to select…</div>
     {:else if !selectedNodeIsServing && !selectedNode.reachable}
       <div class="empty">{selectedNodeName} is unavailable. Its last advertised provider state is shown when it returns; no connection command is sent while it is offline.</div>
+    {:else if addProvider === 'chooser'}
+      <AddProviderChooser
+        showCustom={selectedNodeIsServing}
+        busy={busy !== ''}
+        onAnthropic={() => connectBuiltin('anthropic')}
+        onOpenAI={() => connectBuiltin('openai-codex')}
+        onCustom={() => (addProvider = 'custom')}
+        onCancel={closeAddProvider}
+      />
+    {:else if addProvider === 'custom'}
+      <AddCustomProvider onCancel={closeAddProvider} onCreated={onCustomProviderCreated} />
     {:else if selectedProviders.length}
       <div class="rows">
         {#each selectedProviders as provider (provider.name)}
-          <ProviderCard p={provider} nodeId={selectedNode.id} />
+          <ProviderCard
+            p={provider}
+            nodeId={selectedNode.id}
+            config={selectedNodeIsServing ? (cfg?.providers?.[provider.name] ?? null) : null}
+            editable={local}
+            saveModels={selectedNodeIsServing ? saveProviderModels : undefined}
+          />
         {/each}
       </div>
     {:else if !selectedNodeIsServing && selectedNode.providers === undefined}
       <div class="empty">{selectedNodeName} has not advertised provider capability. It may be an older peer; update it or manage providers on that node directly.</div>
+    {:else if selectedNodeIsServing}
+      <div class="empty onboard">
+        <p>No providers connected. A session needs at least one before it can run.</p>
+        <button class="btn p" onclick={openAddProvider}>Add a provider</button>
+      </div>
     {:else}
       <div class="empty">No provider connections are configured for {selectedNodeName}.</div>
     {/if}
+    {#if addProviderNote}<small>{addProviderNote}</small>{/if}
     {#if selectedNodeIsServing}
       <div class="acts">
         <button class="lnk" onclick={refreshModels} disabled={busy !== ''}>
@@ -688,47 +735,6 @@
       </div>
     {/if}
   </Card>
-
-  {#if selectedNodeIsServing}
-    <Card title="Declared models" note="What the picker offers under each provider, and what an OpenCode harness is told its catalogue is. Written to node.toml; sessions started after the next restart see the change.">
-      {#if form && cfg}
-        {#each providerNames as name (name)}
-          {@const p = form.providers[name]}
-          <div class="catalogue">
-            <div class="catalogue-head">
-              <b>{name}</b>
-              <small>{p.shape} · {p.upstream}{p.login ? ` · signs in as ${p.login}` : ''}</small>
-              <button class="lnk" type="button" onclick={() => addModel(name)} disabled={!local || busy !== ''}>Add model</button>
-            </div>
-            {#if p.models.length === 0}
-              <div class="empty">No models declared: nothing is offered under {name}.</div>
-            {:else}
-              <div class="models">
-                <div class="mrow head" aria-hidden="true"><span>Model id</span><span>Name</span><span>Context</span><span>Output</span><span>Reasons</span><span>Attachments</span><span></span></div>
-                {#each p.models as m, i (i)}
-                  <div class="mrow">
-                    <input bind:value={m.id} placeholder="the provider's model id" aria-label="Model id" disabled={!local} spellcheck="false" />
-                    <input bind:value={m.name} placeholder="shown in the picker" aria-label="Model name" disabled={!local} spellcheck="false" />
-                    <input type="number" min="0" bind:value={m.context} placeholder="harness default" aria-label="Context tokens" disabled={!local} />
-                    <input type="number" min="0" bind:value={m.output} placeholder="harness default" aria-label="Output tokens" disabled={!local} />
-                    <input type="checkbox" bind:checked={m.reasoning} aria-label="Reasoning" disabled={!local} />
-                    <input type="checkbox" bind:checked={m.attachment} aria-label="Attachments" disabled={!local} />
-                    <button class="lnk" type="button" onclick={() => removeModel(name, i)} disabled={!local || busy !== ''} aria-label={`Remove ${m.id || 'model'}`}>Remove</button>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        {/each}
-        <div class="acts">
-          <button class="btn p" onclick={saveConfig} disabled={!local || !catalogueDirty || !catalogueValid || busy !== ''}>{busy === 'config' ? 'Saving…' : 'Save models'}</button>
-          {#if catalogueDirty && !catalogueValid}<small>Every model needs an id, and each id once.</small>{:else if restartOwed}<small>Saved to node.toml; restart the node for new sessions to see it.</small>{/if}
-        </div>
-      {:else if configError}
-        <p class="why"><b>node.toml could not be read</b><i>{configError}</i></p>
-      {:else}<div class="empty">Reading serving-node configuration…</div>{/if}
-    </Card>
-  {/if}
 
   <Card title="Forge tokens" note={`GitHub and GitLab tokens on ${store.node?.name ?? 'the serving node'}, and the channels each may serve. Values are never shown.`}>
     <CredentialSettings />
@@ -1056,17 +1062,6 @@
   .panel:focus {
     outline: none;
   }
-  .catalogue { margin: 0.75rem 0; }
-  .catalogue-head { display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.35rem; }
-  .catalogue-head small { flex: 1; opacity: 0.7; overflow-wrap: anywhere; }
-  .models { display: grid; gap: 0.25rem; }
-  .mrow { display: grid; grid-template-columns: minmax(10rem, 2fr) minmax(8rem, 2fr) 6rem 6rem 4rem 5.5rem auto; gap: 0.4rem; align-items: center; }
-  .mrow.head { font-size: 0.8em; opacity: 0.7; }
-  .mrow input[type='checkbox'] { justify-self: start; }
-  @media (max-width: 720px) {
-    .mrow { grid-template-columns: 1fr 1fr; }
-    .mrow.head { display: none; }
-  }
 
   .section-nav {
     display: flex;
@@ -1099,6 +1094,15 @@
   .rows {
     display: grid;
     gap: 6px;
+  }
+  .empty.onboard {
+    display: grid;
+    gap: 14px;
+    justify-items: center;
+  }
+  .empty.onboard p {
+    margin: 0;
+    max-width: 46ch;
   }
   .grid {
     display: grid;

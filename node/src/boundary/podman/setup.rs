@@ -203,10 +203,11 @@ pub fn write_qa_allowlist(hosts: &[String]) -> Result<(), BoundaryError> {
 /// Anchor one literal hostname as an exact-match tinyproxy filter entry.
 /// Unlike [`anchor`] (for the operator-authored, regex-capable
 /// `[gateway] allow_hosts`), every regex metacharacter in the host itself is
-/// escaped: a QA target's host comes from a parsed URL, never from an
-/// operator writing a pattern, so a literal dot must never accidentally
+/// escaped: a host built from a parsed URL — a QA target's, or a provider
+/// upstream's when `POST /api/providers` widens the allowlist for it — never
+/// an operator writing a pattern, so a literal dot must never accidentally
 /// match any character.
-fn anchor_literal_host(host: &str) -> String {
+pub(crate) fn anchor_literal_host(host: &str) -> String {
     let mut escaped = String::with_capacity(host.len() + 2);
     escaped.push('^');
     for ch in host.chars() {
