@@ -636,22 +636,46 @@ impl HarnessAdapter for ClaudeAdapter {
         })
     }
 
-    /// Claude Code has no model catalogue to ask for, so this reports the
-    /// aliases it accepts. Nothing is launched: the pinned CLI emits its
-    /// `system/init` frame only after a first user message, and a user
-    /// message is a model call.
+    /// Claude Code has no model catalogue to ask for, so this reports what
+    /// the node declared instead of probing anything: nothing is launched,
+    /// since the pinned CLI emits its `system/init` frame only after a first
+    /// user message, and a user message is a model call.
+    ///
+    /// Claude Code only ever talks to Anthropic, so the one `anthropic`-shaped
+    /// provider's `models` is the whole answer when it names any — mapped the
+    /// same way `opencode.rs::declared_models` maps a declaring harness's
+    /// models to `ModelOption`, minus the `provider/` prefix that addressing
+    /// needs there: `--model` forwards a bare id here. A provider that names
+    /// none, or an anthropic-shaped provider not found at all, falls back to
+    /// the fixed alias list unchanged.
     async fn probe_models(
         &self,
         _runner: &dyn Runner,
-        _wiring: &crate::gateway::model::Wiring,
+        wiring: &crate::gateway::model::Wiring,
     ) -> Result<Vec<ModelOption>, AdapterError> {
-        Ok(ALIASES
+        let declared = wiring
+            .providers
             .iter()
-            .map(|a| ModelOption {
-                value: (*a).to_string(),
-                name: (*a).to_string(),
-            })
-            .collect())
+            .find(|p| p.shape == crate::config::SHAPE_ANTHROPIC)
+            .filter(|p| !p.models.is_empty())
+            .map(|p| {
+                p.models
+                    .iter()
+                    .map(|model| ModelOption {
+                        value: model.id.clone(),
+                        name: model.label().to_string(),
+                    })
+                    .collect::<Vec<_>>()
+            });
+        Ok(declared.unwrap_or_else(|| {
+            ALIASES
+                .iter()
+                .map(|a| ModelOption {
+                    value: (*a).to_string(),
+                    name: (*a).to_string(),
+                })
+                .collect()
+        }))
     }
 
     async fn launch(
