@@ -20,6 +20,7 @@ pub mod manifest;
 pub mod mcp;
 pub mod mesh;
 pub mod metrics;
+pub mod models_catalogue;
 pub mod notify;
 pub mod oauth;
 pub mod policy;

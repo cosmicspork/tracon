@@ -431,6 +431,25 @@ async fn writing_the_config_is_refused_off_the_machine() {
     assert_eq!(s, StatusCode::FORBIDDEN);
 }
 
+/// The model catalogue is loopback-only too, the same as `PUT /api/config`:
+/// it is this node's own fetch/cache state, not something a remote peer's
+/// operator reads off it. A fresh, isolated node has never fetched, so the
+/// shape comes back empty rather than erroring.
+#[tokio::test]
+async fn the_model_catalogue_is_loopback_only_and_starts_empty() {
+    let n = node();
+
+    let (s, v) = call(&n, "GET", "/api/model-catalogue", Some(REMOTE), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    let (s, _) = call(&n, "GET", "/api/model-catalogue", None, None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    let (s, v) = call(&n, "GET", "/api/model-catalogue", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["fetched_ms"], Value::Null);
+    assert_eq!(v["providers"], json!({}));
+}
+
 #[tokio::test]
 async fn mesh_init_and_enroll_are_loopback_only_too() {
     let n = node();
