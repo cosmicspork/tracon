@@ -15,7 +15,8 @@ export interface SetupStatus {
   // What the node said as it exited, while it is failing.
   service_error: string | null
   podman: string | null
-  machine: 'running' | 'starting' | 'stopped' | 'missing' | null
+  machine: 'running' | 'starting' | 'stopped' | 'missing' | 'error' | null
+  machine_error: string | null
 }
 
 export interface SetupStep {
@@ -23,6 +24,7 @@ export interface SetupStep {
   title: string
   detail: string
   command?: string
+  href?: string
   // Why it is not working, in the node's own words.
   reason?: string
   done: boolean
@@ -85,13 +87,24 @@ export function setupSteps(s: SetupStatus): SetupStep[] {
           blocking: true,
           detail: 'The boundary the agent runs inside. Install it, then this page picks it up.',
           command: s.platform === 'macos' ? 'brew install podman' : undefined,
+          href: s.platform === 'linux' ? 'https://podman.io/docs/installation' : undefined,
         },
   ]
   if (s.platform === 'macos' && s.podman) {
     steps.push(
-      s.machine === 'missing' || s.machine === null
-        ? { id: 'machine', title: 'Podman machine', done: false, blocking: true, detail: 'Create one once; the node starts it after that.', command: 'podman machine init' }
-        : { id: 'machine', title: 'Podman machine', done: true, blocking: true, detail: s.machine === 'running' ? 'Running.' : 'Not running; the node starts it.' },
+      s.machine === 'missing'
+        ? { id: 'machine', title: 'Podman machine', done: false, blocking: true, detail: 'No Podman machine was found. Create one, then retry setup.', command: 'podman machine init' }
+        : s.machine === 'error' || s.machine === null
+          ? {
+              id: 'machine',
+              title: 'Podman machine',
+              done: false,
+              blocking: true,
+              detail: 'Could not verify whether a Podman machine exists. Resolve the detection problem and retry.',
+              reason: s.machine_error ?? undefined,
+              command: 'podman machine list --format json',
+            }
+          : { id: 'machine', title: 'Podman machine', done: true, blocking: true, detail: s.machine === 'running' ? 'Running.' : 'Not running; the node starts it.' },
     )
   }
   steps.push(serviceStep(s), cliStep(s))

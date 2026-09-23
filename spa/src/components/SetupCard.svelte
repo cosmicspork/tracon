@@ -5,21 +5,28 @@
   import { modelsForChannel } from '../lib/nodes'
   import { store } from '../lib/store.svelte'
 
+  const localChannels = $derived.by(() => {
+    const node = store.node
+    return node ? store.channels.filter((channel) => !channel.archived && channel.nodes.includes(node.id)) : []
+  })
+  const modelOffered = $derived.by(() => {
+    const node = store.node
+    return node !== null && localChannels.some((channel) =>
+      modelsForChannel(node, channel.name, store.providers, channel.bindings).length > 0,
+    )
+  })
   const steps = $derived(
     setupSteps({
       anyProviderConnected: store.providers.some((p) => p.state === 'connected'),
-      modelOffered: store.channels.some((channel) => {
-        const node = store.node
-        return node !== null && !channel.archived && modelsForChannel(node, channel.name, store.providers, channel.bindings).length > 0
-      }),
+      modelOffered,
       anyChannel: store.channels.some((c) => !c.archived),
-      boundaryReady: store.node?.state === 'ready' && !store.node?.harness.mismatch,
+      memberChannel: localChannels.length > 0,
+      boundaryReady: store.node?.reachable === true && store.node.state === 'ready' && !store.node.harness.mismatch,
     }),
   )
-  const left = $derived(steps?.filter((s) => !s.done).length ?? 0)
+  const left = $derived(steps.filter((s) => !s.done).length)
 </script>
 
-{#if steps}
   <div class="setup">
     <div>
       <span class="eyebrow">Run here</span>
@@ -45,7 +52,6 @@
       <p><a class="optional" href="/settings#devices">Register this browser for notifications</a> after a task path is available. It does not make a runtime or model ready.</p>
     </details>
   </div>
-{/if}
 
 <style>
   .setup {

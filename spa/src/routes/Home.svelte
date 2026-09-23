@@ -138,7 +138,7 @@
 </script>
 
 {#if canCompose}
-  {#if !itemId}
+  {#if !itemId && store.sessions.size === 0}
     <FirstTaskGuide
       local={store.node}
       localChannels={localTaskTargets.map((target) => target.channel)}

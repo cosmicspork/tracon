@@ -22,6 +22,7 @@
   const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
   async function refresh() {
+    error = null
     try {
       status = await setupStatus()
     } catch (e) {
@@ -72,6 +73,12 @@
             {/if}
             {#if s.command}
               <code>{s.command}</code>
+            {/if}
+            {#if s.href}
+              <a href={s.href} target="_blank" rel="noreferrer">Podman installation instructions</a>
+            {/if}
+            {#if s.id === 'machine' && status.machine === 'error'}
+              <button class="btn" disabled={busy !== null} onclick={() => refresh()}>Retry detection</button>
             {/if}
             {#if s.id === 'service' && (canRestartNode(status) || (!s.done && status.owner !== 'foreign'))}
               <div class="row">

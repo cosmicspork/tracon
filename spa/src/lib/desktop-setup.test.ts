@@ -15,6 +15,7 @@ const fresh: SetupStatus = {
   service_error: null,
   podman: '/opt/homebrew/bin/podman',
   machine: 'stopped',
+  machine_error: null,
 }
 
 const byId = (s: SetupStatus) => Object.fromEntries(setupSteps(s).map((x) => [x.id, x]))
@@ -29,14 +30,25 @@ test('a fresh mac with podman is asked for the service and the CLI', () => {
   expect(blocked(setupSteps(fresh))).toBe(false)
 })
 
-test('no podman, or no machine, blocks everything after it', () => {
+test('missing Podman blocks setup and points Linux users to installation guidance', () => {
   const none = setupSteps({ ...fresh, podman: null, machine: null })
   expect(blocked(none)).toBe(true)
   expect(none.map((s) => s.id)).toEqual(['podman', 'service', 'cli'])
   expect(none[0].command).toBe('brew install podman')
+  const linux = setupSteps({ ...fresh, platform: 'linux', podman: null, machine: null })
+  expect(linux[0].href).toBe('https://podman.io/docs/installation')
+})
+
+test('missing and failed machine detection both block setup but give distinct recovery guidance', () => {
   const noMachine = byId({ ...fresh, machine: 'missing' })
+  expect(noMachine.machine.detail).toContain('No Podman machine')
   expect(noMachine.machine.command).toBe('podman machine init')
+  const probeFailed = byId({ ...fresh, machine: 'error', machine_error: 'permission denied' })
+  expect(probeFailed.machine.detail).toContain('Could not verify')
+  expect(probeFailed.machine.reason).toBe('permission denied')
+  expect(probeFailed.machine.command).toBe('podman machine list --format json')
   expect(blocked(setupSteps({ ...fresh, machine: 'missing' }))).toBe(true)
+  expect(blocked(setupSteps({ ...fresh, machine: 'error' }))).toBe(true)
 })
 
 test('linux has no machine step', () => {
