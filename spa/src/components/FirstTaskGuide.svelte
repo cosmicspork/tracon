@@ -1,8 +1,7 @@
 <script lang="ts">
   import { formatTokens } from '../lib/format'
   import { nodeReadiness } from '../lib/nodes'
-  import { store } from '../lib/store.svelte'
-  import { isTerminal, type ChannelInfo, type NodeInfo } from '../lib/types'
+  import type { ChannelInfo, NodeInfo } from '../lib/types'
 
   let {
     local,
@@ -29,11 +28,6 @@
       ...peers,
     ].find((target) => target.node.id === selectedNodeId && target.channel === selectedChannel) ?? null,
   )
-  const latest = $derived(selected
-    ? [...store.sessions.values()]
-      .filter((session) => session.node_id === selected.node.id && session.channel === selected.channel)
-      .sort((a, b) => b.created_ms - a.created_ms)[0] ?? null
-    : null)
   const dailyLimit = $derived.by(() => {
     const activeChannel = channel
     const ceiling = activeChannel?.ceiling.ceiling
@@ -49,11 +43,6 @@
       <span class="eyebrow">First task</span>
       <h2 id="first-task-title">Choose where it runs</h2>
     </div>
-    {#if latest}
-      <a class="session" href="/sessions/{latest.id}">
-        {isTerminal(latest.state) ? 'Latest session ended' : 'Latest session is active'} · open session
-      </a>
-    {/if}
   </div>
 
   <div class="targets">
@@ -113,7 +102,7 @@
       <ol>
         <li>
           {#if selected.node.is_self}
-            Choose or import a repository on {selected.node.name}.
+            Choose a managed checkout, clone from a forge, or copy files into a workspace on {selected.node.name}.
           {:else}
             Enter a repository path on {selected.node.name}. Local imports are not sent to a peer.
           {/if}
@@ -172,11 +161,6 @@
   }
   h3 {
     font: 600 14px var(--sans);
-  }
-  .session {
-    color: var(--acc);
-    font: 12px var(--mono);
-    text-align: right;
   }
   .targets {
     display: grid;
@@ -242,9 +226,6 @@
     .targets {
       grid-template-columns: 1fr;
       display: grid;
-    }
-    .session {
-      text-align: left;
     }
   }
 </style>

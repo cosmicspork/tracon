@@ -310,7 +310,7 @@
         <span>Model <em>{bound.model ? `${channel} binds one to ${sessionPhase}` : 'automatic by default'}</em></span>
         <ModelPicker bind:value={model} {models} recent={recentModels} none="Automatic (channel or node default)" />
         {#if models.length === 0}
-          <small class="crit">The node has not offered a model; bind a channel model or connect a provider.</small>
+          <small class="crit">No model is available for this channel. Declare one on a provider and check its channel scope; refresh only if a declared model has not appeared.</small>
         {/if}
       </label>
       <label>

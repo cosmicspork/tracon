@@ -49,8 +49,10 @@ pub struct SetupStatus {
     /// What the node said as it exited, when it is failing.
     pub service_error: Option<String>,
     pub podman: Option<String>,
-    /// macOS only: `running`, `starting`, `stopped` or `missing`.
+    /// macOS only: `running`, `starting`, `stopped`, `missing` or `error`.
     pub machine: Option<&'static str>,
+    /// Why Podman could not determine the macOS machine state.
+    pub machine_error: Option<String>,
 }
 
 /// Podman as the node will find it: the PATH a login shell would add, then
@@ -71,34 +73,60 @@ fn find_podman() -> Option<PathBuf> {
 }
 
 /// The default machine in `podman machine list --format json`, else the
-/// first one listed.
-fn machine_state_from(list: &serde_json::Value) -> &'static str {
-    let machines = list.as_array().map(Vec::as_slice).unwrap_or_default();
+/// first one listed. A valid empty array confirms there is no machine.
+fn machine_state_from(list: &serde_json::Value) -> Result<&'static str, String> {
+    let machines = list.as_array().ok_or_else(|| {
+        "Podman returned invalid machine-list JSON (expected an array).".to_string()
+    })?;
     let Some(m) = machines
         .iter()
         .find(|m| m["Default"].as_bool() == Some(true))
         .or_else(|| machines.first())
     else {
-        return "missing";
+        return Ok("missing");
     };
     if m["Running"].as_bool() == Some(true) {
-        "running"
+        Ok("running")
     } else if m["Starting"].as_bool() == Some(true) {
-        "starting"
+        Ok("starting")
+    } else if m["Running"].as_bool() == Some(false) {
+        Ok("stopped")
     } else {
-        "stopped"
+        Err("Podman returned machine data without a valid Running state.".into())
     }
 }
 
-async fn machine_state(podman: &Path) -> &'static str {
+async fn machine_state(podman: &Path) -> Result<&'static str, String> {
     let out = tokio::process::Command::new(podman)
         .args(["machine", "list", "--format", "json"])
         .output()
-        .await;
-    out.ok()
-        .and_then(|o| serde_json::from_slice(&o.stdout).ok())
-        .map(|v| machine_state_from(&v))
-        .unwrap_or("missing")
+        .await
+        .map_err(|e| format!("Could not run `podman machine list`: {e}"))?;
+    if !out.status.success() {
+        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("`podman machine list` exited with {}.", out.status)
+        } else {
+            format!("`podman machine list` failed: {detail}")
+        });
+    }
+    let list: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("Podman returned invalid machine-list JSON: {e}"))?;
+    machine_state_from(&list)
+}
+
+fn machine_failure(status: &SetupStatus) -> Option<String> {
+    if status.platform != "macos" {
+        return None;
+    }
+    match status.machine {
+        Some("running" | "starting" | "stopped") => None,
+        Some("missing") => Some("No Podman machine exists. Create one with `podman machine init`.".into()),
+        Some("error") | None => Some(status.machine_error.clone().unwrap_or_else(|| {
+            "Could not verify the Podman machine. Retry detection before installing the service.".into()
+        })),
+        _ => Some("Could not verify the Podman machine. Retry detection before installing the service.".into()),
+    }
 }
 
 pub async fn status(http: &reqwest::Client, url: &str) -> SetupStatus {
@@ -117,9 +145,12 @@ pub async fn status(http: &reqwest::Client, url: &str) -> SetupStatus {
         None => None,
     };
     let podman = find_podman();
-    let machine = match &podman {
-        Some(p) if cfg!(target_os = "macos") => Some(machine_state(p).await),
-        _ => None,
+    let (machine, machine_error) = match &podman {
+        Some(p) if cfg!(target_os = "macos") => match machine_state(p).await {
+            Ok(state) => (Some(state), None),
+            Err(error) => (Some("error"), Some(error)),
+        },
+        _ => (None, None),
     };
     SetupStatus {
         platform: if cfg!(target_os = "macos") {
@@ -142,6 +173,7 @@ pub async fn status(http: &reqwest::Client, url: &str) -> SetupStatus {
             None
         },
         podman: podman.map(|p| p.display().to_string()),
+        machine_error,
         machine,
     }
 }
@@ -158,7 +190,17 @@ async fn blocking<T: Send + 'static>(
 /// app runs, install the CLI the unit will name, install the unit, and wait
 /// for the node to answer.
 pub async fn install_service(http: &reqwest::Client, url: &str) -> Result<SetupStatus, String> {
-    match status(http, url).await.owner {
+    let initial = status(http, url).await;
+    if initial.podman.is_none() {
+        return Err(
+            "Podman is required before installing the service. Install Podman, then retry setup."
+                .into(),
+        );
+    }
+    if let Some(reason) = machine_failure(&initial) {
+        return Err(reason);
+    }
+    match initial.owner {
         Owner::Foreign => {
             return Err(
                 "a node you started yourself is answering; stop it, then install the service"
@@ -230,14 +272,43 @@ mod tests {
     #[test]
     fn the_machine_state_is_the_default_machines() {
         let one = |running: bool, starting: bool| json!([{"Name": "m", "Default": true, "Running": running, "Starting": starting}]);
-        assert_eq!(machine_state_from(&one(true, false)), "running");
-        assert_eq!(machine_state_from(&one(false, true)), "starting");
-        assert_eq!(machine_state_from(&one(false, false)), "stopped");
-        assert_eq!(machine_state_from(&json!([])), "missing");
+        assert_eq!(machine_state_from(&one(true, false)), Ok("running"));
+        assert_eq!(machine_state_from(&one(false, true)), Ok("starting"));
+        assert_eq!(machine_state_from(&one(false, false)), Ok("stopped"));
+        assert_eq!(machine_state_from(&json!([])), Ok("missing"));
         let two = json!([
             {"Name": "other", "Default": false, "Running": true},
             {"Name": "main", "Default": true, "Running": false}
         ]);
-        assert_eq!(machine_state_from(&two), "stopped");
+        assert_eq!(machine_state_from(&two), Ok("stopped"));
+        assert!(machine_state_from(&json!({"machines": []})).is_err());
+        assert!(machine_state_from(&json!([{"Name": "main"}])).is_err());
+    }
+
+    #[test]
+    fn service_install_requires_a_verified_machine_on_macos() {
+        let mut status = SetupStatus {
+            platform: "macos",
+            owner: Owner::None,
+            node_version: None,
+            sidecar_version: None,
+            cli_version: None,
+            cli_path: None,
+            path_hint: None,
+            service_installed: false,
+            service_running: false,
+            service_failing: false,
+            service_error: None,
+            podman: Some("/usr/bin/podman".into()),
+            machine: Some("error"),
+            machine_error: Some("probe failed".into()),
+        };
+        assert_eq!(machine_failure(&status).as_deref(), Some("probe failed"));
+        status.machine = Some("missing");
+        assert!(machine_failure(&status)
+            .unwrap()
+            .contains("podman machine init"));
+        status.machine = Some("stopped");
+        assert_eq!(machine_failure(&status), None);
     }
 }

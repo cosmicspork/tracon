@@ -1,6 +1,6 @@
-// What stands between this node itself and a session it can start. A ready
-// peer is a separate, valid task path and must not be hidden behind this local
-// setup state. The card comes back if a local provider is disconnected later.
+// What stands between this node itself and a session it can start. Home uses
+// actual target eligibility to choose between this checklist and the composer.
+// A ready peer is a separate task path; this checklist describes local setup.
 
 export interface SetupStep {
   href: string
@@ -13,9 +13,9 @@ export function setupSteps(s: {
   anyProviderConnected: boolean
   modelOffered: boolean
   anyChannel: boolean
+  memberChannel: boolean
   boundaryReady: boolean
-}): SetupStep[] | null {
-  if (s.boundaryReady && s.anyProviderConnected && s.modelOffered && s.anyChannel) return null
+}): SetupStep[] {
   return [
     {
       href: '/settings#maintenance',
@@ -30,23 +30,25 @@ export function setupSteps(s: {
       done: s.anyProviderConnected,
     },
     {
-      href: '/settings#connections',
-      title: 'Offer a model',
-      // Connected and still not offering is the confusing state, and it has two
-      // causes: the catalogue was never probed, or the credential is not scoped
-      // to a live channel. Refreshing fixes the first and says nothing about the
-      // second, so name both rather than send the operator round one loop twice.
-      detail:
-        s.anyProviderConnected && !s.modelOffered
-          ? 'Connected, but no model reaches a live channel. Refresh models, or check the credential’s channel scope.'
-          : 'A connected provider must offer a model before this node can accept a task.',
-      done: s.modelOffered,
+      href: '/settings#channels',
+      title: 'Name a channel',
+      detail: 'Work, credentials, and ceilings are scoped to it.',
+      done: s.anyChannel,
     },
     {
       href: '/settings#channels',
-      title: 'Name a channel',
-      detail: 'Work, credentials, and ceilings are scoped to it. One is enough to start.',
-      done: s.anyChannel,
+      title: 'Make this node a channel member',
+      detail: 'Create a channel here, or give this node membership in an existing open channel.',
+      done: s.memberChannel,
+    },
+    {
+      href: '/settings#connections',
+      title: 'Offer a model',
+      detail:
+        s.anyProviderConnected && !s.modelOffered
+          ? 'Declare models for the provider and check its channel scope. Refresh only if a declared model has not appeared.'
+          : 'A connected provider must offer a model to a channel this node belongs to.',
+      done: s.modelOffered,
     },
   ]
 }

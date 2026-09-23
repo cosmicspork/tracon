@@ -132,6 +132,10 @@ A local isolation failure or missing local provider does not block that peer.
 Choose the runner and channel first, then the repository, model, and optional
 session cap. Local setup shows the missing prerequisites; joining an existing
 mesh is separate from connecting a browser or registering it for notifications.
+The local checklist requires this node to belong to an open channel with a usable
+provider model; a channel held only by peers does not complete local setup.
+The first-task guide disappears after any session starts, including one on a peer;
+the composer remains available for subsequent work.
 
 A session runs one phase of an optional work item, or none at all: a *plan*
 session reads and ends by writing the plan; an *execute* session does the work and

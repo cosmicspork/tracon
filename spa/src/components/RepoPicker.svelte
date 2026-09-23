@@ -200,7 +200,7 @@
   <small>
     No forge credential is bound to {channel || 'this channel'}.
     <a href="/settings#connections">Add a GitHub or GitLab token in Settings › Connections.</a>
-    You can also pick a checkout this node already has below.
+    Upload a checkout with the file picker below. Managed repositories, if available, are listed under Recently used.
   </small>
 {:else if forges !== null}
   {#if searchable}
