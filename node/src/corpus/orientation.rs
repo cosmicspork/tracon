@@ -5,25 +5,29 @@
 //!
 //! **Whose words they are.** Everything this module generates is tracon's own
 //! account of the installation: the node, the session's work and phase, the
-//! tool names, what the node enforces. It is followed by two sections that are
+//! tool names, what the node enforces. It is followed by sections that are
 //! not tracon's — "Operator notes", the standing text the operator set for
-//! this channel, and "Pinned documents", the documents the operator has chosen
-//! to have every session start with, in full. A session that cannot tell one
-//! from the other cannot weigh either: it reads a human's preference as a
-//! property of the system, or a system fact as advice it may trade away. So
-//! each of those two carries a heading and a sentence saying where it came
-//! from, and nothing personal is ever compiled into this file.
+//! this channel; "Selected context", the documents the operator chose for
+//! this work item (`corpus::context`); and "Pinned documents", the documents
+//! the operator has chosen to have every session start with, in full. A
+//! session that cannot tell one from the other cannot weigh either: it reads
+//! a human's preference as a property of the system, or a system fact as
+//! advice it may trade away. So each of those carries a heading and a
+//! sentence saying where it came from, and nothing personal is ever compiled
+//! into this file.
 //!
 //! **What the cap may take.** *Reserved* is what this session is for and what
 //! bounds it: the node, the work item and its phase, the brief it points at,
 //! the plan or the diff under review, the agreements, the operator's
-//! directives, notes, customization, and any document the operator has
-//! pinned to the channel. It is assembled first and is never dropped to make
-//! room for anything below it — a pinned document goes in whole or not at
-//! all, never truncated; the operator's own curation is the limit, not a
-//! byte cap. *Discretionary* is everything else the node offers because it
-//! might help: the other ready work on the project, in ledger order, with
-//! whatever the reserved tier left of the cap.
+//! directives, notes, customization, the documents selected for the item,
+//! and any document the operator has pinned to the channel. It is assembled
+//! first and is never dropped to make room for anything below it — a pinned
+//! document goes in whole or not at all, never truncated; the operator's own
+//! curation is the limit, not a byte cap. The selected documents have an
+//! allowance of their own, applied when they are delivered, so one oversized
+//! research dump cannot become the session. *Discretionary* is everything
+//! else the node offers because it might help: the other ready work on the
+//! project, in ledger order, with whatever the reserved tier left of the cap.
 //!
 //! The cap exists because oversized context degrades the session it was meant
 //! to help. It used to be enforced by truncating the assembled text, which cut
@@ -94,6 +98,13 @@ pub struct Facts<'a> {
     /// standing text goes, and instruction content grants no permission on
     /// either path.
     pub manifest: &'a crate::manifest::LaunchManifest,
+    /// The documents the operator selected for this item, as this launch
+    /// delivered them, and the receipt recorded for it. `None` when the item
+    /// has no selection and never had one.
+    pub context: Option<(
+        &'a crate::corpus::context::Delivered,
+        &'a crate::corpus::context::Receipt,
+    )>,
 }
 
 /// Context this orientation could not carry in full. Named, with the call
@@ -166,10 +177,10 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, Vec<M
          the repository.\n\nIt carries two kinds of thing, and they are not read the same \
          way. **The system orientation comes first and is tracon's own**: what this node is, \
          what this session is for, which tools exist, and what the node refuses. Take it as \
-         fact about the system. **Any section headed \"Operator notes\" or \"Channel guides\" \
-         is not tracon's**: those are the person running this node, and this channel's own \
-         documents, speaking. Take them as instruction from a human — useful, and not a \
-         property of the system.\n\n",
+         fact about the system. **Any section headed \"Operator notes\", \"Selected \
+         context\" or \"Pinned documents\" is not tracon's**: those are the person running \
+         this node, and the documents they chose, speaking. Take them as instruction from a \
+         human — useful, and not a property of the system.\n\n",
     );
     push_node(&mut out, facts);
     push_work(&mut out, facts, &mut missing);
@@ -178,6 +189,7 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, Vec<M
     push_known(&mut out, store, facts, &mut missing);
     push_customization(&mut out, facts, &mut missing);
     push_operator_notes(&mut out, facts, &mut missing);
+    push_selected_context(&mut out, facts, &mut missing);
     push_pinned_documents(&mut out, store, facts);
 
     // Discretionary. Whatever the reserved tier — including every pinned
@@ -473,6 +485,36 @@ fn push_operator_notes(out: &mut String, facts: &Facts, missing: &mut Vec<Missin
     out.push_str("\n\n");
 }
 
+/// The documents the operator selected for this work item, as this launch
+/// delivered them (`corpus::context`). Reserved: this is what the item is
+/// for, chosen for it rather than for the channel, so it comes before the
+/// channel's pinned documents and is never spent to make room for anything
+/// discretionary. It has an allowance of its own, applied when it was
+/// delivered; what did not fit is already named in the delivery, and joins
+/// the rest of what this orientation does not carry.
+///
+/// An item whose selection was removed after an earlier attempt used it
+/// still gets the heading and the revision line: the session is owed "your
+/// context was taken away", not silence.
+fn push_selected_context(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
+    let Some((delivered, receipt)) = facts.context else {
+        return;
+    };
+    out.push_str(
+        "## Selected context\n\nDocuments the operator selected for this work item. They are \
+         not tracon's, and they were chosen for this item rather than for the channel; every \
+         attempt at the item starts with them. Where one contradicts the work item, the plan \
+         or the operator's notes, ask the operator rather than choosing.\n\n",
+    );
+    out.push_str(&crate::corpus::context::revision_line(receipt));
+    out.push_str("\n\n");
+    if delivered.received.is_empty() {
+        out.push_str("Nothing is selected for this attempt.\n\n");
+    }
+    out.push_str(&delivered.text);
+    missing.extend(delivered.missing.iter().cloned());
+}
+
 /// The heading the channel's pinned documents open under, and the sentence
 /// saying whose they are. Not "Conventions": a pinned document is one the
 /// operator chose, not one tracon selected, and calling it a convention
@@ -565,8 +607,9 @@ fn push_notice(out: &mut String, missing: &[Missing]) {
         return;
     }
     out.push_str(
-        "## Not in this orientation\n\nThe node's context cap kept the following out, not \
-         policy. Ask for any of it you need:\n\n",
+        "## Not in this orientation\n\nThe following was left out by a context cap, or \
+         because this node could not deliver it — not by policy. Ask for any of it you \
+         need:\n\n",
     );
     for m in missing {
         out.push_str(&m.line());
@@ -652,6 +695,7 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
+            context: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         assert!(missing.is_empty(), "{missing:?}");
@@ -751,6 +795,7 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &manifest,
+            context: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         let i = |s: &str| {
@@ -808,6 +853,7 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
+            context: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains(&"x".repeat(KNOWN_CHARS)), "{text}");
@@ -848,6 +894,7 @@ mod tests {
             ready: &ready,
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
+            context: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains(&ready_title), "ready work bypassed the cap");
@@ -894,6 +941,7 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
+            context: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains("old guidance"), "{text}");
@@ -938,6 +986,7 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
+            context: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(
@@ -987,6 +1036,7 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
+            context: None,
         };
         let (text, _) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains("should not appear"), "{text}");
@@ -1028,6 +1078,7 @@ mod tests {
             ready: &ready,
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
+            context: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         // All three pinned documents survive in full: none was capped,
@@ -1079,6 +1130,7 @@ mod tests {
                 ready: &[],
                 review: None,
                 manifest,
+                context: None,
             }
         }
         let (bare, _) = assemble(&store, &Policy::default(), &facts(&item, &manifest));
@@ -1132,6 +1184,7 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &manifest,
+            context: None,
         };
         let (text, _) = assemble(&store, &Policy::shipped(), &facts);
 
@@ -1154,6 +1207,98 @@ mod tests {
         // Closing is not what submitting does, and the roadmap moves work
         // further away from closing merely because a change was published.
         assert!(text.contains("Submitting is not closing"), "{text}");
+    }
+
+    /// The documents the operator selected for the item are reserved, the
+    /// operator's rather than tracon's, specific to the item so they come
+    /// before the channel's pinned documents, and say which revision they
+    /// are. One the node could not deliver is named, not silently missing.
+    #[test]
+    fn selected_context_is_reserved_and_names_what_it_could_not_carry() {
+        let store = Store::open_in_memory().unwrap();
+        let doc = |id: &str, slug: &str, title: &str, body: &str, pinned: bool| {
+            store
+                .write_change(
+                    "n",
+                    "personal",
+                    "document",
+                    ChangeOp::Upsert,
+                    id,
+                    json!({
+                    "channel": "personal", "slug": slug, "kind": "ref", "title": title,
+                    "body": body, "pinned": pinned, "hash": format!("h-{id}"),
+                    "created_ms": 1, "updated_ms": 1}),
+                )
+                .unwrap();
+        };
+        let it = item("Triage alerts", "");
+        doc(
+            "d1",
+            "ref-interviews",
+            "Interviews",
+            "Admins sort by severity.",
+            false,
+        );
+        doc(
+            "d2",
+            "guide-house",
+            "House style",
+            "Pinned for everyone.",
+            true,
+        );
+        doc(
+            "d3",
+            &crate::corpus::context::slug_for(&it.id),
+            "Context",
+            "# Context\n\n## Research\n\n- [doc:ref-interviews] what admins said\n\n\
+             ## Constraints\n\n- [doc:ref-never-synced]\n",
+            false,
+        );
+        let (delivered, receipt) = crate::corpus::context::prepare(&store, "s1", &it)
+            .unwrap()
+            .unwrap();
+        let manifest = crate::manifest::LaunchManifest::default();
+        let facts = Facts {
+            node_name: "n",
+            node_id: "id",
+            backend: "local",
+            harness: "fake",
+            harness_version: "1",
+            channel: "personal",
+            project_id: None,
+            project_name: None,
+            tools: &[],
+            worktree: "/work",
+            phase: "execute",
+            item: Some(&it),
+            plan_body: None,
+            ready: &[],
+            review: None,
+            manifest: &manifest,
+            context: Some((&delivered, &receipt)),
+        };
+        let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
+        let i = |s: &str| {
+            text.find(s)
+                .unwrap_or_else(|| panic!("missing {s:?} in:\n{text}"))
+        };
+        assert!(i("## Work") < i("## Selected context"));
+        assert!(i("## Working agreements") < i("## Selected context"));
+        assert!(i("## Selected context") < i("## Pinned documents"));
+        // Said whose they are, in the section itself.
+        assert!(text[i("## Selected context")..i("## Pinned documents")]
+            .contains("They are not tracon's"));
+        assert!(text.contains("Context revision 1 for this item."), "{text}");
+        assert!(text.contains("Admins sort by severity."), "{text}");
+        assert!(
+            text.contains("_Selected because: what admins said_"),
+            "{text}"
+        );
+        // The one that could not be delivered is named with a way to get it.
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert!(missing[0].what.contains("ref-never-synced"), "{missing:?}");
+        assert!(i("## Not in this orientation") > i("## Pinned documents"));
+        assert!(text.contains("could not deliver"), "{text}");
     }
 
     /// A denial is answered in the task's own terms by `mcp::refusal`; the
@@ -1179,6 +1324,7 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
+            context: None,
         };
         let (text, _) = assemble(&store, &Policy::shipped(), &facts);
         assert!(text.contains("## Working agreements"), "{text}");

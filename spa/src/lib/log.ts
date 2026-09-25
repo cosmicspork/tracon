@@ -173,7 +173,30 @@ export function orientationLine(payload: Record<string, unknown>): string {
     : payload.trimmed
       ? ' · trimmed'
       : ''
-  return `orientation · ${formatTokens(chars)} chars${cut}`
+  const context = orientationContext(payload)
+  const ctx = context
+    ? ` · context revision ${context.revision}${context.changes.length ? ` · ${context.changes.length} changed` : ''}`
+    : ''
+  return `orientation · ${formatTokens(chars)} chars${ctx}${cut}`
+}
+
+/** The selected context an orientation carried: its revision, and what moved since the previous attempt. */
+export interface OrientationContext {
+  revision: number
+  previous_revision: number | null
+  changes: { kind: string; slug: string; says: string }[]
+  omitted: string[]
+}
+
+export function orientationContext(payload: Record<string, unknown>): OrientationContext | null {
+  const raw = payload.context as Partial<OrientationContext> | null | undefined
+  if (!raw || typeof raw !== 'object' || typeof raw.revision !== 'number') return null
+  return {
+    revision: raw.revision,
+    previous_revision: typeof raw.previous_revision === 'number' ? raw.previous_revision : null,
+    changes: Array.isArray(raw.changes) ? raw.changes.filter((c) => c && typeof c.says === 'string') : [],
+    omitted: Array.isArray(raw.omitted) ? raw.omitted.filter((o) => typeof o === 'string') : [],
+  }
 }
 
 /// "guide \"Workspace\" (`guide-workspace`) cut short, 8,000 chars — call

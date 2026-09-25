@@ -7,6 +7,7 @@
     repetitionLine,
     missingContext,
     missingLine,
+    orientationContext,
     orientationLine,
     usageMismatchLine,
     usageUnmeteredLine,
@@ -126,9 +127,19 @@
         <div class="mark wait">{usageUnmeteredLine(e.payload)}</div>
       {:else if e.kind === 'orientation'}
         {@const missing = missingContext(e.payload)}
+        {@const context = orientationContext(e.payload)}
         <details class="fold">
           <summary class:wait={missing.length > 0}>{orientationLine(e.payload)}</summary>
           <div>
+            {#if context && context.changes.length > 0}
+              <!-- What this attempt was given that the previous one was not,
+                   or the other way round. -->
+              <ul class="missing">
+                {#each context.changes as c, i (i)}
+                  <li>context: {c.says}</li>
+                {/each}
+              </ul>
+            {/if}
             {#if missing.length > 0}
               <!-- Named, not flagged: the operator can see whether the guide
                    the session needed was one of the ones it did not get. -->

@@ -191,6 +191,11 @@ impl Tools {
                 review::VERDICT
             ));
         }
+        if name == docs::DOC_WRITE {
+            if let Some(refusal) = docs::reserved_for_operator(args) {
+                return Err(refusal);
+            }
+        }
         if Self::NOT_EXTERNAL.contains(&name) && self.is_external_session(ctx) {
             return Err(format!(
                 "{name} is for a review session the node starts; put your own change up with {}",

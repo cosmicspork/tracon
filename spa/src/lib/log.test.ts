@@ -3,6 +3,7 @@ import {
   groupLog,
   missingContext,
   missingLine,
+  orientationContext,
   orientationLine,
   groupOpen,
   groupSummary,
@@ -152,4 +153,24 @@ test('an orientation event from an older node carries no omissions', () => {
   expect(missingContext({ missing: [null, 7, { what: 'the plan', partial: true, chars: 5 }] })).toHaveLength(1)
   expect(orientationLine({ chars: 100, trimmed: true })).toBe('orientation · 100 chars · trimmed')
   expect(orientationLine({ chars: 100, trimmed: false })).toBe('orientation · 100 chars')
+})
+
+test('an orientation names the context revision it carried and what moved since the last attempt', () => {
+  const payload = {
+    chars: 900,
+    context: {
+      revision: 2,
+      previous_revision: 1,
+      changes: [{ kind: 'edited', slug: 'brief-a', role: 'brief', says: '`brief-a` edited since the previous attempt' }],
+      omitted: ['guide-b'],
+    },
+  }
+  expect(orientationLine(payload)).toBe('orientation · 900 chars · context revision 2 · 1 changed')
+  expect(orientationContext(payload)?.omitted).toEqual(['guide-b'])
+  expect(orientationLine({ chars: 900, context: { revision: 1, previous_revision: null, changes: [], omitted: [] } })).toBe(
+    'orientation · 900 chars · context revision 1',
+  )
+  // An orientation from before contexts were selected, or for an item with none.
+  expect(orientationContext({ chars: 1 })).toBeNull()
+  expect(orientationContext({ context: null })).toBeNull()
 })

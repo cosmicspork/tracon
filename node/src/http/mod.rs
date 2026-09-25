@@ -175,6 +175,10 @@ pub fn router(state: AppState) -> Router {
                 .put(api::put_brief)
                 .delete(api::unlink_brief),
         )
+        .route(
+            "/api/work/{id}/context",
+            get(api::get_context).put(api::put_context),
+        )
         .route("/api/docs", get(api::list_docs))
         .route("/api/docs/reindex", post(api::reindex_docs))
         .route(

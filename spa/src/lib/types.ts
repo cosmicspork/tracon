@@ -578,6 +578,85 @@ export interface BriefEntryInput {
   refs: { kind: RefKind; value: string }[]
 }
 
+/** What a selected document is for; also the order a session reads them in. */
+export type ContextRole = 'brief' | 'research' | 'decisions' | 'constraints' | 'documents'
+
+/** Why a selected document did not reach an attempt whole. */
+export type ContextReason = 'absent' | 'archived' | 'html' | 'cap'
+
+export interface ContextPick {
+  role: ContextRole
+  slug: string
+  note: string
+}
+
+/** A selected document resolved against this node: would the next attempt get it? */
+export interface ContextResolved {
+  role: ContextRole
+  slug: string
+  title?: string
+  known: boolean
+  chars: number
+  reason?: ContextReason
+}
+
+/** The operator's selection for a work item, as the node reads its document. */
+export interface ContextSelection {
+  channel: string
+  slug: string
+  work_item_id: string
+  hash: string
+  updated_ms: number
+  title: string
+  preamble: string
+  picks: ContextPick[]
+  extra: string
+  resolved: ContextResolved[]
+}
+
+/** One selected document as one attempt received it. */
+export interface ContextReceived {
+  role: ContextRole
+  slug: string
+  note?: string
+  title?: string
+  hash?: string
+  chars: number
+  delivered_chars: number
+  delivery: 'full' | 'partial' | 'omitted'
+  reason?: ContextReason
+}
+
+export interface ContextChange {
+  kind: 'added' | 'removed' | 'moved' | 'edited' | 'delivery'
+  slug: string
+  role: ContextRole
+  says: string
+}
+
+/** What one attempt at the item received. Written at launch, never rewritten. */
+export interface ContextReceipt {
+  session_id: string
+  work_item_id: string
+  channel: string
+  revision: number
+  digest: string
+  selection_hash?: string
+  received: ContextReceived[]
+  previous_session?: string
+  previous_revision?: number
+  changes: ContextChange[]
+  created_ms: number
+}
+
+export interface WorkContext {
+  slug: string
+  selection: ContextSelection | null
+  /** Newest first. */
+  attempts: ContextReceipt[]
+  roles: ContextRole[]
+}
+
 export type Blocker = { kind: 'open'; id: string } | { kind: 'unknown'; id: string } | { kind: 'cycle' }
 export type Readiness = { state: 'ready' } | { state: 'blocked'; by: Blocker[] } | { state: 'closed' }
 

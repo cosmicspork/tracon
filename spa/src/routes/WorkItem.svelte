@@ -1,5 +1,6 @@
 <script lang="ts">
   import BriefPanel from '../components/BriefPanel.svelte'
+  import ContextPanel from '../components/ContextPanel.svelte'
   import EvidenceLinks from '../components/EvidenceLinks.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
@@ -146,6 +147,7 @@
   {/if}
 
   <BriefPanel {item} {brief} onchange={load} />
+  <ContextPanel {item} />
 
   {#if sessions.length === 0}
     <EvidenceLinks workItemId={item.id} channel={item.channel} />
