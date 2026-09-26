@@ -20,6 +20,7 @@ use serde_json::Value;
 
 pub mod authority;
 pub use authority::*;
+pub mod context;
 pub mod corpus;
 pub mod evidence;
 pub mod manifest;

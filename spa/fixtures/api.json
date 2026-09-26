@@ -765,6 +765,177 @@
       }
     ]
   },
+  "/api/work/wi-2": {
+    "item": {
+      "id": "wi-2",
+      "channel": "personal",
+      "project_id": "orbit",
+      "title": "Add per-channel rate limits",
+      "body": "The gateway refuses over-ceiling calls but nothing smooths bursts.",
+      "state": "open",
+      "priority": 2,
+      "deps": [],
+      "discovered_from": null,
+      "discovered_by_session": null,
+      "phase_plan_slug": "plan-rate-limits",
+      "brief_slug": null,
+      "closed_by_session": null,
+      "created_ms": -180000000,
+      "updated_ms": -2700000,
+      "readiness": {
+        "state": "ready"
+      },
+      "session_id": "s-run"
+    },
+    "sessions": [],
+    "discovered": [],
+    "brief": null
+  },
+  "/api/work/wi-2/context": {
+    "slug": "context-wi-2",
+    "roles": [
+      "brief",
+      "research",
+      "decisions",
+      "constraints",
+      "documents"
+    ],
+    "selection": {
+      "channel": "personal",
+      "slug": "context-wi-2",
+      "work_item_id": "wi-2",
+      "hash": "c2",
+      "updated_ms": -3600000,
+      "title": "Context: Add per-channel rate limits",
+      "preamble": "Selected by the operator for work item `wi-2`.",
+      "picks": [
+        {
+          "role": "research",
+          "slug": "ref-burst-traces",
+          "note": "three bursts from last week's traces"
+        },
+        {
+          "role": "decisions",
+          "slug": "note-token-bucket",
+          "note": ""
+        },
+        {
+          "role": "constraints",
+          "slug": "guide-gateway-latency",
+          "note": "p99 budget"
+        }
+      ],
+      "extra": "",
+      "resolved": [
+        {
+          "role": "research",
+          "slug": "ref-burst-traces",
+          "title": "Burst traces",
+          "known": true,
+          "chars": 4200
+        },
+        {
+          "role": "decisions",
+          "slug": "note-token-bucket",
+          "title": "Token bucket, not leaky",
+          "known": true,
+          "chars": 1800
+        },
+        {
+          "role": "constraints",
+          "slug": "guide-gateway-latency",
+          "known": false,
+          "chars": 0,
+          "reason": "absent"
+        }
+      ]
+    },
+    "attempts": [
+      {
+        "session_id": "s-run",
+        "work_item_id": "wi-2",
+        "channel": "personal",
+        "revision": 2,
+        "digest": "d2",
+        "selection_hash": "c2",
+        "received": [
+          {
+            "role": "research",
+            "slug": "ref-burst-traces",
+            "title": "Burst traces",
+            "hash": "h1b",
+            "chars": 4200,
+            "delivered_chars": 4200,
+            "delivery": "full"
+          },
+          {
+            "role": "decisions",
+            "slug": "note-token-bucket",
+            "title": "Token bucket, not leaky",
+            "hash": "h2",
+            "chars": 1800,
+            "delivered_chars": 1800,
+            "delivery": "full"
+          },
+          {
+            "role": "constraints",
+            "slug": "guide-gateway-latency",
+            "chars": 0,
+            "delivered_chars": 0,
+            "delivery": "omitted",
+            "reason": "absent"
+          }
+        ],
+        "previous_session": "s-plan",
+        "previous_revision": 1,
+        "changes": [
+          {
+            "kind": "edited",
+            "slug": "ref-burst-traces",
+            "role": "research",
+            "says": "`ref-burst-traces` edited since the previous attempt"
+          },
+          {
+            "kind": "added",
+            "slug": "guide-gateway-latency",
+            "role": "constraints",
+            "says": "`guide-gateway-latency` added as constraints"
+          }
+        ],
+        "created_ms": -2700000
+      },
+      {
+        "session_id": "s-plan",
+        "work_item_id": "wi-2",
+        "channel": "personal",
+        "revision": 1,
+        "digest": "d1",
+        "selection_hash": "c1",
+        "received": [
+          {
+            "role": "research",
+            "slug": "ref-burst-traces",
+            "title": "Burst traces",
+            "hash": "h1a",
+            "chars": 3900,
+            "delivered_chars": 3900,
+            "delivery": "full"
+          },
+          {
+            "role": "decisions",
+            "slug": "note-token-bucket",
+            "title": "Token bucket, not leaky",
+            "hash": "h2",
+            "chars": 1800,
+            "delivered_chars": 1800,
+            "delivery": "full"
+          }
+        ],
+        "changes": [],
+        "created_ms": -90000000
+      }
+    ]
+  },
   "/api/work/ready": {
     "items": [
       {

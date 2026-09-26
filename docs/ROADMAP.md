@@ -52,12 +52,11 @@ It must also preserve what was learned after the intended user encountered the r
 Work items and documents already carry the optional product brief: intended user,
 problem, source references, constraints, success criteria and open questions, with
 every line marked observed, inferred or decided and pointing at the evidence it rests
-on. What remains is the context that follows an attempt, and criteria bound to checks.
+on. An item also carries the context the operator selected for it — brief, research,
+decisions, constraints and other documents — which every later attempt receives in
+full, with a receipt of what it actually got and what changed since the attempt
+before. What remains is criteria bound to checks.
 
-- [ ] Let the operator select a versioned, work-specific context bundle that follows
-      subsequent attempts: brief, research, decisions, constraints and relevant documents.
-      Record what each attempt actually received and make changes or omissions visible;
-      channel-wide guides and memory retrieval are not a substitute for selected context.
 - [ ] Link individual acceptance criteria to checks, scenarios, observations and human
       verdicts. Make uncovered criteria, assumptions and unresolved questions visible.
       An agent may propose what good means; passing its own checks does not establish

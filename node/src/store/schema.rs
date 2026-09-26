@@ -1061,6 +1061,24 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX session_legacy ON session(legacy_ms);
     CREATE INDEX session_parent ON session(parent_session);
     "#,
+    // 42: what each attempt at a work item received of the context the
+    // operator selected for it (`corpus::context`). One row per session,
+    // never rewritten; `revision` counts distinct digests per item, so the
+    // same bytes received twice are the same revision. Node-local, like a
+    // launch manifest's revisions: the selection itself is a document and
+    // travels with the channel, and what one node's session received is that
+    // node's record.
+    r#"
+    CREATE TABLE context_receipt (
+        session_id   TEXT PRIMARY KEY,
+        work_item_id TEXT NOT NULL,
+        revision     INTEGER NOT NULL,
+        digest       TEXT NOT NULL,
+        body         TEXT NOT NULL,
+        created_ms   INTEGER NOT NULL
+    );
+    CREATE INDEX context_receipt_item ON context_receipt(work_item_id, created_ms);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

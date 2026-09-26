@@ -230,6 +230,18 @@ comes to you for approval, and which refuses outright to record a decision in yo
 name or an observation with nothing to point at. Nothing requires a brief: an item
 without one is worked from its description and its plan, exactly as before.
 
+**You choose what every attempt at an item starts with.** The item's Context
+panel selects documents for it by role — the brief, research, decisions,
+constraints, anything else relevant — into one document, `context-<item>`, that
+you can also edit by hand. Each later session on the item gets those documents in
+full in its orientation, under their own heading; a session cannot change the
+selection, only ask you to. The node records what each attempt actually received
+— every document at its exact revision, whole, cut short or left out and why —
+numbers the distinct contexts as revisions, and says what changed since the
+previous attempt, both to you on the item and to the session in its orientation.
+A document the next attempt will not get, because this node does not hold it or
+it has been archived, is flagged before the attempt starts.
+
 The model picker uses the selected runner's connected, channel-bound providers.
 A connected provider whose models never appear has a stale catalogue — the probe
 runs when the provider connects, and can miss if the harness was not up yet or the

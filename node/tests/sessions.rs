@@ -2260,6 +2260,18 @@ async fn orientation_with(
     launch_with: Option<Arc<dyn HarnessAdapter>>,
     pinned_docs: usize,
 ) -> Orientation {
+    orientation_setup(tag, launch_with, pinned_docs, false).await
+}
+
+/// The whole setup, optionally with a context the operator selected for the
+/// item before its session starts: one research document this node holds and
+/// one constraint it does not.
+async fn orientation_setup(
+    tag: &str,
+    launch_with: Option<Arc<dyn HarnessAdapter>>,
+    pinned_docs: usize,
+    with_context: bool,
+) -> Orientation {
     state::isolate();
     let dir = state::scratch(&format!("orientation-{tag}"));
     let repo = dir.join("repo");
@@ -2384,6 +2396,49 @@ async fn orientation_with(
         },
     )
     .unwrap();
+    if with_context {
+        let doc = |slug: &str, body: &str| {
+            tracon::mcp::docs::write_document(
+                &store,
+                &Bus::new(),
+                "n1",
+                "personal",
+                slug,
+                body,
+                None,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+        };
+        doc(
+            "ref-ledger-research",
+            "# Ledger research\n\nOperators read ready work first thing.",
+        );
+        tracon::corpus::context::write(
+            &store,
+            &Bus::new(),
+            "n1",
+            &item.id,
+            tracon::corpus::context::SelectionInput {
+                picks: vec![
+                    tracon::corpus::context::PickInput {
+                        role: "research".into(),
+                        slug: "ref-ledger-research".into(),
+                        note: "why ready work matters".into(),
+                    },
+                    tracon::corpus::context::PickInput {
+                        role: "constraints".into(),
+                        slug: "guide-elsewhere".into(),
+                        note: String::new(),
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
     let row = manager
         .create(
             tracon::session::NewSession {
@@ -2557,6 +2612,65 @@ async fn pinned_documents_do_not_cost_a_session_its_task_or_its_directives() {
             .iter()
             .all(|m| !m["what"].as_str().unwrap_or("").contains("guide-")),
         "{missing:#?}"
+    );
+
+    tracon::session::materialize::remove(&row.id);
+}
+
+/// The documents the operator selected for the item reach the session in
+/// full, the one the node could not deliver is named, and what the session
+/// received is on record — as a receipt against the item, and on the
+/// orientation event the operator reads.
+#[tokio::test]
+async fn a_session_receives_its_items_selected_context_and_the_receipt_is_kept() {
+    state::isolate();
+    let Orientation {
+        store, item, row, ..
+    } = orientation_setup("context", None, 0, true).await;
+
+    let mut found = None;
+    for _ in 0..300 {
+        if let Some(e) = store
+            .events_after(&row.id, 0, 500)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == "orientation")
+        {
+            found = Some(e);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let e = found.expect("no orientation event");
+    let text = e.payload["text"].as_str().unwrap();
+    assert!(text.contains("## Selected context"), "{text}");
+    assert!(text.contains("Context revision 1 for this item."), "{text}");
+    assert!(
+        text.contains("Operators read ready work first thing."),
+        "{text}"
+    );
+    assert!(text.contains("guide-elsewhere"), "{text}");
+    assert_eq!(e.payload["context"]["revision"], 1, "{}", e.payload);
+    assert_eq!(
+        e.payload["context"]["omitted"],
+        json!(["guide-elsewhere"]),
+        "{}",
+        e.payload
+    );
+
+    let receipt = store
+        .context_receipt_for(&row.id)
+        .unwrap()
+        .expect("a receipt for the session");
+    assert_eq!(receipt.work_item_id, item.id);
+    assert_eq!(receipt.received.len(), 2);
+    assert_eq!(
+        receipt.received[0].delivery,
+        tracon::corpus::context::Delivery::Full
+    );
+    assert_eq!(
+        receipt.received[1].reason,
+        Some(tracon::corpus::context::Reason::Absent)
     );
 
     tracon::session::materialize::remove(&row.id);

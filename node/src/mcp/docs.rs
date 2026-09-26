@@ -23,6 +23,7 @@ pub const KINDS: &[&str] = &[
     "proposal",
     "plan",
     "brief",
+    "context",
     "guide",
     "ref",
     "architecture",
@@ -47,6 +48,21 @@ pub fn title_of(slug: &str, body: &str) -> String {
             let rest = slug.strip_prefix(&format!("{kind}-")).unwrap_or(slug);
             rest.replace('-', " ")
         })
+}
+
+/// A work item's selected context is the operator's choice of what every
+/// attempt at the item starts with (`corpus::context`). A session writing it
+/// would be choosing its own context — the substitution the selection exists
+/// to prevent — so `doc_write` refuses the slug outright, before the policy
+/// gate would put it to the operator as an ordinary document edit.
+pub fn reserved_for_operator(args: &Value) -> Option<String> {
+    let slug = args["slug"].as_str().unwrap_or("").trim();
+    (kind_of(slug) == corpus::context::KIND).then(|| {
+        format!(
+            "`{slug}` is a work item's selected context, which only the operator changes. \
+             Say which document belongs in it, and why, with `ask_operator`."
+        )
+    })
 }
 
 pub fn valid_slug(slug: &str) -> bool {

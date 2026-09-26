@@ -3586,6 +3586,60 @@ fn brief_err(e: crate::corpus::brief::BriefError) -> ApiError {
     }
 }
 
+/// `GET /api/work/{id}/context`: the documents the operator selected for the
+/// item, each resolved against this node, and what every attempt so far
+/// received — newest first, each with what changed since the one before.
+/// An item with no selection answers with a null selection, the slug a first
+/// write would start, and whatever attempts earlier selections left behind.
+pub async fn get_context(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let item = s.store().work_get(&id)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        format!("no work item {id}"),
+    ))?;
+    Ok(Json(context_json(&s, &item)?))
+}
+
+/// `PUT /api/work/{id}/context`: replace the item's selection. Applies to the
+/// next attempt; a running session keeps what it was started with, and its
+/// receipt says so.
+pub async fn put_context(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::corpus::context::SelectionInput>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::corpus::context::write(s.store(), s.manager.bus(), &s.node_id, &id, input).map_err(
+        |e| {
+            use crate::corpus::context::ContextError::*;
+            match e {
+                MissingItem(_) => ApiError(StatusCode::NOT_FOUND, e.to_string()),
+                Conflict { .. } => ApiError(StatusCode::CONFLICT, e.to_string()),
+                Store(e) => ApiError::from(e),
+                other => ApiError(StatusCode::BAD_REQUEST, other.to_string()),
+            }
+        },
+    )?;
+    let item = s.store().work_get(&id)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        format!("no work item {id}"),
+    ))?;
+    Ok(Json(context_json(&s, &item)?))
+}
+
+fn context_json(s: &AppState, item: &tracon_sync::work::WorkItem) -> ApiResult<serde_json::Value> {
+    let selection = crate::corpus::context::read(s.store(), item)?;
+    let mut attempts = s.store().context_receipts(&item.id)?;
+    attempts.reverse();
+    Ok(json!({
+        "slug": crate::corpus::context::slug_for(&item.id),
+        "selection": selection,
+        "attempts": attempts,
+        "roles": crate::corpus::context::ROLES,
+    }))
+}
+
 /// `PUT /api/work/{id}` with any of title, body, deps, priority, state.
 pub async fn put_work(
     State(s): State<AppState>,

@@ -42,6 +42,8 @@ import type {
   Brief,
   BriefEntryInput,
   BriefField,
+  ContextRole,
+  WorkContext,
   WorkItem,
   WorkView,
   QaEvidence,
@@ -551,6 +553,14 @@ export const api = {
       if_hash?: string
     },
   ) => call<{ brief: Brief; summary: string }>('PUT', `/api/work/${id}/brief`, input),
+  /** What the operator selected for the item, and what each attempt received. */
+  workContext: (id: string) => call<WorkContext>('GET', `/api/work/${id}/context`),
+  /**
+   * Replace the item's selection. Applies to the next attempt; a running
+   * session keeps what it started with. `if_hash` is the hash last read.
+   */
+  putContext: (id: string, input: { picks: { role: ContextRole; slug: string; note?: string }[]; if_hash?: string }) =>
+    call<WorkContext>('PUT', `/api/work/${id}/context`, input),
   /** Unlink the brief from the item. The document stays. */
   unlinkBrief: (id: string) => call<{ ok: boolean; slug: string; document_kept: boolean }>('DELETE', `/api/work/${id}/brief`),
   addWork: (w: { channel: string; title: string; body?: string; deps?: string[]; priority?: number; project_id?: string; discovered_from?: string }) =>

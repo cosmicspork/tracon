@@ -704,19 +704,20 @@ an event, so the transcript shows what the agent was told.
 **Orientation separates tracon's account of itself from the operator's.** The
 system orientation is generated from the node's own state: the node and harness,
 the item and phase, the tool names this channel serves, the enforced agreements.
-It is followed by two sections that carry a heading saying they are not tracon's —
-*Operator notes*, the standing text on the channel's launch manifest, and *Channel
-guides*, documents of kind `guide` from the corpus. A session that cannot tell a
-system fact from a human's preference weighs neither correctly, so the boundary is
-stated rather than left to be inferred.
+It is followed by sections that carry a heading saying they are not tracon's —
+*Operator notes*, the standing text on the channel's launch manifest; *Selected
+context*, the documents the operator chose for this work item; and *Pinned
+documents*, the ones the operator pinned to every session on the channel. A
+session that cannot tell a system fact from a human's preference weighs neither
+correctly, so the boundary is stated rather than left to be inferred.
 
 **Orientation also reserves its space for the work before the guides.** What the
 session is for and what bounds it — the node it runs on, the item and phase, the
 plan or the diff under review, the enforced agreements, the operator's directives,
-notes and launch customization — is assembled first and is never dropped to make
-room for anything else. Channel guides and other ready work are discretionary and
-get what is left of the context cap: guides shortest first, then ready work in
-ledger order.
+notes and launch customization, the item's selected context and the channel's
+pinned documents — is assembled first and is never dropped to make room for
+anything else. Other ready work is discretionary and gets what is left of the
+context cap, in ledger order.
 The cap used to be enforced by truncating
 the assembled text, which cut from the end, where the task and the constraints were:
 long guides could leave a session a wall of advice and no job. Whatever does not
@@ -775,6 +776,48 @@ not recognize is kept and written back rather than dropped for not fitting. A
 section with no lines says what it does not say — an empty success-criteria
 section reads as "no success criteria stated" — because a brief that has never
 heard from the customer should look like one rather than like a tidy form.
+
+### Selected context
+
+The brief says what the work is for; it is not everything an attempt should start
+from. The research behind it, the decisions already taken, the constraints the
+answer must keep and the documents that matter to this item and not to the whole
+channel are chosen by the operator, per item, and **follow every subsequent
+attempt** — plan, execute, review, and the revised attempt after a request for
+changes. Channel-wide pinned documents and memory recall are not a substitute:
+one is chosen for every session on the channel, the other for whatever the query
+happened to match.
+
+The selection is a document of kind `context`, `context-<item>`, beside the
+item's `brief-` and `plan-`: one line per document, `- [doc:slug] why it is
+here`, under a heading naming its role — Brief, Research, Decisions, Constraints
+or Documents. It travels with the channel and is readable and editable by hand
+with no node running; prose written into it that is not a selection line is
+kept. It is the operator's: `doc_write` refuses a `context-` slug outright,
+before the policy gate would put it to the operator as an ordinary edit, because
+a session choosing its own context is the substitution the selection exists to
+prevent. A session that thinks a document belongs asks.
+
+**What each attempt received is recorded, not inferred from the selection.** At
+launch the node resolves each selected document against what it holds and places
+it in the orientation in full, in role order, within an allowance of its own
+(48,000 characters) that nothing discretionary can spend. A document not on this
+node, archived, an HTML bundle, or past the allowance is not dropped silently: it
+is named in the orientation with the call that fetches it, and marked on the
+receipt. The receipt — one per session, never rewritten — records every selected
+document's role, slug, hash and delivery: whole, cut short, or left out and why.
+Its digest is over what was received, not who received it, and the item's
+context **revision** counts distinct digests, so two attempts that started from
+the same bytes share a revision and the first to start from something new mints
+the next. Each receipt also names what changed since the previous attempt at the
+item — a document added, removed, moved between roles, edited since, or
+delivered differently — and the orientation says so in one line ("Context
+revision 3 for this item. Since the previous attempt (revision 2): `ref-traces`
+edited since the previous attempt"). An item whose selection was removed after an
+attempt used it still gets a receipt, so the removal is visible rather than
+indistinguishable from never having had one. Receipts are node-local, like a
+launch manifest's revisions; the exact text an attempt was given is also on its
+orientation event.
 
 ## Sessions, phases, budgets
 
