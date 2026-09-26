@@ -32,6 +32,18 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.22.0](https://github.com/cosmicspork/tracon/compare/v0.21.0...v0.22.0) (2026-09-26)
+
+
+### Features
+
+* **context:** let the operator select what every attempt at an item starts with ([#256](https://github.com/cosmicspork/tracon/issues/256)) ([af0991b](https://github.com/cosmicspork/tracon/commit/af0991bb711ca2a006a991715fb367be996daeae))
+
+
+### Bug Fixes
+
+* finish first-task onboarding ([#254](https://github.com/cosmicspork/tracon/issues/254)) ([9f0be75](https://github.com/cosmicspork/tracon/commit/9f0be75d4004454c63719aa9cc61b6fd4134695f))
+
 ## [0.21.0](https://github.com/cosmicspork/tracon/compare/v0.20.0...v0.21.0) (2026-09-22)
 
 
