@@ -616,6 +616,119 @@ async fn a_refused_call_says_the_operator_refused_it() {
     assert!(text.contains("did not allow"), "{text}");
 }
 
+/// The kinds and payloads of an attachment's log.
+async fn log(h: &Harness, id: &str) -> Vec<Value> {
+    let (_, v) = call(
+        &h.operator,
+        "GET",
+        &format!("/api/sessions/{id}/events"),
+        None,
+    )
+    .await;
+    v.as_array().cloned().unwrap_or_default()
+}
+
+/// A harness that hung up on a call waiting for the operator: its card is
+/// withdrawn, not left to take an approval that would run nothing.
+#[tokio::test]
+async fn a_card_whose_caller_hung_up_cannot_be_approved() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let app = h.operator.clone();
+    let call_task = tokio::spawn(async move {
+        mcp(
+            &app,
+            "work",
+            tool_call("doc_write", json!({ "slug": "plan-x", "body": "hello" })),
+        )
+        .await
+    });
+    let card = waiting_card(&h).await;
+    let session = attached(&h).unwrap().id;
+    // What a client timeout does to the request: the handler is dropped.
+    call_task.abort();
+    let _ = call_task.await;
+
+    let (status, v) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/permissions/{card}/answer"),
+        Some(json!({ "option_id": "allow_once" })),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{v}");
+    assert!(v.to_string().contains("nothing was run"), "{v}");
+    assert!(h.store.doc_get("work", "plan-x").unwrap().is_none());
+    assert!(h.store.open_permissions().unwrap().is_empty());
+    wait_for_state(&h, &session, "running").await;
+
+    let events = log(&h, &session).await;
+    assert!(
+        events.iter().any(|e| e["kind"] == "tool_result"
+            && e["payload"]["status"] == "abandoned"
+            && e["payload"]["title"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("doc_write"))),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e["kind"] == "permission_expired"
+            && e["payload"]["reason"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("withdrawn"))),
+        "{events:?}"
+    );
+}
+
+/// Nobody has to try the card for it to go: the loop's tick finds it.
+#[tokio::test]
+async fn an_orphaned_card_is_withdrawn_without_an_answer() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let app = h.operator.clone();
+    let call_task = tokio::spawn(async move {
+        mcp(
+            &app,
+            "work",
+            tool_call("doc_write", json!({ "slug": "plan-x", "body": "hello" })),
+        )
+        .await
+    });
+    waiting_card(&h).await;
+    let session = attached(&h).unwrap().id;
+    call_task.abort();
+    let _ = call_task.await;
+    for _ in 0..400 {
+        if h.store.open_permissions().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(h.store.open_permissions().unwrap().is_empty());
+    wait_for_state(&h, &session, "running").await;
+}
+
+/// A call that finishes is not also logged as abandoned.
+#[tokio::test]
+async fn a_finished_call_is_not_logged_as_abandoned() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    mcp(
+        &h.operator,
+        "work",
+        tool_call("recall", json!({ "query": "x" })),
+    )
+    .await;
+    let session = attached(&h).unwrap().id;
+    let statuses: Vec<Value> = log(&h, &session)
+        .await
+        .into_iter()
+        .filter(|e| e["kind"] == "tool_result")
+        .map(|e| e["payload"]["status"].clone())
+        .collect();
+    assert_eq!(statuses, [json!("ok")]);
+}
+
 #[tokio::test]
 async fn an_unanswered_request_expires_here_too() {
     state::isolate();

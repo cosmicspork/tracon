@@ -33,6 +33,9 @@ use crate::{
 /// off this, and `recent_repos` filters on it.
 pub const HARNESS_ID: &str = "external";
 
+/// Why a card whose call was dropped cannot be answered.
+const ABANDONED: &str = "withdrawn: the harness stopped waiting; nothing was run";
+
 /// A channel and the `Mcp-Session-Id` its client echoes, if it echoes one.
 pub(super) type Key = (String, Option<String>);
 
@@ -75,6 +78,9 @@ impl Loop {
                     Some(Command::Answer { permission_id, option_id, arguments, ack }) => {
                         let done = if self.is_paused() {
                             Err("broker access is paused for this external harness".into())
+                        } else if open.get(&permission_id).is_some_and(|reply| reply.is_closed()) {
+                            self.withdraw_abandoned(&mut open, started);
+                            Err(ABANDONED.into())
                         } else {
                             let done = on_answer_row(
                                 &self.store,
@@ -127,6 +133,7 @@ impl Loop {
                     None => break,
                 },
                 _ = ticker.tick() => {
+                    self.withdraw_abandoned(&mut open, started);
                     self.expire(&mut open, started);
                     if !self.is_paused() && open.is_empty() && self.idle_elapsed() > self.idle_timeout {
                         self.close(&mut open, started, EndReason::Detached);
@@ -265,6 +272,41 @@ impl Loop {
             started,
         );
         self.set_state(SessionState::WaitingOnYou, None, started);
+    }
+
+    /// A card whose call is gone. The harness hung up on its request — a
+    /// client timeout, a cancelled tool call — and the door dropped the call
+    /// waiting on this answer, so allowing it now would run nothing while
+    /// looking like consent was acted on. Withdrawn rather than left to expire.
+    fn withdraw_abandoned(
+        &self,
+        open: &mut HashMap<String, oneshot::Sender<PermissionReply>>,
+        started: Instant,
+    ) {
+        let gone: Vec<String> = open
+            .iter()
+            .filter(|(_, reply)| reply.is_closed())
+            .map(|(id, _)| id.clone())
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        for id in gone {
+            open.remove(&id);
+            let _ = self.store.resolve_permission(
+                &id,
+                "expired",
+                None,
+                started.elapsed().as_millis() as i64,
+            );
+            self.record(
+                ek::PERMISSION_EXPIRED,
+                Some(id.clone()),
+                json!({ "permission_id": id, "reason": ABANDONED }),
+                started,
+            );
+        }
+        self.back_to_running(open);
     }
 
     /// Silence is a refusal here too.
