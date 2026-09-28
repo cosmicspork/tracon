@@ -3882,6 +3882,52 @@ pub async fn list_credentials(State(s): State<AppState>) -> ApiResult<Json<serde
     Ok(Json(json!({ "credentials": b.summaries() })))
 }
 
+/// The channels a credential is asked to serve: at least one, each a
+/// visible channel this node holds, and open unless `archived_ok`.
+fn chosen_channels(
+    store: &crate::store::Store,
+    mut channels: Vec<String>,
+    archived_ok: bool,
+) -> ApiResult<Vec<String>> {
+    channels.sort();
+    channels.dedup();
+    if channels.is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "choose at least one channel".into(),
+        ));
+    }
+    let existing = store
+        .channel_list()?
+        .into_iter()
+        .filter(|channel| !channel.name.starts_with('@'))
+        .map(|channel| {
+            let archived = serde_json::from_str::<serde_json::Value>(&channel.bindings_json)
+                .ok()
+                .is_some_and(|bindings| !bindings["archived"].is_null());
+            (channel.name, archived)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for channel in &channels {
+        match existing.get(channel) {
+            None => {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    format!("no visible channel named {channel}"),
+                ))
+            }
+            Some(true) if !archived_ok => {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    format!("channel {channel} is archived"),
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(channels)
+}
+
 struct ForgeCredential {
     name: &'static str,
     token_key: &'static str,
@@ -3927,31 +3973,7 @@ pub async fn put_forge_credential(
             "token must not be empty".into(),
         ));
     }
-    let mut channels = body.channels;
-    channels.sort();
-    channels.dedup();
-    if channels.is_empty() {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "choose at least one channel".into(),
-        ));
-    }
-    let existing_channels = s
-        .store()
-        .channel_list()?
-        .into_iter()
-        .map(|channel| channel.name)
-        .filter(|name| !name.starts_with('@'))
-        .collect::<std::collections::BTreeSet<_>>();
-    if let Some(missing) = channels
-        .iter()
-        .find(|channel| !existing_channels.contains(*channel))
-    {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            format!("no visible channel named {missing}"),
-        ));
-    }
+    let channels = chosen_channels(s.store(), body.channels, true)?;
 
     let key = crate::mesh::identity::load_or_generate()
         .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
@@ -4162,6 +4184,7 @@ async fn connect_local(
     share: bool,
     local_callback: bool,
 ) -> ApiResult<serde_json::Value> {
+    let channels = chosen_channels(s.store(), channels, false)?;
     let result = providers_of(s)?
         .connect(
             name,
@@ -4178,6 +4201,26 @@ async fn connect_local(
             format!("provider response: {error}"),
         )
     })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelsBody {
+    channels: Vec<String>,
+}
+
+/// `PUT /api/providers/{name}/channels`: the channels a connected provider
+/// serves. A peer's sign-in is changed on the node that holds it.
+pub async fn set_provider_channels(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<ChannelsBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let channels = chosen_channels(s.store(), body.channels, false)?;
+    providers_of(&s)?
+        .set_channels(&name, channels.clone())
+        .map_err(provider_err)?;
+    Ok(Json(json!({ "name": name, "channels": channels })))
 }
 
 #[derive(Deserialize)]
@@ -4604,8 +4647,10 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 name,
                 channels,
                 share,
-            } => match providers_of(self) {
-                Ok(providers) => providers
+            } => match chosen_channels(self.store(), channels, false)
+                .and_then(|channels| Ok((providers_of(self)?, channels)))
+            {
+                Ok((providers, channels)) => providers
                     .connect(
                         &name,
                         channels,

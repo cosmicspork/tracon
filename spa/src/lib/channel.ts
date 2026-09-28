@@ -35,3 +35,21 @@ export function defaultChannel(o: {
     .find((s) => open.has(s.channel))
   return last?.channel ?? o.names[0] ?? ''
 }
+
+// Which channels a provider sign-in on `nodeId` starts out serving. A
+// reconnect keeps what it served; otherwise the node's preferred channel,
+// else every open channel the node belongs to.
+export function providerChannelSeed(o: {
+  existing?: string[]
+  nodeDefault?: string | null
+  channels: { name: string; nodes: string[]; archived?: number | null }[]
+  nodeId: string
+}): string[] {
+  const open = o.channels.filter((c) => !c.archived)
+  const member = open.filter((c) => c.nodes.includes(o.nodeId)).map((c) => c.name)
+  const choices = member.length ? member : open.map((c) => c.name)
+  const kept = (o.existing ?? []).filter((name) => choices.includes(name))
+  if (kept.length) return kept
+  if (o.nodeDefault && choices.includes(o.nodeDefault)) return [o.nodeDefault]
+  return choices
+}
