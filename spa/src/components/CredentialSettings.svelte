@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ChannelChoice from './ChannelChoice.svelte'
   import { api } from '../lib/api'
   import { store } from '../lib/store.svelte'
   import type { CredentialSummary } from '../lib/types'
@@ -60,12 +61,6 @@
     token = { ...token, [forge]: '' }
     editing = { ...editing, [forge]: false }
     errors = { ...errors, [forge]: '' }
-  }
-
-  function toggleChannel(forge: ForgeName, channel: string, checked: boolean) {
-    const channels = selected[forge].filter((name) => name !== channel)
-    if (checked) channels.push(channel)
-    selected = { ...selected, [forge]: channels }
   }
 
   async function save(forge: ForgeName) {
@@ -161,20 +156,12 @@
                 bind:value={token[forge.forge]}
               />
             </label>
-            <fieldset>
-              <legend>Channels this token may serve</legend>
-              {#each store.channels as channel (channel.name)}
-                <label class="channel-choice">
-                  <input
-                    type="checkbox"
-                    checked={selected[forge.forge].includes(channel.name)}
-                    onchange={(event) =>
-                      toggleChannel(forge.forge, channel.name, event.currentTarget.checked)}
-                  />
-                  {channel.name}{channel.archived ? ' · archived' : ''}
-                </label>
-              {/each}
-            </fieldset>
+            <ChannelChoice
+              legend="Channels this token may serve"
+              choices={store.channels}
+              selected={selected[forge.forge]}
+              onchange={(next) => (selected = { ...selected, [forge.forge]: next })}
+            />
             {#if peerCopies}
               <small class="warn">Replacing this source token does not update any peer’s sealed copy.</small>
             {/if}
@@ -282,25 +269,6 @@
   }
   .editor > label {
     max-width: 34rem;
-  }
-  fieldset {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px 16px;
-    border: 0;
-    padding: 0;
-    margin: 2px 0;
-  }
-  legend {
-    width: 100%;
-    margin-bottom: 4px;
-    color: var(--dim);
-  }
-  .channel-choice {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 6px;
   }
   .actions {
     display: flex;

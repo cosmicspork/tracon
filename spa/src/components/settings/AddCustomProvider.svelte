@@ -5,6 +5,7 @@
   // the provider naming it (`POST /api/providers`) — so a failed second step
   // never leaves an orphaned, unfindable credential.
   import { api } from '../../lib/api'
+  import { providerChannelSeed } from '../../lib/channel'
   import { credentialImportToml, normalizeProviderName, PROVIDER_SHAPES } from '../../lib/providers'
   import { store } from '../../lib/store.svelte'
 
@@ -25,7 +26,11 @@
     busy = true
     error = ''
     try {
-      const channels = store.channels.filter((c) => !c.archived).map((c) => c.name)
+      const channels = providerChannelSeed({
+        nodeDefault: store.node?.default_channel,
+        channels: store.channels,
+        nodeId: store.node?.id ?? '',
+      })
       const toml = credentialImportToml(cleanName, apiKey.trim(), channels)
       await api.importCredentials(toml)
       await api.createProvider({

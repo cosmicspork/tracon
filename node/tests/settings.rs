@@ -909,3 +909,64 @@ async fn channel_distribution_failure_is_visible_without_losing_the_local_change
     assert_eq!(personal["bindings"]["notify"]["enabled"], false);
     unavailable_hub.abort();
 }
+
+/// Connecting a provider or changing what it serves names at least one open
+/// channel this node holds; the refusal comes before any provider is asked.
+#[tokio::test]
+async fn provider_channels_must_be_open_channels_this_node_holds() {
+    let n = node();
+    for name in ["work", "old"] {
+        let (s, v) = call(
+            &n,
+            "POST",
+            "/api/channels",
+            Some(LOCAL),
+            Some(json!({ "name": name })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+    }
+    let (s, _) = call(
+        &n,
+        "PUT",
+        "/api/channels/old/bindings",
+        Some(LOCAL),
+        Some(json!({ "archived": 1 })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    for channels in [
+        json!([]),
+        json!(["@mesh"]),
+        json!(["missing"]),
+        json!(["old"]),
+        json!(["work", "old"]),
+    ] {
+        for (method, uri) in [
+            ("PUT", "/api/providers/anthropic/channels"),
+            ("POST", "/api/providers/anthropic/connect"),
+            ("POST", "/api/nodes/n1/providers/anthropic/connect"),
+        ] {
+            let (s, v) = call(
+                &n,
+                method,
+                uri,
+                Some(LOCAL),
+                Some(json!({ "channels": channels })),
+            )
+            .await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{method} {uri} {channels}: {v}");
+        }
+    }
+    // An acceptable choice reaches the providers, which this node lacks.
+    let (s, v) = call(
+        &n,
+        "PUT",
+        "/api/providers/anthropic/channels",
+        Some(LOCAL),
+        Some(json!({ "channels": ["work", "work"] })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+}

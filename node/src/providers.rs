@@ -934,6 +934,56 @@ impl Providers {
         Ok(())
     }
 
+    /// Change the channels a connected provider's credential serves, keeping
+    /// its tokens. A shared credential also goes to the members of any added
+    /// channel; a node that already holds it keeps its copy for a channel
+    /// taken away.
+    pub fn set_channels(&self, name: &str, channels: Vec<String>) -> Result<(), ProviderError> {
+        let credential_name = self.credential_name(name)?;
+        let (credential, was_unbound) = {
+            let mut broker = self.broker.write().unwrap();
+            let mut staged = broker.clone();
+            let mut credential = staged
+                .get(&credential_name)
+                .cloned()
+                .ok_or_else(|| ProviderError::Failed(format!("{name} is not connected")))?;
+            let was_unbound = credential.channels.is_empty();
+            if credential.nodes.iter().any(|node| *node != self.node_id) {
+                for member in self
+                    .mesh
+                    .get()
+                    .map(|mesh| mesh.members_in(&channels))
+                    .unwrap_or_default()
+                {
+                    if !credential.nodes.contains(&member) {
+                        credential.nodes.push(member);
+                    }
+                }
+            }
+            credential.channels = channels;
+            // Peers keep the copy they hold unless this one is newer.
+            if credential.grant_id.is_some() {
+                credential.grant_version += 1;
+            }
+            staged.put(&credential_name, credential.clone());
+            staged
+                .save(&self.store_key)
+                .map_err(|error| ProviderError::Failed(error.to_string()))?;
+            *broker = staged;
+            (credential, was_unbound)
+        };
+        if let Some(mesh) = self.mesh.get() {
+            self.hand_off(mesh.as_ref(), &credential_name, &credential);
+        }
+        if was_unbound {
+            if let Some(callback) = self.on_connected.get() {
+                callback();
+            }
+        }
+        self.publish();
+        Ok(())
+    }
+
     async fn terminal(&self, name: &str, generation: u64, message: &'static str) {
         let Some(slot) = self.take_generation(name, generation) else {
             return;

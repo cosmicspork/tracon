@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import ChannelChoice from './ChannelChoice.svelte'
   import { api } from '../lib/api'
+  import { providerChannelSeed } from '../lib/channel'
   import { clock } from '../lib/clock.svelte'
   import {
     browserCanClaimNode,
@@ -38,6 +40,9 @@
   let managedLocal = $state(false)
   let sameHostBrowser = $state(false)
   let shareSignIn = $state(true)
+  // The operator's pick, once they touch the boxes; until then the seed.
+  let chosen = $state<string[] | null>(null)
+  let editingChannels = $state(false)
 
   // The declared-models editor's own local copy: edited freely, saved on
   // request. Re-seeded whenever the node's own config changes under it
@@ -87,6 +92,20 @@
   const completion = $derived(p.completion ?? justResult?.completion ?? null)
   const completionNote = $derived(p.completion_note ?? justResult?.completion_note ?? null)
   const deviceCode = $derived(p.device_code ?? justResult?.device_code ?? null)
+  const channelChoices = $derived.by(() => {
+    const open = store.channels.filter((channel) => !channel.archived)
+    const member = open.filter((channel) => channel.nodes.includes(nodeId))
+    return member.length ? member : open
+  })
+  const picked = $derived(
+    chosen ??
+      providerChannelSeed({
+        existing: p.channels,
+        nodeDefault: store.nodes.find((node) => node.id === nodeId)?.default_channel,
+        channels: store.channels,
+        nodeId,
+      }),
+  )
 
   $effect(() => {
     if (p.state === 'connected' || p.state === 'failed') justResult = null
@@ -115,10 +134,28 @@
       justResult = await api.nodeConnectProvider(
         nodeId,
         p.name,
-        store.channels.filter((channel) => !channel.archived).map((channel) => channel.name),
+        picked,
         managedLocal || sameHostBrowser,
         shareSignIn,
       )
+    })
+  }
+
+  function editChannels() {
+    chosen = [...p.channels]
+    editingChannels = true
+  }
+
+  function cancelChannels() {
+    chosen = null
+    editingChannels = false
+  }
+
+  function saveChannels() {
+    return act(async () => {
+      await api.setProviderChannels(p.name, picked)
+      chosen = null
+      editingChannels = false
     })
   }
 
@@ -173,7 +210,26 @@
       <span class="scope">Remote node {nodeName}: commands are sealed to it. Its provider credential stays there and this browser cannot claim its local callback.</span>
     {/if}
     {#if p.state === 'connected'}
-      <span class="l"><span class="chip">connected</span>{#if p.channels.length} · {p.channels.join(', ')}{/if}</span>
+      <span class="l"
+        ><span class="chip">connected</span>{#if p.channels.length} · {p.channels.join(', ')}{:else} · no channel{/if}{#if isSelf && editable && !editingChannels}
+          · <button class="lnk" onclick={editChannels} disabled={busy}>edit channels</button>{/if}</span
+      >
+      {#if editingChannels}
+        <ChannelChoice
+          legend="Channels this sign-in serves"
+          choices={channelChoices}
+          selected={picked}
+          onchange={(next) => (chosen = next)}
+          disabled={busy}
+        />
+        {#if p.channels.some((channel) => !picked.includes(channel)) && store.nodes.length > 1}
+          <span class="l off">Peers that already hold this sign-in keep it for channels you remove.</span>
+        {/if}
+        <span class="actions">
+          <button class="btn p" onclick={saveChannels} disabled={busy || picked.length === 0}>{busy ? 'Saving…' : 'Save channels'}</button>
+          <button class="lnk" onclick={cancelChannels} disabled={busy}>Cancel</button>
+        </span>
+      {/if}
       {#if isSelf}
         <span><button class="lnk d" onclick={disconnect} disabled={busy}>Disconnect</button></span>
       {:else}
@@ -268,6 +324,15 @@
         ><span class="chip" class:off={p.state !== 'failed'} class:bad={p.state === 'failed'}>{p.state === 'failed' ? 'failed' : 'disconnected'}</span>{#if p.error} · {p.error}{/if}</span
       >
       {#if p.can_login}
+        {#if channelChoices.length > 1}
+          <ChannelChoice
+            legend="Channels this sign-in serves"
+            choices={channelChoices}
+            selected={picked}
+            onchange={(next) => (chosen = next)}
+            disabled={busy}
+          />
+        {/if}
         {#if mayClaimBrowser}
           <label class="local-choice">
             <input type="checkbox" bind:checked={sameHostBrowser} />
@@ -280,7 +345,7 @@
             Share this sign-in with every node in its channels
           </label>
         {/if}
-        <span><button class="lnk" onclick={connect} disabled={busy}>{p.state === 'failed' ? 'Try again' : 'Connect'}</button></span>
+        <span><button class="lnk" onclick={connect} disabled={busy || picked.length === 0}>{p.state === 'failed' ? 'Try again' : 'Connect'}</button></span>
       {:else if isSelf}
         <span>API key only. Add it under <a class="lnk" href="/settings#connections">serving-node credentials</a>.</span>
       {:else}

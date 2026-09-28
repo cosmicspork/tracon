@@ -14,6 +14,7 @@
   import ProviderCard from '../components/ProviderCard.svelte'
   import AddProviderChooser from '../components/settings/AddProviderChooser.svelte'
   import AddCustomProvider from '../components/settings/AddCustomProvider.svelte'
+  import { providerChannelSeed } from '../lib/channel'
   import { connectableProviders } from '../lib/providers'
   import HubRollups from '../components/HubRollups.svelte'
   import TransferInbox from '../components/TransferInbox.svelte'
@@ -201,7 +202,11 @@
       await api.nodeConnectProvider(
         selectedNode.id,
         name,
-        store.channels.filter((c) => !c.archived).map((c) => c.name),
+        providerChannelSeed({
+          nodeDefault: selectedNode.default_channel,
+          channels: store.channels,
+          nodeId: selectedNode.id,
+        }),
         false,
         true,
       )

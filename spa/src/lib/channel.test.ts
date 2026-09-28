@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { defaultChannel } from './channel'
+import { defaultChannel, providerChannelSeed } from './channel'
 
 const names = ['personal', 'work']
 
@@ -18,4 +18,21 @@ test('then this browser\'s last choice, then what ran last, then the first name'
   expect(defaultChannel({ names, nodeDefault: '' , sessions })).toBe('work')
   expect(defaultChannel({ names })).toBe('personal')
   expect(defaultChannel({ names: [] })).toBe('')
+})
+
+test('a sign-in serves the node\'s preferred channel unless it already served others', () => {
+  const channels = [
+    { name: 'personal', nodes: ['n1'] },
+    { name: 'work', nodes: ['n1', 'n2'] },
+    { name: 'old', nodes: ['n1'], archived: 1 },
+    { name: 'theirs', nodes: ['n2'] },
+  ]
+  expect(providerChannelSeed({ channels, nodeId: 'n1', nodeDefault: 'work' })).toEqual(['work'])
+  expect(providerChannelSeed({ channels, nodeId: 'n1', nodeDefault: 'theirs' })).toEqual(['personal', 'work'])
+  expect(providerChannelSeed({ channels, nodeId: 'n1' })).toEqual(['personal', 'work'])
+  expect(providerChannelSeed({ channels, nodeId: 'n1', nodeDefault: 'work', existing: ['personal', 'old'] })).toEqual([
+    'personal',
+  ])
+  // A node no channel lists yet is offered every open channel.
+  expect(providerChannelSeed({ channels, nodeId: 'n9' })).toEqual(['personal', 'work', 'theirs'])
 })

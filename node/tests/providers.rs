@@ -594,6 +594,8 @@ fn only_a_connected_provider_is_wired() {
 #[derive(Default)]
 struct FakeMesh {
     members: Vec<String>,
+    /// `(channel, node)`: when set, a channel's members are these instead.
+    by_channel: Vec<(String, String)>,
     claim: Mutex<Option<ClaimResult>>,
     claims: Mutex<Vec<(String, u64)>>,
     handed: Mutex<Vec<(String, Credential, Vec<String>)>>,
@@ -612,8 +614,14 @@ impl CredentialMesh for FakeMesh {
     fn members_in(&self, channels: &[String]) -> Vec<String> {
         if channels.is_empty() {
             Vec::new()
-        } else {
+        } else if self.by_channel.is_empty() {
             self.members.clone()
+        } else {
+            self.by_channel
+                .iter()
+                .filter(|(channel, _)| channels.contains(channel))
+                .map(|(_, node)| node.clone())
+                .collect()
         }
     }
     fn hand_off(&self, name: &str, credential: &Credential, to: &[String]) {
@@ -839,4 +847,88 @@ async fn a_credential_that_arrives_by_handoff_is_published() {
     // A handoff of something no provider uses changes nothing.
     p.handoff_received(&["consulta".to_string()]);
     assert!(frames.try_recv().is_err());
+}
+
+/// Adding a channel to a shared sign-in keeps its tokens, reaches the new
+/// channel's members, and is a newer copy every holder takes.
+#[tokio::test]
+async fn a_sign_in_can_serve_another_channel_without_signing_in_again() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, broker, bus) = providers(fake.endpoints());
+    let mesh = Arc::new(FakeMesh {
+        by_channel: vec![
+            ("work".into(), "n2".into()),
+            ("personal".into(), "n3".into()),
+        ],
+        ..Default::default()
+    });
+    p.set_mesh(mesh.clone());
+    sign_in_anthropic(&p, &fake, true).await;
+    let before = broker.read().unwrap().get("anthropic").unwrap().clone();
+    assert_eq!(before.nodes, ["n1", "n2"]);
+
+    let mut frames = bus.subscribe();
+    p.set_channels("anthropic", vec!["personal".into(), "work".into()])
+        .unwrap();
+    let after = broker.read().unwrap().get("anthropic").unwrap().clone();
+    assert_eq!(after.channels, ["personal", "work"]);
+    assert_eq!(after.nodes, ["n1", "n2", "n3"]);
+    assert_eq!(after.grant_id, before.grant_id);
+    assert_eq!(after.grant_version, before.grant_version + 1);
+    assert_eq!(after.env["ACCESS_TOKEN"], before.env["ACCESS_TOKEN"]);
+    assert_eq!(
+        listed(&p, "anthropic")["channels"],
+        serde_json::json!(["personal", "work"])
+    );
+    {
+        let handed = mesh.handed.lock().unwrap();
+        let (_, copy, to) = handed.last().unwrap();
+        assert_eq!(to, &["n2", "n3"]);
+        assert_eq!(copy.grant_version, after.grant_version);
+    }
+    assert!(matches!(
+        frames.try_recv(),
+        Ok(tracon::stream::Frame::Providers { .. })
+    ));
+
+    // Taking a channel away keeps the holders it already has.
+    p.set_channels("anthropic", vec!["work".into()]).unwrap();
+    let narrowed = broker.read().unwrap().get("anthropic").unwrap().clone();
+    assert_eq!(narrowed.channels, ["work"]);
+    assert_eq!(narrowed.nodes, ["n1", "n2", "n3"]);
+}
+
+/// A sign-in kept on this node stays here when it serves more channels.
+#[tokio::test]
+async fn an_unshared_sign_in_stays_here_when_its_channels_change() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, broker, _bus) = providers(fake.endpoints());
+    let mesh = Arc::new(FakeMesh {
+        members: vec!["n2".into()],
+        ..Default::default()
+    });
+    p.set_mesh(mesh.clone());
+    sign_in_anthropic(&p, &fake, false).await;
+    p.set_channels("anthropic", vec!["personal".into(), "work".into()])
+        .unwrap();
+    let held = broker.read().unwrap().get("anthropic").unwrap().clone();
+    assert_eq!(held.nodes, ["n1"]);
+    assert!(mesh.handed.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn channels_are_changed_only_on_a_connected_provider() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, _broker, _bus) = providers(fake.endpoints());
+    assert!(matches!(
+        p.set_channels("anthropic", vec!["work".into()]),
+        Err(ProviderError::Failed(_))
+    ));
+    assert!(matches!(
+        p.set_channels("nope", vec!["work".into()]),
+        Err(ProviderError::Unknown(_))
+    ));
 }

@@ -243,6 +243,11 @@ A document the next attempt will not get, because this node does not hold it or
 it has been archived, is flagged before the attempt starts.
 
 The model picker uses the selected runner's connected, channel-bound providers.
+A sign-in starts out serving the node's default channel (or every channel the node
+belongs to when it has none); choose others before connecting, or use **edit
+channels** on a connected provider to change them without signing in again. A
+shared sign-in reaches the members of a channel you add; a peer that already holds
+it keeps its copy for a channel you remove.
 A connected provider whose models never appear has a stale catalogue — the probe
 runs when the provider connects, and can miss if the harness was not up yet or the
 credential arrived by handoff: **Settings → Connections → Refresh models**, under the

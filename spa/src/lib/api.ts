@@ -472,6 +472,9 @@ export const api = {
   providerCode: (name: string, code: string) =>
     call<void>('POST', `/api/providers/${name}/code`, { code }),
   disconnectProvider: (name: string) => call<void>('POST', `/api/providers/${name}/disconnect`),
+  /** The channels a connected provider on the serving node serves. */
+  setProviderChannels: (name: string, channels: string[]) =>
+    call<{ name: string; channels: string[] }>('PUT', `/api/providers/${name}/channels`, { channels }),
   /** Ask this node's harness for its model list again. The probe runs on the
       serving node — a peer's catalogue is refreshed by that peer. */
   refreshModels: () => call<ModelOption[]>('POST', '/api/node/refresh-models'),

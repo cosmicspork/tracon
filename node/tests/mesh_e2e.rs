@@ -312,7 +312,7 @@ async fn a_peers_providers_are_driven_from_here() {
         &a.app,
         "POST",
         &format!("/api/nodes/{ai}/providers/anthropic/connect"),
-        Some(json!({ "local_callback": true })),
+        Some(json!({ "channels": ["personal"], "local_callback": true })),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
