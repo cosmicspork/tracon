@@ -1351,6 +1351,16 @@ async fn a_diff_over_the_cap_is_refused_before_any_check_runs() {
 }
 
 #[tokio::test]
+async fn a_diff_over_the_file_cap_is_refused() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| c.review.max_files = 0).await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let err = v["error"].as_str().unwrap_or_default();
+    assert!(err.contains("and 0 files"), "{v}");
+    assert!(f.store.open_reviews().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_on_the_card() {
     state::isolate();
     let f = fixture(test_name!(), WITH_GH).await;

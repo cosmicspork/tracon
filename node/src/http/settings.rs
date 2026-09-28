@@ -147,13 +147,13 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
                     match k.as_str() {
                         "max_diff_lines" => set_i64(
                             &mut cfg.review.max_diff_lines,
-                            v,
+                            positive(v, "review.max_diff_lines")?,
                             "review.max_diff_lines",
                             &mut changed,
                         )?,
                         "max_files" => set_usize(
                             &mut cfg.review.max_files,
-                            v,
+                            positive(v, "review.max_files")?,
                             "review.max_files",
                             &mut changed,
                         )?,
@@ -403,6 +403,14 @@ fn whole(v: &Value, key: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("`{key}` expects a whole number that is not negative"))
 }
 
+/// A cap of zero refuses every submission, which is never what setting one means.
+fn positive<'a>(v: &'a Value, key: &str) -> Result<&'a Value, String> {
+    if whole(v, key)? < 1 {
+        return Err(format!("`{key}` must be at least 1"));
+    }
+    Ok(v)
+}
+
 fn set_i64(slot: &mut i64, v: &Value, key: &str, changed: &mut Vec<String>) -> Result<(), String> {
     let next = whole(v, key)? as i64;
     if *slot != next {
@@ -429,6 +437,15 @@ fn set_usize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_review_cap_of_zero_is_refused() {
+        for key in ["max_diff_lines", "max_files"] {
+            let err = positive(&json!(0), &format!("review.{key}")).unwrap_err();
+            assert!(err.contains("at least 1"), "{err}");
+        }
+        assert!(positive(&json!(1), "review.max_files").is_ok());
+    }
 
     #[test]
     fn the_view_carries_the_writable_keys_and_no_secrets() {

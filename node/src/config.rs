@@ -1299,8 +1299,21 @@ pub struct ReviewLimits {
 impl Default for ReviewLimits {
     fn default() -> Self {
         Self {
-            max_diff_lines: 800,
-            max_files: 40,
+            max_diff_lines: 10_000,
+            max_files: 200,
+        }
+    }
+}
+
+impl ReviewLimits {
+    /// The defaults before they were raised. `Config::save` writes every key,
+    /// so a node that never touched the cap has these in its `node.toml` and
+    /// would otherwise keep them forever.
+    const RETIRED_DEFAULTS: (i64, usize) = (800, 40);
+
+    fn lift_retired_defaults(&mut self) {
+        if (self.max_diff_lines, self.max_files) == Self::RETIRED_DEFAULTS {
+            *self = Self::default();
         }
     }
 }
@@ -2099,6 +2112,7 @@ impl Config {
                 for (name, provider) in default_providers() {
                     config.providers.entry(name).or_insert(provider);
                 }
+                config.review.lift_retired_defaults();
                 // A built-in provider the operator wrote without models is
                 // not one with none: the section is usually there to set a
                 // credential name or an upstream, and an empty catalogue
@@ -2188,6 +2202,23 @@ mod tests {
 
     /// The README's `node.toml` reference is checked, not trusted: every key it
     /// names must exist, and the values it shows as defaults must be them.
+    #[test]
+    fn a_node_toml_carrying_the_retired_review_defaults_gets_the_new_ones() {
+        let dir = std::env::temp_dir().join(format!("tracon-review-lift-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node.toml");
+        std::fs::write(&path, "[review]\nmax_diff_lines = 800\nmax_files = 40\n").unwrap();
+        let lifted = Config::try_load_from(&path).unwrap();
+        assert_eq!(lifted.review.max_diff_lines, 10_000);
+        assert_eq!(lifted.review.max_files, 200);
+        // One the operator chose is kept, even when half of it matches.
+        std::fs::write(&path, "[review]\nmax_diff_lines = 800\nmax_files = 60\n").unwrap();
+        let kept = Config::try_load_from(&path).unwrap();
+        assert_eq!(kept.review.max_diff_lines, 800);
+        assert_eq!(kept.review.max_files, 60);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_readme_configuration_block_is_a_valid_node_toml() {
         let readme = include_str!("../../README.md");

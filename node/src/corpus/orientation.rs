@@ -52,7 +52,7 @@ use crate::{
 /// whole text.
 pub const CAP_CHARS: usize = 24_000;
 /// A diff longer than this is cut; the reviewer has the worktree and git.
-const DIFF_CHARS: usize = 12_000;
+const DIFF_CHARS: usize = 60_000;
 /// Each reserved piece is bounded too, so that nothing inside the reserved
 /// tier can starve anything else inside it.
 const BODY_CHARS: usize = 8_000;

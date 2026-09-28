@@ -676,8 +676,8 @@ checks = ["just check"]             # run against a snapshot of the workspace be
 timeout_secs = 900
 
 [review]
-max_diff_lines = 800                # a bigger submission is refused before any check runs
-max_files = 40
+max_diff_lines = 10000              # added plus removed lines; a bigger submission is refused before any check runs
+max_files = 200
 
 [qa]                                # no targets by default: QA has no implicit environment
 # [qa.targets.<name>]               # see QA targets below. A name containing "production" is refused.
