@@ -1010,6 +1010,8 @@
         <label><span>Harness</span><select bind:value={form.harness.id} disabled={!local}><option value="opencode">opencode</option><option value="claude">claude</option></select><small>Running: {cfg.running.harness_id} {cfg.running.harness_version}</small></label>
         <label><span>Harness version</span><input bind:value={form.harness.version} disabled={!local} spellcheck="false" /></label>
         <label><span>Session budget (tokens)</span><input type="number" bind:value={form.session.budget_tokens} disabled={!local} /></label>
+        <label><span>Review cap (lines)</span><input type="number" min="1" bind:value={form.review.max_diff_lines} disabled={!local} /><small>Added plus removed; a bigger submission is refused.</small></label>
+        <label><span>Review cap (files)</span><input type="number" min="1" bind:value={form.review.max_files} disabled={!local} /></label>
         <label><span>Default channel</span><select bind:value={form.session.default_channel} disabled={!local}><option value="">none</option>{#each open_channels as c (c.name)}<option value={c.name}>{c.name}</option>{/each}</select><small>Where the composer starts until a browser picks another.</small></label>
         <label><span>Podman binary</span><input bind:value={form.boundary.podman} disabled={!local} placeholder="found on PATH" spellcheck="false" /><small>Empty resolves from PATH, then usual install locations.</small></label>
       </div>

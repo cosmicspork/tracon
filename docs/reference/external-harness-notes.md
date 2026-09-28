@@ -93,7 +93,8 @@ worktree. So the harness names one, and the node accepts it when the
 repository (the worktree's common git directory, not the worktree's own path)
 is under `[external] repo_roots`; the target records it, and staleness, the
 diff editor, and publishing read it from there. Checks are skipped, because the
-operator's toolchain is where the operator runs them. Ownership is by channel
+operator's toolchain is where the operator runs them. The `[review]` cap on lines and files
+applies all the same, before anything else runs. Ownership is by channel
 rather than by session, since an attachment that idles out comes back as a new
 session. `work_close` takes an id, and refuses an item a running session holds,
 since closing it would end that session. What stays absent is `review_verdict`,
