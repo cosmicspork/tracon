@@ -42,6 +42,10 @@ claim; on the local backend used by tests it is
 `local-runtime/tracon-workspace-<workspace-id>` under the state directory. The `[docs] export_dir` mirror, if it is configured, is
 already on disk and needs nothing running at all.
 
+A workspace or harness-state volume that `tracon gc --apply` removed is gone;
+the sweep only takes those of archived or vanished sessions, so export one first
+if it may be needed.
+
 Often the fastest answer is none of these: an execute session that submitted
 anything has a branch on the forge, and that branch is a normal clone away.
 

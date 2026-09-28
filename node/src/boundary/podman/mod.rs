@@ -134,6 +134,24 @@ async fn volume_copy_out(
     crate::workspace::validate_tree(destination).map_err(|e| BoundaryError::Other(e.to_string()))
 }
 
+/// `podman volume ls --format '{{.Name}} {{.CreatedAt.Unix}}'`, one volume a line.
+fn parse_volume_list(out: &str) -> Vec<super::VolumeInfo> {
+    out.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let name = fields.next()?.to_string();
+            if !name.starts_with("tracon-") {
+                return None;
+            }
+            let created_ms = fields
+                .next()
+                .and_then(|secs| secs.parse::<i64>().ok())
+                .map(|secs| secs * 1000);
+            Some(super::VolumeInfo { name, created_ms })
+        })
+        .collect()
+}
+
 pub struct PodmanBackend {
     cfg: Config,
     selinux: bool,
@@ -206,6 +224,28 @@ impl Backend for PodmanBackend {
     async fn reconcile(&self, names: &[String]) {
         for name in names {
             let _ = podman(&["rm", "-f", "-i", name]).await;
+        }
+    }
+
+    async fn list_volumes(&self) -> Result<Vec<super::VolumeInfo>, BoundaryError> {
+        let out = podman(&[
+            "volume",
+            "ls",
+            "--filter",
+            "name=^tracon-",
+            "--format",
+            "{{.Name}} {{.CreatedAt.Unix}}",
+        ])
+        .await?;
+        Ok(parse_volume_list(&out))
+    }
+
+    async fn remove_volume(&self, volume: &str) -> Result<(), BoundaryError> {
+        // Never `--force`: a volume a harness still mounts is refused.
+        match podman(&["volume", "rm", volume]).await {
+            Ok(_) => Ok(()),
+            Err(BoundaryError::Podman(stderr)) if stderr.contains("no such volume") => Ok(()),
+            Err(error) => Err(error),
         }
     }
 
@@ -484,5 +524,24 @@ mod tests {
         // Nothing anywhere: the bare name, so the spawn error names it.
         assert_eq!(resolve_podman("", Some(&empty), &[]), "podman");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_volume_list_keeps_only_tracon_volumes_with_their_age() {
+        let out =
+            "tracon-probe-scratch 1789178113\nminikube-config 1789000000\ntracon-workspace-abc\n\n";
+        assert_eq!(
+            super::parse_volume_list(out),
+            vec![
+                crate::boundary::VolumeInfo {
+                    name: "tracon-probe-scratch".into(),
+                    created_ms: Some(1_789_178_113_000),
+                },
+                crate::boundary::VolumeInfo {
+                    name: "tracon-workspace-abc".into(),
+                    created_ms: None,
+                },
+            ]
+        );
     }
 }

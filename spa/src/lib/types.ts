@@ -1255,3 +1255,13 @@ export interface QaEvidence {
   assets: QaAsset[]
   prototypes: Prototype[]
 }
+
+/** One runtime volume or state directory, and what a storage sweep makes of it. */
+export interface StorageItem {
+  kind: 'volume' | 'directory'
+  name: string
+  remove: boolean
+  reason: string
+  removed?: boolean
+  error?: string
+}

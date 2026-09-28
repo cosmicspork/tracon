@@ -727,6 +727,19 @@ impl Store {
         self.finish_check_run(id, "cancelled", None, None, log, None, metadata)
     }
 
+    /// The check runs still executing: their runtime volumes are in use.
+    pub fn running_check_run_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        let mut stmt = conn.prepare("SELECT id FROM check_run WHERE outcome='running'")?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(ids)
+    }
+
     /// One execution record by id, for a caller that needs to read back what
     /// a run actually settled as after losing the race to write it.
     pub fn check_run(&self, id: &str) -> Result<Option<CheckRunRow>> {

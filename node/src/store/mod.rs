@@ -70,9 +70,9 @@ pub struct LegacyArchive {
     pub sessions: Vec<SessionRow>,
     /// Pending approvals closed because nothing could answer them.
     pub approvals_closed: usize,
-    /// The workspaces those sessions leave behind. Retained, never removed:
-    /// the work in them is the operator's, and a reopened session is given
-    /// one back.
+    /// The workspaces those sessions leave behind. Retained here: the work in
+    /// them is the operator's, and a reopened session is given one back.
+    /// Only an operator's storage sweep (`crate::gc`) removes them.
     pub workspaces: Vec<String>,
 }
 

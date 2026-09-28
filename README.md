@@ -284,6 +284,12 @@ path; your Git configuration, hooks, and credentials stay outside. A workspace
 outlives its session — start another on it, export a checked snapshot, or download
 it as a zip — and publication happens from that snapshot through a separate,
 credential-bearing repository the node owns, never from the agent's clone.
+Nothing is removed on its own except a check run's copy once the check is over.
+`tracon gc` (or **Settings → Maintenance → Runtime storage**) lists the volumes
+and state directories whose owner is over (an archived or vanished session, a
+workspace no open session uses and older than a day, a finished check run) and
+removes them with `--apply`; dependency caches only with `--caches`, and the
+node-wide volumes and any name it does not recognize never.
 Dependency preparation runs first as its own credential-free command in an
 isolated cache: a `devcontainer.json` may name a digest-pinned image, but hooks,
 mounts, sockets, and privilege in it are refused rather than partly honoured, and
@@ -575,6 +581,7 @@ and revoked the moment the hub loses that key.
 | `tracon work add\|ls\|ready\|show\|close\|dep\|rm` | the ledger |
 | `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |
 | `tracon metrics [--channel] [--days]`, `provenance <sha>` | what happened |
+| `tracon gc [--apply] [--caches] [--all]` | runtime storage whose owner is over |
 
 Most commands talk to the running node over its API, and `TRACON_URL` and
 `TRACON_TOKEN` point them at a remote node. The ones that act on this machine itself

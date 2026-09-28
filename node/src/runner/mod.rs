@@ -378,6 +378,15 @@ pub mod local {
             crate::session::materialize::PODMAN_HARNESS_HOME.into()
         }
         async fn reconcile(&self, _names: &[String]) {}
+        async fn list_volumes(&self) -> Result<Vec<crate::boundary::VolumeInfo>, BoundaryError> {
+            crate::boundary::directory_volumes(&Config::state_dir().join("local-runtime"))
+        }
+        async fn remove_volume(&self, volume: &str) -> Result<(), BoundaryError> {
+            crate::boundary::remove_directory_volume(
+                &Config::state_dir().join("local-runtime"),
+                volume,
+            )
+        }
     }
 
     #[cfg(all(test, unix))]

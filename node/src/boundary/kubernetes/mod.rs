@@ -206,4 +206,15 @@ impl Backend for KubeBackend {
             let _ = runner.kill(name).await;
         }
     }
+
+    // A volume here is a directory on the shared state claim. Nothing stops
+    // removing one a pod still mounts, so the caller only removes volumes
+    // whose owner is over.
+    async fn list_volumes(&self) -> Result<Vec<crate::boundary::VolumeInfo>, BoundaryError> {
+        crate::boundary::directory_volumes(&self.cfg.runtime.kubernetes.state_mount)
+    }
+
+    async fn remove_volume(&self, volume: &str) -> Result<(), BoundaryError> {
+        crate::boundary::remove_directory_volume(&self.cfg.runtime.kubernetes.state_mount, volume)
+    }
 }

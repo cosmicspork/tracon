@@ -120,6 +120,66 @@ pub trait Backend: Send + Sync {
     }
     /// Remove harnesses left over from a previous run, by name.
     async fn reconcile(&self, names: &[String]);
+    /// The runtime volumes this backend holds whose names begin with
+    /// `tracon-`. A backend that keeps none has nothing to list.
+    async fn list_volumes(&self) -> Result<Vec<VolumeInfo>, BoundaryError> {
+        Ok(Vec::new())
+    }
+    /// Remove a runtime volume. One that does not exist is already removed;
+    /// one a running harness still mounts is refused, never forced.
+    async fn remove_volume(&self, volume: &str) -> Result<(), BoundaryError> {
+        Err(BoundaryError::Other(format!(
+            "the {} backend cannot remove runtime volume {volume}",
+            self.kind()
+        )))
+    }
+}
+
+/// A runtime volume as its backend reports it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct VolumeInfo {
+    pub name: String,
+    /// When the backend can say.
+    pub created_ms: Option<i64>,
+}
+
+/// The `tracon-` volumes kept as directories under `root`, as the Kubernetes
+/// and local backends store them. A staging copy mid-import is not a volume.
+pub fn directory_volumes(root: &std::path::Path) -> Result<Vec<VolumeInfo>, BoundaryError> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut volumes = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("tracon-") || name.contains(".staging-") || !entry.path().is_dir() {
+            continue;
+        }
+        let created_ms = entry
+            .metadata()
+            .and_then(|m| m.created().or_else(|_| m.modified()))
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64);
+        volumes.push(VolumeInfo { name, created_ms });
+    }
+    volumes.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(volumes)
+}
+
+/// Remove a directory-backed volume; a missing one is already gone.
+pub fn remove_directory_volume(root: &std::path::Path, volume: &str) -> Result<(), BoundaryError> {
+    if volume.is_empty() || volume.contains('/') || volume.contains("..") {
+        return Err(BoundaryError::Other(format!("not a volume name: {volume}")));
+    }
+    match std::fs::remove_dir_all(root.join(volume)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// The backend `[runtime] kind` selects. Detection that needs the host (the

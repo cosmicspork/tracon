@@ -12,6 +12,7 @@ pub mod environment;
 pub mod explain;
 pub mod forge;
 pub mod gateway;
+pub mod gc;
 pub mod git_remote;
 pub mod git_tree;
 pub mod http;

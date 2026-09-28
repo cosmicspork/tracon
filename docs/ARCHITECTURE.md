@@ -572,7 +572,9 @@ read and never written — and that seed is copied, never bind-mounted,
 into a runtime-owned volume; the copy strips `.git` hooks, replace refs, grafts,
 alternates, and `config.worktree` before anything node-side or harness-side reads
 it. The harness sees `/work` and no host path. A workspace outlives its session:
-resume it, export a checked snapshot, or download it. Harness config is
+resume it, export a checked snapshot, or download it. It is reclaimed only by an
+explicit sweep (`crate::gc`), once no unarchived session uses it; a check run's
+volume is the one removed as soon as its run is over. Harness config is
 materialized into scratch and passed explicitly, so instruction-file discovery by
 directory walk stops mattering.
 

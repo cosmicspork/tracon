@@ -118,6 +118,7 @@ pub fn router(state: AppState) -> Router {
             post(admin::boundary_check),
         )
         .route("/api/admin/maintenance/restart", post(admin::restart))
+        .route("/api/maintenance/storage", post(admin::storage))
         .route("/api/admin/maintenance/install", post(admin::install))
         .route("/api/admin/maintenance/uninstall", post(admin::uninstall))
         .route("/api/admin/policy", get(policy_admin::status))
