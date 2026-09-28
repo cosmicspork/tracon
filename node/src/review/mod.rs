@@ -197,6 +197,45 @@ async fn git_bytes(dir: &str, op: &'static str, args: &[&str]) -> Result<Vec<u8>
     }
 }
 
+/// Run `git cat-file` in batch mode over `objects`, one per line, and return
+/// its whole output. The input is written from its own task so a large output
+/// cannot fill the pipe while git is still waiting to read.
+async fn cat_file(
+    dir: &str,
+    op: &'static str,
+    mode: &str,
+    objects: &[String],
+) -> Result<Vec<u8>, ReviewError> {
+    use tokio::io::AsyncWriteExt;
+    if objects.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut child = hardened_git(dir)
+        .args(["cat-file", mode])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    let input = objects.join("\n") + "\n";
+    let writer = tokio::spawn(async move {
+        stdin.write_all(input.as_bytes()).await?;
+        stdin.shutdown().await
+    });
+    let out = child.wait_with_output().await?;
+    writer
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))??;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(ReviewError::Git {
+            op,
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        })
+    }
+}
+
 /// The default branch the worktree was cut from, read from `origin/HEAD`. The
 /// worktree shares the repo's refs, so this is resolvable there. Returns the
 /// plain branch name (e.g. `main`), which is the branch a change merges into.
@@ -264,17 +303,16 @@ pub async fn capture(worktree: &str, base_ref: &str, branch: &str) -> Result<Cap
         }
     }
 
+    let names: Vec<String> = paths.iter().map(|path| format!("HEAD:{path}")).collect();
+    let checked = cat_file(worktree, "cat-file --batch-check", "--batch-check", &names).await?;
     let mut files = Vec::new();
-    for path in &paths {
+    for (path, line) in paths.iter().zip(String::from_utf8_lossy(&checked).lines()) {
         // A deleted file has no blob at HEAD; record it as absent rather than
         // failing the capture.
-        let blob = git(
-            worktree,
-            "rev-parse",
-            &["rev-parse", &format!("HEAD:{path}")],
-        )
-        .await
-        .unwrap_or_else(|_| "absent".into());
+        let blob = match line.split(' ').collect::<Vec<_>>()[..] {
+            [oid, "blob", _] => oid.to_string(),
+            _ => "absent".into(),
+        };
         files.push(FileAtSubmit {
             path: path.clone(),
             blob,
@@ -364,7 +402,7 @@ pub async fn snapshot_candidate(
         tree_sha,
         files: Vec::new(),
     };
-    let mut total = 0u64;
+    let mut entries = Vec::new();
     for entry in listing.split(|b| *b == 0).filter(|entry| !entry.is_empty()) {
         let (meta, path) = split_once_byte(entry, b'\t')
             .ok_or_else(|| ReviewError::Rejected("Git tree entry has no path separator".into()))?;
@@ -390,12 +428,34 @@ pub async fn snapshot_candidate(
                 "candidate path {path} has unsupported mode {mode:o}"
             )));
         }
-        let size = git(worktree, "cat-file size", &["cat-file", "-s", object])
-            .await?
-            .parse::<u64>()
-            .map_err(|_| {
-                ReviewError::Rejected(format!("candidate blob {object} has invalid size"))
-            })?;
+        entries.push((mode, object.to_string(), path.to_string()));
+    }
+    // Two git processes for the whole tree, not two per file: spawning one
+    // per blob made a submission outlast the client on a throttled host.
+    let objects: Vec<String> = entries
+        .iter()
+        .map(|(_, object, _)| object.clone())
+        .collect();
+    let checked = cat_file(
+        worktree,
+        "cat-file --batch-check",
+        "--batch-check",
+        &objects,
+    )
+    .await?;
+    let mut sizes = Vec::with_capacity(entries.len());
+    let mut total = 0u64;
+    for ((_, object, _), line) in entries
+        .iter()
+        .zip(String::from_utf8_lossy(&checked).lines())
+    {
+        let size = match line.split(' ').collect::<Vec<_>>()[..] {
+            [oid, "blob", size] if oid == object => size.parse::<u64>().ok(),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            ReviewError::Rejected(format!("candidate blob {object} has invalid size"))
+        })?;
         total = total
             .checked_add(size)
             .ok_or_else(|| ReviewError::Rejected("candidate snapshot is too large".into()))?;
@@ -404,17 +464,32 @@ pub async fn snapshot_candidate(
                 "candidate snapshot is {total} bytes; the operator limit is {max_bytes}"
             )));
         }
-        let content = git_bytes(worktree, "cat-file", &["cat-file", "blob", object]).await?;
-        if u64::try_from(content.len()).ok() != Some(size) {
-            return Err(ReviewError::Rejected(format!(
+        sizes.push(size);
+    }
+    if sizes.len() != entries.len() {
+        return Err(ReviewError::Rejected(
+            "git did not describe every candidate blob".into(),
+        ));
+    }
+    let batch = cat_file(worktree, "cat-file --batch", "--batch", &objects).await?;
+    let mut rest = &batch[..];
+    for ((mode, object, path), size) in entries.into_iter().zip(sizes) {
+        let changed = || {
+            ReviewError::Rejected(format!(
                 "candidate blob {object} changed while it was captured"
-            )));
+            ))
+        };
+        let (header, body) = split_once_byte(rest, b'\n').ok_or_else(changed)?;
+        let len = usize::try_from(size).map_err(|_| changed())?;
+        if header != format!("{object} blob {size}").as_bytes() || body.get(len) != Some(&b'\n') {
+            return Err(changed());
         }
         snapshot.files.push(crate::store::CandidateFile {
-            path: path.to_string(),
+            path,
             mode,
-            content,
+            content: body[..len].to_vec(),
         });
+        rest = &body[len + 1..];
     }
     materialize_candidate_files(&snapshot.root, &snapshot.files)?;
     Ok(snapshot)
@@ -759,6 +834,73 @@ mod tests {
         let paths: Vec<&str> = c.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["a.txt", "b.txt"]);
         assert!(c.uncommitted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_deleted_file_is_captured_as_absent() {
+        const FN: &str = "a_deleted_file_is_captured_as_absent";
+        let dir = repo(FN).await;
+        sh(&dir, "git rm -q a.txt && git commit -qm gone").await;
+        let c = capture(dir.to_str().unwrap(), "main", "feat/x")
+            .await
+            .unwrap();
+        let a = c.files.iter().find(|f| f.path == "a.txt").unwrap();
+        assert_eq!(a.blob, "absent");
+        let b = c.files.iter().find(|f| f.path == "b.txt").unwrap();
+        assert_ne!(b.blob, "absent");
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_copies_every_blob_exactly() {
+        const FN: &str = "a_snapshot_copies_every_blob_exactly";
+        let dir = repo(FN).await;
+        // Content with embedded newlines and no trailing one, so a batch parse
+        // that trusted line boundaries instead of sizes would misalign.
+        sh(
+            &dir,
+            "printf 'x\\n\\ny' > nl.bin && printf '#!/bin/sh\\n' > run.sh && chmod +x run.sh \
+             && mkdir -p d && : > d/empty && ln -s b.txt link && git add -A && git commit -qm more",
+        )
+        .await;
+        let head = git(dir.to_str().unwrap(), "rev-parse", &["rev-parse", "HEAD"])
+            .await
+            .unwrap();
+        let snapshot = snapshot_candidate(dir.to_str().unwrap(), &head, 1 << 20)
+            .await
+            .unwrap();
+        let file = |path: &str| {
+            snapshot
+                .files
+                .iter()
+                .find(|f| f.path == path)
+                .unwrap_or_else(|| panic!("{path} missing"))
+        };
+        assert_eq!(snapshot.files.len(), 6);
+        assert_eq!(file("a.txt").content, b"one\ntwo\n");
+        assert_eq!(file("nl.bin").content, b"x\n\ny");
+        assert_eq!(file("d/empty").content, b"");
+        assert_eq!(file("run.sh").mode, 0o100755);
+        assert_eq!(file("link").mode, 0o120000);
+        assert_eq!(file("link").content, b"b.txt");
+        assert_eq!(
+            std::fs::read(snapshot.root.join("nl.bin")).unwrap(),
+            b"x\n\ny"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_over_the_byte_limit_is_refused() {
+        const FN: &str = "a_snapshot_over_the_byte_limit_is_refused";
+        let dir = repo(FN).await;
+        let head = git(dir.to_str().unwrap(), "rev-parse", &["rev-parse", "HEAD"])
+            .await
+            .unwrap();
+        let Err(ReviewError::Rejected(reason)) =
+            snapshot_candidate(dir.to_str().unwrap(), &head, 4).await
+        else {
+            panic!("a snapshot over the limit was accepted");
+        };
+        assert!(reason.contains("the operator limit is 4"), "{reason}");
     }
 
     #[tokio::test]
