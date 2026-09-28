@@ -26,6 +26,8 @@ export interface NodeInfo {
   loopback?: boolean
   /** The channel this node prefers the composer to start on; only on the serving node's row. */
   default_channel?: string | null
+  /** The release the node runs. Absent from older builds. */
+  application_version?: string | null
 }
 
 export interface ModelOption {

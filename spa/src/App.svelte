@@ -26,6 +26,7 @@
   import { router } from './lib/router.svelte'
   import { store } from './lib/store.svelte'
   import { surface } from './lib/surface.svelte'
+  import { staleInterface } from './lib/version'
 
   // A login QR lands with the token in the fragment. Stash it and strip the
   // address bar before anything else renders; if this browser is already
@@ -100,6 +101,9 @@
               : 'home'
   )
   const hubDown = $derived(store.mesh?.hub.state === 'unreachable')
+  const staleVersion = $derived(
+    staleInterface(__TRACON_VERSION__, store.node?.application_version) ? store.node?.application_version : null,
+  )
   /** No hub is a thing to do something about, so it links to doing it. */
   const noHub = $derived(!store.mesh?.hub || store.mesh.hub.state === 'disabled')
   const hubLabel = $derived.by(() => {
@@ -191,6 +195,12 @@
           <p>{store.node.failed_check}: {store.node.failed_detail}</p>
           <p>{remedy(store.node.failed_check)}</p>
         </details>
+      </div>
+    {/if}
+    {#if staleVersion}
+      <div class="banner">
+        tracon {staleVersion} is running <b>· this page is still {__TRACON_VERSION__}.</b>
+        <button class="lnk" type="button" onclick={() => location.reload()}>Reload</button>
       </div>
     {/if}
     <!-- Degraded is a state, not an error: quiet, persistent, not dismissable. -->
