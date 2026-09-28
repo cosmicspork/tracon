@@ -1,5 +1,5 @@
 //! A harness the operator runs themselves, through the operator door: it
-//! attaches one session per channel, is offered the channel's tools minus the
+//! attaches one session per client on a channel, is offered the channel's tools minus the
 //! ones needing a worktree, and a call the policy does not name waits on the
 //! same queue as any other — which is the thing that could not happen before
 //! this mode existed.
@@ -29,22 +29,80 @@ fn enabled() -> Config {
 }
 
 async fn mcp(app: &axum::Router, channel: &str, body: Value) -> (StatusCode, Value) {
-    let req = Request::builder()
+    let (status, v, _) = mcp_as(app, channel, None, body).await;
+    (status, v)
+}
+
+/// A call from the client that echoes `client` as its `Mcp-Session-Id`, and
+/// the id the door answered with.
+async fn mcp_as(
+    app: &axum::Router,
+    channel: &str,
+    client: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value, Option<String>) {
+    let mut req = Request::builder()
         .method("POST")
         .uri(format!("/mcp/external/{channel}"))
         .header("host", "127.0.0.1:7420")
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
+        .header("content-type", "application/json");
+    if let Some(client) = client {
+        req = req.header("mcp-session-id", client);
+    }
+    let res = app
+        .clone()
+        .oneshot(req.body(Body::from(body.to_string())).unwrap())
+        .await
         .unwrap();
-    let res = app.clone().oneshot(req).await.unwrap();
     let status = res.status();
+    let echoed = res
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
         .await
         .unwrap();
     (
         status,
         serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        echoed,
     )
+}
+
+fn ping() -> Value {
+    json!({"jsonrpc":"2.0","id":1,"method":"ping"})
+}
+
+/// Every external session on this node, oldest first.
+fn external_rows(h: &Harness) -> Vec<tracon::store::SessionRow> {
+    let mut rows: Vec<_> = h
+        .store
+        .list_sessions(None)
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.harness_id == "external")
+        .collect();
+    rows.sort_by_key(|s| s.created_ms);
+    rows
+}
+
+fn row_for(h: &Harness, client: &str) -> tracon::store::SessionRow {
+    external_rows(h)
+        .into_iter()
+        .rev()
+        .find(|s| s.harness_session_id.as_deref() == Some(client))
+        .unwrap_or_else(|| panic!("no session for {client}"))
+}
+
+async fn wait_for_state(h: &Harness, id: &str, state: &str) {
+    for _ in 0..100 {
+        if h.store.get_session(id).unwrap().unwrap().state == state {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("{id} never reached {state}");
 }
 
 async fn list(app: &axum::Router, channel: &str) -> Vec<String> {
@@ -644,28 +702,29 @@ async fn a_pause_fence_survives_a_restart_and_only_resume_clears_it() {
     )
     .await;
     assert!(status.is_success(), "{status}");
-    for _ in 0..100 {
-        if h.store.get_session(&id).unwrap().unwrap().state == "paused" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert_eq!(h.manager.bindings("work")["external_paused"], true);
+    wait_for_state(&h, &id, "paused").await;
+    // The fence is the paused row, not a flag that would pause the channel's
+    // other clients too.
+    assert_ne!(h.manager.bindings("work")["external_paused"], true);
 
     // A fresh process over the same store: no live attachment, no live
     // supervisor, only what the pause left durable.
     let restarted = manager_over(&h.store).await;
-    let err = restarted.attach_external("work").await.unwrap_err();
+    let err = restarted.attach_external("work", None).await.unwrap_err();
     assert!(format!("{err}").contains("paused"), "{err}");
+    // Another client on the channel was never paused.
+    restarted
+        .attach_external("work", Some("other"))
+        .await
+        .unwrap();
 
     // The operator resumes; the fence lifts, the stale row closes honestly,
     // and the next call attaches fresh.
     restarted.resume(&id, "operator back".into()).await.unwrap();
-    assert_eq!(restarted.bindings("work")["external_paused"], false);
     let stale = h.store.get_session(&id).unwrap().unwrap();
     assert_eq!(stale.state, "closed");
 
-    let new_id = restarted.attach_external("work").await.unwrap();
+    let new_id = restarted.attach_external("work", None).await.unwrap();
     assert_ne!(new_id, id);
     let new_row = h.store.get_session(&new_id).unwrap().unwrap();
     assert_eq!(new_row.state, "running");
@@ -745,11 +804,11 @@ async fn a_session_stop_is_cleared_from_the_channel() {
     .await;
     assert!(status.is_success(), "{status}");
     assert_eq!(h.manager.bindings("work")["external_stopped"], true);
-    assert!(h.manager.attach_external("work").await.is_err());
+    assert!(h.manager.attach_external("work", None).await.is_err());
 
     let (status, _) = call(&h.operator, "DELETE", "/api/external/work/stop", None).await;
     assert!(status.is_success(), "{status}");
-    let next = h.manager.attach_external("work").await.unwrap();
+    let next = h.manager.attach_external("work", None).await.unwrap();
     assert_ne!(next, id);
 }
 
@@ -929,4 +988,157 @@ async fn a_card_reaches_an_interface_that_is_already_open() {
         "{}",
         queued[0].title
     );
+}
+
+/// `initialize` names the client; each client that echoes its name is its own
+/// session, and a client that echoes none shares the channel's one.
+#[tokio::test]
+async fn each_client_that_echoes_its_id_gets_its_own_session() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize"});
+    let (status, _, a) = mcp_as(&h.operator, "work", None, init.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, _, b) = mcp_as(&h.operator, "work", None, init).await;
+    let (a, b) = (a.expect("initialize names the client"), b.unwrap());
+    assert_ne!(a, b);
+
+    for _ in 0..3 {
+        let (_, _, echoed) = mcp_as(&h.operator, "work", Some(&a), ping()).await;
+        assert_eq!(echoed.as_deref(), Some(a.as_str()));
+        mcp_as(&h.operator, "work", Some(&b), ping()).await;
+    }
+    assert_eq!(external_rows(&h).len(), 2);
+    assert_ne!(row_for(&h, &a).id, row_for(&h, &b).id);
+
+    // Header-less calls keep today's behaviour: one shared attachment.
+    mcp(&h.operator, "work", ping()).await;
+    mcp(&h.operator, "work", ping()).await;
+    assert_eq!(external_rows(&h).len(), 3);
+
+    let (_, v) = call(&h.operator, "GET", "/api/external", None).await;
+    let clients: Vec<Value> = v["attachments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["client"].clone())
+        .collect();
+    assert_eq!(clients.len(), 3, "{v}");
+    assert!(
+        clients.contains(&json!(a))
+            && clients.contains(&json!(b))
+            && clients.contains(&Value::Null),
+        "{v}"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_session_id_is_refused() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let (status, _, _) = mcp_as(&h.operator, "work", Some("has space"), ping()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(external_rows(&h).is_empty());
+}
+
+/// Pausing one agent fences only that one; the other keeps working, and a
+/// DELETE from one ends only its own session.
+#[tokio::test]
+async fn one_clients_pause_and_exit_leave_the_other_alone() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    mcp_as(&h.operator, "work", Some("agent-a"), ping()).await;
+    mcp_as(&h.operator, "work", Some("agent-b"), ping()).await;
+    let a = row_for(&h, "agent-a").id;
+    let b = row_for(&h, "agent-b").id;
+
+    let (status, _) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/sessions/{a}/pause"),
+        Some(json!({ "reason": "look at a" })),
+    )
+    .await;
+    assert!(status.is_success(), "{status}");
+    wait_for_state(&h, &a, "paused").await;
+    let (status, _, _) = mcp_as(&h.operator, "work", Some("agent-a"), ping()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _, _) = mcp_as(&h.operator, "work", Some("agent-b"), ping()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(h.store.get_session(&b).unwrap().unwrap().state, "running");
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/mcp/external/work")
+        .header("host", "127.0.0.1:7420")
+        .header("mcp-session-id", "agent-b")
+        .body(Body::empty())
+        .unwrap();
+    let res = h.operator.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    wait_for_state(&h, &b, "closed").await;
+    assert_eq!(h.store.get_session(&a).unwrap().unwrap().state, "paused");
+}
+
+/// The channel's Stop is still the kill switch for every client on it.
+#[tokio::test]
+async fn a_channel_stop_ends_every_client() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    mcp_as(&h.operator, "work", Some("agent-a"), ping()).await;
+    mcp_as(&h.operator, "work", Some("agent-b"), ping()).await;
+    let (status, _) = call(&h.operator, "POST", "/api/external/work/stop", None).await;
+    assert!(status.is_success(), "{status}");
+    for row in external_rows(&h) {
+        wait_for_state(&h, &row.id, "closed").await;
+    }
+    let (status, _, _) = mcp_as(&h.operator, "work", Some("agent-c"), ping()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// An id the node no longer holds is not an error: the client attaches again
+/// under it, so a restart or idle detach needs nothing from the client.
+#[tokio::test]
+async fn an_unknown_id_attaches_again_under_the_same_name() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    mcp_as(&h.operator, "work", Some("agent-a"), ping()).await;
+    let first = row_for(&h, "agent-a").id;
+    h.manager.kill(&first).await.unwrap();
+    wait_for_state(&h, &first, "closed").await;
+    let (status, _, _) = mcp_as(&h.operator, "work", Some("agent-a"), ping()).await;
+    assert_eq!(status, StatusCode::OK);
+    let second = row_for(&h, "agent-a").id;
+    assert_ne!(first, second);
+}
+
+/// A named client's pause outlives the node: after a restart its id finds the
+/// paused row, and nothing else on the channel is held back.
+#[tokio::test]
+async fn a_named_clients_pause_survives_a_restart() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    mcp_as(&h.operator, "work", Some("agent-a"), ping()).await;
+    let a = row_for(&h, "agent-a").id;
+    let (status, _) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/sessions/{a}/pause"),
+        Some(json!({ "reason": "hold" })),
+    )
+    .await;
+    assert!(status.is_success(), "{status}");
+    wait_for_state(&h, &a, "paused").await;
+
+    let restarted = manager_over(&h.store).await;
+    let err = restarted
+        .attach_external("work", Some("agent-a"))
+        .await
+        .unwrap_err();
+    assert!(format!("{err}").contains("paused"), "{err}");
+    restarted.attach_external("work", None).await.unwrap();
+    restarted
+        .attach_external("work", Some("agent-b"))
+        .await
+        .unwrap();
 }

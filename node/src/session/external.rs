@@ -8,8 +8,8 @@
 //! comes back through the same command channel, and the log of what was asked
 //! for belongs somewhere the operator can read it afterwards.
 //!
-//! So a channel gets one attached session and a loop that handles only what an
-//! attachment can produce: a permission request, its answer, its expiry, and
+//! So each client on a channel gets one attached session and a loop that
+//! handles only what an attachment can produce: a permission request, its answer, its expiry, and
 //! the end. No turns, no budget, no container. A `Supervisor` with a stubbed
 //! harness would have to fake all three.
 
@@ -33,7 +33,10 @@ use crate::{
 /// off this, and `recent_repos` filters on it.
 pub const HARNESS_ID: &str = "external";
 
-/// One attachment per channel, while it is live.
+/// A channel and the `Mcp-Session-Id` its client echoes, if it echoes one.
+pub(super) type Key = (String, Option<String>);
+
+/// One attachment per client on a channel, while it is live.
 pub(super) struct Attachment {
     pub session_id: String,
     /// Bumped by every call the door lets through; the loop reads it on its
@@ -178,7 +181,6 @@ impl Loop {
             started,
         );
         self.publish_queue();
-        self.set_access_fence("external_paused", true);
     }
 
     fn resume(&self, started: Instant, source: PauseSource, reason: &str) -> Result<(), String> {
@@ -192,23 +194,26 @@ impl Loop {
             json!({ "source": source.as_str(), "reason": reason }),
             started,
         );
-        self.set_access_fence("external_paused", false);
+        // A pause is this row's state now; the channel-wide flag is only
+        // what an older node left behind, and a resume retires it.
+        self.clear_legacy_pause();
         Ok(())
     }
 
-    fn set_access_fence(&self, key: &str, enabled: bool) {
+    fn clear_legacy_pause(&self) {
         let Ok(Some(session)) = self.store.get_session(&self.session_id) else {
             return;
         };
-        let channel = self.store.channel_get(&session.channel).ok().flatten();
-        let (keyring, mut bindings) = match channel {
-            Some(channel) => (
-                channel.keyring,
-                serde_json::from_str(&channel.bindings_json).unwrap_or_else(|_| json!({})),
-            ),
-            None => (Vec::new(), json!({})),
+        let Some(channel) = self.store.channel_get(&session.channel).ok().flatten() else {
+            return;
         };
-        bindings[key] = json!(enabled);
+        let mut bindings: serde_json::Value =
+            serde_json::from_str(&channel.bindings_json).unwrap_or_else(|_| json!({}));
+        if bindings["external_paused"] != true {
+            return;
+        }
+        let keyring = channel.keyring;
+        bindings["external_paused"] = json!(false);
         let _ = self.store.channel_put(
             &session.channel,
             &keyring,

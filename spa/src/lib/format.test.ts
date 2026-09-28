@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { digits, formatAge, formatBudget, formatDuration, formatExpiry, formatGrouped, formatTokens } from './format'
+import { digits, externalAgent, formatAge, formatBudget, formatDuration, formatExpiry, formatGrouped, formatTokens } from './format'
 
 test('tokens are shown with a k or M suffix once they earn one', () => {
   expect(formatTokens(512)).toBe('512')
@@ -70,4 +70,10 @@ test('a typed number is shown grouped and read back as digits', () => {
   expect(digits('2,000,000')).toBe(2_000_000)
   expect(digits('1 500k')).toBe(1500)
   expect(digits('')).toBe(0)
+})
+
+test('an external agent is named by the tail of its id', () => {
+  expect(externalAgent('01a0e964-9d4a-7872-b04c-f7d19aa8a4b8')).toBe('agent 9aa8a4b8')
+  expect(externalAgent(null)).toBe('')
+  expect(externalAgent(undefined)).toBe('')
 })

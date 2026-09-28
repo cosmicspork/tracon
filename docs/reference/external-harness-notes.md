@@ -100,6 +100,19 @@ session. `work_close` takes an id, and refuses an item a running session holds,
 since closing it would end that session. What stays absent is `review_verdict`,
 which belongs to a review session the node starts.
 
+**One session per client, not per channel.** The first cut keyed the
+attachment on the channel alone, so two terminals on one channel shared a
+session: one card queue, one pause, one idle clock, one log. `initialize` now
+mints an `Mcp-Session-Id` and returns it as the transport specifies; the key is
+(channel, id), and the id is stored as the row's `harness_session_id`. An id the
+node no longer holds is not refused with the 404 the spec allows: the client
+attaches again under it, because a client that mishandles that 404 would lose
+its tools until it restarts, and the node gains nothing by insisting. A client
+that echoes no id keeps the old shared attachment. Pause became per client with
+it — the paused row is the fence, found again by id after a restart — while
+Stop stayed the channel's kill switch, and reviews, reports and `ask_operator`
+keys stayed channel-shared so a reattached agent picks up where it left off.
+
 ## The policy change that came with it
 
 Comments stopped being allowed unattended in the same bundle (version 5). The
@@ -111,9 +124,6 @@ explain than a split between kinds of write. Reads stay free.
 
 ## Left for later
 
-- Whether an attachment should expose `Mcp-Session-Id`. The in-container client
-  proves POST-per-message works; a client that insists on the header would need
-  one echoed per attachment.
 - Metrics count an attachment as a session with zero tokens, so a channel's
   session count includes them. Nothing reads that number for a decision yet.
 - A peer's interface renders the row with the wording it has; an older peer
