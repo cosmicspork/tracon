@@ -32,6 +32,33 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.23.0](https://github.com/cosmicspork/tracon/compare/v0.22.0...v0.23.0) (2026-09-28)
+
+
+### Features
+
+* **external:** give each connected agent its own session ([#270](https://github.com/cosmicspork/tracon/issues/270)) ([90e6fb7](https://github.com/cosmicspork/tracon/commit/90e6fb7291f969cf0ae52d0e842039179c7b49b3))
+* **external:** stop and clear broker access per channel from the GUI and CLI ([#268](https://github.com/cosmicspork/tracon/issues/268)) ([85cae38](https://github.com/cosmicspork/tracon/commit/85cae38929f2e1195e65e1818a015b520b514b48))
+* offer a reload when the node runs a newer interface ([#260](https://github.com/cosmicspork/tracon/issues/260)) ([3ce84d4](https://github.com/cosmicspork/tracon/commit/3ce84d4a566920c55a9a43c05f5f8e7a85e3e72a))
+* **providers:** choose and edit a sign-in's channels ([#259](https://github.com/cosmicspork/tracon/issues/259)) ([cd553e7](https://github.com/cosmicspork/tracon/commit/cd553e72d521483aa8a8214164fa49e2643d3657))
+* reclaim runtime storage whose owner is over ([#266](https://github.com/cosmicspork/tracon/issues/266)) ([46df837](https://github.com/cosmicspork/tracon/commit/46df83733ef0dd8302cba7dfc17f762339d70e5b))
+* **review:** raise the submission cap to 10k lines and 200 files ([#269](https://github.com/cosmicspork/tracon/issues/269)) ([1a8be3f](https://github.com/cosmicspork/tracon/commit/1a8be3fee96787b0b84667d6f2bef10177af0763))
+
+
+### Bug Fixes
+
+* **cli:** accept the short work ids that ls prints ([#261](https://github.com/cosmicspork/tracon/issues/261)) ([823b079](https://github.com/cosmicspork/tracon/commit/823b079d1123501bc179ec0ef3868588beaa892c))
+* **cli:** print memory ids in full and accept a unique prefix in rm ([#262](https://github.com/cosmicspork/tracon/issues/262)) ([0453943](https://github.com/cosmicspork/tracon/commit/04539436cc0acedec311d2944d444b87c08178fc))
+* **external:** withdraw a card whose caller hung up, and log the call as abandoned ([#272](https://github.com/cosmicspork/tracon/issues/272)) ([3db6dc6](https://github.com/cosmicspork/tracon/commit/3db6dc6acd88f15b6eb82bda327b9536c15687a1))
+* **publish:** drop glab's nonexistent --no-squash-before-merge flag ([#271](https://github.com/cosmicspork/tracon/issues/271)) ([33db9bd](https://github.com/cosmicspork/tracon/commit/33db9bd0cb9d6f9b09d61ebb0b6877b1ffc591dc))
+* **spa:** grow the review body to fit what it holds ([#265](https://github.com/cosmicspork/tracon/issues/265)) ([cbf7867](https://github.com/cosmicspork/tracon/commit/cbf78674baceeb31155f9013ac857352ff275b6a))
+* **spa:** open list screens on the node's default channel ([#257](https://github.com/cosmicspork/tracon/issues/257)) ([e40cdc4](https://github.com/cosmicspork/tracon/commit/e40cdc46cb4da8d96ea0c25481ac72d6d9e6b641))
+
+
+### Performance Improvements
+
+* **review:** snapshot a candidate with two git processes, not two per file ([#267](https://github.com/cosmicspork/tracon/issues/267)) ([63af708](https://github.com/cosmicspork/tracon/commit/63af708ac81c0b1bde474c20162de3b204e73f8d))
+
 ## [0.22.0](https://github.com/cosmicspork/tracon/compare/v0.21.0...v0.22.0) (2026-09-26)
 
 
