@@ -75,6 +75,10 @@ pub fn router(state: AppState) -> Router {
                 .delete(mcp::external_delete),
         )
         .route("/api/external", get(api::external))
+        .route(
+            "/api/external/{channel}/stop",
+            post(api::external_stop).delete(api::external_clear),
+        )
         .route("/api/health", get(api::health))
         .route("/api/node", get(api::get_node))
         .route("/api/node/refresh-models", post(api::refresh_models))

@@ -2452,6 +2452,17 @@ async fn decide_report_local(
 /// register with; the interface shows the same.
 pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let rows = s.store().channel_list()?;
+    // Listed on their own rather than folded into `channels`, which callers
+    // read as names: a stopped channel is still one a harness registers with.
+    let stopped: Vec<String> = rows
+        .iter()
+        .filter(|c| !c.name.starts_with('@'))
+        .filter(|c| {
+            serde_json::from_str::<serde_json::Value>(&c.bindings_json)
+                .is_ok_and(|b| b["external_stopped"] == true)
+        })
+        .map(|c| c.name.clone())
+        .collect();
     let channels: Vec<String> = if rows.is_empty() {
         DEFAULT_CHANNELS.iter().map(|c| c.to_string()).collect()
     } else {
@@ -2476,7 +2487,28 @@ pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::V
         "enabled": s.cfg.external.enabled,
         "channels": channels,
         "attachments": attached,
+        "stopped": stopped,
     })))
+}
+
+/// `POST /api/external/{channel}/stop`: refuse every external harness on the
+/// channel and end any attached now. Needs no live attachment.
+pub async fn external_stop(
+    State(s): State<AppState>,
+    Path(channel): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    s.manager.set_external_stopped(&channel, true).await?;
+    Ok(Json(json!({ "channel": channel, "stopped": true })))
+}
+
+/// `DELETE /api/external/{channel}/stop`: allow external harnesses on the
+/// channel again. Their next call attaches fresh.
+pub async fn external_clear(
+    State(s): State<AppState>,
+    Path(channel): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    s.manager.set_external_stopped(&channel, false).await?;
+    Ok(Json(json!({ "channel": channel, "stopped": false })))
 }
 
 /// The queue, ordered on the node: waiting-on-you first, oldest first within

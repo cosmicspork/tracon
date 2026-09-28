@@ -384,7 +384,11 @@ your own harness over `tracon external`, the node never held the process: pause
 and stop only fence its brokered tool access, so the interface labels the control
 "Stop broker access" rather than "Stop", and a stopped attachment reads "Broker
 access stopped" rather than "Killed" — your own client keeps running until you
-end it. A watchdog pauses a session on its own after repeated harness-turn
+end it. Stop broker access fences the whole channel, not just the one
+attachment: every external agent on it is refused until you allow it again from
+**Settings → Your own harness** or with `tracon external clear <channel>`. The
+same card, or `tracon external stop <channel>`, stops a channel with nothing
+attached. A watchdog pauses a session on its own after repeated harness-turn
 failures, with the reason on the record, rather than restarting the same loop
 indefinitely.
 
@@ -567,7 +571,7 @@ and revoked the moment the hub loses that key.
 | `tracon setup [--rebuild] [--ui-bundle <tarball>]`, `check-boundary [--deep]` | the boundary, and OpenCode's UI bundle — fetched from the release, or installed from a file offline (also on the Settings screen) |
 | `tracon service install\|uninstall\|status\|restart` | the platform supervisor (the desktop app runs these for you) |
 | `tracon auth issue [--url]\|revoke\|sessions` | off-machine access; `--url` prints the login QR |
-| `tracon external show\|detach <channel>` | a harness you run yourself, using this node's tools |
+| `tracon external show\|detach\|stop\|clear <channel>` | a harness you run yourself, using this node's tools |
 | `tracon push ls\|rm <id>\|test` | the phones this node pushes to |
 | `tracon mesh id\|init\|invite\|members\|remove\|admit`, `enroll` | the mesh |
 | `tracon channel create\|list\|bind\|share` | channels and their bindings |

@@ -186,6 +186,24 @@
     }
   }
 
+  const channelStopped = $derived(
+    store.channels.find((c) => c.name === session?.channel)?.bindings?.external_stopped === true,
+  )
+
+  async function allowExternal() {
+    if (controlling || !session) return
+    controlling = true
+    error = null
+    try {
+      await api.externalClear(session.channel)
+      await store.refetch()
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err)
+    } finally {
+      controlling = false
+    }
+  }
+
   async function control(action: 'pause' | 'resume') {
     if (controlling) return
     controlling = true
@@ -366,6 +384,12 @@
     </div>
   {/if}
 
+  {#if session.harness_id === 'external' && isTerminal(session.state) && channelStopped}
+    <div class="banner dim">
+      broker access stopped on {session.channel} <b>· every external agent on it is refused until allowed again</b>
+      <button class="lnk" onclick={allowExternal} disabled={controlling}>Allow broker access again</button>
+    </div>
+  {/if}
   {#if session.harness_id === 'external' && session.state !== 'paused' && !isTerminal(session.state)}
     <div class="banner dim">external agent attached <b>· its host process, repository, prompts, and model usage stay outside Tracon; these controls only fence broker access</b></div>
   {/if}

@@ -1589,7 +1589,7 @@ impl Manager {
         let bindings = self.bindings(channel);
         if bindings["external_stopped"] == true {
             return Err(SessionError::Rejected(
-                "external broker access was stopped by the operator; explicitly clear channel binding external_stopped before reattaching".into(),
+                "external broker access was stopped by the operator; allow it again in Settings or with `tracon external clear <channel>`".into(),
             ));
         }
         let mut attached = self.external.lock().await;
@@ -2207,6 +2207,74 @@ impl Manager {
         Ok(())
     }
 
+    /// Refuse every external harness on `channel`, or allow them again. The
+    /// channel-level form of an external session's Stop: it needs no live
+    /// attachment, and it is the only way the fence is lifted.
+    pub async fn set_external_stopped(
+        &self,
+        channel: &str,
+        stopped: bool,
+    ) -> Result<(), SessionError> {
+        match self.channel_usable(channel) {
+            Ok(()) | Err(SessionError::ChannelArchived(_)) => {}
+            Err(e) => return Err(e),
+        }
+        self.write_external_stop(channel, stopped)?;
+        if stopped {
+            let ids: Vec<String> = self
+                .external
+                .lock()
+                .await
+                .iter()
+                .filter(|(c, _)| c.as_str() == channel)
+                .map(|(_, a)| a.session_id.clone())
+                .collect();
+            for id in ids {
+                match self.terminate(&id, false).await {
+                    Ok(()) | Err(SessionError::NotFound) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The durable fence behind Stop broker access, written locally like the
+    /// pause fence beside it.
+    fn write_external_stop(&self, channel: &str, stopped: bool) -> Result<(), SessionError> {
+        if self.store.channel_get(channel)?.is_none() {
+            // Materialize both standalone defaults together; creating
+            // one otherwise makes the other disappear from the
+            // synthesized channel list.
+            for name in crate::http::api::DEFAULT_CHANNELS {
+                self.store.channel_put(name, &[], "{}")?;
+                self.store.node_channel_add(&self.node_id, name)?;
+            }
+        }
+        let (keyring, mut bindings) = match self.store.channel_get(channel)? {
+            Some(channel) => (
+                channel.keyring,
+                serde_json::from_str(&channel.bindings_json).unwrap_or_else(|_| json!({})),
+            ),
+            None => (Vec::new(), json!({})),
+        };
+        if stopped {
+            // Stop supersedes any earlier pause: one fence gates
+            // reattachment from here on, and it is this one.
+            bindings["external_stopped"] = json!(true);
+            bindings["external_paused"] = json!(false);
+        } else if let Some(map) = bindings.as_object_mut() {
+            map.remove("external_stopped");
+        }
+        self.store.channel_put(
+            channel,
+            &keyring,
+            &serde_json::to_string(&bindings)
+                .map_err(|error| SessionError::Rejected(error.to_string()))?,
+        )?;
+        Ok(())
+    }
+
     /// Stop a live session and, for an external harness, durably fence the
     /// channel: broker access stays refused until the operator explicitly
     /// clears it. The operator's actual "Stop" action.
@@ -2340,35 +2408,7 @@ impl Manager {
         if fence_external {
             if let Some(row) = self.store.get_session(id)? {
                 if row.harness_id == external::HARNESS_ID {
-                    let channel = self.store.channel_get(&row.channel)?;
-                    if channel.is_none() {
-                        // Materialize both standalone defaults together; creating
-                        // one otherwise makes the other disappear from the
-                        // synthesized channel list.
-                        for name in crate::http::api::DEFAULT_CHANNELS {
-                            self.store.channel_put(name, &[], "{}")?;
-                            self.store.node_channel_add(&self.node_id, name)?;
-                        }
-                    }
-                    let channel = self.store.channel_get(&row.channel)?;
-                    let (keyring, mut bindings) = match channel {
-                        Some(channel) => (
-                            channel.keyring,
-                            serde_json::from_str(&channel.bindings_json)
-                                .unwrap_or_else(|_| json!({})),
-                        ),
-                        None => (Vec::new(), json!({})),
-                    };
-                    // Stop supersedes any earlier pause: one fence gates
-                    // reattachment from here on, and it is this one.
-                    bindings["external_stopped"] = json!(true);
-                    bindings["external_paused"] = json!(false);
-                    self.store.channel_put(
-                        &row.channel,
-                        &keyring,
-                        &serde_json::to_string(&bindings)
-                            .map_err(|error| SessionError::Rejected(error.to_string()))?,
-                    )?;
+                    self.write_external_stop(&row.channel, true)?;
                 }
             }
         }

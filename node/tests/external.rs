@@ -671,6 +671,96 @@ async fn a_pause_fence_survives_a_restart_and_only_resume_clears_it() {
     assert_eq!(new_row.state, "running");
 }
 
+/// Stop is reachable without a live attachment, ends one that is there, and
+/// only the operator's explicit clear lets the next call through again.
+#[tokio::test]
+async fn a_channel_stop_needs_no_attachment_and_only_clear_lifts_it() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+
+    // Nothing attached yet: the stop still lands, and the next call is refused.
+    let (status, _) = call(&h.operator, "POST", "/api/external/work/stop", None).await;
+    assert!(status.is_success(), "{status}");
+    let (status, v) = mcp(
+        &h.operator,
+        "work",
+        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let message = v["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("tracon external clear"), "{message}");
+    assert!(attached(&h).is_none());
+    let (_, view) = call(&h.operator, "GET", "/api/external", None).await;
+    assert_eq!(view["stopped"], json!(["work"]), "{view}");
+
+    // Cleared: the next call attaches.
+    let (status, _) = call(&h.operator, "DELETE", "/api/external/work/stop", None).await;
+    assert!(status.is_success(), "{status}");
+    assert!(h.manager.bindings("work")["external_stopped"].is_null());
+    let (status, _) = mcp(
+        &h.operator,
+        "work",
+        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
+    )
+    .await;
+    assert!(status.is_success(), "{status}");
+    let live = attached(&h).unwrap().id;
+    let (_, view) = call(&h.operator, "GET", "/api/external", None).await;
+    assert_eq!(view["stopped"], json!([]), "{view}");
+
+    // Stopped while attached: the attachment ends as the operator's doing.
+    let (status, _) = call(&h.operator, "POST", "/api/external/work/stop", None).await;
+    assert!(status.is_success(), "{status}");
+    let row = h.store.get_session(&live).unwrap().unwrap();
+    assert_eq!(row.state, "closed");
+    assert_eq!(row.end_reason.as_deref(), Some("killed_user"));
+    let (status, _) = mcp(
+        &h.operator,
+        "work",
+        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// The session page's Stop sets the same fence the channel's clear lifts.
+#[tokio::test]
+async fn a_session_stop_is_cleared_from_the_channel() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    mcp(
+        &h.operator,
+        "work",
+        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
+    )
+    .await;
+    let id = attached(&h).unwrap().id;
+    let (status, _) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/sessions/{id}/stop"),
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{status}");
+    assert_eq!(h.manager.bindings("work")["external_stopped"], true);
+    assert!(h.manager.attach_external("work").await.is_err());
+
+    let (status, _) = call(&h.operator, "DELETE", "/api/external/work/stop", None).await;
+    assert!(status.is_success(), "{status}");
+    let next = h.manager.attach_external("work").await.unwrap();
+    assert_ne!(next, id);
+}
+
+#[tokio::test]
+async fn stopping_a_channel_this_node_does_not_hold_is_refused() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let (status, _) = call(&h.operator, "POST", "/api/external/nope/stop", None).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
 #[tokio::test]
 async fn an_attachment_that_goes_quiet_detaches() {
     state::isolate();

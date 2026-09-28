@@ -490,6 +490,11 @@ enum ExternalCommand {
     /// End the attachment on a channel. The next call from that harness
     /// attaches a new one.
     Detach { channel: String },
+    /// Refuse every external harness on a channel and end any attached now,
+    /// until `clear`.
+    Stop { channel: String },
+    /// Allow external harnesses on a channel again after `stop`.
+    Clear { channel: String },
 }
 
 #[derive(Subcommand)]
@@ -1397,6 +1402,13 @@ async fn external_command(cmd: ExternalCommand) -> Result<()> {
                 let Some(name) = c.as_str() else { continue };
                 println!("  claude mcp add --transport http tracon-{name} {base}/mcp/external/{name}{header}");
             }
+            let stopped = v["stopped"].as_array().cloned().unwrap_or_default();
+            if !stopped.is_empty() {
+                println!("\nStopped (tracon external clear <channel> to allow again):");
+                for c in stopped {
+                    println!("  {}", c.as_str().unwrap_or(""));
+                }
+            }
             let attached = v["attachments"].as_array().cloned().unwrap_or_default();
             if attached.is_empty() {
                 println!("\nNothing attached.");
@@ -1430,6 +1442,28 @@ async fn external_command(cmd: ExternalCommand) -> Result<()> {
             )
             .await?;
             println!("detached {channel}");
+            Ok(())
+        }
+        ExternalCommand::Stop { channel } => {
+            node_call(
+                Method::POST,
+                &format!("/api/external/{channel}/stop"),
+                None,
+                None,
+            )
+            .await?;
+            println!("stopped broker access on {channel}");
+            Ok(())
+        }
+        ExternalCommand::Clear { channel } => {
+            node_call(
+                Method::DELETE,
+                &format!("/api/external/{channel}/stop"),
+                None,
+                None,
+            )
+            .await?;
+            println!("broker access on {channel} is allowed again");
             Ok(())
         }
     }

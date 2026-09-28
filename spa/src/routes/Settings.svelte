@@ -83,6 +83,17 @@
   const externalChannels = $derived(
     store.channels.filter((c) => !c.archived).map((c) => c.name),
   )
+  const externalStopped = $derived(
+    new Set(store.channels.filter((c) => c.bindings?.external_stopped === true).map((c) => c.name)),
+  )
+  let stoppingExternal = $state('')
+  function setExternalStopped(channel: string, stopped: boolean) {
+    return act('external-stop', async () => {
+      await (stopped ? api.externalStop(channel) : api.externalClear(channel))
+      stoppingExternal = ''
+      await store.refetch()
+    })
+  }
   const refused = $derived(store.node?.state === 'refused')
 
   function selectNode(id: string) {
@@ -1045,7 +1056,25 @@
     {:else if externalChannels.length === 0}
       <small>Create a shared channel first.</small>
     {:else}
-      <div class="mcp">{#each externalChannels as name (name)}<code>claude mcp add --transport http tracon-{name} {origin}/mcp/external/{name}</code>{/each}</div>
+      <div class="mcp">
+        {#each externalChannels as name (name)}
+          <div class="ext">
+            <code>claude mcp add --transport http tracon-{name} {origin}/mcp/external/{name}</code>
+            <div class="acts">
+              {#if externalStopped.has(name)}
+                <span class="chip bad">broker access stopped</span>
+                <button class="lnk" onclick={() => setExternalStopped(name, false)} disabled={busy !== ''}>Allow broker access again</button>
+              {:else if stoppingExternal === name}
+                <small>End every agent attached to {name} and refuse new ones until allowed again?</small>
+                <button class="btn d" onclick={() => setExternalStopped(name, true)} disabled={busy !== ''}>Stop broker access</button>
+                <button class="lnk" onclick={() => (stoppingExternal = '')} disabled={busy !== ''}>Cancel</button>
+              {:else}
+                <button class="lnk d" onclick={() => (stoppingExternal = name)} disabled={busy !== ''}>Stop broker access</button>
+              {/if}
+            </div>
+          </div>
+        {/each}
+      </div>
       <small>Use <code>submit_report</code> for an operator report and notification without Git or publication; <code>report_status</code> reads feedback.{#if !local} From another machine, add <code>--header "Authorization: Bearer &lt;operator token&gt;"</code>.{/if}</small>
     {/if}
   </Card>
@@ -1365,6 +1394,10 @@
   .mcp {
     display: grid;
     gap: 6px;
+  }
+  .ext {
+    display: grid;
+    gap: 4px;
   }
   .mcp code {
     font: 12px var(--mono);
