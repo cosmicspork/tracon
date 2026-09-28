@@ -1,7 +1,7 @@
-// Which channel the composer starts on. This browser's last choice wins,
-// because it was made here; then the node's own preference; then whatever
-// this node ran last; then the first name there is. An archived or
-// vanished channel is skipped at every step.
+// Which channel a screen starts on. The node's own preference wins, because
+// the operator set it for every browser; then this browser's last choice;
+// then whatever this node ran last; then the first name there is. An
+// archived or vanished channel is skipped at every step.
 
 const KEY = 'tracon.channel'
 
@@ -28,8 +28,8 @@ export function defaultChannel(o: {
   sessions?: { channel: string; created_ms: number }[]
 }): string {
   const open = new Set(o.names)
-  if (o.remembered && open.has(o.remembered)) return o.remembered
   if (o.nodeDefault && open.has(o.nodeDefault)) return o.nodeDefault
+  if (o.remembered && open.has(o.remembered)) return o.remembered
   const last = [...(o.sessions ?? [])]
     .sort((a, b) => b.created_ms - a.created_ms)
     .find((s) => open.has(s.channel))
