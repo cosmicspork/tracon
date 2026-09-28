@@ -430,18 +430,29 @@ async fn attempt(
         }
     }
     let body = format!("{}\n\n{}", p.body, marker_comment(p.id));
-    let args: Vec<String> = match provider {
+    let args = open_change_args(provider, p.target, p.title, body);
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let url = run_cli(provider.command(cfg), &publisher, &env, &argv).await?;
+    p.journal.opened(&url).map_err(PublishError::Broker)?;
+    Ok(url)
+}
+
+/// The CLI arguments that open the change. The squash choice is left to the
+/// project's own merge settings: glab has no negated squash flag, and the
+/// squash-merge subject is what semantic-release reads.
+fn open_change_args(provider: Provider, target: &Target, title: &str, body: String) -> Vec<String> {
+    match provider {
         Provider::Github => vec![
             "pr".into(),
             "create".into(),
             "--repo".into(),
-            p.target.project.clone(),
+            target.project.clone(),
             "--base".into(),
-            p.target.base.clone(),
+            target.base.clone(),
             "--head".into(),
-            p.target.branch.clone(),
+            target.branch.clone(),
             "--title".into(),
-            p.title.to_string(),
+            title.to_string(),
             "--body".into(),
             body,
         ],
@@ -449,23 +460,18 @@ async fn attempt(
             "mr".into(),
             "create".into(),
             "--repo".into(),
-            p.target.project.clone(),
+            target.project.clone(),
             "--target-branch".into(),
-            p.target.base.clone(),
+            target.base.clone(),
             "--source-branch".into(),
-            p.target.branch.clone(),
+            target.branch.clone(),
             "--title".into(),
-            p.title.to_string(),
+            title.to_string(),
             "--description".into(),
             body,
-            "--no-squash-before-merge".into(),
             "--yes".into(),
         ],
-    };
-    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    let url = run_cli(provider.command(cfg), &publisher, &env, &argv).await?;
-    p.journal.opened(&url).map_err(PublishError::Broker)?;
-    Ok(url)
+    }
 }
 
 /// The marker that identifies a change this publication opened. A merge
@@ -728,6 +734,37 @@ mod tests {
             before_push: None,
             journal,
         }
+    }
+
+    #[test]
+    fn gitlab_change_leaves_squash_to_the_project() {
+        let target = Target {
+            provider: "gitlab".into(),
+            project: "group/app".into(),
+            base: "master".into(),
+            branch: "fix/x".into(),
+            worktree: None,
+        };
+        let args = open_change_args(Provider::Gitlab, &target, "fix: x", "b".into());
+        assert_eq!(
+            args,
+            [
+                "mr",
+                "create",
+                "--repo",
+                "group/app",
+                "--target-branch",
+                "master",
+                "--source-branch",
+                "fix/x",
+                "--title",
+                "fix: x",
+                "--description",
+                "b",
+                "--yes",
+            ]
+        );
+        assert!(!args.iter().any(|a| a.contains("squash")));
     }
 
     #[test]
