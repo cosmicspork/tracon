@@ -256,13 +256,27 @@ fn ps_field(pid: u32, field: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// A child that ends when the test is done with it.
+    /// A child that ends when the test is done with it, returned once it is
+    /// running `sleep`. On Linux `spawn` can return while the child is still
+    /// this test binary: posix_spawn's vfork releases the parent part-way
+    /// through the child's exec, so an identity read at once may record the
+    /// wrong executable.
     fn sleeper() -> std::process::Child {
-        std::process::Command::new("sleep")
+        let child = std::process::Command::new("sleep")
             .arg("30")
             .stdin(std::process::Stdio::null())
             .spawn()
-            .expect("spawning sleep")
+            .expect("spawning sleep");
+        let parent = exe(std::process::id());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while exe(child.id()) == parent {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never became sleep"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        child
     }
 
     #[test]
