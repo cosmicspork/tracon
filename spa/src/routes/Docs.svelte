@@ -3,6 +3,7 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
+  import { defaultChannel, rememberChannel, rememberedChannel } from '../lib/channel'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { Document, RecallHit } from '../lib/types'
@@ -22,12 +23,17 @@
   const channels = $derived(store.channels.map((c) => c.name))
 
   $effect(() => {
-    if (!channel && channels.length) channel = channels.includes('personal') ? 'personal' : channels[0]
+    if (!channel && channels.length)
+      channel = defaultChannel({
+        names: store.channels.filter((c) => !c.archived).map((c) => c.name),
+        remembered: rememberedChannel(),
+        nodeDefault: store.node?.default_channel,
+      }) || channels[0]
   })
 
   $effect(() => {
     void store.docsVersion
-    void channel
+    if (!channel && channels.length) return
     api
       .docs(channel || undefined, undefined, showArchived)
       .then((d) => (docs = d.docs))
@@ -96,7 +102,7 @@
   {#if channels.length > 1}
     <label class="channel">
       <span>Channel</span>
-      <select bind:value={channel}>
+      <select bind:value={channel} onchange={() => rememberChannel(channel)}>
         {#each channels as c (c)}<option value={c}>{c}</option>{/each}
       </select>
     </label>

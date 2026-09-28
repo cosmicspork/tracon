@@ -1,6 +1,7 @@
 <script lang="ts">
   import WorkRow from '../components/WorkRow.svelte'
   import { api } from '../lib/api'
+  import { defaultChannel, rememberChannel, rememberedChannel } from '../lib/channel'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { WorkView } from '../lib/types'
@@ -18,7 +19,12 @@
 
   const channels = $derived(store.channels.filter((c) => !c.archived).map((c) => c.name))
   $effect(() => {
-    if (!channel && channels.length) channel = channels.includes('personal') ? 'personal' : channels[0]
+    if (!channel && channels.length)
+      channel = defaultChannel({
+        names: channels,
+        remembered: rememberedChannel(),
+        nodeDefault: store.node?.default_channel,
+      })
   })
   $effect(() => {
     void store.workVersion
@@ -65,7 +71,7 @@
   <div class="bar">
     <label class="channel">
       <span>Channel</span>
-      <select bind:value={channel}>
+      <select bind:value={channel} onchange={() => rememberChannel(channel)}>
         {#each channels as c (c)}<option value={c}>{c}</option>{/each}
       </select>
     </label>

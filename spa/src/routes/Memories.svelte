@@ -2,6 +2,7 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
+  import { defaultChannel, rememberChannel, rememberedChannel } from '../lib/channel'
   import { store } from '../lib/store.svelte'
   import type { Memory } from '../lib/types'
 
@@ -16,7 +17,12 @@
   const channels = $derived(store.channels.map((c) => c.name))
 
   $effect(() => {
-    if (!channel && channels.length) channel = channels.includes('personal') ? 'personal' : channels[0]
+    if (!channel && channels.length)
+      channel = defaultChannel({
+        names: store.channels.filter((c) => !c.archived).map((c) => c.name),
+        remembered: rememberedChannel(),
+        nodeDefault: store.node?.default_channel,
+      }) || channels[0]
   })
 
   // No single `state` filter covers "live": a promoted memory is as live as
@@ -98,7 +104,7 @@
   {#if channels.length > 1}
     <label class="channel">
       <span>Channel</span>
-      <select bind:value={channel}>
+      <select bind:value={channel} onchange={() => rememberChannel(channel)}>
         {#each channels as c (c)}<option value={c}>{c}</option>{/each}
       </select>
     </label>
