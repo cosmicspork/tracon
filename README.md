@@ -879,7 +879,10 @@ rest of the mesh. A bundle that is missing, unsigned or malformed has no rules, 
 no rules means everything is asked.
 
 A rule allows, denies, or is left to ask. Deny wins over allow whatever the order,
-and anything no rule names is asked. For a brokered tool an allow names the tool
+and anything no rule names is asked. A deny matches its patterns anywhere in the
+call, arguments included, except the `title` and `body` of `submit_review` and
+`submit_report`: those only reach your queue, and a write-up of a production
+incident has to be able to say so. For a brokered tool an allow names the tool
 exactly and can narrow it by argument, with `*` as the only wildcard:
 
 ```toml
