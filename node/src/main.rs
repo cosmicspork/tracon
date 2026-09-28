@@ -317,17 +317,32 @@ enum WorkCommand {
         project: Option<String>,
     },
     /// Show one item, its sessions, and what was discovered from it.
-    Show { id: String },
+    /// Ids here and below may be the prefixes `ls` prints.
+    Show {
+        id: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
     /// Close an item; a session holding it ends at its next turn end.
-    Close { id: String },
+    Close {
+        id: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
     /// Add a dependency: `dep <id> --on <id>`.
     Dep {
         id: String,
         #[arg(long)]
         on: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
     },
     /// Delete an item.
-    Rm { id: String },
+    Rm {
+        id: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1752,17 +1767,22 @@ async fn work_resolve(channel: &str, prefix: &str) -> Result<String> {
         None,
     )
     .await?;
-    let hits: Vec<String> = v["items"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|i| i["id"].as_str())
-        .filter(|id| id.starts_with(prefix))
-        .map(str::to_string)
-        .collect();
+    let items = v["items"].as_array().cloned().unwrap_or_default();
+    resolve_prefix(
+        items.iter().filter_map(|i| i["id"].as_str()),
+        prefix,
+        channel,
+    )
+}
+
+fn resolve_prefix<'a>(
+    ids: impl Iterator<Item = &'a str>,
+    prefix: &str,
+    channel: &str,
+) -> Result<String> {
+    let hits: Vec<&str> = ids.filter(|id| id.starts_with(prefix)).collect();
     match hits.as_slice() {
-        [one] => Ok(one.clone()),
+        [one] => Ok(one.to_string()),
         [] => anyhow::bail!("no work item starts with {prefix} on {channel}"),
         _ => anyhow::bail!("{prefix} is ambiguous on {channel}"),
     }
@@ -1855,12 +1875,14 @@ async fn work_command(cmd: WorkCommand) -> Result<()> {
             }
             Ok(())
         }
-        WorkCommand::Show { id } => {
+        WorkCommand::Show { id, channel } => {
+            let id = work_resolve(&channel, &id).await?;
             let v = node_call(Method::GET, &format!("/api/work/{id}"), None, None).await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
             Ok(())
         }
-        WorkCommand::Close { id } => {
+        WorkCommand::Close { id, channel } => {
+            let id = work_resolve(&channel, &id).await?;
             let v = node_call(
                 Method::PUT,
                 &format!("/api/work/{id}"),
@@ -1871,7 +1893,9 @@ async fn work_command(cmd: WorkCommand) -> Result<()> {
             println!("closed {}", v["id"].as_str().unwrap_or(&id));
             Ok(())
         }
-        WorkCommand::Dep { id, on } => {
+        WorkCommand::Dep { id, on, channel } => {
+            let id = work_resolve(&channel, &id).await?;
+            let on = work_resolve(&channel, &on).await?;
             let cur = node_call(Method::GET, &format!("/api/work/{id}"), None, None).await?;
             let mut deps: Vec<String> = cur["item"]["deps"]
                 .as_array()
@@ -1892,7 +1916,8 @@ async fn work_command(cmd: WorkCommand) -> Result<()> {
             println!("ok");
             Ok(())
         }
-        WorkCommand::Rm { id } => {
+        WorkCommand::Rm { id, channel } => {
+            let id = work_resolve(&channel, &id).await?;
             node_call(Method::DELETE, &format!("/api/work/{id}"), None, None).await?;
             println!("removed {id}");
             Ok(())
@@ -2095,5 +2120,27 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
             println!("handed {name} to {}", &to[..16.min(to.len())]);
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_prefix;
+
+    const IDS: [&str; 3] = ["45abb223aa", "45abc001bb", "0f80343ccc"];
+
+    #[test]
+    fn a_prefix_names_exactly_one_item_or_says_why_not() {
+        let resolve = |prefix| resolve_prefix(IDS.into_iter(), prefix, "work");
+        assert_eq!(resolve("0f80").unwrap(), "0f80343ccc");
+        assert_eq!(resolve("45abb223aa").unwrap(), "45abb223aa");
+        assert!(resolve("45ab")
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous on work"));
+        assert!(resolve("ffff")
+            .unwrap_err()
+            .to_string()
+            .contains("no work item starts with ffff on work"));
     }
 }
