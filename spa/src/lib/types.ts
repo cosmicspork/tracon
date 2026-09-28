@@ -224,6 +224,9 @@ export interface Session {
   harness_agent: string | null
   harness_found: string | null
   harness_protocol: string | null
+  /** An external agent's `Mcp-Session-Id`; null for a managed session and
+   * for a client that echoes none. */
+  harness_session_id?: string | null
   model: string
   phase: 'plan' | 'execute' | 'review'
   policy_version: number | null

@@ -4,7 +4,8 @@
 
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use serde_json::{json, Value};
@@ -61,18 +62,69 @@ pub async fn handle(
 /// is the operator, anything else presents the operator token — which is
 /// exactly the trust an external harness runs under, being a process of the
 /// operator's on the operator's own machine.
+///
+/// Each client is its own session. `initialize` hands out an `Mcp-Session-Id`
+/// and a client that echoes it is told apart from every other on the channel;
+/// one that does not shares the channel's single header-less attachment, as
+/// every client did before. An id the node no longer holds (a restart, an idle
+/// detach, a kill) is not refused: the client simply attaches again under it,
+/// so no client has to know to re-initialize.
 pub async fn handle_external(
     State(s): State<AppState>,
     Path(channel): Path<String>,
+    headers: HeaderMap,
     Json(msg): Json<Value>,
-) -> (StatusCode, Json<Value>) {
+) -> Response {
     if !s.cfg.external.enabled {
         return rpc_error(
             StatusCode::FORBIDDEN,
             "this node does not answer harnesses outside the boundary: set [external] enabled = true in node.toml and restart",
-        );
+        )
+        .into_response();
     }
-    let session_id = match s.manager.attach_external(&channel).await {
+    let client = match client_id(&headers) {
+        Ok(Some(id)) => Some(id),
+        Ok(None) if msg.get("method").and_then(Value::as_str) == Some("initialize") => {
+            Some(uuid::Uuid::now_v7().to_string())
+        }
+        Ok(None) => None,
+        Err(e) => return rpc_error(StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let mut response = answer_external(&s, channel, client.as_deref(), &msg)
+        .await
+        .into_response();
+    if let Some(value) = client.and_then(|id| HeaderValue::from_str(&id).ok()) {
+        response.headers_mut().insert(SESSION_HEADER, value);
+    }
+    response
+}
+
+/// The header MCP's streamable HTTP transport names a session with.
+const SESSION_HEADER: &str = "mcp-session-id";
+
+/// The id a client echoes, if any. The transport allows visible ASCII; the
+/// length bound keeps a stored column from being whatever a caller sends.
+fn client_id(headers: &HeaderMap) -> Result<Option<String>, &'static str> {
+    let Some(value) = headers.get(SESSION_HEADER) else {
+        return Ok(None);
+    };
+    let id = value
+        .to_str()
+        .ok()
+        .filter(|id| {
+            !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| (0x21..=0x7e).contains(&b))
+        })
+        .ok_or("Mcp-Session-Id must be 1 to 128 visible ASCII characters")?;
+    Ok(Some(id.to_string()))
+}
+
+async fn answer_external(
+    s: &AppState,
+    channel: String,
+    client: Option<&str>,
+    msg: &Value,
+) -> (StatusCode, Json<Value>) {
+    let session_id = match s.manager.attach_external(&channel, client).await {
         Ok(id) => id,
         Err(e) => return rpc_error(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
     };
@@ -119,7 +171,7 @@ pub async fn handle_external(
         return rpc_error(StatusCode::CONFLICT, &error.to_string());
     }
 
-    match s.tools.handle(&ctx, &msg).await {
+    match s.tools.handle(&ctx, msg).await {
         Some(response) => {
             if let Some(title) = &call {
                 let failed = response["result"]["isError"] == true;
@@ -145,10 +197,18 @@ pub async fn external_get() -> (StatusCode, Json<Value>) {
     )
 }
 
-/// Some clients close a session on exit. Honour it: the attachment ends and
-/// the home stops showing it as connected.
-pub async fn external_delete(State(s): State<AppState>, Path(channel): Path<String>) -> StatusCode {
-    let _ = s.manager.detach_external(&channel).await;
+/// Some clients close a session on exit. Honour it: that client's attachment
+/// ends and the home stops showing it as connected. Any other client on the
+/// channel is untouched.
+pub async fn external_delete(
+    State(s): State<AppState>,
+    Path(channel): Path<String>,
+    headers: HeaderMap,
+) -> StatusCode {
+    let Ok(client) = client_id(&headers) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let _ = s.manager.detach_external(&channel, client.as_deref()).await;
     StatusCode::NO_CONTENT
 }
 

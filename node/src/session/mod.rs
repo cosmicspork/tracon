@@ -203,11 +203,12 @@ pub struct Manager {
     /// starts and dropped when it ends, so it authorises exactly one session
     /// for exactly as long as that session runs.
     tokens: Arc<Mutex<HashMap<String, (String, String)>>>,
-    /// Channel → the session an externally attached harness acts as. One per
-    /// channel: a second terminal on the same channel joins the attachment
-    /// rather than opening a second one, so the home shows what is connected
-    /// and not how many windows are open.
-    external: Arc<Mutex<HashMap<String, external::Attachment>>>,
+    /// (channel, client) → the session an externally attached harness acts
+    /// as. The client is the `Mcp-Session-Id` the door handed out at
+    /// `initialize`, so two agents on one channel are two sessions: separate
+    /// cards, separate pauses, separate idle clocks. A client that never
+    /// echoes the id is `None`, and every such caller on a channel shares one.
+    external: Arc<Mutex<HashMap<external::Key, external::Attachment>>>,
     /// Session id → the running harness's own HTTP API, for the sessions
     /// whose harness has one. Registered when the harness starts and dropped
     /// when its supervisor ends, so the gateway can answer for exactly the
@@ -1584,7 +1585,11 @@ impl Manager {
     /// the operator's own guard already answers; a token here would be a
     /// second capability for the same trust, and `session_for_token` must
     /// never resolve one of these for the model gateway.
-    pub async fn attach_external(&self, channel: &str) -> Result<String, SessionError> {
+    pub async fn attach_external(
+        &self,
+        channel: &str,
+        client: Option<&str>,
+    ) -> Result<String, SessionError> {
         self.channel_usable(channel)?;
         let bindings = self.bindings(channel);
         if bindings["external_stopped"] == true {
@@ -1592,8 +1597,9 @@ impl Manager {
                 "external broker access was stopped by the operator; allow it again in Settings or with `tracon external clear <channel>`".into(),
             ));
         }
+        let key: external::Key = (channel.to_string(), client.map(str::to_string));
         let mut attached = self.external.lock().await;
-        if let Some(a) = attached.get(channel) {
+        if let Some(a) = attached.get(&key) {
             // The in-memory `live` map's cleanup lags a Kill/Stop's
             // synchronous store fence by a scheduler tick or two; trusting
             // it here would hand a caller an attachment already published
@@ -1609,12 +1615,18 @@ impl Manager {
                 return Ok(a.session_id.clone());
             }
         }
-        // The live attachment is gone (a node restart drops it; the pause
-        // fence does not), but the operator paused this channel and never
+        // The live attachment is gone (a node restart drops it; the paused
+        // row does not), but the operator paused this client and never
         // resumed it. Creating a new running attachment here would resume
         // broker work without the operator's say-so, which is the one thing
-        // a pause promises will not happen.
-        if bindings["external_paused"] == true {
+        // a pause promises will not happen. A channel-wide `external_paused`
+        // is what a node before per-client sessions left; it is honoured
+        // until a resume clears it.
+        let paused = self
+            .store
+            .external_session_for(channel, client)?
+            .is_some_and(|row| row.state == SessionState::Paused.as_str());
+        if paused || bindings["external_paused"] == true {
             return Err(SessionError::Rejected(
                 "external broker access is paused; resume the session before it accepts more work"
                     .into(),
@@ -1635,7 +1647,7 @@ impl Manager {
             harness_agent: None,
             harness_found: None,
             harness_protocol: None,
-            harness_session_id: None,
+            harness_session_id: client.map(str::to_string),
             container_name: None,
             model: String::new(),
             project_id: None,
@@ -1685,7 +1697,7 @@ impl Manager {
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
         self.live.lock().await.insert(id.clone(), cmd_tx);
         attached.insert(
-            channel.to_string(),
+            key.clone(),
             external::Attachment {
                 session_id: id.clone(),
                 last_seen: last_seen.clone(),
@@ -1705,39 +1717,45 @@ impl Manager {
         let live = self.live.clone();
         let external = self.external.clone();
         let sid = id.clone();
-        let ch = channel.to_string();
         tokio::spawn(async move {
             looper.run(cmd_rx).await;
             live.lock().await.remove(&sid);
             let mut attached = external.lock().await;
             // Only if it is still this attachment: a reattach may have
             // replaced it while this one was closing.
-            if attached.get(&ch).is_some_and(|a| a.session_id == sid) {
-                attached.remove(&ch);
+            if attached.get(&key).is_some_and(|a| a.session_id == sid) {
+                attached.remove(&key);
             }
         });
         Ok(id)
     }
 
-    /// Live external attachments as `(channel, session_id)`, for the CLI and
-    /// the interface.
-    pub async fn external_attachments(&self) -> Vec<(String, String)> {
+    /// Live external attachments as `(channel, client, session_id)`, for the
+    /// CLI and the interface.
+    pub async fn external_attachments(&self) -> Vec<(String, Option<String>, String)> {
         let attached = self.external.lock().await;
         let live = self.live.lock().await;
-        attached
+        let mut out: Vec<_> = attached
             .iter()
             .filter(|(_, a)| live.contains_key(&a.session_id))
-            .map(|(c, a)| (c.clone(), a.session_id.clone()))
-            .collect()
+            .map(|((channel, client), a)| (channel.clone(), client.clone(), a.session_id.clone()))
+            .collect();
+        out.sort();
+        out
     }
 
-    /// End the attachment on a channel, if there is one.
-    pub async fn detach_external(&self, channel: &str) -> Result<(), SessionError> {
+    /// End one client's attachment on a channel, if there is one.
+    pub async fn detach_external(
+        &self,
+        channel: &str,
+        client: Option<&str>,
+    ) -> Result<(), SessionError> {
+        let key: external::Key = (channel.to_string(), client.map(str::to_string));
         let id = self
             .external
             .lock()
             .await
-            .get(channel)
+            .get(&key)
             .map(|a| a.session_id.clone())
             .ok_or(SessionError::NotFound)?;
         self.send(&id, Command::Kill).await
@@ -2152,7 +2170,8 @@ impl Manager {
     }
 
     /// A restart drops the in-memory attachment an external harness had, but
-    /// the pause fence it left on the channel is durable and outlives it.
+    /// its paused row (and, from an older node, a channel-wide pause fence)
+    /// is durable and outlives it.
     /// There is no live loop to hand the row back to, so this clears the
     /// fence and closes the stale row honestly rather than pretending the
     /// old attachment is running again; the next call re-attaches fresh.
@@ -2226,7 +2245,7 @@ impl Manager {
                 .lock()
                 .await
                 .iter()
-                .filter(|(c, _)| c.as_str() == channel)
+                .filter(|((c, _), _)| c.as_str() == channel)
                 .map(|(_, a)| a.session_id.clone())
                 .collect();
             for id in ids {
@@ -2576,12 +2595,11 @@ pub async fn reconcile_after_restart(
             }
         }
         if s.state == state::SessionState::Paused.as_str() && s.harness_id == external::HARNESS_ID {
-            // External broker access is fenced on the channel, not owned by
-            // a process this node supervises: the pause already made that
-            // fence durable, a restart does not touch it, and only an
-            // explicit operator Resume (`Manager::resume_stale_external`)
-            // clears it. Resurrecting the row here would not help; closing
-            // it would silently drop the fence for the channel's next call.
+            // An external client's broker access is fenced by this paused
+            // row, not by a process this node supervises: a restart does not
+            // touch it, the client's next call finds it by its id, and only
+            // an explicit operator Resume (`Manager::resume_stale_external`)
+            // clears it. Closing it here would silently drop the fence.
             continue;
         }
         if let Some(container) = &s.container_name {

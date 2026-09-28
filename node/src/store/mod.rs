@@ -339,6 +339,27 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// The newest unfinished session an external client on `channel` acted
+    /// as, found by the id it echoes (`None` for a client that echoes none).
+    /// This is how a paused client is recognised after a restart dropped its
+    /// live attachment.
+    pub fn external_session_for(
+        &self,
+        channel: &str,
+        client: Option<&str>,
+    ) -> Result<Option<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM session WHERE harness_id='external' AND channel=?1 \
+             AND harness_session_id IS ?2 AND state NOT IN ('closed','killed_budget','failed') \
+             ORDER BY created_ms DESC LIMIT 1",
+            rusqlite::params![channel, client],
+            SessionRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// Every session that ever held an item, oldest first.
     pub fn sessions_of_work_item(&self, work_item_id: &str) -> Result<Vec<SessionRow>> {
         let conn = self.conn.lock().unwrap();

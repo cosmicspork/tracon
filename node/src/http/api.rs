@@ -2481,7 +2481,9 @@ pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::V
         .external_attachments()
         .await
         .into_iter()
-        .map(|(channel, session_id)| json!({ "channel": channel, "session_id": session_id }))
+        .map(|(channel, client, session_id)| {
+            json!({ "channel": channel, "client": client, "session_id": session_id })
+        })
         .collect();
     Ok(Json(json!({
         "enabled": s.cfg.external.enabled,

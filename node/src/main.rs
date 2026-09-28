@@ -487,7 +487,7 @@ enum ChannelCommand {
 enum ExternalCommand {
     /// How to point your own harness at this node, and what is attached now.
     Show,
-    /// End the attachment on a channel. The next call from that harness
+    /// End every attachment on a channel. The next call from each harness
     /// attaches a new one.
     Detach { channel: String },
     /// Refuse every external harness on a channel and end any attached now,
@@ -1377,6 +1377,13 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
     }
 }
 
+/// The tail of a client id, which is what differs between two minted ones:
+/// a v7 UUID's leading digits are its timestamp and repeat for clients that
+/// attached in the same minute.
+fn short_client(id: &str) -> &str {
+    id.get(id.len().saturating_sub(8)..).unwrap_or(id)
+}
+
 async fn external_command(cmd: ExternalCommand) -> Result<()> {
     use reqwest::Method;
     let v = node_call(Method::GET, "/api/external", None, None).await?;
@@ -1415,8 +1422,12 @@ async fn external_command(cmd: ExternalCommand) -> Result<()> {
             } else {
                 println!("\nAttached now:");
                 for a in attached {
+                    let client = a["client"]
+                        .as_str()
+                        .map(|c| format!(" · client {}", short_client(c)))
+                        .unwrap_or_default();
                     println!(
-                        "  {} · session {}",
+                        "  {}{client} · session {}",
                         a["channel"].as_str().unwrap_or(""),
                         a["session_id"].as_str().unwrap_or("")
                     );
@@ -1425,23 +1436,29 @@ async fn external_command(cmd: ExternalCommand) -> Result<()> {
             Ok(())
         }
         ExternalCommand::Detach { channel } => {
-            let id = v["attachments"]
+            let ids: Vec<String> = v["attachments"]
                 .as_array()
-                .and_then(|a| {
+                .map(|a| {
                     a.iter()
-                        .find(|a| a["channel"] == serde_json::json!(channel))
-                        .and_then(|a| a["session_id"].as_str())
+                        .filter(|a| a["channel"] == serde_json::json!(channel))
+                        .filter_map(|a| a["session_id"].as_str())
                         .map(str::to_string)
+                        .collect()
                 })
-                .ok_or_else(|| anyhow::anyhow!("nothing is attached to {channel}"))?;
-            node_call(
-                Method::POST,
-                &format!("/api/sessions/{id}/kill"),
-                None,
-                None,
-            )
-            .await?;
-            println!("detached {channel}");
+                .unwrap_or_default();
+            if ids.is_empty() {
+                anyhow::bail!("nothing is attached to {channel}");
+            }
+            for id in &ids {
+                node_call(
+                    Method::POST,
+                    &format!("/api/sessions/{id}/kill"),
+                    None,
+                    None,
+                )
+                .await?;
+            }
+            println!("detached {} from {channel}", ids.len());
             Ok(())
         }
         ExternalCommand::Stop { channel } => {

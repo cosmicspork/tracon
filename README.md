@@ -384,8 +384,11 @@ your own harness over `tracon external`, the node never held the process: pause
 and stop only fence its brokered tool access, so the interface labels the control
 "Stop broker access" rather than "Stop", and a stopped attachment reads "Broker
 access stopped" rather than "Killed" — your own client keeps running until you
-end it. Stop broker access fences the whole channel, not just the one
-attachment: every external agent on it is refused until you allow it again from
+end it. Each agent attached to a channel is its own session — the node hands
+it an `Mcp-Session-Id` at `initialize` — so pausing one agent leaves the others
+on the channel working, and a pause survives a node restart. A client that
+echoes no id shares one session per channel. Stop broker access fences the
+whole channel, not just the one attachment: every external agent on it is refused until you allow it again from
 **Settings → Your own harness** or with `tracon external clear <channel>`. The
 same card, or `tracon external stop <channel>`, stops a channel with nothing
 attached. A watchdog pauses a session on its own after repeated harness-turn

@@ -55,3 +55,12 @@ export function formatGrouped(n: number): string {
 export function digits(s: string): number {
   return Number(s.replace(/\D/g, '') || 0)
 }
+
+/**
+ * Which of a channel's external agents a session is: the tail of the id the
+ * node handed it at `initialize`, since a v7 id's head is a timestamp two
+ * agents started together share. Empty for a client that echoes no id.
+ */
+export function externalAgent(clientId: string | null | undefined): string {
+  return clientId ? `agent ${clientId.slice(-8)}` : ''
+}
