@@ -6,6 +6,7 @@
   import { formatAge } from '../lib/format'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
+  import { autogrow } from '../lib/autogrow'
   import { surface } from '../lib/surface.svelte'
   import {
     reviewChecks,
@@ -396,7 +397,7 @@
     Title and body <b>{surface.phone ? 'edited on the desktop' : 'edit before approving if you want to'}</b>
   </div>
   <input class="edit" bind:value={title} disabled={busy || publishing || surface.phone} />
-  <textarea class="edit body" bind:value={body} disabled={busy || publishing || surface.phone}></textarea>
+  <textarea class="edit body" bind:value={body} use:autogrow={body} disabled={busy || publishing || surface.phone}></textarea>
   {#if edited}
     <div class="note">Edited. Approving publishes what is written here, not what was submitted.</div>
   {/if}
@@ -760,6 +761,7 @@
   }
   .edit.body {
     min-height: 110px;
+    max-height: 70vh;
     resize: vertical;
     font-family: var(--sans);
   }
