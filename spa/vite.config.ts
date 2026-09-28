@@ -53,7 +53,20 @@ const fixtures = (): Plugin => ({
 
 const fixtureMode = Boolean(process.env.TRACON_FIXTURES)
 
+// The release this bundle belongs to, so a page left open across a node
+// upgrade can tell it is running the previous interface. Empty when built
+// without the workspace manifest; the page then never claims to be stale.
+const appVersion = (() => {
+  try {
+    const manifest = readFileSync(fileURLToPath(new URL('../Cargo.toml', import.meta.url)), 'utf8')
+    return /\[workspace\.package\][^[]*?\bversion\s*=\s*"([^"]+)"/.exec(manifest)?.[1] ?? ''
+  } catch {
+    return ''
+  }
+})()
+
 export default defineConfig({
+  define: { __TRACON_VERSION__: JSON.stringify(appVersion) },
   plugins: [svelte(), fixtureMode ? fixtures() : undefined].filter(Boolean) as PluginOption[],
   build: {
     outDir: 'dist',

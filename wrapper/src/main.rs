@@ -475,6 +475,8 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::select_all(app, None)?,
         ],
     )?;
+    let reload = MenuItem::with_id(app, "app:reload", "Reload", true, Some("CmdOrCtrl+R"))?;
+    let view = Submenu::with_items(app, "View", true, &[&reload])?;
     let window = Submenu::with_items(
         app,
         "Window",
@@ -486,14 +488,28 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::close_window(app, Some("Close Window"))?,
         ],
     )?;
-    let menu = Menu::with_items(app, &[&app_menu, &edit, &window])?;
+    let menu = Menu::with_items(app, &[&app_menu, &edit, &view, &window])?;
     app.set_menu(menu)?;
-    app.on_menu_event(|app, event| {
-        if event.id().as_ref() == "app:quit" {
-            on_cmd_q(app);
-        }
+    app.on_menu_event(|app, event| match event.id().as_ref() {
+        "app:quit" => on_cmd_q(app),
+        "app:reload" => reload_focused(app),
+        _ => {}
     });
     Ok(())
+}
+
+/// ⌘R: the window in front loads its page again, picking up an interface the
+/// node was upgraded to while it stayed open.
+#[cfg(target_os = "macos")]
+fn reload_focused(app: &tauri::AppHandle) {
+    let windows = app.webview_windows();
+    let focused = windows
+        .values()
+        .find(|window| window.is_focused().unwrap_or(false))
+        .or_else(|| windows.get("main"));
+    if let Some(window) = focused {
+        let _ = window.reload();
+    }
 }
 
 /// ⌘Q, or Quit from the application menu.
