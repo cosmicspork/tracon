@@ -100,6 +100,19 @@ enum Command {
     },
     /// The trail behind a commit: model, prompts, approval, policy version.
     Provenance { sha: String },
+    /// Runtime volumes and state directories whose session, workspace or
+    /// check is over. Lists them; `--apply` removes them (talks to `tracon serve`).
+    Gc {
+        /// Remove what is listed for removal.
+        #[arg(long)]
+        apply: bool,
+        /// Include dependency caches, which are rebuilt when next needed.
+        #[arg(long)]
+        caches: bool,
+        /// Also list what is kept, and why.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -580,6 +593,50 @@ async fn main() -> Result<()> {
                     f("agent_seconds"),
                     c["sessions"],
                 );
+            }
+            Ok(())
+        }
+        Command::Gc { apply, caches, all } => {
+            use reqwest::Method;
+            let v = node_call(
+                Method::POST,
+                "/api/maintenance/storage",
+                Some(serde_json::json!({ "apply": apply, "caches": caches })),
+                None,
+            )
+            .await?;
+            let items = v["items"].as_array().cloned().unwrap_or_default();
+            let mut listed = 0;
+            let mut failed = 0;
+            for item in &items {
+                let remove = item["remove"].as_bool().unwrap_or(false);
+                if !remove && !all {
+                    continue;
+                }
+                let status = match (remove, apply, item["error"].as_str()) {
+                    (false, _, _) => "keep".to_string(),
+                    (true, false, _) => "remove".to_string(),
+                    (true, true, Some(error)) => {
+                        failed += 1;
+                        format!("FAILED ({error})")
+                    }
+                    (true, true, None) => "removed".to_string(),
+                };
+                listed += usize::from(remove);
+                println!(
+                    "{status:<8} {:<9} {}  — {}",
+                    item["kind"].as_str().unwrap_or(""),
+                    item["name"].as_str().unwrap_or(""),
+                    item["reason"].as_str().unwrap_or("")
+                );
+            }
+            if listed == 0 {
+                println!("nothing to remove");
+            } else if !apply {
+                println!("{listed} to remove; run again with --apply to remove them");
+            }
+            if failed > 0 {
+                anyhow::bail!("{failed} could not be removed");
             }
             Ok(())
         }

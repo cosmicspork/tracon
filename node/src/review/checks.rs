@@ -248,6 +248,7 @@ pub async fn run_required(
         // read-only evidence.
         let scratch_volume = format!("tracon-check-{run_id}");
         if let Err(error) = backend.import_volume(&scratch_volume, snapshot).await {
+            release_check_volume(backend, &scratch_volume).await;
             let message = format!("could not stage check workspace: {error}");
             store
                 .finish_check_run(
@@ -274,7 +275,7 @@ pub async fn run_required(
             });
             continue;
         }
-        let mount = Mount::volume(scratch_volume, "/work", false);
+        let mount = Mount::volume(scratch_volume.clone(), "/work", false);
         let started = std::time::Instant::now();
         let runner_name = format!("tracon-c-{index}-{}", &hash(&run_id)[..12]);
         // What the runner will actually call this execution, not what it was
@@ -316,6 +317,8 @@ pub async fn run_required(
             }
         }
         .await;
+        // Only the output is kept; the copy it ran against is nobody's now.
+        release_check_volume(backend, &scratch_volume).await;
         // Cancelled: the runtime is stopped before anything is written down,
         // so the record is never ahead of what is actually running.
         if let Err(Some(reason)) = finished {
@@ -452,6 +455,14 @@ fn with_candidate_tree(
 
 /// The result a cancelled execution contributes: never ok, never reusable,
 /// and carrying the reason the operator will read.
+/// Best effort: a runtime still releasing a killed execution's mount refuses
+/// the removal, and `tracon gc` takes the volume later.
+async fn release_check_volume(backend: &dyn crate::boundary::Backend, volume: &str) {
+    if let Err(error) = backend.remove_volume(volume).await {
+        tracing::debug!(%volume, %error, "check volume left for a later sweep");
+    }
+}
+
 fn cancelled_result(command: &str, reason: &str, ms: u64) -> CheckResult {
     CheckResult {
         command: command.to_string(),
@@ -666,11 +677,18 @@ mod tests {
             }
         }
 
-        struct FakeBackend;
+        #[derive(Default)]
+        struct FakeBackend {
+            removed: std::sync::Mutex<Vec<String>>,
+        }
         #[async_trait]
         impl Backend for FakeBackend {
             fn kind(&self) -> &'static str {
                 "fake"
+            }
+            async fn remove_volume(&self, volume: &str) -> Result<(), BoundaryError> {
+                self.removed.lock().unwrap().push(volume.to_string());
+                Ok(())
             }
             async fn setup(&self, _cfg: &Config, _rebuild: bool) -> Result<(), BoundaryError> {
                 Ok(())
@@ -729,7 +747,7 @@ mod tests {
         // confirmed identity is what must grant reuse, not this string.
         cfg.boundary.harness_image = "registry/example:latest".into();
         cfg.supervision.checks = vec!["true".into()];
-        let backend = FakeBackend;
+        let backend = FakeBackend::default();
 
         let first = run_required(
             &backend,
@@ -747,6 +765,15 @@ mod tests {
             !first.reused,
             "the first run has no prior evidence to reuse"
         );
+        {
+            let removed = backend.removed.lock().unwrap();
+            assert_eq!(
+                removed.len(),
+                1,
+                "an executed check releases its volume: {removed:?}"
+            );
+            assert!(removed[0].starts_with("tracon-check-"));
+        }
 
         let second = run_required(
             &backend,

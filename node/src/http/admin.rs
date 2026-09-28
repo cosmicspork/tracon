@@ -587,6 +587,38 @@ pub async fn maintenance(
     })))
 }
 
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct StorageSweep {
+    /// Remove what the sweep finds; without it, only say what it would.
+    #[serde(default)]
+    apply: bool,
+    /// Dependency caches are candidates too.
+    #[serde(default)]
+    caches: bool,
+}
+
+/// `POST /api/maintenance/storage`: runtime volumes and host directories
+/// whose owner is over, removed only with `apply`. Done at the node, like
+/// everything else that deletes what the node holds.
+pub async fn storage(
+    _local: Loopback,
+    State(s): State<AppState>,
+    body: Option<Json<StorageSweep>>,
+) -> ApiResult<Json<Value>> {
+    let body = body.map(|Json(body)| body).unwrap_or_default();
+    let items = crate::gc::sweep(
+        s.manager.backend().as_ref(),
+        s.store(),
+        &s.node_id,
+        body.caches,
+        body.apply,
+    )
+    .await
+    .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error))?;
+    Ok(Json(json!({ "applied": body.apply, "items": items })))
+}
+
 /// `POST /api/admin/maintenance/boundary-check`: rerun the fixed boundary
 /// checks for this serving node. It accepts no executable, command, or path.
 pub async fn boundary_check(

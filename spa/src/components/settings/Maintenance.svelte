@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, type Snippet } from 'svelte'
   import Card from './Card.svelte'
+  import StorageSweep from './StorageSweep.svelte'
   import { desktopUpdatesAvailable } from '../../lib/desktop-update'
   import {
     inDesktopApp,
@@ -207,6 +208,8 @@
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if note}<p class="note" role="status">{note}</p>{/if}
 </Card>
+
+<StorageSweep />
 
 <style>
   .recheck { display: grid; gap: 8px; justify-items: start; padding-top: 12px; border-top: 1px solid var(--rule); }

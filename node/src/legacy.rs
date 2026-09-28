@@ -18,9 +18,8 @@
 //!   on purpose (`Store::archive_legacy_sessions`), and a reopened session is
 //!   given its workspace back.
 //!
-//! The provider login volumes need no step here: `Providers::connect` clears a
-//! provider's login volume before every sign-in, so whatever omp's login wrote
-//! into one is gone the first time the operator signs in again.
+//! The provider login volumes are no longer used at all; `tracon gc` lists
+//! them for removal.
 //!
 //! `node.toml` is the other thing it left. Versions before the cutover wrote
 //! that file in full, so an operator who never touched `[harness]` still has

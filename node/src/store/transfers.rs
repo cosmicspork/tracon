@@ -221,6 +221,19 @@ impl Store {
         }
     }
 
+    /// Workspaces an unfinished import may still reuse on retry.
+    pub fn retryable_import_workspaces(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT workspace_id FROM transfer_import
+             WHERE state != 'imported' AND workspace_id IS NOT NULL",
+        )?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(ids)
+    }
+
     pub fn transfer_import(&self, id: &str) -> Result<Option<TransferImportRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(

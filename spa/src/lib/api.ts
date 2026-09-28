@@ -10,6 +10,7 @@ import type {
   CandidateTransfer,
   CeilingInfo as Ceiling,
   CredentialSummary,
+  StorageItem,
   Document,
   EnrollStatus,
   Event,
@@ -253,6 +254,9 @@ export const api = {
   archiveSession: (id: string) => call<Session>('POST', `/api/sessions/${id}/archive`),
   unarchiveSession: (id: string) => call<Session>('POST', `/api/sessions/${id}/unarchive`),
   archiveEnded: () => call<{ archived: number }>('POST', '/api/sessions/archive-ended'),
+  /** Runtime storage whose owner is over; removed only with `apply`. Loopback only. */
+  storageSweep: (apply: boolean, caches: boolean) =>
+    call<{ applied: boolean; items: StorageItem[] }>('POST', '/api/maintenance/storage', { apply, caches }),
   /** A channel keeps its work and takes no new sessions. */
   archiveChannel: (name: string) => api.putChannelBindings(name, { archived: Date.now() }),
   unarchiveChannel: (name: string) => api.putChannelBindings(name, { archived: null }),

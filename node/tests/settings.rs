@@ -970,3 +970,91 @@ async fn provider_channels_must_be_open_channels_this_node_holds() {
     .await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{v}");
 }
+
+/// Runtime storage is swept by owner: what an archived or vanished session
+/// left goes, what an open one holds stays, and nothing is removed until
+/// asked — and only at the node.
+#[tokio::test]
+async fn storage_is_swept_by_owner_and_only_removed_when_asked() {
+    let n = node();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let open = format!("open{tag}");
+    let archived = format!("archived{tag}");
+    n.store.ensure_peer_node("n1").unwrap();
+    n.store
+        .insert_session(&session_on(&open, "personal", "running"))
+        .unwrap();
+    n.store
+        .insert_session(&session_on(&archived, "personal", "closed"))
+        .unwrap();
+    n.store.set_session_archived(&archived, Some(1)).unwrap();
+
+    let state_dir = tracon::config::Config::state_dir();
+    let runtime = state_dir.join("local-runtime");
+    let volumes = [
+        format!("tracon-scratch-{open}"),
+        format!("tracon-scratch-{archived}"),
+        format!("tracon-scratch-gone{tag}"),
+        format!("tracon-workspace-{open}"),
+        format!("tracon-check-done{tag}"),
+        format!("tracon-cache-{tag}"),
+        format!("tracon-provider-x{tag}"),
+        format!("tracon-unknown-{tag}"),
+    ];
+    for volume in &volumes {
+        std::fs::create_dir_all(runtime.join(volume)).unwrap();
+    }
+    for dir in [format!("sessions/{open}"), format!("sessions/{archived}")] {
+        std::fs::create_dir_all(state_dir.join(dir)).unwrap();
+    }
+
+    let (s, _) = call(&n, "POST", "/api/maintenance/storage", Some(REMOTE), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    let (s, v) = call(&n, "POST", "/api/maintenance/storage", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let verdict = |v: &Value, name: &str| -> bool {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == name)
+            .unwrap_or_else(|| panic!("{name} not listed: {v}"))["remove"]
+            .as_bool()
+            .unwrap()
+    };
+    let expected = [
+        (volumes[0].as_str(), false),
+        (volumes[1].as_str(), true),
+        (volumes[2].as_str(), true),
+        (volumes[3].as_str(), false),
+        (volumes[4].as_str(), true),
+        (volumes[5].as_str(), false),
+        (volumes[6].as_str(), true),
+        (volumes[7].as_str(), false),
+    ];
+    for (name, remove) in expected {
+        assert_eq!(verdict(&v, name), remove, "{name}");
+    }
+    assert!(!verdict(&v, &format!("sessions/{open}")));
+    assert!(verdict(&v, &format!("sessions/{archived}")));
+    // A preview removes nothing.
+    assert!(volumes.iter().all(|volume| runtime.join(volume).exists()));
+
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/maintenance/storage",
+        Some(LOCAL),
+        Some(json!({ "apply": true, "caches": true })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["applied"], json!(true));
+    for (name, remove) in expected {
+        let caches_now = name.starts_with("tracon-cache-");
+        assert_eq!(!runtime.join(name).exists(), remove || caches_now, "{name}");
+    }
+    assert!(state_dir.join(format!("sessions/{open}")).exists());
+    assert!(!state_dir.join(format!("sessions/{archived}")).exists());
+}
