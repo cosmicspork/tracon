@@ -366,8 +366,12 @@ enum MemoryCommand {
         #[arg(long)]
         scope_ref: Option<String>,
     },
-    /// Remove a memory by id.
-    Rm { id: String },
+    /// Remove a memory by id, or a prefix unique on the channel.
+    Rm {
+        id: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
     /// Recall, as a session would.
     Recall {
         query: String,
@@ -1771,6 +1775,30 @@ async fn work_resolve(channel: &str, prefix: &str) -> Result<String> {
     resolve_prefix(
         items.iter().filter_map(|i| i["id"].as_str()),
         prefix,
+        "work item",
+        channel,
+    )
+}
+
+/// Resolve a memory id prefix against the channel's newest memories; an older
+/// one needs its full id.
+async fn memory_resolve(channel: &str, prefix: &str) -> Result<String> {
+    use reqwest::Method;
+    if uuid::Uuid::try_parse(prefix).is_ok() {
+        return Ok(prefix.to_string());
+    }
+    let v = node_call(
+        Method::GET,
+        &format!("/api/memories?channel={channel}"),
+        None,
+        None,
+    )
+    .await?;
+    let memories = v["memories"].as_array().cloned().unwrap_or_default();
+    resolve_prefix(
+        memories.iter().filter_map(|m| m["id"].as_str()),
+        prefix,
+        "memory",
         channel,
     )
 }
@@ -1778,12 +1806,13 @@ async fn work_resolve(channel: &str, prefix: &str) -> Result<String> {
 fn resolve_prefix<'a>(
     ids: impl Iterator<Item = &'a str>,
     prefix: &str,
+    noun: &str,
     channel: &str,
 ) -> Result<String> {
     let hits: Vec<&str> = ids.filter(|id| id.starts_with(prefix)).collect();
     match hits.as_slice() {
         [one] => Ok(one.to_string()),
-        [] => anyhow::bail!("no work item starts with {prefix} on {channel}"),
+        [] => anyhow::bail!("no {noun} starts with {prefix} on {channel}"),
         _ => anyhow::bail!("{prefix} is ambiguous on {channel}"),
     }
 }
@@ -1937,10 +1966,12 @@ async fn memory_command(cmd: MemoryCommand) -> Result<()> {
                 None,
             )
             .await?;
+            // In full: a UUIDv7 begins with its timestamp, so memories added
+            // together share any short prefix.
             for m in v["memories"].as_array().cloned().unwrap_or_default() {
                 println!(
                     "{}  {:<9} {:<9} {:<8} {:.2}  {}",
-                    &m["id"].as_str().unwrap_or("")[..8.min(m["id"].as_str().unwrap_or("").len())],
+                    m["id"].as_str().unwrap_or(""),
                     m["kind"].as_str().unwrap_or(""),
                     m["state"].as_str().unwrap_or(""),
                     m["scope"].as_str().unwrap_or(""),
@@ -1972,7 +2003,8 @@ async fn memory_command(cmd: MemoryCommand) -> Result<()> {
             println!("{}", v["id"].as_str().unwrap_or(""));
             Ok(())
         }
-        MemoryCommand::Rm { id } => {
+        MemoryCommand::Rm { id, channel } => {
+            let id = memory_resolve(&channel, &id).await?;
             node_call(Method::DELETE, &format!("/api/memories/{id}"), None, None).await?;
             println!("removed {id}");
             Ok(())
@@ -2131,7 +2163,7 @@ mod tests {
 
     #[test]
     fn a_prefix_names_exactly_one_item_or_says_why_not() {
-        let resolve = |prefix| resolve_prefix(IDS.into_iter(), prefix, "work");
+        let resolve = |prefix| resolve_prefix(IDS.into_iter(), prefix, "work item", "work");
         assert_eq!(resolve("0f80").unwrap(), "0f80343ccc");
         assert_eq!(resolve("45abb223aa").unwrap(), "45abb223aa");
         assert!(resolve("45ab")
@@ -2142,5 +2174,23 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("no work item starts with ffff on work"));
+    }
+
+    #[test]
+    fn memories_added_together_need_more_than_eight_characters() {
+        let ids = [
+            "01999b3a-7c1e-7a00-8000-aaaaaaaaaaaa",
+            "01999b3a-7d02-7b00-8000-bbbbbbbbbbbb",
+        ];
+        let resolve = |prefix| resolve_prefix(ids.into_iter(), prefix, "memory", "personal");
+        assert!(resolve("01999b3a")
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous"));
+        assert_eq!(resolve("01999b3a-7d").unwrap(), ids[1]);
+        assert!(resolve("0200")
+            .unwrap_err()
+            .to_string()
+            .contains("no memory starts with 0200 on personal"));
     }
 }
