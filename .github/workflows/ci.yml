@@ -76,7 +76,8 @@ jobs:
   # then. So it compiles and runs its unit tests on every change. The wrapper
   # is here for the same reason and learned it the hard way: its self-update
   # reads a Linux-only field, and nothing compiled it on macOS until the
-  # release that failed.
+  # release that failed. A debug build is enough to catch that; the release
+  # profile's LTO build cost most of this job and is left to the release leg.
   macos:
     runs-on: macos-15
     steps:
@@ -89,7 +90,7 @@ jobs:
           workspaces: |
             .
             wrapper
-      - run: cargo build --release --bin tracon
+      - run: cargo build --bin tracon
       - run: cargo test -p tracon --lib
       # The SPA is what the window loads; tauri-build wants it present.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
