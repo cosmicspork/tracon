@@ -171,7 +171,17 @@ async fn answer_external(
         return rpc_error(StatusCode::CONFLICT, &error.to_string());
     }
 
-    match s.tools.handle(&ctx, msg).await {
+    let mut unfinished = call.as_ref().map(|title| Abandoned {
+        manager: s.manager.clone(),
+        session_id: session_id.clone(),
+        title: title.clone(),
+        finished: false,
+    });
+    let answered = s.tools.handle(&ctx, msg).await;
+    if let Some(guard) = unfinished.as_mut() {
+        guard.finished = true;
+    }
+    match answered {
         Some(response) => {
             if let Some(title) = &call {
                 let failed = response["result"]["isError"] == true;
@@ -184,6 +194,29 @@ async fn answer_external(
             (StatusCode::OK, Json(response))
         }
         None => (StatusCode::OK, Json(json!({}))),
+    }
+}
+
+/// A call the harness hung up on. The server drops the handler when the
+/// client goes away, so without this the log shows a call and never its end,
+/// and nothing says whether it ran.
+struct Abandoned {
+    manager: crate::session::Manager,
+    session_id: String,
+    title: String,
+    finished: bool,
+}
+
+impl Drop for Abandoned {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.manager.record_event(
+            &self.session_id,
+            crate::session::state::event_kind::TOOL_RESULT,
+            json!({ "title": self.title, "status": "abandoned" }),
+        );
     }
 }
 
