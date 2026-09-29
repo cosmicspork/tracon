@@ -294,7 +294,9 @@ impl Tools {
             | gitlab::MR_COMMENT
             | gitlab::MR_MERGE
             | gitlab::PIPELINE_STATUS
+            | gitlab::PIPELINE_LIST_BY_SHA
             | gitlab::JOB_TRACE
+            | gitlab::JOB_PLAY
             | gitlab::PIPELINE_RUN
             | gitlab::DEPLOY => {
                 gitlab::call(
