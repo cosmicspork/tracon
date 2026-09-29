@@ -1,6 +1,7 @@
 <script lang="ts">
   import BriefPanel from '../components/BriefPanel.svelte'
   import ContextPanel from '../components/ContextPanel.svelte'
+  import CriteriaPanel from '../components/CriteriaPanel.svelte'
   import EvidenceLinks from '../components/EvidenceLinks.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
@@ -8,13 +9,14 @@
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
-  import type { Brief, Session, WorkView } from '../lib/types'
+  import type { Brief, Criteria, Session, WorkView } from '../lib/types'
   import { blockersLine, short, workLabel, workState } from '../lib/work'
 
   let { id }: { id: string } = $props()
 
   let item = $state<WorkView | null>(null)
   let brief = $state<Brief | null>(null)
+  let criteria = $state<Criteria | null>(null)
   let sessions = $state<Session[]>([])
   let discovered = $state<{ id: string; title: string; state: string }[]>([])
   let titles = $state<Map<string, string>>(new Map())
@@ -28,6 +30,7 @@
       const d = await api.workItem(id)
       item = d.item
       brief = d.brief
+      criteria = d.criteria
       sessions = d.sessions
       discovered = d.discovered
       if (d.item) {
@@ -147,6 +150,7 @@
   {/if}
 
   <BriefPanel {item} {brief} onchange={load} />
+  <CriteriaPanel {item} {criteria} onchange={load} />
   <ContextPanel {item} />
 
   {#if sessions.length === 0}

@@ -183,7 +183,7 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, Vec<M
          human — useful, and not a property of the system.\n\n",
     );
     push_node(&mut out, facts);
-    push_work(&mut out, facts, &mut missing);
+    push_work(&mut out, store, facts, &mut missing);
     push_review(&mut out, facts, &mut missing);
     push_agreements(&mut out, policy);
     push_known(&mut out, store, facts, &mut missing);
@@ -243,7 +243,7 @@ fn push_node(out: &mut String, facts: &Facts) {
 }
 
 /// The item, its phase, what the phase must produce, and the plan.
-fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
+fn push_work(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<Missing>) {
     let Some(item) = facts.item else { return };
     out.push_str(&format!(
         "## Work\n\n**{}** (`{}…`, phase: {})\n\n",
@@ -276,6 +276,7 @@ fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
              decision is the operator's and is refused. Every line you add goes to the \
              operator for approval before it lands.\n\n"
         ));
+        push_criteria(out, store, item);
     }
     if let Some(from) = &item.discovered_from {
         out.push_str(&format!(
@@ -323,6 +324,42 @@ fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
         }
         _ => {}
     }
+}
+
+/// One sentence on what the item's success criteria are bound to, when the
+/// brief states any. Said here because a session that never learns a criterion
+/// has nothing pointing at it will not go looking: the gap is what is worth the
+/// reserved space, not the coverage.
+fn push_criteria(out: &mut String, store: &Store, item: &WorkItem) {
+    let Some(slug) = item.brief_slug.as_deref() else {
+        return;
+    };
+    let Ok(Some(doc)) = store.doc_get(&item.channel, slug) else {
+        return;
+    };
+    let standing =
+        crate::corpus::criteria::standing(&crate::corpus::brief::Brief::parse(&doc.body));
+    if standing.total == 0 {
+        return;
+    }
+    let loose = standing.unlinked + standing.only_proposed;
+    let gap = if loose == 0 {
+        "every one of them says what would settle it".to_string()
+    } else {
+        format!(
+            "{loose} of them have nothing agreed pointing at them ({} with nothing at all, \
+             {} with only somebody's proposal)",
+            standing.unlinked, standing.only_proposed
+        )
+    };
+    out.push_str(&format!(
+        "It states {} success criteri{}, and {gap}. `criteria_read` says which, and what the \
+         checks say about the current candidate; `criteria_link` records what you think would \
+         settle one. Your link is a proposal: only the operator decides what good means, and \
+         your own checks passing is not the customer agreeing with the standard.\n\n",
+        standing.total,
+        if standing.total == 1 { "on" } else { "a" },
+    ));
 }
 
 /// A review session: requirements and diff, nothing of how the diff came to
@@ -1156,6 +1193,92 @@ mod tests {
             "the pointer sits with the task"
         );
         assert!(missing.is_empty(), "a pointer costs nothing: {missing:?}");
+    }
+
+    /// A criterion nothing points at is the thing a session will not go
+    /// looking for unless it is told. The pointer says how many, and how many
+    /// are loose — and says nothing at all when the brief states no criteria.
+    #[test]
+    fn the_criteria_gap_is_named_only_when_the_brief_states_criteria() {
+        let store = Store::open_in_memory().unwrap();
+        let mut item = item("Overnight alert triage", "");
+        let manifest = crate::manifest::LaunchManifest::default();
+        let write = |slug: &str, body: &str| {
+            store
+                .write_change(
+                    "n",
+                    "personal",
+                    "document",
+                    ChangeOp::Upsert,
+                    slug,
+                    json!({
+                        "channel": "personal", "slug": slug,
+                        "kind": "brief", "title": "Brief: Overnight alert triage",
+                        "body": body, "hash": slug, "format": "markdown",
+                        "entry_path": null, "source_name": null, "pinned": false,
+                        "created_ms": 1, "updated_ms": 1}),
+                )
+                .unwrap();
+        };
+        fn facts<'a>(
+            item: &'a WorkItem,
+            manifest: &'a crate::manifest::LaunchManifest,
+        ) -> Facts<'a> {
+            Facts {
+                node_name: "n",
+                node_id: "id",
+                backend: "local",
+                harness: "fake",
+                harness_version: "1",
+                channel: "personal",
+                project_id: None,
+                project_name: None,
+                tools: &[],
+                worktree: "/work",
+                phase: "execute",
+                item: Some(item),
+                plan_body: None,
+                ready: &[],
+                review: None,
+                manifest,
+                context: None,
+            }
+        }
+
+        write(
+            "brief-quiet",
+            "# Brief: Overnight alert triage\n\n## Problem\n\n- decided: it is slow\n",
+        );
+        item.brief_slug = Some("brief-quiet".into());
+        let (quiet, _) = assemble(&store, &Policy::default(), &facts(&item, &manifest));
+        assert!(
+            !quiet.contains("It states") && !quiet.contains("criteria_read"),
+            "a brief that states none is not told it has an uncovered one: {quiet}"
+        );
+
+        write(
+            "brief-stated",
+            "# Brief: Overnight alert triage\n\n## Success criteria\n\n\
+             - decided: triage finishes in under two minutes\n  - decided check: just check\n\
+             - decided: the count is never stale\n  - inferred check: just test\n\
+             - inferred: nobody scrolls to find the urgent one\n",
+        );
+        item.brief_slug = Some("brief-stated".into());
+        let (text, missing) = assemble(&store, &Policy::default(), &facts(&item, &manifest));
+        assert!(text.contains("It states 3 success criteria"), "{text}");
+        assert!(
+            text.contains("2 of them have nothing agreed pointing at them"),
+            "the gap, not the coverage: {text}"
+        );
+        assert!(
+            text.contains("`criteria_read`") && text.contains("`criteria_link`"),
+            "{text}"
+        );
+        assert!(
+            text.contains("only the operator decides what good means"),
+            "and that a proposal is not agreement: {text}"
+        );
+        assert!(missing.is_empty(), "a sentence costs nothing: {missing:?}");
     }
 
     /// An orientation that names a tool the node does not serve is worse than

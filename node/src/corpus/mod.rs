@@ -6,6 +6,7 @@
 pub mod brief;
 pub mod chunk;
 pub mod context;
+pub mod criteria;
 pub mod export;
 pub mod html;
 pub mod import;

@@ -1829,6 +1829,7 @@ pub async fn get_review(
             "revision": null,
             "stale": [],
             "requirements": null,
+            "criteria": null,
             "surrounding_code": [],
             "evidence": null,
             "legacy_check_events": [],
@@ -1862,6 +1863,25 @@ pub async fn get_review(
         .as_ref()
         .and_then(|revision| serde_json::from_str::<serde_json::Value>(&revision.context_json).ok())
         .unwrap_or_else(|| json!([]));
+    // The criteria of the item this revision was pinned to, read against this
+    // revision's own candidate — so what the checks say is what the operator is
+    // looking at, and a verdict given here is about this attempt and no other.
+    // Null when the revision names no item, or the item has no brief.
+    let criteria = match revision.as_ref() {
+        Some(revision) => match revision.requirements_work_item_id.as_deref() {
+            Some(work_item_id) => match criteria_json(&s, work_item_id, Some(&revision.candidate_id))
+            {
+                Ok(view) => view,
+                // The item may have been deleted since it was pinned here. The
+                // revision still carries what it required; its criteria simply
+                // cannot be read any more, and that must not take the review
+                // screen down with it.
+                Err(_) => None,
+            },
+            None => None,
+        },
+        None => None,
+    };
     let legacy_check_events = s.store().legacy_check_runs_for_session(&r.session_id)?;
     // What publication has already done outside this node. An interrupted
     // attempt is visible here — including the `uncertain` one an operator has
@@ -1883,6 +1903,7 @@ pub async fn get_review(
         "revision": revision_ref,
         "stale": stale,
         "requirements": requirements,
+        "criteria": criteria,
         "surrounding_code": surrounding_code,
         "evidence": evidence,
         "legacy_check_events": legacy_check_events,
@@ -3552,11 +3573,16 @@ pub async fn get_work(
         .map(|w| json!({ "id": w.id, "title": w.title, "state": w.state }))
         .collect();
     let brief = crate::corpus::brief::for_item(s.store(), &id).map_err(brief_err)?;
+    // Beside the brief, what its success criteria are bound to. The panel
+    // would otherwise have to ask for it, and the two readings belong
+    // together: the standard and whether anything settles it.
+    let criteria = criteria_json(&s, &id, None)?;
     Ok(Json(json!({
         "item": view,
         "sessions": sessions,
         "discovered": discovered,
         "brief": brief,
+        "criteria": criteria,
     })))
 }
 
@@ -3625,6 +3651,149 @@ fn brief_err(e: crate::corpus::brief::BriefError) -> ApiError {
     match e {
         MissingItem(_) | NoBrief(_) => ApiError(StatusCode::NOT_FOUND, e.to_string()),
         Conflict { .. } => ApiError(StatusCode::CONFLICT, e.to_string()),
+        Store(e) => ApiError::from(e),
+        other => ApiError(StatusCode::BAD_REQUEST, other.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CriteriaQuery {
+    /// The candidate to read the check results against. Without it the
+    /// criteria and their links are read, with no results.
+    pub candidate: Option<String>,
+}
+
+/// The item's criteria for one candidate, or for the newest one if the caller
+/// named none. `None` when the item has no brief: there is nowhere for a
+/// criterion to be written, which is an answer rather than an empty view.
+fn criteria_json(
+    s: &AppState,
+    item_id: &str,
+    candidate: Option<&str>,
+) -> Result<Option<crate::corpus::criteria::CriteriaView>, ApiError> {
+    let candidate = match candidate {
+        Some(id) => Some(id.to_string()),
+        None => crate::corpus::criteria::newest_candidate(s.store(), item_id)?,
+    };
+    crate::corpus::criteria::for_item(s.store(), &s.cfg, item_id, candidate.as_deref())
+        .map_err(criteria_err)
+}
+
+/// `GET /api/work/{id}/criteria`: the item's acceptance criteria, each with
+/// what points at it and how far the evidence for one candidate got, plus what
+/// nothing points at and what nobody has judged.
+pub async fn get_criteria(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<CriteriaQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let view = criteria_json(&s, &id, q.candidate.as_deref())?;
+    Ok(Json(json!({ "criteria": view })))
+}
+
+#[derive(Deserialize)]
+pub struct LinkBody {
+    #[serde(flatten)]
+    pub link: crate::corpus::brief::LinkInput,
+    /// The brief's hash as the caller last read it.
+    #[serde(default)]
+    pub if_hash: Option<String>,
+}
+
+/// `POST /api/work/{id}/criteria/{key}/links`: say what would settle a
+/// criterion. The operator writes here, so this link may be `decided` — which
+/// is the whole difference between it and what a session may write.
+pub async fn add_criterion_link(
+    State(s): State<AppState>,
+    Path((id, key)): Path<(String, String)>,
+    Json(body): Json<LinkBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::corpus::criteria::add_link(
+        s.store(),
+        s.manager.bus(),
+        &s.node_id,
+        &id,
+        &key,
+        body.link,
+        body.if_hash.as_deref(),
+        &crate::corpus::brief::Author::Operator,
+    )
+    .map_err(criteria_err)?;
+    let view = criteria_json(&s, &id, None)?;
+    Ok(Json(json!({ "criteria": view })))
+}
+
+/// `DELETE /api/work/{id}/criteria/{key}/links/{index}`: take back one of a
+/// criterion's links, by the index the view gave it.
+pub async fn remove_criterion_link(
+    State(s): State<AppState>,
+    Path((id, key, index)): Path<(String, String, usize)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::corpus::criteria::remove_link(
+        s.store(),
+        s.manager.bus(),
+        &s.node_id,
+        &id,
+        &key,
+        index,
+        None,
+    )
+    .map_err(criteria_err)?;
+    let view = criteria_json(&s, &id, None)?;
+    Ok(Json(json!({ "criteria": view })))
+}
+
+#[derive(Deserialize)]
+pub struct JudgementBody {
+    /// The criterion's key, or its text verbatim.
+    pub criterion: String,
+    pub verdict: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    /// What the verdict is about. Defaults to the item's newest candidate.
+    #[serde(default)]
+    pub candidate_id: Option<String>,
+    /// Set when the verdict was given from a review, so it binds to what was
+    /// on screen rather than to whatever the branch is now.
+    #[serde(default)]
+    pub revision_id: Option<String>,
+}
+
+/// `POST /api/work/{id}/criteria/judgements`: the operator saying whether a
+/// criterion was met. There is no session route to this: an agent passing its
+/// own checks does not establish that the customer agreed with the standard,
+/// so the word `met` can only be written here.
+pub async fn judge_criterion(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<JudgementBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let candidate = match body.candidate_id {
+        Some(id) => Some(id),
+        None => crate::corpus::criteria::newest_candidate(s.store(), &id)?,
+    };
+    let row = crate::corpus::criteria::judge(
+        s.store(),
+        &id,
+        &body.criterion,
+        candidate.as_deref(),
+        body.revision_id.as_deref(),
+        &body.verdict,
+        body.note.as_deref(),
+        &crate::corpus::brief::Author::Operator,
+    )
+    .map_err(criteria_err)?;
+    let view = criteria_json(&s, &id, candidate.as_deref())?;
+    Ok(Json(json!({ "judgement": row, "criteria": view })))
+}
+
+fn criteria_err(e: crate::corpus::criteria::CriteriaError) -> ApiError {
+    use crate::corpus::criteria::CriteriaError::*;
+    match e {
+        MissingItem(_) | NoBrief(_) | MissingCandidate(_) => {
+            ApiError(StatusCode::NOT_FOUND, e.to_string())
+        }
+        Brief(e) => brief_err(e),
         Store(e) => ApiError::from(e),
         other => ApiError(StatusCode::BAD_REQUEST, other.to_string()),
     }

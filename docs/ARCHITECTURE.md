@@ -779,6 +779,42 @@ section with no lines says what it does not say — an empty success-criteria
 section reads as "no success criteria stated" — because a brief that has never
 heard from the customer should look like one rather than like a tidy form.
 
+### Criteria bound to what would settle them
+
+A success criterion is not a new record: it is a line in the brief's success
+criteria section, and what points at it is an indented line under it naming a
+`check`, a `scenario` or an `observation`. The document stays the record, so
+links travel with the channel, round-trip, and are editable by hand.
+
+**A criterion is named by its own text.** `sc-` and twelve hex characters of the
+hash of the normalized line. Reordering the section changes nothing; rewording a
+criterion mints a new name, so a link or a verdict can never silently follow a
+criterion whose meaning changed. It is reported as orphaned instead, carrying the
+wording it was about. Two lines that say the same thing share a name and are
+marked as duplicates rather than quietly merged.
+
+**An agent may propose what good means; the operator decides it.** A link
+carries the same provenance as every other brief line and is checked by the same
+rule, so a session's link is `inferred` and a `decided` one is refused. Coverage
+follows: a criterion whose only links are somebody's proposal reads as
+`only_proposed`, not as covered, however green that proposal would go. A `check`
+resolves only against the commands the operator configured — any other is
+recorded and reported as never running — and a `scenario` says plainly that this
+node holds no such record yet.
+
+**Passing one's own checks is not the customer agreeing.** A check result raises
+a criterion as far as `checks_pass`, shown as "checks pass · nobody has judged
+it". The word *met* comes from `criterion_judgement`, which is node-local like
+the other QA rows, append-only, bound to the candidate that was judged, and
+written only by the operator — there is no MCP tool that writes one, and the
+absence is the enforcement. A verdict about one candidate is reported against a
+later one as being about an earlier attempt, and settles nothing on it.
+
+Beside the criteria the view carries the gaps: what nothing points at, what
+nobody has judged, every inferred or unattributed line in the brief, the
+questions it still asks, and the orphaned verdicts — because a coverage view
+that lists only what is covered reads as though that were everything there is.
+
 ### Selected context
 
 The brief says what the work is for; it is not everything an attempt should start

@@ -107,6 +107,9 @@ impl Tools {
         // What good was agreed to be, where the item said so. A reviewer
         // asked to judge against criteria it cannot read is judging its own.
         work::BRIEF_READ,
+        // And which of those criteria anything actually points at: a reviewer
+        // that cannot see an uncovered criterion cannot say it is uncovered.
+        work::CRITERIA_READ,
         review::VERDICT,
     ];
 
@@ -345,12 +348,14 @@ impl Tools {
             | work::WORK_DISCOVER
             | work::WORK_CLOSE
             | work::BRIEF_READ
-            | work::BRIEF_NOTE => {
+            | work::BRIEF_NOTE
+            | work::CRITERIA_READ
+            | work::CRITERIA_LINK => {
                 let access = self
                     .session
                     .get()
                     .ok_or_else(|| "node not ready".to_string())?;
-                work::call(access, ctx, name, args).await
+                work::call(&self.cfg, access, ctx, name, args).await
             }
             qa::DEPLOY | qa::BROWSER_VERIFY | qa::PROTOTYPE_BUILD => {
                 let access = self
