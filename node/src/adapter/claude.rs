@@ -148,6 +148,14 @@ fn claude_model(model: &str) -> Result<&str, AdapterError> {
 
 /// The node builds one neutral MCP descriptor; Claude Code wants a map keyed
 /// by server name, with headers as an object rather than a list.
+/// How long Claude Code waits on one call to the node's MCP server, silent or
+/// not. Left at its default the CLI aborts a call that sends nothing for about
+/// a minute, and `ask_operator` sends nothing until a person answers: every
+/// question came back "The operation timed out" while the node still held it
+/// open. Twenty minutes covers the node's own permission timeout (fifteen by
+/// default) and matches a turn's idle bound.
+const MCP_CALL_TIMEOUT_MS: u64 = 20 * 60 * 1000;
+
 fn mcp_config(servers: &[Value]) -> Value {
     let mut map = serde_json::Map::new();
     for s in servers {
@@ -166,6 +174,7 @@ fn mcp_config(servers: &[Value]) -> Value {
                 "type": s["type"].as_str().unwrap_or("http"),
                 "url": s["url"],
                 "headers": Value::Object(headers),
+                "timeout": MCP_CALL_TIMEOUT_MS,
             }),
         );
     }
@@ -831,6 +840,8 @@ mod tests {
         assert_eq!(server["type"], "http");
         assert_eq!(server["url"], "http://gw:7421/mcp/s1");
         assert_eq!(server["headers"]["Authorization"], "Bearer tok");
+        // Long enough for an operator to answer an ask.
+        assert_eq!(server["timeout"], MCP_CALL_TIMEOUT_MS);
     }
 
     #[test]
