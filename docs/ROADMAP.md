@@ -205,6 +205,17 @@ cross-node transfer follow the first proven loop, not the other way around.
       `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
       host environment for the child only and keep the URL and origin restrictions.
 
+**Forge and tracker parity**
+
+- [ ] Give GitHub the CI tools GitLab has: a run's job log tail (`run_logs`, the
+      `job_trace` limits), rerunning a run's failed jobs (`run_rerun`, asked), and the
+      runs at an exact commit. An agent on a GitHub project should diagnose and retry CI
+      the way it can on GitLab, without the operator's token or a host CLI.
+- [ ] Discover Jira transitions: `issue_transitions` lists an issue's currently available
+      transitions (id, name, destination status) through the brokered token, so an
+      authorized `issue_transition` never rests on an out-of-band `acli` lookup or an id
+      copied from another project. Discovery stays a read; the transition keeps its grant.
+
 **Portable data and recovery**
 
 - [ ] Publish a versioned data contract: the signed candidate JSON, offline package reader
