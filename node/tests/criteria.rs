@@ -394,8 +394,10 @@ async fn passing_your_own_checks_is_not_the_customer_agreeing() {
         "{view}"
     );
 
-    // No agent-reachable path writes a verdict. A session is offered the
-    // reading and the proposal, and nothing that settles anything.
+    // No agent-reachable path settles a criterion. A session is offered the
+    // reading and the proposal, and nothing that judges. (`review_verdict` is
+    // a review session's opinion of a diff, which is not a criterion's and
+    // does not reach this table.)
     let token = h
         .manager
         .register_tool_token_for_test("s1", "personal")
@@ -413,12 +415,16 @@ async fn passing_your_own_checks_is_not_the_customer_agreeing() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"criteria_read"), "{names:?}");
-    assert!(
-        !names
-            .iter()
-            .any(|n| n.contains("judge") || n.contains("verdict")),
-        "no tool judges a criterion: {names:?}"
+    let mut about_criteria: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|n| n.starts_with("criteria_"))
+        .collect();
+    about_criteria.sort_unstable();
+    assert_eq!(
+        about_criteria,
+        ["criteria_link", "criteria_read"],
+        "a session reads the criteria and proposes a link, and that is all: {names:?}"
     );
     // What the session does read says so in as many words.
     let read = tool(&h.harness, "s1", &token, "criteria_read", json!({})).await;
@@ -582,21 +588,40 @@ async fn an_agent_proposes_what_good_means_and_the_operator_decides_it() {
         .register_tool_token_for_test("s1", "personal")
         .await;
 
+    let call_args = json!({
+        "criterion": TRIAGE,
+        "kind": "check",
+        "value": "just check",
+        "provenance": "inferred",
+    });
+
+    // The shipped agreements name no `criteria_link`: a line in the operator's
+    // own record of what the work is for is put to the operator first. With no
+    // live session here to carry the question, it is refused rather than run,
+    // and nothing lands in the document.
+    let asked = tool(&h.harness, "s1", &token, "criteria_link", call_args.clone()).await;
+    assert_eq!(asked["error"], true, "{asked}");
+    assert!(!brief_body(&h, &id).contains("just check"), "{asked}");
+
+    // What this test is about is the line once it lands, not the asking, so the
+    // agreements are widened to allow the call outright — the way the tracker
+    // tool tests do. A deny still wins over this, so nothing it would refuse
+    // rides in on it.
+    let allow: tracon::policy::Rule = toml::from_str(
+        r#"
+        id = "test-allow-criteria-link"
+        verdict = "allow"
+        reason = "Under test."
+        kinds = ["tool"]
+        matches = ["criteria_link"]
+        "#,
+    )
+    .unwrap();
+    h.tools.policy.write().rules.push(allow);
+
     // The session's own idea of what would settle it, named by the criterion's
     // text — a key is not something an agent reading the brief has.
-    let v = tool(
-        &h.harness,
-        "s1",
-        &token,
-        "criteria_link",
-        json!({
-            "criterion": TRIAGE,
-            "kind": "check",
-            "value": "just check",
-            "provenance": "inferred",
-        }),
-    )
-    .await;
+    let v = tool(&h.harness, "s1", &token, "criteria_link", call_args).await;
     assert!(
         v["standing"]
             .as_str()

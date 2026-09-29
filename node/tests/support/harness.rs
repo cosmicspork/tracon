@@ -17,6 +17,10 @@ pub struct Harness {
     pub operator: axum::Router,
     pub store: Arc<Store>,
     pub manager: Manager,
+    /// The tool surface behind both routers, and with it the working
+    /// agreements. A test whose subject is what a tool *does*, rather than
+    /// that it is asked, widens these the way `work_tools.rs` does.
+    pub tools: Arc<Tools>,
     /// What the interface would be watching: tests that care about a live
     /// client, rather than a fresh page load, assert on these.
     pub bus: Bus,
@@ -60,7 +64,7 @@ pub async fn harness_with(cfg: Config) -> Harness {
             tokens: Arc::new(tokio::sync::Mutex::new(0)),
         }),
         node_id: "n1".into(),
-        tools,
+        tools: tools.clone(),
         mesh: None,
         auth: Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
         enroll: Default::default(),
@@ -70,6 +74,7 @@ pub async fn harness_with(cfg: Config) -> Harness {
         operator: tracon::http::router(state),
         store,
         manager,
+        tools,
         bus,
     }
 }
