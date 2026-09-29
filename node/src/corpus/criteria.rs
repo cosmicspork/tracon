@@ -4,10 +4,9 @@
 //! section of the product brief, and three claims follow from that.
 //!
 //! *Its name comes from its own text.* `sc-` and twelve hex characters of the
-//! hash of the normalized line. Reordering the section changes nothing, and
-//! rewording a criterion mints a new name — so a link or a verdict can never
-//! silently follow a criterion whose meaning changed. It is reported as
-//! orphaned instead, with the wording it was about.
+//! hash of the trimmed line. Reordering the section changes nothing, while
+//! changing punctuation, case, or wording mints a new name. An old verdict is
+//! reported as orphaned instead of silently following a changed requirement.
 //!
 //! *What points at a criterion lives in the document.* An indented line under
 //! it naming a check, a scenario or an observation (`corpus::brief::Link`). The
@@ -27,6 +26,8 @@
 //! points at, criteria nobody has judged, the assumptions the brief rests on,
 //! and the questions it says are still open — because a coverage view that only
 //! lists what is covered reads as though that were everything.
+
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -269,17 +270,24 @@ pub enum CriteriaError {
     SessionJudgement,
     #[error("no candidate {0}")]
     MissingCandidate(String),
+    #[error("no revision {0}")]
+    MissingRevision(String),
+    #[error("revision does not match the work item and candidate")]
+    RevisionMismatch,
     #[error(transparent)]
     Brief(#[from] BriefError),
     #[error(transparent)]
     Store(#[from] StoreError),
 }
 
-/// A criterion's name, from its own text. Normalized first, so two lines that
-/// differ only in case or punctuation are the same criterion — and two that
-/// differ in a word are not.
+/// A criterion's identity preserves every meaningful byte; only outer
+/// whitespace is insignificant in a brief line.
+fn criterion_text(text: &str) -> &str {
+    text.trim()
+}
+
 pub fn key_for(text: &str) -> String {
-    let digest = Sha256::digest(brief::normalize(text).as_bytes());
+    let digest = Sha256::digest(criterion_text(text).as_bytes());
     format!("sc-{}", &hex::encode(digest)[..12])
 }
 
@@ -314,7 +322,7 @@ pub fn for_item(
     let candidate = match candidate {
         Some(id) => Some(
             store
-                .candidate(id)?
+                .candidate_for_item(id, item_id, &view.channel)?
                 .ok_or_else(|| CriteriaError::MissingCandidate(id.to_string()))?,
         ),
         None => None,
@@ -324,7 +332,11 @@ pub fn for_item(
         None => Vec::new(),
     };
     let configured = checks::required_definitions(cfg);
-    let judgements = store.criterion_judgements_for_item(item_id)?;
+    let judgements: Vec<_> = store
+        .criterion_judgements_for_item(item_id)?
+        .into_iter()
+        .filter(|row| row.channel == view.channel && row.brief_slug == view.slug)
+        .collect();
     let candidate_id = candidate.as_ref().map(|c| c.id.clone());
 
     let entries = view
@@ -335,7 +347,6 @@ pub fn for_item(
     let mut criteria: Vec<CriterionView> = Vec::with_capacity(entries.len());
     for entry in &entries {
         let key = key_for(&entry.text);
-        let duplicate = criteria.iter().any(|c| c.key == key);
         let links: Vec<LinkView> = entry
             .links
             .iter()
@@ -363,10 +374,17 @@ pub fn for_item(
             judgement: judgement.map(JudgementView::from),
             earlier_judgement: earlier_judgement.map(JudgementView::from),
             coverage,
-            duplicate,
+            duplicate: false,
         });
     }
 
+    let mut counts = HashMap::with_capacity(criteria.len());
+    for criterion in &criteria {
+        *counts.entry(criterion.key.clone()).or_insert(0usize) += 1;
+    }
+    for criterion in &mut criteria {
+        criterion.duplicate = counts[&criterion.key] > 1;
+    }
     let gaps = read_gaps(&view.brief, &criteria, &judgements);
     let summary = summarize(&criteria, &gaps);
     Ok(Some(CriteriaView {
@@ -721,11 +739,10 @@ fn locate(brief: &Brief, criterion: &str) -> Result<usize, CriteriaError> {
         .map(|(i, _)| i)
         .collect();
     let matches = if by_key.is_empty() {
-        let normalized = brief::normalize(wanted);
         entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| brief::normalize(&e.text) == normalized)
+            .filter(|(_, e)| criterion_text(&e.text) == criterion_text(wanted))
             .map(|(i, _)| i)
             .collect()
     } else {
@@ -782,8 +799,21 @@ pub fn judge(
         .map(|s| s.entries[index].text.clone())
         .unwrap_or_default();
     if let Some(id) = candidate_id {
-        if store.candidate(id)?.is_none() {
+        if store
+            .candidate_for_item(id, item_id, &item.channel)?
+            .is_none()
+        {
             return Err(CriteriaError::MissingCandidate(id.to_string()));
+        }
+    }
+    if let Some(id) = revision_id {
+        let revision = store
+            .review_revision(id)?
+            .ok_or_else(|| CriteriaError::MissingRevision(id.to_string()))?;
+        if revision.requirements_work_item_id.as_deref() != Some(item_id)
+            || candidate_id != Some(revision.candidate_id.as_str())
+        {
+            return Err(CriteriaError::RevisionMismatch);
         }
     }
     let row = CriterionJudgementRow {
@@ -850,20 +880,15 @@ mod tests {
     }
 
     #[test]
-    fn a_criterion_is_named_by_its_text_and_rewording_it_mints_a_new_name() {
-        let one = key_for("Triage finishes in under two minutes");
-        assert_eq!(
-            one,
-            key_for("  triage FINISHES in under two minutes.  "),
-            "case, padding and punctuation are not the criterion"
-        );
+    fn identity_preserves_comparisons_and_code_identifiers() {
         assert_ne!(
-            one,
-            key_for("Triage finishes in under three minutes"),
-            "a different standard is a different criterion"
+            key_for("Latency < 2 seconds"),
+            key_for("Latency > 2 seconds")
         );
-        assert!(one.starts_with("sc-"));
-        assert_eq!(one.len(), 15);
+        assert_ne!(key_for("Status == READY"), key_for("Status == ready"));
+        assert_eq!(key_for("  Status == READY  "), key_for("Status == READY"));
+        assert!(key_for("Status == READY").starts_with("sc-"));
+        assert_eq!(key_for("Status == READY").len(), 15);
     }
 
     #[test]

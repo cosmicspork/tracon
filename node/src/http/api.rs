@@ -1866,15 +1866,26 @@ pub async fn get_review(
     // The criteria of the item this revision was pinned to, read against this
     // revision's own candidate — so what the checks say is what the operator is
     // looking at, and a verdict given here is about this attempt and no other.
-    // Null when the revision names no item, or the item has no brief. The item
-    // may also have been deleted since it was pinned here: the revision still
-    // carries what it required, its criteria simply cannot be read any more,
-    // and that must not take the review screen down with it.
-    let criteria = revision.as_ref().and_then(|revision| {
-        let item = revision.requirements_work_item_id.as_deref()?;
-        let candidate = Some(revision.candidate_id.as_str());
-        criteria_json(&s, item, candidate).ok().flatten()
-    });
+    // Null only when the revision has no item, or its item/brief is gone.
+    // Every other criteria failure is a failed review read, not missing data.
+    let criteria = if let Some(item) = revision
+        .as_ref()
+        .and_then(|revision| revision.requirements_work_item_id.as_deref())
+    {
+        let candidate = revision
+            .as_ref()
+            .map(|revision| revision.candidate_id.as_str());
+        match criteria_json(&s, item, candidate) {
+            Ok(view) => view,
+            Err(crate::corpus::criteria::CriteriaError::MissingItem(_))
+            | Err(crate::corpus::criteria::CriteriaError::Brief(
+                crate::corpus::brief::BriefError::MissingItem(_),
+            )) => None,
+            Err(error) => return Err(criteria_err(error)),
+        }
+    } else {
+        None
+    };
     let legacy_check_events = s.store().legacy_check_runs_for_session(&r.session_id)?;
     // What publication has already done outside this node. An interrupted
     // attempt is visible here — including the `uncertain` one an operator has
@@ -3569,7 +3580,7 @@ pub async fn get_work(
     // Beside the brief, what its success criteria are bound to. The panel
     // would otherwise have to ask for it, and the two readings belong
     // together: the standard and whether anything settles it.
-    let criteria = criteria_json(&s, &id, None)?;
+    let criteria = criteria_json(&s, &id, None).map_err(criteria_err)?;
     Ok(Json(json!({
         "item": view,
         "sessions": sessions,
@@ -3663,13 +3674,12 @@ fn criteria_json(
     s: &AppState,
     item_id: &str,
     candidate: Option<&str>,
-) -> Result<Option<crate::corpus::criteria::CriteriaView>, ApiError> {
+) -> Result<Option<crate::corpus::criteria::CriteriaView>, crate::corpus::criteria::CriteriaError> {
     let candidate = match candidate {
         Some(id) => Some(id.to_string()),
         None => crate::corpus::criteria::newest_candidate(s.store(), item_id)?,
     };
     crate::corpus::criteria::for_item(s.store(), &s.cfg, item_id, candidate.as_deref())
-        .map_err(criteria_err)
 }
 
 /// `GET /api/work/{id}/criteria`: the item's acceptance criteria, each with
@@ -3680,7 +3690,7 @@ pub async fn get_criteria(
     Path(id): Path<String>,
     Query(q): Query<CriteriaQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let view = criteria_json(&s, &id, q.candidate.as_deref())?;
+    let view = criteria_json(&s, &id, q.candidate.as_deref()).map_err(criteria_err)?;
     Ok(Json(json!({ "criteria": view })))
 }
 
@@ -3712,8 +3722,13 @@ pub async fn add_criterion_link(
         &crate::corpus::brief::Author::Operator,
     )
     .map_err(criteria_err)?;
-    let view = criteria_json(&s, &id, None)?;
+    let view = criteria_json(&s, &id, None).map_err(criteria_err)?;
     Ok(Json(json!({ "criteria": view })))
+}
+
+#[derive(Deserialize)]
+pub struct CriterionLinkDeleteQuery {
+    pub if_hash: String,
 }
 
 /// `DELETE /api/work/{id}/criteria/{key}/links/{index}`: take back one of a
@@ -3721,6 +3736,7 @@ pub async fn add_criterion_link(
 pub async fn remove_criterion_link(
     State(s): State<AppState>,
     Path((id, key, index)): Path<(String, String, usize)>,
+    Query(q): Query<CriterionLinkDeleteQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     crate::corpus::criteria::remove_link(
         s.store(),
@@ -3729,10 +3745,10 @@ pub async fn remove_criterion_link(
         &id,
         &key,
         index,
-        None,
+        Some(&q.if_hash),
     )
     .map_err(criteria_err)?;
-    let view = criteria_json(&s, &id, None)?;
+    let view = criteria_json(&s, &id, None).map_err(criteria_err)?;
     Ok(Json(json!({ "criteria": view })))
 }
 
@@ -3743,7 +3759,7 @@ pub struct JudgementBody {
     pub verdict: String,
     #[serde(default)]
     pub note: Option<String>,
-    /// What the verdict is about. Defaults to the item's newest candidate.
+    /// Explicit null or omission judges the criterion without an attempt.
     #[serde(default)]
     pub candidate_id: Option<String>,
     /// Set when the verdict was given from a review, so it binds to what was
@@ -3761,29 +3777,27 @@ pub async fn judge_criterion(
     Path(id): Path<String>,
     Json(body): Json<JudgementBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let candidate = match body.candidate_id {
-        Some(id) => Some(id),
-        None => crate::corpus::criteria::newest_candidate(s.store(), &id)?,
-    };
+    let candidate = body.candidate_id.as_deref();
     let row = crate::corpus::criteria::judge(
         s.store(),
         &id,
         &body.criterion,
-        candidate.as_deref(),
+        candidate,
         body.revision_id.as_deref(),
         &body.verdict,
         body.note.as_deref(),
         &crate::corpus::brief::Author::Operator,
     )
     .map_err(criteria_err)?;
-    let view = criteria_json(&s, &id, candidate.as_deref())?;
+    let view = crate::corpus::criteria::for_item(s.store(), &s.cfg, &id, candidate)
+        .map_err(criteria_err)?;
     Ok(Json(json!({ "judgement": row, "criteria": view })))
 }
 
 fn criteria_err(e: crate::corpus::criteria::CriteriaError) -> ApiError {
     use crate::corpus::criteria::CriteriaError::*;
     match e {
-        MissingItem(_) | NoBrief(_) | MissingCandidate(_) => {
+        MissingItem(_) | NoBrief(_) | MissingCandidate(_) | MissingRevision(_) => {
             ApiError(StatusCode::NOT_FOUND, e.to_string())
         }
         Brief(e) => brief_err(e),

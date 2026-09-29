@@ -125,10 +125,8 @@ impl Field {
 }
 
 /// Lowercase, alphanumerics and single spaces: `Success criteria`,
-/// `success_criteria` and `SUCCESS  CRITERIA` are one heading. Also how a
-/// criterion is named from its own text, in `corpus::criteria`: two lines that
-/// differ only in punctuation or case are the same line.
-pub fn normalize(text: &str) -> String {
+/// `success_criteria` and `SUCCESS  CRITERIA` are one heading.
+fn normalize(text: &str) -> String {
     let mut out = String::new();
     for ch in text.chars() {
         if ch.is_alphanumeric() {

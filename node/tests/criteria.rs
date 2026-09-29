@@ -460,7 +460,7 @@ async fn passing_your_own_checks_is_not_the_customer_agreeing() {
         &h.operator,
         "POST",
         &format!("/api/work/{id}/criteria/judgements"),
-        Some(json!({ "criterion": key_for(TRIAGE), "verdict": "met", "note": "watched it twice" })),
+        Some(json!({ "criterion": key_for(TRIAGE), "verdict": "met", "note": "watched it twice", "candidate_id": candidate })),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
@@ -491,7 +491,7 @@ async fn passing_your_own_checks_is_not_the_customer_agreeing() {
         &h.operator,
         "POST",
         &format!("/api/work/{id}/criteria/judgements"),
-        Some(json!({ "criterion": key_for(TRIAGE), "verdict": "not_met" })),
+        Some(json!({ "criterion": key_for(TRIAGE), "verdict": "not_met", "candidate_id": candidate })),
     )
     .await;
     let rows = h.store.criterion_judgements_for_item(&id).unwrap();
@@ -721,7 +721,11 @@ async fn an_agent_proposes_what_good_means_and_the_operator_decides_it() {
     let (st, v) = call(
         &h.operator,
         "DELETE",
-        &format!("/api/work/{id}/criteria/{}/links/1", key_for(TRIAGE)),
+        &format!(
+            "/api/work/{id}/criteria/{}/links/1?if_hash={}",
+            key_for(TRIAGE),
+            v["criteria"]["hash"].as_str().unwrap()
+        ),
         None,
     )
     .await;
@@ -730,7 +734,11 @@ async fn an_agent_proposes_what_good_means_and_the_operator_decides_it() {
     let (st, _) = call(
         &h.operator,
         "DELETE",
-        &format!("/api/work/{id}/criteria/{}/links/7", key_for(TRIAGE)),
+        &format!(
+            "/api/work/{id}/criteria/{}/links/7?if_hash={}",
+            key_for(TRIAGE),
+            v["criteria"]["hash"].as_str().unwrap()
+        ),
         None,
     )
     .await;
@@ -789,19 +797,20 @@ async fn rewording_a_criterion_orphans_the_verdict_it_was_about() {
         "{view}"
     );
 
-    // Two lines that say the same thing share a name, so a verdict on one would
-    // be a verdict on both. Said, rather than merged behind the operator's back.
+    // Identical lines have the same identity, and neither is safe to mutate.
     write_brief(
         &h,
         &id,
         &format!(
-            "# Brief: Overnight alert triage\n\n## Success criteria\n\n- decided: {TRIAGE}\n- decided: {TRIAGE}.\n"
+            "# Brief: Overnight alert triage\n\n## Success criteria\n\n- decided: {TRIAGE}\n  - decided check: just check\n- decided: {TRIAGE}\n"
         ),
     )
     .await;
     let view = read_criteria(&h, &id).await;
-    assert_eq!(view["criteria"][0]["duplicate"], false);
+    assert_eq!(view["criteria"][0]["duplicate"], true);
     assert_eq!(view["criteria"][1]["duplicate"], true, "{view}");
+    assert_eq!(view["criteria"][0]["links"][0]["value"], "just check");
+    assert_eq!(view["criteria"][1]["links"].as_array().unwrap().len(), 0);
     // And naming it by text is now ambiguous, which is refused rather than
     // resolved to whichever line happens to come first.
     let (st, v) = call(
@@ -903,6 +912,41 @@ async fn the_review_screen_carries_the_criteria_of_the_item_it_was_pinned_to() {
         "what nothing points at is on the screen too, or the checks read as everything"
     );
 
+    let mut reviewer = session_row("reviewer", &id, "fake");
+    reviewer.phase = "review".into();
+    reviewer.review_id = Some("rv1".into());
+    h.store.insert_session(&reviewer).unwrap();
+    let token = h
+        .manager
+        .register_tool_token_for_test("reviewer", "personal")
+        .await;
+    let read = tool(
+        &h.harness,
+        "reviewer",
+        &token,
+        "criteria_read",
+        json!({"candidate": candidate}),
+    )
+    .await;
+    assert_eq!(read["criteria"]["candidate"]["id"], candidate, "{read}");
+    assert_eq!(of(&read["criteria"], TRIAGE)["coverage"], "checks_pass");
+    let before = brief_body(&h, &id);
+    let refused = tool(
+        &h.harness,
+        "reviewer",
+        &token,
+        "criteria_link",
+        json!({"criterion": TRIAGE, "kind": "check", "value": "just check"}),
+    )
+    .await;
+    assert!(
+        refused
+            .to_string()
+            .contains("not offered to a review session"),
+        "{refused}"
+    );
+    assert_eq!(brief_body(&h, &id), before);
+
     // A verdict given from that screen names the revision, so it is about what
     // was on it rather than about whatever the branch becomes next.
     let (st, judged) = call(
@@ -925,9 +969,409 @@ async fn the_review_screen_carries_the_criteria_of_the_item_it_was_pinned_to() {
         "the verdict keeps the wording it was about"
     );
 
+    let (status, response) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/work/{id}/criteria/judgements"),
+        Some(
+            json!({"criterion": TRIAGE, "verdict": "met", "candidate_id": candidate,
+                    "revision_id": "not-a-revision"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{response}");
+    let error = criteria::judge(
+        &h.store,
+        &id,
+        TRIAGE,
+        None,
+        Some("revision-1"),
+        "met",
+        None,
+        &Author::Operator,
+    )
+    .expect_err("a revision cannot bind an unnamed candidate");
+    assert!(matches!(error, criteria::CriteriaError::RevisionMismatch));
+    let alternate = a_candidate(&h, "s1", &"d".repeat(40), now_ms() + 1);
+    let (status, response) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/work/{id}/criteria/judgements"),
+        Some(
+            json!({"criterion": TRIAGE, "verdict": "met", "candidate_id": alternate,
+                    "revision_id": "revision-1"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    let other = an_item(&h, "Other").await;
+    write_brief(&h, &other, &brief_markdown()).await;
+    h.store
+        .insert_session(&session_row("other-session", &other, "external"))
+        .unwrap();
+    let other_candidate = a_candidate(&h, "other-session", &"b".repeat(40), now_ms());
+    let (status, response) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/work/{other}/criteria/judgements"),
+        Some(
+            json!({"criterion": TRIAGE, "verdict": "met", "candidate_id": other_candidate,
+                    "revision_id": "revision-1"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert!(h
+        .store
+        .criterion_judgements_for_item(&other)
+        .unwrap()
+        .is_empty());
+    assert_eq!(h.store.criterion_judgements_for_item(&id).unwrap().len(), 1);
+
+    // A revision can associate a candidate with another item even when the
+    // owner session belongs to this one.
+    let mut review = h.store.get_review("rv1").unwrap().unwrap();
+    review.id = "rv2".into();
+    let mut pinned = h.store.review_revision("revision-1").unwrap().unwrap();
+    pinned.id = "revision-2".into();
+    pinned.review_id = review.id.clone();
+    pinned.requirements_work_item_id = Some(other.clone());
+    h.store
+        .insert_review_with_revision(&review, &pinned)
+        .unwrap();
+    let (status, scoped) = call(
+        &h.operator,
+        "GET",
+        &format!("/api/work/{other}/criteria?candidate={candidate}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{scoped}");
+    let (status, response) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/work/{other}/criteria/judgements"),
+        Some(
+            json!({"criterion": TRIAGE, "verdict": "met", "candidate_id": candidate,
+                    "revision_id": "revision-2"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+
     // What a session is told before it proposes anything: how many criteria
     // there are, and how many nothing agreed points at.
     let standing = criteria::standing(&brief::Brief::parse(&brief_body(&h, &id)));
     assert_eq!(standing.total, 3);
     assert_eq!(standing.unlinked, 1, "{standing:?}");
+    // Evidence exists, but a candidate from another channel is not evidence
+    // for this item's criteria. The review must not pretend criteria are null.
+    let mut foreign = h.store.candidate(&candidate).unwrap().unwrap();
+    foreign.id = tracon::store::candidate_id(&"e".repeat(40), "work");
+    foreign.head_sha = "e".repeat(40);
+    foreign.channel = "work".into();
+    h.store.insert_candidate(&foreign).unwrap();
+    let mut bad_review = review.clone();
+    bad_review.id = "rv3".into();
+    let mut bad_revision = pinned.clone();
+    bad_revision.id = "revision-3".into();
+    bad_revision.review_id = bad_review.id.clone();
+    bad_revision.candidate_id = foreign.id.clone();
+    bad_revision.requirements_work_item_id = Some(id.clone());
+    h.store
+        .insert_review_with_revision(&bad_review, &bad_revision)
+        .unwrap();
+    let (status, _) = call(&h.operator, "GET", "/api/reviews/rv3", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let absent = an_item(&h, "No brief").await;
+    let mut no_brief_review = review.clone();
+    no_brief_review.id = "rv4".into();
+    let mut no_brief_revision = pinned.clone();
+    no_brief_revision.id = "revision-4".into();
+    no_brief_revision.review_id = no_brief_review.id.clone();
+    no_brief_revision.requirements_work_item_id = Some(absent.clone());
+    h.store
+        .insert_review_with_revision(&no_brief_review, &no_brief_revision)
+        .unwrap();
+    let (status, response) = call(&h.operator, "GET", "/api/reviews/rv4", None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(response["criteria"].is_null());
+    tracon::corpus::work::remove(&h.store, &h.bus, "n1", &other).unwrap();
+    let (status, response) = call(&h.operator, "GET", "/api/reviews/rv2", None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(response["criteria"].is_null());
+}
+
+#[tokio::test]
+async fn operators_and_code_identifiers_do_not_share_verdicts() {
+    state::isolate();
+    let h = harness().await;
+    let id = an_item(&h, "Latency").await;
+    let before = "Latency < 2 seconds";
+    let after = "Latency > 2 seconds";
+    write_brief(
+        &h,
+        &id,
+        &format!("# Brief: Latency\n\n## Success criteria\n\n- decided: {before}\n"),
+    )
+    .await;
+    let (status, _) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/work/{id}/criteria/judgements"),
+        Some(json!({"criterion": before, "verdict": "met", "candidate_id": null})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    write_brief(
+        &h,
+        &id,
+        &format!("# Brief: Latency\n\n## Success criteria\n\n- decided: {after}\n"),
+    )
+    .await;
+    let view = read_criteria(&h, &id).await;
+    assert!(of(&view, after)["judgement"].is_null(), "{view}");
+    assert_eq!(
+        view["gaps"]["orphaned_judgements"][0]["criterion_text"],
+        before
+    );
+    assert_ne!(key_for("Status == READY"), key_for("Status == ready"));
+    assert_eq!(key_for("  Status == READY  "), key_for("Status == READY"));
+}
+
+#[tokio::test]
+async fn foreign_candidate_is_not_evidence_for_another_item() {
+    state::isolate();
+    let h = harness().await;
+    let a = an_item(&h, "A").await;
+    let b = an_item(&h, "B").await;
+    write_brief(&h, &a, "# Brief: A\n\n## Success criteria\n\n- decided: Latency < 2 seconds\n  - decided check: just check\n").await;
+    h.store
+        .insert_session(&session_row("foreign", &b, "external"))
+        .unwrap();
+    let foreign = a_candidate(&h, "foreign", &"f".repeat(40), now_ms());
+    a_check_run(&h, &foreign, "just check", "passed");
+    let (status, _) = call(
+        &h.operator,
+        "GET",
+        &format!("/api/work/{a}/criteria?candidate={foreign}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/work/{a}/criteria/judgements"),
+        Some(
+            json!({"criterion": "Latency < 2 seconds", "verdict": "met", "candidate_id": foreign}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(h
+        .store
+        .criterion_judgements_for_item(&a)
+        .unwrap()
+        .is_empty());
+    h.store
+        .insert_session(&session_row("s1", &a, "external"))
+        .unwrap();
+    let token = h
+        .manager
+        .register_tool_token_for_test("s1", "personal")
+        .await;
+    let denied = tool(
+        &h.harness,
+        "s1",
+        &token,
+        "criteria_read",
+        json!({"candidate": foreign}),
+    )
+    .await;
+    let text = denied.to_string();
+    assert!(
+        text.contains("no candidate")
+            && !text.contains("run-")
+            && !text.contains("passed")
+            && !text.contains(&"f".repeat(40)),
+        "{denied}"
+    );
+
+    let mut wrong_channel = h.store.candidate(&foreign).unwrap().unwrap();
+    wrong_channel.channel = "work".into();
+    wrong_channel.id = tracon::store::candidate_id(&"e".repeat(40), "work");
+    wrong_channel.head_sha = "e".repeat(40);
+    h.store.insert_candidate(&wrong_channel).unwrap();
+    let (status, _) = call(
+        &h.operator,
+        "GET",
+        &format!("/api/work/{a}/criteria?candidate={}", wrong_channel.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let denied = tool(
+        &h.harness,
+        "s1",
+        &token,
+        "criteria_read",
+        json!({"candidate": wrong_channel.id}),
+    )
+    .await;
+    assert!(denied.to_string().contains("no candidate"));
+}
+
+#[tokio::test]
+async fn candidate_less_verdict_stays_candidate_less_after_capture() {
+    state::isolate();
+    let h = harness().await;
+    let id = an_item(&h, "A").await;
+    write_brief(
+        &h,
+        &id,
+        "# Brief: A\n\n## Success criteria\n\n- decided: Works\n",
+    )
+    .await;
+    let loaded = read_criteria(&h, &id).await;
+    assert!(loaded["candidate"].is_null());
+    h.store
+        .insert_session(&session_row("s1", &id, "external"))
+        .unwrap();
+    let candidate = a_candidate(&h, "s1", &"a".repeat(40), now_ms());
+    let (status, written) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/work/{id}/criteria/judgements"),
+        Some(json!({"criterion": "Works", "verdict": "met", "candidate_id": null})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    assert!(written["judgement"]["candidate_id"].is_null(), "{written}");
+    assert!(written["criteria"]["candidate"].is_null(), "{written}");
+    let latest = read_criteria(&h, &id).await;
+    assert_eq!(latest["candidate"]["id"], candidate);
+    assert_ne!(of(&latest, "Works")["coverage"], "judged_met");
+    let second = a_candidate(&h, "s1", &"b".repeat(40), now_ms() + 1000);
+    let (status, pinned) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/work/{id}/criteria/judgements"),
+        Some(json!({"criterion": "Works", "verdict": "not_met", "candidate_id": candidate})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{pinned}");
+    assert_eq!(pinned["criteria"]["candidate"]["id"], candidate);
+    assert_eq!(
+        of(&read_criteria(&h, &id).await, "Works")["earlier_judgement"]["candidate_id"],
+        candidate
+    );
+    assert_eq!(read_criteria(&h, &id).await["candidate"]["id"], second);
+}
+
+#[tokio::test]
+async fn stale_link_index_never_deletes_the_next_link() {
+    state::isolate();
+    let h = harness().await;
+    let id = an_item(&h, "A").await;
+    write_brief(&h, &id, "# Brief: A\n\n## Success criteria\n\n- decided: Works\n  - decided check: A\n  - decided check: B\n  - decided check: C\n").await;
+    let stale = read_criteria(&h, &id).await;
+    let key = key_for("Works");
+    let uri = format!("/api/work/{id}/criteria/{key}/links");
+    let (status, _) = call(
+        &h.operator,
+        "DELETE",
+        &format!("{uri}/0?if_hash={}", stale["hash"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call(
+        &h.operator,
+        "DELETE",
+        &format!("{uri}/1?if_hash={}", stale["hash"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = call(&h.operator, "DELETE", &format!("{uri}/0"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let current = read_criteria(&h, &id).await;
+    let values: Vec<_> = of(&current, "Works")["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|link| link["value"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(values, ["B", "C"]);
+    let (status, _) = call(
+        &h.operator,
+        "DELETE",
+        &format!("{uri}/0?if_hash={}", current["hash"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let latest = read_criteria(&h, &id).await;
+    assert_eq!(of(&latest, "Works")["links"][0]["value"], "C");
+}
+
+#[tokio::test]
+async fn attaching_another_brief_does_not_transfer_agreement() {
+    state::isolate();
+    let h = harness().await;
+    let id = an_item(&h, "First").await;
+    let other = an_item(&h, "Second").await;
+    write_brief(
+        &h,
+        &id,
+        "# Brief: First\n\n## Success criteria\n\n- decided: Works\n",
+    )
+    .await;
+    write_brief(
+        &h,
+        &other,
+        "# Brief: Second\n\n## Success criteria\n\n- decided: Works\n",
+    )
+    .await;
+    let (status, _) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/work/{id}/criteria/judgements"),
+        Some(json!({"criterion": "Works", "verdict": "met", "candidate_id": null})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let slug = h
+        .store
+        .work_get(&other)
+        .unwrap()
+        .unwrap()
+        .brief_slug
+        .unwrap();
+    tracon::corpus::work::set_brief(&h.store, &h.bus, "n1", &id, Some(&slug)).unwrap();
+    let view = read_criteria(&h, &id).await;
+    assert!(of(&view, "Works")["judgement"].is_null(), "{view}");
+    assert!(
+        view["gaps"]["orphaned_judgements"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{view}"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_rows_retain_their_own_link_coverage() {
+    state::isolate();
+    let h = harness().await;
+    let id = an_item(&h, "Duplicates").await;
+    write_brief(&h, &id, "# Brief: Duplicates\n\n## Success criteria\n\n- decided: Works\n  - decided check: just check\n- decided: Works\n").await;
+    let view = read_criteria(&h, &id).await;
+    assert_eq!(view["criteria"][0]["duplicate"], true);
+    assert_eq!(view["criteria"][1]["duplicate"], true);
+    assert_eq!(view["criteria"][0]["coverage"], "no_result_yet");
+    assert_eq!(view["criteria"][1]["coverage"], "nothing_points_at_it");
+    assert_eq!(view["gaps"]["uncovered"].as_array().unwrap().len(), 1);
 }

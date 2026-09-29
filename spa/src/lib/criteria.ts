@@ -6,7 +6,7 @@
 // whole screen exists to keep, said in words rather than in a colour: checks
 // passing is not a person agreeing that the criterion was met.
 
-import type { Coverage, Criteria, Criterion, CriterionLink, LinkKind, Standard, Verdict } from './types'
+import type { Coverage, Criteria, CriterionLink, LinkKind, Standard, Verdict } from './types'
 
 export const LINK_KINDS: LinkKind[] = ['check', 'scenario', 'observation']
 
@@ -56,11 +56,6 @@ export function linkSays(link: CriterionLink): string {
   else if (link.kind === 'observation') parts.push('context for a person, not a result')
   else parts.push('no run against this candidate')
   return parts.join(' · ')
-}
-
-/** The criteria the caller asked to see, by key. */
-export function byKey(view: Criteria, keys: string[]): Criterion[] {
-  return keys.map((key) => view.criteria.find((c) => c.key === key)).filter((c): c is Criterion => !!c)
 }
 
 /**

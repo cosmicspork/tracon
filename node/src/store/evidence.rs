@@ -455,6 +455,33 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Candidate association includes owner sessions and pinned requirements.
+    pub fn candidate_for_item(
+        &self,
+        candidate_id: &str,
+        work_item_id: &str,
+        channel: &str,
+    ) -> Result<Option<CandidateRow>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        conn.query_row(
+            "SELECT c.* FROM candidate c
+             WHERE c.id=?1 AND c.channel=?3
+               AND (
+                 EXISTS (SELECT 1 FROM session s
+                         WHERE s.id=c.owner_session_id AND s.work_item_id=?2)
+                 OR EXISTS (SELECT 1 FROM review_revision rr
+                            WHERE rr.candidate_id=c.id AND rr.requirements_work_item_id=?2)
+               )",
+            params![candidate_id, work_item_id, channel],
+            CandidateRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn candidate_by_commit(
         &self,
         channel: &str,
@@ -969,6 +996,20 @@ impl Store {
         conn.query_row(
             "SELECT * FROM review_revision WHERE review_id=?1 ORDER BY created_ms DESC, id DESC LIMIT 1",
             [review_id],
+            ReviewRevisionRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn review_revision(&self, id: &str) -> Result<Option<ReviewRevisionRow>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        conn.query_row(
+            "SELECT * FROM review_revision WHERE id=?1",
+            [id],
             ReviewRevisionRow::from_row,
         )
         .optional()

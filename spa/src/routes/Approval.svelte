@@ -221,7 +221,7 @@
         criterion: key,
         verdict: criterionVerdict,
         note: criterionNote.trim() || undefined,
-        candidate_id: criteria.candidate?.id,
+        candidate_id: criteria.candidate?.id ?? null,
         revision_id: revision?.id,
       })
       criteria = res.criteria
@@ -394,12 +394,17 @@
           {whatIsLeft(criteria)} · the checks are this node's; whether the criterion was met is yours.
         </p>
         <ul>
-          {#each criteria.criteria as c (c.key)}
+          {#each criteria.criteria as c, i (i)}
             <li class={attention(c.coverage)}>
               <div class="line">
                 <span class="chip {attention(c.coverage)}" title={COVERAGE[c.coverage].title}>{COVERAGE[c.coverage].label}</span>
                 <span>{c.text}</span>
               </div>
+              {#if c.duplicate}
+                <small class="missing">
+                  Duplicate criterion; <a href="/docs/{criteria.channel}/{criteria.brief_slug}">edit the brief to distinguish these lines.</a>
+                </small>
+              {/if}
               {#each c.links as l (l.index)}
                 <small><code>{l.value}</code> · {linkSays(l)}</small>
               {/each}
@@ -417,7 +422,9 @@
                   settle this one
                 </small>
               {/if}
-              {#if judging === c.key}
+              {#if c.duplicate}
+                <button class="lnk" disabled>Judge it</button>
+              {:else if judging === c.key}
                 <div class="judge">
                   <select bind:value={criterionVerdict} aria-label="your verdict">
                     {#each VERDICTS as v (v)}<option value={v}>{v.replace('_', ' ')}</option>{/each}

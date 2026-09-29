@@ -9,7 +9,7 @@
   // view that lists only what is covered reads as though that were everything.
   import { api } from '../lib/api'
   import { PROVENANCE, refHref, refLabel } from '../lib/brief'
-  import { COVERAGE, LINK_KINDS, STANDARD, VERDICTS, attention, byKey, linkSays, whatIsLeft } from '../lib/criteria'
+  import { COVERAGE, LINK_KINDS, STANDARD, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
   import { surface } from '../lib/surface.svelte'
   import type { Criteria, LinkKind, Provenance, Verdict, WorkView } from '../lib/types'
 
@@ -66,7 +66,8 @@
   }
 
   function removeLink(key: string, index: number) {
-    return act(() => api.removeCriterionLink(item.id, key, index))
+    if (!criteria) return
+    return act(() => api.removeCriterionLink(item.id, key, index, criteria.hash))
   }
 
   function judge(key: string) {
@@ -75,7 +76,7 @@
         criterion: key,
         verdict,
         note: note.trim() || undefined,
-        candidate_id: criteria?.candidate?.id,
+        candidate_id: criteria?.candidate?.id ?? null,
         revision_id: revisionId,
       })
       note = ''
@@ -110,7 +111,7 @@
     {:else}
       <div class="left">{whatIsLeft(criteria)}</div>
       <ul class="rows">
-        {#each criteria.criteria as c (c.key)}
+        {#each criteria.criteria as c, i (i)}
           <li class={attention(c.coverage)}>
             <div class="line">
               <span class="mark {c.provenance}" title={PROVENANCE[c.provenance].title}>{PROVENANCE[c.provenance].label}</span>
@@ -120,8 +121,8 @@
               <span class="mark std {c.standard}" title={STANDARD[c.standard].title}>standard: {STANDARD[c.standard].label}</span>
               <span class="mark cov {attention(c.coverage)}" title={COVERAGE[c.coverage].title}>{COVERAGE[c.coverage].label}</span>
               {#if c.duplicate}
-                <span class="mark warn" title="another line says the same thing, so they share a name and a verdict">
-                  said twice
+                <span class="mark warn">
+                  Duplicate criterion; <a href="/docs/{criteria.channel}/{criteria.brief_slug}">edit the brief to distinguish these lines.</a>
                 </span>
               {/if}
             </div>
@@ -144,7 +145,7 @@
                     <code>{l.value}</code>
                     <span class="says">{linkSays(l)}</span>
                     {#if !surface.phone}
-                      <button class="lnk d" onclick={() => removeLink(c.key, l.index)} disabled={busy}>Remove</button>
+                      <button class="lnk d" onclick={() => removeLink(c.key, l.index)} disabled={busy || c.duplicate}>Remove</button>
                     {/if}
                   </li>
                 {/each}
@@ -165,7 +166,12 @@
             {/if}
 
             {#if !surface.phone}
-              {#if linking === c.key}
+              {#if c.duplicate}
+                <div class="actions">
+                  <button class="lnk" disabled>Say what settles it</button>
+                  <button class="lnk" disabled>Judge it</button>
+                </div>
+              {:else if linking === c.key}
                 <div class="form">
                   <div class="row">
                     <select bind:value={kind} aria-label="what would settle it">
@@ -230,7 +236,7 @@
       <div class="section">
         <div class="head">Nothing agreed points at these</div>
         <ul class="plain">
-          {#each byKey(criteria, criteria.gaps.uncovered) as c (c.key)}
+          {#each criteria.criteria.filter((c) => c.coverage === 'nothing_points_at_it' || c.coverage === 'only_proposed') as c, i (i)}
             <li>{c.text} <span class="says">{COVERAGE[c.coverage].label}</span></li>
           {/each}
         </ul>

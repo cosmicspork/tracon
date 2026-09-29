@@ -590,16 +590,16 @@ export const api = {
     key: string,
     input: { kind: LinkKind; value: string; provenance?: Provenance; refs?: { kind: RefKind; value: string }[]; if_hash?: string },
   ) => call<{ criteria: Criteria | null }>('POST', `/api/work/${id}/criteria/${key}/links`, input),
-  /** Take back one of a criterion's links, by the index the view gave it. */
-  removeCriterionLink: (id: string, key: string, index: number) =>
-    call<{ criteria: Criteria | null }>('DELETE', `/api/work/${id}/criteria/${key}/links/${index}`),
+  /** Take back one of a criterion's links from the brief version displayed. */
+  removeCriterionLink: (id: string, key: string, index: number, ifHash: string) =>
+    call<{ criteria: Criteria | null }>('DELETE', `/api/work/${id}/criteria/${key}/links/${index}?${new URLSearchParams({ if_hash: ifHash })}`),
   /**
    * Say whether a criterion was met. There is no session route to this: an
    * agent passing its own checks does not establish that the customer agreed.
    */
   judgeCriterion: (
     id: string,
-    input: { criterion: string; verdict: Verdict; note?: string; candidate_id?: string; revision_id?: string },
+    input: { criterion: string; verdict: Verdict; note?: string; candidate_id: string | null; revision_id?: string },
   ) => call<{ judgement: CriterionJudgement; criteria: Criteria | null }>('POST', `/api/work/${id}/criteria/judgements`, input),
   /** What the operator selected for the item, and what each attempt received. */
   workContext: (id: string) => call<WorkContext>('GET', `/api/work/${id}/context`),

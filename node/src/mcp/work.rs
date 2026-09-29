@@ -373,7 +373,12 @@ pub async fn call(
                     .map_err(|e| e.to_string())?,
             };
             let view = corpus::criteria::for_item(&access.store, cfg, &id, candidate.as_deref())
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| match e {
+                    corpus::criteria::CriteriaError::MissingCandidate(_) => {
+                        "no candidate for this item".to_string()
+                    }
+                    other => other.to_string(),
+                })?;
             match view {
                 Some(view) => {
                     let summary = view.summary.clone();
