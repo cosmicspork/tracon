@@ -344,7 +344,7 @@ pub async fn call(
                     notes: None,
                     replace: false,
                     entries: Some(vec![corpus::brief::EntryInput {
-                        provenance: args["provenance"].as_str().map(str::to_string),
+                        provenance: Some(session_provenance(args).to_string()),
                         text,
                         refs,
                         links: vec![],
@@ -411,7 +411,7 @@ pub async fn call(
                 &id,
                 criterion,
                 corpus::brief::LinkInput {
-                    provenance: args["provenance"].as_str().map(str::to_string),
+                    provenance: Some(session_provenance(args).to_string()),
                     kind: args["kind"].as_str().unwrap_or("").to_string(),
                     value: args["value"].as_str().unwrap_or("").to_string(),
                     refs,
@@ -426,9 +426,18 @@ pub async fn call(
                 .map_err(|e| e.to_string())?;
             Ok(json!({
                 "summary": view.as_ref().map(|v| v.summary.clone()),
-                "standing": "your proposal, recorded as `inferred`; the operator decides what good means",
+                "standing": format!(
+                    "your proposal, recorded as `{}`; the operator decides what good means",
+                    session_provenance(args)
+                ),
             }))
         }
         other => Err(format!("no work tool named {other}")),
     }
+}
+
+/// The schemas promise `inferred` when a session names no provenance; left to
+/// the store, an omitted value would be recorded as `unattributed` instead.
+fn session_provenance(args: &Value) -> &str {
+    args["provenance"].as_str().unwrap_or("inferred")
 }
