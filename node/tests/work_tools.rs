@@ -164,6 +164,12 @@ async fn rig_with_bodies() -> (Tools, Seen, Bodies, String) {
     });
     let creds = format!(
         r#"
+        [credentials.gh]
+        channels = ["work"]
+        [credentials.gh.env]
+        GITHUB_API = "{base}"
+        GH_TOKEN = "gh-secret"
+
         [credentials.glab]
         channels = ["work"]
         [credentials.glab.env]
@@ -265,6 +271,30 @@ async fn the_forge_and_tracker_tools_are_offered_to_the_bound_channel_and_node()
     assert!(elsewhere.contains(&"mr_status".to_string()));
     assert!(!elsewhere.contains(&"issue".to_string()));
     assert!(names("personal", "n1").is_empty());
+}
+
+/// A tool that is offered but not routed fails only after the operator was
+/// asked about it; every offered name must reach its family's handler.
+#[tokio::test]
+async fn every_offered_tool_is_routed_to_a_handler() {
+    state::isolate();
+    let (mut t, _, _) = rig().await;
+    let names: Vec<String> = t
+        .list("work", "n1")
+        .iter()
+        .map(|d| d["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(names.contains(&"pr_status".to_string()), "{names:?}");
+    let quoted: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
+    t.policy = allowing(&quoted.join(", "));
+    let c = ctx("work", "n1");
+    for name in &names {
+        let (_, v) = call(&t, &c, name, json!({})).await;
+        assert!(
+            !v.to_string().contains("no tool named"),
+            "{name} is offered but not routed: {v}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -1,8 +1,8 @@
-//! Jira, as five narrow tools: search, read an issue, comment on it, edit its
-//! fields, and create one. Transitions are not among them: moving a ticket's status
-//! desyncs what the operator is actually working on, so the verb does not
-//! exist here, and the fields the writes touch are named rather than passed
-//! through. The API token never leaves the node.
+//! Jira, as narrow tools: search, read an issue, comment on it, edit its
+//! fields, create one, and transition one. A transition moves what the
+//! operator is actually working on, so it runs only with current scoped
+//! authority for that issue; the fields the other writes touch are named
+//! rather than passed through. The API token never leaves the node.
 
 use serde_json::{json, Map, Value};
 
@@ -52,8 +52,8 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": ISSUE_COMMENT,
             "description": "Post one comment on a Jira issue. The body is Jira wiki markup \
-                            (*bold*, {{code}}, * bullets), not Markdown. Status changes are the \
-                            operator's; say what you would transition and why instead.",
+                            (*bold*, {{code}}, * bullets), not Markdown. Status changes are \
+                            issue_transition, not a comment.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -66,8 +66,8 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": ISSUE_UPDATE,
             "description": "Edit an issue's fields: summary, description, priority, labels, and \
-                            parent. Status is not a field here, so say what you would transition \
-                            and why with issue_comment.",
+                            parent. Status is not a field here; it changes only through \
+                            issue_transition.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

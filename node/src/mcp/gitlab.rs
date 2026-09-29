@@ -2,8 +2,8 @@
 //! read a pipeline and a job's log, list the pipelines that ran at an exact
 //! commit and play a manual job in one, and run a pipeline on a branch.
 //! Opening a merge request is the review path (`review::publish`); merging
-//! and marking ready are not tools at all — "no merge" is the absence of a
-//! verb, not a rule about one. A pipeline on a tag, which is how a
+//! (`mr_merge`) and playing a deploy job (`deploy`) run only with current
+//! scoped authority. Marking ready is not a tool. A pipeline on a tag, which is how a
 //! production deploy runs, is refused by the tool itself. GitLab's own
 //! pipeline-creation API resolves `ref` only against a branch or tag, never
 //! a bare commit SHA, so an exact-SHA deploy never creates a pipeline: it
@@ -50,7 +50,8 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": MR_COMMENT,
-            "description": "Post one comment on a GitLab merge request.",
+            "description": "Post one comment on a GitLab merge request. The operator is asked \
+                            before it posts.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

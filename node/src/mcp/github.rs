@@ -1,7 +1,8 @@
 //! GitHub, as narrow tools: a pull request's state with its checks, one
 //! comment on it, and the Actions runs for a branch or a commit. Opening a
-//! pull request is the review path (`review::publish`); merging and marking
-//! ready are not tools at all. The token never leaves the node.
+//! pull request is the review path (`review::publish`); merging is
+//! `pr_merge`, which runs only with current scoped authority for the exact
+//! head SHA. Marking ready is not a tool. The token never leaves the node.
 
 use serde_json::{json, Value};
 
