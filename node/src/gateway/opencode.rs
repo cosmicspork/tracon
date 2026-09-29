@@ -92,6 +92,10 @@ enum Class {
     /// Served by the node out of what it already reads upstream, and never
     /// forwarded. The native UI's one live channel (finding 20).
     Synthesised,
+    /// Answered by the node with an empty object, never forwarded: a startup
+    /// read the app will not finish loading without, whose real answer is
+    /// not the browser's to have.
+    Empty,
     /// Decided by tracon before anything reaches the harness.
     Mediated(Mediation),
     /// Refused, with the reason the operator reads.
@@ -185,6 +189,13 @@ const ROUTES: &[Row] = &[
     // the events the node is already reading (`gateway::native_events`).
     // The upstream route stays unforwarded; nothing below reaches the harness.
     ("GET", &["global", "event"], Class::Synthesised),
+    // The app reads both at startup and, refused, fails its instance
+    // bootstrap: the page shows an error toast and retries every few seconds.
+    // The global config is the whole server's, beside a write the deny list
+    // names; the resource list is the experimental tree's. Neither is
+    // forwarded — the page gets "nothing configured" and "no resources".
+    ("GET", &["global", "config"], Class::Empty),
+    ("GET", &["experimental", "resource"], Class::Empty),
     (
         "GET",
         &["api", "event"],
@@ -512,6 +523,13 @@ fn pattern_matches(pattern: &[&str], path: &[String]) -> bool {
 /// The matrix's verdict on one call, with the pattern that produced it so the
 /// session-id positions can be checked against this session's own.
 fn classify(method: &Method, path: &[String]) -> (Class, &'static [&'static str]) {
+    // Checked before the trees: an `Empty` row forwards nothing, so it cannot
+    // reopen what a tree closes.
+    for (verb, pattern, class) in ROUTES {
+        if *class == Class::Empty && method.as_str() == *verb && pattern_matches(pattern, path) {
+            return (*class, pattern);
+        }
+    }
     if let Some(reason) = forbidden_tree(method, path) {
         return (Class::Forbidden(reason), &[]);
     }
@@ -928,6 +946,7 @@ pub async fn handle(
         // Answered here. No upstream request is built, so the harness never
         // sees a `/global/event` on this session's behalf.
         Class::Synthesised => synthesised_events(&s, &session_id, &api, &headers),
+        Class::Empty => axum::Json(json!({})).into_response(),
         Class::Mediated(mediation) => {
             // A mediated call changes something. A paused or ended session
             // takes none of them, whatever the operator's UI still shows.
@@ -1943,7 +1962,7 @@ pub fn trace_class(method: &str, path: &str) -> &'static str {
     match classify(&method, &path).0 {
         Class::Readable => trace::READABLE,
         Class::Stream => trace::STREAM,
-        Class::Synthesised => trace::SYNTHESISED,
+        Class::Synthesised | Class::Empty => trace::SYNTHESISED,
         Class::Mediated(Mediation::Unavailable(_)) => trace::UNAVAILABLE,
         Class::Mediated(_) => trace::MEDIATED,
         Class::Forbidden(_) => trace::FORBIDDEN,
@@ -1969,6 +1988,28 @@ mod tests {
 
     fn class_of(method: &str, raw: &str) -> Class {
         classify(&Method::from_bytes(method.as_bytes()).unwrap(), &path(raw)).0
+    }
+
+    #[test]
+    fn the_app_s_startup_reads_are_answered_empty_and_nothing_near_them_opens() {
+        assert_eq!(class_of("GET", "global/config"), Class::Empty);
+        assert_eq!(class_of("GET", "experimental/resource"), Class::Empty);
+        assert!(matches!(
+            class_of("PATCH", "global/config"),
+            Class::Forbidden(_)
+        ));
+        assert!(matches!(
+            class_of("POST", "experimental/resource"),
+            Class::Forbidden(_)
+        ));
+        assert!(matches!(
+            class_of("GET", "experimental/resource/x"),
+            Class::Forbidden(_)
+        ));
+        assert!(matches!(
+            class_of("GET", "experimental/workspace"),
+            Class::Forbidden(_)
+        ));
     }
 
     /// Every route on the manifest's deny list, and the trees around them.
