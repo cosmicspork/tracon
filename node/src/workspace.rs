@@ -124,7 +124,7 @@ pub fn copy_tree(source: &Path, destination: &Path, skip_git: bool) -> Result<()
         return Err(WorkspaceError::Unsafe(source.into()));
     }
     let mut budget = CopyBudget::default();
-    copy_dir(source, destination, skip_git, &mut budget)?;
+    copy_dir(source, destination, skip_git, None, &mut budget)?;
     // A directory that vanished under the walk is copied as empty, which is
     // the right answer for something inside the tree and the wrong one for the
     // tree itself: no destination at all means the source went away, not that
@@ -133,6 +133,59 @@ pub fn copy_tree(source: &Path, destination: &Path, skip_git: bool) -> Result<()
         return Err(WorkspaceError::Missing(source.into()));
     }
     Ok(())
+}
+
+/// Overlay an operator checkout the way `git status` sees it: tracked and
+/// untracked files, never what its ignore rules exclude. Dependency trees and
+/// build output are ignored, so they neither break the import (their
+/// symlinks) nor exhaust its budget, and an ignored `.env` never reaches the
+/// harness. The rules are read as files; no Git runs in the operator's
+/// checkout, where its configuration could execute commands.
+fn overlay_checkout(source: &Path, destination: &Path) -> Result<(), WorkspaceError> {
+    let metadata =
+        std::fs::symlink_metadata(source).map_err(|_| WorkspaceError::Missing(source.into()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(WorkspaceError::Unsafe(source.into()));
+    }
+    let mut keep = std::collections::HashSet::new();
+    let walk = ignore::WalkBuilder::new(source)
+        .standard_filters(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .require_git(false)
+        .follow_links(false)
+        .filter_entry(|entry| !entry.file_name().eq_ignore_ascii_case(".git"))
+        .build();
+    for entry in walk {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => match error.io_error() {
+                Some(io) if vanished(io) => continue,
+                _ => return Err(WorkspaceError::Unsafe(source.into())),
+            },
+        };
+        if let Ok(relative) = entry.path().strip_prefix(source) {
+            keep.insert(relative.to_path_buf());
+        }
+    }
+    let keep = Keep {
+        root: source.to_path_buf(),
+        paths: keep,
+    };
+    let mut budget = CopyBudget::default();
+    copy_dir(source, destination, true, Some(&keep), &mut budget)
+}
+
+struct Keep {
+    root: PathBuf,
+    paths: std::collections::HashSet<PathBuf>,
+}
+
+impl Keep {
+    fn allows(&self, path: &Path) -> bool {
+        path.strip_prefix(&self.root)
+            .is_ok_and(|relative| self.paths.contains(relative))
+    }
 }
 /// Create or replace the runtime-owned bytes for a workspace from a validated
 /// node staging directory. This is the only bridge from a candidate snapshot
@@ -219,6 +272,7 @@ fn copy_dir(
     source: &Path,
     destination: &Path,
     skip_git: bool,
+    keep: Option<&Keep>,
     budget: &mut CopyBudget,
 ) -> Result<(), WorkspaceError> {
     // Listed before the destination is created: a directory that vanished
@@ -240,6 +294,9 @@ fn copy_dir(
             continue;
         }
         let source_path = entry.path();
+        if keep.is_some_and(|keep| !keep.allows(&source_path)) {
+            continue;
+        }
         let destination_path = destination.join(&name);
         let metadata = match std::fs::symlink_metadata(&source_path) {
             Ok(metadata) => metadata,
@@ -250,7 +307,7 @@ fn copy_dir(
             return Err(WorkspaceError::Unsafe(source_path));
         }
         if metadata.is_dir() {
-            copy_dir(&source_path, &destination_path, skip_git, budget)?;
+            copy_dir(&source_path, &destination_path, skip_git, keep, budget)?;
             continue;
         }
         if !metadata.is_file() {
@@ -393,7 +450,7 @@ pub async fn seed_from_checkout(
     .await?;
     // Overlay files after checkout so selected, uncommitted work arrives as
     // bytes only. .git stays the fresh, node-created checkout.
-    copy_tree(source, &stage, true)?;
+    overlay_checkout(source, &stage)?;
     sanitize_git(&stage)?;
     Ok(Workspace {
         id: id.to_string(),
@@ -879,6 +936,42 @@ mod tests {
             }
             Err(other) => panic!("{other}"),
         }
+    }
+
+    /// A checkout that has installed its dependencies holds symlinks and
+    /// build output its ignore rules exclude; the overlay carries what Git
+    /// would show and nothing it ignores.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_overlay_carries_untracked_work_but_nothing_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        sh(
+            &source,
+            "git init -q -b main . && git config user.email t@e && git config user.name t \
+             && printf 'node_modules/\\n.env\\n' > .gitignore && echo one > a.txt \
+             && git add -A && git commit -qm one \
+             && echo edited > a.txt && echo new > b.txt && echo SECRET=1 > .env \
+             && mkdir -p app/node_modules/.bin && ln -s ../acorn app/node_modules/.bin/acorn",
+        );
+
+        let id = format!("seed-overlay-{}", uuid::Uuid::now_v7());
+        let workspace = seed_from_checkout("git", &source, "feat/x", None, &id)
+            .await
+            .unwrap();
+        let stage = staging_path(&workspace.id);
+        assert_eq!(
+            std::fs::read_to_string(stage.join("a.txt")).unwrap(),
+            "edited\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(stage.join("b.txt")).unwrap(),
+            "new\n"
+        );
+        assert!(!stage.join(".env").exists());
+        assert!(!stage.join("app/node_modules").exists());
+        let _ = std::fs::remove_dir_all(&stage);
     }
 
     /// Uploads and continuity transfers name their own relative paths, and a
