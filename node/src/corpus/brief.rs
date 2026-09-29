@@ -25,6 +25,15 @@
 //! dependency. Nothing is copied into the brief and no second store is
 //! introduced to hold it.
 //!
+//! *A line may say what points at it.* Under a line, indented, are the checks,
+//! scenarios and observations that would settle it — the same provenance
+//! vocabulary one level down, so the standing of a link is carried by the
+//! machinery that already enforces it: an agent's link is `inferred`, the
+//! operator's is `decided`, and a session writing either a decision or an
+//! uncited observation is refused here as it is one level up. What is made of
+//! those links — which criterion is covered, which is only a proposal — is
+//! `corpus::criteria`'s reading, not this module's.
+//!
 //! The document is the record. It is Markdown, it round-trips through this
 //! module, and it is readable — and editable — with no node running: the
 //! structure here is a reading of the file, not a schema the file depends on.
@@ -52,6 +61,9 @@ pub const MAX_BYTES: usize = 64 * 1024;
 const MAX_TEXT: usize = 2000;
 const MAX_ENTRIES: usize = 400;
 const MAX_REFS: usize = 12;
+/// How many things one line may say point at it. A criterion that needs a
+/// dozen checks is a criterion that is really several.
+pub const MAX_LINKS: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -194,12 +206,37 @@ impl Ref {
     }
 }
 
+/// What a line may say points at it. A `check` is a command the operator
+/// configured, and is the only kind that can produce a result on its own. A
+/// `scenario` names a customer task that would exercise the line; this node
+/// holds no scenario records yet, and says so rather than pretending. An
+/// `observation` is what someone was seen to do, and is context for a
+/// person's judgement rather than a result.
+pub const LINK_KINDS: &[&str] = &["check", "scenario", "observation"];
+
+/// One thing a line points at, written indented under it. Its provenance is
+/// the same question as the line's, one level down: `decided` is the
+/// operator's, `inferred` is somebody's proposal, `observed` is what was seen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Link {
+    pub provenance: Provenance,
+    /// One of [`LINK_KINDS`].
+    pub kind: String,
+    /// The command, scenario name, or what was observed.
+    pub value: String,
+    #[serde(default)]
+    pub refs: Vec<Ref>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub provenance: Provenance,
     pub text: String,
     #[serde(default)]
     pub refs: Vec<Ref>,
+    /// What points at this line: its checks, scenarios and observations.
+    #[serde(default)]
+    pub links: Vec<Link>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,7 +286,10 @@ impl Brief {
         self.sections.iter().find(|s| s.field == field)
     }
 
-    fn section_mut(&mut self, field: Field) -> &mut Section {
+    /// The section, adding it if a parse did not find its heading. Public so
+    /// `corpus::criteria` can write a link under a line it found; every line it
+    /// writes still goes through [`check_link`] first.
+    pub fn section_mut(&mut self, field: Field) -> &mut Section {
         if let Some(ix) = self.sections.iter().position(|s| s.field == field) {
             return &mut self.sections[ix];
         }
@@ -362,7 +402,18 @@ impl Brief {
                 At::Preamble => preamble.push(line.trim_end().to_string()),
                 At::Unknown => extra.push(line.trim_end().to_string()),
                 At::Known(field) => {
-                    if let Some(entry) = parse_entry(trimmed) {
+                    // An indented bullet naming a link kind belongs to the
+                    // line above it, not beside it.
+                    let link = line
+                        .starts_with([' ', '\t'])
+                        .then(|| parse_link(trimmed))
+                        .flatten()
+                        .filter(|_| brief.section(field).is_some_and(|s| !s.entries.is_empty()));
+                    if let Some(link) = link {
+                        if let Some(entry) = brief.section_mut(field).entries.last_mut() {
+                            entry.links.push(link);
+                        }
+                    } else if let Some(entry) = parse_entry(trimmed) {
                         brief.section_mut(field).entries.push(entry);
                     } else if is_absence_marker(trimmed, field) {
                         // What `render` writes for an empty section; reading
@@ -426,6 +477,22 @@ fn render_entry(entry: &Entry) -> String {
         line.push(' ');
         line.push_str(&r.render());
     }
+    // Two spaces: what points at the line is written under it, so the
+    // document reads as the structure rather than needing a table beside it.
+    for link in &entry.links {
+        line.push_str("\n  - ");
+        if let Some(marker) = link.provenance.marker() {
+            line.push_str(marker);
+            line.push(' ');
+        }
+        line.push_str(link.kind.trim());
+        line.push_str(": ");
+        line.push_str(link.value.trim());
+        for r in &link.refs {
+            line.push(' ');
+            line.push_str(&r.render());
+        }
+    }
     line
 }
 
@@ -449,6 +516,49 @@ fn parse_entry(line: &str) -> Option<Entry> {
     Some(Entry {
         provenance,
         text,
+        refs,
+        links: Vec::new(),
+    })
+}
+
+/// `  - inferred check: cargo test -p node triage`, indented under the line it
+/// points at. Only an indented bullet naming one of [`LINK_KINDS`] is read as
+/// a link: an indented bullet saying anything else is read as the flat line it
+/// would have been read as before links existed, because inventing a nesting
+/// for it would guess at what someone meant and would not survive a round
+/// trip through the canonical render.
+fn parse_link(line: &str) -> Option<Link> {
+    let rest = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))?
+        .trim();
+    let (head, value) = rest.split_once(':')?;
+    let mut words = head.split_whitespace();
+    let first = words.next()?;
+    // The kind is read first, so a lone `observation:` is the kind and not the
+    // provenance word `observation` that [`Provenance::parse`] also accepts.
+    // One word is the kind; two are a provenance and then the kind; anything
+    // else, including `decided: …` — which is an indented *line*, not a link —
+    // is left to `parse_entry`.
+    let (provenance, kind) = match words.next() {
+        Some(kind) => (Provenance::parse(first)?, kind),
+        None => (Provenance::Unattributed, first),
+    };
+    if words.next().is_some() {
+        return None;
+    }
+    let kind = kind.to_ascii_lowercase();
+    if !LINK_KINDS.contains(&kind.as_str()) {
+        return None;
+    }
+    let (value, refs) = take_refs(value.trim());
+    if value.is_empty() {
+        return None;
+    }
+    Some(Link {
+        provenance,
+        kind,
+        value,
         refs,
     })
 }
@@ -526,6 +636,12 @@ pub enum BriefError {
     TooManyEntries,
     #[error("a brief line points at at most {MAX_REFS} things")]
     TooManyRefs,
+    #[error("a brief line may say at most {MAX_LINKS} things point at it")]
+    TooManyLinks,
+    #[error("{0:?} is not one of {LINK_KINDS:?}")]
+    LinkKind(String),
+    #[error("a link needs a value: the command, the scenario, or what was observed")]
+    EmptyLink,
     #[error("{0:?} is not one of {REF_KINDS:?}")]
     RefKind(String),
     #[error("a [url:…] reference must be http or https")]
@@ -651,7 +767,8 @@ fn count(brief: &Brief) -> Counts {
 /// been written on another node, and a silent link is worse than a named gap.
 fn resolve(store: &Store, channel: &str, brief: &mut Brief) {
     for entry in brief.sections.iter_mut().flat_map(|s| s.entries.iter_mut()) {
-        for r in entry.refs.iter_mut() {
+        let links = entry.links.iter_mut().flat_map(|l| l.refs.iter_mut());
+        for r in entry.refs.iter_mut().chain(links) {
             match r.kind.as_str() {
                 "doc" => match store.doc_get(channel, &r.value) {
                     Ok(Some(doc)) => {
@@ -717,6 +834,20 @@ pub struct EntryInput {
     #[serde(default)]
     pub provenance: Option<String>,
     pub text: String,
+    #[serde(default)]
+    pub refs: Vec<RefInput>,
+    /// What points at the line. A caller that names none leaves the line
+    /// pointing at nothing, which is what most lines do.
+    #[serde(default)]
+    pub links: Vec<LinkInput>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LinkInput {
+    #[serde(default)]
+    pub provenance: Option<String>,
+    pub kind: String,
+    pub value: String,
     #[serde(default)]
     pub refs: Vec<RefInput>,
 }
@@ -879,17 +1010,77 @@ fn check(entry: EntryInput, author: &Author) -> Result<Entry, BriefError> {
     if text.chars().count() > MAX_TEXT {
         return Err(BriefError::LongText);
     }
-    let provenance = match entry.provenance.as_deref() {
-        None | Some("") => Provenance::Unattributed,
-        Some("unattributed") => Provenance::Unattributed,
-        Some(word) => Provenance::parse(word)
-            .ok_or_else(|| BriefError::Field(format!("provenance {word:?}")))?,
-    };
-    if entry.refs.len() > MAX_REFS {
+    let provenance = read_provenance(entry.provenance.as_deref())?;
+    let refs = check_refs(entry.refs, provenance, author)?;
+    if entry.links.len() > MAX_LINKS {
+        return Err(BriefError::TooManyLinks);
+    }
+    let mut links = Vec::with_capacity(entry.links.len());
+    for link in entry.links {
+        links.push(check_link(link, author)?);
+    }
+    Ok(Entry {
+        provenance,
+        text,
+        refs,
+        links,
+    })
+}
+
+/// One link, held to the same two rules as the line it hangs under: an agent
+/// may propose what would settle a criterion, and may not decide it; an agent
+/// claiming someone was observed needing it must say where that was seen.
+/// Public because `corpus::criteria` writes links into an existing document
+/// and must not be able to write one this would refuse.
+pub fn check_link(link: LinkInput, author: &Author) -> Result<Link, BriefError> {
+    let kind = link.kind.trim().to_ascii_lowercase();
+    if !LINK_KINDS.contains(&kind.as_str()) {
+        return Err(BriefError::LinkKind(link.kind));
+    }
+    let value = link.value.trim().to_string();
+    if value.is_empty() {
+        return Err(BriefError::EmptyLink);
+    }
+    if value.chars().count() > MAX_TEXT {
+        return Err(BriefError::LongText);
+    }
+    // A link is one line of the document: a newline in its value would make
+    // it several, and the second one would read as something else entirely.
+    if value.contains('\n') {
+        return Err(BriefError::EmptyLink);
+    }
+    let provenance = read_provenance(link.provenance.as_deref())?;
+    let refs = check_refs(link.refs, provenance, author)?;
+    Ok(Link {
+        provenance,
+        kind,
+        value,
+        refs,
+    })
+}
+
+fn read_provenance(word: Option<&str>) -> Result<Provenance, BriefError> {
+    match word {
+        None | Some("") | Some("unattributed") => Ok(Provenance::Unattributed),
+        Some(word) => {
+            Provenance::parse(word).ok_or_else(|| BriefError::Field(format!("provenance {word:?}")))
+        }
+    }
+}
+
+/// What one line points at, and the two rules a session cannot be trusted to
+/// keep about itself. Shared by a line and by a link under one, so neither
+/// path is the loose one.
+fn check_refs(
+    input: Vec<RefInput>,
+    provenance: Provenance,
+    author: &Author,
+) -> Result<Vec<Ref>, BriefError> {
+    if input.len() > MAX_REFS {
         return Err(BriefError::TooManyRefs);
     }
-    let mut refs = Vec::with_capacity(entry.refs.len());
-    for r in entry.refs {
+    let mut refs = Vec::with_capacity(input.len());
+    for r in input {
         let kind = r.kind.trim().to_ascii_lowercase();
         if !REF_KINDS.contains(&kind.as_str()) {
             return Err(BriefError::RefKind(r.kind));
@@ -922,11 +1113,7 @@ fn check(entry: EntryInput, author: &Author) -> Result<Entry, BriefError> {
     if refs.len() > MAX_REFS {
         return Err(BriefError::TooManyRefs);
     }
-    Ok(Entry {
-        provenance,
-        text,
-        refs,
-    })
+    Ok(refs)
 }
 
 /// The one-line summary the interface and the orientation both use.
@@ -960,6 +1147,16 @@ mod tests {
             provenance: p,
             text: text.to_string(),
             refs: refs.iter().map(|(k, v)| Ref::new(k, v)).collect(),
+            links: Vec::new(),
+        }
+    }
+
+    fn link(p: Provenance, kind: &str, value: &str) -> Link {
+        Link {
+            provenance: p,
+            kind: kind.to_string(),
+            value: value.to_string(),
+            refs: Vec::new(),
         }
     }
 
@@ -1036,6 +1233,172 @@ mod tests {
     }
 
     #[test]
+    fn what_points_at_a_line_is_written_under_it_and_read_back_there() {
+        let mut brief = Brief::empty("Overnight alert triage");
+        let mut criterion = entry(Provenance::Decided, "Triage in under two minutes", &[]);
+        criterion.links.push(link(
+            Provenance::Decided,
+            "check",
+            "cargo test -p node triage",
+        ));
+        criterion.links.push(link(
+            Provenance::Inferred,
+            "scenario",
+            "overnight-happy-path",
+        ));
+        criterion.links.push(Link {
+            provenance: Provenance::Observed,
+            kind: "observation".into(),
+            value: "two leads gave up after 40s".into(),
+            refs: vec![Ref::new("doc", "meeting-ride-along")],
+        });
+        brief
+            .section_mut(Field::SuccessCriteria)
+            .entries
+            .push(criterion);
+        brief
+            .section_mut(Field::SuccessCriteria)
+            .entries
+            .push(entry(Provenance::Inferred, "The count is never stale", &[]));
+
+        let rendered = brief.render();
+        assert!(
+            rendered.contains(
+                "- decided: Triage in under two minutes\n  - decided check: cargo test -p node triage\n"
+            ),
+            "a link is indented under the line it settles: {rendered}"
+        );
+        assert!(rendered.contains(
+            "  - observed observation: two leads gave up after 40s [doc:meeting-ride-along]\n"
+        ));
+        let read = Brief::parse(&rendered);
+        assert_eq!(read, brief, "round trip, links and all");
+        assert_eq!(read.render(), rendered, "and the render is stable");
+        let criteria = read.section(Field::SuccessCriteria).unwrap();
+        assert_eq!(criteria.entries[0].links.len(), 3);
+        assert!(
+            criteria.entries[1].links.is_empty(),
+            "a link belongs to the line above it, not to every line after"
+        );
+    }
+
+    #[test]
+    fn an_indented_bullet_that_names_no_link_kind_is_not_guessed_into_one() {
+        let brief = Brief::parse(
+            "# Brief: Thing\n\n## Success criteria\n\n- decided: under two minutes\n  - check: cargo test\n  - and it should feel quick\n",
+        );
+        let criteria = brief.section(Field::SuccessCriteria).unwrap();
+        assert_eq!(
+            criteria.entries[0].links,
+            vec![link(Provenance::Unattributed, "check", "cargo test")],
+            "the one that names a kind is the only link"
+        );
+        assert_eq!(
+            criteria.entries[1].text, "and it should feel quick",
+            "the other is kept as the line of its own it was read as before links \
+             existed, rather than invented into a link: {criteria:?}"
+        );
+        assert!(criteria.entries[1].links.is_empty());
+    }
+
+    #[test]
+    fn an_unmarked_link_is_read_as_its_kind_even_when_the_kind_is_also_a_provenance_word() {
+        let mut brief = Brief::empty("Thing");
+        let mut criterion = entry(Provenance::Decided, "under two minutes", &[]);
+        // `observation` is also how `Provenance::parse` spells `observed`. One
+        // word is the kind, so this renders and reads back as what it is.
+        criterion.links.push(link(
+            Provenance::Unattributed,
+            "observation",
+            "two leads gave up",
+        ));
+        brief
+            .section_mut(Field::SuccessCriteria)
+            .entries
+            .push(criterion);
+        let rendered = brief.render();
+        assert!(
+            rendered.contains("\n  - observation: two leads gave up\n"),
+            "no marker is written for an unattributed link: {rendered}"
+        );
+        assert_eq!(Brief::parse(&rendered), brief, "and it round-trips");
+    }
+
+    #[test]
+    fn a_session_may_propose_what_would_settle_a_line_but_may_not_decide_it() {
+        let session = Author::Session("s-9".into());
+        let proposed = check(
+            EntryInput {
+                provenance: Some("inferred".into()),
+                text: "Triage in under two minutes".into(),
+                refs: vec![],
+                links: vec![LinkInput {
+                    provenance: Some("inferred".into()),
+                    kind: "check".into(),
+                    value: "cargo test -p node triage".into(),
+                    refs: vec![],
+                }],
+            },
+            &session,
+        )
+        .expect("an agent may propose a check");
+        assert_eq!(proposed.links[0].provenance, Provenance::Inferred);
+        assert_eq!(
+            proposed.links[0].refs,
+            vec![Ref::new("session", "s-9")],
+            "the link says which session proposed it"
+        );
+
+        let decided = check(
+            EntryInput {
+                provenance: Some("inferred".into()),
+                text: "Triage in under two minutes".into(),
+                refs: vec![],
+                links: vec![LinkInput {
+                    provenance: Some("decided".into()),
+                    kind: "check".into(),
+                    value: "cargo test -p node triage".into(),
+                    refs: vec![],
+                }],
+            },
+            &session,
+        );
+        assert!(
+            matches!(decided, Err(BriefError::SessionDecision)),
+            "and may not make its own proposal the standard: {decided:?}"
+        );
+
+        let unknown = check_link(
+            LinkInput {
+                provenance: None,
+                kind: "benchmark".into(),
+                value: "x".into(),
+                refs: vec![],
+            },
+            &Author::Operator,
+        );
+        assert!(matches!(unknown, Err(BriefError::LinkKind(k)) if k == "benchmark"));
+
+        let too_many = check(
+            EntryInput {
+                provenance: None,
+                text: "x".into(),
+                refs: vec![],
+                links: (0..MAX_LINKS + 1)
+                    .map(|i| LinkInput {
+                        provenance: None,
+                        kind: "check".into(),
+                        value: format!("cargo test {i}"),
+                        refs: vec![],
+                    })
+                    .collect(),
+            },
+            &Author::Operator,
+        );
+        assert!(matches!(too_many, Err(BriefError::TooManyLinks)));
+    }
+
+    #[test]
     fn a_session_may_not_decide_and_may_not_observe_without_something_to_point_at() {
         let session = Author::Session("s-9".into());
         let decided = check(
@@ -1043,6 +1406,7 @@ mod tests {
                 provenance: Some("decided".into()),
                 text: "we will ship the ranking".into(),
                 refs: vec![],
+                links: vec![],
             },
             &session,
         );
@@ -1053,6 +1417,7 @@ mod tests {
                 provenance: Some("observed".into()),
                 text: "they said it is too slow".into(),
                 refs: vec![],
+                links: vec![],
             },
             &session,
         );
@@ -1066,6 +1431,7 @@ mod tests {
                     kind: "doc".into(),
                     value: "meeting-ops".into(),
                 }],
+                links: vec![],
             },
             &session,
         )
@@ -1081,6 +1447,7 @@ mod tests {
                 provenance: Some("decided".into()),
                 text: "we will ship the ranking".into(),
                 refs: vec![],
+                links: vec![],
             },
             &Author::Operator,
         )
@@ -1102,6 +1469,7 @@ mod tests {
                     kind: "ticket".into(),
                     value: "4821".into(),
                 }],
+                links: vec![],
             },
             &Author::Operator,
         );
@@ -1114,6 +1482,7 @@ mod tests {
                     kind: "url".into(),
                     value: "ftp://host/x".into(),
                 }],
+                links: vec![],
             },
             &Author::Operator,
         );

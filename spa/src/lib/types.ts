@@ -456,6 +456,12 @@ export interface ReviewDetails {
   stale: string[]
   /** Pinned to the revision at submit time; never the live work item. */
   requirements: PinnedRequirements | null
+  /**
+   * The pinned item's acceptance criteria, read against this revision's own
+   * candidate. Null when the revision names no item, or the item has no brief.
+   * A verdict given from this screen binds to `revision`.
+   */
+  criteria: Criteria | null
   surrounding_code: ReviewContext[]
   evidence: CandidateEvidence | null
   legacy_check_events: CandidateCheckRun[]
@@ -552,6 +558,18 @@ export interface BriefEntry {
   provenance: Provenance
   text: string
   refs: BriefRef[]
+  /** What this line says points at it, written under it in the document. */
+  links?: BriefLink[]
+}
+
+/** What a brief line says would settle it. */
+export type LinkKind = 'check' | 'scenario' | 'observation'
+
+export interface BriefLink {
+  provenance: Provenance
+  kind: LinkKind
+  value: string
+  refs: BriefRef[]
 }
 
 export interface BriefSection {
@@ -581,6 +599,99 @@ export interface BriefEntryInput {
   provenance?: Provenance
   text: string
   refs: { kind: RefKind; value: string }[]
+}
+
+/**
+ * Whether the standard a criterion states is agreed, or is still somebody's
+ * proposal. An agent may propose what good means; only the operator decides it.
+ */
+export type Standard = 'agreed' | 'proposed' | 'unattributed'
+
+/**
+ * How far the evidence for one candidate got. `checks_pass` is deliberately not
+ * `judged_met`: passing the checks an agent proposed is not the customer
+ * agreeing with the standard.
+ */
+export type Coverage =
+  | 'judged_met'
+  | 'judged_not_met'
+  | 'judged_unclear'
+  | 'failing'
+  | 'no_result_yet'
+  | 'checks_pass'
+  | 'awaits_judgement'
+  | 'only_proposed'
+  | 'nothing_points_at_it'
+
+export type Verdict = 'met' | 'not_met' | 'unclear'
+
+/** One thing a criterion points at, and what this node can say about it. */
+export interface CriterionLink {
+  index: number
+  provenance: Provenance
+  standard: Standard
+  kind: LinkKind
+  value: string
+  refs: BriefRef[]
+  /** For a check: `passed`, `failed`, `running`, `interrupted`, `cancelled`. */
+  outcome?: string
+  run_id?: string
+  /** Why this link contributes no result, said plainly. */
+  unresolved?: string
+}
+
+export interface CriterionJudgement {
+  id: string
+  verdict: Verdict
+  note?: string
+  candidate_id?: string
+  /** The criterion as it read when this verdict was given. */
+  criterion_text: string
+  judged_ms: number
+}
+
+export interface Criterion {
+  key: string
+  text: string
+  provenance: Provenance
+  standard: Standard
+  refs: BriefRef[]
+  links: CriterionLink[]
+  judgement?: CriterionJudgement
+  /** A verdict about another attempt, or about none. It does not settle this one. */
+  earlier_judgement?: CriterionJudgement
+  coverage: Coverage
+  duplicate?: boolean
+}
+
+/** An assumption the brief rests on: a line nobody observed and nobody decided. */
+export interface CriteriaAssumption {
+  field: BriefField
+  heading: string
+  text: string
+  provenance: Provenance
+}
+
+export interface CriteriaGaps {
+  uncovered: string[]
+  unjudged: string[]
+  assumptions: CriteriaAssumption[]
+  questions: string[]
+  orphaned_judgements: CriterionJudgement[]
+}
+
+/** The criteria of one item, read against one candidate. */
+export interface Criteria {
+  work_item_id: string
+  channel: string
+  brief_slug: string
+  hash: string
+  candidate?: { id: string; head_sha: string; captured_ms: number }
+  criteria: Criterion[]
+  /** What the section says when it states nothing, rather than an empty form. */
+  absent?: string
+  gaps: CriteriaGaps
+  summary: string
 }
 
 /** What a selected document is for; also the order a session reads them in. */

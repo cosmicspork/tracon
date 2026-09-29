@@ -55,12 +55,13 @@ every line marked observed, inferred or decided and pointing at the evidence it 
 on. An item also carries the context the operator selected for it — brief, research,
 decisions, constraints and other documents — which every later attempt receives in
 full, with a receipt of what it actually got and what changed since the attempt
-before. What remains is criteria bound to checks.
-
-- [ ] Link individual acceptance criteria to checks, scenarios, observations and human
-      verdicts. Make uncovered criteria, assumptions and unresolved questions visible.
-      An agent may propose what good means; passing its own checks does not establish
-      that the customer agreed with the standard.
+before. Each success criterion is now bound to what would settle it — checks, scenarios
+and observations written under it in the brief, an agent's proposal plainly marked as
+one — and a criterion carries whether its checks passed and whether a person judged it,
+with the uncovered criteria, the assumptions and the open questions beside it. What
+remains is evaluating the experience rather than the diff: versioned scenarios a
+criterion can point at, observations from the intended user anchored to the criteria
+they are about, and the loop closing after publication.
 
 **Experience-centered evaluation**
 

@@ -184,6 +184,19 @@ pub fn router(state: AppState) -> Router {
             "/api/work/{id}/context",
             get(api::get_context).put(api::put_context),
         )
+        .route("/api/work/{id}/criteria", get(api::get_criteria))
+        .route(
+            "/api/work/{id}/criteria/judgements",
+            post(api::judge_criterion),
+        )
+        .route(
+            "/api/work/{id}/criteria/{key}/links",
+            post(api::add_criterion_link),
+        )
+        .route(
+            "/api/work/{id}/criteria/{key}/links/{index}",
+            delete(api::remove_criterion_link),
+        )
         .route("/api/docs", get(api::list_docs))
         .route("/api/docs/reindex", post(api::reindex_docs))
         .route(

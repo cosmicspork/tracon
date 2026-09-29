@@ -576,7 +576,9 @@ fn check_inputs(cfg: &Config) -> serde_json::Value {
     })
 }
 
-fn effective_outcome(run: &CheckRunRow) -> &str {
+/// What a run says about the candidate. A `reused` row is a pointer at the run
+/// that actually executed, so its source's outcome is the truth it carries.
+pub fn effective_outcome(run: &CheckRunRow) -> &str {
     if run.outcome == "reused" {
         run.source_outcome.as_deref().unwrap_or("interrupted")
     } else {

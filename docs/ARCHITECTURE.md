@@ -779,6 +779,51 @@ section with no lines says what it does not say — an empty success-criteria
 section reads as "no success criteria stated" — because a brief that has never
 heard from the customer should look like one rather than like a tidy form.
 
+### Criteria bound to what would settle them
+
+A success criterion is not a new record: it is a line in the brief's success
+criteria section, and what points at it is an indented line under it naming a
+`check`, a `scenario` or an `observation`. The document stays the record, so
+links travel with the channel, round-trip, and are editable by hand.
+
+**A criterion is named by its own text.** `sc-` and twelve hex characters of
+the SHA-256 hash of the line with only outer whitespace trimmed. Case,
+punctuation, comparison operators and internal whitespace are significant:
+changing the requirement requires a fresh judgement, never an inherited one.
+Reordering does not change identity. Earlier verdict rows are retained; on the
+same brief, a changed criterion leaves its prior verdict visible as orphaned.
+Switching briefs does not transfer a verdict even when the text matches.
+Identical lines remain separate display rows, both marked as duplicates; neither
+can be linked or judged until the brief distinguishes them.
+
+**An agent may propose what good means; the operator decides it.** A link
+carries the same provenance as every other brief line and is checked by the same
+rule, so a session's link is `inferred` and a `decided` one is refused. Coverage
+follows: a criterion whose only links are somebody's proposal reads as
+`only_proposed`, not as covered, however green that proposal would go. A `check`
+resolves only against the commands the operator configured — any other is
+recorded and reported as never running — and a `scenario` says plainly that this
+node holds no such record yet.
+
+**Passing one's own checks is not the customer agreeing.** A check result raises
+a criterion as far as `checks_pass`, shown as "checks pass · unjudged".
+The word *met* comes from append-only, node-local `criterion_judgement` rows
+written only by the operator; review sessions may read criteria, but no MCP tool
+settles one. An explicit candidate must belong to the item's channel and be
+associated by its owner session or a pinned review revision. When provided, a
+revision must pin that same item and candidate. An omitted or null candidate
+on a judgement write means no attempt, even if a new candidate was captured
+after the screen loaded; candidate-specific verdicts name the attempt the
+operator saw. Reads with no candidate still default to the newest attempt.
+An earlier verdict does not settle a later candidate. Index-based link removal
+requires the displayed brief hash: another editor's change refuses a stale
+index instead of deleting a different link.
+
+Beside the criteria the view carries the gaps: what nothing points at, what
+nobody has judged, every inferred or unattributed line in the brief, the
+questions it still asks, and the orphaned verdicts — because a coverage view
+that lists only what is covered reads as though that were everything there is.
+
 ### Selected context
 
 The brief says what the work is for; it is not everything an attempt should start

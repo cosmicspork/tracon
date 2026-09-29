@@ -1079,6 +1079,31 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX context_receipt_item ON context_receipt(work_item_id, created_ms);
     "#,
+    // 43: the operator's verdict on one acceptance criterion of one candidate.
+    // Node-local for the reason QA rows are: this node's operator judging this
+    // node's candidate must not become another node's observation. Append-only;
+    // a later row supersedes an earlier one rather than replacing it, and the
+    // criterion's text is kept as it stood so a reworded line reads as orphaned
+    // instead of quietly carrying the old verdict.
+    r#"
+    CREATE TABLE criterion_judgement (
+        id             TEXT PRIMARY KEY,
+        channel        TEXT NOT NULL,
+        work_item_id   TEXT NOT NULL,
+        brief_slug     TEXT NOT NULL,
+        criterion_key  TEXT NOT NULL,
+        criterion_text TEXT NOT NULL,
+        candidate_id   TEXT,
+        revision_id    TEXT,
+        verdict        TEXT NOT NULL CHECK (verdict IN ('met','not_met','unclear')),
+        note           TEXT,
+        judged_ms      INTEGER NOT NULL
+    );
+    CREATE INDEX criterion_judgement_item
+        ON criterion_judgement(work_item_id, judged_ms DESC);
+    CREATE INDEX criterion_judgement_criterion
+        ON criterion_judgement(work_item_id, criterion_key, judged_ms DESC);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

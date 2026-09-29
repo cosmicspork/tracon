@@ -22,6 +22,7 @@ pub mod authority;
 pub use authority::*;
 pub mod context;
 pub mod corpus;
+pub mod criteria;
 pub mod evidence;
 pub mod manifest;
 pub mod metrics;

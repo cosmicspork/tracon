@@ -165,6 +165,7 @@ matches = [
     "doc_read",
     "doc_search",
     "brief_read",
+    "criteria_read",
     "work_ready",
     "work_discover",
     "work_close",
@@ -176,6 +177,11 @@ matches = [
 # observation; what is left is a claim about the customer, in the operator's
 # own record of what the work is for, and one look before it lands costs less
 # than finding it there later.
+#
+# `criteria_link` is a brief line too — an agent's proposal about what would
+# settle a criterion, written into the operator's own record of what the work is
+# for — so it is named nowhere here either, and is asked the same way. There is
+# no tool for judging a criterion at all: that one is not asked, it is absent.
 
 # Working notes are the agent's to keep current. A plan, a guide, a proposal or
 # a reference is not, and stays asked. A document's kind is its slug's prefix,
