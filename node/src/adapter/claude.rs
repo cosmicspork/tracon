@@ -89,6 +89,13 @@ impl ClaudeAdapter {
             "--verbose".into(),
             "--permission-mode".into(),
             "default".into(),
+            // Where an ask goes. Without it the headless CLI does not send a
+            // `can_use_tool` request at all: it denies anything not already
+            // allowed ("you haven't granted it yet") and the node never sees
+            // the ask. `stdio` routes it over the control protocol this
+            // adapter answers, as the Agent SDKs do.
+            "--permission-prompt-tool".into(),
+            "stdio".into(),
             "--strict-mcp-config".into(),
             // Never read the operator's own settings or memory: the boundary
             // gives it a fresh home, and this makes that explicit rather than
@@ -801,6 +808,7 @@ mod tests {
         let cmd = ClaudeAdapter::cmd("c", &spec(), "sid");
         let argv = cmd.argv.join(" ");
         assert!(argv.contains("--permission-mode default"), "{argv}");
+        assert!(argv.contains("--permission-prompt-tool stdio"), "{argv}");
         assert!(!argv.contains("bypassPermissions"), "{argv}");
         assert!(!argv.contains("dontAsk"), "{argv}");
         assert!(argv.contains("--strict-mcp-config"), "{argv}");
