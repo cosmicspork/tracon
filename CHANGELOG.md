@@ -32,6 +32,30 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.23.1](https://github.com/cosmicspork/tracon/compare/v0.23.0...v0.23.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* **claude:** let a call to the node's MCP server outlast an operator's answer ([#289](https://github.com/cosmicspork/tracon/issues/289)) ([68b8e60](https://github.com/cosmicspork/tracon/commit/68b8e60e5f99a49caafa6d99de913eaf1bfdde0a))
+* **claude:** route Claude Code's permission asks to the node over stdio ([#286](https://github.com/cosmicspork/tracon/issues/286)) ([d7e7e62](https://github.com/cosmicspork/tracon/commit/d7e7e62ffdea9e1c94ea5e84b9ed8d3b557b0315))
+* **claude:** send Claude Code the model as Anthropic names it, and re-probe models once the boundary passes ([#284](https://github.com/cosmicspork/tracon/issues/284)) ([76f0722](https://github.com/cosmicspork/tracon/commit/76f0722cd7f8adaaa54b9ca70f8dd275d6898627))
+* **compose:** refuse execute before writing an item that cannot have a plan ([#280](https://github.com/cosmicspork/tracon/issues/280)) ([f6b1420](https://github.com/cosmicspork/tracon/commit/f6b1420ae228d96d3b2b83232cf69e1b42e8b311))
+* **config:** offer the ChatGPT subscription only models it serves ([#279](https://github.com/cosmicspork/tracon/issues/279)) ([3150213](https://github.com/cosmicspork/tracon/commit/3150213cf859808b6ca7212588e4dc60759d3c76))
+* **config:** save only what changed, so a default is never frozen into node.toml ([#292](https://github.com/cosmicspork/tracon/issues/292)) ([cfa4b1a](https://github.com/cosmicspork/tracon/commit/cfa4b1a7ea4968c299cef0ae44bc081439aa3c8f))
+* **gateway:** ask providers for uncompressed responses so refusals are readable ([#285](https://github.com/cosmicspork/tracon/issues/285)) ([29e33ce](https://github.com/cosmicspork/tracon/commit/29e33ce70ae709db086c16997a9090065ba04235))
+* **gateway:** bound model streams by silence, not total time ([#274](https://github.com/cosmicspork/tracon/issues/274)) ([77dfd82](https://github.com/cosmicspork/tracon/commit/77dfd8234c2100ad1bd9a8582e02fa1d80143a26))
+* **opencode:** answer the native app's two startup reads instead of refusing them ([#277](https://github.com/cosmicspork/tracon/issues/277)) ([2f04fca](https://github.com/cosmicspork/tracon/commit/2f04fcac29583ae6a5210de32752fc21b48dbdfe))
+* **opencode:** give the session runner the node's config, tools and orientation, and refuse an ungated launch ([#281](https://github.com/cosmicspork/tracon/issues/281)) ([c7640ff](https://github.com/cosmicspork/tracon/commit/c7640fffcaf36d55b7ef4298b13a55d08c990b13))
+* **opencode:** stage manifest skills where both halves find them, and say what to do about a configured repo ([#282](https://github.com/cosmicspork/tracon/issues/282)) ([c48e9d6](https://github.com/cosmicspork/tracon/commit/c48e9d6e771ada2336d01daaf334efba87592823))
+* **opencode:** stage the config directory's .gitignore so the sealed mount is never written ([#283](https://github.com/cosmicspork/tracon/issues/283)) ([7cc66dc](https://github.com/cosmicspork/tracon/commit/7cc66dcb352f03d7f9fbbf0b69a9a583fc85f889))
+* **policy:** let a review or report's prose name what a deny rule guards ([#273](https://github.com/cosmicspork/tracon/issues/273)) ([3c3f91c](https://github.com/cosmicspork/tracon/commit/3c3f91c08b0224b8b8f71c80af2a942c9419961a))
+* **runner:** leave a staged file mount alone when preparing a Kubernetes pod's volume ([#291](https://github.com/cosmicspork/tracon/issues/291)) ([aab0897](https://github.com/cosmicspork/tracon/commit/aab08971acb24059c870a6fd953631190bde8bbd))
+* **session:** end a harness turn on silence, not after twenty minutes of work ([#288](https://github.com/cosmicspork/tracon/issues/288)) ([9070bbf](https://github.com/cosmicspork/tracon/commit/9070bbf384918acc5d64964a57d2c86748d37299))
+* **session:** let the node's own MCP tools through the harness's ask; the node decides them when called ([#287](https://github.com/cosmicspork/tracon/issues/287)) ([95baa33](https://github.com/cosmicspork/tracon/commit/95baa332dc6cc284bb53d60556cf4d50304c8478))
+* **session:** record a failed step as an error, not a refusal ([#278](https://github.com/cosmicspork/tracon/issues/278)) ([b356551](https://github.com/cosmicspork/tracon/commit/b35655128543de873e2b79aac3aa7031abd446b5))
+* **workspace:** overlay a checkout without what its ignore rules exclude ([#275](https://github.com/cosmicspork/tracon/issues/275)) ([5607020](https://github.com/cosmicspork/tracon/commit/5607020d9bdec7adefea72e1be99cc60c8b390c2))
+
 ## [0.23.0](https://github.com/cosmicspork/tracon/compare/v0.22.0...v0.23.0) (2026-09-28)
 
 
