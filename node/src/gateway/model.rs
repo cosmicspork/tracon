@@ -575,7 +575,12 @@ pub async fn handle(
     for (k, v) in headers.iter() {
         if matches!(
             k.as_str(),
-            "host" | "authorization" | "x-api-key" | "content-length" | "connection"
+            "host"
+                | "authorization"
+                | "x-api-key"
+                | "content-length"
+                | "connection"
+                | "accept-encoding"
         ) || (p.shape == SHAPE_OPENAI_CODEX && k == "chatgpt-account-id")
             || (injection.oauth_beta && k == "anthropic-beta")
         {
@@ -583,6 +588,11 @@ pub async fn handle(
         }
         req = req.header(k, v);
     }
+    // Uncompressed, whatever the harness offered: the node reads error bodies
+    // into the transcript and counts usage off the stream, and this client
+    // decodes no content encoding, so a gzip or brotli body recorded
+    // compressed bytes as the reason a call was refused.
+    req = req.header(reqwest::header::ACCEPT_ENCODING, "identity");
     req = injection.apply(req, &headers);
     let model = serde_json::from_slice::<Value>(&body)
         .ok()
