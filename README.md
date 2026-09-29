@@ -330,7 +330,18 @@ project's checks against that snapshot in a throwaway container, and refuses a f
 diff before you ever see it. You approve, reject with a reason, or — on a desktop —
 edit the diff and send it back as a request for changes. Approval publishes exactly
 the reviewed bytes with the brokered credential; if the branch moved since submit,
-approval is refused and the changed files are named. `tracon provenance <sha>`
+approval is refused and the changed files are named.
+
+A review either opens a new pull or merge request or updates one the branch
+already has (`change`, named at first submit). The review's title and body are the
+agent's summary for you; what reaches the forge is separate and editable before
+you approve: a description (a new change's, or a replacement for an existing
+one's), a comment, both, or — for an update — nothing but the push. Submit checks
+the forge first: a branch with an open change must name it, and an update must be
+an open change of that branch into that base. An update pushes only over the
+commit the change held at submit; a rewritten history (rebase, amend) must be
+declared, is forced with that commit as its lease, and always comes to you even
+under a publish grant. `tracon provenance <sha>`
 answers, later, which model, which prompts, which approval and which policy shipped
 a commit.
 
@@ -448,7 +459,8 @@ path of your worktree; its repository must live under `[external] repo_roots`
 (`~/src` unless you say otherwise), so a linked worktree in a scratch directory
 is fine. The node captures the diff from it, skips the container checks (you
 ran them where your toolchain is), and on approval pushes that branch and opens
-the change with the brokered credential, exactly as for a session it started.
+the change — or updates the one named by `change` — with the brokered
+credential, exactly as for a session it started.
 `work_close` takes the item's id, and refuses one a running session holds. A
 verb the policy does not name reaches your home as a card, exactly as it would
 from inside the boundary, and the call waits for you.
@@ -909,7 +921,10 @@ revoked one at a time in **Settings → Permissions & policies**, beside the sig
 they sit under. A grant names one target (a pull request, a merge request, an
 issue's exact transition, a deployment job) and, for merge, publish, and deploy,
 the one commit it covers; the branch moving to a later sha makes the grant no
-longer apply, rather than carrying it forward. A signed policy deny always wins
+longer apply, rather than carrying it forward. A publish grant also binds what the
+forge will show: an update's target names the change (`…:change:<n>:prose:<hash>`),
+and the hash covers any separate description or comment. A publish that rewrites
+a change's history is never granted around: it always asks. A signed policy deny always wins
 over a local grant, however narrow it is scoped — production deploys, for
 instance, stay refused until the signed bundle itself changes, never by granting
 around it. Revoking a grant, or letting it expire, takes effect on the next

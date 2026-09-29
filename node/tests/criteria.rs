@@ -894,6 +894,7 @@ async fn the_review_screen_carries_the_criteria_of_the_item_it_was_pinned_to() {
                 requirements_body: Some(String::new()),
                 requirements_hash: Some("h".into()),
                 created_ms: now_ms(),
+                intent_json: None,
             },
         )
         .unwrap();

@@ -90,6 +90,113 @@ pub struct Target {
     /// immutable candidate into a distinct publisher repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// The change on the forge this review updates. `None` opens a new one.
+    /// Fixed at first submit: a resubmission cannot retarget a review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<ChangeRef>,
+}
+
+/// An existing pull request (by number) or merge request (by iid).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeRef {
+    pub number: u64,
+    #[serde(default)]
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Description {
+    pub title: String,
+    pub body: String,
+}
+
+/// What a revision asks the forge to show besides its commits. The review's
+/// own title and body are the operator's summary; they reach the forge only
+/// as a new change's description when no other description is given.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Outputs {
+    /// A new change opens with it; an existing change's title and
+    /// description are replaced by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<Description>,
+    /// Posted on the change once its commits are on the forge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// Open the new change as a draft. Meaningless for an existing one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draft: bool,
+}
+
+impl Outputs {
+    /// The outputs a publication acts on: a new change always has a
+    /// description, and without one it is the approved title and body — which
+    /// is all a review published before outputs existed ever asked for.
+    pub fn resolve(mut self, target: &Target, title: &str, body: &str) -> Self {
+        if target.change.is_none() && self.description.is_none() {
+            self.description = Some(Description {
+                title: title.to_string(),
+                body: body.to_string(),
+            });
+        }
+        if target.change.is_some() {
+            self.draft = false;
+        }
+        self
+    }
+}
+
+/// One revision's publication intent, pinned when it is submitted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Intent {
+    #[serde(default)]
+    pub forge: Outputs,
+    /// What the existing change's branch held when this revision was
+    /// submitted. A push may replace exactly this and nothing else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease: Option<String>,
+    /// The branch's history was rewritten, so the push is not a fast-forward
+    /// of `lease` and is forced — but only over `lease`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rewrite: bool,
+}
+
+/// What the forge says about an existing change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeState {
+    pub url: String,
+    pub open: bool,
+    pub source_branch: String,
+    pub target_branch: String,
+    /// The change's source branch lives in another repository (a fork).
+    pub cross_repository: bool,
+    pub head_sha: String,
+}
+
+impl ChangeState {
+    /// Why this change cannot be updated by publishing `target`, if it can't.
+    pub fn refusal(&self, provider: Provider, target: &Target, number: u64) -> Option<String> {
+        let noun = provider.noun();
+        if !self.open {
+            Some(format!("{noun} {number} is not open"))
+        } else if self.cross_repository {
+            Some(format!(
+                "{noun} {number} comes from another repository; only a branch of {} can be updated",
+                target.project
+            ))
+        } else if self.source_branch != target.branch {
+            Some(format!(
+                "{noun} {number} is for branch {}, not {}",
+                self.source_branch, target.branch
+            ))
+        } else if self.target_branch != target.base {
+            Some(format!(
+                "{noun} {number} merges into {}, not {}",
+                self.target_branch, target.base
+            ))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -123,6 +230,15 @@ pub enum PublishError {
     RefMismatch {
         branch: String,
         expected: String,
+        found: String,
+    },
+    #[error(
+        "{branch} on the forge holds {found:.8}, not {lease:.8} that this revision was submitted \
+         against; somebody else pushed to it, so resubmit on top of what it holds now"
+    )]
+    LeaseLost {
+        branch: String,
+        lease: String,
         found: String,
     },
     #[error("{0}")]
@@ -193,8 +309,12 @@ pub struct Publication<'a> {
     /// tree" into "this commit still holds the bytes that were reviewed".
     /// Required: a candidate with no recorded tree cannot be published.
     pub reviewed_tree: &'a str,
-    pub title: &'a str,
-    pub body: &'a str,
+    /// Resolved (`Outputs::resolve`): a new change always has a description.
+    pub outputs: &'a Outputs,
+    /// For an existing change: what its branch held at submit, and whether
+    /// the push replaces that history rather than fast-forwarding it.
+    pub lease: Option<&'a str>,
+    pub rewrite: bool,
     /// A previous attempt for this same publication reached, or may have
     /// reached, the forge. Its side effects are observed rather than repeated.
     pub resume: bool,
@@ -368,13 +488,37 @@ async fn attempt(
     let credential = git_remote::brokered(provider.forge().git_user(), token);
     let refname = format!("refs/heads/{}", p.target.branch);
 
+    // An existing change is only ever updated in place: still open, still
+    // this branch of this repository into this base.
+    let verified = match &p.target.change {
+        Some(change) => {
+            let state =
+                change_state(provider, cfg, &publisher, &env, p.target, change.number).await?;
+            if let Some(refusal) = state.refusal(provider, p.target, change.number) {
+                return Err(PublishError::Target(refusal));
+            }
+            Some(state)
+        }
+        None => None,
+    };
+
     // Look before acting: a resumed attempt asks what the forge holds rather
-    // than repeating a push whose outcome it never learned.
-    let observed = if p.resume {
+    // than repeating a push whose outcome it never learned. An update always
+    // looks, because what it may replace is exactly what it was reviewed on.
+    let observed = if p.resume || p.target.change.is_some() {
         Some(remote_sha(cfg, &publisher, &credential, &refname).await?)
     } else {
         None
     };
+    if let (Some(Some(found)), Some(lease)) = (&observed, p.lease) {
+        if found != p.head_sha && found != lease {
+            return Err(PublishError::LeaseLost {
+                branch: p.target.branch.clone(),
+                lease: lease.to_string(),
+                found: found.clone(),
+            });
+        }
+    }
     match observed {
         Some(Some(ref sha)) if sha == p.head_sha => {
             // The interrupted attempt's push did land. Nothing to repeat.
@@ -392,13 +536,16 @@ async fn attempt(
         }
         _ => {
             let refspec = format!("{}:refs/heads/{}", p.head_sha, p.target.branch);
-            publisher_git_with_credential(
-                &cfg.publish.git,
-                &publisher,
-                &credential,
-                ["push", "origin", &refspec],
-            )
-            .await?;
+            // A rewrite is forced only over the commit it was reviewed
+            // against; anything else there makes the forge refuse it.
+            let lease = match (p.rewrite, p.lease) {
+                (true, Some(lease)) => Some(format!("--force-with-lease={refname}:{lease}")),
+                _ => None,
+            };
+            let mut args = vec!["push"];
+            args.extend(lease.as_deref());
+            args.extend(["origin", &refspec]);
+            publisher_git_with_credential(&cfg.publish.git, &publisher, &credential, args).await?;
             // A push that reports success is not evidence the forge kept it:
             // a ref-update hook can reject it after the fact, and a proxy can
             // answer for a repository that is not the one named.
@@ -421,26 +568,307 @@ async fn attempt(
         recheck().map_err(PublishError::Broker)?;
     }
     p.journal.opening().map_err(PublishError::Broker)?;
-    // The same question for the second side effect: if an interrupted attempt
-    // already opened the change, record that one rather than opening another.
-    if p.resume {
-        if let Some(url) = existing_change(provider, cfg, &publisher, &env, p).await? {
-            p.journal.opened(&url).map_err(PublishError::Broker)?;
-            return Ok(url);
+    let (url, number) = match &p.target.change {
+        Some(change) => {
+            // Replacing a description is idempotent, so a resumed attempt
+            // simply says it again.
+            if let Some(description) = &p.outputs.description {
+                edit_description(
+                    provider,
+                    cfg,
+                    &publisher,
+                    &env,
+                    p.target,
+                    change.number,
+                    description,
+                )
+                .await?;
+            }
+            let url = verified.map(|state| state.url).unwrap_or_default();
+            (url, change.number)
         }
+        None => {
+            // The same question for the second side effect: if an interrupted
+            // attempt already opened the change, record that one rather than
+            // opening another.
+            let found = if p.resume {
+                existing_change(provider, cfg, &publisher, &env, p).await?
+            } else {
+                None
+            };
+            let url = match found {
+                Some(url) => url,
+                None => {
+                    let description = p.outputs.description.clone().unwrap_or_default();
+                    let body = format!("{}\n\n{}", description.body, marker_comment(p.id));
+                    let args = open_change_args(
+                        provider,
+                        p.target,
+                        &description.title,
+                        body,
+                        p.outputs.draft,
+                    );
+                    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+                    run_cli(provider.command(cfg), &publisher, &env, &argv).await?
+                }
+            };
+            let number = change_number(&url);
+            (url, number.unwrap_or(0))
+        }
+    };
+    if let Some(comment) = &p.outputs.comment {
+        if number == 0 {
+            return Err(PublishError::Unknown(format!(
+                "{url} was opened, but its number could not be read from that address to post \
+                 the comment; post it by hand or verify before retrying"
+            )));
+        }
+        post_comment_once(provider, cfg, &publisher, &env, p, number, comment).await?;
     }
-    let body = format!("{}\n\n{}", p.body, marker_comment(p.id));
-    let args = open_change_args(provider, p.target, p.title, body);
-    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    let url = run_cli(provider.command(cfg), &publisher, &env, &argv).await?;
     p.journal.opened(&url).map_err(PublishError::Broker)?;
     Ok(url)
+}
+
+/// The number a forge gives a change, from its web address: the last path
+/// segment of `…/pull/7` or `…/-/merge_requests/7`.
+fn change_number(url: &str) -> Option<u64> {
+    url.trim()
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .and_then(|n| n.parse().ok())
+}
+
+/// A REST call to the forge through its own CLI, so the brokered environment
+/// is the only credential it can use.
+async fn forge_api(
+    provider: Provider,
+    cfg: &Config,
+    dir: &Path,
+    env: &BTreeMap<String, String>,
+    method: &str,
+    path: &str,
+    fields: &[(&str, &str)],
+) -> Result<Value, PublishError> {
+    let mut args: Vec<String> = vec!["api".into(), "-X".into(), method.into(), path.into()];
+    for (key, value) in fields {
+        // `-f` is a raw field: a value is never read as `@file`.
+        args.push("-f".into());
+        args.push(format!("{key}={value}"));
+    }
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run_cli(provider.command(cfg), dir, env, &argv).await?;
+    serde_json::from_str(&out).map_err(|error| PublishError::Refused {
+        cli: provider.command(cfg),
+        stderr: format!("{method} {path} answered something that is not JSON ({error})"),
+    })
+}
+
+fn gitlab_project(project: &str) -> String {
+    project.replace('/', "%2F")
+}
+
+fn change_path(provider: Provider, target: &Target, number: u64) -> String {
+    match provider {
+        Provider::Github => format!("repos/{}/pulls/{number}", target.project),
+        Provider::Gitlab => format!(
+            "projects/{}/merge_requests/{number}",
+            gitlab_project(&target.project)
+        ),
+    }
+}
+
+fn comments_path(provider: Provider, target: &Target, number: u64) -> String {
+    match provider {
+        Provider::Github => format!("repos/{}/issues/{number}/comments", target.project),
+        Provider::Gitlab => format!("{}/notes", change_path(provider, target, number)),
+    }
+}
+
+/// Where a forge read made outside a publication runs: node-owned and empty,
+/// like the home publication's commands get.
+pub fn inspection_dir() -> Result<PathBuf, PublishError> {
+    let dir = git_remote::home(PUBLISH_HOME);
+    std::fs::create_dir_all(&dir).map_err(|source| PublishError::Spawn {
+        cli: "mkdir".into(),
+        source,
+    })?;
+    Ok(dir)
+}
+
+/// What the forge holds for an existing change.
+pub async fn change_state(
+    provider: Provider,
+    cfg: &Config,
+    dir: &Path,
+    env: &BTreeMap<String, String>,
+    target: &Target,
+    number: u64,
+) -> Result<ChangeState, PublishError> {
+    let v = forge_api(
+        provider,
+        cfg,
+        dir,
+        env,
+        "GET",
+        &change_path(provider, target, number),
+        &[],
+    )
+    .await?;
+    let text = |pointer: &str| {
+        v.pointer(pointer)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    Ok(match provider {
+        Provider::Github => ChangeState {
+            url: text("/html_url"),
+            open: text("/state") == "open",
+            source_branch: text("/head/ref"),
+            target_branch: text("/base/ref"),
+            cross_repository: !text("/head/repo/full_name").eq_ignore_ascii_case(&target.project),
+            head_sha: text("/head/sha"),
+        },
+        Provider::Gitlab => ChangeState {
+            url: text("/web_url"),
+            open: text("/state") == "opened",
+            source_branch: text("/source_branch"),
+            target_branch: text("/target_branch"),
+            cross_repository: v.get("source_project_id") != v.get("target_project_id"),
+            head_sha: text("/sha"),
+        },
+    })
+}
+
+/// The open change for `target.branch`, if the forge has one: `(number, url)`.
+pub async fn open_change_for_branch(
+    provider: Provider,
+    cfg: &Config,
+    dir: &Path,
+    env: &BTreeMap<String, String>,
+    target: &Target,
+) -> Result<Option<(u64, String)>, PublishError> {
+    let path = match provider {
+        Provider::Github => {
+            let owner = target.project.split('/').next().unwrap_or_default();
+            format!(
+                "repos/{}/pulls?state=open&head={owner}:{}",
+                target.project, target.branch
+            )
+        }
+        Provider::Gitlab => format!(
+            "projects/{}/merge_requests?state=opened&source_branch={}",
+            gitlab_project(&target.project),
+            target.branch
+        ),
+    };
+    let listed = forge_api(provider, cfg, dir, env, "GET", &path, &[]).await?;
+    let (number_key, url_key) = match provider {
+        Provider::Github => ("number", "html_url"),
+        Provider::Gitlab => ("iid", "web_url"),
+    };
+    Ok(listed.as_array().into_iter().flatten().find_map(|change| {
+        Some((
+            change.get(number_key)?.as_u64()?,
+            change.get(url_key)?.as_str()?.to_string(),
+        ))
+    }))
+}
+
+async fn edit_description(
+    provider: Provider,
+    cfg: &Config,
+    dir: &Path,
+    env: &BTreeMap<String, String>,
+    target: &Target,
+    number: u64,
+    description: &Description,
+) -> Result<(), PublishError> {
+    let (method, body_key) = match provider {
+        Provider::Github => ("PATCH", "body"),
+        Provider::Gitlab => ("PUT", "description"),
+    };
+    forge_api(
+        provider,
+        cfg,
+        dir,
+        env,
+        method,
+        &change_path(provider, target, number),
+        &[("title", &description.title), (body_key, &description.body)],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Post the comment unless a resumed attempt finds this publication already
+/// posted it: a comment, unlike a description, is not idempotent.
+async fn post_comment_once(
+    provider: Provider,
+    cfg: &Config,
+    dir: &Path,
+    env: &BTreeMap<String, String>,
+    p: &Publication<'_>,
+    number: u64,
+    comment: &str,
+) -> Result<(), PublishError> {
+    let path = comments_path(provider, p.target, number);
+    let marker = marker_comment(p.id);
+    if p.resume {
+        let listed = forge_api(
+            provider,
+            cfg,
+            dir,
+            env,
+            "GET",
+            &format!("{path}?per_page=100"),
+            &[],
+        )
+        .await
+        .map_err(|error| {
+            PublishError::Unknown(format!(
+                "the forge could not be asked whether this publication already commented \
+                     ({error}); verify it before retrying"
+            ))
+        })?;
+        let posted = listed.as_array().into_iter().flatten().any(|c| {
+            c.get("body")
+                .and_then(Value::as_str)
+                .is_some_and(|body| body.contains(&marker))
+        });
+        if posted {
+            return Ok(());
+        }
+    }
+    let body = format!("{comment}\n\n{marker}");
+    forge_api(provider, cfg, dir, env, "POST", &path, &[("body", &body)]).await?;
+    Ok(())
 }
 
 /// The CLI arguments that open the change. The squash choice is left to the
 /// project's own merge settings: glab has no negated squash flag, and the
 /// squash-merge subject is what semantic-release reads.
-fn open_change_args(provider: Provider, target: &Target, title: &str, body: String) -> Vec<String> {
+fn open_change_args(
+    provider: Provider,
+    target: &Target,
+    title: &str,
+    body: String,
+    draft: bool,
+) -> Vec<String> {
+    let mut args = open_change_args_ready(provider, target, title, body);
+    if draft {
+        args.push("--draft".into());
+    }
+    args
+}
+
+fn open_change_args_ready(
+    provider: Provider,
+    target: &Target,
+    title: &str,
+    body: String,
+) -> Vec<String> {
     match provider {
         Provider::Github => vec![
             "pr".into(),
@@ -718,7 +1146,11 @@ async fn output(cli: &str, mut command: Command) -> Result<String, PublishError>
 mod tests {
     use super::*;
 
-    fn publication<'a>(target: &'a Target, journal: &'a NoJournal) -> Publication<'a> {
+    fn publication<'a>(
+        target: &'a Target,
+        outputs: &'a Outputs,
+        journal: &'a NoJournal,
+    ) -> Publication<'a> {
         Publication {
             channel: "work",
             node_id: "n1",
@@ -727,8 +1159,9 @@ mod tests {
             target,
             head_sha: "deadbeef",
             reviewed_tree: "cafebabe",
-            title: "t",
-            body: "b",
+            outputs,
+            lease: None,
+            rewrite: false,
             resume: false,
             pushed: false,
             before_push: None,
@@ -744,8 +1177,9 @@ mod tests {
             base: "master".into(),
             branch: "fix/x".into(),
             worktree: None,
+            change: None,
         };
-        let args = open_change_args(Provider::Gitlab, &target, "fix: x", "b".into());
+        let args = open_change_args(Provider::Gitlab, &target, "fix: x", "b".into(), false);
         assert_eq!(
             args,
             [
@@ -787,11 +1221,12 @@ mod tests {
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            change: None,
         };
         let err = publish(
             &broker,
             &Config::default(),
-            &publication(&target, &NoJournal),
+            &publication(&target, &Outputs::default(), &NoJournal),
         )
         .await
         .unwrap_err();
@@ -806,11 +1241,12 @@ mod tests {
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            change: None,
         };
         let err = publish(
             &crate::broker::Broker::default().shared(),
             &Config::default(),
-            &publication(&target, &NoJournal),
+            &publication(&target, &Outputs::default(), &NoJournal),
         )
         .await
         .unwrap_err();
@@ -833,9 +1269,11 @@ mod tests {
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            change: None,
         };
         let journal = NoJournal;
-        let mut p = publication(&target, &journal);
+        let outputs = Outputs::default();
+        let mut p = publication(&target, &outputs, &journal);
         p.reviewed_tree = "";
         let err = publish(&broker, &Config::default(), &p).await.unwrap_err();
         assert!(matches!(err, PublishError::NoReviewedTree), "{err}");

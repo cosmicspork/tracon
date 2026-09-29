@@ -453,6 +453,11 @@ export interface ReviewDetails {
    * that has no revision recorded.
    */
   revision: ReviewRevisionRef | null
+  /**
+   * What approving this revision sends to the forge besides its commits, as
+   * the agent asked. Absent from a node that predates it.
+   */
+  intent?: ReviewIntent
   stale: string[]
   /** Pinned to the revision at submit time; never the live work item. */
   requirements: PinnedRequirements | null
@@ -465,6 +470,22 @@ export interface ReviewDetails {
   surrounding_code: ReviewContext[]
   evidence: CandidateEvidence | null
   legacy_check_events: CandidateCheckRun[]
+}
+
+/** What an approval shows on the forge. The review's title and body are the
+ * operator's summary; a new change without a description is described by them. */
+export interface ReviewOutputs {
+  description?: { title: string; body: string }
+  comment?: string
+  draft?: boolean
+}
+
+export interface ReviewIntent {
+  forge: ReviewOutputs
+  /** For an existing change: what its branch held at submit. */
+  lease?: string
+  /** The push replaces `lease` rather than fast-forwarding it. */
+  rewrite?: boolean
 }
 
 export interface ReviewRevisionRef {

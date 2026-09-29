@@ -328,6 +328,12 @@ pub enum Command {
         /// none and is held to the commit alone, as before.
         #[serde(default)]
         revision_id: Option<String>,
+        /// The operator's edits to what an approval sends to the forge (the
+        /// owning node's `Outputs`), carried opaquely. Additive and optional:
+        /// a peer on an older build sends none, and the revision's own
+        /// outputs are published.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outputs: Option<serde_json::Value>,
     },
     /// Contract 3: a peer's providers, driven from another node's interface.
     /// The paste-back flow is request/response shaped — start the login and
@@ -894,6 +900,7 @@ mod tests {
             patch: None,
             head_sha: Some("abc".into()),
             revision_id: Some("rev-2".into()),
+            outputs: None,
         })
         .unwrap();
         assert_eq!(v["op"], "verdict");

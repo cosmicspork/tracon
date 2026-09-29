@@ -185,6 +185,16 @@ async fn git(dir: &str, op: &'static str, args: &[&str]) -> Result<String, Revie
     }
 }
 
+/// Whether `head` descends from `ancestor`, a commit this worktree holds. A
+/// commit it does not hold is not an ancestor it can vouch for.
+pub async fn descends_from(worktree: &str, head: &str, ancestor: &str) -> bool {
+    hardened_git(worktree)
+        .args(["merge-base", "--is-ancestor", ancestor, head])
+        .output()
+        .await
+        .is_ok_and(|out| out.status.success())
+}
+
 async fn git_bytes(dir: &str, op: &'static str, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
     let out = hardened_git(dir).args(args).output().await?;
     if out.status.success() {

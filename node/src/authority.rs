@@ -224,6 +224,36 @@ pub struct PublishRequest<'a> {
     /// rather than transferred to bytes nobody looked at. `None` means the
     /// caller has no earlier reading to bind to and takes the latest.
     pub decided_revision_id: Option<&'a str>,
+    /// The operator's edits to what goes to the forge. `None` publishes the
+    /// revision's own outputs.
+    pub outputs: Option<&'a crate::review::publish::Outputs>,
+}
+
+/// Where an approval landed, and exactly what it sent to the forge.
+#[derive(Debug, Clone)]
+pub struct Published {
+    pub url: String,
+    pub outputs: crate::review::publish::Outputs,
+}
+
+/// A revision's publication intent. A revision from before intents existed
+/// has none, and asks only for a new change described by its title and body.
+pub fn revision_intent(
+    store: &Store,
+    revision_id: Option<&str>,
+) -> Result<crate::review::publish::Intent, String> {
+    let Some(id) = revision_id else {
+        return Ok(Default::default());
+    };
+    match store
+        .review_revision(id)
+        .map_err(|e| e.to_string())?
+        .and_then(|revision| revision.intent_json)
+    {
+        Some(json) => serde_json::from_str(&json)
+            .map_err(|e| format!("this revision's publication intent is unreadable: {e}")),
+        None => Ok(Default::default()),
+    }
 }
 
 /// The publication record, as `review::publish` needs to speak to it: each
@@ -293,7 +323,7 @@ pub fn publication_id(
 pub async fn publish_review(
     ctx: &PublishContext<'_>,
     request: PublishRequest<'_>,
-) -> Result<String, PublishError> {
+) -> Result<Published, PublishError> {
     let PublishRequest {
         review,
         title,
@@ -301,6 +331,7 @@ pub async fn publish_review(
         require_evidence,
         recheck_authority,
         decided_revision_id,
+        outputs: edited_outputs,
     } = request;
     // Before anything is read from the worktree or the forge: if a newer
     // revision landed after the decision was made, this approval is for bytes
@@ -382,6 +413,12 @@ pub async fn publish_review(
     };
     let target: crate::review::publish::Target =
         serde_json::from_str(&review.target).map_err(|e| PublishError::External(e.to_string()))?;
+    let intent =
+        revision_intent(ctx.store, revision_id.as_deref()).map_err(PublishError::Conflict)?;
+    let outputs = edited_outputs
+        .cloned()
+        .unwrap_or_else(|| intent.forge.clone())
+        .resolve(&target, title, body);
     // The tree the node hashed out of the candidate when it captured this
     // review. Publication compares the bytes it is about to push against it,
     // so the reviewed tree is asserted from node-held evidence rather than
@@ -439,7 +476,7 @@ pub async fn publish_review(
             .finish_publish(&review.id, title, body, &url)
             .map_err(|e| PublishError::External(e.to_string()))?;
         ctx.manager.publish_queue().await;
-        return Ok(url);
+        return Ok(Published { url, outputs });
     }
     // What a previous attempt may have left on the forge decides whether this
     // one looks before it acts.
@@ -478,8 +515,9 @@ pub async fn publish_review(
             target: &target,
             head_sha: &review.head_sha,
             reviewed_tree: &reviewed_tree,
-            title,
-            body,
+            outputs: &outputs,
+            lease: intent.lease.as_deref(),
+            rewrite: intent.rewrite,
             resume,
             pushed: record.pushed_sha.is_some(),
             before_push: recheck_authority,
@@ -519,7 +557,10 @@ pub async fn publish_review(
                         .await;
                 }
             }
-            Ok(published)
+            Ok(Published {
+                url: published,
+                outputs,
+            })
         }
         // The outcome is unknown, so the claim stays: releasing it would
         // invite a second attempt at a side effect that may already have
@@ -538,7 +579,9 @@ pub async fn publish_review(
             Err(match error {
                 crate::review::publish::PublishError::BranchMoved { .. }
                 | crate::review::publish::PublishError::TreeChanged { .. }
-                | crate::review::publish::PublishError::NoReviewedTree => {
+                | crate::review::publish::PublishError::NoReviewedTree
+                | crate::review::publish::PublishError::LeaseLost { .. }
+                | crate::review::publish::PublishError::Target(_) => {
                     PublishError::Conflict(error.to_string())
                 }
                 other => PublishError::External(other.to_string()),

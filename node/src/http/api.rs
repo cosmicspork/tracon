@@ -1797,6 +1797,10 @@ pub struct VerdictBody {
     /// interface always sends it.
     #[serde(default)]
     pub revision_id: Option<String>,
+    /// The operator's edits to what an approval sends to the forge: the
+    /// description, the comment, or neither. Absent means the revision's own.
+    #[serde(default)]
+    pub outputs: Option<crate::review::publish::Outputs>,
 }
 
 /// What an old tab is told when the review it is showing has been superseded.
@@ -1902,9 +1906,17 @@ pub async fn get_review(
             "created_ms": revision.created_ms,
         })
     });
+    // What approval would send to the forge, as this revision asked for it;
+    // the screen edits a copy and sends it back with the verdict.
+    let intent = crate::authority::revision_intent(
+        s.store(),
+        revision.as_ref().map(|revision| revision.id.as_str()),
+    )
+    .unwrap_or_default();
     Ok(Json(json!({
         "review": r,
         "revision": revision_ref,
+        "intent": intent,
         "stale": stale,
         "requirements": requirements,
         "criteria": criteria,
@@ -2002,6 +2014,7 @@ fn record_evidence_decision(
     title: Option<&str>,
     body: Option<&str>,
     patch: Option<&str>,
+    outputs: Option<&crate::review::publish::Outputs>,
 ) -> Result<Option<i64>, crate::store::StoreError> {
     let Some(revision) = revision else {
         // A row directly written by an old node/test fixture has no immutable
@@ -2020,6 +2033,7 @@ fn record_evidence_decision(
         body: body.map(str::to_string),
         patch: patch.map(str::to_string),
         decided_ms,
+        outputs_json: outputs.and_then(|outputs| serde_json::to_string(outputs).ok()),
     })?;
     Ok(Some((decided_ms - revision.created_ms).max(0)))
 }
@@ -2175,6 +2189,10 @@ pub async fn decide_review(
                     // operator inspected is theirs to name, and the owning
                     // node compares it against its own latest revision.
                     revision_id: b.revision_id.clone(),
+                    outputs: b
+                        .outputs
+                        .as_ref()
+                        .and_then(|outputs| serde_json::to_value(outputs).ok()),
                 },
                 timeout,
             )
@@ -2274,6 +2292,7 @@ pub(crate) async fn decide_local(
                 None,
                 None,
                 patch,
+                None,
             )?;
             record_operator_decision_event(&s, &r.session_id, &id, "revise", waiting_ms);
             s.manager.publish_queue().await;
@@ -2315,6 +2334,7 @@ pub(crate) async fn decide_local(
                 None,
                 None,
                 None,
+                None,
             )?;
             record_operator_decision_event(&s, &r.session_id, &id, "rejected", waiting_ms);
             s.manager.publish_queue().await;
@@ -2341,11 +2361,15 @@ pub(crate) async fn decide_local(
                     // landing from here on loses, rather than having its
                     // bytes published under this approval.
                     decided_revision_id: decided_revision.as_deref(),
+                    outputs: b.outputs.as_ref(),
                 },
             )
             .await
             {
-                Ok(published) => {
+                Ok(crate::authority::Published {
+                    url: published,
+                    outputs,
+                }) => {
                     let waiting_ms = record_evidence_decision(
                         s.store(),
                         revision.as_ref(),
@@ -2355,6 +2379,7 @@ pub(crate) async fn decide_local(
                         Some(&title),
                         Some(&body),
                         None,
+                        Some(&outputs),
                     )?;
                     record_operator_decision_event(&s, &r.session_id, &id, "approved", waiting_ms);
                     Ok(json!({ "state": "approved", "published": published }))
@@ -4829,6 +4854,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 patch,
                 head_sha,
                 revision_id,
+                outputs,
             } => {
                 async {
                     let review = self
@@ -4853,6 +4879,17 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                                 patch,
                                 head_sha,
                                 revision_id,
+                                // A malformed edit from a peer is refused, not
+                                // silently replaced by the revision's own.
+                                outputs: match outputs.map(serde_json::from_value).transpose() {
+                                    Ok(outputs) => outputs,
+                                    Err(error) => {
+                                        return Err(ApiError(
+                                            StatusCode::UNPROCESSABLE_ENTITY,
+                                            format!("the edited outputs are not valid: {error}"),
+                                        ))
+                                    }
+                                },
                             },
                         )
                         .await

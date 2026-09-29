@@ -435,13 +435,32 @@ impl Tools {
             .map(|revision| revision.id);
         let target: crate::review::publish::Target =
             serde_json::from_str(&review.target).map_err(|e| e.to_string())?;
-        let prose = crate::corpus::hash_body(&format!(
-            "{}\u{1f}{}",
-            review.approved_title(),
-            review.approved_body()
-        ));
+        let intent =
+            crate::authority::revision_intent(access.store.as_ref(), decided_revision.as_deref())?;
+        // The prose hash binds everything the forge will show. A revision
+        // that asks for nothing beyond a new change described by its title
+        // and body hashes exactly as it always has, so existing grants hold.
+        let prose = if intent.forge == Default::default() {
+            crate::corpus::hash_body(&format!(
+                "{}\u{1f}{}",
+                review.approved_title(),
+                review.approved_body()
+            ))
+        } else {
+            crate::corpus::hash_body(&format!(
+                "{}\u{1f}{}\u{1f}{}",
+                review.approved_title(),
+                review.approved_body(),
+                serde_json::to_string(&intent.forge).map_err(|e| e.to_string())?
+            ))
+        };
+        let change = target
+            .change
+            .as_ref()
+            .map(|change| format!(":change:{}", change.number))
+            .unwrap_or_default();
         let canonical = format!(
-            "publish:{}:{}:{}:{}:prose:{}",
+            "publish:{}:{}:{}:{}{change}:prose:{}",
             target.provider, target.project, target.base, target.branch, prose
         );
         let authority_args = serde_json::json!({
@@ -449,7 +468,7 @@ impl Tools {
             "revision": review.head_sha.clone(),
             "prose_hash": prose.clone(),
         });
-        let decision = crate::authority::decide(
+        let mut decision = crate::authority::decide(
             access.store.as_ref(),
             &self.policy.read(),
             &crate::authority::AuthorityQuery {
@@ -461,6 +480,13 @@ impl Tools {
                 args: &authority_args,
             },
         )?;
+        // Replacing history on a shared branch is never unattended, whatever
+        // a grant says: the operator sees what it throws away.
+        if intent.rewrite && decision.verdict == Verdict::Allow {
+            decision.verdict = Verdict::Ask;
+            decision.reason =
+                Some("a push that rewrites a change's history always goes to the operator".into());
+        }
         if decision.verdict != Verdict::Allow {
             let mut submitted = submitted;
             if let Some(object) = submitted.as_object_mut() {
@@ -595,11 +621,15 @@ impl Tools {
                 require_evidence: true,
                 recheck_authority: Some(&recheck),
                 decided_revision_id: decided_revision.as_deref(),
+                outputs: None,
             },
         )
         .await
         {
-            Ok(published) => {
+            Ok(crate::authority::Published {
+                url: published,
+                outputs,
+            }) => {
                 access
                     .store
                     .authority_action_finish(&action_id, "succeeded", &published)
@@ -626,6 +656,7 @@ impl Tools {
                             body: Some(review.approved_body().to_string()),
                             patch: None,
                             decided_ms: crate::store::now_ms(),
+                            outputs_json: serde_json::to_string(&outputs).ok(),
                         })
                         .map_err(|e| e.to_string())?;
                 }

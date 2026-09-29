@@ -16,6 +16,8 @@
     type PinnedRequirements,
     type Review,
     type ReviewContext,
+    type ReviewIntent,
+    type ReviewOutputs,
     type ReviewRevisionRef,
     type Verdict,
   } from '../lib/types'
@@ -42,6 +44,13 @@
   let reason = $state('')
   let title = $state('')
   let body = $state('')
+  /** What approval sends to the forge, as the agent asked and you edit it. */
+  let intent = $state<ReviewIntent>({ forge: {} })
+  let describe = $state(false)
+  let descTitle = $state('')
+  let descBody = $state('')
+  let commenting = $state(false)
+  let comment = $state('')
   let busy = $state(false)
   let error = $state<string | null>(null)
   let loaded = $state(false)
@@ -62,6 +71,12 @@
         surroundingCode = d.surrounding_code
         title = d.review.edited_title ?? d.review.title
         body = d.review.edited_body ?? d.review.body
+        intent = d.intent ?? { forge: {} }
+        describe = intent.forge.description !== undefined
+        descTitle = intent.forge.description?.title ?? ''
+        descBody = intent.forge.description?.body ?? ''
+        commenting = intent.forge.comment !== undefined
+        comment = intent.forge.comment ?? ''
         loaded = true
       })
       .catch((e) => {
@@ -182,6 +197,19 @@
     }
   })
   const noun = $derived(review?.provider === 'gitlab' ? 'merge request' : 'pull request')
+  /** The open change this review updates, or null when it opens a new one. */
+  const change = $derived<{ number: number; url: string } | null>(target?.change ?? null)
+  /**
+   * Whether the review's title and body are only your summary. They describe
+   * a new change when it has no description of its own, as every review did
+   * before a revision could say otherwise.
+   */
+  const summaryOnly = $derived(change !== null || describe)
+  const outputs = $derived<ReviewOutputs>({
+    description: describe ? { title: descTitle, body: descBody } : undefined,
+    comment: commenting && comment.trim() ? comment : undefined,
+    draft: change === null ? intent.forge.draft : undefined,
+  })
   const files = $derived.by(() => {
     try {
       return JSON.parse(review?.files ?? '[]') as { path: string; blob: string }[]
@@ -194,7 +222,15 @@
   const session = $derived(review ? store.sessions.get(review.session_id) : undefined)
   const reviewer = $derived(review?.review_session_id ? store.sessions.get(review.review_session_id) : undefined)
   const edited = $derived(
-    review !== null && (title !== review.title || body !== review.body),
+    review !== null &&
+      (title !== review.title ||
+        body !== review.body ||
+        JSON.stringify(outputs) !==
+          JSON.stringify({
+            description: intent.forge.description,
+            comment: intent.forge.comment,
+            draft: change === null ? intent.forge.draft : undefined,
+          })),
   )
   const authoritativeChecks = $derived(evidence?.checks ?? [])
 
@@ -245,6 +281,7 @@
         reason: verdict === 'approve' ? undefined : reason,
         title: verdict === 'approve' ? title : undefined,
         body: verdict === 'approve' ? body : undefined,
+        outputs: verdict === 'approve' ? outputs : undefined,
         // An edit is a request for changes, never an approval of something
         // the operator changed: the agent applies it and resubmits.
         patch: verdict === 'revise' && patch ? patch : undefined,
@@ -301,7 +338,19 @@
   <dl class="kv">
     <dt>Publishes</dt>
     <dd class="m">
-      {noun} → {target?.project} · {target?.branch} into {target?.base}
+      {#if change}
+        updates <a href={change.url} target="_blank" rel="noreferrer">{noun} {change.number}</a>
+      {:else}
+        new {noun}{intent.forge.draft ? ' (draft)' : ''}
+      {/if}
+      → {target?.project} · {target?.branch} into {target?.base}
+      {#if intent.rewrite}
+        <span
+          class="chip warn"
+          title="the push replaces what the branch held at submit instead of adding to it"
+          >rewrites history · replaces {intent.lease?.slice(0, 8)}</span
+        >
+      {/if}
     </dd>
 
     <dt>Session</dt>
@@ -501,11 +550,39 @@
     </div>
   {/if}
 
-  <div class="h4">
-    Title and body <b>{surface.phone ? 'edited on the desktop' : 'edit before approving if you want to'}</b>
-  </div>
-  <input class="edit" bind:value={title} disabled={busy || publishing || surface.phone} />
-  <textarea class="edit body" bind:value={body} use:autogrow={body} disabled={busy || publishing || surface.phone}></textarea>
+  {#if summaryOnly}
+    <div class="h4">Summary <b>for you · not sent to the forge</b></div>
+    <div class="summary">
+      <b>{review.title}</b>
+      <p>{review.body}</p>
+    </div>
+  {:else}
+    <div class="h4">
+      Title and body <b>{surface.phone ? 'edited on the desktop' : 'edit before approving if you want to'}</b>
+    </div>
+    <input class="edit" bind:value={title} disabled={busy || publishing || surface.phone} />
+    <textarea class="edit body" bind:value={body} use:autogrow={body} disabled={busy || publishing || surface.phone}></textarea>
+  {/if}
+
+  <div class="h4">On the forge <b>{surface.phone ? 'edited on the desktop' : 'what approval sends besides the commits'}</b></div>
+  <label class="toggle">
+    <input type="checkbox" bind:checked={describe} disabled={busy || publishing || surface.phone} />
+    {change ? `Replace the ${noun}'s title and description` : `Describe the ${noun} separately from the summary`}
+  </label>
+  {#if describe}
+    <input class="edit" bind:value={descTitle} placeholder="title" disabled={busy || publishing || surface.phone} />
+    <textarea class="edit body" bind:value={descBody} use:autogrow={descBody} disabled={busy || publishing || surface.phone}></textarea>
+  {/if}
+  <label class="toggle">
+    <input type="checkbox" bind:checked={commenting} disabled={busy || publishing || surface.phone} />
+    Comment on the {noun}
+  </label>
+  {#if commenting}
+    <textarea class="edit body" bind:value={comment} use:autogrow={comment} disabled={busy || publishing || surface.phone}></textarea>
+  {/if}
+  {#if change && !describe && !(commenting && comment.trim())}
+    <div class="note dim">Approving only pushes; the {noun}'s text is left as it is.</div>
+  {/if}
   {#if edited}
     <div class="note">Edited. Approving publishes what is written here, not what was submitted.</div>
   {/if}
@@ -974,6 +1051,32 @@
   .note {
     font-size: 12.5px;
     color: var(--wait);
+  }
+  .note.dim {
+    color: var(--dim);
+  }
+  .summary {
+    background: var(--s1);
+    border-radius: 4px;
+    padding: 9px 11px;
+    font-size: 13.5px;
+  }
+  .summary p {
+    margin: 5px 0 0;
+    white-space: pre-wrap;
+    color: var(--ink2);
+  }
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--ink2);
+  }
+  .kv .chip.warn {
+    background: var(--wash-wait);
+    color: var(--wait);
+    margin-left: 6px;
   }
   .editbar {
     display: flex;

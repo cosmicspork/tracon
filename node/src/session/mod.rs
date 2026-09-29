@@ -287,6 +287,10 @@ impl Manager {
         &self.cfg
     }
 
+    pub fn broker(&self) -> &crate::broker::SharedBroker {
+        &self.tools.broker
+    }
+
     pub fn previews(&self) -> &Arc<crate::http::preview::PreviewTokens> {
         &self.previews
     }

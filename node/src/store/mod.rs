@@ -3363,6 +3363,7 @@ mod tests {
             requirements_body: None,
             requirements_hash: None,
             created_ms: now_ms(),
+            intent_json: None,
         };
         store
             .insert_candidate(&crate::store::CandidateRow {
