@@ -504,7 +504,7 @@ impl Pump {
                     let stop = match v["subtype"].as_str().or_else(|| v["status"].as_str()) {
                         Some("success") | None => "end_turn",
                         Some("error_max_turns") => "max_turn_requests",
-                        Some(_) => "refusal",
+                        Some(_) => "error",
                     };
                     if let Some(done) = turn.lock().unwrap().take() {
                         let _ = done.send(TurnResult {
