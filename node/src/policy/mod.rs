@@ -172,13 +172,35 @@ pub struct Request<'a> {
     pub arguments: Option<&'a serde_json::Value>,
 }
 
+/// The narrative fields of a call that only puts something in front of the
+/// operator. A review or report about a production incident has to be able to
+/// say "production"; what it describes is not what it does, and nothing it
+/// carries leaves the node until the operator approves it.
+fn prose_fields(action: &str) -> &'static [&'static str] {
+    match action {
+        crate::mcp::review::SUBMIT | crate::mcp::review::SUBMIT_REPORT => &["title", "body"],
+        _ => &[],
+    }
+}
+
 impl Request<'_> {
     fn haystack(&self) -> String {
-        let mut arguments = self
-            .arguments
+        let prose = prose_fields(self.action);
+        let matched = self.arguments.map(|arguments| match arguments.as_object() {
+            Some(fields) if !prose.is_empty() => serde_json::Value::Object(
+                fields
+                    .iter()
+                    .filter(|(key, _)| !prose.contains(&key.as_str()))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            ),
+            _ => arguments.clone(),
+        });
+        let mut arguments = matched
+            .as_ref()
             .map(serde_json::Value::to_string)
             .unwrap_or_default();
-        if let Some(fields) = self.arguments.and_then(serde_json::Value::as_object) {
+        if let Some(fields) = matched.as_ref().and_then(serde_json::Value::as_object) {
             for (key, value) in fields {
                 match value {
                     serde_json::Value::String(value) => {
@@ -438,6 +460,34 @@ mod tests {
         let args = serde_json::json!({ "slug": "note-x", "body": "then git push origin main" });
         let summary = format!("doc_write {args}");
         let d = policy().decide(&tool("doc_write", &args, &summary));
+        assert_eq!(d.verdict, Verdict::Deny);
+    }
+
+    #[test]
+    fn a_submissions_prose_may_name_production_but_its_target_may_not() {
+        let p = policy();
+        for name in ["submit_review", "submit_report"] {
+            let args = serde_json::json!({
+                "title": "fix: the eks-prd rollout",
+                "body": "The web pipeline ran with environment:production and kubectl apply.",
+                "provider": "gitlab",
+                "project": "group/app",
+                "base": "main",
+            });
+            let d = p.decide(&tool(name, &args, name));
+            assert_ne!(d.verdict, Verdict::Deny, "{name}: {:?}", d.rule_id);
+            // Only the narrative is exempt: a production name anywhere else
+            // in the call is still refused.
+            let args = serde_json::json!({
+                "title": "fix", "body": "x", "provider": "gitlab",
+                "project": "group/app-prd", "base": "main",
+            });
+            let d = p.decide(&tool(name, &args, name));
+            assert_eq!(d.verdict, Verdict::Deny, "{name}");
+        }
+        // Every other tool's prose is still matched.
+        let args = serde_json::json!({ "slug": "note-x", "body": "deploy to eks-prd" });
+        let d = p.decide(&tool("doc_write", &args, "doc_write"));
         assert_eq!(d.verdict, Verdict::Deny);
     }
 
