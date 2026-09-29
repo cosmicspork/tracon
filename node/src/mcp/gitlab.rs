@@ -1,4 +1,5 @@
-//! GitLab, as narrow tools: read a merge request's state and comment on it,
+//! GitLab, as narrow tools: read a merge request's state and its discussions,
+//! comment on it or reply to one discussion, find the open one for a branch,
 //! read a pipeline and a job's log, list the pipelines that ran at an exact
 //! commit and play a manual job in one, and run a pipeline on a branch.
 //! Opening a merge request is the review path (`review::publish`); merging
@@ -24,6 +25,13 @@ pub const JOB_PLAY: &str = "job_play";
 pub const PIPELINE_RUN: &str = "pipeline_run";
 pub const MR_MERGE: &str = "mr_merge";
 pub const DEPLOY: &str = "deploy";
+pub const MR_DISCUSSIONS: &str = "mr_discussions";
+pub const MR_REPLY: &str = "mr_reply";
+pub const MR_FOR_BRANCH: &str = "mr_for_branch";
+
+/// One page of discussions: a review is read in one call, and a merge request
+/// with more than this says so rather than pretending it has none.
+const DISCUSSIONS_MAX: usize = 100;
 
 /// How much of a job's log `job_trace` returns, in KiB, unless asked.
 const TRACE_KIB: u64 = 16;
@@ -60,6 +68,50 @@ pub fn definitions() -> Vec<Value> {
                     "body": { "type": "string" },
                 },
                 "required": ["project", "iid", "body"],
+            },
+        }),
+        json!({
+            "name": MR_DISCUSSIONS,
+            "description": "A GitLab merge request's review feedback: its diff discussions (id, \
+                            resolved, file and line, each note) and its general comments, \
+                            without system notes. Pass a discussion's id to mr_reply.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "group/project path or numeric id." },
+                    "iid": { "type": "integer" },
+                    "unresolved_only": { "type": "boolean", "description": "Leave out resolved discussions." },
+                },
+                "required": ["project", "iid"],
+            },
+        }),
+        json!({
+            "name": MR_REPLY,
+            "description": "Reply to one discussion on a GitLab merge request, and optionally \
+                            resolve it. The operator is asked before it posts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" },
+                    "iid": { "type": "integer" },
+                    "discussion_id": { "type": "string", "description": "The discussion's id from mr_discussions." },
+                    "body": { "type": "string", "description": "The reply. May be omitted when only resolving." },
+                    "resolve": { "type": "boolean", "description": "Mark the discussion resolved after replying." },
+                },
+                "required": ["project", "iid", "discussion_id"],
+            },
+        }),
+        json!({
+            "name": MR_FOR_BRANCH,
+            "description": "The open GitLab merge request for a source branch, if there is one: \
+                            its iid is what submit_review takes as `change`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "group/project path or numeric id." },
+                    "branch": { "type": "string" },
+                },
+                "required": ["project", "branch"],
             },
         }),
         json!({
@@ -184,6 +236,101 @@ pub async fn call(
         .ok_or("project is required")?;
     let project_url = format!("{host}/api/v4/projects/{}", urlencode(project));
     match name {
+        MR_DISCUSSIONS => {
+            let base = format!("{project_url}/merge_requests/{}", iid(args)?);
+            let v = get(
+                http,
+                token,
+                &format!("{base}/discussions?per_page={DISCUSSIONS_MAX}"),
+            )
+            .await?;
+            let unresolved_only = args
+                .get("unresolved_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let all = v.as_array().cloned().unwrap_or_default();
+            let (threads, comments) = discussions(&all, unresolved_only);
+            Ok(json!({
+                "threads": threads,
+                "more_threads": all.len() >= DISCUSSIONS_MAX,
+                "comments": comments,
+            }))
+        }
+        MR_REPLY => {
+            let base = format!("{project_url}/merge_requests/{}", iid(args)?);
+            let discussion = args
+                .get("discussion_id")
+                .and_then(Value::as_str)
+                .filter(|d| {
+                    !d.is_empty() && d.len() <= 64 && d.chars().all(|c| c.is_ascii_hexdigit())
+                })
+                .ok_or("discussion_id is required, as mr_discussions gave it")?;
+            let body = args
+                .get("body")
+                .and_then(Value::as_str)
+                .filter(|b| !b.trim().is_empty());
+            let resolve = args
+                .get("resolve")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if body.is_none() && !resolve {
+                return Err("body is required unless the discussion is only being resolved".into());
+            }
+            if let Some(recheck) = before_mutation {
+                recheck()?;
+            }
+            let mut out = json!({ "discussion_id": discussion });
+            if let Some(body) = body {
+                let v = write(
+                    http.post(format!("{base}/discussions/{discussion}/notes")),
+                    token,
+                    &json!({ "body": body }),
+                )
+                .await?;
+                out["note_id"] = v["id"].clone();
+            }
+            if resolve {
+                let v = write(
+                    http.put(format!("{base}/discussions/{discussion}")),
+                    token,
+                    &json!({ "resolved": true }),
+                )
+                .await?;
+                out["resolved"] = json!(v["notes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|n| n["resolvable"] == true)
+                    .all(|n| n["resolved"] == true));
+            }
+            Ok(out)
+        }
+        MR_FOR_BRANCH => {
+            let branch = args
+                .get("branch")
+                .and_then(Value::as_str)
+                .filter(|b| !b.is_empty())
+                .ok_or("branch is required")?;
+            let v = get(
+                http,
+                token,
+                &format!(
+                    "{project_url}/merge_requests?state=opened&source_branch={}&per_page=10",
+                    urlencode(branch)
+                ),
+            )
+            .await?;
+            let open: Vec<Value> = v
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|m| {
+                    json!({ "iid": m["iid"], "title": m["title"], "draft": m["draft"],
+                            "target_branch": m["target_branch"], "web_url": m["web_url"] })
+                })
+                .collect();
+            Ok(json!({ "branch": branch, "open": open }))
+        }
         MR_STATUS | MR_COMMENT | MR_MERGE => {
             let iid = args
                 .get("iid")
@@ -558,6 +705,78 @@ fn tail(log: &str, max: usize) -> (&str, bool) {
     (&log[start..], true)
 }
 
+fn iid(args: &Value) -> Result<i64, String> {
+    args.get("iid")
+        .and_then(Value::as_i64)
+        .filter(|n| *n > 0)
+        .ok_or_else(|| "iid is required".to_string())
+}
+
+/// Discussions as a reviewer reads them: threads anchored to the diff (or
+/// started as resolvable), and general comments, with GitLab's own system
+/// notes ("added 1 commit") left out.
+fn discussions(all: &[Value], unresolved_only: bool) -> (Vec<Value>, Vec<Value>) {
+    let mut threads = Vec::new();
+    let mut comments = Vec::new();
+    for d in all {
+        let notes: Vec<&Value> = d["notes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|n| n["system"] != true)
+            .collect();
+        let Some(first) = notes.first() else { continue };
+        let note = |n: &&Value| {
+            json!({ "id": n["id"], "author": n["author"]["username"], "body": n["body"],
+                    "created_at": n["created_at"] })
+        };
+        if d["individual_note"] == true && first["resolvable"] != true {
+            comments.push(note(first));
+            continue;
+        }
+        let resolvable: Vec<&&Value> = notes.iter().filter(|n| n["resolvable"] == true).collect();
+        let resolved = !resolvable.is_empty() && resolvable.iter().all(|n| n["resolved"] == true);
+        if unresolved_only && resolved {
+            continue;
+        }
+        let position = &first["position"];
+        threads.push(json!({
+            "id": d["id"],
+            "resolved": resolved,
+            "path": if position["new_path"].is_null() { position["old_path"].clone() } else { position["new_path"].clone() },
+            "line": if position["new_line"].is_null() { position["old_line"].clone() } else { position["new_line"].clone() },
+            "notes": notes.iter().map(note).collect::<Vec<_>>(),
+        }));
+    }
+    (threads, comments)
+}
+
+/// A write whose outcome is unknown when GitLab cannot be reached or fails
+/// on its side: the note may or may not exist.
+async fn write(
+    request: reqwest::RequestBuilder,
+    token: &str,
+    body: &Value,
+) -> Result<Value, String> {
+    let res = request
+        .header("PRIVATE-TOKEN", token)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("mutation-outcome-unknown: gitlab: {e}"))?;
+    let status = res.status();
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        let error = format!("gitlab refused ({status}): {}", v["message"]);
+        return Err(if status.is_server_error() {
+            format!("mutation-outcome-unknown: {error}")
+        } else {
+            error
+        });
+    }
+    Ok(v)
+}
+
 async fn get(http: &reqwest::Client, token: &str, url: &str) -> Result<Value, String> {
     let res = http
         .get(url)
@@ -588,6 +807,35 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discussions_split_threads_from_comments_and_drop_system_notes() {
+        let all = [
+            json!({ "id": "a1", "individual_note": true, "notes": [
+                { "id": 1, "body": "looks good", "author": { "username": "r" } }] }),
+            json!({ "id": "b2", "individual_note": true, "notes": [
+                { "id": 2, "body": "added 1 commit", "system": true }] }),
+            json!({ "id": "c3", "individual_note": false, "notes": [
+                { "id": 3, "body": "rename this", "resolvable": true, "resolved": false,
+                  "author": { "username": "r" },
+                  "position": { "new_path": "src/a.rs", "new_line": 12 } },
+                { "id": 4, "body": "done", "resolvable": true, "resolved": false }] }),
+            json!({ "id": "d4", "individual_note": false, "notes": [
+                { "id": 5, "body": "nit", "resolvable": true, "resolved": true,
+                  "position": { "old_path": "src/b.rs", "old_line": 3 } }] }),
+        ];
+        let (threads, comments) = discussions(&all, false);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0]["body"], "looks good");
+        assert_eq!(threads.len(), 2);
+        assert_eq!(threads[0]["path"], "src/a.rs");
+        assert_eq!(threads[0]["line"], 12);
+        assert_eq!(threads[0]["resolved"], false);
+        assert_eq!(threads[0]["notes"].as_array().unwrap().len(), 2);
+        assert_eq!(threads[1]["path"], "src/b.rs");
+        let (threads, _) = discussions(&all, true);
+        assert_eq!(threads.len(), 1, "a resolved thread is left out when asked");
+    }
 
     #[test]
     fn project_paths_are_one_segment() {

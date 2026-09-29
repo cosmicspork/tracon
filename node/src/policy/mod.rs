@@ -500,6 +500,10 @@ mod tests {
             "job_trace",
             "pr_status",
             "run_status",
+            "pr_threads",
+            "pr_for_branch",
+            "mr_discussions",
+            "mr_for_branch",
         ] {
             let d = policy().decide(&tool(name, &none, name));
             assert_eq!(d.verdict, Verdict::Allow, "{name}");
@@ -508,6 +512,8 @@ mod tests {
             "pipeline_run",
             "pr_comment",
             "mr_comment",
+            "pr_reply",
+            "mr_reply",
             "issue_comment",
             "issue_update",
             "issue_create",

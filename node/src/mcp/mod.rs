@@ -301,7 +301,10 @@ impl Tools {
             | gitlab::JOB_TRACE
             | gitlab::JOB_PLAY
             | gitlab::PIPELINE_RUN
-            | gitlab::DEPLOY => {
+            | gitlab::DEPLOY
+            | gitlab::MR_DISCUSSIONS
+            | gitlab::MR_REPLY
+            | gitlab::MR_FOR_BRANCH => {
                 gitlab::call(
                     &self.broker,
                     &self.http,
@@ -373,7 +376,13 @@ impl Tools {
                     .ok_or("documents are not available on this node")?;
                 docs::call(self, access, ctx, name, args).await
             }
-            github::PR_STATUS | github::PR_COMMENT | github::RUN_STATUS | github::PR_MERGE => {
+            github::PR_STATUS
+            | github::PR_COMMENT
+            | github::RUN_STATUS
+            | github::PR_MERGE
+            | github::PR_THREADS
+            | github::PR_REPLY
+            | github::PR_FOR_BRANCH => {
                 github::call(
                     &self.broker,
                     &self.http,
