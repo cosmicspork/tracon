@@ -2149,17 +2149,149 @@ impl Config {
         self.save_to(&Self::config_path())
     }
 
+    /// Write what changed, and only that.
+    ///
+    /// The file keeps every key it already had, and gains or changes only the
+    /// values that differ from what loading it gives. Serializing the whole
+    /// struct wrote every default into the file, where it then stayed fixed:
+    /// a node whose settings were saved once kept that release's harness image
+    /// (`runtime.kubernetes.harness_image`) through every upgrade after it,
+    /// because a written value is never a default again.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let text = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
+        let (mut doc, before) = match std::fs::read_to_string(path) {
+            // A file that does not parse has nothing to keep: it is replaced,
+            // as it always was. (`put_config` refuses before reaching here.)
+            Ok(text) => match (
+                toml::from_str::<toml::Table>(&text),
+                Self::try_load_from(path),
+            ) {
+                (Ok(doc), Ok(before)) => (doc, before),
+                _ => (toml::Table::new(), Self::default()),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                (toml::Table::new(), Self::default())
+            }
+            Err(e) => return Err(e),
+        };
+        let before = toml::Table::try_from(&before).map_err(std::io::Error::other)?;
+        let after = toml::Table::try_from(self).map_err(std::io::Error::other)?;
+        write_changes(&mut doc, &before, &after, &[]);
+        let text = toml::to_string_pretty(&doc).map_err(std::io::Error::other)?;
         std::fs::write(path, text)
+    }
+}
+
+/// Carry into `doc` every value that differs between `before` (what the file
+/// loads as) and `after` (what is being saved), leaving everything else as the
+/// file had it — present or absent.
+fn write_changes(doc: &mut toml::Table, before: &toml::Table, after: &toml::Table, at: &[&str]) {
+    for key in before.keys() {
+        if !after.contains_key(key) {
+            doc.remove(key);
+        }
+    }
+    for (key, now) in after {
+        let was = before.get(key);
+        if was == Some(now) {
+            continue;
+        }
+        // A provider the file does not name comes from the defaults on load,
+        // entry by entry: a partial entry written here would shadow the whole
+        // default one and lose its credential and upstream. Write it whole.
+        let whole_entry = at == ["providers"] && !doc.contains_key(key);
+        match (was, now) {
+            (Some(toml::Value::Table(was)), toml::Value::Table(now)) if !whole_entry => {
+                let entry = doc
+                    .entry(key.clone())
+                    .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+                if !entry.is_table() {
+                    *entry = toml::Value::Table(toml::Table::new());
+                }
+                if let toml::Value::Table(entry) = entry {
+                    let mut path = at.to_vec();
+                    path.push(key.as_str());
+                    write_changes(entry, was, now, &path);
+                }
+            }
+            _ => {
+                doc.insert(key.clone(), now.clone());
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// Saving writes the change, not the release's defaults: a default that is
+    /// written stops being one, which is how a node's harness image stayed at
+    /// the release its settings were first saved under.
+    #[test]
+    fn a_save_writes_what_changed_and_no_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        let mut cfg = Config::default();
+        cfg.harness.id = "claude".into();
+        cfg.save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("claude"), "{text}");
+        assert!(
+            !text.contains("harness_image"),
+            "a default was written: {text}"
+        );
+        assert!(
+            !text.contains("[providers"),
+            "a default was written: {text}"
+        );
+        let back = Config::try_load_from(&path).unwrap();
+        assert_eq!(back.harness.id, "claude");
+        assert_eq!(
+            back.runtime.kubernetes.harness_image,
+            Config::default().runtime.kubernetes.harness_image
+        );
+    }
+
+    #[test]
+    fn a_save_keeps_what_the_file_already_says() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        std::fs::write(
+            &path,
+            "node_name = \"kept\"\n\n[session]\nbudget_tokens = 5\n",
+        )
+        .unwrap();
+        let mut cfg = Config::try_load_from(&path).unwrap();
+        cfg.harness.id = "claude".into();
+        cfg.save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("node_name = \"kept\""), "{text}");
+        assert!(text.contains("budget_tokens = 5"), "{text}");
+        assert!(!text.contains("harness_image"), "{text}");
+        assert_eq!(Config::try_load_from(&path).unwrap().harness.id, "claude");
+    }
+
+    /// A provider the file never named is a default entry; editing it must not
+    /// leave a partial one that shadows its credential, or drop the others.
+    #[test]
+    fn a_provider_edit_on_a_file_without_providers_keeps_them_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        std::fs::write(&path, "node_name = \"n\"\n").unwrap();
+        let mut cfg = Config::try_load_from(&path).unwrap();
+        let codex = cfg.providers.get_mut("openai-codex").unwrap();
+        codex.models.truncate(1);
+        let want = codex.models.clone();
+        cfg.save_to(&path).unwrap();
+        let back = Config::try_load_from(&path).unwrap();
+        let codex = &back.providers["openai-codex"];
+        assert_eq!(codex.models, want);
+        assert_eq!(codex.credential, "openai-codex");
+        assert!(!codex.upstream.is_empty());
+        assert!(back.providers.contains_key("anthropic"));
+    }
 
     /// The guard that stands between `cargo test` and the operator's sealed
     /// credential store, and the override integration tests use because they
