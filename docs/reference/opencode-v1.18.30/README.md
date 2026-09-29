@@ -173,10 +173,11 @@ Three things follow, none of them "widen the matrix".
   unscoped. That is a route tracon serves, not a route it forwards, so it is a new row
   in the app-route table rather than a hole in the deny list. *(This is what was
   built; see "The resolution".)*
-- **Two more startup calls are refused and survive it**: `GET /global/config` (a global
-  config read, on the deny list beside its write) and `GET /experimental/resource` (the
-  experimental tree). The app retries both and carries on. They are named here so the
-  next reader knows the 403s in the trace are deliberate.
+- **Two more startup calls were refused**: `GET /global/config` (a global config read,
+  beside its write on the deny list) and `GET /experimental/resource` (the experimental
+  tree). The app did not carry on: it failed its instance bootstrap, toasted the 403 and
+  retried every few seconds. Both are now `Class::Empty`: the node answers `{}` itself and
+  forwards neither, so the page loads and the harness is never asked.
 
 #### The resolution
 

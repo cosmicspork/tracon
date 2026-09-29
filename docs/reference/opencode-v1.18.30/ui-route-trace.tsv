@@ -50,10 +50,10 @@ GET	/assets/wasm-CG6Dc4jp.js	200	asset	1	diff	-
 GET	/command	200	readable	2	load,second-session	-
 GET	/config	200	readable	3	load,settings-probe,second-session	-
 GET	/config/providers	200	readable	1	model-probe	-
-GET	/experimental/resource	403	forbidden	8	load,second-session	gateway_refused
+GET	/experimental/resource	200	synthesised	8	load,second-session	-
 GET	/favicon-v3.ico	200	asset	2	load	-
 GET	/file/status	200	readable	1	diff-probe	-
-GET	/global/config	403	forbidden	8	load,second-session	gateway_refused
+GET	/global/config	200	synthesised	8	load,second-session	-
 GET	/global/event	200	synthesised	2	load,second-session	-
 GET	/global/health	200	readable	2	load,second-session	-
 GET	/index.html	404	not-found	1	unowned-probe	-
