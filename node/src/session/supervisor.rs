@@ -26,10 +26,17 @@ use crate::{
 /// carry an entire file.
 const MAX_TOOL_OUTPUT: usize = 64 * 1024;
 
-/// A harness turn must not hold a session open indefinitely. The timeout is
+/// A harness turn must not hold a session open indefinitely. The timeouts are
 /// intentionally independent of a token budget: subscriptions need the same
 /// runaway protection as metered providers.
-const TURN_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+///
+/// Silence is what ends a turn: one that has gone this long without a single
+/// event from the harness is stuck. A turn that keeps working keeps going — a
+/// real implementation turn reads, edits and runs tests for well over twenty
+/// minutes, and a wall-clock cap cut exactly those short.
+const TURN_IDLE: Duration = Duration::from_secs(20 * 60);
+/// The backstop for a turn that is busy but never ends.
+const TURN_MAX: Duration = Duration::from_secs(4 * 60 * 60);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 const PAUSE_QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
 const WATCHDOG_FAILURE_LIMIT: u8 = 3;
@@ -136,6 +143,8 @@ pub struct Supervisor {
     /// the harness reports is cumulative, so the turn's own share is the
     /// difference; `None` when the harness prices nothing.
     turn_start_cost_usd: Option<f64>,
+    /// When the harness last said anything, for the turn's idle timeout.
+    last_activity: Arc<std::sync::Mutex<tokio::time::Instant>>,
     consecutive_failures: u8,
     /// The signature of the last tool call this turn, and how many times it
     /// has arrived unchanged in a row. Surfaced as a signal; never a reason
@@ -178,6 +187,7 @@ impl Supervisor {
             active_turn: None,
             next_turn: 0,
             turn_start_cost_usd: None,
+            last_activity: Arc::new(std::sync::Mutex::new(tokio::time::Instant::now())),
             consecutive_failures: 0,
             last_tool_call: None,
             repeated_tool_calls: 0,
@@ -618,6 +628,7 @@ impl Supervisor {
     }
 
     async fn on_harness_event(&mut self, ev: HarnessEvent) -> bool {
+        *self.last_activity.lock().unwrap() = tokio::time::Instant::now();
         if self.is_fenced() {
             // A session that has ended is not merely quiet: work still
             // arriving for it is a late completion, and the log says so once
@@ -1014,11 +1025,13 @@ impl Supervisor {
 
         let handle = self.handle.clone();
         let done = self.self_tx.clone();
+        let activity = self.last_activity.clone();
+        *activity.lock().unwrap() = tokio::time::Instant::now();
         // The supervisor owns the result: a stalled harness cannot leave a
         // permanently active turn, and a late answer carries this turn id.
         tokio::spawn(async move {
             let (kind, mut payload, tokens) =
-                match tokio::time::timeout(TURN_TIMEOUT, handle.prompt(text)).await {
+                match until_silent(handle.prompt(text), &activity, TURN_IDLE, TURN_MAX).await {
                     Ok(Ok(turn)) => (
                         ek::TURN_END,
                         json!({
@@ -1242,6 +1255,30 @@ struct RetryNotice {
     attempt: Option<i64>,
 }
 
+/// Run a turn until it answers, goes `idle` without any harness activity, or
+/// passes `max` in all. `Err` is the timeout, whichever bound it was.
+async fn until_silent<F: std::future::Future>(
+    turn: F,
+    activity: &std::sync::Mutex<tokio::time::Instant>,
+    idle: Duration,
+    max: Duration,
+) -> Result<F::Output, ()> {
+    let started = tokio::time::Instant::now();
+    tokio::pin!(turn);
+    loop {
+        let quiet = activity.lock().unwrap().elapsed();
+        let wait = idle
+            .saturating_sub(quiet)
+            .min(max.saturating_sub(started.elapsed()));
+        if wait.is_zero() {
+            return Err(());
+        }
+        if let Ok(done) = tokio::time::timeout(wait, &mut turn).await {
+            return Ok(done);
+        }
+    }
+}
+
 /// Whether a harness's ask names a tool the node's own MCP server serves, as
 /// Claude Code spells it (`mcp__<server>__<tool>`, the server named `tracon`
 /// where the session's MCP descriptor is built).
@@ -1435,6 +1472,62 @@ mod tests {
         assert!(out.len() <= MAX_TOOL_OUTPUT);
         // It is still valid UTF-8 (the assertion is that we got here at all).
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_keeps_talking_outlasts_the_idle_bound() {
+        let activity = Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
+        let ticker = activity.clone();
+        let chatter = tokio::spawn(async move {
+            for _ in 0..8 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                *ticker.lock().unwrap() = tokio::time::Instant::now();
+            }
+        });
+        let turn = tokio::time::sleep(Duration::from_millis(400));
+        let done = until_silent(
+            turn,
+            &activity,
+            Duration::from_millis(150),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            done.is_ok(),
+            "a turn with steady activity must not time out"
+        );
+        chatter.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_silent_turn_and_an_endless_one_are_both_cut() {
+        let activity = std::sync::Mutex::new(tokio::time::Instant::now());
+        let silent = until_silent(
+            std::future::pending::<()>(),
+            &activity,
+            Duration::from_millis(100),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(silent.is_err());
+
+        let busy = Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
+        let ticker = busy.clone();
+        let chatter = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                *ticker.lock().unwrap() = tokio::time::Instant::now();
+            }
+        });
+        let endless = until_silent(
+            std::future::pending::<()>(),
+            &busy,
+            Duration::from_millis(100),
+            Duration::from_millis(300),
+        )
+        .await;
+        chatter.abort();
+        assert!(endless.is_err(), "the absolute bound still holds");
     }
 
     #[test]
