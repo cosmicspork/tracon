@@ -116,6 +116,25 @@ impl KubeSpec {
         }
     }
 
+    /// Make sure each mount's source exists on the PVC before the pod names it.
+    /// A mount whose source is already there — a staged file such as the
+    /// harness's config or orientation, or a directory from an earlier run —
+    /// is left alone: `create_dir_all` over a staged *file* fails "File
+    /// exists", and that failed every session on a Kubernetes node before its
+    /// harness started.
+    async fn ensure_mount_roots(&self, cmd: &RunnerCommand) -> Result<(), RunnerError> {
+        for mount in self.extra_mounts.iter().chain(cmd.mounts.iter()) {
+            let path = self.state_mount.join(self.sub_path(mount)?);
+            if tokio::fs::symlink_metadata(&path).await.is_ok() {
+                continue;
+            }
+            tokio::fs::create_dir_all(path)
+                .await
+                .map_err(|e| RunnerError::Other(format!("prepare PVC runtime volume: {e}")))?;
+        }
+        Ok(())
+    }
+
     /// The pod's PVC is the runtime-owned storage root. Each conceptual
     /// volume gets its own checked subdirectory under it; no host path is ever
     /// interpreted as a mount source.
@@ -434,13 +453,7 @@ impl KubeRunner {
     }
 
     async fn ensure_mount_roots(&self, cmd: &RunnerCommand) -> Result<(), RunnerError> {
-        for mount in self.spec.extra_mounts.iter().chain(cmd.mounts.iter()) {
-            let path = self.spec.state_mount.join(self.spec.sub_path(mount)?);
-            tokio::fs::create_dir_all(path)
-                .await
-                .map_err(|e| RunnerError::Other(format!("prepare PVC runtime volume: {e}")))?;
-        }
-        Ok(())
+        self.spec.ensure_mount_roots(cmd).await
     }
 }
 
@@ -639,6 +652,29 @@ mod tests {
             ],
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn a_staged_file_mount_is_left_as_it_is() {
+        let root = tempfile::tempdir().unwrap();
+        let mut spec = spec();
+        spec.state_mount = root.path().to_path_buf();
+        // What `import_volume` leaves behind: the scratch volume already holds
+        // the file this mount names.
+        let staged = root.path().join("tracon-scratch-repo-x");
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("gitconfig"), "[user]\n").unwrap();
+
+        spec.ensure_mount_roots(&cmd()).await.unwrap();
+
+        assert!(
+            staged.join("gitconfig").is_file(),
+            "the staged file survives"
+        );
+        assert!(
+            root.path().join("tracon-workspace-repo-x").is_dir(),
+            "a missing root is made"
+        );
     }
 
     #[test]
