@@ -474,6 +474,7 @@ async fn a_session_reads_the_brief_and_is_held_to_what_it_can_claim() {
             provenance: Some(provenance.into()),
             text: "they gave up and phoned the on-call".into(),
             refs,
+            links: vec![],
         }]),
     };
     let session = Author::Session("s1".into());

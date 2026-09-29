@@ -1866,22 +1866,15 @@ pub async fn get_review(
     // The criteria of the item this revision was pinned to, read against this
     // revision's own candidate — so what the checks say is what the operator is
     // looking at, and a verdict given here is about this attempt and no other.
-    // Null when the revision names no item, or the item has no brief.
-    let criteria = match revision.as_ref() {
-        Some(revision) => match revision.requirements_work_item_id.as_deref() {
-            Some(work_item_id) => match criteria_json(&s, work_item_id, Some(&revision.candidate_id))
-            {
-                Ok(view) => view,
-                // The item may have been deleted since it was pinned here. The
-                // revision still carries what it required; its criteria simply
-                // cannot be read any more, and that must not take the review
-                // screen down with it.
-                Err(_) => None,
-            },
-            None => None,
-        },
-        None => None,
-    };
+    // Null when the revision names no item, or the item has no brief. The item
+    // may also have been deleted since it was pinned here: the revision still
+    // carries what it required, its criteria simply cannot be read any more,
+    // and that must not take the review screen down with it.
+    let criteria = revision.as_ref().and_then(|revision| {
+        let item = revision.requirements_work_item_id.as_deref()?;
+        let candidate = Some(revision.candidate_id.as_str());
+        criteria_json(&s, item, candidate).ok().flatten()
+    });
     let legacy_check_events = s.store().legacy_check_runs_for_session(&r.session_id)?;
     // What publication has already done outside this node. An interrupted
     // attempt is visible here — including the `uncertain` one an operator has

@@ -410,9 +410,7 @@ impl Brief {
                         .starts_with([' ', '\t'])
                         .then(|| parse_link(trimmed))
                         .flatten()
-                        .filter(|_| {
-                            brief.section(field).is_some_and(|s| !s.entries.is_empty())
-                        });
+                        .filter(|_| brief.section(field).is_some_and(|s| !s.entries.is_empty()));
                     if let Some(link) = link {
                         if let Some(entry) = brief.section_mut(field).entries.last_mut() {
                             entry.links.push(link);
@@ -1240,12 +1238,16 @@ mod tests {
     fn what_points_at_a_line_is_written_under_it_and_read_back_there() {
         let mut brief = Brief::empty("Overnight alert triage");
         let mut criterion = entry(Provenance::Decided, "Triage in under two minutes", &[]);
-        criterion
-            .links
-            .push(link(Provenance::Decided, "check", "cargo test -p node triage"));
-        criterion
-            .links
-            .push(link(Provenance::Inferred, "scenario", "overnight-happy-path"));
+        criterion.links.push(link(
+            Provenance::Decided,
+            "check",
+            "cargo test -p node triage",
+        ));
+        criterion.links.push(link(
+            Provenance::Inferred,
+            "scenario",
+            "overnight-happy-path",
+        ));
         criterion.links.push(Link {
             provenance: Provenance::Observed,
             kind: "observation".into(),
@@ -1307,9 +1309,11 @@ mod tests {
         let mut criterion = entry(Provenance::Decided, "under two minutes", &[]);
         // `observation` is also how `Provenance::parse` spells `observed`. One
         // word is the kind, so this renders and reads back as what it is.
-        criterion
-            .links
-            .push(link(Provenance::Unattributed, "observation", "two leads gave up"));
+        criterion.links.push(link(
+            Provenance::Unattributed,
+            "observation",
+            "two leads gave up",
+        ));
         brief
             .section_mut(Field::SuccessCriteria)
             .entries

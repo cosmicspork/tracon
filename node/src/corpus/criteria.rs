@@ -420,8 +420,7 @@ fn resolve_link(
             // not what the candidate is, and a rerun that failed is.
             if let Some(run) = runs
                 .iter()
-                .filter(|r| r.command.as_deref() == Some(link.value.as_str()))
-                .next_back()
+                .rfind(|r| r.command.as_deref() == Some(link.value.as_str()))
             {
                 view.outcome = Some(checks::effective_outcome(run).to_string());
                 view.run_id = Some(run.id.clone());
@@ -797,7 +796,10 @@ pub fn judge(
         candidate_id: candidate_id.map(str::to_string),
         revision_id: revision_id.map(str::to_string),
         verdict,
-        note: note.map(str::trim).filter(|n| !n.is_empty()).map(String::from),
+        note: note
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(String::from),
         judged_ms: now_ms(),
     };
     store.criterion_judgement_record(&row)?;

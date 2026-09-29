@@ -459,7 +459,8 @@ async fn passing_your_own_checks_is_not_the_customer_agreeing() {
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(
-        v["judgement"]["candidate_id"], json!(candidate),
+        v["judgement"]["candidate_id"],
+        json!(candidate),
         "a verdict is about an attempt, and names which"
     );
     let triage = of(&v["criteria"], TRIAGE);
@@ -866,7 +867,8 @@ async fn the_review_screen_carries_the_criteria_of_the_item_it_was_pinned_to() {
     let (st, v) = call(&h.operator, "GET", "/api/reviews/rv1", None).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(
-        v["criteria"]["candidate"]["id"], json!(candidate),
+        v["criteria"]["candidate"]["id"],
+        json!(candidate),
         "read against this revision's own attempt, not the branch's newest"
     );
     assert_eq!(of(&v["criteria"], TRIAGE)["coverage"], "checks_pass");

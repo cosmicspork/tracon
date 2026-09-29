@@ -50,7 +50,7 @@ export function attention(coverage: Coverage): 'gap' | 'fail' | 'wait' | 'settle
 
 /** What one link says of itself: its kind, its standing, and its result or why it has none. */
 export function linkSays(link: CriterionLink): string {
-  const parts = [link.kind]
+  const parts: string[] = [link.kind]
   if (link.unresolved) parts.push(link.unresolved)
   else if (link.outcome) parts.push(link.outcome)
   else if (link.kind === 'observation') parts.push('context for a person, not a result')
