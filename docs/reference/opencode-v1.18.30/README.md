@@ -283,6 +283,32 @@ the session's placeholder token; `options.apiKey` stays for the v1 path. The val
 runner is still only the token that names its own session. The earlier proof passed
 because it drove the v1 message route, which the native UI uses and the node does not.
 
+### Finding 22 — the session runner's config loader ignores `OPENCODE_CONFIG` and the project-config switch
+
+Observed live on the operator's node (2026-09-28): an OpenCode session ran `bash` and `write`
+with no ask raised, no MCP server connected and no orientation read. The v2 config service
+(`packages/core/src/config.ts:136-213`) loads `$XDG_CONFIG_HOME/opencode/` and the
+`opencode.json[c]` / `.opencode/` it finds walking up from the location, and nothing else:
+`OPENCODE_CONFIG` is read only by v1 (`packages/opencode/src/config/config.ts:415`), and
+`OPENCODE_DISABLE_PROJECT_CONFIG` only by `instruction-context.ts`. So the v2 `build` agent
+evaluated its built-in `* allow`, and a worktree config's rules would be applied after the
+global ones. v2 does no `{env:…}` substitution either.
+
+What tracon does about it:
+
+- The config is staged into a directory mounted **read-only as a whole** and named by
+  `XDG_CONFIG_HOME`, beside the orientation as `AGENTS.md`, which both halves read from the
+  global config directory whatever else is off (`instruction-context.ts`). The v1 copy at
+  `OPENCODE_CONFIG` stays.
+- The handshake reads `GET /api/agent` (the list is empty until the location's agents load)
+  and refuses the launch unless the node's `* * ask` is the `build` agent's last catch-all and
+  nothing after it allows anything but a specific `external_directory` scratch path.
+- A workspace whose root carries `opencode.json`, `opencode.jsonc` or `.opencode` is refused
+  at session start, before the harness is launched.
+
+Verified against the pinned binary: with the staged directory, a `bash` call raises
+`permission.v2.asked` and does not run; with a worktree `* allow`, the launch is refused.
+
 ### Still the operator's (no credential for them exists on a test machine)
 
 - Hosted Anthropic and OpenAI API keys end to end.

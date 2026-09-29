@@ -655,7 +655,7 @@ async fn the_manifests_skill_is_listed_and_the_projects_are_not() {
     .unwrap();
 
     let adapter = OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION);
-    let state_dir = root.join(".opencode");
+    let state_dir = root.join("home/.opencode");
     std::fs::create_dir_all(state_dir.join("run")).unwrap();
     for (name, body) in adapter.scratch_files(&wiring_with(built)) {
         let staged = state_dir.join(&name);
@@ -672,7 +672,7 @@ async fn the_manifests_skill_is_listed_and_the_projects_are_not() {
         cwd_in_runner: work.to_string_lossy().into_owned(),
         model: "anthropic/claude-x".into(),
         container_name: container.clone(),
-        harness_home: root.to_string_lossy().into_owned(),
+        harness_home: root.join("home").to_string_lossy().into_owned(),
         mcp_servers: Vec::new(),
         tools: Vec::new(),
         env: Vec::new(),

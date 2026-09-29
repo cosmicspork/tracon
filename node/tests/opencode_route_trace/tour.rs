@@ -514,11 +514,13 @@ async fn launch(node: &Node, binary: &str, cursor: Arc<dyn DurableCursor>) -> Li
     std::fs::write(work.join("README.md"), "# tracon route trace\n").unwrap();
 
     let wiring = harness_wiring(&node.cfg, "127.0.0.1", &node.token, |_, _| true);
-    let state_dir = root.join(".opencode");
+    let state_dir = root.join("home/.opencode");
     std::fs::create_dir_all(state_dir.join("run")).unwrap();
     for (file, body) in OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION).scratch_files(&wiring)
     {
-        std::fs::write(state_dir.join(&file), body).unwrap();
+        let staged = state_dir.join(&file);
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::write(staged, body).unwrap();
     }
     let container = format!("tracon-ui-trace-{}", std::process::id());
     let runner = LiveRunner {
@@ -530,7 +532,7 @@ async fn launch(node: &Node, binary: &str, cursor: Arc<dyn DurableCursor>) -> Li
         cwd_in_runner: work.to_string_lossy().into_owned(),
         model: MODEL.into(),
         container_name: container.clone(),
-        harness_home: root.to_string_lossy().into_owned(),
+        harness_home: root.join("home").to_string_lossy().into_owned(),
         mcp_servers: Vec::new(),
         tools: Vec::new(),
         env: Vec::new(),

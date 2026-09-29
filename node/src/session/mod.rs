@@ -1145,6 +1145,17 @@ impl Manager {
         };
         let snapshot = crate::workspace::export(self.backend.as_ref(), &workspace).await?;
         crate::workspace::sanitize_git(&snapshot)?;
+        if let Some(entry) = adapter
+            .refused_workspace_entries()
+            .iter()
+            .find(|entry| std::fs::symlink_metadata(snapshot.join(entry)).is_ok())
+        {
+            anyhow::bail!(
+                "the workspace carries `{entry}`, which the {} harness would load as its own \
+                 configuration over the node's; remove it from the repository to run this work here",
+                adapter.id()
+            );
+        }
         self.store.update_session(
             id,
             SessionPatch {
@@ -1342,6 +1353,32 @@ impl Manager {
             return Ok(());
         }
 
+        // The harness reaches the node only through the gateway's forward, and
+        // only with this session's token. Tools are offered only if the
+        // channel has a credential bound to it; otherwise the harness is given
+        // no MCP server at all rather than one that refuses everything.
+        let mcp_servers = if self
+            .tools
+            .list_for(&spec.channel, &self.node_id, spec.phase)
+            .is_empty()
+        {
+            Vec::new()
+        } else {
+            vec![json!({
+                "type": "http",
+                "name": "tracon",
+                "url": format!(
+                    "http://{}:{}/mcp/{id}",
+                    self.backend.harness_host(),
+                    self.cfg.gateway.forward_port
+                ),
+                "headers": [{ "name": "Authorization", "value": format!("Bearer {token}") }],
+            })]
+        };
+        // Written into the harness's own configuration too: OpenCode reads
+        // its MCP servers from the config file, not from anything at launch.
+        wiring.mcp_servers = mcp_servers.clone();
+
         let scratch = materialize::scratch_for(
             id,
             &snapshot,
@@ -1371,29 +1408,6 @@ impl Manager {
                 ..Default::default()
             },
         )?;
-
-        // The harness reaches the node only through the gateway's forward, and
-        // only with this session's token. Tools are offered only if the
-        // channel has a credential bound to it; otherwise the harness is given
-        // no MCP server at all rather than one that refuses everything.
-        let mcp_servers = if self
-            .tools
-            .list_for(&spec.channel, &self.node_id, spec.phase)
-            .is_empty()
-        {
-            Vec::new()
-        } else {
-            vec![json!({
-                "type": "http",
-                "name": "tracon",
-                "url": format!(
-                    "http://{}:{}/mcp/{id}",
-                    self.backend.harness_host(),
-                    self.cfg.gateway.forward_port
-                ),
-                "headers": [{ "name": "Authorization", "value": format!("Bearer {token}") }],
-            })]
-        };
 
         let mut harness_env = wiring.env.clone();
         harness_env.extend([

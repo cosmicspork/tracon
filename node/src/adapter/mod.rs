@@ -453,6 +453,29 @@ pub trait HarnessAdapter: Send + Sync {
         Vec::new()
     }
 
+    /// Directories inside the state directory mounted read-only as a whole,
+    /// with whatever `scratch_files` stages under them. A file mounted alone
+    /// sits in a directory the harness may still write beside it; a harness
+    /// that loads every config file it finds in a directory needs the
+    /// directory sealed, not the file.
+    fn readonly_dirs(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Where, relative to the state directory, the harness reads the
+    /// orientation as its own standing instructions, if it reads one from a
+    /// file it finds rather than one it is handed at launch.
+    fn orientation_file(&self) -> Option<String> {
+        None
+    }
+
+    /// Entries at the root of a workspace this harness would load as its own
+    /// configuration. A session whose workspace carries one is refused: the
+    /// repository would be configuring the harness the node configures.
+    fn refused_workspace_entries(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError>;
     /// The models this node can run through the harness: probed from it where
     /// it keeps a catalogue, declared by the node where it does not. The

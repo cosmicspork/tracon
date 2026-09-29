@@ -977,10 +977,12 @@ mod live {
 
             let adapter = OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION);
             let wiring = wiring();
-            let scratch = root.join(".opencode");
+            let scratch = root.join("home/.opencode");
             std::fs::create_dir_all(scratch.join("run")).unwrap();
             for (file, body) in adapter.scratch_files(&wiring) {
-                std::fs::write(scratch.join(&file), body).unwrap();
+                let staged = scratch.join(&file);
+                std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+                std::fs::write(staged, body).unwrap();
             }
 
             let container = format!("tracon-opencode-pty-{}", std::process::id());
@@ -990,7 +992,7 @@ mod live {
             let spec = LaunchSpec {
                 cwd_in_runner: work.to_string_lossy().into_owned(),
                 container_name: container.clone(),
-                harness_home: root.to_string_lossy().into_owned(),
+                harness_home: root.join("home").to_string_lossy().into_owned(),
                 ..support::fake_opencode::spec()
             };
             let (handle, _events) = adapter

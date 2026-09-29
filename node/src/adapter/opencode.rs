@@ -132,6 +132,12 @@ impl OpenCodeAdapter {
 
     /// The read-only manifest, relative to the state directory.
     const CONFIG_FILE: &'static str = "opencode.json";
+    /// The runner's global config directory, sealed read-only. The session
+    /// runner (v2) loads its config and permission ruleset from here and from
+    /// nowhere `OPENCODE_CONFIG` names; that variable reaches the v1 half
+    /// only. Staged per session, so the ruleset the v2 agent evaluates is the
+    /// node's all-`ask` one rather than its built-in `* allow`.
+    const XDG_CONFIG_DIR: &'static str = "xdg";
     /// The pinned catalogue, relative to the state directory.
     const MODELS_FILE: &'static str = "models.json";
     /// The auth store the runner is given, relative to the state directory.
@@ -157,7 +163,10 @@ impl OpenCodeAdapter {
         [
             // Per-session, and none of them the shared state volume.
             ("HOME", format!("{run}/home")),
-            ("XDG_CONFIG_HOME", format!("{run}/config")),
+            (
+                "XDG_CONFIG_HOME",
+                format!("{state}/{}", Self::XDG_CONFIG_DIR),
+            ),
             ("XDG_DATA_HOME", format!("{run}/data")),
             ("XDG_CACHE_HOME", format!("{run}/cache")),
             ("XDG_STATE_HOME", format!("{run}/state")),
@@ -446,6 +455,51 @@ fn mcp_document(servers: &[Value]) -> Option<Value> {
     Some(Value::Object(map))
 }
 
+/// Whether the agent every turn runs as (`build`) asks before any tool runs.
+///
+/// v2 appends the config's rules after its built-in defaults and takes the
+/// last rule that matches, so the node's own `* * ask` must be there, and
+/// nothing after it may allow anything but a scratch directory the runtime
+/// itself grants (`external_directory` for its tool output and `/tmp`).
+fn gate_holds(agents: &Value) -> Result<(), String> {
+    let list = agents["data"].as_array().or_else(|| agents.as_array());
+    let build = list
+        .into_iter()
+        .flatten()
+        .find(|agent| agent["id"] == "build" || agent["name"] == "build")
+        .ok_or_else(|| {
+            let ids: Vec<String> = list
+                .into_iter()
+                .flatten()
+                .map(|agent| agent["id"].as_str().unwrap_or("?").to_string())
+                .collect();
+            format!("the harness has no build agent (it lists {ids:?})")
+        })?;
+    let rules = build["permissions"]
+        .as_array()
+        .ok_or("the build agent lists no permissions")?;
+    let field = |rule: &Value, key: &str| rule[key].as_str().unwrap_or_default().to_string();
+    let last_ask = rules
+        .iter()
+        .rposition(|rule| {
+            field(rule, "action") == "*"
+                && field(rule, "resource") == "*"
+                && field(rule, "effect") == "ask"
+        })
+        .ok_or("the node's `* ask` rule is not in the build agent's ruleset")?;
+    if let Some(rule) = rules[last_ask..].iter().find(|rule| {
+        field(rule, "effect") == "allow"
+            && !(field(rule, "action") == "external_directory" && field(rule, "resource") != "*")
+    }) {
+        return Err(format!(
+            "a later rule allows {} on {}",
+            field(rule, "action"),
+            field(rule, "resource")
+        ));
+    }
+    Ok(())
+}
+
 /// The pinned catalogue, in the shape `OPENCODE_MODELS_PATH` is read with: a
 /// map of provider id to a provider whose `models` are the ones this node
 /// declared. Nothing is fetched, so what the picker offers and what the
@@ -703,18 +757,20 @@ impl HarnessAdapter for OpenCodeAdapter {
     /// (OpenCode reads no base-URL environment variable — finding 8), the
     /// pinned catalogue, and an auth store with nothing in it.
     fn scratch_files(&self, wiring: &Wiring) -> Vec<(String, String)> {
-        let mut config = config_document(wiring, &[]);
+        let mut config = config_document(wiring, &wiring.mcp_servers);
         // The `lsp` and `formatter` halves come from the image's toolchain
         // profile, which is the runner's to own: it names absolute paths in
         // an image this file knows nothing about. The manifest records the
         // same profile's names in its digest, so what a session ran with is
         // readable from its row, but it does not render them a second time.
         crate::runner::toolchain::merge_into_config(&mut config);
+        let config = serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".into());
         let mut files = vec![
             (
-                Self::CONFIG_FILE.into(),
-                serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".into()),
+                format!("{}/opencode/opencode.json", Self::XDG_CONFIG_DIR),
+                config.clone(),
             ),
+            (Self::CONFIG_FILE.into(), config),
             (
                 Self::MODELS_FILE.into(),
                 serde_json::to_string_pretty(&catalogue_document(wiring))
@@ -731,6 +787,24 @@ impl HarnessAdapter for OpenCodeAdapter {
 
     fn scratch_dirs(&self) -> Vec<String> {
         vec![Self::RUN_DIR.to_string()]
+    }
+
+    fn readonly_dirs(&self) -> Vec<String> {
+        vec![Self::XDG_CONFIG_DIR.to_string()]
+    }
+
+    /// Both halves read `AGENTS.md` from the global config directory whatever
+    /// else is switched off (`core/src/instruction-context.ts`), and neither
+    /// substitutes `{env:…}` in the v2 config, so the file is the path.
+    fn orientation_file(&self) -> Option<String> {
+        Some(format!("{}/opencode/AGENTS.md", Self::XDG_CONFIG_DIR))
+    }
+
+    /// The v2 config loader reads these from the worktree after the global
+    /// config, so their rules win, and `OPENCODE_DISABLE_PROJECT_CONFIG` does
+    /// not stop it. One `* allow` there would switch the gate off.
+    fn refused_workspace_entries(&self) -> &'static [&'static str] {
+        &["opencode.json", "opencode.jsonc", ".opencode"]
     }
 
     async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
@@ -810,7 +884,13 @@ impl HarnessAdapter for OpenCodeAdapter {
             Ok(Ok(started)) => started,
             Ok(Err(e)) => {
                 let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container)).await;
-                return Err(e);
+                return Err(match e {
+                    AdapterError::Protocol(message) => AdapterError::Protocol(format!(
+                        "{message}; it last said: {}",
+                        last_log(&logs)
+                    )),
+                    other => other,
+                });
             }
             Err(_) => {
                 let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container)).await;
@@ -946,6 +1026,34 @@ async fn handshake(
                         "the harness opened {directory:?} rather than the workspace \
                          {:?}",
                         spec.cwd_in_runner
+                    )));
+                }
+                // The ruleset the session runner will actually evaluate, asked
+                // of it rather than assumed from the file this node wrote: the
+                // v2 agent is built from a config loader that ignores
+                // `OPENCODE_CONFIG`, and a worktree config would be applied
+                // after ours. A harness that would run a tool unasked is not
+                // one this node launches.
+                let query: String =
+                    url::form_urlencoded::byte_serialize(spec.cwd_in_runner.as_bytes()).collect();
+                // The agents load after the location opens, and until they
+                // have the list is empty rather than an error.
+                *stage.lock().unwrap() = "waiting for the harness's agents to load".into();
+                let agents = loop {
+                    let agents = client
+                        .get_json(&format!("/api/agent?directory={query}"))
+                        .await?;
+                    if agents["data"]
+                        .as_array()
+                        .is_some_and(|list| !list.is_empty())
+                    {
+                        break agents;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                };
+                if let Err(why) = gate_holds(&agents) {
+                    return Err(AdapterError::Protocol(format!(
+                        "the harness would not ask before running a tool: {why}"
                     )));
                 }
                 return Ok(Started {
@@ -1752,6 +1860,107 @@ mod tests {
         assert_eq!(config["share"], "disabled");
     }
 
+    /// Through the path a launch takes, not `config_document` alone: the file
+    /// OpenCode loads is the one `scratch_files` writes, and until it carried
+    /// the session's servers and orientation, every OpenCode session ran with
+    /// no tracon tools and no instructions while the test above passed.
+    #[test]
+    fn the_written_config_carries_the_session_s_tools_and_orientation() {
+        let adapter = OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION);
+        let mut wired = wiring();
+        wired.mcp_servers = vec![json!({
+            "type": "http",
+            "name": "tracon",
+            "url": "http://tracon-gw:7421/mcp/s1",
+            "headers": [{ "name": "Authorization", "value": "Bearer tok" }],
+        })];
+        let files = adapter.scratch_files(&wired);
+        let sealed = adapter.readonly_dirs();
+        // The copy the session runner reads: under the sealed directory that
+        // `XDG_CONFIG_HOME` names, not only where `OPENCODE_CONFIG` points.
+        let (rel, text) = files
+            .iter()
+            .find(|(name, _)| name.ends_with("/opencode/opencode.json"))
+            .expect("the global config file");
+        assert!(
+            sealed.iter().any(|dir| rel.starts_with(&format!("{dir}/"))),
+            "{rel}"
+        );
+        let env: std::collections::HashMap<String, String> =
+            OpenCodeAdapter::launch_env("/root", "pw")
+                .into_iter()
+                .collect();
+        assert_eq!(
+            format!("{}/opencode/opencode.json", env["XDG_CONFIG_HOME"]),
+            format!("/root/.opencode/{rel}")
+        );
+        let config: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            config["mcp"]["tracon"]["url"],
+            "http://tracon-gw:7421/mcp/s1"
+        );
+        assert_eq!(config["permission"]["*"], "ask");
+        // v2 does no `{env:…}` substitution, so nothing may rely on it here.
+        assert!(!text.contains("{env:TRACON_ORIENTATION}"), "{text}");
+
+        let orientation = adapter.orientation_file().expect("an orientation file");
+        assert_eq!(
+            format!("/root/.opencode/{orientation}"),
+            format!("{}/opencode/AGENTS.md", env["XDG_CONFIG_HOME"])
+        );
+        assert!(sealed
+            .iter()
+            .any(|dir| orientation.starts_with(&format!("{dir}/"))));
+    }
+
+    fn rules(list: &[(&str, &str, &str)]) -> Value {
+        json!({ "data": [{
+            "id": "build",
+            "permissions": list
+                .iter()
+                .map(|(a, r, e)| json!({ "action": a, "resource": r, "effect": e }))
+                .collect::<Vec<_>>(),
+        }]})
+    }
+
+    /// Shapes observed from the pinned binary's `GET /api/agent`.
+    #[test]
+    fn the_gate_holds_only_when_the_node_s_asks_are_last() {
+        let defaults = [
+            ("*", "*", "allow"),
+            ("external_directory", "*", "ask"),
+            ("external_directory", "/tmp/opencode/*", "allow"),
+            ("read", "*", "allow"),
+        ];
+        // What every OpenCode session ran with: the built-in `* allow` alone.
+        assert!(gate_holds(&rules(&defaults)).is_err());
+
+        let mut ours = defaults.to_vec();
+        ours.extend([
+            ("*", "*", "ask"),
+            ("bash", "*", "ask"),
+            ("edit", "*", "ask"),
+        ]);
+        ours.push((
+            "external_directory",
+            "/root/.opencode/run/data/opencode/tool-output/*",
+            "allow",
+        ));
+        assert!(gate_holds(&rules(&ours)).is_ok());
+
+        // A worktree config is applied after the global one.
+        for widened in [
+            ("*", "*", "allow"),
+            ("bash", "git *", "allow"),
+            ("external_directory", "*", "allow"),
+        ] {
+            let mut after = ours.clone();
+            after.push(widened);
+            assert!(gate_holds(&rules(&after)).is_err(), "{widened:?}");
+        }
+        assert!(gate_holds(&json!({ "data": [] })).is_err());
+    }
+
     /// An `oauth` record is what arms every bundled subscription plugin, and a
     /// `wellknown` record is what fetches a remote config and runs a command
     /// to mint a credential. The store this node writes has neither.
@@ -1789,7 +1998,7 @@ mod tests {
                 .into_iter()
                 .collect();
         assert_eq!(env["HOME"], "/root/.opencode/run/home");
-        assert_eq!(env["XDG_CONFIG_HOME"], "/root/.opencode/run/config");
+        assert_eq!(env["XDG_CONFIG_HOME"], "/root/.opencode/xdg");
         assert_eq!(env["XDG_DATA_HOME"], "/root/.opencode/run/data");
         assert_eq!(env["XDG_CACHE_HOME"], "/root/.opencode/run/cache");
         assert_eq!(env["XDG_STATE_HOME"], "/root/.opencode/run/state");
