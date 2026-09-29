@@ -15,8 +15,9 @@
 
 use std::{
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     task::{Context, Poll},
+    time::Duration,
 };
 
 use axum::{
@@ -36,6 +37,25 @@ use crate::{
     http::api::AppState,
     store::{now_ms, UsageRow},
 };
+
+/// How long an upstream model stream may go quiet. A reasoning model can think
+/// for minutes before its first token, so this bounds silence, never the
+/// whole response: a total timeout cuts every long answer mid-stream.
+const UPSTREAM_IDLE: Duration = Duration::from_secs(600);
+const UPSTREAM_CONNECT: Duration = Duration::from_secs(30);
+
+fn upstream_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| streaming_client(UPSTREAM_CONNECT, UPSTREAM_IDLE))
+}
+
+fn streaming_client(connect: Duration, idle: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(connect)
+        .read_timeout(idle)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
 
 /// The beta flag Anthropic's subscription tokens are issued under. Verified
 /// against a live token on 2026-09-12: necessary but not sufficient — see
@@ -546,7 +566,7 @@ pub async fn handle(
         upstream_tail(&p.shape, &rest),
         query
     );
-    let mut req = s.tools.http.request(method.clone(), &target);
+    let mut req = upstream_client().request(method.clone(), &target);
     for (k, v) in headers.iter() {
         if matches!(
             k.as_str(),
@@ -921,6 +941,46 @@ impl Drop for Counted {
 mod tests {
     use super::*;
     use crate::config::SHAPE_OPENAI;
+
+    /// A raw chunked HTTP server that writes `chunks` pieces `gap` apart.
+    async fn trickle(chunks: usize, gap: Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n")
+                .await;
+            for _ in 0..chunks {
+                tokio::time::sleep(gap).await;
+                let _ = sock.write_all(b"2\r\nok\r\n").await;
+            }
+            let _ = sock.write_all(b"0\r\n\r\n").await;
+        });
+        format!("http://{addr}/")
+    }
+
+    #[tokio::test]
+    async fn a_model_stream_may_outlast_the_idle_bound_while_it_keeps_talking() {
+        let url = trickle(5, Duration::from_millis(300)).await;
+        let client = streaming_client(Duration::from_secs(5), Duration::from_secs(1));
+        let body = client.get(url).send().await.unwrap().bytes().await.unwrap();
+        assert_eq!(&body[..], b"okokokokok");
+    }
+
+    #[tokio::test]
+    async fn a_silent_model_stream_is_still_cut() {
+        let url = trickle(2, Duration::from_millis(1500)).await;
+        let client = streaming_client(Duration::from_secs(5), Duration::from_millis(500));
+        let result = match client.get(url).send().await {
+            Ok(response) => response.bytes().await.map(|_| ()),
+            Err(e) => Err(e),
+        };
+        assert!(result.unwrap_err().is_timeout());
+    }
 
     fn system_of(body: &[u8]) -> Value {
         serde_json::from_slice::<Value>(body).unwrap()["system"].clone()
