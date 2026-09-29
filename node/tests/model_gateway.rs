@@ -191,6 +191,7 @@ async fn call(
         .header("x-api-key", key)
         .header("authorization", format!("Bearer {key}"))
         .header("anthropic-beta", "effort-2025-11-24")
+        .header("accept-encoding", "gzip, deflate, br")
         .body(Body::from(body.to_string()))
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
@@ -244,6 +245,8 @@ async fn the_placeholder_never_reaches_the_provider_and_the_credential_does() {
         "placeholder bearer stripped"
     );
     assert_eq!(header(up, "anthropic-beta"), Some("effort-2025-11-24"));
+    // Asked uncompressed, so the node can read what comes back.
+    assert_eq!(header(up, "accept-encoding"), Some("identity"));
     assert!(
         !format!("{up:?}{up_body}").contains(&token),
         "token leaked upstream"
