@@ -442,6 +442,10 @@ fn mcp_document(servers: &[Value]) -> Option<Value> {
     Some(Value::Object(map))
 }
 
+/// What OpenCode would write as the config directory's `.gitignore`.
+const SEALED_GITIGNORE: &str =
+    "node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore";
+
 /// Whether the agent every turn runs as (`build`) asks before any tool runs.
 ///
 /// v2 appends the config's rules after its built-in defaults and takes the
@@ -756,6 +760,15 @@ impl HarnessAdapter for OpenCodeAdapter {
             (
                 format!("{}/opencode/opencode.json", Self::XDG_CONFIG_DIR),
                 config.clone(),
+            ),
+            // v1 writes this into every config directory it loads unless one
+            // is there, and tolerates only `EACCES` when it cannot: on the
+            // sealed mount the write fails `EROFS` and every request 500s
+            // (`packages/opencode/src/config/config.ts`, `ensureGitignore`).
+            // Staged with upstream's own contents so there is nothing to write.
+            (
+                format!("{}/opencode/.gitignore", Self::XDG_CONFIG_DIR),
+                SEALED_GITIGNORE.into(),
             ),
             (Self::CONFIG_FILE.into(), config),
             (
@@ -1904,6 +1917,10 @@ mod tests {
         assert!(sealed
             .iter()
             .any(|dir| orientation.starts_with(&format!("{dir}/"))));
+        // Present, so the read-only mount is never written to.
+        assert!(files
+            .iter()
+            .any(|(rel, body)| rel == "xdg/opencode/.gitignore" && body == SEALED_GITIGNORE));
     }
 
     fn rules(list: &[(&str, &str, &str)]) -> Value {
