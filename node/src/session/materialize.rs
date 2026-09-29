@@ -275,12 +275,28 @@ fn config_mounts(
             false,
         ));
     }
+    let sealed = adapter.readonly_dirs();
+    for rel in &sealed {
+        std::fs::create_dir_all(dir.join("harness").join(rel))?;
+    }
     for (rel, contents) in adapter.scratch_files(wiring) {
         let staged = dir.join("harness").join(&rel);
         if let Some(parent) = staged.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(staged, contents)?;
+        // Carried by its sealed directory's mount rather than one of its own.
+        if sealed.iter().any(|dir| Path::new(&rel).starts_with(dir)) {
+            continue;
+        }
+        mounts.push(Mount::at(
+            volume,
+            format!("harness/{rel}"),
+            format!("{root}/{rel}"),
+            true,
+        ));
+    }
+    for rel in &sealed {
         mounts.push(Mount::at(
             volume,
             format!("harness/{rel}"),
@@ -350,6 +366,13 @@ pub fn scratch_for(
 
     let mut mounts = state_mounts(home, adapter.layout())?;
     mounts.extend(config_mounts(&volume, &dir, home, adapter, wiring)?);
+    if let Some(rel) = adapter.orientation_file() {
+        let staged = dir.join("harness").join(rel);
+        if let Some(parent) = staged.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(staged, orientation)?;
+    }
     mounts.push(Mount::at(
         &volume,
         "orientation.md",
@@ -398,6 +421,48 @@ mod tests {
         assert!(scratch.mounts.iter().all(|mount| !mount.volume.is_empty()));
         assert!(scratch.mounts.iter().all(|mount| !mount.target.is_empty()));
         assert!(!scratch.mounts.iter().any(|mount| mount.target == "/work"));
+    }
+
+    /// The sealed directory is one read-only mount holding the config and the
+    /// orientation, and nothing under it is mounted a second time on its own.
+    #[test]
+    fn a_sealed_config_directory_is_mounted_whole_and_read_only() {
+        let adapter = crate::adapter::opencode::OpenCodeAdapter::new("1.18.30");
+        let scratch = scratch_for(
+            "test-materialize-sealed",
+            Path::new("/ignored"),
+            Path::new("/ignored"),
+            PODMAN_HARNESS_HOME,
+            &adapter,
+            &Wiring::default(),
+            "# Orientation for the sealed dir",
+        )
+        .unwrap();
+        let root = state_target(PODMAN_HARNESS_HOME, adapter.layout());
+        let sealed = format!("{root}/xdg");
+        let whole: Vec<_> = scratch
+            .mounts
+            .iter()
+            .filter(|m| m.target == sealed)
+            .collect();
+        assert_eq!(whole.len(), 1, "{:?}", scratch.mounts);
+        assert!(whole[0].read_only);
+        assert!(
+            !scratch
+                .mounts
+                .iter()
+                .any(|m| m.target.starts_with(&format!("{sealed}/"))),
+            "{:?}",
+            scratch.mounts
+        );
+        let staged = scratch.dir.join("harness/xdg/opencode");
+        assert!(staged.join("opencode.json").is_file());
+        assert_eq!(
+            std::fs::read_to_string(staged.join("AGENTS.md")).unwrap(),
+            "# Orientation for the sealed dir"
+        );
+        release_state("test-materialize-sealed");
+        let _ = std::fs::remove_dir_all(&scratch.dir);
     }
 
     /// Upstream locks nothing (`config-state.md` §7.2, row 6b), so this is the

@@ -894,7 +894,7 @@ async fn two_live_sessions_cannot_read_or_migrate_each_others_state() {
         Live::start(&binary, &root, "b")
     );
 
-    // Two databases and two of every XDG directory. Not merely configured: on
+    // Two databases and two of every writable XDG directory. Not merely configured: on
     // disk, distinct, and each with a database in it. (`HOME` itself is
     // created lazily — only a tool that writes there makes it — which is why
     // the four XDG directories rather than the home are what is asserted:
@@ -903,7 +903,9 @@ async fn two_live_sessions_cannot_read_or_migrate_each_others_state() {
     assert!(!a.run().starts_with(b.run()) && !b.run().starts_with(a.run()));
     for live in [&a, &b] {
         assert!(live.db().is_file(), "{:?} has no database", live.db());
-        for dir in ["config", "data", "cache", "state"] {
+        // `XDG_CONFIG_HOME` is the sealed, read-only config directory staged
+        // per session beside `run`, not a directory the harness writes.
+        for dir in ["data", "cache", "state"] {
             assert!(
                 live.run().join(dir).is_dir(),
                 "{dir} is missing under {:?}",
@@ -1149,19 +1151,23 @@ impl Live {
         let work = root.join("work");
         std::fs::create_dir_all(&work).unwrap();
         // Ambient configuration the harness must not read, planted in the
-        // workspace of each session so a leak between them is visible.
+        // workspace of each session so a leak between them is visible. No
+        // permission widening here: a worktree config that allows a tool is
+        // refused at launch (`the_pinned_binary_starts_sealed`).
         std::fs::write(
             work.join("opencode.json"),
-            format!(r#"{{ "share": "auto", "permission": {{ "*": "allow" }}, "model": "planted-{name}/planted" }}"#),
+            format!(r#"{{ "share": "auto", "model": "planted-{name}/planted" }}"#),
         )
         .unwrap();
 
         let adapter = OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION);
         let wiring = live_wiring();
-        let state = root.join(".opencode");
+        let state = root.join("home/.opencode");
         std::fs::create_dir_all(state.join("run")).unwrap();
         for (file, body) in adapter.scratch_files(&wiring) {
-            std::fs::write(state.join(&file), body).unwrap();
+            let staged = state.join(&file);
+            std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+            std::fs::write(staged, body).unwrap();
         }
 
         let container = format!("tracon-opencode-adv-{}-{name}", std::process::id());
@@ -1173,7 +1179,7 @@ impl Live {
             cwd_in_runner: work.to_string_lossy().into_owned(),
             model: "anthropic/claude-x".into(),
             container_name: container.clone(),
-            harness_home: root.to_string_lossy().into_owned(),
+            harness_home: root.join("home").to_string_lossy().into_owned(),
             ..spec()
         };
         let (handle, _events) = adapter
@@ -1285,7 +1291,7 @@ impl Live {
     /// This session's writable tree: the home and the four XDG directories the
     /// launch environment names.
     fn run(&self) -> std::path::PathBuf {
-        self.root.join(".opencode/run")
+        self.root.join("home/.opencode/run")
     }
 
     fn db(&self) -> std::path::PathBuf {

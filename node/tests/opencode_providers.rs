@@ -1138,11 +1138,13 @@ async fn launch(node: &Node, name: &str, model: &str, env: Vec<(String, String)>
         merged.extend(env);
         merged
     };
-    let state_dir = root.join(".opencode");
+    let state_dir = root.join("home/.opencode");
     std::fs::create_dir_all(state_dir.join("run")).unwrap();
     for (file, body) in OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION).scratch_files(&wiring)
     {
-        std::fs::write(state_dir.join(&file), body).unwrap();
+        let staged = state_dir.join(&file);
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::write(staged, body).unwrap();
     }
     let container = format!("tracon-{name}-{}", std::process::id());
     let runner = LiveRunner {
@@ -1154,7 +1156,7 @@ async fn launch(node: &Node, name: &str, model: &str, env: Vec<(String, String)>
         cwd_in_runner: work.to_string_lossy().into_owned(),
         model: model.into(),
         container_name: container.clone(),
-        harness_home: root.to_string_lossy().into_owned(),
+        harness_home: root.join("home").to_string_lossy().into_owned(),
         mcp_servers: Vec::new(),
         tools: Vec::new(),
         env,

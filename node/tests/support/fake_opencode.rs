@@ -353,6 +353,25 @@ pub fn app(fake: Fake) -> Router {
                 Json(json!({ "healthy": true, "version": fake.version })).into_response()
             }),
         )
+        // The pinned binary's v2 agent list, gated the way the node's config
+        // leaves it: its defaults, then the node's asks last.
+        .route(
+            "/api/agent",
+            get(|State(fake): State<Fake>, headers: HeaderMap| async move {
+                if let Some(refused) = guard(&fake, &headers).await {
+                    return refused;
+                }
+                Json(json!({ "data": [{
+                    "id": "build",
+                    "permissions": [
+                        { "action": "*", "resource": "*", "effect": "allow" },
+                        { "action": "*", "resource": "*", "effect": "ask" },
+                        { "action": "bash", "resource": "*", "effect": "ask" },
+                    ],
+                }]}))
+                .into_response()
+            }),
+        )
         .route(
             "/config/providers",
             get(|State(fake): State<Fake>| async move {

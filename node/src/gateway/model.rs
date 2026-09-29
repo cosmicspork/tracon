@@ -155,6 +155,10 @@ pub struct Wiring {
     /// default and renders nothing, which is what a probe and every harness
     /// but OpenCode get.
     pub manifest: crate::manifest::LaunchManifest,
+    /// The node's MCP server for this session, as `LaunchSpec::mcp_servers`
+    /// names it. A harness that reads its servers from its configuration file
+    /// (OpenCode) renders them here; one that takes them at launch ignores it.
+    pub mcp_servers: Vec<serde_json::Value>,
 }
 
 /// The base URL for one provider as the harness sees it.
@@ -229,6 +233,7 @@ pub fn harness_wiring(
         providers: wired,
         token: token.to_string(),
         manifest: crate::manifest::LaunchManifest::default(),
+        mcp_servers: Vec::new(),
     }
 }
 
