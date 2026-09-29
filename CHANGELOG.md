@@ -32,6 +32,22 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.24.0](https://github.com/cosmicspork/tracon/compare/v0.23.1...v0.24.0) (2026-09-29)
+
+
+### Features
+
+* **criteria:** bind acceptance criteria to checks, scenarios, observations and verdicts ([#290](https://github.com/cosmicspork/tracon/issues/290)) ([db81c6a](https://github.com/cosmicspork/tracon/commit/db81c6a9b5d07cddf9874be4476e1ad4bd0ad571))
+* **mcp:** read and answer forge review threads ([#298](https://github.com/cosmicspork/tracon/issues/298)) ([9dc2a61](https://github.com/cosmicspork/tracon/commit/9dc2a61750db7a3d62d5d25ec96bcbec7c1dc396))
+* **review:** update an existing pull or merge request from the review gate ([#297](https://github.com/cosmicspork/tracon/issues/297)) ([812acbb](https://github.com/cosmicspork/tracon/commit/812acbb088958890927f9e47271d89dec98819d3))
+
+
+### Bug Fixes
+
+* **kubernetes:** let the node's pod reach an OpenCode harness, and nothing else ([#294](https://github.com/cosmicspork/tracon/issues/294)) ([99767f7](https://github.com/cosmicspork/tracon/commit/99767f7141d4362970b43653260fde6df5a756d7))
+* **mcp:** route job_play and pipeline_list_by_sha to their handler ([#296](https://github.com/cosmicspork/tracon/issues/296)) ([a352f2d](https://github.com/cosmicspork/tracon/commit/a352f2d4f8a716c0fd0861368217d9a081ac0339))
+* **spa:** make the desktop Check for updates button actually check ([#293](https://github.com/cosmicspork/tracon/issues/293)) ([ec5f68a](https://github.com/cosmicspork/tracon/commit/ec5f68a33e389514a9b1f5d9afbad3896ff4463c))
+
 ## [0.23.1](https://github.com/cosmicspork/tracon/compare/v0.23.0...v0.23.1) (2026-09-29)
 
 
