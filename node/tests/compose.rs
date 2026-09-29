@@ -182,6 +182,32 @@ async fn a_refused_session_keeps_the_item_and_says_where_it_went() {
 }
 
 #[tokio::test]
+async fn composing_straight_to_execute_is_refused_before_anything_is_written() {
+    state::isolate();
+    let h = Harness::new(Some(r#"[{"value":"m/a","name":"A"}]"#)).await;
+    let (st, body) = h
+        .call(
+            "POST",
+            "/api/compose",
+            Some(json!({
+                "channel": "personal",
+                "title": "Cannot have a plan yet",
+                "repo_path": "/nonexistent/repo",
+                "phase": "execute",
+            })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body.get("work_item_id").is_none(), "{body}");
+    let (st, items) = h.call("GET", "/api/work?channel=personal", None).await;
+    assert_eq!(st, StatusCode::OK, "{items}");
+    assert!(
+        !items.to_string().contains("Cannot have a plan yet"),
+        "{items}"
+    );
+}
+
+#[tokio::test]
 async fn a_prompt_takes_the_channel_s_bound_model() {
     state::isolate();
     let h = Harness::new(Some(r#"[{"value":"m/a","name":"A"}]"#)).await;

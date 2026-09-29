@@ -1278,6 +1278,16 @@ pub async fn compose(State(s): State<AppState>, Json(c): Json<ComposeBody>) -> R
 }
 
 async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
+    // A new item has no plan, and execute requires one, so this could only
+    // ever write an item and then refuse the session. Refused before the write.
+    if c.phase == Phase::Execute {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "compose starts a new item, which has no plan yet: compose with phase plan, \
+             then run execute on the item"
+                .into(),
+        ));
+    }
     let item = crate::corpus::work::create(
         s.store(),
         s.manager.bus(),
