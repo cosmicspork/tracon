@@ -124,6 +124,21 @@ impl ClaudeAdapter {
     }
 }
 
+/// The model as Claude Code names it. The node's picker spells models
+/// `provider/id` (that is how OpenCode takes them), and Claude Code passes its
+/// `--model` to Anthropic verbatim, which answers 404 for `anthropic/…`. A
+/// model another provider serves is refused rather than sent where it cannot
+/// run.
+fn claude_model(model: &str) -> Result<&str, AdapterError> {
+    match model.split_once('/') {
+        Some(("anthropic", id)) => Ok(id),
+        Some((provider, _)) => Err(AdapterError::Protocol(format!(
+            "the Claude Code harness runs Anthropic models only; {model} is served by {provider}"
+        ))),
+        None => Ok(model),
+    }
+}
+
 /// The node builds one neutral MCP descriptor; Claude Code wants a map keyed
 /// by server name, with headers as an object rather than a list.
 fn mcp_config(servers: &[Value]) -> Value {
@@ -687,6 +702,8 @@ impl HarnessAdapter for ClaudeAdapter {
         // it has already written and the harness's own id are the same string
         // even if the handshake fails.
         let session_id = uuid::Uuid::now_v7().to_string();
+        let mut spec = spec;
+        spec.model = claude_model(&spec.model)?.to_string();
         let Spawned {
             stdin,
             stdout,
@@ -738,6 +755,20 @@ impl HarnessAdapter for ClaudeAdapter {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_model_reaches_claude_code_as_anthropic_names_it() {
+        assert_eq!(
+            claude_model("anthropic/claude-opus-5").unwrap(),
+            "claude-opus-5"
+        );
+        assert_eq!(claude_model("claude-opus-5").unwrap(), "claude-opus-5");
+        assert_eq!(claude_model("sonnet").unwrap(), "sonnet");
+        let refused = claude_model("openai-codex/gpt-5.5")
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("Anthropic models only"), "{refused}");
+    }
     use super::*;
 
     fn spec() -> LaunchSpec {
