@@ -22,6 +22,40 @@ use crate::runner::{Runner, RunnerCommand};
 const PROBE: &str = "tracon-boundary-probe";
 pub const HARNESS_POLICY: &str = "tracon-harness";
 
+/// Whether the harness policy's ingress admits the node's pod and nothing
+/// else. The OpenCode adapter drives its harness over HTTP on a port the node
+/// picks per launch, so the node pod must reach the harness pod — the one
+/// direction the runner documents — while any other peer (another pod, a
+/// namespace, an address block, or a rule with no `from` at all, which admits
+/// everyone) is refused. No rules at all is the tightest shape and still holds.
+fn ingress_only_from_node(
+    rules: &[k8s_openapi::api::networking::v1::NetworkPolicyIngressRule],
+) -> Result<(), String> {
+    for rule in rules {
+        let peers = rule.from.as_deref().unwrap_or_default();
+        if peers.is_empty() {
+            return Err("an ingress rule admits every peer".into());
+        }
+        for peer in peers {
+            if peer.ip_block.is_some() || peer.namespace_selector.is_some() {
+                return Err(
+                    "ingress reaches beyond the node's pod (ipBlock or namespaceSelector)".into(),
+                );
+            }
+            let from_node = peer
+                .pod_selector
+                .as_ref()
+                .and_then(|s| s.match_labels.as_ref())
+                .and_then(|l| l.get(ROLE_LABEL))
+                .is_some_and(|v| v == "node");
+            if !from_node {
+                return Err("an ingress peer is not the node pod".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The verbs the node needs, and exactly those: create/attach/delete its
 /// harness pods, read their state and logs, and read the policy it verifies.
 const RIGHTS: &[(&str, &str, &str, &str)] = &[
@@ -367,16 +401,8 @@ async fn check_network(
             "policy must govern both Ingress and Egress",
         );
     }
-    if pspec
-        .ingress
-        .as_ref()
-        .map(|i| !i.is_empty())
-        .unwrap_or(false)
-    {
-        return CheckResult::fail(
-            CheckId::NetworkIsolated,
-            "policy admits ingress to the harness",
-        );
+    if let Err(why) = ingress_only_from_node(pspec.ingress.as_deref().unwrap_or_default()) {
+        return CheckResult::fail(CheckId::NetworkIsolated, why);
     }
     let egress = pspec.egress.unwrap_or_default();
     if egress.is_empty() {
@@ -503,6 +529,52 @@ mod tests {
             "{}",
             check_no_runtime_socket(&p).detail
         );
+    }
+
+    fn ingress(
+        peers: Option<Vec<k8s_openapi::api::networking::v1::NetworkPolicyPeer>>,
+    ) -> k8s_openapi::api::networking::v1::NetworkPolicyIngressRule {
+        k8s_openapi::api::networking::v1::NetworkPolicyIngressRule {
+            from: peers,
+            ports: None,
+        }
+    }
+
+    fn pods(role: &str) -> k8s_openapi::api::networking::v1::NetworkPolicyPeer {
+        k8s_openapi::api::networking::v1::NetworkPolicyPeer {
+            pod_selector: Some(
+                k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                    match_labels: Some([(ROLE_LABEL.to_string(), role.to_string())].into()),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        }
+    }
+
+    /// The node must reach an OpenCode harness's server; nothing else may.
+    #[test]
+    fn harness_ingress_admits_the_node_pod_and_nothing_else() {
+        assert!(ingress_only_from_node(&[]).is_ok());
+        assert!(ingress_only_from_node(&[ingress(Some(vec![pods("node")]))]).is_ok());
+
+        assert!(
+            ingress_only_from_node(&[ingress(None)]).is_err(),
+            "no from admits all"
+        );
+        assert!(ingress_only_from_node(&[ingress(Some(vec![]))]).is_err());
+        assert!(ingress_only_from_node(&[ingress(Some(vec![pods("harness")]))]).is_err());
+        let mut wide = pods("node");
+        wide.namespace_selector = Some(Default::default());
+        assert!(ingress_only_from_node(&[ingress(Some(vec![wide]))]).is_err());
+        let block = k8s_openapi::api::networking::v1::NetworkPolicyPeer {
+            ip_block: Some(k8s_openapi::api::networking::v1::IPBlock {
+                cidr: "0.0.0.0/0".into(),
+                except: None,
+            }),
+            ..Default::default()
+        };
+        assert!(ingress_only_from_node(&[ingress(Some(vec![block]))]).is_err());
     }
 
     #[test]
