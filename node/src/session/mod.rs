@@ -1151,8 +1151,11 @@ impl Manager {
             .find(|entry| std::fs::symlink_metadata(snapshot.join(entry)).is_ok())
         {
             anyhow::bail!(
-                "the workspace carries `{entry}`, which the {} harness would load as its own \
-                 configuration over the node's; remove it from the repository to run this work here",
+                "the workspace carries `{entry}` at its root. The {} harness would load it as its \
+                 own configuration after the node's, where it could allow tools without asking or \
+                 start MCP servers and plugins, so the session was not started. Remove or rename \
+                 it on the branch this work starts from, or run this repository under the Claude \
+                 Code harness (`[harness] id = \"claude\"`), which does not read it.",
                 adapter.id()
             );
         }

@@ -173,17 +173,6 @@ impl OpenCodeAdapter {
             ("OPENCODE_DB", format!("{run}/state/opencode.db")),
             // The one file it may read, mounted read-only outside the worktree.
             ("OPENCODE_CONFIG", format!("{state}/{}", Self::CONFIG_FILE)),
-            // Where the launch manifest's skills are mounted. The config file
-            // is written before the node knows this path, so it names the
-            // variable instead and `{env:…}` substitution resolves it when
-            // the file is loaded (`config-state.md` §1.5). Set even when the
-            // manifest has no skills: the directory then does not exist and
-            // OpenCode logs a missing skill path, which is the honest state
-            // and not an error.
-            (
-                crate::manifest::SKILL_ROOT_ENV,
-                format!("{state}/{}", crate::manifest::SKILL_DIR),
-            ),
             // The catalogue is declared, not fetched. Both are needed: the
             // path alone leaves an hourly refresh running, the flag alone
             // falls back to a build-time snapshot this node did not choose.
@@ -368,13 +357,11 @@ fn config_document(wiring: &Wiring, mcp_servers: &[Value]) -> Value {
 ///   session says which toolchain it ran with, but rendering them twice would
 ///   be two sources for one fact.
 fn manifest_document(manifest: &crate::manifest::LaunchManifest) -> Vec<(&'static str, Value)> {
+    // No `skills` key: the skills are staged in the sealed global config
+    // directory, where both halves look for `skills/**/SKILL.md` on their own
+    // (v1 `skill/index.ts`, v2 `config/plugin/skill.ts`). A `skills.paths`
+    // entry would need `{env:…}` substitution, which the v2 loader never does.
     let mut keys: Vec<(&'static str, Value)> = Vec::new();
-    if !manifest.skills.is_empty() {
-        keys.push((
-            "skills",
-            json!({ "paths": [format!("{{env:{}}}", crate::manifest::SKILL_ROOT_ENV)] }),
-        ));
-    }
     if !manifest.plugins.is_empty() {
         keys.push(("plugin", json!(manifest.plugins)));
     }
@@ -778,10 +765,16 @@ impl HarnessAdapter for OpenCodeAdapter {
             ),
             (Self::AUTH_FILE.into(), empty_auth_store()),
         ];
-        // The manifest's skill packages, staged beside the config and mounted
-        // read-only like it — one directory per skill under a root the
-        // worktree cannot reach and OpenCode does not discover on its own.
-        files.extend(wiring.manifest.skill_files());
+        // The manifest's skill packages, in the sealed global config
+        // directory: read-only, out of the worktree's reach, and where both
+        // halves discover skills without a path in the config.
+        files.extend(
+            wiring
+                .manifest
+                .skill_files()
+                .into_iter()
+                .map(|(rel, text)| (format!("{}/opencode/{rel}", Self::XDG_CONFIG_DIR), text)),
+        );
         files
     }
 
@@ -2022,17 +2015,9 @@ mod tests {
         assert_eq!(env["OPENCODE_SERVER_USERNAME"], "opencode");
         // Per-session state is never the volume every session shares.
         assert!(!env["HOME"].ends_with("/.opencode"));
-        // The launch manifest's skill root: absolute, beside the read-only
-        // config rather than inside the worktree, and outside every directory
-        // OpenCode discovers on its own. This is the value `{env:…}` in the
-        // config resolves to — a relative `skills.paths` entry would be
-        // resolved against the worktree, which is the one place a session can
-        // write.
-        assert_eq!(
-            env[crate::manifest::SKILL_ROOT_ENV],
-            "/root/.opencode/skills"
-        );
-        assert!(!env[crate::manifest::SKILL_ROOT_ENV].starts_with(&env["HOME"]));
+        // Skills are found in the sealed config directory, not through a
+        // variable the v2 loader would never substitute.
+        assert!(!env.contains_key("TRACON_SKILL_ROOT"));
     }
 
     /// The manifest renders into the keys OpenCode reads, and the ones it
@@ -2070,11 +2055,15 @@ mod tests {
         let mut wired = wiring();
         wired.manifest = manifest;
         let document = config_document(&wired, &[]);
-        assert_eq!(
-            document["skills"]["paths"],
-            json!(["{env:TRACON_SKILL_ROOT}"])
+        assert!(document["skills"].is_null(), "{document}");
+        let staged = OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION).scratch_files(&wired);
+        assert!(
+            staged
+                .iter()
+                .any(|(rel, _)| rel == "xdg/opencode/skills/notes/SKILL.md"),
+            "{:?}",
+            staged.iter().map(|(rel, _)| rel).collect::<Vec<_>>()
         );
-        assert!(document["skills"]["urls"].is_null(), "{document}");
         assert_eq!(document["plugin"], json!(baked));
         // `lsp` and `formatter` are the toolchain profile's, merged in by
         // `scratch_files`; the manifest renders neither, so one fact has one

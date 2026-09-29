@@ -42,20 +42,10 @@ use sha2::{Digest, Sha256};
 
 pub use skill::{parse_source, read_package, SkillSource};
 
-/// Where the rendered skill packages are mounted, relative to the harness's
-/// state directory — outside the worktree, and outside every directory
-/// OpenCode discovers on its own.
+/// The directory the rendered skill packages sit under, relative to wherever
+/// the adapter stages them: one `<name>/` per skill, the layout OpenCode
+/// discovers as `skills/**/SKILL.md` in its global config directory.
 pub const SKILL_DIR: &str = "skills";
-
-/// The variable the rendered config resolves the skill root through.
-///
-/// The config file is written before the node knows the harness's home, and
-/// `skills.paths` entries are resolved against the *worktree* when they are
-/// relative (`config-state.md` §3.2). `{env:VAR}` substitution is applied to
-/// every config text OpenCode loads, including the one `OPENCODE_CONFIG`
-/// names, so the launch environment supplies the absolute path and the file
-/// stays independent of where the runner puts the harness's home.
-pub const SKILL_ROOT_ENV: &str = "TRACON_SKILL_ROOT";
 
 /// The shape of the image's offline package cache, relative to
 /// `$XDG_CACHE_HOME/opencode`. A pure existence check at this path is the
