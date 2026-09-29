@@ -556,14 +556,16 @@
 
   async function runDesktopUpdate() {
     if (!desktopUpdate || !desktopAction?.command) return
+    // Read before the optimistic status below re-derives the action to null.
+    const command = desktopAction.command
     const prior = desktopUpdate
     desktopUpdate =
-      desktopAction.command === 'check'
+      command === 'check'
         ? { ...prior, state: 'checking', available_version: undefined, message: undefined }
         : { ...prior, state: 'downloading', message: undefined }
     try {
       desktopUpdate =
-        desktopAction.command === 'check'
+        command === 'check'
           ? await checkDesktopUpdate()
           : await installDesktopUpdate()
     } catch (e) {
