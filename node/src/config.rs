@@ -1773,10 +1773,14 @@ fn hardcoded_default_models(provider: &str) -> Vec<ModelDecl> {
                 true,
             ),
         ],
-        "openai" | "openai-codex" => vec![
+        "openai" => vec![
             model("gpt-5.5", "GPT-5.5", 400_000, 128_000, false),
             model("gpt-5.5-codex", "GPT-5.5 Codex", 400_000, 128_000, false),
         ],
+        // A ChatGPT sign-in is refused the `-codex` models ("not supported
+        // when using Codex with a ChatGPT account"), so the subscription's
+        // fallback offers only what it will actually serve.
+        "openai-codex" => vec![model("gpt-5.5", "GPT-5.5", 400_000, 128_000, false)],
         _ => Vec::new(),
     }
 }
@@ -2378,7 +2382,15 @@ models = [{ id = "gpt-6" }]
         );
         assert_eq!(default_models_tiered("anthropic", None).len(), 3);
         assert_eq!(default_models_tiered("openai", None).len(), 2);
-        assert_eq!(default_models_tiered("openai-codex", None).len(), 2);
+        let codex: Vec<_> = default_models_tiered("openai-codex", None)
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(
+            codex,
+            ["gpt-5.5"],
+            "a ChatGPT sign-in refuses the -codex models"
+        );
     }
 
     /// Tier 3: neither the catalogue nor the hardcoded match knows this
