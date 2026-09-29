@@ -743,6 +743,12 @@ impl Supervisor {
                         }),
                     );
                     let _ = self.watchdog_pause_if_needed().await;
+                } else if let Some(message) = step_failure(&v) {
+                    self.record(
+                        ek::ERROR,
+                        None,
+                        json!({ "error": message, "source": "harness" }),
+                    );
                 }
             }
             HarnessEvent::Models(_) => {}
@@ -1250,6 +1256,27 @@ fn retry_notice(v: &serde_json::Value) -> Option<RetryNotice> {
     })
 }
 
+/// A step the harness gave up on — a provider error it will not retry, or a
+/// stream cut mid-answer — as the line the operator reads. Without it the
+/// turn ends with nothing but its stop reason, and the cause is only in the
+/// harness's own log.
+fn step_failure(v: &serde_json::Value) -> Option<String> {
+    if v["method"].as_str() != Some("session.next.step.failed") {
+        return None;
+    }
+    Some(
+        [
+            &v["message"],
+            &v["params"]["error"]["message"],
+            &v["params"]["error"],
+        ]
+        .into_iter()
+        .find_map(|m| m.as_str().filter(|s| !s.is_empty()))
+        .unwrap_or("the harness gave up on this step without saying why")
+        .to_string(),
+    )
+}
+
 fn truncate(v: Option<&serde_json::Value>) -> (Option<String>, bool) {
     let Some(v) = v else { return (None, false) };
     let s = serde_json::to_string(v).unwrap_or_default();
@@ -1374,6 +1401,23 @@ mod tests {
         assert!(out.len() <= MAX_TOOL_OUTPUT);
         // It is still valid UTF-8 (the assertion is that we got here at all).
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn a_failed_step_is_recorded_with_its_cause() {
+        // As the OpenCode adapter forwards `session.next.step.failed` for a
+        // stream the gateway cut mid-answer.
+        let cut = step_failure(&json!({
+            "method": "session.next.step.failed",
+            "params": { "error": { "type": "unknown", "message": "Failed to read stream" } },
+            "provider": "unknown",
+            "message": "Failed to read stream",
+        }));
+        assert_eq!(cut.as_deref(), Some("Failed to read stream"));
+        let silent = step_failure(&json!({ "method": "session.next.step.failed", "params": {} }));
+        assert!(silent.is_some_and(|m| !m.is_empty()));
+        // A retry is the recogniser's, not this one's.
+        assert!(step_failure(&json!({ "method": "session.next.retried" })).is_none());
     }
 
     #[test]

@@ -1279,7 +1279,7 @@ impl Pump {
                 {
                     return false;
                 }
-                self.finish_turn(turn.take("refusal"));
+                self.finish_turn(turn.take("error"));
             }
             // The harness's own "the provider refused, I am retrying" notice,
             // shaped so the supervisor's recogniser can be taught this
@@ -1531,7 +1531,10 @@ fn stop_reason(finish: &str) -> &'static str {
         "stop" | "" => "end_turn",
         "length" => "max_tokens",
         "content-filter" => "refusal",
-        "error" => "refusal",
+        // A failed step is not a refusal: the provider answered with an error,
+        // or its stream was cut. Calling it one sent the operator looking for
+        // a policy decision that never happened.
+        "error" => "error",
         _ => "end_turn",
     }
 }
