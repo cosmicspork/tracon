@@ -11,7 +11,10 @@ use serde_json::{json, Value};
 
 use crate::{
     mcp::CallContext,
-    review::{self, publish::Target},
+    review::{
+        self,
+        publish::{ChangeRef, Intent, Outputs, Provider, Target},
+    },
     session::{state::event_kind as ek, Manager},
     store::{candidate_id, now_ms, CandidateRow, ReviewRevisionRow, ReviewRow, Store},
 };
@@ -58,7 +61,12 @@ pub fn definitions() -> Vec<Value> {
                             Resubmit with the same review_id after making changes. A harness you \
                             run yourself passes `worktree`: the absolute path of a worktree whose \
                             repository is under the node's [external] repo_roots; its branch is \
-                            what gets pushed.",
+                            what gets pushed. `title` and `body` are your summary for the \
+                            operator. Without `change`, approval opens a new pull/merge request \
+                            described by `forge.description`, or by title and body when that is \
+                            absent. With `change`, approval pushes to that open change's branch \
+                            and sends only what `forge` asks for: a replacement description, a \
+                            comment, both, or neither.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -70,6 +78,25 @@ pub fn definitions() -> Vec<Value> {
                     "base": { "type": "string", "description": "Branch to merge into. Defaults to the branch the worktree was created from." },
                     "review_id": { "type": "string", "description": "Set to resubmit an existing review after changes were requested." },
                     "rerun_checks": { "type": "boolean", "description": "Run configured required checks again even when exact immutable evidence exists. This cannot alter which checks are required." },
+                    "change": { "type": "integer", "description": "The open pull request number or merge request iid this branch already has. Approval updates it instead of opening a new one. Fixed by the first submit of a review." },
+                    "forge": {
+                        "type": "object",
+                        "description": "What the forge shows besides the commits. Omit for a new change to describe it with title and body; omit for an existing change to push only.",
+                        "properties": {
+                            "description": {
+                                "type": "object",
+                                "description": "Opens a new change with this, or replaces an existing change's title and description.",
+                                "properties": {
+                                    "title": { "type": "string" },
+                                    "body": { "type": "string" },
+                                },
+                                "required": ["title", "body"],
+                            },
+                            "comment": { "type": "string", "description": "Posted on the change after the push, e.g. what this revision changed." },
+                            "draft": { "type": "boolean", "description": "Open the new change as a draft. Not for an existing change." },
+                        },
+                    },
+                    "rewrite": { "type": "boolean", "description": "The branch's history was rewritten (rebase, amend), so the push replaces what the change holds. Forced only over what it held at submit, and always approved by the operator." },
                 },
                 "required": ["title", "body", "provider", "project"],
             },
@@ -277,6 +304,15 @@ async fn submit(
     let capture = review::capture(&worktree, &range_base, &branch)
         .await
         .map_err(|e| e.to_string())?;
+    let asked_change = match args.get("change") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .filter(|n| *n > 0)
+                .ok_or("change is the pull request number or merge request iid")?,
+        ),
+    };
     let files = serde_json::to_string(&capture.files).unwrap_or_else(|_| "[]".into());
 
     // The cap, before anything else: complexity accretes because nothing says
@@ -298,6 +334,49 @@ async fn submit(
         );
         return Err(review::ReviewError::Rejected(reason).to_string());
     }
+    // Where this review publishes. A resubmission keeps the target it was
+    // first submitted with, including the change it updates.
+    let mut target = match &resubmission {
+        Some(existing) => {
+            let target: Target = serde_json::from_str(&existing.target)
+                .map_err(|e| format!("this review's target is unreadable: {e}"))?;
+            if asked_change.is_some() && asked_change != target.change.as_ref().map(|c| c.number) {
+                return Err(
+                    "a review updates the change it was first submitted for; submit a new review \
+                     to target another"
+                        .into(),
+                );
+            }
+            target
+        }
+        None => Target {
+            provider: provider.clone(),
+            project: project.clone(),
+            base: base.clone(),
+            branch: branch.clone(),
+            worktree: external.then(|| worktree.clone()),
+            change: asked_change.map(|number| ChangeRef {
+                number,
+                url: String::new(),
+            }),
+        },
+    };
+    let forge = forge_arg(args)?;
+    let rewrite = args
+        .get("rewrite")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let intent = forge_intent(
+        manager,
+        ctx,
+        &mut target,
+        &capture.head_sha,
+        &worktree,
+        forge,
+        rewrite,
+    )
+    .await?;
+    let intent_json = Some(serde_json::to_string(&intent).map_err(|e| e.to_string())?);
     // Capture the committed candidate before any check can execute. The
     // snapshot is a hardened Git tree import, not this mutable worktree.
     let snapshot = review::snapshot_candidate(
@@ -396,6 +475,7 @@ async fn submit(
             requirements_body,
             requirements_hash,
             created_ms: now_ms(),
+            intent_json,
         };
         let revised = store
             .revise_review_with_revision(
@@ -427,13 +507,6 @@ async fn submit(
         }));
     }
 
-    let target = Target {
-        provider: provider.clone(),
-        project: project.clone(),
-        base: base.clone(),
-        branch,
-        worktree: external.then(|| worktree.clone()),
-    };
     let id = uuid::Uuid::now_v7().to_string();
     let row = ReviewRow {
         id: id.clone(),
@@ -485,6 +558,7 @@ async fn submit(
         requirements_body,
         requirements_hash,
         created_ms: row.created_ms,
+        intent_json,
     };
     store
         .insert_review_with_revision(&row, &revision)
@@ -503,6 +577,118 @@ async fn submit(
         "candidate_id": candidate.id,
         "checks_reused": checks.reused,
     }))
+}
+
+fn forge_arg(args: &Value) -> Result<Outputs, String> {
+    let forge: Outputs = match args.get("forge") {
+        None | Some(Value::Null) => Outputs::default(),
+        Some(value) => serde_json::from_value(value.clone()).map_err(|e| format!("forge: {e}"))?,
+    };
+    if forge
+        .description
+        .as_ref()
+        .is_some_and(|d| d.title.trim().is_empty())
+    {
+        return Err("forge.description needs a title".into());
+    }
+    Ok(Outputs {
+        comment: forge.comment.filter(|c| !c.trim().is_empty()),
+        ..forge
+    })
+}
+
+/// Settle what this revision may do on the forge, asking the forge rather
+/// than finding out after the operator approved. An existing change must be
+/// open and be this branch of this repository into this base; what its branch
+/// holds now is the only thing the push may replace. A new change must not
+/// collide with one already open for the branch.
+async fn forge_intent(
+    manager: &Manager,
+    ctx: &CallContext,
+    target: &mut Target,
+    head_sha: &str,
+    worktree: &str,
+    forge: Outputs,
+    rewrite: bool,
+) -> Result<Intent, String> {
+    let provider = Provider::parse(&target.provider).ok_or_else(|| {
+        format!(
+            "{} is not a provider this node publishes to",
+            target.provider
+        )
+    })?;
+    let noun = provider.noun();
+    let env =
+        manager
+            .broker()
+            .read()
+            .unwrap()
+            .env_for(provider.credential(), &ctx.channel, &ctx.node_id);
+    let dir = review::publish::inspection_dir().map_err(|e| e.to_string())?;
+    let cfg = manager.cfg();
+    let Some(change) = target.change.clone() else {
+        if rewrite {
+            return Err(
+                "rewrite replaces an existing change's history; pass change as well".into(),
+            );
+        }
+        // Opening a second change for a branch fails at publication, after
+        // the operator approved it. Where the forge can be asked, say so now.
+        if let Ok(env) = env {
+            match review::publish::open_change_for_branch(provider, cfg, &dir, &env, target).await {
+                Ok(Some((number, url))) => {
+                    return Err(format!(
+                        "{noun} {number} ({url}) is already open for {}; pass change: {number} to \
+                         update it",
+                        target.branch
+                    ))
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    %error,
+                    "could not ask the forge whether this branch already has an open change"
+                ),
+            }
+        }
+        return Ok(Intent {
+            forge,
+            lease: None,
+            rewrite: false,
+        });
+    };
+    let number = change.number;
+    if forge.draft {
+        return Err(format!("draft is for a new change, not {noun} {number}"));
+    }
+    let env = env.map_err(|e| {
+        format!("updating {noun} {number} needs the forge credential on this channel: {e}")
+    })?;
+    let state = review::publish::change_state(provider, cfg, &dir, &env, target, number)
+        .await
+        .map_err(|e| format!("could not read {noun} {number}: {e}"))?;
+    if let Some(refusal) = state.refusal(provider, target, number) {
+        return Err(refusal);
+    }
+    target.change = Some(ChangeRef {
+        number,
+        url: state.url.clone(),
+    });
+    let lease = state.head_sha;
+    let builds_on = lease == head_sha || review::descends_from(worktree, head_sha, &lease).await;
+    if !builds_on && !rewrite {
+        return Err(format!(
+            "{noun} {number}'s branch holds {lease:.8}, which {head_sha:.8} does not build on. \
+             Rebase onto it, or pass rewrite: true to replace that history (the operator always \
+             approves a rewrite)."
+        ));
+    }
+    Ok(Intent {
+        forge,
+        lease: Some(lease),
+        // A branch that builds on what the change holds is a fast-forward,
+        // whatever was asked: nothing is thrown away, so nothing is forced.
+        rewrite: rewrite && !builds_on,
+    })
 }
 
 /// Submit a standalone report without touching a worktree, Git, a provider, or

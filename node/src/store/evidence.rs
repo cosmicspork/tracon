@@ -132,6 +132,10 @@ pub struct ReviewRevisionRow {
     pub requirements_body: Option<String>,
     pub requirements_hash: Option<String>,
     pub created_ms: i64,
+    /// This revision's `review::publish::Intent`, as JSON. `None` for a
+    /// revision submitted before intents existed.
+    #[serde(default)]
+    pub intent_json: Option<String>,
 }
 
 impl ReviewRevisionRow {
@@ -151,6 +155,7 @@ impl ReviewRevisionRow {
             requirements_body: row.get("requirements_body")?,
             requirements_hash: row.get("requirements_hash")?,
             created_ms: row.get("created_ms")?,
+            intent_json: row.get("intent_json")?,
         })
     }
 }
@@ -168,6 +173,9 @@ pub struct ReviewDecisionRow {
     pub body: Option<String>,
     pub patch: Option<String>,
     pub decided_ms: i64,
+    /// The `review::publish::Outputs` an approval published, as JSON.
+    #[serde(default)]
+    pub outputs_json: Option<String>,
 }
 
 impl ReviewDecisionRow {
@@ -182,6 +190,7 @@ impl ReviewDecisionRow {
             title: row.get("title")?,
             body: row.get("body")?,
             patch: row.get("patch")?,
+            outputs_json: row.get("outputs_json")?,
             decided_ms: row.get("decided_ms")?,
         })
     }
@@ -962,13 +971,13 @@ impl Store {
             "INSERT INTO review_revision
                 (id, review_id, candidate_id, title, body, diff, files, head_sha, context_json,
                  requirements_work_item_id, requirements_title, requirements_body, requirements_hash,
-                 created_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                 created_ms, intent_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 revision.id, revision.review_id, revision.candidate_id, revision.title, revision.body,
                 revision.diff, revision.files, revision.head_sha, revision.context_json,
                 revision.requirements_work_item_id, revision.requirements_title, revision.requirements_body,
-                revision.requirements_hash, revision.created_ms,
+                revision.requirements_hash, revision.created_ms, revision.intent_json,
             ],
         )?;
         Ok(())
@@ -1023,11 +1032,13 @@ impl Store {
             .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
         conn.execute(
             "INSERT INTO review_decision
-                (id, review_id, revision_id, decision, source, reason, title, body, patch, decided_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                (id, review_id, revision_id, decision, source, reason, title, body, patch, decided_ms,
+                 outputs_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 decision.id, decision.review_id, decision.revision_id, decision.decision, decision.source,
                 decision.reason, decision.title, decision.body, decision.patch, decision.decided_ms,
+                decision.outputs_json,
             ],
         )?;
         Ok(())

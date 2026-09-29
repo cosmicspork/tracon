@@ -100,6 +100,19 @@ session. `work_close` takes an id, and refuses an item a running session holds,
 since closing it would end that session. What stays absent is `review_verdict`,
 which belongs to a review session the node starts.
 
+**Review could only open a change; now it can update one.** An external
+harness most often works on a branch that already has a pull or merge request
+(review feedback, a rebase), and publication's `gh pr create` failed there after
+the operator had approved. `submit_review` now takes `change` (the number, fixed
+at first submit) and `forge` (a description, a comment, or neither), separate
+from `title`/`body`, which are the operator's summary. Submit reads the change
+through the brokered CLI, refuses one that is closed, from a fork, or for another
+branch or base, and pins the branch head it held as the lease. A worktree that
+does not build on that head must say `rewrite: true`; the push is then forced
+only over the lease, and never published unattended by a grant. A new submit
+for a branch that already has an open change is refused with its number rather
+than failing at publication.
+
 **One session per client, not per channel.** The first cut keyed the
 attachment on the channel alone, so two terminals on one channel shared a
 session: one card queue, one pause, one idle clock, one log. `initialize` now

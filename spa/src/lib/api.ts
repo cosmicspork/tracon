@@ -37,6 +37,7 @@ import type {
   Session,
   SessionUsage,
   ReviewDetails,
+  ReviewOutputs,
   TransferImport,
   TransferInboxItem,
   TransferStage,
@@ -305,6 +306,8 @@ export const api = {
        * requirements or prose, and the node compares this as it records the
        * decision. */
       revision_id?: string
+      /** With approve: what goes to the forge, as the operator left it. */
+      outputs?: ReviewOutputs
     },
   ) => call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/verdict`, verdict),
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),

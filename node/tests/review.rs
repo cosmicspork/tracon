@@ -921,6 +921,7 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
         base: "main".into(),
         branch: "feat/x".into(),
         worktree: None,
+        change: None,
     };
     // A head_sha that is not the worktree's HEAD stands in for a branch that
     // moved between approval and publish.
@@ -935,8 +936,9 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
             target: &target,
             head_sha: "0000000000000000000000000000000000000000",
             reviewed_tree: "1111111111111111111111111111111111111111",
-            title: "t",
-            body: "b",
+            outputs: &Default::default(),
+            lease: None,
+            rewrite: false,
             resume: false,
             pushed: false,
             before_push: None,
@@ -2710,4 +2712,420 @@ async fn stopping_a_session_mid_check_cancels_the_run_and_kills_its_process_grou
         kinds.contains(&"late_refused".to_string()),
         "the refused transition is recorded: {kinds:?}"
     );
+}
+
+// ---- updating an existing change ----
+
+/// A `gh` that answers the REST calls publication makes for an existing
+/// change. The pull request is `pr.json`, the open changes for a branch are
+/// `open.json`, and its comments are `comments.json`, all files the test
+/// writes: the test decides what the forge holds.
+fn gh_forge(f: &Fixture, pull: Value) {
+    std::fs::write(f.dir.join("pr.json"), pull.to_string()).unwrap();
+    std::fs::write(
+        f.dir.join("bin/gh"),
+        "#!/bin/sh\n\
+         d=\"$(dirname \"$0\")/..\"\n\
+         { echo \"ARGS: $*\"; echo \"GH_TOKEN=$GH_TOKEN\"; } >> \"$d/gh.log\"\n\
+         if [ \"$1\" = api ]; then\n\
+         case \"$3 $4\" in\n\
+         'GET repos/owner/name/pulls?'*) cat \"$d/open.json\" 2>/dev/null || echo '[]' ;;\n\
+         'GET repos/owner/name/pulls/'*) cat \"$d/pr.json\" ;;\n\
+         'GET repos/owner/name/issues/'*) cat \"$d/comments.json\" 2>/dev/null || echo '[]' ;;\n\
+         *) echo '{}' ;;\n\
+         esac\n\
+         exit 0\n\
+         fi\n\
+         echo https://github.test/pull/1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(f.dir.join("bin/gh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+}
+
+/// Pull request 7 for `feat/x` into `main`, whose branch holds `head`.
+fn pull_seven(head: &str) -> Value {
+    json!({
+        "html_url": "https://github.test/pull/7",
+        "state": "open",
+        "head": { "ref": "feat/x", "sha": head, "repo": { "full_name": "owner/name" } },
+        "base": { "ref": "main" },
+    })
+}
+
+impl Fixture {
+    /// The commit the session's branch was cut from.
+    fn base_sha(&self) -> String {
+        sh_out(std::path::Path::new(&self.worktree), "git rev-parse main")
+    }
+
+    /// What the forge's `feat/x` holds.
+    fn forge_branch(&self) -> String {
+        sh_out(
+            &self.dir,
+            "git --git-dir=origin.git rev-parse refs/heads/feat/x",
+        )
+    }
+
+    /// Make the forge's `feat/x` hold `sha`, as a push from elsewhere would.
+    fn forge_holds(&self, sha: &str) {
+        sh(
+            std::path::Path::new(&self.worktree),
+            &format!(
+                "git push -qf {} {sha}:refs/heads/feat/x",
+                self.dir.join("origin.git").display()
+            ),
+        );
+    }
+
+    async fn submit_update(&self, extra: Value) -> Value {
+        let mut args = self.submit_args();
+        args["change"] = json!(7);
+        for (key, value) in extra.as_object().unwrap() {
+            args[key] = value.clone();
+        }
+        self.tool("s1", "submit_review", args).await
+    }
+
+    async fn approve(&self, id: &str) -> (StatusCode, Value) {
+        self.call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve" })),
+        )
+        .await
+    }
+}
+
+fn review_id(submitted: &Value) -> String {
+    submitted["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{submitted}"))
+        .to_string()
+}
+
+/// The branch already has a pull request. Approval pushes to it, replaces its
+/// description, and comments — and never opens a second one.
+#[tokio::test]
+async fn an_update_pushes_to_the_open_change_and_sends_what_was_asked() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let base = f.base_sha();
+    f.forge_holds(&base);
+    gh_forge(&f, pull_seven(&base));
+
+    let submitted = f
+        .submit_update(json!({ "forge": {
+            "description": { "title": "feat: the thing, revised", "body": "now with more" },
+            "comment": "This revision handles the edge case.",
+        }}))
+        .await;
+    let id = review_id(&submitted);
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
+    let change = target
+        .change
+        .expect("the review names the change it updates");
+    assert_eq!(change.number, 7);
+    assert_eq!(change.url, "https://github.test/pull/7");
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["published"], "https://github.test/pull/7");
+    assert_eq!(
+        f.forge_branch(),
+        review.head_sha,
+        "the change's branch holds the reviewed commit"
+    );
+
+    let gh = f.gh_log();
+    assert!(
+        !gh.contains("pr create"),
+        "no second change is opened: {gh}"
+    );
+    assert!(gh.contains("api -X PATCH repos/owner/name/pulls/7"), "{gh}");
+    assert!(gh.contains("title=feat: the thing, revised"), "{gh}");
+    assert!(
+        gh.contains("api -X POST repos/owner/name/issues/7/comments"),
+        "{gh}"
+    );
+    assert!(gh.contains("This revision handles the edge case."), "{gh}");
+    assert!(
+        !f.git_log().contains("--force"),
+        "a fast-forward is never forced: {}",
+        f.git_log()
+    );
+    let decision = f.store.review_decisions(&id).unwrap().pop().unwrap();
+    let outputs: tracon::review::publish::Outputs =
+        serde_json::from_str(decision.outputs_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        outputs.comment.as_deref(),
+        Some("This revision handles the edge case.")
+    );
+}
+
+/// An update that asks for nothing on the forge only pushes: the review's
+/// title and body are the operator's, not the change's.
+#[tokio::test]
+async fn an_update_without_forge_outputs_only_pushes() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let base = f.base_sha();
+    f.forge_holds(&base);
+    gh_forge(&f, pull_seven(&base));
+    let id = review_id(&f.submit_update(json!({})).await);
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    assert!(!gh.contains("PATCH"), "{gh}");
+    assert!(!gh.contains("comments"), "{gh}");
+    assert!(!gh.contains("pr create"), "{gh}");
+    assert_eq!(
+        f.forge_branch(),
+        f.store.get_review(&id).unwrap().unwrap().head_sha
+    );
+}
+
+/// The operator edits what goes to the forge; the edit is what is sent.
+#[tokio::test]
+async fn the_operators_edited_outputs_are_what_the_forge_receives() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let base = f.base_sha();
+    f.forge_holds(&base);
+    gh_forge(&f, pull_seven(&base));
+    let id = review_id(
+        &f.submit_update(json!({ "forge": { "comment": "agent's wording" } }))
+            .await,
+    );
+    f.forget_logs();
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "outputs": { "comment": "operator's wording" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    assert!(gh.contains("operator's wording"), "{gh}");
+    assert!(!gh.contains("agent's wording"), "{gh}");
+}
+
+/// A commit already on the change is a prose-only update: nothing is pushed,
+/// and the comment still lands.
+#[tokio::test]
+async fn a_prose_only_update_pushes_nothing() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let head = sh_out(std::path::Path::new(&f.worktree), "git rev-parse HEAD");
+    f.forge_holds(&head);
+    gh_forge(&f, pull_seven(&head));
+    let id = review_id(
+        &f.submit_update(json!({ "forge": { "comment": "ready again" } }))
+            .await,
+    );
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!f.git_log().contains("push origin"), "{}", f.git_log());
+    assert!(f.gh_log().contains("ready again"));
+}
+
+/// A resumed publication finds the comment it already posted by its marker
+/// and does not post it twice.
+#[tokio::test]
+async fn a_resumed_update_does_not_comment_twice() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let base = f.base_sha();
+    f.forge_holds(&base);
+    gh_forge(&f, pull_seven(&base));
+    let id = review_id(
+        &f.submit_update(json!({ "forge": { "comment": "once" } }))
+            .await,
+    );
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap().id;
+    // The interrupted attempt pushed and commented, then the node died.
+    f.forge_holds(&review.head_sha);
+    let publication = f.publication_id(&id);
+    let marker = tracon::review::publish::marker_comment(&publication);
+    std::fs::write(
+        f.dir.join("comments.json"),
+        json!([{ "body": format!("once\n\n{marker}") }]).to_string(),
+    )
+    .unwrap();
+    f.store
+        .publication_begin(&tracon::store::PublicationBegin {
+            id: &publication,
+            review_id: &id,
+            revision_id: Some(&revision),
+            candidate_id: &tracon::store::candidate_id(&review.head_sha, "work"),
+            channel: "work",
+            node_id: "n1",
+            provider: "github",
+            project: "owner/name",
+            base: "main",
+            branch: "feat/x",
+            head_sha: &review.head_sha,
+            instance: "a-process-that-is-no-longer-running",
+        })
+        .unwrap();
+    f.store
+        .publication_pushed(&publication, &review.head_sha)
+        .unwrap();
+    f.store.publication_opening(&publication).unwrap();
+    assert!(f.store.begin_publish(&id, Some(&revision)).unwrap());
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    assert!(
+        gh.contains("GET repos/owner/name/issues/7/comments"),
+        "{gh}"
+    );
+    assert!(
+        !gh.contains("POST"),
+        "the comment is not posted again: {gh}"
+    );
+    assert_eq!(f.publication(&id).state, "opened");
+}
+
+/// A branch that already has an open change cannot silently get a second
+/// one: submit says which change to name.
+#[tokio::test]
+async fn submitting_without_the_open_change_is_refused_with_its_number() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    gh_forge(&f, pull_seven(&f.base_sha()));
+    std::fs::write(
+        f.dir.join("open.json"),
+        json!([{ "number": 7, "html_url": "https://github.test/pull/7" }]).to_string(),
+    )
+    .unwrap();
+    let submitted = f.tool("s1", "submit_review", f.submit_args()).await;
+    let error = submitted["error"].to_string();
+    assert!(error.contains("pass change: 7"), "{submitted}");
+}
+
+/// Only an open change of this branch, in this repository, into this base can
+/// be updated.
+#[tokio::test]
+async fn a_closed_or_foreign_change_is_refused_at_submit() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let base = f.base_sha();
+    for (pull, expected) in [
+        (
+            json!({ "state": "closed", "head": { "ref": "feat/x", "sha": base,
+                    "repo": { "full_name": "owner/name" } }, "base": { "ref": "main" } }),
+            "is not open",
+        ),
+        (
+            json!({ "state": "open", "head": { "ref": "feat/x", "sha": base,
+                    "repo": { "full_name": "someone/fork" } }, "base": { "ref": "main" } }),
+            "another repository",
+        ),
+        (
+            json!({ "state": "open", "head": { "ref": "feat/y", "sha": base,
+                    "repo": { "full_name": "owner/name" } }, "base": { "ref": "main" } }),
+            "is for branch feat/y",
+        ),
+    ] {
+        gh_forge(&f, pull);
+        let submitted = f.submit_update(json!({})).await;
+        assert!(
+            submitted["error"].to_string().contains(expected),
+            "{submitted}"
+        );
+    }
+}
+
+/// History the change holds that this branch does not build on is replaced
+/// only when the agent says so, and then only over exactly that commit.
+#[tokio::test]
+async fn a_rewrite_must_be_asked_for_and_is_forced_only_over_its_lease() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    // The change's branch holds a commit this worktree's branch does not
+    // descend from: its history was rewritten since.
+    let host = f.dir.join("wt");
+    sh(
+        &host,
+        "git checkout -qb elsewhere main && echo other > b.txt && git add -A \
+         && git commit -qm other && git push -qf origin elsewhere:refs/heads/feat/x",
+    );
+    let lease = sh_out(&host, "git rev-parse elsewhere");
+    gh_forge(&f, pull_seven(&lease));
+
+    let refused = f.submit_update(json!({})).await;
+    assert!(
+        refused["error"].to_string().contains("rewrite: true"),
+        "{refused}"
+    );
+
+    let id = review_id(&f.submit_update(json!({ "rewrite": true })).await);
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let intent: tracon::review::publish::Intent =
+        serde_json::from_str(revision.intent_json.as_deref().unwrap()).unwrap();
+    assert!(intent.rewrite);
+    assert_eq!(intent.lease.as_deref(), Some(lease.as_str()));
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        f.git_log()
+            .contains(&format!("--force-with-lease=refs/heads/feat/x:{lease}")),
+        "{}",
+        f.git_log()
+    );
+    assert_eq!(
+        f.forge_branch(),
+        f.store.get_review(&id).unwrap().unwrap().head_sha
+    );
+}
+
+/// Somebody pushed to the change after this revision was submitted. The push
+/// would throw their work away, so publication refuses and says why.
+#[tokio::test]
+async fn an_update_whose_lease_was_lost_is_refused() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let base = f.base_sha();
+    f.forge_holds(&base);
+    gh_forge(&f, pull_seven(&base));
+    let id = review_id(&f.submit_update(json!({})).await);
+    let host = f.dir.join("wt");
+    sh(
+        &host,
+        "git checkout -qb theirs main && echo theirs > c.txt && git add -A \
+         && git commit -qm theirs && git push -qf origin theirs:refs/heads/feat/x",
+    );
+    let theirs = sh_out(&host, "git rev-parse theirs");
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("somebody else pushed"),
+        "{body}"
+    );
+    assert!(!f.git_log().contains("push origin"), "{}", f.git_log());
+    assert_eq!(f.forge_branch(), theirs, "their work is still there");
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "claimed");
 }

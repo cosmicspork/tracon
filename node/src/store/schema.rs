@@ -1104,6 +1104,16 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX criterion_judgement_criterion
         ON criterion_judgement(work_item_id, criterion_key, judged_ms DESC);
     "#,
+    // 44: what a revision asks the forge to show, and what was approved. A
+    // revision's intent (`review::publish::Intent`) is pinned at submit: the
+    // forge description and comment it proposes, and for an existing change
+    // the branch head it may replace. A decision records the outputs the
+    // operator approved, which may be edited. NULL is a review from before
+    // this, whose only output is a new change described by its title and body.
+    r#"
+    ALTER TABLE review_revision ADD COLUMN intent_json TEXT;
+    ALTER TABLE review_decision ADD COLUMN outputs_json TEXT;
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build
