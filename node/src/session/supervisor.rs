@@ -781,6 +781,31 @@ impl Supervisor {
             let _ = reply.send(PermissionReply::Cancelled);
             return;
         }
+        // The node's own MCP tools are gated where they run: the MCP server
+        // decides each call against the same policy and queues what it must
+        // ask (`mcp::Tools::call`). A harness asking first would put every
+        // read of the brief or the work item in front of the operator twice,
+        // and the plan document the phase exists to write behind a prompt the
+        // server deliberately does not raise.
+        if node_tool(&request.action) {
+            let _ = reply.send(PermissionReply::Selected(
+                crate::adapter::types::OPTION_ALLOW_ONCE.into(),
+            ));
+            self.record(
+                ek::POLICY_ALLOWED,
+                None,
+                json!({
+                    "title": request.title,
+                    "action": request.action,
+                    "kind": request.kind,
+                    "resource": request.resource,
+                    "command": request.command,
+                    "rule": "node-tool",
+                    "reason": "The node's own tool; it is decided when the call reaches the node.",
+                }),
+            );
+            return;
+        }
         let decision = self.policy.read().decide(&crate::policy::Request {
             channel: &self.channel,
             action: &request.action,
@@ -1217,6 +1242,15 @@ struct RetryNotice {
     attempt: Option<i64>,
 }
 
+/// Whether a harness's ask names a tool the node's own MCP server serves, as
+/// Claude Code spells it (`mcp__<server>__<tool>`, the server named `tracon`
+/// where the session's MCP descriptor is built).
+fn node_tool(action: &str) -> bool {
+    action
+        .strip_prefix("mcp__tracon__")
+        .is_some_and(|tool| !tool.is_empty())
+}
+
 /// Recognise a harness's own "the provider refused, I am retrying" notice.
 ///
 /// Two harnesses say it two ways and neither is in a schema the node shares:
@@ -1401,6 +1435,16 @@ mod tests {
         assert!(out.len() <= MAX_TOOL_OUTPUT);
         // It is still valid UTF-8 (the assertion is that we got here at all).
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn only_the_node_s_own_tools_skip_the_harness_ask() {
+        assert!(node_tool("mcp__tracon__brief_read"));
+        assert!(node_tool("mcp__tracon__doc_write"));
+        assert!(!node_tool("mcp__tracon__"));
+        assert!(!node_tool("mcp__other__doc_write"));
+        assert!(!node_tool("Bash"));
+        assert!(!node_tool("tracon_doc_write"));
     }
 
     #[test]
