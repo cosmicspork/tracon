@@ -14,12 +14,15 @@ use tracon::mcp::{CallContext, Tools};
 
 /// Method, path and query, authorization, user-agent.
 type Seen = Arc<Mutex<Vec<(String, String, String, String)>>>;
+/// The JSON bodies of GraphQL calls, in order.
+type Bodies = Arc<Mutex<Vec<Value>>>;
 
 async fn stub(
-    axum::extract::State(seen): axum::extract::State<Seen>,
+    axum::extract::State((seen, bodies)): axum::extract::State<(Seen, Bodies)>,
     method: axum::http::Method,
     uri: axum::http::Uri,
     headers: HeaderMap,
+    body: String,
 ) -> (axum::http::StatusCode, Json<Value>) {
     let header = |h: &str| {
         headers
@@ -40,6 +43,32 @@ async fn stub(
     ));
     let path = uri.path();
     let ok = |v: Value| (axum::http::StatusCode::OK, Json(v));
+    if (method.as_str(), path) == ("POST", "/graphql") {
+        let sent: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        bodies.lock().unwrap().push(sent.clone());
+        let query = sent["query"].as_str().unwrap_or_default();
+        return ok(if query.contains("addPullRequestReviewThreadReply") {
+            json!({ "data": { "addPullRequestReviewThreadReply": {
+                "comment": { "url": "https://github.test/owner/name/pull/7#r9" } } } })
+        } else if query.contains("resolveReviewThread") {
+            json!({ "data": { "resolveReviewThread": { "thread": { "isResolved": true } } } })
+        } else if sent["variables"]["number"] == 404 {
+            json!({ "errors": [{ "message": "Could not resolve to a PullRequest" }] })
+        } else {
+            json!({ "data": { "repository": { "pullRequest": { "reviewThreads": {
+                "pageInfo": { "hasNextPage": false },
+                "nodes": [
+                    { "id": "PRRT_open", "isResolved": false, "isOutdated": false,
+                      "path": "src/a.rs", "line": 12, "originalLine": 10,
+                      "comments": { "nodes": [
+                        { "author": { "login": "rev" }, "body": "rename this",
+                          "createdAt": "t", "url": "https://github.test/r1" }] } },
+                    { "id": "PRRT_done", "isResolved": true, "isOutdated": true,
+                      "path": "src/b.rs", "line": null, "originalLine": 3,
+                      "comments": { "nodes": [] } }
+                ] } } } } })
+        });
+    }
     match (method.as_str(), path) {
         ("GET", "/repos/owner/name/pulls/7") => ok(json!({
             "number": 7, "title": "Add thing", "state": "open", "draft": false,
@@ -52,6 +81,19 @@ async fn stub(
             { "name": "lint", "status": "completed", "conclusion": "failure" },
             { "name": "e2e", "status": "in_progress", "conclusion": null }
         ] })),
+        ("GET", "/repos/owner/name/pulls/7/reviews") => ok(json!([
+            { "user": { "login": "a" }, "state": "APPROVED", "submitted_at": "t1" },
+            { "user": { "login": "b" }, "state": "CHANGES_REQUESTED", "submitted_at": "t2" },
+            { "user": { "login": "b" }, "state": "COMMENTED", "submitted_at": "t3" }
+        ])),
+        ("GET", "/repos/owner/name/issues/7/comments") => ok(json!([
+            { "id": 4, "user": { "login": "a" }, "body": "general note",
+              "created_at": "t", "html_url": "https://github.test/c4" }
+        ])),
+        ("GET", "/repos/owner/name/pulls") => ok(json!([
+            { "number": 7, "title": "Add thing", "draft": false,
+              "base": { "ref": "main" }, "html_url": "https://github.test/owner/name/pull/7" }
+        ])),
         ("POST", "/repos/owner/name/issues/7/comments") => (
             axum::http::StatusCode::CREATED,
             Json(json!({ "id": 5, "html_url": "https://github.test/owner/name/pull/7#c5" })),
@@ -70,10 +112,16 @@ async fn stub(
 }
 
 async fn rig() -> (Tools, Seen) {
+    let (tools, seen, _) = rig_with_bodies().await;
+    (tools, seen)
+}
+
+async fn rig_with_bodies() -> (Tools, Seen, Bodies) {
     let seen = Seen::default();
+    let bodies = Bodies::default();
     let app = Router::new()
         .route("/{*path}", any(stub))
-        .with_state(seen.clone());
+        .with_state((seen.clone(), bodies.clone()));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move {
@@ -95,7 +143,7 @@ async fn rig() -> (Tools, Seen) {
         http: reqwest::Client::new(),
         session: Default::default(),
     };
-    (tools, seen)
+    (tools, seen, bodies)
 }
 
 fn allowing(names: &str) -> Arc<parking_lot::RwLock<tracon::policy::Policy>> {
@@ -174,8 +222,10 @@ async fn pr_status_rolls_up_the_checks_on_the_head_commit() {
     assert_eq!(v["checks"]["passed"], 1);
     assert_eq!(v["checks"]["failed"], 1);
     assert_eq!(v["checks"]["pending"], 1);
+    assert_eq!(v["review_decision"], "changes_requested");
+    assert_eq!(v["reviews"].as_array().unwrap().len(), 2);
     let seen = seen.lock().unwrap().clone();
-    assert_eq!(seen.len(), 2);
+    assert_eq!(seen.len(), 3);
     assert!(seen
         .iter()
         .all(|(_, _, auth, _)| auth == "Bearer gh-secret"));
@@ -234,4 +284,120 @@ async fn run_status_asks_for_a_branch_and_refuses_a_bad_repo_before_any_request(
     let (err, _) = call(&t, &c, "run_status", json!({ "repo": "owner/name" })).await;
     assert!(err);
     assert_eq!(seen.lock().unwrap().len(), 1, "the bad calls sent nothing");
+}
+
+#[tokio::test]
+async fn pr_threads_reads_threads_and_conversation_in_one_call() {
+    state::isolate();
+    let (mut t, seen, bodies) = rig_with_bodies().await;
+    // Shipped policy: a read runs unattended.
+    let c = ctx("work");
+    let args = json!({ "repo": "owner/name", "number": 7 });
+    let (err, v) = call(&t, &c, "pr_threads", args.clone()).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["threads"].as_array().unwrap().len(), 2);
+    assert_eq!(v["threads"][0]["id"], "PRRT_open");
+    assert_eq!(v["threads"][0]["comments"][0]["body"], "rename this");
+    assert_eq!(
+        v["threads"][1]["line"], 3,
+        "an outdated thread keeps its original line"
+    );
+    assert_eq!(v["comments"][0]["body"], "general note");
+    assert_eq!(v["more_threads"], false);
+    let sent = bodies.lock().unwrap()[0].clone();
+    assert_eq!(sent["variables"]["owner"], "owner");
+    assert_eq!(sent["variables"]["name"], "name");
+    assert_eq!(sent["variables"]["number"], 7);
+    assert!(seen
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(_, _, auth, _)| auth == "Bearer gh-secret"));
+
+    let (err, v) = call(
+        &t,
+        &c,
+        "pr_threads",
+        json!({ "repo": "owner/name", "number": 7, "unresolved_only": true }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["threads"].as_array().unwrap().len(), 1);
+
+    // GraphQL answers 200 with errors; that is a failure, not an empty review.
+    t.policy = allowing(r#""pr_threads""#);
+    let (err, v) = call(
+        &t,
+        &c,
+        "pr_threads",
+        json!({ "repo": "owner/name", "number": 404 }),
+    )
+    .await;
+    assert!(err, "{v}");
+    assert!(v.to_string().contains("Could not resolve"), "{v}");
+}
+
+#[tokio::test]
+async fn a_thread_reply_waits_on_the_operator_then_replies_and_resolves() {
+    state::isolate();
+    let (mut t, _, bodies) = rig_with_bodies().await;
+    let c = ctx("work");
+    let args = json!({ "repo": "owner/name", "number": 7, "thread_id": "PRRT_open",
+                       "body": "renamed", "resolve": true });
+    let (err, v) = call(&t, &c, "pr_reply", args.clone()).await;
+    assert!(err);
+    assert!(v.as_str().unwrap_or_default().contains("approval"), "{v}");
+    assert!(bodies.lock().unwrap().is_empty(), "nothing reached GitHub");
+
+    t.policy = allowing(r#""pr_reply""#);
+    let (err, v) = call(&t, &c, "pr_reply", args).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["url"], "https://github.test/owner/name/pull/7#r9");
+    assert_eq!(v["resolved"], true);
+    let sent = bodies.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0]["variables"]["thread"], "PRRT_open");
+    assert_eq!(sent[0]["variables"]["body"], "renamed");
+    assert!(sent[1]["query"]
+        .as_str()
+        .unwrap()
+        .contains("resolveReviewThread"));
+
+    // Neither a reply nor a resolve is nothing to do; a bad id never leaves.
+    let (err, _) = call(
+        &t,
+        &c,
+        "pr_reply",
+        json!({ "repo": "owner/name", "number": 7, "thread_id": "PRRT_open" }),
+    )
+    .await;
+    assert!(err);
+    let (err, _) = call(
+        &t,
+        &c,
+        "pr_reply",
+        json!({ "repo": "owner/name", "number": 7, "thread_id": "PRRT open; drop", "body": "b" }),
+    )
+    .await;
+    assert!(err);
+    assert_eq!(bodies.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn pr_for_branch_finds_the_open_pull_request() {
+    state::isolate();
+    let (t, seen) = rig().await;
+    let (err, v) = call(
+        &t,
+        &ctx("work"),
+        "pr_for_branch",
+        json!({ "repo": "owner/name", "branch": "feat/thing" }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["open"][0]["number"], 7);
+    assert_eq!(
+        seen.lock().unwrap()[0].1,
+        "/repos/owner/name/pulls?state=open&head=owner:feat/thing&per_page=10"
+    );
 }

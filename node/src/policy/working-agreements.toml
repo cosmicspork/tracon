@@ -6,7 +6,7 @@
 # Anything not matched here is asked, so adding a rule can only ever reduce the
 # number of interruptions, never widen what an agent may do unattended.
 
-version = 9
+version = 10
 
 # --- 1. Worktree, not the main checkout -------------------------------------
 # Structurally true already: the harness only ever sees its own worktree at
@@ -135,9 +135,13 @@ matches = [
     "report_status",
     "review_verdict",
     "mr_status",
+    "mr_discussions",
+    "mr_for_branch",
     "pipeline_status",
     "job_trace",
     "pr_status",
+    "pr_threads",
+    "pr_for_branch",
     "run_status",
     "issue",
     "issue_search",

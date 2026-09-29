@@ -78,7 +78,7 @@ pub fn definitions() -> Vec<Value> {
                     "base": { "type": "string", "description": "Branch to merge into. Defaults to the branch the worktree was created from." },
                     "review_id": { "type": "string", "description": "Set to resubmit an existing review after changes were requested." },
                     "rerun_checks": { "type": "boolean", "description": "Run configured required checks again even when exact immutable evidence exists. This cannot alter which checks are required." },
-                    "change": { "type": "integer", "description": "The open pull request number or merge request iid this branch already has. Approval updates it instead of opening a new one. Fixed by the first submit of a review." },
+                    "change": { "type": "integer", "description": "The open pull request number or merge request iid this branch already has (pr_for_branch or mr_for_branch finds it). Approval updates it instead of opening a new one. Fixed by the first submit of a review." },
                     "forge": {
                         "type": "object",
                         "description": "What the forge shows besides the commits. Omit for a new change to describe it with title and body; omit for an existing change to push only.",

@@ -74,6 +74,42 @@ async fn stub(
                 "assignee": { "displayName": "J" }, "parent": { "key": "WRK-100" } } }] })),
         );
     }
+    if path.ends_with("/merge_requests/7/discussions") && method == "GET" {
+        return (
+            axum::http::StatusCode::OK,
+            Json(json!([
+                { "id": "aa11", "individual_note": true, "notes": [
+                    { "id": 1, "body": "general note", "author": { "username": "rev" }, "created_at": "t" }] },
+                { "id": "bb22", "individual_note": true, "notes": [
+                    { "id": 2, "body": "added 1 commit", "system": true }] },
+                { "id": "cc33", "individual_note": false, "notes": [
+                    { "id": 3, "body": "rename this", "resolvable": true, "resolved": false,
+                      "author": { "username": "rev" }, "created_at": "t",
+                      "position": { "new_path": "src/a.rs", "new_line": 12 } }] }
+            ])),
+        );
+    }
+    if path.ends_with("/merge_requests/7/discussions/cc33/notes") && method == "POST" {
+        return (
+            axum::http::StatusCode::CREATED,
+            Json(json!({ "id": 44, "body": "renamed" })),
+        );
+    }
+    if path.ends_with("/merge_requests/7/discussions/cc33") && method == "PUT" {
+        return (
+            axum::http::StatusCode::OK,
+            Json(json!({ "id": "cc33", "notes": [
+                { "id": 3, "resolvable": true, "resolved": true },
+                { "id": 44, "resolvable": true, "resolved": true }] })),
+        );
+    }
+    if path.ends_with("/merge_requests") && method == "GET" {
+        return (
+            axum::http::StatusCode::OK,
+            Json(json!([{ "iid": 7, "title": "Add thing", "draft": false,
+                "target_branch": "main", "web_url": "https://gitlab.example/g/p/-/merge_requests/7" }])),
+        );
+    }
     if path.contains("/repository/tags/") {
         return if path.ends_with("/v1.0") {
             (axum::http::StatusCode::OK, Json(json!({ "name": "v1.0" })))
@@ -672,4 +708,83 @@ async fn a_refusal_from_jira_carries_the_field_it_names() {
     let text = v.as_str().unwrap();
     assert!(text.contains("priority"), "{text}");
     assert!(text.contains("Specify a valid value"), "{text}");
+}
+
+#[tokio::test]
+async fn mr_discussions_reads_threads_and_comments_without_system_notes() {
+    state::isolate();
+    let (t, seen, _) = rig().await;
+    // Shipped policy: a read runs unattended.
+    let c = ctx("work", "n1");
+    let (err, v) = call(
+        &t,
+        &c,
+        "mr_discussions",
+        json!({ "project": "g/p", "iid": 7 }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["comments"].as_array().unwrap().len(), 1);
+    assert_eq!(v["comments"][0]["body"], "general note");
+    assert_eq!(v["threads"].as_array().unwrap().len(), 1);
+    assert_eq!(v["threads"][0]["id"], "cc33");
+    assert_eq!(v["threads"][0]["path"], "src/a.rs");
+    assert_eq!(v["threads"][0]["resolved"], false);
+    let seen = seen.0.lock().unwrap().clone();
+    assert!(
+        seen[0].1.ends_with("/merge_requests/7/discussions"),
+        "{seen:?}"
+    );
+    assert_eq!(seen[0].2, "glpat-secret");
+}
+
+#[tokio::test]
+async fn an_mr_reply_waits_on_the_operator_then_replies_and_resolves() {
+    state::isolate();
+    let (mut t, seen, bodies, _) = rig_with_bodies().await;
+    let c = ctx("work", "n1");
+    let args = json!({ "project": "g/p", "iid": 7, "discussion_id": "cc33",
+                       "body": "renamed", "resolve": true });
+    let (err, v) = call(&t, &c, "mr_reply", args.clone()).await;
+    assert!(err);
+    assert!(v.as_str().unwrap_or_default().contains("approval"), "{v}");
+    assert!(seen.0.lock().unwrap().is_empty(), "nothing reached GitLab");
+
+    t.policy = allowing(r#""mr_reply""#);
+    let (err, v) = call(&t, &c, "mr_reply", args).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["note_id"], 44);
+    assert_eq!(v["resolved"], true);
+    let sent = bodies.0.lock().unwrap().clone();
+    assert_eq!(sent[0].0, "POST");
+    assert_eq!(sent[0].2["body"], "renamed");
+    assert_eq!(sent[1].0, "PUT");
+    assert_eq!(sent[1].2["resolved"], true);
+
+    let (err, _) = call(
+        &t,
+        &c,
+        "mr_reply",
+        json!({ "project": "g/p", "iid": 7, "discussion_id": "../../notes", "body": "b" }),
+    )
+    .await;
+    assert!(err, "a discussion id is hex, never a path");
+    assert_eq!(bodies.0.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn mr_for_branch_finds_the_open_merge_request() {
+    state::isolate();
+    let (t, seen, _) = rig().await;
+    let (err, v) = call(
+        &t,
+        &ctx("work", "n1"),
+        "mr_for_branch",
+        json!({ "project": "g/p", "branch": "feat/thing" }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["open"][0]["iid"], 7);
+    let seen = seen.0.lock().unwrap().clone();
+    assert!(seen[0].1.ends_with("/merge_requests"), "{seen:?}");
 }

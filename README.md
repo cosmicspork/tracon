@@ -341,7 +341,14 @@ the forge first: a branch with an open change must name it, and an update must b
 an open change of that branch into that base. An update pushes only over the
 commit the change held at submit; a rewritten history (rebase, amend) must be
 declared, is forced with that commit as its lease, and always comes to you even
-under a publish grant. `tracon provenance <sha>`
+under a publish grant.
+
+Feedback left on the forge comes back the same way: an agent reads a change's
+review threads (file, line, resolved or outdated) and conversation with
+`pr_threads` / `mr_discussions`, finds a branch's open change with `pr_for_branch` /
+`mr_for_branch`, and sees each reviewer's latest verdict in `pr_status`, all
+unattended. Replying to a thread, and resolving it, is `pr_reply` / `mr_reply`,
+which you are asked about like any other comment. `tracon provenance <sha>`
 answers, later, which model, which prompts, which approval and which policy shipped
 a commit.
 
