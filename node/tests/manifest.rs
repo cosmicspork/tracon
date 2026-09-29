@@ -437,10 +437,11 @@ fn rendered(wiring: &tracon::gateway::model::Wiring) -> Vec<(String, String)> {
     OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION).scratch_files(wiring)
 }
 
-/// The config the node writes names one skill root, through the variable the
-/// launch environment resolves, and never names a URL.
+/// The config the node writes names no skill path and no URL: the packages sit
+/// in the sealed global config directory, where both halves of OpenCode find
+/// them without one.
 #[tokio::test]
-async fn the_rendered_config_points_at_one_skill_root_and_no_urls() {
+async fn the_rendered_config_names_no_skill_path_and_no_urls() {
     let n = node();
     let root = state::scratch("manifest-render");
     let dir = package(&root, "release-notes", "Write the notes.");
@@ -464,12 +465,7 @@ async fn the_rendered_config_points_at_one_skill_root_and_no_urls() {
             .1,
     )
     .unwrap();
-    assert_eq!(
-        config["skills"]["paths"],
-        json!(["{env:TRACON_SKILL_ROOT}"]),
-        "{config}"
-    );
-    assert!(config["skills"]["urls"].is_null(), "{config}");
+    assert!(config["skills"].is_null(), "{config}");
     assert!(config["plugin"].is_null(), "{config}");
     // `lsp` and `formatter` come from the image's toolchain profile, merged
     // in by `scratch_files`: records rather than booleans, so nothing the
@@ -477,12 +473,12 @@ async fn the_rendered_config_points_at_one_skill_root_and_no_urls() {
     assert!(config["lsp"].is_object(), "{config}");
     assert!(config["formatter"].is_object(), "{config}");
 
-    // The package itself is staged under that root, one directory per skill.
+    // The package itself is staged in the sealed directory, one per skill.
     assert!(
-        files
-            .iter()
-            .any(|(name, body)| name == "skills/release-notes/SKILL.md"
-                && body.contains("Write the notes.")),
+        files.iter().any(
+            |(name, body)| name == "xdg/opencode/skills/release-notes/SKILL.md"
+                && body.contains("Write the notes.")
+        ),
         "{:?}",
         files.iter().map(|(n, _)| n).collect::<Vec<_>>()
     );
@@ -533,10 +529,10 @@ async fn a_later_revision_does_not_alter_what_a_running_session_was_staged_from(
     // The running session's files are unchanged — they are a function of the
     // manifest it holds, not of the store.
     assert_eq!(staged, rendered(&wiring_with(first.clone())));
-    assert!(staged
-        .iter()
-        .any(|(name, body)| name == "skills/release-notes/SKILL.md"
-            && body.contains("The first version.")));
+    assert!(staged.iter().any(
+        |(name, body)| name == "xdg/opencode/skills/release-notes/SKILL.md"
+            && body.contains("The first version.")
+    ));
 
     // And the digest a session recorded still resolves to those bytes.
     let looked_up = n.store.manifest_by_digest(&first.digest).unwrap().unwrap();
@@ -548,8 +544,10 @@ async fn a_later_revision_does_not_alter_what_a_running_session_was_staged_from(
     // What the next launch would stage is the second version.
     assert!(rendered(&wiring_with(second))
         .iter()
-        .any(|(name, body)| name == "skills/release-notes/SKILL.md"
-            && body.contains("The second version.")));
+        .any(
+            |(name, body)| name == "xdg/opencode/skills/release-notes/SKILL.md"
+                && body.contains("The second version.")
+        ));
 }
 
 /// A session carries the digest it launched under, written once.
@@ -714,6 +712,8 @@ async fn the_manifests_skill_is_listed_and_the_projects_are_not() {
 
     let directory = urlencode(&work.to_string_lossy());
     let skills = ask(format!("/skill?directory={directory}")).await;
+    // The session runner's own list, which the turns actually use.
+    let skills_v2 = ask(format!("/api/skill?directory={directory}")).await;
     let tools = ask(format!("/experimental/tool/ids?directory={directory}")).await;
     handle.close().await.ok();
     runner.kill(&container).await.ok();
@@ -721,6 +721,10 @@ async fn the_manifests_skill_is_listed_and_the_projects_are_not() {
     assert!(
         skills.contains("release-notes"),
         "the manifest's skill is not listed: {skills}"
+    );
+    assert!(
+        skills_v2.contains("release-notes"),
+        "the session runner does not list the manifest's skill: {skills_v2}"
     );
     assert!(
         !skills.contains("planted"),

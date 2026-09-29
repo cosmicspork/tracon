@@ -3294,3 +3294,86 @@ async fn a_harness_speaking_an_unsupported_protocol_fails_the_session_with_the_r
 
     tracon::session::materialize::remove(&row.id);
 }
+
+/// A harness that would load an entry at the workspace root as its own
+/// configuration. `.git` stands in for `opencode.json` because it is the one
+/// entry every seeded workspace has; the check is the same.
+struct ConfiguredByTheRepoAdapter;
+
+#[async_trait]
+impl HarnessAdapter for ConfiguredByTheRepoAdapter {
+    fn id(&self) -> &'static str {
+        "fake"
+    }
+    fn pinned_version(&self) -> &str {
+        "1.0.0"
+    }
+    fn protocol(&self) -> tracon::adapter::ProtocolSupport {
+        tracon::adapter::ProtocolSupport {
+            name: "fake",
+            min: 1,
+            max: 1,
+        }
+    }
+    fn refused_workspace_entries(&self) -> &'static [&'static str] {
+        &[".git"]
+    }
+    async fn version(
+        &self,
+        _r: &dyn Runner,
+    ) -> Result<tracon::adapter::HarnessVersion, AdapterError> {
+        Ok(tracon::adapter::HarnessVersion {
+            found: "1.0.0".into(),
+            pinned: "1.0.0".into(),
+        })
+    }
+    async fn probe_models(
+        &self,
+        _r: &dyn Runner,
+        _wiring: &tracon::gateway::model::Wiring,
+    ) -> Result<Vec<tracon::adapter::ModelOption>, AdapterError> {
+        Ok(Vec::new())
+    }
+    async fn launch(
+        &self,
+        _runner: &dyn Runner,
+        _spec: tracon::adapter::LaunchSpec,
+    ) -> Result<
+        (
+            Box<dyn HarnessHandle>,
+            mpsc::Receiver<tracon::adapter::HarnessEvent>,
+        ),
+        AdapterError,
+    > {
+        panic!("a workspace the harness would be configured by must not be launched")
+    }
+}
+
+/// A repository carrying the harness's own configuration is refused before the
+/// harness starts, and the reason says what to do about it.
+#[tokio::test]
+async fn a_workspace_that_would_configure_the_harness_is_refused_before_launch() {
+    state::isolate();
+    let Orientation { store, row, .. } = orientation_with(
+        "configured-by-repo",
+        Some(Arc::new(ConfiguredByTheRepoAdapter)),
+        0,
+    )
+    .await;
+    let mut ended = None;
+    for _ in 0..300 {
+        let s = store.get_session(&row.id).unwrap().unwrap();
+        if s.state == "failed" {
+            ended = Some(s);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let ended = ended.expect("the session must fail rather than launch");
+    let reason = ended.last_error.unwrap_or_default();
+    assert!(reason.contains("the workspace carries `.git`"), "{reason}");
+    assert!(reason.contains("was not started"), "{reason}");
+    assert!(reason.contains("Remove or rename"), "{reason}");
+
+    tracon::session::materialize::remove(&row.id);
+}
