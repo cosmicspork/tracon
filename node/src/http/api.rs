@@ -4835,6 +4835,17 @@ pub async fn recheck_boundary(State(s): State<AppState>) -> ApiResult<Json<serde
     s.manager
         .bus()
         .publish(crate::stream::Frame::Node(node_json(&s)?));
+    // The startup probe runs before the gateway is up and is refused, which
+    // leaves whatever list the node last held — after a harness switch, the
+    // previous harness's. A boundary that now passes is when the probe can
+    // answer, so it asks then.
+    if row.state == "ready" {
+        let probe = s.clone();
+        tokio::spawn(async move {
+            let backend = probe.manager.backend().clone();
+            let _ = probe_models_into_store(&probe, backend.as_ref()).await;
+        });
+    }
     Ok(Json(json!({ "state": row.state, "checks": report })))
 }
 
