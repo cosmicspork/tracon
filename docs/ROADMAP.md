@@ -12,88 +12,147 @@
   not multi-user tenancy.
 - Keep the core accountable and personal workflows adaptable. Customizations reuse
   isolation, scoped authority, manifests and evidence; installing code grants no permission.
-- Support the product engineer's scarce work: understand the customer, define good,
-  judge the experience, and learn from the result. Delegate implementation mechanics.
-- Evaluate the candidate experience against an agreed user task; the diff is supporting
-  evidence, not the whole product decision. Publication is not outcome acceptance.
-- Preserve low-ceremony prompts. Product briefs, evaluation and follow-through are optional
-  extensions of existing work and documents, not mandatory process or a new platform.
+- The operator's scarce work is understanding the problem and judging the result; tracon's
+  job is to take the implementation mechanics off their plate reliably. Product briefs,
+  criteria and follow-through stay optional extensions of ordinary work, never process.
 
-This priority shift follows the product-engineer definition in
-[We are all Product Engineers now](https://seldo.com/posts/we-are-all-product-engineers-now/).
-It changes what to build next, not what the current release already guarantees.
+**Reprioritised 2026-09-29.** The 2026-09-15 turn towards product engineering added a
+layer of evaluation machinery before tracon had run a real session, and the first real
+runs (2026-09-20, 2026-09-28) found the everyday path broken underneath it. The plan
+now is ordered by what it takes to start a session, build something and ship it from
+one node, every day. The product-engineering work that shipped (the brief, selected
+context, criteria bound to checks) stays and stays optional; the rest waits until its
+absence is felt in real work.
 
-Completed items are removed from this file when they land; the changelog and the
-reference documents under `docs/reference/` carry the history.
+### The supported configuration
 
-## Planned
+One configuration is what daily use runs on, and what a defect has to be in to enter
+**Now**: the desktop app on macOS or Linux, rootless Podman, Claude Code as the managed
+harness, a single node. Everything else — OpenCode, the Kubernetes runtime, the hub and
+mesh, the installed phone app, handoff between nodes — is built and tested but
+*experimental* until that configuration is boring. The homelab node keeps running the
+hub and serving the phone; work on those surfaces is deferred, not removed.
 
-Delivery order: prove one loop from customer context to accepted outcome; strengthen
-reliability and portable ownership; then invest in richer diff reading and optional
-automation. Pull forward infrastructure fixes needed by that real workflow, rather than
-waiting for every platform or integration to be complete. The trust and attention
-defects that came first are done: the attention count is actionable decisions, and a
-session's authority is explained by the gate that enforces it.
+### How work enters this file
+
+An item enters **Now** only when it was hit during real use, and says where: the session,
+task or run that found it. **Next** holds work whose need is already clear from daily
+use. **Later** holds intended changes that wait for the loop before them to be proven.
+Nothing enters from a blog post, an idea or a demo without first being missed on a real
+task. Completed items are removed when they land; the changelog and the reference
+documents under `docs/reference/` carry the history. Live validation of existing
+features is tracked separately under [Live proofs](#live-proofs-still-the-operators).
 
 Build on the existing ledger, documents, workspace snapshots, evidence, scoped grants
-and launch manifests. Do not replace the store or introduce another agent loop. These
-are intended changes, including a future revision of the diff-first design principle,
-not additional guarantees of the current release. Live validation of existing features
-remains separately tracked under [Live proofs still the operator's](#live-proofs-still-the-operators).
+and launch manifests. Do not replace the store or introduce another agent loop.
 
-### 1. One complete product loop
+## Now — start, build, ship from one node
 
-The first product slice is one real user problem carried through implementation,
-an evaluable candidate, specific feedback, a revised attempt and explicit acceptance.
-It must also preserve what was learned after the intended user encountered the result.
+Every item here was found on the 2026-09-20 or 2026-09-28 live runs, or in the daily
+desktop use since.
 
-**Customer context and definition of good**
+- [ ] **Run required checks where they can run.** Checks execute in the harness image,
+      which carries no project toolchain or dependencies, so a repository's `just check`
+      exits 127 and the operator runs it on the host and relays the result. Let the
+      operator name a validated toolchain image per repository (the repositories' own
+      `.devcontainer/` Dockerfiles are the obvious source), snapshotted per execution
+      with validation invalidated when its inputs change, and run checks and preparation
+      in it. A command that cannot be found is reported as "not runnable here" with the
+      missing tool named, never as a failing check the agent is asked to fix.
+- [ ] **Proof of work.** One MCP tool that runs a command in the session's own boundary
+      and has the *node* record the command, exit code, bounded output, revision and
+      image digest as evidence — the agent cannot type the output. A proof document is
+      assembled from those records, shown beside the diff in review, marked stale when
+      the revision moves, and rerun to verify. This is the Showboat idea with the
+      capture owned by the supervisor; the existing attached demonstration (a linked,
+      hashed, never-executed document) stays for what a human writes by hand. Depends on
+      the toolchain image above for anything that needs the project's tools.
+- [ ] **Weight cached reads in the token budget.** A cache read is charged as a full
+      input token, so a planning pass on this repository spends 3–4M of a 2M default
+      budget on mostly-cached context. Count cache reads and cache writes at their price
+      ratio (or as their own limit), keep the raw counts visible, and never let a cheaper
+      unit hide spend.
+- [ ] **Give a node restart its own end reason.** Sessions running when the node restarts
+      are ended as `killed_user`, which tells the operator they stopped something they did
+      not; record `node_restart` and offer the resume a restart interrupted.
+- [ ] **Give the Podman gateway its own user service or cgroup**, reconciled idempotently,
+      so a node-service restart leaves it running and a stopped gateway recovers without
+      rerunning setup or weakening `KillMode`. Fail-closed boundary checks stay.
+- [ ] **Publication recovery.** Show credential and binding readiness before offering
+      publication and link missing forge access to the right settings, without implying
+      remote permission from token presence. A failed publish needs a durable, visible
+      outcome and a remedy: distinguish definitely-not-attempted, failed, in-progress,
+      uncertain and published, and reconcile uncertain external effects before retrying.
+      Expose an explicit recovery action backed by the publication journal, not a
+      misleading second approval. Adding a credential never retries automatically;
+      changed revisions or prose need fresh authorization.
+- [ ] **Make tracon invisible in what it publishes.** A commit, branch, pull request or
+      forge request should read as the operator's own work through their harness, with
+      nothing naming tracon. Authorship comes from the bound forge credential, not the
+      host or a placeholder: inside the boundary every commit is `tracon <tracon@localhost>`
+      today (hard-coded in the harness home's gitconfig and the sanitized workspace
+      config), and outside it commits carry the host's Git config, which can be a work
+      address on a personal repository. Resolve the identity once per bound credential
+      from the forge (GitHub `/user`: name and `<id>+<login>@users.noreply.github.com`;
+      GitLab `/user`: name and commit or noreply email), cache it with the binding, and
+      write it as author and committer wherever the node writes Git config. Attribution
+      is see-through: the harness's own default trailers (Claude Code's `Co-Authored-By`,
+      whatever OpenCode does) pass through untouched, and tracon adds none of its own;
+      its provenance stays in the node's ledger. Forge API calls stop sending
+      `user-agent: tracon`. For an external harness the node launches nothing, so it
+      offers the identity (in `external show` and as a tool result the harness applies as
+      repo-local config) and checks authorship at `submit_review` and publish: a commit
+      whose author is not an identity of the target forge account is named in the review,
+      and rewriting it is an operator-approved step, never silent.
+- [ ] **Decide OpenCode's future with a one-day spike, not a rewrite.** On 2026-09-28 the
+      OpenCode v2 session runner (`/api/session/{id}/prompt`, 1.18.30–1.18.33) offered the
+      model no MCP tools, so no `doc_write`, `submit_review` or `publish`; the node was
+      switched to Claude Code. The candidate remedy is an adapter on the v1 routes
+      (`/session/{id}/message`), which is also what the native UI speaks, so the blank
+      history window and the respelled permission replies would go with it. Before
+      committing to that, prove on the pinned binary: MCP tools offered, asks raised,
+      provider traffic reaching only the gateway (finding 19 is a v2 property), and what
+      reconnect looks like without v2's per-session `event?after=` stream. Keep the v2
+      adapter behind the same trait; a third adapter is a stopgap, not a product.
+      Until this is decided, OpenCode-only items sit under **Next** and the docs say
+      Claude Code is the working harness.
+- [ ] **Open external links through a clean Linux host launcher**: the AppImage's bundled
+      `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
+      host environment for the child only and keep the URL and origin restrictions.
 
-Work items and documents already carry the optional product brief: intended user,
-problem, source references, constraints, success criteria and open questions, with
-every line marked observed, inferred or decided and pointing at the evidence it rests
-on. An item also carries the context the operator selected for it — brief, research,
-decisions, constraints and other documents — which every later attempt receives in
-full, with a receipt of what it actually got and what changed since the attempt
-before. Each success criterion is now bound to what would settle it — checks, scenarios
-and observations written under it in the brief, an agent's proposal plainly marked as
-one — and a criterion carries whether its checks passed and whether a person judged it,
-with the uncovered criteria, the assumptions and the open questions beside it. What
-remains is evaluating the experience rather than the diff: versioned scenarios a
-criterion can point at, observations from the intended user anchored to the criteria
-they are about, and the loop closing after publication.
+## Next — the working loop, made comfortable
 
-**Experience-centered evaluation**
+Needed for daily use, but not blocking it today.
 
-- [ ] Make the candidate experience against its agreed user task the primary product-review
-      surface: task, criteria, exact preview, evidence, observations and verdict together.
-      Keep the diff and runtime checks available as supporting evidence. Update the design
-      record when this lands, without removing implementation review or publication gates.
-- [ ] Save inspectable, versioned customer-task scenarios with starting conditions,
-      observable outcomes and device/viewport settings. Let agents propose executable
-      steps; retain the exact scenario with each run and rerun it against later candidates.
-      Separate changes to the evaluation standard from changes to the implementation.
-- [ ] Support an operator-led trial of the exact deployed candidate with deployment identity
-      and freshness visible. Capture observations against the candidate and UI state;
-      static prototypes must state their fidelity and keep their isolated sandbox.
-      Screenshots prove capture, not usability; distinguish automated assertions from
-      criteria awaiting human judgment, including narrow-screen behavior.
+**Sessions and accounting**
 
-#### Publication follow-through
+- [ ] Record a policy decision for every Claude Code tool call. Calls Claude Code allows
+      by its own rules (reads, searches) never reach `can_use_tool`, so they leave no
+      `policy_allowed` event, while the same calls under OpenCode do; the ledger should
+      not depend on which harness ran.
+- [ ] Choose a provider-exhaustion policy, per channel with a per-run override: pause and
+      resume after reset, fall back to a named provider, or fall back then wait,
+      defaulting to pause. Distinguish exhaustion from throttling, auth failure and
+      outage; never invent a reset timer; record policy, reason, model and next wake;
+      recheck grants, caps and compatibility before resuming, and continue only from a
+      recorded safe boundary.
+- [ ] A work-level continuation view carrying intent, decisions, attempts, blockers, next
+      action, workspace, lineage and evidence, with continue / change approach / abandon.
+      Plain sessions gain it without being forced into a work item.
+- [ ] A concise outcome record derived from recorded state: what changed, what was
+      verified, what needs a decision, what is uncertain, and cost. Narrative summary
+      cannot turn a claim into verification.
+- [ ] Distinguish ready-to-investigate, ready-to-verify and ready-to-publish. Surface
+      missing project checks or publication prerequisites before spending a session on
+      that path; do not require forge credentials, QA setup or a product brief for an
+      investigation.
+- [ ] Preview preparation and explain incompatibility before launch, without turning
+      unsupported scripts or devcontainer features into silent host execution. Let the
+      agent propose project checks and setup, but require operator validation; it cannot
+      waive checks or authorize its own environment.
 
-- [ ] Separate authorization to publish, technical verification and human acceptance of the
-      outcome. Support optional published/awaiting-evaluation work rather than closing it
-      merely because a PR opened. Bind acceptance to the evaluated candidate and criteria;
-      a new candidate must not inherit an old verdict. Plain coding tasks may still end at
-      publication when that is the operator's chosen endpoint.
-- [ ] Separate review decisions from publication recovery. Show credential and binding
-      readiness before offering publication and link missing forge access to the right
-      settings, without implying remote permission from token presence. A failed publish
-      needs a durable, visible outcome and a remedy: distinguish definitely-not-attempted,
-      failed, in-progress, uncertain and published, and reconcile uncertain external
-      effects before retrying. Expose an explicit recovery action backed by the publication
-      journal, not a misleading second approval. Adding a credential never retries
-      automatically; changed revisions or prose need fresh authorization.
+**Review and publication**
+
 - [ ] Follow a published pull or merge request after it opens: subscribe to its CI runs,
       draft/ready and open/merged/closed transitions, review verdicts and new comments or
       threads, and record each as an event on the review and its work item. Notify through
@@ -103,147 +162,22 @@ they are about, and the loop closing after publication.
       through the brokered token first; webhooks only where the node is reachable. A
       subscription ends when the request closes, and it never merges, approves or retries
       anything on its own.
-
-**Feedback and re-review**
-
-- [ ] Preserve individually addressable observations anchored to criteria, screenshots or
-      UI states, as well as general and file comments and line/range threads bound to
-      revision, path and side. Return feedback through the agent review contract and keep
-      it across resubmission. Addressed, unresolved and outdated are distinct; a moved
-      anchor must not silently attach to unrelated experience or code.
 - [ ] Durable review drafts: unsent feedback and publication prose survive navigation,
       reconnect and device changes with explicit saved/conflict state. Desktop diff drafts
-      remain revision-keyed; preview-to-review navigation must not discard observations.
-- [ ] Show before/after evidence and what changed in response to each observation, with
-      changes since the last reviewed revision beside the full base diff. The operator
-      should not need to reconstruct feedback from transcripts or reread the entire change
-      to find the one concern that remains unresolved.
+      remain revision-keyed. The acceptance test is the reconnect: leave feedback, switch
+      device or reconnect, find it intact.
+- [ ] Show changes since the last reviewed revision beside the full base diff, and what
+      changed in response to each comment, so the operator does not reread the entire
+      change to find the one concern that remains unresolved.
 - [ ] Keep verdicts reachable in long reviews, open a labelled reason composer for Request
       changes and Reject rather than disabling a button, and explain unavailable actions
-      inline. Preview and evidence navigation must lead back to the decision being made.
-- [ ] Prove feedback continuity: leave three independent observations, switch device or
-      reconnect, receive a revision addressing two, and find the remaining concern intact.
-      Include stale requirements, changed scenarios and resubmission into existing threads.
+      inline.
+- [ ] Trim criteria binding to what is produced. #290 lets a criterion point at a
+      `scenario` or an `observation`; neither is produced by anything now that versioned
+      scenarios and trial capture are dropped. Remove those link kinds, keep `check` and
+      the operator's judgement, and say so in the brief format.
 
-#### Everyday work and portability
-
-Keep intent and learning continuous within ordinary work before extending whole-session
-transfer across nodes. Plain sessions gain these capabilities without requiring a ledger
-item; broader export and cross-node commitments remain below.
-
-- [ ] A work-level continuation view carrying intent, decisions, attempts, blockers, next
-      action, workspace, lineage and evidence, with continue / change approach / abandon.
-      Plain sessions gain it without being forced into a work item.
-- [ ] A concise outcome record derived from recorded state: what changed, what was
-      verified, what needs a decision, what is uncertain, and cost. Narrative summary
-      cannot turn a claim into verification or publication into customer success.
-- [ ] Optional post-publication follow-through: record publication, merge, deployment,
-      evaluation and customer observation separately. Keep the expected outcome, an
-      observation source and next observation date/action with the work. Use customer
-      notes, existing database queries or external dashboard links; connect what was
-      learned to continue / change approach / stop, without building an analytics platform.
-- [ ] Judge tracon by fewer low-value interruptions, less context re-explanation and time
-      to an evaluable experience and an accepted outcome. Retain setup failures, time to
-      verified work, interventions and tokens per accepted change, explicitly labelled as
-      approved/published reviews rather than human-accepted outcomes or observed customer
-      benefit. Include total effort across unsuccessful attempts when measuring cost per
-      accepted outcome; keep unmetered usage and missing verification visible. Quantitative
-      measures supplement qualitative user judgment; no agent reputation score.
-
-**Project readiness and independent use**
-
-- [ ] Save validated project setup profiles by extending the launch manifest and toolchain
-      profiles: image, language tools, skills, preparation, required checks and previews,
-      snapshotted per execution, with validation invalidated when its inputs change.
-- [ ] Run required checks where they can run. Today they execute in the harness image,
-      which carries no project toolchain or dependencies, so a repository's own
-      `just check` exits 127 and the operator has to run it on the host and relay the
-      result. Checks need the project's validated toolchain image and prepared
-      dependencies, and a command that cannot be found is reported as "not runnable
-      here" with the missing tool named, never as a failing check the agent is asked to fix.
-- [ ] Preview preparation and explain incompatibility before launch, without turning
-      unsupported scripts or devcontainer features into silent host execution. Let the
-      agent propose project checks and setup, but require operator validation; it cannot
-      waive checks or authorize its own environment.
-- [ ] Distinguish ready-to-investigate, ready-to-verify and ready-to-publish. Surface missing
-      project checks or publication prerequisites before spending a session on that path;
-      do not require forge credentials, QA setup or a product brief for an investigation.
-- [ ] One proven installation-to-first-task path for another operator, with explicit
-      OS/runtime/harness/login compatibility and actionable diagnostics. Remote access and
-      mesh stay optional. Demonstrate that project readiness leads to useful completion,
-      not only a runnable node.
-
-**Exit proof**
-
-- [ ] Prove one independent operator's complete loop on a real project: capture a user's
-      problem and source, agree on good, delegate with selected context, capture a candidate,
-      obtain a preview, try the task, record observations, inspect a revision and explicitly
-      accept the result. Record the intended user's subsequent experience and next decision.
-      Include disconnect/reconnect and recovery without losing context or feedback.
-- [ ] In a preview workflow that requires a PR first, publish the candidate, fail a user
-      task in the preview, and show that the product outcome remains unaccepted with an
-      obvious continuation path. Only the later explicit acceptance counts as acceptance.
-      Reuse the private-repository and live-QA proofs below; fixtures are not substitutes.
-
-### 2. Reliability and portable ownership
-
-Fix prerequisites for the product loop as they arise. Broader platform parity and
-cross-node transfer follow the first proven loop, not the other way around.
-
-**Node connections and desktop reliability**
-
-- [ ] Give the Podman gateway its own user service or cgroup, reconciled idempotently, so
-      a node-service restart leaves it running and a stopped gateway recovers without
-      rerunning setup or weakening `KillMode`. Fail-closed boundary checks stay.
-- [ ] Converge credential handoff status: after durable receiver acceptance, recompute
-      provider availability and republish the local and mesh summaries. A successful
-      enqueue proves neither receipt nor use.
-- [ ] Re-offer a shared credential to a holder that missed its handoff: one offline past
-      hub retention (a cursor that jumps ahead on `410`) never receives the renewed copy,
-      and nothing sends it again. Do not treat removed local bindings as evidence a
-      copied token was revoked.
-- [ ] Sync node configuration across the mesh the way credentials will be: set once and
-      carried to every member, with secrets only ever in direct-sealed handoffs and
-      everything else on the hub's ordered replication (last writer wins per record).
-      Define which settings are mesh-wide, per channel, and per node — a node's own
-      runtime, boundary and paths stay its own.
-- [ ] Choose a provider-exhaustion policy, per channel with a per-run override: pause and
-      resume after reset, fall back to a named provider, or fall back then wait,
-      defaulting to pause. Distinguish exhaustion from throttling, auth failure and
-      outage; never invent a reset timer; record policy, reason, model and next wake;
-      recheck grants, caps and compatibility before resuming, and continue only from a
-      recorded safe boundary.
-- [ ] Explain browser push enrollment failures by stage: unavailable API, denied
-      permission, service-worker failure, push-service registration failure, node storage
-      error; never report a device as registered after a failed enrollment.
-- [ ] Open external links through a clean Linux host launcher: the AppImage's bundled
-      `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
-      host environment for the child only and keep the URL and origin restrictions.
-
-**Session accounting and harness surfaces**
-
-- [ ] Weight cached reads in the token budget. A cache read is charged as a full input
-      token, so a planning pass on this repository spends 3–4M of a 2M default budget on
-      mostly-cached context. Count cache reads and cache writes at their price ratio (or as
-      their own limit), keep the raw counts visible, and never let a cheaper unit hide spend.
-- [ ] Give a node restart its own end reason. Sessions running when the node restarts are
-      ended as `killed_user`, which tells the operator they stopped something they did not;
-      record `node_restart` (or equivalent), and offer the resume a restart interrupted.
-- [ ] Show an OpenCode session's history in its native window. OpenCode keeps separate v1
-      and v2 session stores; the v2 runner writes one and the v1 native UI reads the other,
-      so the window opens on "New Session" with a blank history.
-- [ ] Open the native OpenCode window from any origin the SPA is served at. It loads only
-      when the tracon tab is at exactly `http://127.0.0.1:7420`; `localhost`, a LAN address
-      or the hub's origin get a refused frame.
-- [ ] Let the model catalogue refresh. `models.opencode.ai` is not on the gateway's
-      `allow_hosts`, so the harness's catalogue fetch is refused and its model list never
-      updates; fetch it node-side and serve it, or allow the one host.
-- [ ] Record a policy decision for every Claude Code tool call. Calls Claude Code allows by
-      its own rules (reads, searches) never reach `can_use_tool`, so they leave no
-      `policy_allowed` event, while the same calls under OpenCode do; the ledger should not
-      depend on which harness ran.
-
-**Forge and tracker parity**
+**Forge and tracker**
 
 - [ ] Give GitHub the CI tools GitLab has: a run's job log tail (`run_logs`, the
       `job_trace` limits), rerunning a run's failed jobs (`run_rerun`, asked), and the
@@ -253,98 +187,71 @@ cross-node transfer follow the first proven loop, not the other way around.
       transitions (id, name, destination status) through the brokered token, so an
       authorized `issue_transition` never rests on an out-of-band `acli` lookup or an id
       copied from another project. Discovery stays a read; the transition keeps its grant.
-- [ ] Make tracon invisible in what it publishes: a commit, branch, pull request or forge
-      request should read as the operator's own work through their harness, with nothing
-      naming tracon. Authorship comes from the bound forge credential, not the host or a
-      placeholder: inside the boundary every commit is `tracon <tracon@localhost>` today
-      (hard-coded in the harness home's gitconfig and the sanitized workspace config), and
-      outside it commits carry the host's Git config, which can be a work address on a
-      personal repository. Resolve the identity once per bound credential from the forge
-      (GitHub `/user`: name and `<id>+<login>@users.noreply.github.com`; GitLab `/user`:
-      name and commit or noreply email), cache it with the binding, and write it as author
-      and committer wherever the node writes Git config. Attribution is see-through: the
-      harness's own default trailers (Claude Code's `Co-Authored-By`, whatever OpenCode
-      does) pass through untouched, and tracon adds none of its own; its provenance stays
-      in the node's ledger. Forge API calls stop sending `user-agent: tracon`. For an
-      external harness the node launches nothing, so it offers the identity (in `external
-      show` and as a tool result the harness applies as repo-local config) and checks
-      authorship at `submit_review` and publish: a commit whose author is not an identity
-      of the target forge account is named in the review, and rewriting it is an
-      operator-approved step, never silent.
 
-**Portable data and recovery**
+**Node data**
+
+- [ ] **Data management in Settings.** Retention is decided: the node keeps everything
+      and the operator deletes by hand. Give that a pane — what the node holds per kind
+      (sessions, events, candidates and evidence, documents, memories, workspaces, harness
+      state), how much it weighs, and delete for the kinds that have a real delete, with
+      the propagation each one does or does not have stated. A storage figure belongs on
+      the Nodes screen too. Tombstones stay undecided until replication makes them matter.
+- [ ] Explain browser push enrollment failures by stage: unavailable API, denied
+      permission, service-worker failure, push-service registration failure, node storage
+      error; never report a device as registered after a failed enrollment.
+
+**OpenCode, contingent on the spike above**
+
+- [ ] Show an OpenCode session's history in its native window. OpenCode keeps separate v1
+      and v2 session stores; the v2 runner writes one and the v1 native UI reads the other,
+      so the window opens on "New Session" with a blank history.
+- [ ] Open the native OpenCode window from any origin the SPA is served at. It loads only
+      when the tracon tab is at exactly `http://127.0.0.1:7420`; `localhost`, a LAN address
+      or the hub's origin get a refused frame.
+- [ ] Let the model catalogue refresh. `models.opencode.ai` is not on the gateway's
+      `allow_hosts`, so the harness's catalogue fetch is refused and its model list never
+      updates; fetch it node-side and serve it, or allow the one host.
+
+## Later — earned by the loop before it
+
+Intended changes, including a future revision of the diff-first design principle. They
+wait until **Now** and **Next** have made a day's work unremarkable.
+
+**Product engineering, the part that survived**
+
+- [ ] Show the preview link and the proof document beside the diff in review, with the
+      criteria coverage the brief already carries. The diff and runtime checks stay the
+      authoritative record; this adds the two things a product judgement needs and no more.
+- [ ] Separate authorization to publish, technical verification and human acceptance of the
+      outcome. Support optional published/awaiting-evaluation work rather than closing it
+      merely because a PR opened. Bind acceptance to the evaluated candidate and criteria;
+      a new candidate must not inherit an old verdict. Plain coding tasks may still end at
+      publication when that is the operator's chosen endpoint.
+- [ ] Individually addressable review feedback: general and file comments and line/range
+      threads bound to revision, path and side, returned through the agent review contract
+      and kept across resubmission. Addressed, unresolved and outdated are distinct; a moved
+      anchor must not silently attach to unrelated code. Anchoring to criteria and
+      screenshots only if the proof document makes it worth it.
+- [ ] Exit proof: one independent operator's complete loop on a real project — capture a
+      user's problem and source, agree on good, delegate with selected context, capture a
+      candidate, obtain a preview, try the task, record the result, inspect a revision and
+      explicitly accept. In a PR-first preview workflow, publish the candidate, fail the
+      user task in the preview, and show that the outcome stays unaccepted with an obvious
+      continuation path. Fixtures are not substitutes.
+
+**Portable data**
 
 - [ ] Publish a versioned data contract: the signed candidate JSON, offline package reader
-      and document export extended into a round-trip export readable without tracon.
-- [ ] Specify complete portable content: sessions, events, work items, decisions, drafts,
-      documents, memories, workspace state, evidence, provenance, selected product context,
-      criteria and observations, with identifiers, encodings and omission rules defined.
-      Harness-native state is never the only copy.
-- [ ] Make import predictable and independently implementable: schemas, example exports,
-      integrity rules, migration policy, duplicate and reference handling, proven on a
-      fresh node and by reading without one.
-- [ ] Separate export, backup and handoff: export omits credentials and private keys and
-      warns that transcripts and customer context can still carry sensitive information;
-      neither import nor signature verification grants authority.
-- [ ] Unify recovery and maintenance entry points on the existing Settings controls, and
-      promise rollback only where state compatibility allows it.
-- [ ] Make export, import, handoff and recovery discoverable from the work they act on,
-      and keep empty and archived-only states navigable on every surface.
-- [ ] Bound maintenance expectations: supported versus experimental integrations, pinned
-      release and update policy, backup requirements, and the recovery path for a failed
-      upgrade, for installed customizations as well as the runtime.
-
-#### Session portability
-
-Move a whole session to another node, or resume it later, without losing anything the
-model or the operator saw. The durable record today is the event ledger and, for
-OpenCode, the per-session state backup; the gaps are the harness's own context and the
-working files a session accumulates outside the workspace.
-
-- [ ] Save the full-text conversation before any compaction or context reset: every turn
-      as the harness sent and received it, keyed by session and turn, so a compacted
-      context summarises something that still exists.
-- [ ] Save session scratchpads with the session, in the same package, digest and
-      generation record as the state backup.
-- [ ] Make that package the unit of transfer and resume: backup produces it, continuity
-      transfer carries it, reopening restores transcript, scratchpad, state and workspace
-      checkpoint together with lineage recorded.
-
-**Cross-node session handoff**
-
-- [ ] Move an unfinished session to another node: select, check compatibility, checkpoint,
-      transfer, continue, with continuous history and explicit lineage, requiring no
-      candidate, mesh membership or work item.
-- [ ] Carry the actual continuation state: workspace changes, conversation, decisions,
-      context, unsent draft, next action, harness/model/manifest identity, evidence, usage
-      and remaining limits, over the portable contract and existing transport.
-- [ ] Carry Git history, not just files. An imported transfer today is the carried tree
-      under a fresh `git init` on `main` with no commit and no remote: the recorded
-      `continuation/…` branch never exists, `submit_review` cannot resolve a base, and a
-      publish has no shared history to push onto. The destination should fetch the
-      repository at the candidate's base from the forge (brokered, like a managed
-      checkout), apply the carried changes on the named continuation branch, and fall back
-      to a local baseline when the forge is out of reach — one that is never published and
-      names nothing about tracon, so a publish from it waits for the real history.
-- [ ] Record lineage on every continuation: a resumed or imported session links the session
-      and transfer it continues (`continued_from`), and both sides show the link.
-- [ ] Lift the 2 MB mesh ceiling on transfers: stream or chunk packages over the existing
-      relay with a digest per chunk, so a real repository's candidate moves over the mesh
-      instead of only as a portable file carried by hand.
-- [ ] Transfer ownership safely: quiesce and fence the source first, persist
-      acknowledgements so retries duplicate nothing, and never let a timeout enable both
-      owners.
-- [ ] Re-evaluate authority and state compatibility at the destination; native-state resume
-      and fresh continuation are distinct, visible outcomes, and lost fidelity is explained
-      before confirmation.
-- [ ] Prove handoff both directions, including interruption, unavailable destination,
-      duplicate import, dirty workspace and incompatible harness state, with one active
-      owner and no budget reset.
-
-### 3. Richer review and optional automation
-
-These commitments remain, but follow a working product-evaluation loop. More agent
-coordination or richer code rendering is not a substitute for better product judgment.
+      and document export extended into a round-trip export readable without tracon —
+      sessions, events, work items, decisions, drafts, documents, memories, workspace
+      state, evidence, provenance, briefs and criteria, with identifiers, encodings and
+      omission rules defined. Export omits credentials and private keys and warns that
+      transcripts can still carry sensitive information; neither import nor signature
+      verification grants authority. Import is proven on a fresh node and by reading with
+      nothing running.
+- [ ] Save the full-text conversation before any compaction or context reset, and the
+      session's scratchpad, in the same package as the harness state backup, so a
+      compacted context summarises something that still exists.
 
 **Diff reading.** Borrow interaction patterns from
 [cosmicspork/review](https://github.com/cosmicspork/review), especially its
@@ -354,121 +261,17 @@ tracon's immutable candidates, isolated checks and brokered publication.
 
 - [ ] Side-by-side and unified modes, defaulting by width, with aligned lines, synchronized
       scrolling and a remembered preference; switching preserves file, position and
-      feedback, and neither mode needs the desktop diff editor.
+      feedback.
 - [ ] Readable code and context: line numbers both sides, syntax highlighting, within-line
       emphasis, wrap controls, context expanded from the pinned base and candidate rather
       than the live worktree, and explicit labels for renames, binaries and missing context.
 - [ ] File navigation and progress: collapsible sections, filtering, per-file counts,
-      next/previous hunk, a full-height reading view, and viewed-file tracking against the
-      reviewed revision that invalidates on resubmission. Viewed is not approved.
+      next/previous hunk, and viewed-file tracking against the reviewed revision that
+      invalidates on resubmission. Viewed is not approved.
 - [ ] Keep large reviews responsive: headers first, incremental bodies, lazy highlighting,
       generated and oversized files collapsed with a reason and a Load diff action.
-      Rendering performance does not waive submission caps.
 - [ ] Present the outgoing title and body as sanitized Markdown with source editing and a
-      preview of the exact text to be published, without burying the evaluation or diff.
-- [ ] Prove the review experience on real surfaces: both modes in browser and desktop,
-      narrow screens, long lines, generated files, light and dark, keyboard-only, blank
-      reasons, missing forge credential, publication failure, reconnect with drafts, stale
-      revisions and resubmission into existing threads. Keep the earlier product-loop and
-      feedback proofs as regression coverage, not deferred to this rendering work.
-
-**Reusable work and bounded automation.** Personal workflows around an accountable core,
-not a new platform ([extensible software](https://jeremymorrell.dev/blog/extensible-software-in-the-age-of-llms/)).
-Sequence: node and credential reliability; profiles and effective authority; reviewed
-recipe authoring; one proven customization; then bounded triggers. Quota classification,
-safe resumption, accounting and permission enforcement stay in the core.
-
-- [ ] Let an agent propose a skill, instruction package, profile or recipe, and show source,
-      provenance and validation evidence before explicit activation, which creates a
-      revision on the existing manifests. Updates never change running sessions or broaden
-      authority; rollback cannot undo external effects.
-- [ ] Expose resource-scoped operations for custom work: evidence for a named work item,
-      not ledger access; proposing a change, not mutation rights; prove out-of-scope
-      access refused.
-- [ ] Saved workflow recipes for a few recurring procedures, reusing phase presets and the
-      ledger, snapshotted on invocation, revisable and stoppable. No workflow language, and
-      no ceremony for a plain prompt.
-- [ ] Prove one personal customization end to end: a preferred review summary from an
-      approved recipe and scoped evidence, shown to fail safely and to be revisable,
-      disableable and exportable without transferring authority. Custom UI starts as
-      isolated reports, not plugins in the administration UI.
-- [ ] Lightweight batches: related work with dependencies, explicit ownership and reclaim
-      rules, aggregate spending, blockers and one completion report.
-- [ ] Integration when parallel same-repository work needs it: prefer a forge merge queue,
-      serialize, pin the combined revision and reverify. Demand-gated.
-- [ ] Bounded scheduled or event-driven chores, after daily-use reliability: low-stakes work
-      that returns a report and stops, with concurrency, spend, time and retry limits, run
-      through the existing supervisor rather than extension code inside the node.
-- [ ] Optional conversational coordination, only if useful: an ordinary session inspecting
-      permitted cross-project work and proposing actions through existing tools. No
-      privileged manager loop.
-- [ ] A clearly labelled demonstration mode reusing the fixture machinery, with no
-      implication that its output proves a live run.
-
-## OpenCode migration
-
-**Decided 2026-09-13, cut over 2026-09-14.** OpenCode is the primary managed harness,
-driven through its native server API, with its native web UI offered as an optional
-advanced view. Claude Code is retained as a second supported harness. omp is gone — adapter,
-image, ACP layer, provider wiring and catalogue workarounds — and its sessions are
-archived read-only. No new agent loop was added; the isolated execution boundary is
-unchanged.
-
-Pinned candidate: OpenCode v1.18.30, inventoried in `docs/reference/opencode-v1.18.30/`
-— compatibility manifest and twenty numbered findings, route/provider/config matrices,
-the minimum launch environment, the gateway deny list, and the native UI route trace.
-That directory is the history and the upgrade checklist; this is the record of what
-each gate delivered.
-
-- **Gate A — candidate inventory and contract** (#189). Release pinned with checksums,
-  API snapshot, server flags and startup egress verified live, provider/mutation/config
-  matrices produced. Verdict: no stop condition.
-- **Gate B — owner-side policy, credentials, convergence** (#190, #193, #195–#200). One
-  isolated `opencode serve` per session under a sealed launch environment (#193); the
-  policy-aware API gateway — deny by default from the route matrix, directory pinned and
-  bodies inspected, an all-`ask` ruleset with every `always` rewritten to `once` and the
-  broadening recorded (#195); durable identity mapping and idempotent ingestion anchored
-  on the per-session sequenced streams, with uncertain mutations settled by reconciliation
-  (#196); per-turn usage reconciled between the gateway's on-the-wire count and the
-  harness's own report, unmetered turns flagged rather than charged zero, unsent prompts
-  held on the node (#197); the adversarial run and per-session state isolation behind a
-  node-owned single-writer fence (#198); provider traffic proven to reach the gateway and
-  only the gateway, with finding 19 — the session runner resolving a provider from the
-  catalogue rather than `options.baseURL` — found and closed (#199, #200); Anthropic
-  subscription login lifted out of `claude setup-token` (#190).
-- **Gate C — customization and recovery** (#201–#204, #216). The node-owned launch
-  manifest for skills, instructions, agents and approved plugins, with a digest recorded
-  on every session (#203); LSP, formatters and the plugin cache baked into the image,
-  runner egress rejected, orphaned children reaped (#202); quiesced `VACUUM INTO` backups,
-  migration on a clone, generation-gated restore (#204); the direct-harness recovery route
-  documented and corpus export proven to round-trip with rebuildable vectors (#201); the
-  legacy transition — `tracon session archive-legacy` and `reopen` — with the cutover
-  (#216).
-- **Gate D — browser, desktop, and installed mobile PWA** (#205–#207, #210–#212, #217).
-  The native UI served from its own origin behind a single-use bootstrap, with no password
-  in the browser (#206); an unprivileged desktop window navigable only to that origin
-  (#205); PTY as an explicit terminal capability with owner-bound tickets and a bounded
-  proxy (#207); the installed app hosting the native view in an in-scope frame on a
-  partitioned cookie (#210); the 60-shape route trace, the proof that unknown mutations
-  fail closed, and the installable pinned bundle (#211, #212); and finding 20's fix — a
-  node-synthesised, session-scoped, replayable `/global/event`, which is what makes the
-  native view live (#217).
-- **Gate E — remote-node parity** (#215). Bounded encrypted owner streams over the hub for
-  HTTP, SSE and PTY: authenticated stream ids, owner binding and epoch fencing, flow
-  control, reconnect without replaying input, revocation, protocol mismatch refused; the
-  hub sees ciphertext and routing metadata only.
-- **Gate F — release and clean cutover** (#216, #218, and this change). omp retired;
-  README, architecture and design reconciled with the landed migration; the migration plan
-  archived. A QA target gained a second deployment kind so the first real run need not be
-  GitLab-shaped: `command` runs an operator-configured argv on the node with a brokered
-  credential as environment — never in argv, never in the recorded tail — observes the host
-  through further argv, and ends in the same identity check and immutable browser binding,
-  so browser verification is unchanged (#218). The real Podman and Kubernetes project
-  workflows on both harnesses remain on the checklist below.
-
-Alongside the gates: the macOS bundle ships unsigned (#192),
-administration and first-task workflows unified (#208), and the provider callback tests
-de-raced (#194).
+      preview of the exact text to be published.
 
 ## Live proofs still the operator's
 
@@ -476,50 +279,56 @@ Everything here is built and covered by test; what is missing is a real credenti
 real device, a real cluster or a published release. Nothing on this list is a blocker for
 work that does not need it, and nothing on it may be described elsewhere as proven.
 
-- [ ] **Anthropic subscription** signed in through the node's own OAuth flow, by local
-      callback and by paste, refreshed by the refresh loop, and the gateway's subscription
-      shaping serving an OpenCode `anthropic` provider unchanged. The flow's exchange,
+**For the supported configuration**
+
+- [ ] **A hosted Anthropic API key, or the Anthropic subscription, end to end through the
+      gateway** from a node-started Claude Code session. The subscription flow's exchange,
       refresh and an inference call were confirmed by hand against the live service on
       2026-09-15; the node doing it is not yet proven.
+- [ ] **A private repository end to end**, through preparation, agent work, checks in the
+      project's toolchain image, and authorized publication to GitHub, with nothing in the
+      published result naming tracon.
+- [ ] **The normal workflow, proven as a workflow**: client disconnect and reconnect,
+      interrupted execution, retained drafts, a node restart, and recovery through
+      completion, with what actually ran, what stayed uncertain, and where the operator
+      intervened recorded. Fixture screenshots and fake-provider tests are not evidence.
+- [ ] **The macOS desktop leg**: the bundle, its self-update against a published release,
+      and the Edit menu that makes copy and paste work.
+
+**For the experimental surfaces**
+
 - [ ] **Codex subscription** signed in through the node's own OAuth flow, by local callback
       and by device code, and with it whether the ChatGPT backend accepts a Codex request
       whose system prompt stays in the message array.
-- [ ] **Hosted API keys** — Anthropic and OpenAI — end to end through the gateway.
 - [ ] **`OPENCODE_SERVER_PASSWORD` refused live**: an unauthenticated probe of a running
       session server, rather than of the fake.
-- [ ] **The model-dependent adversarial cases**: a second identical tool call asking again
-      after a gateway-mediated `once`; a subagent child session the harness raises for
-      itself; and killing the server *after* a tool call was recorded.
-- [ ] **Usage reconciliation against the pinned binary and a live provider**, not the fake
-      server and a stub upstream.
+- [ ] **The model-dependent adversarial cases** on OpenCode: a second identical tool call
+      asking again after a gateway-mediated `once`; a subagent child session the harness
+      raises for itself; and killing the server *after* a tool call was recorded.
+- [ ] **Usage reconciliation against the pinned OpenCode binary and a live provider**, not
+      the fake server and a stub upstream.
 - [ ] **A real restart against a surviving `opencode serve`**, closing the missed turn from
       the durable stream; today the container dies with the session and the path is proven
       by test.
-- [ ] **The macOS desktop leg**: the bundle, the second window's behaviour, and the Edit
-      menu that makes copy and paste work.
-- [ ] **The desktop window against the real UI origin**, wrapper and origin and PTY
-      together, rather than each against a stand-in.
+- [ ] **The desktop window against the real OpenCode UI origin**, wrapper and origin and PTY
+      together, rather than each against a stand-in; and **the browser and PWA runs against
+      the real pinned bundle**, which needs `containers/opencode-ui/build.sh` to have been
+      run on the machine.
+- [ ] **The UI bundle fetched from a published release**: `tracon setup` fetches and
+      verifies `opencode-ui-v1.18.30.tar.gz`, but no release has published that asset yet,
+      so only the offline `--ui-bundle` path has been exercised against real bytes.
 - [ ] **Physical devices**: install from the always-on node over HTTPS on iOS Safari and
       Android Chrome, and confirm the framed native view authenticates with cross-site
       tracking prevention on. Safari is the open one; if the frame is refused there the
       candidate fix is `document.requestStorageAccess` from inside the frame before
       `POST /boot`, which needs a gesture and therefore a visible control.
-- [ ] **The browser and PWA runs against the real pinned bundle**, which needs
-      `containers/opencode-ui/build.sh` to have been run on the machine.
-- [ ] **The UI bundle fetched from a published release**: `tracon setup` fetches and
-      verifies `opencode-ui-v1.18.30.tar.gz`, but no release has published that asset yet,
-      so only the offline `--ui-bundle` path has been exercised against real bytes.
 - [ ] **The relayed run through the real hub**: `tracon session open` a session owned by
       another node, with `RUST_LOG=tracon::mesh::stream=debug` on both, confirming the
       relay's `GET /v0/streams` connection holds and `GET /v0/info` reports the same
       contract everywhere.
-- [ ] **Real project workflows on both harnesses, on Podman and on Kubernetes**:
-      preparation, a coding task, checks, review.
-- [ ] **A private repository end to end**, through preparation, agent work, checks, and
-      authorized publication to GitHub. This is the same GitHub-hosted project the QA run
-      below deploys, and its publication is that run's precondition: Laravel Cloud's
-      automation opens the preview environment when the pull request opens, so the branch
-      has to be on the forge before there is anything to discover.
+- [ ] **Real project workflows on Kubernetes**: preparation, a coding task, checks, review.
+      An OpenCode session started on the homelab cluster and ran gated tools on
+      2026-09-29 (after #291, #294); the whole workflow has not.
 - [ ] **QA deploy and browser verification against a real target** (the Laravel Cloud
       preview target). The documented recipe *discovers* rather than creates: it finds the
       preview environment Cloud's pull-request automation made for the candidate's published
@@ -531,19 +340,21 @@ work that does not need it, and nothing on it may be described elsewhere as prov
       target's attested `origin_suffix` and app name, an identity endpoint on the
       application that returns its build commit, and a digest-pinned browser image.
       Podman-only until the Kubernetes backend has a scoped QA egress gateway.
-- [ ] **The normal workflow, proven as a workflow**: client disconnect and reconnect,
-      interrupted execution, retained drafts, and recovery through completion, with what
-      actually ran, what stayed uncertain, and where the operator intervened recorded.
-      Fixture screenshots and fake-provider tests are not evidence of a live run.
 
 **Upstream contributions worth a bounded PR** (not blockers): a flag that turns the
 web-UI fallback into a 404; a flag check on nested instruction attachment; invoking the
-declared `permission.ask` hook; an LSP status event.
+declared `permission.ask` hook; an LSP status event; and, if the spike confirms it, MCP
+servers reaching the v2 session runner.
 
 ## Current limitations
 
 - Everything under "Live proofs still the operator's" is unproven live, including the
   private-repository run and QA verification against a real target.
+- OpenCode sessions run without the node's MCP tools (finding 22 and the 2026-09-28 run):
+  an OpenCode session can code but cannot write documents, submit a review or publish.
+  Claude Code is the working managed harness until the v1 spike settles it.
+- Required checks run in the harness image, which has no project toolchain, so a
+  repository's own check command exits 127 and the operator runs it on the host.
 - macOS releases are unsigned — the publisher holds no Apple Developer ID — and are
   authenticated by GitHub build provenance instead, so Gatekeeper asks once on first open
   (right-click Open, or System Settings > Privacy & Security > Open Anyway).
@@ -556,6 +367,9 @@ declared `permission.ask` hook; an LSP status event.
   flag and the explicitly disabled server list alone — which cover OpenCode but not a future
   harness with its own timeout-free fetch. `check-boundary --deep` measures the same bound
   on both backends and fails the Kubernetes one if it drops.
+- Mesh transfers are capped at 2 MB, and an imported transfer is the carried tree under a
+  fresh `git init` with no history, so a candidate moved between nodes cannot be submitted
+  or published from the destination. Handoff is a portable file carried by hand today.
 - The OpenCode UI bundle is about 34 MiB of built assets. It is not in git: `tracon setup`
   fetches and verifies it, or `--ui-bundle` installs it offline, and the node serves it from
   disk against the tree digest in `containers/opencode-ui/DIGEST`. A tree that does not
@@ -581,14 +395,33 @@ declared `permission.ask` hook; an LSP status event.
 
 ## Deferred
 
+Kept as intent, off the plan until the supported configuration has earned them.
+
+- **Mesh and cross-node work.** Credential handoff convergence and re-offer to a holder
+  that missed it; mesh-wide configuration sync; cross-node session handoff (checkpoint,
+  transfer with Git history fetched from the forge, lineage, fencing, chunked transfers
+  past 2 MB, compatibility re-evaluated at the destination); the hub roll-ups. The
+  homelab node keeps what exists running.
+- **Kubernetes parity.** A scoped QA egress gateway and a refuse-not-drop egress policy.
+- **Post-publication follow-through and product metrics.** Recording merge, deployment,
+  evaluation and customer observation separately; judging tracon by interruptions, time
+  to verified work and tokens per accepted change. Reconsider once outcomes exist to
+  count.
+- **Installation-to-first-task for another operator.** After the author's own loop is
+  proven.
+- **Reusable work and bounded automation.** Agent-proposed skills, profiles and recipes
+  activated as manifest revisions; resource-scoped operations for custom reports; saved
+  recipes for recurring procedures; batches with dependencies and one completion report;
+  bounded scheduled chores through the existing supervisor; a labelled demonstration mode.
+  Sequence when revisited: reliability, then profiles and effective authority, then one
+  proven customization, then triggers. No workflow language, no plugin runtime.
 - **Retrieval reranker:** when existing retrieval proves insufficient.
 - **Client terminal:** superseded by the OpenCode PTY capability; no separate tracon
   terminal.
 - **`cr-sqlite`:** only if real multi-writer convergence requires it.
 - **Stacked MR automation:** decide whether stacks are preferable to feature flags first.
 - **General dashboard/plugin system:** only after isolated reports and views prove
-  insufficient. No new extension runtime, marketplace or workflow language is required for
-  the personal-customization work above.
+  insufficient.
 
 ## Out of scope
 

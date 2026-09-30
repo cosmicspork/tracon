@@ -1,7 +1,7 @@
 # OpenCode v1.18.30 — Gate A compatibility manifest and verdict
 
-Gate A of the OpenCode migration (see `docs/ROADMAP.md`, "OpenCode as the primary
-harness"): candidate inventory and contract. Three source inventories were made
+Gate A of the OpenCode migration (see `../opencode-migration.md`): candidate inventory
+and contract. Three source inventories were made
 against the pinned release and one live probe of the pinned binary on a
 network-isolated host. **Verdict: no stop condition. Proceed to Gate B.** Nothing
 found requires a long-lived fork; every gap has a node-side or config-side

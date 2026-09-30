@@ -90,7 +90,10 @@ compatibility at session start, and let an unknown harness id refuse to start ra
 than fall back. A harness declares its own state layout and config files; nothing
 outside the trait may spell a harness's name.
 
-That last rule is what made the 2026-09-13 cutover cheap. tracon's first harness was
+Which harness daily work runs on is a roadmap decision, not an architectural one:
+Claude Code today, because OpenCode's v2 session runner offers the model none of the
+node's MCP tools (`reference/opencode-v1.18.30/README.md`, finding 22); the gate below
+is the same for both. That last rule is what made the 2026-09-13 cutover cheap. tracon's first harness was
 omp, driven over the Agent Client Protocol; removing it took the adapter, its image,
 its provider wiring and its catalogue workarounds, and nothing else. What survived is
 the shared vocabulary the adapters translate into (`node/src/adapter/types.rs` — tool
@@ -101,7 +104,7 @@ behind one trait is the whole ambition; a plugin system for harnesses is not.
 
 ### The OpenCode boundary
 
-The primary harness is a *server*, not a pipe, and that changes where the seam is
+OpenCode is a *server*, not a pipe, and that changes where the seam is
 rather than what it guarantees. A supervised session is one `opencode serve` in its
 own runner, and everything between it and anyone else is node-owned. In order:
 
@@ -1025,8 +1028,10 @@ Three surfaces, three answers, and the differences are the point.
 
 Encrypted snapshots of the hub's volume to object storage, with a restore path that
 has been exercised — hub failure without a tested restore costs years of context.
-Retention per kind and a real delete that propagates; tombstone semantics are
-decided before there is data. Plain-text export for every kind: no format readable
+Retention is decided (2026-09-29): the node keeps everything, and the operator deletes
+by hand; a data-management pane that shows what is held per kind and offers those
+deletes is on the roadmap. Tombstone semantics wait until replication makes a
+propagated delete matter, and that decision is due before it does. Plain-text export for every kind: no format readable
 only by this binary. Documents export as plain Markdown and import back by filename
 alone; a session package is JSON that `tracon session show` renders with nothing
 running; the vector index is derived and is rebuilt rather than restored.
@@ -1049,7 +1054,8 @@ outside its own state, which it says before it acts.
 
 ## Open questions
 
-1. **Retention and tombstone semantics.** Needs deciding before data accumulates.
+1. **Tombstone semantics.** Retention is keep-and-delete-by-hand (see Data lifecycle);
+   how a delete propagates across replicas is undecided and waits on the mesh work.
 2. **Stacked MR handling.** Whether the node owns restacking or feature flags on
    trunk make stacks unnecessary. The trunk setup favors flags.
 
