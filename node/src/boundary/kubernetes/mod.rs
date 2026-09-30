@@ -131,6 +131,18 @@ impl Backend for KubeBackend {
         checks::check_all(self, cfg, deep).await
     }
 
+    /// Pods pull on use, so a cluster names each image and says nothing of it.
+    async fn harness_images(&self, cfg: &Config) -> Vec<crate::boundary::HarnessImage> {
+        crate::adapter::KNOWN
+            .iter()
+            .map(|id| crate::boundary::HarnessImage {
+                harness_id: id.to_string(),
+                image: cfg.kubernetes_harness_image(id),
+                state: "unknown",
+            })
+            .collect()
+    }
+
     fn runner(&self, extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
         Backend::runner_for(self, &self.cfg.harness.id, extra_mounts)
     }

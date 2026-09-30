@@ -1262,6 +1262,10 @@ pub struct ComposeBody {
     pub budget_tokens: Option<i64>,
     #[serde(default)]
     pub node_id: Option<String>,
+    /// The harness to run on, for a model either harness runs; absent, the
+    /// model's credential decides.
+    #[serde(default)]
+    pub harness: Option<String>,
 }
 
 fn plan_phase() -> Phase {
@@ -1312,7 +1316,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         workspace_id: c.workspace_id,
         parent_session: None,
         continued_from: None,
-        harness: None,
+        harness: c.harness,
         branch: c.branch,
         work_item_id: Some(item.id.clone()),
         model: c.model,
@@ -4716,7 +4720,15 @@ pub async fn probe_models_into_store(
             }
         }
     }
-    let models = models?;
+    let mut models = models?;
+    for model in &mut models {
+        model.harnesses = s
+            .manager
+            .model_harnesses(&model.value)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+    }
     if let Ok(Some(mut node)) = s.store().get_node(&s.node_id) {
         node.models_json = serde_json::to_string(&models).ok();
         let _ = s.store().put_node(&node);

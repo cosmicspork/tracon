@@ -1129,6 +1129,14 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (session_id, part_id, milestone)
     );
     "#,
+    // 46: every harness a node runs, not only its configured one. Each node
+    // builds an image per supported harness and a session runs the one its
+    // model's credential allows, so the version found and the image state are
+    // per harness. The `harness_*` columns keep the configured harness, which
+    // is what an older peer reads. NULL is a row from before this.
+    r#"
+    ALTER TABLE node ADD COLUMN harnesses_json TEXT;
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

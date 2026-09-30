@@ -91,6 +91,7 @@ impl HarnessAdapter for FakeAdapter {
         Ok(vec![ModelOption {
             value: "m/a".into(),
             name: "A".into(),
+            harnesses: Vec::new(),
         }])
     }
     async fn launch(

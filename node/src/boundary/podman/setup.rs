@@ -49,6 +49,31 @@ pub fn images(cfg: &Config) -> Vec<(String, &'static str)> {
     out
 }
 
+/// Each harness image and whether it is built from this build's
+/// definitions, judged the way `check_runtime` judges it: an image without
+/// the label cannot be judged, which is not the same as stale.
+pub async fn harness_images(cfg: &Config) -> Vec<crate::boundary::HarnessImage> {
+    let mut out = Vec::new();
+    for id in crate::adapter::KNOWN {
+        let image = cfg.podman_harness_image(id);
+        let state = if podman(&["image", "exists", &image]).await.is_err() {
+            "missing"
+        } else {
+            match image_digest(&image).await {
+                Some(built) if built == definitions_digest(harness_dir_for(id)) => "current",
+                Some(_) => "stale",
+                None => "unknown",
+            }
+        };
+        out.push(crate::boundary::HarnessImage {
+            harness_id: id.to_string(),
+            image,
+            state,
+        });
+    }
+    out
+}
+
 /// The definitions directory for a harness id.
 pub fn harness_dir_for(harness_id: &str) -> &'static str {
     match harness_id {

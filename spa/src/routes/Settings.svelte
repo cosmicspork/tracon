@@ -44,6 +44,8 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { remedy } from '../lib/refusal'
+  import { nodeHarnesses } from '../lib/nodes'
+  import type { HarnessState } from '../lib/types'
   import { modelPatch, phaseDefaults } from '../lib/bindings'
   import { modelSummary, recentModelValues } from '../lib/models'
   import { changedSubset, hashToken, loginUrl, mintToken } from '../lib/settings'
@@ -121,6 +123,21 @@
     return act('setup', async () => {
       checks = (await api.runSetup(rebuild)).checks.checks
     })
+  }
+
+  // A session runs whichever harness its model's credential allows, so each
+  // image has to be there and current, not only the configured one's.
+  function imageNote(h: HarnessState): string {
+    switch (h.image_state) {
+      case 'current':
+        return 'image current'
+      case 'stale':
+        return 'image stale · rebuild runtime images'
+      case 'missing':
+        return 'image missing · prepare isolated runtime'
+      default:
+        return 'image not judged here'
+    }
   }
 
   // --- the model catalogue ----------------------------------------------
@@ -1049,6 +1066,19 @@
         <p class="why"><b>{store.node.failed_check}: {store.node.failed_detail}</b><i>{remedy(store.node.failed_check)}</i></p>
       {/if}
       {#if checks}<ul class="checks">{#each checks as c (c.id)}<li><span class="chip" class:bad={!c.ok}>{c.ok ? 'ok' : 'fail'}</span> {c.id} · <small>{c.detail}</small></li>{/each}</ul>{/if}
+      {#if store.node && nodeHarnesses(store.node).length}
+        <p class="dim">Harnesses. A session runs the one its model's credential allows; the default breaks the tie for a model either runs.</p>
+        <ul class="checks">
+          {#each nodeHarnesses(store.node) as h (h.id)}
+            <li>
+              <span class="chip" class:bad={h.mismatch} class:warn={h.image_state === 'stale' || h.image_state === 'missing'} class:off={!h.mismatch && h.image_state === 'unknown'}>{h.id}</span>
+              {#if h.default}<em class="tag">default</em>{/if}
+              <small>pinned {h.pinned || 'image default'} · found {h.found ?? 'not probed'} · {imageNote(h)}</small>
+              {#if h.mismatch}<small class="crit">Sessions on {h.id} are refused until its image reports {h.pinned}.</small>{/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
     {/snippet}
   </Maintenance>
 

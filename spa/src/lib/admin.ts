@@ -14,11 +14,23 @@ export interface AdminCompatibility {
   runtime: 'compatible' | 'mismatch' | 'not_found' | 'unknown'
   pinned: string | null
   found: string | null
+  /** Every harness the member runs; an older member lists only its configured one. */
+  harnesses?: AdminHarness[]
   checked_at_ms: number | null
   models: { state: 'offered' | 'none_offered' | 'unknown'; offered: number | null }
   application: CompatibilityFact<string>
   wire: CompatibilityFact<number>
   policy: PolicyCompatibility
+}
+
+export interface AdminHarness {
+  id: string
+  default: boolean
+  runtime: AdminCompatibility['runtime']
+  pinned: string | null
+  found: string | null
+  image?: string | null
+  image_state: 'current' | 'stale' | 'missing' | 'unknown'
 }
 
 export interface CompatibilityFact<T> {

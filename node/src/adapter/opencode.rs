@@ -553,6 +553,7 @@ fn declared_models(wiring: &Wiring) -> Vec<ModelOption> {
             provider.models.iter().map(move |model| ModelOption {
                 value: format!("{}/{}", provider.name, model.id),
                 name: format!("{} ({})", model.label(), provider.name),
+                harnesses: Vec::new(),
             })
         })
         .collect()

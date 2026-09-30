@@ -231,6 +231,11 @@ pub struct HarnessCompat {
 pub struct ModelOption {
     pub value: String,
     pub name: String,
+    /// The harnesses this model's credential runs on, as the node classified
+    /// it when it built the catalogue. Empty where it could not say, and from
+    /// an older build.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harnesses: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -593,6 +598,7 @@ mod tests {
         let option = |value: &str| super::ModelOption {
             value: value.into(),
             name: value.into(),
+            harnesses: Vec::new(),
         };
         let claude = vec![option("claude-opus-5"), option("claude-sonnet-5")];
         let opencode = vec![

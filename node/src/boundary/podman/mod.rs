@@ -187,6 +187,10 @@ impl Backend for PodmanBackend {
         checks::check_all(cfg, self.selinux, deep).await
     }
 
+    async fn harness_images(&self, cfg: &Config) -> Vec<crate::boundary::HarnessImage> {
+        setup::harness_images(cfg).await
+    }
+
     fn runner(&self, extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
         self.runner_for(&self.cfg.harness.id, extra_mounts)
     }

@@ -60,6 +60,14 @@ impl Drop for QaEgressGuard {
     }
 }
 
+/// One harness's image as the runtime holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessImage {
+    pub harness_id: String,
+    pub image: String,
+    pub state: &'static str,
+}
+
 /// One way of putting a harness behind a boundary the node can verify.
 #[async_trait]
 pub trait Backend: Send + Sync {
@@ -77,6 +85,12 @@ pub trait Backend: Send + Sync {
     /// configured harness is only the default; a session runs the one it
     /// names.
     fn runner_for(&self, harness_id: &str, extra_mounts: Vec<Mount>) -> Arc<dyn Runner>;
+    /// Each supported harness's image and its state: `current`, `stale`,
+    /// `missing`, or `unknown` where this runtime cannot say. For display;
+    /// `check_all` is what refuses a node whose images are not usable.
+    async fn harness_images(&self, _cfg: &Config) -> Vec<HarnessImage> {
+        Vec::new()
+    }
     /// Copy an explicitly staged directory into runtime-owned storage. The
     /// source is never mounted into a harness.
     async fn import_volume(

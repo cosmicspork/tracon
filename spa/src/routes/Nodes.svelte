@@ -2,7 +2,7 @@
   import { attention } from '../lib/attention'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
-  import { nodeReadiness } from '../lib/nodes'
+  import { nodeHarnesses, nodeReadiness } from '../lib/nodes'
   import { store } from '../lib/store.svelte'
 
   const nodes = $derived(store.nodes)
@@ -45,7 +45,8 @@
     {#each nodes as node (node.id)}
       {@const readiness = nodeReadiness(node)}
       {@const off = !node.is_self && !node.reachable}
-      <div class="node" class:bad={node.state === 'refused'} class:warn={node.harness.mismatch} class:off>
+      {@const mismatch = nodeHarnesses(node).some((h) => h.mismatch)}
+      <div class="node" class:bad={node.state === 'refused'} class:warn={mismatch} class:off>
         <span class="bar"></span>
         <div class="head">
           <span class="nm">
@@ -53,8 +54,8 @@
             <small>{node.is_self ? 'serving node' : 'peer'} · {node.id.slice(0, 4)}…{node.id.slice(-4)}</small>
           </span>
           <span class="st">
-            <span class="l" class:off={!readiness.canRun} class:bad={node.state === 'refused'} class:warn={node.harness.mismatch}>
-              <span class="chip" class:off={!readiness.canRun} class:bad={node.state === 'refused'} class:warn={node.harness.mismatch}>{readiness.label}</span>
+            <span class="l" class:off={!readiness.canRun} class:bad={node.state === 'refused'} class:warn={mismatch}>
+              <span class="chip" class:off={!readiness.canRun} class:bad={node.state === 'refused'} class:warn={mismatch}>{readiness.label}</span>
               {#if off && node.last_seen_ms}
                 · last seen {formatAge(node.last_seen_ms, clock.now)}
               {:else}
@@ -62,7 +63,7 @@
               {/if}
             </span>
             <span class="detail">
-              {node.harness.id} {node.harness.found ?? node.harness.pinned} · {node.models.length} offered model{node.models.length === 1 ? '' : 's'} · {running(node.id)} running{waiting(node.id) ? ` · ${waiting(node.id)} awaiting an operator` : ''}
+              {nodeHarnesses(node).map((h) => `${h.id} ${h.found ?? h.pinned}${h.mismatch ? ' (mismatch)' : ''}`).join(' · ')} · {node.models.length} offered model{node.models.length === 1 ? '' : 's'} · {running(node.id)} running{waiting(node.id) ? ` · ${waiting(node.id)} awaiting an operator` : ''}
             </span>
           </span>
           <span class="actions">

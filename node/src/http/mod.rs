@@ -947,6 +947,74 @@ async fn init_node(
     Ok((id, identity))
 }
 
+/// Every harness this node runs, each probed in its own image the way the
+/// configured one is: a session runs whichever its model's credential allows,
+/// so each one's version is a fact about this node. A node whose configured
+/// harness is not a supported one (a test's fake) runs only that.
+async fn harness_states(
+    cfg: &Config,
+    adapter: &dyn HarnessAdapter,
+    backend: &dyn boundary::Backend,
+    found: Option<&str>,
+    ready: bool,
+) -> Vec<crate::store::HarnessState> {
+    let images = backend.harness_images(cfg).await;
+    let image_of = |id: &str| images.iter().find(|image| image.harness_id == id);
+    let default = crate::store::HarnessState {
+        id: adapter.id().to_string(),
+        pinned: adapter.pinned_version().to_string(),
+        found: found.map(str::to_string),
+        default: true,
+        image: image_of(adapter.id()).map(|image| image.image.clone()),
+        image_state: image_of(adapter.id())
+            .map_or("unknown", |image| image.state)
+            .to_string(),
+    };
+    if !crate::adapter::KNOWN.contains(&adapter.id()) {
+        return vec![default];
+    }
+    let mut out = Vec::new();
+    for id in crate::adapter::KNOWN {
+        if *id == adapter.id() {
+            out.push(default.clone());
+            continue;
+        }
+        let Ok(other) = crate::adapter::adapter_for_id(cfg, id) else {
+            continue;
+        };
+        let found = if ready {
+            let runner = backend.runner_for(
+                id,
+                crate::session::materialize::state_mounts(&backend.harness_home(), other.layout())
+                    .unwrap_or_default(),
+            );
+            Some(
+                other
+                    .version(runner.as_ref())
+                    .await
+                    .map(|v| v.found)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(harness = id, error = %e, "harness version probe failed; treating as unknown");
+                        "unknown".into()
+                    }),
+            )
+        } else {
+            None
+        };
+        out.push(crate::store::HarnessState {
+            id: id.to_string(),
+            pinned: other.pinned_version().to_string(),
+            found,
+            default: false,
+            image: image_of(id).map(|image| image.image.clone()),
+            image_state: image_of(id)
+                .map_or("unknown", |image| image.state)
+                .to_string(),
+        });
+    }
+    out
+}
+
 /// Run the boundary checks, probe the harness, and record what this node is.
 ///
 /// Startup calls it, and so does a re-check from the interface: an operator
@@ -989,6 +1057,7 @@ pub(crate) async fn verify_node(
     } else {
         None
     };
+    let harnesses = harness_states(cfg, adapter, backend, found.as_deref(), ready).await;
     let previous = store.get_node(id).ok().flatten();
     // The model list is probed once the gateway is listening (see `serve`);
     // until then the previous run's list stands.
@@ -1013,6 +1082,7 @@ pub(crate) async fn verify_node(
         policy_identity: policy.as_ref().map(|bundle| bundle.pubkey_hex.clone()),
         policy_sha256: policy.as_ref().map(|bundle| bundle.sha256.clone()),
         policy_receipt_v1: Some(true),
+        harnesses_json: serde_json::to_string(&harnesses).ok(),
         name: cfg.node_name.clone(),
         state: if ready { "ready" } else { "refused" }.into(),
         failed_check: failed.as_ref().map(|f| f.id.as_str().to_string()),

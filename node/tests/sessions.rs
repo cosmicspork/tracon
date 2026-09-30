@@ -60,6 +60,7 @@ impl Harness {
                 policy_identity: None,
                 policy_sha256: None,
                 policy_receipt_v1: None,
+                harnesses_json: None,
             })
             .unwrap();
         let events = Arc::new(Mutex::new(None));
@@ -380,6 +381,7 @@ async fn a_refused_node_refuses_sessions_and_says_which_check_failed() {
             policy_identity: None,
             policy_sha256: None,
             policy_receipt_v1: None,
+            harnesses_json: None,
         })
         .unwrap();
     let (status, body) = h
@@ -428,6 +430,7 @@ async fn a_version_mismatch_blocks_new_sessions() {
             policy_identity: None,
             policy_sha256: None,
             policy_receipt_v1: None,
+            harnesses_json: None,
         })
         .unwrap();
     let (status, body) = h
@@ -518,6 +521,7 @@ async fn a_draft_survives_the_node_restarting() {
                 policy_identity: None,
                 policy_sha256: None,
                 policy_receipt_v1: None,
+                harnesses_json: None,
             })
             .unwrap();
         let id = insert_running_session(&store, 1000);
@@ -909,6 +913,7 @@ impl Rig {
                 policy_identity: None,
                 policy_sha256: None,
                 policy_receipt_v1: None,
+                harnesses_json: None,
             })
             .unwrap();
         let session_id = insert_running_session(&store, budget);
@@ -1367,6 +1372,7 @@ async fn a_stop_that_lands_before_the_startup_handoff_is_never_resurrected() {
             policy_identity: None,
             policy_sha256: None,
             policy_receipt_v1: None,
+            harnesses_json: None,
         })
         .unwrap();
     let session_id = insert_running_session(&store, 10_000);
@@ -1491,6 +1497,7 @@ async fn reconcile_after_restart_closes_a_managed_pause_but_keeps_an_external_on
             policy_identity: None,
             policy_sha256: None,
             policy_receipt_v1: None,
+            harnesses_json: None,
         })
         .unwrap();
     let managed_id = insert_running_session(&store, 10_000);
@@ -2081,6 +2088,7 @@ async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
             policy_identity: None,
             policy_sha256: None,
             policy_receipt_v1: None,
+            harnesses_json: None,
         })
         .unwrap();
     let cfg = Arc::new(Config::default());
@@ -2321,6 +2329,7 @@ async fn orientation_setup(
             policy_identity: None,
             policy_sha256: None,
             policy_receipt_v1: None,
+            harnesses_json: None,
         })
         .unwrap();
     // Something to be told: a directive on the channel.
@@ -2964,6 +2973,7 @@ async fn a_harness_that_never_starts_fails_the_session_visibly_and_removes_the_h
             policy_identity: None,
             policy_sha256: None,
             policy_receipt_v1: None,
+            harnesses_json: None,
         })
         .unwrap();
     let mut cfg = Config::default();

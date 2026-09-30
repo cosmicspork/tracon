@@ -695,6 +695,7 @@ impl HarnessAdapter for ClaudeAdapter {
                     .map(|model| ModelOption {
                         value: model.id.clone(),
                         name: model.label().to_string(),
+                        harnesses: Vec::new(),
                     })
                     .collect::<Vec<_>>()
             });
@@ -704,6 +705,7 @@ impl HarnessAdapter for ClaudeAdapter {
                 .map(|a| ModelOption {
                     value: (*a).to_string(),
                     name: (*a).to_string(),
+                    harnesses: Vec::new(),
                 })
                 .collect()
         }))

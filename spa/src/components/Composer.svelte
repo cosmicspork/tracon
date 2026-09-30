@@ -8,7 +8,7 @@
   import { defaultChannel, rememberChannel, rememberedChannel } from '../lib/channel'
   import { digits, formatGrouped, formatTokens } from '../lib/format'
   import { recentModelValues } from '../lib/models'
-  import { eligibleNodes, modelsForChannel, nodeReadiness } from '../lib/nodes'
+  import { eligibleNodes, harnessChoice, modelsForChannel, nodeHarnesses, nodeReadiness } from '../lib/nodes'
   import { repoLabel } from '../lib/repo'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
@@ -36,6 +36,7 @@
   let repoScope = $state<string | null>(null)
   let branch = $state('')
   let model = $state('')
+  let harness = $state('')
   let budget = $state('')
   let nodeId = $state<string | null>(null)
   let open = $state(false)
@@ -66,6 +67,10 @@
   const bound = $derived(phaseDefaults(channelInfo?.bindings, sessionPhase))
   const models = $derived(selectedNode ? modelsForChannel(selectedNode, channel, store.providers, channelInfo?.bindings) : [])
   const recentModels = $derived(recentModelValues(store.sessions.values()))
+  // Only a model either harness runs leaves a choice; otherwise its
+  // credential decides, and the node says why if it is asked otherwise.
+  const harnessOptions = $derived(harnessChoice(models.find((candidate) => candidate.value === model)))
+  const defaultHarness = $derived(selectedNode ? nodeHarnesses(selectedNode).find((h) => h.default)?.id ?? null : null)
   const planLabel = $derived(modelLabel(phaseDefaults(channelInfo?.bindings, 'plan').model, models))
   const execLabel = $derived(modelLabel(phaseDefaults(channelInfo?.bindings, 'execute').model, models))
   const needsPlan = $derived(structured && phase === 'execute' && item !== null && !item.phase_plan_slug)
@@ -111,6 +116,9 @@
   })
   $effect(() => {
     if (model && !models.some((candidate) => candidate.value === model)) model = ''
+  })
+  $effect(() => {
+    if (harness && !harnessOptions.includes(harness)) harness = ''
   })
   // A workspace import belongs to the serving node and cannot be forwarded to
   // a peer. Do not carry a local checkout into a different runner either: a
@@ -168,6 +176,7 @@
         model: model || undefined,
         budget_tokens: budget === '' ? undefined : Number(budget),
         node_id: selectedNode && !selectedNode.is_self ? selectedNode.id : undefined,
+        harness: harness || undefined,
       }
       const lines = prompt.trim().split('\n')
       const session = item
@@ -308,11 +317,22 @@
       {/if}
       <label>
         <span>Model <em>{bound.model ? `${channel} binds one to ${sessionPhase}` : 'automatic by default'}</em></span>
-        <ModelPicker bind:value={model} {models} recent={recentModels} none="Automatic (channel or node default)" />
+        <ModelPicker bind:value={model} {models} recent={recentModels} none="Automatic (channel or node default)" harnessTags />
         {#if models.length === 0}
           <small class="crit">No model is available for this channel. Declare one on a provider and check its channel scope; refresh only if a declared model has not appeared.</small>
         {/if}
       </label>
+      {#if harnessOptions.length > 1}
+        <label>
+          <span>Harness <em>this model's credential runs on either</em></span>
+          <select bind:value={harness}>
+            <option value="">Automatic{defaultHarness ? ` (node default: ${defaultHarness})` : ''}</option>
+            {#each harnessOptions as option (option)}
+              <option value={option}>{option}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
       <label>
         <span>Budget <em>{budget.trim() === '' ? 'channel or node default' : Number(budget) ? `${formatTokens(Number(budget))} tokens` : 'no cap'}</em></span>
         <input
@@ -353,7 +373,7 @@
           <small class="crit">{nodeReadiness(node).label} · {nodeBlock(node)}</small>
         {:else if node}
           <span class="chip">{node.name}</span>
-          <small>{node.harness.id} {node.harness.found ?? node.harness.pinned}</small>
+          <small>{nodeHarnesses(node).map((h) => `${h.id} ${h.found ?? h.pinned}`).join(' · ')}</small>
         {:else}
           <small class="crit">No node has reported a usable isolated runtime for {channel || 'this channel'}.</small>
         {/if}
