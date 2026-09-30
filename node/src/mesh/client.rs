@@ -970,6 +970,7 @@ impl MeshClient {
                     policy_identity: None,
                     policy_sha256: None,
                     policy_receipt_v1: None,
+                    harnesses_json: None,
                 });
             }
         }

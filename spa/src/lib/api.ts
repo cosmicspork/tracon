@@ -243,6 +243,7 @@ export const api = {
     initial_prompt?: string
     node_id?: string
     phase?: 'plan' | 'execute'
+    harness?: string
   }) => call<Session>('POST', '/api/sessions', spec),
   /** One prompt: the work item and the session that starts on it. */
   compose: (c: {
@@ -256,6 +257,7 @@ export const api = {
     model?: string
     budget_tokens?: number
     node_id?: string
+    harness?: string
   }) => call<{ work: WorkView; session: Session }>('POST', '/api/compose', c),
   /** Put an ended session away, or bring it back. Nothing is deleted. */
   archiveSession: (id: string) => call<Session>('POST', `/api/sessions/${id}/archive`),

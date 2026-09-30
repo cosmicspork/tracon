@@ -180,18 +180,19 @@ impl Store {
             "INSERT INTO node (id, name, state, failed_check, failed_detail, harness_id,
                 harness_pinned, harness_found, models_json, checked_at_ms, is_self, x25519_pub,
                 last_seen_ms, reachable, providers_json, app_version, wire_contract,
-                policy_identity, policy_sha256, policy_receipt_v1)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+                policy_identity, policy_sha256, policy_receipt_v1, harnesses_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
              ON CONFLICT(id) DO UPDATE SET name=?2, state=?3, failed_check=?4, failed_detail=?5,
                 harness_id=?6, harness_pinned=?7, harness_found=?8, models_json=?9, checked_at_ms=?10,
                 is_self=?11, x25519_pub=?12, last_seen_ms=?13, reachable=?14, providers_json=?15,
                 app_version=?16, wire_contract=?17, policy_identity=?18, policy_sha256=?19,
-                policy_receipt_v1=?20",
+                policy_receipt_v1=?20, harnesses_json=?21",
             rusqlite::params![
                 n.id, n.name, n.state, n.failed_check, n.failed_detail, n.harness_id,
                 n.harness_pinned, n.harness_found, n.models_json, n.checked_at_ms, n.is_self,
                 n.x25519_pub, n.last_seen_ms, n.reachable, n.providers_json, n.app_version,
-                n.wire_contract, n.policy_identity, n.policy_sha256, n.policy_receipt_v1.map(i64::from)
+                n.wire_contract, n.policy_identity, n.policy_sha256, n.policy_receipt_v1.map(i64::from),
+                n.harnesses_json
             ],
         )?;
         Ok(())
@@ -1852,6 +1853,42 @@ mod records {
         /// PolicyReceipt support. NULL means unknown or legacy.
         #[serde(default)]
         pub policy_receipt_v1: Option<bool>,
+        /// Every harness this node runs, as `HarnessState`s. NULL from older
+        /// builds, whose one harness is the `harness_*` columns.
+        #[serde(default)]
+        pub harnesses_json: Option<String>,
+    }
+
+    /// One harness a node runs: the version it pins and the one its image
+    /// reported, and whether the image is built from this build's definitions.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct HarnessState {
+        pub id: String,
+        pub pinned: String,
+        #[serde(default)]
+        pub found: Option<String>,
+        /// The configured `[harness] id`, which breaks the tie for a model
+        /// either harness runs.
+        #[serde(default)]
+        pub default: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub image: Option<String>,
+        /// `current`, `stale`, `missing`, or `unknown` where the runtime
+        /// cannot say (a label-less image, or a cluster that pulls on use).
+        #[serde(default = "unknown")]
+        pub image_state: String,
+    }
+
+    fn unknown() -> String {
+        "unknown".into()
+    }
+
+    impl HarnessState {
+        pub fn mismatch(&self) -> bool {
+            self.found
+                .as_ref()
+                .is_some_and(|found| found != &self.pinned)
+        }
     }
 
     fn one() -> i64 {
@@ -1859,6 +1896,28 @@ mod records {
     }
 
     impl NodeRow {
+        /// Every harness this node runs. A row from an older build, or a
+        /// peer that advertised none, runs its one configured harness.
+        pub fn harnesses(&self) -> Vec<HarnessState> {
+            self.harnesses_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<Vec<HarnessState>>(json).ok())
+                .filter(|list| !list.is_empty())
+                .unwrap_or_else(|| {
+                    if self.harness_id.is_empty() {
+                        return Vec::new();
+                    }
+                    vec![HarnessState {
+                        id: self.harness_id.clone(),
+                        pinned: self.harness_pinned.clone(),
+                        found: self.harness_found.clone(),
+                        default: true,
+                        image: None,
+                        image_state: unknown(),
+                    }]
+                })
+        }
+
         /// The wire shape the interface and the mesh share.
         pub fn to_json(&self) -> Value {
             let models: Value = self
@@ -1878,6 +1937,12 @@ mod records {
                     "found": self.harness_found,
                     "mismatch": self.harness_found.as_ref().map(|f| f != &self.harness_pinned).unwrap_or(false),
                 },
+                "harnesses": self.harnesses().into_iter().map(|h| {
+                    let mismatch = h.mismatch();
+                    let mut v = serde_json::to_value(h).unwrap_or_default();
+                    v["mismatch"] = Value::Bool(mismatch);
+                    v
+                }).collect::<Vec<_>>(),
                 "models": models,
                 "checked_at_ms": self.checked_at_ms,
                 "is_self": self.is_self != 0,
@@ -1929,6 +1994,11 @@ mod records {
                 policy_identity: v["policy"]["identity"].as_str().map(String::from),
                 policy_sha256: v["policy"]["sha256"].as_str().map(String::from),
                 policy_receipt_v1: v["policy"]["receipt_v1"].as_bool(),
+                harnesses_json: v
+                    .get("harnesses")
+                    .and_then(|list| serde_json::from_value::<Vec<HarnessState>>(list.clone()).ok())
+                    .filter(|list| !list.is_empty())
+                    .and_then(|list| serde_json::to_string(&list).ok()),
             })
         }
     }
@@ -1958,6 +2028,7 @@ mod records {
                 policy_receipt_v1: r
                     .get::<_, Option<i64>>("policy_receipt_v1")?
                     .map(|value| value != 0),
+                harnesses_json: r.get("harnesses_json")?,
             })
         }
     }
@@ -3037,6 +3108,7 @@ mod tests {
             policy_identity: Some("identity".into()),
             policy_sha256: Some("bundle".into()),
             policy_receipt_v1: Some(true),
+            harnesses_json: None,
         };
         store.put_node(&n).unwrap();
         n.id
@@ -3072,6 +3144,49 @@ mod tests {
         assert!(old.policy_identity.is_none());
         assert!(old.policy_sha256.is_none());
         assert!(old.policy_receipt_v1.is_none());
+    }
+
+    #[test]
+    fn a_node_advertises_every_harness_and_an_older_one_lists_its_only_one() {
+        let store = Store::open_in_memory().unwrap();
+        let id = node(&store);
+        let mut row = store.get_node(&id).unwrap().unwrap();
+        let harnesses = vec![
+            HarnessState {
+                id: "opencode".into(),
+                pinned: "1.18.30".into(),
+                found: Some("1.18.30".into()),
+                default: true,
+                image: Some("localhost/tracon-harness-opencode".into()),
+                image_state: "current".into(),
+            },
+            HarnessState {
+                id: "claude".into(),
+                pinned: "2.1.247".into(),
+                found: Some("2.1.200".into()),
+                default: false,
+                image: Some("localhost/tracon-harness-claude".into()),
+                image_state: "stale".into(),
+            },
+        ];
+        row.harnesses_json = Some(serde_json::to_string(&harnesses).unwrap());
+        store.put_node(&row).unwrap();
+        let v = store.get_node(&id).unwrap().unwrap().to_json();
+        assert_eq!(v["harnesses"][1]["id"], "claude");
+        assert_eq!(v["harnesses"][1]["mismatch"], true);
+        assert_eq!(v["harnesses"][0]["mismatch"], false);
+        assert_eq!(NodeRow::from_json(&v).unwrap().harnesses(), harnesses);
+
+        // An older peer says nothing of harnesses: it runs its configured one.
+        let mut old = v.clone();
+        old.as_object_mut().unwrap().remove("harnesses");
+        let old = NodeRow::from_json(&old).unwrap();
+        assert!(old.harnesses_json.is_none());
+        let only = old.harnesses();
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].id, old.harness_id);
+        assert!(only[0].default);
+        assert_eq!(only[0].image_state, "unknown");
     }
 
     fn session(store: &Store, id: &str, node_id: &str) {
@@ -3551,6 +3666,7 @@ mod migration_tests {
                 policy_identity: None,
                 policy_sha256: None,
                 policy_receipt_v1: None,
+                harnesses_json: None,
             })
             .unwrap();
         let conn = store.conn.lock().unwrap();

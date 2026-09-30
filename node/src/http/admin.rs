@@ -67,12 +67,28 @@ fn compatibility(
         .as_deref()
         .and_then(|models| serde_json::from_str::<Value>(models).ok())
         .and_then(|models| models.as_array().map(Vec::len));
-    let runtime = match (&node.harness_found, node.harness_pinned.as_str()) {
+    let runtime_state = |found: Option<&String>, pinned: &str| match (found, pinned) {
         (Some(found), pinned) if !pinned.is_empty() && found == pinned => "compatible",
         (Some(_), _) => "mismatch",
         (None, _) if node.checked_at_ms.is_some() => "not_found",
         (None, _) => "unknown",
     };
+    let runtime = runtime_state(node.harness_found.as_ref(), &node.harness_pinned);
+    let harnesses: Vec<Value> = node
+        .harnesses()
+        .into_iter()
+        .map(|h| {
+            json!({
+                "id": h.id,
+                "default": h.default,
+                "runtime": runtime_state(h.found.as_ref(), &h.pinned),
+                "pinned": (!h.pinned.is_empty()).then_some(&h.pinned),
+                "found": h.found,
+                "image": h.image,
+                "image_state": h.image_state,
+            })
+        })
+        .collect();
     let models = match model_count {
         None => "unknown",
         Some(0) => "none_offered",
@@ -102,6 +118,7 @@ fn compatibility(
         "runtime": runtime,
         "pinned": (!node.harness_pinned.is_empty()).then_some(&node.harness_pinned),
         "found": node.harness_found,
+        "harnesses": harnesses,
         "checked_at_ms": node.checked_at_ms,
         "models": { "state": models, "offered": model_count },
         "application": {

@@ -1,7 +1,7 @@
 // Pure helpers over the node list: which node a thing belongs to and whether
 // the operator can act on it from here. Kept free of Svelte so they test flat.
 
-import type { MeshState, ModelOption, NodeInfo, ProviderInfo } from './types'
+import type { HarnessState, MeshState, ModelOption, NodeInfo, ProviderInfo } from './types'
 
 /**
  * Upsert a node into the list, self first, then by name. `loopback` is a fact
@@ -74,11 +74,15 @@ export function nodeReadiness(node: NodeInfo): { canRun: boolean; label: string;
       detail: failure ? `The isolated runtime refused this node: ${failure}.` : 'The isolated runtime refused this node.',
     }
   }
-  if (node.harness.mismatch) {
+  // A node runs whichever harness a session's model allows, so it is blocked
+  // only when no harness it runs is the version it pins.
+  const harnesses = nodeHarnesses(node)
+  if (harnesses.length > 0 && harnesses.every((harness) => harness.mismatch)) {
+    const [first] = harnesses
     return {
       canRun: false,
       label: 'Runtime mismatch',
-      detail: `This node expects ${node.harness.pinned}, but found ${node.harness.found ?? 'no runtime'}.`,
+      detail: `This node expects ${first.pinned}, but found ${first.found ?? 'no runtime'}.`,
     }
   }
   if (node.models.length === 0) {
@@ -93,6 +97,33 @@ export function nodeReadiness(node: NodeInfo): { canRun: boolean; label: string;
     label: 'Ready',
     detail: `${node.models.length} model${node.models.length === 1 ? '' : 's'} offered by this ready isolated runtime.`,
   }
+}
+
+/**
+ * Every harness a node runs. An older build reports only its configured one,
+ * which is then the whole list.
+ */
+export function nodeHarnesses(node: NodeInfo): HarnessState[] {
+  if (node.harnesses?.length) return node.harnesses
+  if (!node.harness?.id) return []
+  return [{ ...node.harness, default: true, image: null, image_state: 'unknown' }]
+}
+
+/** How a model's harness reads in the picker: the one it runs on, or `either`. */
+export function harnessTag(model: ModelOption): string | null {
+  const harnesses = model.harnesses ?? []
+  if (harnesses.length === 0) return null
+  return harnesses.length === 1 ? harnesses[0] : 'either'
+}
+
+/**
+ * The harnesses the operator may choose between for `model`: only a model
+ * whose credential runs on more than one (an Anthropic API key). Otherwise the
+ * credential decides and there is nothing to choose.
+ */
+export function harnessChoice(model: ModelOption | undefined): string[] {
+  const harnesses = model?.harnesses ?? []
+  return harnesses.length > 1 ? harnesses : []
 }
 
 /**

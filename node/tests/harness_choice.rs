@@ -115,6 +115,7 @@ async fn node(default: &'static str) -> Node {
             policy_identity: None,
             policy_sha256: None,
             policy_receipt_v1: None,
+            harnesses_json: None,
         })
         .unwrap();
     let mut cfg = Config::default();
@@ -285,4 +286,86 @@ async fn naming_a_harness_the_credential_cannot_run_on_is_refused() {
     let (status, body) = node.start("anthropic-key/claude-x", Some("claude")).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["harness_id"], "claude");
+}
+
+#[tokio::test]
+async fn the_picker_learns_which_harnesses_each_model_runs_on() {
+    state::isolate();
+    let node = node("opencode").await;
+    for (model, harnesses) in [
+        ("anthropic/claude-x", vec!["claude"]),
+        ("anthropic-key/claude-x", vec!["opencode", "claude"]),
+        ("openai/gpt-x", vec!["opencode"]),
+        ("sonnet", vec!["claude"]),
+        ("elsewhere/m", vec![]),
+    ] {
+        assert_eq!(node.manager.model_harnesses(model), harnesses, "{model}");
+    }
+}
+
+/// Planning through compose takes the Adjust panel's harness too.
+#[tokio::test]
+async fn compose_runs_on_the_harness_the_operator_chose() {
+    state::isolate();
+    let node = node("opencode").await;
+    let response = node
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/compose")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "channel": "personal",
+                        "title": "try it on Claude Code",
+                        "repo_path": node.repo,
+                        "phase": "plan",
+                        "model": "anthropic-key/claude-x",
+                        "harness": "claude",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["session"]["harness_id"], "claude");
+}
+
+/// Each harness's probe gates the sessions on that harness, not the others.
+#[tokio::test]
+async fn a_mismatched_harness_blocks_only_its_own_sessions() {
+    state::isolate();
+    let node = node("opencode").await;
+    let mut row = node.store.get_node("n1").unwrap().unwrap();
+    row.harnesses_json = Some(
+        json!([
+            {"id": "opencode", "pinned": "1.0.0", "found": "1.0.0", "default": true},
+            {"id": "claude", "pinned": "2.0.0", "found": "1.9.0"},
+        ])
+        .to_string(),
+    );
+    node.store.put_node(&row).unwrap();
+
+    let (status, body) = node.start("anthropic/claude-x", None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("1.9.0") && message.contains("2.0.0"),
+        "{message}"
+    );
+
+    let (status, body) = node.start("openai/gpt-x", None).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["harness_id"], "opencode");
 }

@@ -224,5 +224,16 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus
 .chip.bad { color: var(--crit); }
 .chip.bad::before { background: var(--crit); }
 .chip.warn::before { background: var(--wait); }
+/* A plain label beside a thing, where a chip's status dot would claim a state. */
+.tag {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  font: 11px var(--mono);
+  font-style: normal;
+  color: var(--dim);
+  white-space: nowrap;
+}
 /* The node that served this interface. Named "you" by chipLabel where the
    chip stands for another thing's owner; the node pickers keep real names. */

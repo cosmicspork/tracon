@@ -51,7 +51,10 @@ image for each, and a session's harness follows the credential its model spends:
 Anthropic subscription runs on Claude Code only (through any other client Anthropic
 bills it as extra usage), ChatGPT/Codex and every other provider on OpenCode, and an
 Anthropic API key on either, where `[harness] id` breaks the tie. A session may name
-its harness, and naming one its credential cannot run on is refused with the reason. **Claude Code**, over the stream-json control
+its harness, and naming one its credential cannot run on is refused with the reason. The
+picker tags each model with the harness it runs on; for a model either runs, the
+composer's Adjust panel offers a Harness field, and Settings lists each harness's
+version and image. **Claude Code**, over the stream-json control
 protocol, is the harness daily work runs on today: it reaches the node's tools, its
 permission asks come to the node, and it has no native UI of its own. **OpenCode** is
 driven through its native server API — one isolated `opencode serve` per session,

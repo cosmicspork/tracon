@@ -62,6 +62,7 @@ fn store_with_session(state: &str) -> Arc<Store> {
             policy_identity: None,
             policy_sha256: None,
             policy_receipt_v1: None,
+            harnesses_json: None,
         })
         .unwrap();
     let mut row = support::rows::session_row(SESSION_ID, "n1", "personal");

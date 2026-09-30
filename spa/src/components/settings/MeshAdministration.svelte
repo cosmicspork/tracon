@@ -175,7 +175,13 @@
             <p><code>{member.id}</code></p>
             <dl>
               <div><dt>Channels</dt><dd>{member.channels.filter((channel) => channel !== '@mesh').join(', ') || 'none reported'}</dd></div>
-              <div><dt>Runtime</dt><dd>{member.compatibility.runtime}{member.compatibility.pinned ? ` · expects ${member.compatibility.pinned}` : ''}{member.compatibility.found ? ` · reports ${member.compatibility.found}` : ''}</dd></div>
+              {#if member.compatibility.harnesses?.length}
+                {#each member.compatibility.harnesses as h (h.id)}
+                  <div><dt>{h.id}{h.default ? ' (default)' : ''}</dt><dd>{h.runtime}{h.pinned ? ` · expects ${h.pinned}` : ''}{h.found ? ` · reports ${h.found}` : ''}{h.image_state !== 'unknown' ? ` · image ${h.image_state}` : ''}</dd></div>
+                {/each}
+              {:else}
+                <div><dt>Runtime</dt><dd>{member.compatibility.runtime}{member.compatibility.pinned ? ` · expects ${member.compatibility.pinned}` : ''}{member.compatibility.found ? ` · reports ${member.compatibility.found}` : ''}</dd></div>
+              {/if}
               <div><dt>Models</dt><dd>{member.compatibility.models.state === 'unknown' ? 'unknown — node has not reported models' : member.compatibility.models.state === 'none_offered' ? 'none offered' : `${member.compatibility.models.offered} offered`}</dd></div>
               <div><dt>App</dt><dd class:mismatch={member.compatibility.application.state === 'mismatch'}>{comparison(member.compatibility.application, 'its application version')}</dd></div>
               <div><dt>Wire</dt><dd class:mismatch={member.compatibility.wire.state === 'mismatch'}>{comparison(member.compatibility.wire, 'its wire contract')}</dd></div>

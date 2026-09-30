@@ -3,6 +3,7 @@
   // Enter to pick, Escape to leave it as it was. The models this node has
   // already run sit first; the harness's own order follows.
   import { filterModels, orderModels } from '../lib/models'
+  import { harnessTag } from '../lib/nodes'
   import type { ModelOption } from '../lib/types'
 
   let {
@@ -11,6 +12,7 @@
     recent = [],
     none = null,
     disabled = false,
+    harnessTags = false,
     onchange,
   }: {
     value?: string
@@ -20,6 +22,8 @@
     /** When set, an empty value is a real choice and this is its label. */
     none?: string | null
     disabled?: boolean
+    /** Tag each model with the harness its credential runs on. */
+    harnessTags?: boolean
     onchange?: (value: string) => void
   } = $props()
 
@@ -35,7 +39,7 @@
     const { recent: used, rest } = orderModels(filterModels(models, query), recent)
     return { used, rest }
   })
-  const rows = $derived<{ value: string; name: string; note?: string }[]>([
+  const rows = $derived<{ value: string; name: string; note?: string; harnesses?: string[] }[]>([
     ...(none !== null && query.trim() === '' ? [{ value: '', name: none }] : []),
     ...groups.used.map((m) => ({ ...m, note: 'recent' })),
     ...groups.rest,
@@ -124,6 +128,7 @@
           onmouseenter={() => (active = i)}
         >
           <span>{r.name}</span>
+          {#if harnessTags && harnessTag(r)}<em class="tag" title="Runs on {r.harnesses?.join(' or ')}">{harnessTag(r)}</em>{/if}
           {#if r.note}<small>{r.note}</small>{:else if r.value && r.value !== r.name}<small>{r.value}</small>{/if}
         </button>
       {:else}
@@ -187,6 +192,9 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .list button .tag {
+    margin-left: auto;
   }
   .list button small {
     font: 11px var(--mono);

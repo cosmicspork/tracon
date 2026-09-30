@@ -7,7 +7,10 @@ export interface NodeInfo {
   state: 'ready' | 'refused' | 'unknown'
   failed_check: string | null
   failed_detail: string | null
+  /** The configured harness, as older builds report their only one. */
   harness: { id: string; pinned: string; found: string | null; mismatch: boolean }
+  /** Every harness the node runs. Absent from older builds; see `nodeHarnesses`. */
+  harnesses?: HarnessState[]
   models: ModelOption[]
   checked_at_ms: number | null
   /** The node that served this interface. */
@@ -33,6 +36,20 @@ export interface NodeInfo {
 export interface ModelOption {
   value: string
   name: string
+  /** The harnesses this model's credential runs on. Absent where the node could not say. */
+  harnesses?: string[]
+}
+
+/** One harness a node runs: its pinned and probed versions and its image. */
+export interface HarnessState {
+  id: string
+  pinned: string
+  found: string | null
+  mismatch: boolean
+  /** The configured `[harness] id`, which breaks the tie for a model either harness runs. */
+  default: boolean
+  image?: string | null
+  image_state: 'current' | 'stale' | 'missing' | 'unknown'
 }
 
 export type LoginCompletion = 'local_callback' | 'paste' | 'device_code'

@@ -381,6 +381,14 @@ impl Manager {
         Some(CredentialClass::classify(&provider.shape, &kind))
     }
 
+    /// The supported harnesses `model` runs on, for the picker; empty where
+    /// the node cannot classify it.
+    pub fn model_harnesses(&self, model: &str) -> Vec<&'static str> {
+        self.credential_class(model)
+            .map(|class| class.harnesses())
+            .unwrap_or_default()
+    }
+
     /// The harness a session runs on and why: the one the spec names, if the
     /// model's credential runs there; otherwise the only one it runs on; and
     /// where it runs on either (an Anthropic API key) or the node cannot say,
@@ -949,13 +957,13 @@ impl Manager {
                         .unwrap_or_else(|| "boundary check failed".into()),
                 ));
             }
-            // The node row records the configured harness's probe; a session
-            // on the other harness is checked at its own handshake.
-            if node.harness_id == adapter.id() {
-                if let Some(found) = node.harness_found.filter(|f| f != &node.harness_pinned) {
+            // Each harness's probe is on the node row; a harness it does not
+            // list is checked at its own handshake.
+            if let Some(harness) = node.harnesses().into_iter().find(|h| h.id == adapter.id()) {
+                if harness.mismatch() {
                     return Err(SessionError::VersionMismatch {
-                        found,
-                        pinned: node.harness_pinned,
+                        found: harness.found.unwrap_or_default(),
+                        pinned: harness.pinned,
                     });
                 }
             }
