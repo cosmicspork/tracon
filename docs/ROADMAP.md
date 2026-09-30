@@ -94,6 +94,15 @@ they are about, and the loop closing after publication.
       effects before retrying. Expose an explicit recovery action backed by the publication
       journal, not a misleading second approval. Adding a credential never retries
       automatically; changed revisions or prose need fresh authorization.
+- [ ] Follow a published pull or merge request after it opens: subscribe to its CI runs,
+      draft/ready and open/merged/closed transitions, review verdicts and new comments or
+      threads, and record each as an event on the review and its work item. Notify through
+      the existing push channel with the change named ("CI failed on `node`", "marked
+      ready", "2 new comments"), and let a session that is still attached pick the change
+      up through the forge tools (#297, #298) rather than the operator relaying it. Polling
+      through the brokered token first; webhooks only where the node is reachable. A
+      subscription ends when the request closes, and it never merges, approves or retries
+      anything on its own.
 
 **Feedback and re-review**
 
@@ -146,6 +155,12 @@ item; broader export and cross-node commitments remain below.
 - [ ] Save validated project setup profiles by extending the launch manifest and toolchain
       profiles: image, language tools, skills, preparation, required checks and previews,
       snapshotted per execution, with validation invalidated when its inputs change.
+- [ ] Run required checks where they can run. Today they execute in the harness image,
+      which carries no project toolchain or dependencies, so a repository's own
+      `just check` exits 127 and the operator has to run it on the host and relay the
+      result. Checks need the project's validated toolchain image and prepared
+      dependencies, and a command that cannot be found is reported as "not runnable
+      here" with the missing tool named, never as a failing check the agent is asked to fix.
 - [ ] Preview preparation and explain incompatibility before launch, without turning
       unsupported scripts or devcontainer features into silent host execution. Let the
       agent propose project checks and setup, but require operator validation; it cannot
@@ -205,6 +220,29 @@ cross-node transfer follow the first proven loop, not the other way around.
       `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
       host environment for the child only and keep the URL and origin restrictions.
 
+**Session accounting and harness surfaces**
+
+- [ ] Weight cached reads in the token budget. A cache read is charged as a full input
+      token, so a planning pass on this repository spends 3–4M of a 2M default budget on
+      mostly-cached context. Count cache reads and cache writes at their price ratio (or as
+      their own limit), keep the raw counts visible, and never let a cheaper unit hide spend.
+- [ ] Give a node restart its own end reason. Sessions running when the node restarts are
+      ended as `killed_user`, which tells the operator they stopped something they did not;
+      record `node_restart` (or equivalent), and offer the resume a restart interrupted.
+- [ ] Show an OpenCode session's history in its native window. OpenCode keeps separate v1
+      and v2 session stores; the v2 runner writes one and the v1 native UI reads the other,
+      so the window opens on "New Session" with a blank history.
+- [ ] Open the native OpenCode window from any origin the SPA is served at. It loads only
+      when the tracon tab is at exactly `http://127.0.0.1:7420`; `localhost`, a LAN address
+      or the hub's origin get a refused frame.
+- [ ] Let the model catalogue refresh. `models.opencode.ai` is not on the gateway's
+      `allow_hosts`, so the harness's catalogue fetch is refused and its model list never
+      updates; fetch it node-side and serve it, or allow the one host.
+- [ ] Record a policy decision for every Claude Code tool call. Calls Claude Code allows by
+      its own rules (reads, searches) never reach `can_use_tool`, so they leave no
+      `policy_allowed` event, while the same calls under OpenCode do; the ledger should not
+      depend on which harness ran.
+
 **Forge and tracker parity**
 
 - [ ] Give GitHub the CI tools GitLab has: a run's job log tail (`run_logs`, the
@@ -262,6 +300,18 @@ working files a session accumulates outside the workspace.
 - [ ] Carry the actual continuation state: workspace changes, conversation, decisions,
       context, unsent draft, next action, harness/model/manifest identity, evidence, usage
       and remaining limits, over the portable contract and existing transport.
+- [ ] Carry Git history, not just files. An imported transfer today is the carried tree
+      under a fresh `git init` on `main` with no commit and no remote: the recorded
+      `continuation/…` branch never exists, `submit_review` cannot resolve a base, and a
+      publish has no shared history to push onto. The destination should fetch the
+      repository at the candidate's base from the forge (brokered, like a managed
+      checkout), apply the carried changes on the named continuation branch, and fall back
+      to one baseline commit, labelled as such, when the forge is out of reach.
+- [ ] Record lineage on every continuation: a resumed or imported session links the session
+      and transfer it continues (`continued_from`), and both sides show the link.
+- [ ] Lift the 2 MB mesh ceiling on transfers: stream or chunk packages over the existing
+      relay with a digest per chunk, so a real repository's candidate moves over the mesh
+      instead of only as a portable file carried by hand.
 - [ ] Transfer ownership safely: quiesce and fence the source first, persist
       acknowledgements so retries duplicate nothing, and never let a timeout enable both
       owners.
