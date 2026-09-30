@@ -253,6 +253,24 @@ cross-node transfer follow the first proven loop, not the other way around.
       transitions (id, name, destination status) through the brokered token, so an
       authorized `issue_transition` never rests on an out-of-band `acli` lookup or an id
       copied from another project. Discovery stays a read; the transition keeps its grant.
+- [ ] Make tracon invisible in what it publishes: a commit, branch, pull request or forge
+      request should read as the operator's own work through their harness, with nothing
+      naming tracon. Authorship comes from the bound forge credential, not the host or a
+      placeholder: inside the boundary every commit is `tracon <tracon@localhost>` today
+      (hard-coded in the harness home's gitconfig and the sanitized workspace config), and
+      outside it commits carry the host's Git config, which can be a work address on a
+      personal repository. Resolve the identity once per bound credential from the forge
+      (GitHub `/user`: name and `<id>+<login>@users.noreply.github.com`; GitLab `/user`:
+      name and commit or noreply email), cache it with the binding, and write it as author
+      and committer wherever the node writes Git config. Attribution is see-through: the
+      harness's own default trailers (Claude Code's `Co-Authored-By`, whatever OpenCode
+      does) pass through untouched, and tracon adds none of its own; its provenance stays
+      in the node's ledger. Forge API calls stop sending `user-agent: tracon`. For an
+      external harness the node launches nothing, so it offers the identity (in `external
+      show` and as a tool result the harness applies as repo-local config) and checks
+      authorship at `submit_review` and publish: a commit whose author is not an identity
+      of the target forge account is named in the review, and rewriting it is an
+      operator-approved step, never silent.
 
 **Portable data and recovery**
 
@@ -306,7 +324,8 @@ working files a session accumulates outside the workspace.
       publish has no shared history to push onto. The destination should fetch the
       repository at the candidate's base from the forge (brokered, like a managed
       checkout), apply the carried changes on the named continuation branch, and fall back
-      to one baseline commit, labelled as such, when the forge is out of reach.
+      to a local baseline when the forge is out of reach — one that is never published and
+      names nothing about tracon, so a publish from it waits for the real history.
 - [ ] Record lineage on every continuation: a resumed or imported session links the session
       and transfer it continues (`continued_from`), and both sides show the link.
 - [ ] Lift the 2 MB mesh ceiling on transfers: stream or chunk packages over the existing
