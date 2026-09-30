@@ -36,10 +36,16 @@ pub struct RunSpec {
 
 impl RunSpec {
     pub fn from_config(cfg: &Config, selinux: bool) -> Self {
-        let layout = crate::adapter::layout(&cfg.harness.id);
+        Self::for_harness(cfg, &cfg.harness.id, selinux)
+    }
+
+    /// The spec for a named harness: its image, its state layout, everything
+    /// else the boundary's.
+    pub fn for_harness(cfg: &Config, harness_id: &str, selinux: bool) -> Self {
+        let layout = crate::adapter::layout(harness_id);
         Self {
             podman_bin: crate::boundary::podman::resolve_podman_env(cfg),
-            image: cfg.boundary.harness_image.clone(),
+            image: cfg.podman_harness_image(harness_id),
             network: cfg.boundary.network.clone(),
             gateway_host: cfg.boundary.gateway_container.clone(),
             gateway_ip: cfg.boundary.gateway_ip.clone(),

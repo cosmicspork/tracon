@@ -188,7 +188,11 @@ impl Backend for PodmanBackend {
     }
 
     fn runner(&self, extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
-        let mut spec = self.spec();
+        self.runner_for(&self.cfg.harness.id, extra_mounts)
+    }
+
+    fn runner_for(&self, harness_id: &str, extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
+        let mut spec = RunSpec::for_harness(&self.cfg, harness_id, self.selinux);
         spec.extra_mounts = extra_mounts;
         Arc::new(PodmanRunner::new(spec))
     }

@@ -75,10 +75,22 @@ pub fn layout(harness_id: &str) -> Layout {
 /// default — a node that thinks it is running something else is worse than a
 /// node that will not start.
 pub fn adapter_for(cfg: &Config) -> Result<Arc<dyn HarnessAdapter>, AdapterError> {
-    match cfg.harness.id.as_str() {
-        claude::ClaudeAdapter::ID => Ok(Arc::new(claude::ClaudeAdapter::new(pinned_version(cfg)))),
+    adapter_for_id(cfg, &cfg.harness.id)
+}
+
+/// The adapter for any supported harness, whether or not it is the configured
+/// one. A session names its harness (`session.harness_id`), and the node runs
+/// it with this; the configured id is only the default.
+pub fn adapter_for_id(
+    cfg: &Config,
+    harness_id: &str,
+) -> Result<Arc<dyn HarnessAdapter>, AdapterError> {
+    match harness_id {
+        claude::ClaudeAdapter::ID => Ok(Arc::new(claude::ClaudeAdapter::new(pinned_version_for(
+            cfg, harness_id,
+        )))),
         opencode::OpenCodeAdapter::ID => Ok(Arc::new(opencode::OpenCodeAdapter::new(
-            pinned_version(cfg),
+            pinned_version_for(cfg, harness_id),
         ))),
         RETIRED => Err(AdapterError::Protocol(RETIRED_MESSAGE.to_string())),
         other => Err(AdapterError::Protocol(format!(
@@ -93,11 +105,17 @@ pub fn adapter_for(cfg: &Config) -> Result<Arc<dyn HarnessAdapter>, AdapterError
 /// installs, which is the same string the image build reads. Both are checked
 /// against what the harness reports, so an image built elsewhere still fails.
 pub fn pinned_version(cfg: &Config) -> String {
+    pinned_version_for(cfg, &cfg.harness.id)
+}
+
+/// `[harness] version` pins the configured harness only; any other runs at
+/// the version its image installs.
+pub fn pinned_version_for(cfg: &Config, harness_id: &str) -> String {
     let configured = cfg.harness.version.trim();
-    if !configured.is_empty() {
+    if harness_id == cfg.harness.id && !configured.is_empty() {
         return configured.to_string();
     }
-    image_version(&cfg.harness.id).to_string()
+    image_version(harness_id).to_string()
 }
 
 /// Plugin packages the harness image for `harness_id` bakes into its offline

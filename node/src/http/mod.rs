@@ -40,6 +40,10 @@ struct OperatorSecurityHeaders {
 }
 
 pub fn router(state: AppState) -> Router {
+    // The adapter this state carries is the node's default harness, probed at
+    // startup; sessions that name no harness run on it.
+    state.manager.set_default_adapter(state.adapter.clone());
+    state.manager.set_adapter(state.adapter.clone());
     let preview_origin = state
         .cfg
         .docs
@@ -654,7 +658,6 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     if mesh.is_none() {
         tracing::info!("no hub configured; this node is standalone (tracon enroll to join a mesh)");
     }
-    manager.set_adapter(adapter.clone());
     let state = AppState {
         manager,
         cfg: cfg.clone(),

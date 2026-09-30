@@ -347,6 +347,9 @@ pub mod local {
         fn runner(&self, _extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
             Arc::new(LocalRunner)
         }
+        fn runner_for(&self, _harness_id: &str, _extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
+            Arc::new(LocalRunner)
+        }
         async fn import_volume(
             &self,
             volume: &str,

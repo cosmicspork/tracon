@@ -701,6 +701,9 @@ mod tests {
             fn runner(&self, _extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
                 Arc::new(FakeRunner)
             }
+            fn runner_for(&self, _harness_id: &str, _extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
+                Arc::new(FakeRunner)
+            }
             fn harness_host(&self) -> String {
                 "fake".into()
             }

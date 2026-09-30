@@ -96,10 +96,15 @@ pub struct KubeSpec {
 
 impl KubeSpec {
     pub fn from_config(cfg: &Config, env: PodEnv) -> Self {
+        Self::for_harness(cfg, &cfg.harness.id, env)
+    }
+
+    /// The spec for a named harness: its image, its layout, its entrypoint.
+    pub fn for_harness(cfg: &Config, harness_id: &str, env: PodEnv) -> Self {
         let k = &cfg.runtime.kubernetes;
-        let layout = crate::adapter::layout(&cfg.harness.id);
+        let layout = crate::adapter::layout(harness_id);
         Self {
-            image: k.harness_image.clone(),
+            image: cfg.kubernetes_harness_image(harness_id),
             state_claim: k.state_claim.clone(),
             state_mount: k.state_mount.clone(),
             home: k.harness_home.clone(),
@@ -111,7 +116,7 @@ impl KubeSpec {
             workdir: "/work".into(),
             state_env: layout.env,
             state_dir: layout.dir,
-            entrypoint: image_entrypoint(&cfg.harness.id),
+            entrypoint: image_entrypoint(harness_id),
             stop_timeout_secs: cfg.boundary.stop_timeout_secs,
         }
     }

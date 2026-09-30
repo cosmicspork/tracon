@@ -91,6 +91,7 @@ async fn check_runtime(cfg: &Config) -> CheckResult {
         );
     }
     for (image, dir) in super::setup::images(cfg) {
+        let image = image.as_str();
         if podman(&["image", "exists", image]).await.is_err() {
             return CheckResult::fail(
                 CheckId::Runtime,

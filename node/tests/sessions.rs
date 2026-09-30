@@ -233,6 +233,7 @@ async fn an_explicit_model_the_channel_cannot_authenticate_is_refused_by_create_
             workspace_id: None,
             parent_session: None,
             continued_from: None,
+            harness: None,
         })
         .expect_err("preflight refuses an unauthenticatable model")
         .to_string();
@@ -2440,7 +2441,7 @@ async fn orientation_setup(
         .unwrap();
     }
     let row = manager
-        .create(
+        .create_with(
             tracon::session::NewSession {
                 channel: "personal".into(),
                 repo_path: repo.to_string_lossy().into_owned(),
@@ -2456,6 +2457,7 @@ async fn orientation_setup(
                 workspace_id: None,
                 parent_session: None,
                 continued_from: None,
+                harness: None,
             },
             launch_with.unwrap_or_else(|| adapter.clone()),
         )
@@ -2850,6 +2852,12 @@ impl tracon::boundary::Backend for RecordingBackend {
             killed: self.killed.clone(),
         })
     }
+    fn runner_for(&self, harness_id: &str, extra: Vec<tracon::runner::Mount>) -> Arc<dyn Runner> {
+        Arc::new(RecordingRunner {
+            inner: self.inner.runner_for(harness_id, extra),
+            killed: self.killed.clone(),
+        })
+    }
     async fn import_volume(
         &self,
         volume: &str,
@@ -2982,7 +2990,7 @@ async fn a_harness_that_never_starts_fails_the_session_visibly_and_removes_the_h
         }),
     );
     let row = manager
-        .create(
+        .create_with(
             tracon::session::NewSession {
                 channel: "personal".into(),
                 repo_path: repo.to_string_lossy().into_owned(),
@@ -2998,6 +3006,7 @@ async fn a_harness_that_never_starts_fails_the_session_visibly_and_removes_the_h
                 workspace_id: None,
                 parent_session: None,
                 continued_from: None,
+                harness: None,
             },
             Arc::new(StallingAdapter),
         )

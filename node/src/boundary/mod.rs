@@ -70,8 +70,13 @@ pub trait Backend: Send + Sync {
     /// The startup verification, against the same specification a session
     /// runs. `deep` adds the active egress probe from inside the boundary.
     async fn check_all(&self, cfg: &Config, deep: bool) -> BoundaryReport;
-    /// A runner carrying these mounts in addition to the boundary's own.
+    /// A runner for the configured harness, carrying these mounts in addition
+    /// to the boundary's own.
     fn runner(&self, extra_mounts: Vec<Mount>) -> Arc<dyn Runner>;
+    /// A runner for a named harness: its image and its state layout. The
+    /// configured harness is only the default; a session runs the one it
+    /// names.
+    fn runner_for(&self, harness_id: &str, extra_mounts: Vec<Mount>) -> Arc<dyn Runner>;
     /// Copy an explicitly staged directory into runtime-owned storage. The
     /// source is never mounted into a harness.
     async fn import_volume(

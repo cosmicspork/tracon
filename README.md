@@ -46,8 +46,9 @@ and Claude Code over stream-json, and contains no model loop. Not multi-user —
 Not an IDE — the diff is the unit of review, and there is deliberately no file tree
 and no editor of its own.
 
-**The harnesses.** Two are supported behind one adapter trait, and one node runs one
-harness image, chosen by `[harness] id`. **Claude Code**, over the stream-json control
+**The harnesses.** Two are supported behind one adapter trait. `tracon setup` builds an
+image for each, and every session runs the harness it names; `[harness] id` is the
+default for a session that names none. **Claude Code**, over the stream-json control
 protocol, is the harness daily work runs on today: it reaches the node's tools, its
 permission asks come to the node, and it has no native UI of its own. **OpenCode** is
 driven through its native server API — one isolated `opencode serve` per session,
@@ -656,8 +657,9 @@ subnet = "10.89.0.0/24"
 gateway_ip = "10.89.0.2"
 gateway_container = "tracon-gw"
 gateway_image = "localhost/tracon-gateway"
-harness_image = "localhost/tracon-harness-opencode"  # "localhost/tracon-harness-claude" with
-                                    # [harness] id = "claude"
+harness_image = "localhost/tracon-harness-opencode"  # the image for [harness] id; the other
+                                    # harness runs from localhost/tracon-harness-<id>, which
+                                    # setup builds too
 start_machine = true                # macOS: start the podman machine when it is stopped
 # selinux_label_disable = true      # only if the boundary check says the labels fight you
 

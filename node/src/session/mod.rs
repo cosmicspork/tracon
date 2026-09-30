@@ -79,6 +79,11 @@ pub struct NewSession {
     pub parent_session: Option<String>,
     #[serde(default)]
     pub continued_from: Option<String>,
+    /// The harness to run this session on. Absent: the node's configured
+    /// `[harness] id`. A session runs the harness it names for its whole life;
+    /// the node holds an image for every supported one.
+    #[serde(default)]
+    pub harness: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -231,8 +236,13 @@ pub struct Manager {
     backend: Arc<dyn crate::boundary::Backend>,
     /// Provider logins, once the node exists to run them.
     providers: Arc<std::sync::OnceLock<Arc<crate::providers::Providers>>>,
-    /// The node's harness adapter, for sessions the node spawns itself.
-    adapter: Arc<std::sync::OnceLock<Arc<dyn HarnessAdapter>>>,
+    /// Adapters registered by harness id. Startup registers the ones it
+    /// built (and probed); a harness with none registered is built from the
+    /// config on demand. A test registers a fake under the id it stands for.
+    adapters: Arc<std::sync::Mutex<HashMap<String, Arc<dyn HarnessAdapter>>>>,
+    /// The adapter a session that names no harness runs on: the configured
+    /// harness's, once startup has probed it.
+    default_adapter: Arc<std::sync::OnceLock<Arc<dyn HarnessAdapter>>>,
     previews: Arc<crate::http::preview::PreviewTokens>,
 }
 
@@ -274,7 +284,8 @@ impl Manager {
             probe_token: mint_token(),
             mesh: Arc::new(std::sync::OnceLock::new()),
             providers: Arc::new(std::sync::OnceLock::new()),
-            adapter: Arc::new(std::sync::OnceLock::new()),
+            adapters: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            default_adapter: Arc::new(std::sync::OnceLock::new()),
             previews: Arc::new(crate::http::preview::PreviewTokens::default()),
         }
     }
@@ -307,27 +318,12 @@ impl Manager {
     /// `continued_from`), and gives it an explicit handoff note as its first
     /// prompt, because the new harness inherits none of the old one's context
     /// and pretending otherwise is how an agent redoes finished work.
-    pub async fn reopen(
-        &self,
-        id: &str,
-        harness: &str,
-        adapter: Arc<dyn HarnessAdapter>,
-    ) -> Result<SessionRow, SessionError> {
+    pub async fn reopen(&self, id: &str, harness: &str) -> Result<SessionRow, SessionError> {
         let old = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
         if !crate::adapter::KNOWN.contains(&harness) {
             return Err(SessionError::Rejected(format!(
                 "no harness `{harness}`; this node knows {}",
                 crate::adapter::KNOWN.join(", ")
-            )));
-        }
-        // One node runs one harness image. Offering to reopen under the other
-        // one and then failing at the version check would be a worse answer
-        // than saying so here.
-        if harness != adapter.id() {
-            return Err(SessionError::Rejected(format!(
-                "this node runs the `{}` harness; reopen under it, or set \
-                 [harness] id = \"{harness}\" in node.toml and run `tracon setup` first",
-                adapter.id()
             )));
         }
         let workspace_id = old
@@ -350,23 +346,43 @@ impl Manager {
             workspace_id,
             parent_session: Some(old.id.clone()),
             continued_from: Some(old.id.clone()),
+            harness: Some(harness.to_string()),
         };
-        self.create(spec, adapter).await
+        self.create(spec).await
     }
 
-    pub async fn create_local(&self, spec: NewSession) -> Result<SessionRow, SessionError> {
-        let adapter = self
-            .adapter
-            .get()
-            .cloned()
-            .ok_or_else(|| SessionError::Rejected("no harness adapter yet".into()))?;
-        self.create(spec, adapter).await
-    }
-
-    /// The node's adapter, set once at startup so node-spawned sessions can
-    /// use it.
+    /// Register an adapter under its own id. Node-spawned sessions on that
+    /// harness use it; the node's default is registered at startup, once it
+    /// has been probed.
     pub fn set_adapter(&self, adapter: Arc<dyn HarnessAdapter>) {
-        let _ = self.adapter.set(adapter);
+        self.adapters
+            .lock()
+            .unwrap()
+            .insert(adapter.id().to_string(), adapter);
+    }
+
+    /// The adapter for sessions that name no harness. Set once; the first
+    /// caller wins, which is startup in the node and the harness in a test.
+    pub fn set_default_adapter(&self, adapter: Arc<dyn HarnessAdapter>) {
+        let _ = self.default_adapter.set(adapter);
+    }
+
+    /// The adapter a session runs on: the harness the spec names, or the
+    /// node's configured one. Every supported harness has an image on this
+    /// node, so the answer never depends on which one is the default.
+    fn adapter_for(&self, spec: &NewSession) -> Result<Arc<dyn HarnessAdapter>, SessionError> {
+        let named = spec.harness.as_deref().filter(|h| !h.trim().is_empty());
+        if named.is_none() {
+            if let Some(default) = self.default_adapter.get() {
+                return Ok(default.clone());
+            }
+        }
+        let harness = named.unwrap_or(&self.cfg.harness.id);
+        if let Some(registered) = self.adapters.lock().unwrap().get(harness) {
+            return Ok(registered.clone());
+        }
+        crate::adapter::adapter_for_id(&self.cfg, harness)
+            .map_err(|e| SessionError::Rejected(e.to_string()))
     }
 
     pub fn set_mesh(&self, mesh: Arc<crate::mesh::client::MeshClient>) {
@@ -744,7 +760,15 @@ impl Manager {
     /// Validate, insert the row, and start the session in the background. The
     /// row exists before the harness does, so the interface can show a session
     /// that is still starting.
-    pub async fn create(
+    pub async fn create(&self, spec: NewSession) -> Result<SessionRow, SessionError> {
+        let adapter = self.adapter_for(&spec)?;
+        self.create_with(spec, adapter).await
+    }
+
+    /// `create`, on an adapter the caller chose. The node's own paths never
+    /// choose: the registry does, from the harness the spec names. This is
+    /// the seam a test drives a fake harness through.
+    pub async fn create_with(
         &self,
         mut spec: NewSession,
         adapter: Arc<dyn HarnessAdapter>,
@@ -829,11 +853,15 @@ impl Manager {
                         .unwrap_or_else(|| "boundary check failed".into()),
                 ));
             }
-            if let Some(found) = node.harness_found.filter(|f| f != &node.harness_pinned) {
-                return Err(SessionError::VersionMismatch {
-                    found,
-                    pinned: node.harness_pinned,
-                });
+            // The node row records the configured harness's probe; a session
+            // on the other harness is checked at its own handshake.
+            if node.harness_id == adapter.id() {
+                if let Some(found) = node.harness_found.filter(|f| f != &node.harness_pinned) {
+                    return Err(SessionError::VersionMismatch {
+                        found,
+                        pinned: node.harness_pinned,
+                    });
+                }
             }
         }
 
@@ -1402,7 +1430,7 @@ impl Manager {
         let container = format!("tracon-h-{slug}");
         let mut mounts = scratch.mounts;
         mounts.push(workspace.mount("/work", false));
-        let runner: Arc<dyn Runner> = self.backend.runner(mounts);
+        let runner: Arc<dyn Runner> = self.backend.runner_for(adapter.id(), mounts);
 
         // Record the container name before it exists: it is deterministic, and a
         // launch that fails after the container is created would otherwise leave

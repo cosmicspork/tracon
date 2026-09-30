@@ -706,7 +706,7 @@ impl Live {
         });
 
         let row = manager
-            .create(
+            .create_with(
                 tracon::session::NewSession {
                     channel: "personal".into(),
                     repo_path: repo.to_string_lossy().into_owned(),
@@ -722,6 +722,7 @@ impl Live {
                     workspace_id: None,
                     parent_session: None,
                     continued_from: None,
+                    harness: None,
                 },
                 adapter,
             )

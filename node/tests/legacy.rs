@@ -360,10 +360,11 @@ async fn reopening_makes_a_new_session_with_the_workspace_and_the_lineage() {
     assert_eq!(old.state, "closed");
 }
 
-/// One node runs one harness image. Offering to reopen under the other one and
-/// then failing at the version check would be a worse answer than saying so.
+/// Either supported harness may be named: the node holds an image for each and
+/// a session runs the one it names, whatever the node's default is. Only a
+/// harness that does not exist is refused.
 #[tokio::test]
-async fn reopening_under_a_harness_this_node_does_not_run_is_refused() {
+async fn reopening_names_either_harness_and_refuses_an_unknown_one() {
     state::isolate();
     let adapter: Arc<dyn tracon::adapter::HarnessAdapter> =
         Arc::new(tracon::adapter::opencode::OpenCodeAdapter::new(
@@ -375,16 +376,15 @@ async fn reopening_under_a_harness_this_node_does_not_run_is_refused() {
         .unwrap();
     h.post("/api/sessions/archive-legacy", None).await;
 
-    let (status, body) = h
+    // The node's default is OpenCode; the other harness is still a valid name.
+    let (status, row) = h
         .post(
             "/api/sessions/legacy-1/reopen",
             Some(json!({ "harness": "claude" })),
         )
         .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    let message = body["error"]["message"].as_str().unwrap_or_default();
-    assert!(message.contains("runs the `opencode` harness"), "{message}");
-    assert!(message.contains("tracon setup"), "{message}");
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    assert_eq!(row["harness_id"], "claude");
 
     // And a harness that does not exist at all is refused by name.
     let (status, body) = h
