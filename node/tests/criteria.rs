@@ -592,7 +592,6 @@ async fn an_agent_proposes_what_good_means_and_the_operator_decides_it() {
         "criterion": TRIAGE,
         "kind": "check",
         "value": "just check",
-        "provenance": "inferred",
     });
 
     // The shipped agreements name no `criteria_link`: a line in the operator's
@@ -632,6 +631,10 @@ async fn an_agent_proposes_what_good_means_and_the_operator_decides_it() {
     let view = read_criteria(&h, &id).await;
     let triage = of(&view, TRIAGE);
     assert_eq!(triage["links"][0]["standard"], "proposed");
+    assert_eq!(
+        triage["links"][0]["provenance"], "inferred",
+        "an omitted provenance is the default the tool advertises: {triage}"
+    );
     assert_eq!(
         triage["coverage"], "only_proposed",
         "a proposal nobody agreed to is not coverage, however green it would go"
