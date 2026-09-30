@@ -69,7 +69,9 @@ const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 /// the same token, same model, same message, 200 with the sentence, 429
 /// without it; the user-agent made no difference. A harness that knows it
 /// holds an OAuth token prepends this itself; through the gateway the harness
-/// believes it holds an API key, so the gateway does it.
+/// believes it holds an API key, so the gateway does it. Only Claude Code is
+/// lent a subscription (`adapter::compat`), so this is Claude Code's own
+/// sentence restored, never another client made to pass as it.
 const CLAUDE_CODE_SYSTEM: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 /// Rewrite an Anthropic Messages body so its system prompt opens with the
@@ -563,6 +565,32 @@ pub async fn handle(
             return refuse(StatusCode::FORBIDDEN, &reason);
         }
     };
+    // An Anthropic subscription is lent to Claude Code only. Through any other
+    // harness Anthropic bills it as extra usage, and the gateway does not dress
+    // one client up as another.
+    if injection.oauth_beta {
+        if let Some(session_id) = &session_id {
+            let harness = s
+                .manager
+                .store()
+                .get_session(session_id)
+                .ok()
+                .flatten()
+                .map(|row| row.harness_id)
+                .unwrap_or_default();
+            if let Err(reason) =
+                crate::adapter::compat::CredentialClass::AnthropicSubscription.fits(&harness)
+            {
+                tracing::warn!(
+                    provider,
+                    harness,
+                    "model call refused: subscription off Claude Code"
+                );
+                note_refusal(&s, session_id, &provider, &method, reason);
+                return refuse(StatusCode::FORBIDDEN, reason);
+            }
+        }
+    }
 
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
     let target = format!(

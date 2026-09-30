@@ -4681,11 +4681,42 @@ pub async fn probe_models_into_store(
         .await
         .map_err(|e| e.to_string())?;
     let runner = backend.runner(scratch.mounts);
-    let models = s
+    let mut models = s
         .adapter
         .probe_models(runner.as_ref(), &wiring)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string());
+    // The picker lists every model this node can run, whichever harness runs
+    // it: a session's harness follows its model's credential. Both supported
+    // adapters answer from the wiring alone and launch nothing, so the other
+    // one is asked through the same runner. A harness with nothing to offer
+    // (OpenCode with no models declared) leaves the other's list standing.
+    if crate::adapter::KNOWN.contains(&s.adapter.id()) {
+        for id in crate::adapter::KNOWN
+            .iter()
+            .filter(|id| **id != s.adapter.id())
+        {
+            let Ok(other) = crate::adapter::adapter_for_id(&s.cfg, id) else {
+                continue;
+            };
+            match (
+                other.probe_models(runner.as_ref(), &wiring).await,
+                &mut models,
+            ) {
+                (Ok(more), Ok(list)) => {
+                    *list = crate::adapter::merge_catalogues(std::mem::take(list), more)
+                }
+                (Ok(more), Err(error)) => {
+                    tracing::info!(harness = s.adapter.id(), %error, "no models from the configured harness");
+                    models = Ok(more);
+                }
+                (Err(error), _) => {
+                    tracing::info!(harness = id, %error, "no models from this harness");
+                }
+            }
+        }
+    }
+    let models = models?;
     if let Ok(Some(mut node)) = s.store().get_node(&s.node_id) {
         node.models_json = serde_json::to_string(&models).ok();
         let _ = s.store().put_node(&node);

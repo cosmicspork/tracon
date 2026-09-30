@@ -489,6 +489,59 @@ async fn an_oauth_credential_becomes_a_bearer_with_the_beta_flag_merged() {
     );
 }
 
+/// An Anthropic subscription is Claude Code's alone. An OpenCode session that
+/// reaches for it is refused before anything is forwarded, and the refusal is
+/// on its log; a Claude Code session on the same credential goes through.
+#[tokio::test]
+async fn a_subscription_is_lent_to_claude_code_and_refused_to_opencode() {
+    state::isolate();
+    const OAUTH: &str = r#"
+        [credentials.stubcred]
+        kind = "oauth"
+        provider = "stub"
+        channels = ["work"]
+        [credentials.stubcred.env]
+        ACCESS_TOKEN = "at-1"
+        REFRESH_TOKEN = "rt-1"
+    "#;
+    let h = harness(OAUTH, LOOPBACK).await;
+    running_session_on(&h.store, "s-oc", "opencode");
+    running_session_on(&h.store, "s-cc", "claude");
+
+    let token = h.manager.register_tool_token_for_test("s-oc", "work").await;
+    let (status, _, body) =
+        call(&h.app, "POST", "/model/stub/v1/messages", &token, json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body.to_string().contains("Claude Code only"),
+        "the refusal names why: {body}"
+    );
+    assert!(h.seen.requests.lock().unwrap().is_empty());
+    let refused = h.store.events_after("s-oc", 0, 100).unwrap();
+    assert!(
+        refused.iter().any(|e| e.kind == "gateway_refused"),
+        "the refusal is on the session's log"
+    );
+
+    let token = h.manager.register_tool_token_for_test("s-cc", "work").await;
+    let (status, _, _) = call(&h.app, "POST", "/model/stub/v1/messages", &token, json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(h.seen.requests.lock().unwrap().len(), 1);
+}
+
+fn running_session_on(store: &Store, id: &str, harness: &str) {
+    store.ensure_peer_node("n1").unwrap();
+    store
+        .conn()
+        .execute(
+            "INSERT INTO session (id, node_id, channel, repo_path, branch, harness_id, harness_version, model,
+                budget_tokens, tokens_used, state, turn_active, created_ms, updated_ms)
+             VALUES (?1, 'n1', 'work', '/r', 'b', ?2, '1', 'm', 1000, 0, 'running', 1, 1, 1)",
+            [id, harness],
+        )
+        .unwrap();
+}
+
 /// A running session row for `id` on the `work` channel, so events have
 /// somewhere to land.
 fn running_session(store: &Store, id: &str) {

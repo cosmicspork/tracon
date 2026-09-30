@@ -1262,7 +1262,11 @@ async fn mediate(
             let Some(model) = requested_model(&body) else {
                 return answer(StatusCode::UNPROCESSABLE_ENTITY, "no model in the body");
             };
-            if !s.manager.model_authorized(channel, &model) {
+            if let Err(reason) = s.manager.model_authorized(
+                channel,
+                &model,
+                crate::adapter::opencode::OpenCodeAdapter::ID,
+            ) {
                 record_decision(
                     s,
                     session_id,
@@ -1271,14 +1275,9 @@ async fn mediate(
                     joined,
                     "model",
                     None,
-                    Some(&format!(
-                        "{model} is not a model channel {channel} is authorised for"
-                    )),
+                    Some(&reason),
                 );
-                return answer(
-                    StatusCode::FORBIDDEN,
-                    &format!("{model} is not a model channel {channel} is authorised for"),
-                );
+                return answer(StatusCode::FORBIDDEN, &reason);
             }
             record_decision(
                 s,

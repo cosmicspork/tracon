@@ -159,8 +159,10 @@ every start: the ones that never ended still read as running, which holds up
 anything waiting for the node to be idle — the desktop app's restart onto a
 newer node after an update among them.
 
-To choose Claude Code instead, set `[harness] id = "claude"` (and run `tracon
-setup`) after the migration, or before it.
+A session on an Anthropic subscription runs on Claude Code whatever `[harness] id`
+says; the setting only breaks the tie for a model either harness runs (an
+Anthropic API key). To prefer Claude Code there, set `[harness] id = "claude"`
+(and run `tracon setup`) after the migration, or before it.
 
 `tracon setup` removes what omp left in node-owned state and prints each thing
 it removed — today that is `harness-state/agent/`, its login credential
@@ -195,8 +197,9 @@ and nothing else — not the old conversation, not its plan, not what it had
 already tried. The archived session stays readable at its own id; ask the new
 session to read from it rather than assuming it can.
 
-`--harness` may name either supported harness: `tracon setup` builds an image
-for each, and a session runs the one it names whatever `[harness] id` says.
+`--harness` may name either supported harness the session's model can run on:
+`tracon setup` builds an image for each, and a session runs the one it names
+whatever `[harness] id` says. A subscription session reopens on Claude Code only.
 
 ## Recovering the node itself
 
