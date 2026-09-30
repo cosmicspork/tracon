@@ -58,7 +58,10 @@ desktop use since.
       `.devcontainer/` Dockerfiles are the obvious source), snapshotted per execution
       with validation invalidated when its inputs change, and run checks and preparation
       in it. A command that cannot be found is reported as "not runnable here" with the
-      missing tool named, never as a failing check the agent is asked to fix.
+      missing tool named, never as a failing check the agent is asked to fix. Dependency
+      fetches belong here too: `cargo add`, `npm install`, `pip` and `go get` from inside a
+      session meet the egress proxy's 403, so preparation fills the cache before launch and
+      the refusal says "not reachable from a session; add it to preparation".
 - [ ] **Proof of work.** One MCP tool that runs a command in the session's own boundary
       and has the *node* record the command, exit code, bounded output, revision and
       image digest as evidence — the agent cannot type the output. A proof document is
@@ -139,8 +142,50 @@ Needed for daily use, but not blocking it today.
       agent propose project checks and setup, but require operator validation; it cannot
       waive checks or authorize its own environment.
 
+**What the boundary defeats, and what replaces it.** The harnesses offer tools the
+isolation silently breaks — the proxy answers 403, the agent sees a network error and
+retries variations. Each item below is a brokered replacement on the node, shaped like
+the forge and tracker tools: policy on the request, the result recorded, the harness's
+own tool left useless by design and the orientation saying so. Enter **Now** as each is
+hit on a real task.
+
+- [ ] Prompt attachments: a screenshot or a log file sent with a prompt, from the phone
+      too, staged into the workspace under a fixed path and named in the turn. `PromptBody`
+      is text only today.
+- [ ] `web_fetch` on the node: URL policy (allow and deny patterns, `kinds = ["fetch"]`), a
+      size cap and a redirect limit, the URL and a digest of the body recorded as evidence.
+      Claude Code's server-side `WebSearch` already works through the gateway; every
+      client-side fetch, `curl` included, does not and should say why.
+- [ ] `repo_fetch`: the node refreshes the workspace's remote refs with its own credential
+      and records the sha, so a session can rebase onto a `main` that moved since launch.
+      Inside the boundary `git fetch` has neither a credential nor a route.
+- [ ] Refusals the agent can read: what the boundary refuses, and which brokered tool to
+      use instead, stated in the orientation; where the node can intercept a refused egress,
+      a tool-shaped message rather than a bare 403.
+- [ ] Files back to the operator: an artefact a session made (a diagram, a screenshot, a
+      generated report) attached to the session and downloadable from its screen, without
+      committing it. Only `report_issue` carries attachments today.
+- [ ] Seeing a running app: the QA browser pointed at the session's own dev server, one
+      screenshot per call, recorded — the same capture the proof-of-work item wants.
+- [ ] Secrets for project checks: a credential class injected into preparation and check
+      runs only (a test database URL, a sandbox key), never into the session.
+
 **Review and publication**
 
+- [ ] What ships under the operator's name is reviewed: the branch name and the commits.
+      Today the candidate is the tree, the review shows the diff and the forge prose, and
+      the commits and branch are pushed as the agent wrote them (the default branch even
+      names tracon). Three steps: list the commits and the branch beside the diff;
+      treat commit message and branch name as publication prose like the forge
+      description — proposed by the agent, edited by the operator, bound by hash under the
+      publish grant — with the node squashing the candidate into one commit carrying the
+      approved message on the approved branch by default (`publish.commits = squash |
+      keep` per channel or repository; `keep` edits each message), which leaves the tree
+      and therefore the candidate, its evidence and the verdict unchanged; and a
+      deterministic subject-and-branch check (conventional type, imperative subject,
+      kebab branch, no ticket keys) whose rules come from the channel or the repository's
+      own guidelines, so a bad message fails before the card reaches the operator. Record
+      the "reviewed tree, not reviewed bytes" reframing in ARCHITECTURE and DESIGN.
 - [ ] Follow a published pull or merge request after it opens: subscribe to its CI runs,
       draft/ready and open/merged/closed transitions, review verdicts and new comments or
       threads, and record each as an event on the review and its work item. Notify through
