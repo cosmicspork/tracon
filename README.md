@@ -28,7 +28,7 @@ Your work should outlive the tool. Workspaces outlive sessions, documents can be
 exported, and candidate packages carry their files and evidence outside the node.
 These are existing escape routes, not a promise of live session migration or a
 complete portable archive; broader export and cross-node continuity are on the
-[roadmap](docs/ROADMAP.md#everyday-work-and-portability).
+[roadmap](docs/ROADMAP.md#later--earned-by-the-loop-before-it).
 
 This project is built with coding agents. The name comes from terminal radar
 approach control: it issues clearances, but never flies the aircraft.
@@ -46,20 +46,31 @@ and Claude Code over stream-json, and contains no model loop. Not multi-user —
 Not an IDE — the diff is the unit of review, and there is deliberately no file tree
 and no editor of its own.
 
-**The harnesses.** **OpenCode** is the primary one, driven through its native
-server API: one isolated `opencode serve` per session, every route decided by the
-node's own gateway, every tool call asked for rather than saved as a standing
-grant, and the session's events synthesised by the node. Its native web UI is an
-*optional advanced view* on a session tracon is already supervising — a second,
-unprivileged window on the desktop, a framed route inside the installed app on a
-phone — never the way tracon itself is used, and a node without the bundle simply
-does not offer it. A terminal comes with that view as a capability you grant to one
-session and one workspace: default-denied, revocable, and never a general shell on
-the node. **Claude Code** is retained as a second supported harness over the
-stream-json control protocol. It has no native UI, so the advanced view, the
-terminal, and streaming either of them to another node are OpenCode-only. One node
-runs one harness image, chosen by `[harness] id`. Subscription sign-in does not run
-in either: the node speaks the Anthropic and ChatGPT OAuth flows itself.
+**The harnesses.** Two are supported behind one adapter trait, and one node runs one
+harness image, chosen by `[harness] id`. **Claude Code**, over the stream-json control
+protocol, is the harness daily work runs on today: it reaches the node's tools, its
+permission asks come to the node, and it has no native UI of its own. **OpenCode** is
+driven through its native server API — one isolated `opencode serve` per session,
+every route decided by the node's own gateway, every tool call asked for rather than
+saved as a standing grant, and the session's events synthesised by the node — and is
+*experimental* for now: its v2 session runner offers the model none of the node's MCP
+tools, so an OpenCode session can code but not write documents, submit a review or
+publish. Whether tracon drives its v1 routes instead is
+[an open roadmap decision](docs/ROADMAP.md#now--start-build-ship-from-one-node).
+OpenCode's native web UI is an *optional advanced view* on a session tracon is
+already supervising — a second, unprivileged window on the desktop, a framed route
+inside the installed app on a phone — never the way tracon itself is used, and a node
+without the bundle simply does not offer it. A terminal comes with that view as a
+capability you grant to one session and one workspace: default-denied, revocable, and
+never a general shell on the node. The advanced view, the terminal, and streaming
+either to another node are OpenCode-only. Subscription sign-in does not run in either
+harness: the node speaks the Anthropic and ChatGPT OAuth flows itself.
+
+**The supported configuration** is the desktop app on macOS or Linux, rootless Podman,
+Claude Code, one node. Everything described below beyond that — the Kubernetes runtime,
+the hub and mesh, the installed phone app, handoff between nodes — is built and tested
+but experimental until that configuration is boring; the
+[roadmap](docs/ROADMAP.md#the-supported-configuration) says why.
 
 What is built but not yet proven against a real credential, device, cluster, or
 published release is listed in one place:
@@ -326,8 +337,10 @@ ask for what it did not get.
 
 An agent has no forge token and never runs `gh` or `glab`. To publish it commits,
 submits, and waits: the node snapshots the workspace volume itself, runs the
-project's checks against that snapshot in a throwaway container, and refuses a failure or an oversized
-diff before you ever see it. You approve, reject with a reason, or — on a desktop —
+project's checks against that snapshot in a throwaway container, and refuses a failure
+or an oversized diff before you ever see it. (The check container is the harness image,
+which has no project toolchain yet, so a check that needs one exits 127 today and the
+operator runs it on the host; a per-repository toolchain image is the first roadmap item.) You approve, reject with a reason, or — on a desktop —
 edit the diff and send it back as a request for changes. Approval publishes exactly
 the reviewed bytes with the brokered credential; if the branch moved since submit,
 approval is refused and the changed files are named.
@@ -623,9 +636,10 @@ which reads a file and needs no node at all. `--help` on any of them says more.
 node_name = "<hostname>"            # how this node is named in the mesh
 
 [harness]
-id = "opencode"                     # "opencode" or "claude"; an unknown id refuses to start, and a
-                                    # retired one is refused by name with its migration path
-                                    # (docs/RECOVERY.md) rather than a bare unknown-harness error.
+id = "opencode"                     # "opencode" or "claude" (the supported one today); an unknown id
+                                    # refuses to start, and a retired one is refused by name with its
+                                    # migration path (docs/RECOVERY.md) rather than a bare
+                                    # unknown-harness error.
 version = "1.18.30"                 # pinned; empty means the version this node's harness image
                                     # installs. Checked twice — `--version` in the runner, and the
                                     # handshake's own report — and a session whose harness reports
@@ -1025,5 +1039,6 @@ the whole of it.
 - [docs/DESIGN.md](docs/DESIGN.md) — the interface: principles, jobs, states.
 - [docs/RECOVERY.md](docs/RECOVERY.md) — working outside tracon when it is down, and rebuilding a node.
 - [docs/reference/external-harness-notes.md](docs/reference/external-harness-notes.md) — the external harness trust boundary and operating guidance.
+- [docs/reference/opencode-migration.md](docs/reference/opencode-migration.md) — the record of the 2026-09 move from omp to OpenCode, gate by gate.
 
 Contributions are welcome — open an issue or a PR.
