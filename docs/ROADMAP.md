@@ -253,6 +253,20 @@ cross-node transfer follow the first proven loop, not the other way around.
       transitions (id, name, destination status) through the brokered token, so an
       authorized `issue_transition` never rests on an out-of-band `acli` lookup or an id
       copied from another project. Discovery stays a read; the transition keeps its grant.
+- [ ] Take Git authorship from the forge credential, not the host. Inside the boundary every
+      commit is `tracon <tracon@localhost>` (the harness home's gitconfig and the sanitized
+      workspace config both hard-code it); outside it, commits carry whatever the host's
+      Git config says, which can be a work address on a personal repository. Resolve the
+      identity once per bound credential from the forge (GitHub `/user`: name and
+      `<id>+<login>@users.noreply.github.com`; GitLab `/user`: name and commit or noreply
+      email), cache it with the binding, and write it as `user.name`/`user.email` wherever
+      the node writes Git config, so a session's commits are attributable to the account
+      that will push them. Record the session and model as a `Co-authored-by`-style
+      trailer rather than as the author. For an external harness the node launches
+      nothing, so it offers the identity (in `external show` and as a tool result the
+      harness can apply as repo-local config) and checks authorship at `submit_review` and
+      publish: a commit whose author is not an identity of the target forge account is
+      named in the review, and rewriting it is an operator-approved step, never silent.
 
 **Portable data and recovery**
 
