@@ -309,6 +309,46 @@ What tracon does about it:
 Verified against the pinned binary: with the staged directory, a `bash` call raises
 `permission.v2.asked` and does not run; with a worktree `* allow`, the launch is refused.
 
+### Finding 23 — the v1 message route offers the node's MCP tools; the v2 prompt route does not
+
+The spike the 2026-09-29 roadmap asked for, run against the pinned binary on the host
+(`spike/drive.py`, with `spike/fakes.py` standing in for the gateway's provider and for the
+node's MCP server; both scripts are in this directory so the check can be rerun on an
+upgrade). Same binary, same rendered config (`OPENCODE_CONFIG` and the sealed
+`XDG_CONFIG_HOME` copy, catalogue at `OPENCODE_MODELS_PATH`, `permission.* = ask`, one
+`remote` MCP entry with a bearer header), same fake model scripted to call the MCP tool,
+then `bash`, then stop. The only difference is the route the prompt goes down.
+
+| | v1 `POST /session/{id}/prompt_async` | v2 `POST /api/session/{id}/prompt` |
+|---|---|---|
+| MCP server | connects (`initialize`, `tools/list`) | connects (`initialize`, `tools/list`) |
+| tools offered to the model | `bash edit glob grep question read skill task todowrite tracon_tracon_ping webfetch write` | `apply_patch bash edit glob grep question read skill todowrite webfetch websearch write` — **no MCP tool** |
+| MCP tool call | asked (`permission.asked`, `permission: "tracon_tracon_ping"`), then `tools/call` reaches the server, result returned to the model | never offered, so never called |
+| `bash` | asked, run after `once` | asked (`permission.v2.asked`) |
+| ask reply | `POST /session/{id}/permissions/{per_id}` `{"response":"once"}` → 200; `permission.replied` follows | `POST /session/{id}/permissions/{per_id}` → 404 `PermissionNotFoundError`; the v2 reply route is the one the adapter uses today |
+| turn end | `session.idle` on `GET /event` | `session.next.*` on the per-session stream |
+| usage | `message.updated` (assistant) carries `tokens {input, output, reasoning, cache{read,write}}`, `cost` | as today (`cost` hard-coded zero) |
+| provider traffic | every call to the URL in the config, placeholder under `x-api-key`; nothing else left the process (proxy variables pointed at a dead port and nothing failed) | as finding 19 |
+| which base-URL field | `options.baseURL` alone works; `api` alone works; keep writing both | `api` (finding 19) |
+| after `SIGTERM` and a restart | `GET /session/{id}` 200, `GET /session/{id}/message` returns the same messages with tool states and outputs; `GET /session` lists it | same store for the session row; the v2 message list is separate (the blank native window) |
+| live stream | `GET /event`, instance-wide, filter on `properties.sessionID`; `evt_…` ids, no `after=` replay | `GET /api/session/{id}/event?after=N`, durable, replayable |
+
+So MCP tools are permission-checked and served on the v1 path (`packages/opencode/src/
+session/tools.ts`), and simply absent from the v2 runner's tool set at this pin. This is
+the whole of the 2026-09-28 gap: nothing about the config was wrong.
+
+**What a v1-route adapter costs**, from the same run: the live stream is the instance-wide
+`GET /event` with no replay, so a dropped stream is reconciled from
+`GET /session/{id}/message` (which does carry everything the model saw and every tool's
+state) rather than resumed from a sequence number, and ingestion's idempotency has to key
+on message and part ids rather than `admittedSeq`. `always` on a v1 ask persists in the
+process's memory (finding 2), so the gateway's rewrite to `once` stays load-bearing. The
+gateway's route matrix has to classify `POST /session`, `POST /session/{id}/prompt_async`,
+`POST /session/{id}/permissions/{id}`, `POST /session/{id}/abort` and `GET /event` as
+mediated for the adapter, which it already does for the native UI. In return the native UI
+reads the same store the adapter writes, so the history window and the respelled reply
+both go away.
+
 ### Still the operator's (no credential for them exists on a test machine)
 
 - Hosted Anthropic and OpenAI API keys end to end.

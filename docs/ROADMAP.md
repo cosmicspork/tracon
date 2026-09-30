@@ -104,18 +104,20 @@ desktop use since.
       repo-local config) and checks authorship at `submit_review` and publish: a commit
       whose author is not an identity of the target forge account is named in the review,
       and rewriting it is an operator-approved step, never silent.
-- [ ] **Decide OpenCode's future with a one-day spike, not a rewrite.** On 2026-09-28 the
-      OpenCode v2 session runner (`/api/session/{id}/prompt`, 1.18.30–1.18.33) offered the
-      model no MCP tools, so no `doc_write`, `submit_review` or `publish`; the node was
-      switched to Claude Code. The candidate remedy is an adapter on the v1 routes
-      (`/session/{id}/message`), which is also what the native UI speaks, so the blank
-      history window and the respelled permission replies would go with it. Before
-      committing to that, prove on the pinned binary: MCP tools offered, asks raised,
-      provider traffic reaching only the gateway (finding 19 is a v2 property), and what
-      reconnect looks like without v2's per-session `event?after=` stream. Keep the v2
-      adapter behind the same trait; a third adapter is a stopgap, not a product.
-      Until this is decided, OpenCode-only items sit under **Next** and the docs say
-      Claude Code is the working harness.
+- [ ] **Drive OpenCode over its v1 routes.** The spike ran 2026-09-29
+      (`docs/reference/opencode-v1.18.30/README.md`, finding 23): with the very config the
+      adapter writes, the v1 message route offers the model the node's MCP tools, asks
+      before each one, reaches the provider only at the configured URL, and after a restart
+      `GET /session/{id}/message` returns the whole conversation with tool states; the v2
+      prompt route connects the MCP server and offers none of its tools. So the adapter
+      moves to `POST /session`, `POST /session/{id}/prompt_async`,
+      `POST /session/{id}/permissions/{id}`, `POST /session/{id}/abort`, turn end on
+      `session.idle`, usage from the assistant `message.updated`. What it gives up is v2's
+      per-session replayable stream: the live feed is the instance-wide `GET /event`,
+      filtered by session, and a dropped stream is reconciled from the message list, keyed
+      on message and part ids. Keep the v2 code behind the same trait until the v1 path
+      has run a real session; the native UI reads the store v1 writes, so the blank
+      history window and the respelled permission reply go with this.
 - [ ] **Open external links through a clean Linux host launcher**: the AppImage's bundled
       `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
       host environment for the child only and keep the URL and origin restrictions.
