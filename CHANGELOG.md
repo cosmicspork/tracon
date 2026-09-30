@@ -32,6 +32,21 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.25.0](https://github.com/cosmicspork/tracon/compare/v0.24.0...v0.25.0) (2026-09-30)
+
+
+### Features
+
+* **harness:** derive each session's harness from the credential its model runs on ([#309](https://github.com/cosmicspork/tracon/issues/309)) ([8e2a804](https://github.com/cosmicspork/tracon/commit/8e2a8044e015c58debbdafeeee9a69ade5b8f0ef))
+* **harness:** run each session on the harness it names, with an image for every supported one ([#307](https://github.com/cosmicspork/tracon/issues/307)) ([70992d8](https://github.com/cosmicspork/tracon/commit/70992d8b5c8ce91a0667a4fe80be2f2d97558ead))
+* **harness:** show which harness each model runs on, and let an either-way model choose ([#310](https://github.com/cosmicspork/tracon/issues/310)) ([d022cd0](https://github.com/cosmicspork/tracon/commit/d022cd04e0393e7b644cd666fd9d933310f26fe6))
+* **opencode:** drive sessions over the v1 routes, where the node's MCP tools reach the model ([#306](https://github.com/cosmicspork/tracon/issues/306)) ([5165202](https://github.com/cosmicspork/tracon/commit/5165202f03abfb9422c6015661653b8a8c92904a))
+
+
+### Bug Fixes
+
+* **criteria:** record an omitted provenance as the inferred the tool promises ([#299](https://github.com/cosmicspork/tracon/issues/299)) ([2081699](https://github.com/cosmicspork/tracon/commit/2081699596f4c09f2e234d87ab0dee38d6d5442c))
+
 ## [0.24.0](https://github.com/cosmicspork/tracon/compare/v0.23.1...v0.24.0) (2026-09-29)
 
 
