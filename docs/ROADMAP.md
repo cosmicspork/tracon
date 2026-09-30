@@ -104,20 +104,6 @@ desktop use since.
       repo-local config) and checks authorship at `submit_review` and publish: a commit
       whose author is not an identity of the target forge account is named in the review,
       and rewriting it is an operator-approved step, never silent.
-- [ ] **Drive OpenCode over its v1 routes.** The spike ran 2026-09-29
-      (`docs/reference/opencode-v1.18.30/README.md`, finding 23): with the very config the
-      adapter writes, the v1 message route offers the model the node's MCP tools, asks
-      before each one, reaches the provider only at the configured URL, and after a restart
-      `GET /session/{id}/message` returns the whole conversation with tool states; the v2
-      prompt route connects the MCP server and offers none of its tools. So the adapter
-      moves to `POST /session`, `POST /session/{id}/prompt_async`,
-      `POST /session/{id}/permissions/{id}`, `POST /session/{id}/abort`, turn end on
-      `session.idle`, usage from the assistant `message.updated`. What it gives up is v2's
-      per-session replayable stream: the live feed is the instance-wide `GET /event`,
-      filtered by session, and a dropped stream is reconciled from the message list, keyed
-      on message and part ids. Keep the v2 code behind the same trait until the v1 path
-      has run a real session; the native UI reads the store v1 writes, so the blank
-      history window and the respelled permission reply go with this.
 - [ ] **Open external links through a clean Linux host launcher**: the AppImage's bundled
       `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
       host environment for the child only and keep the URL and origin restrictions.
@@ -299,6 +285,10 @@ work that does not need it, and nothing on it may be described elsewhere as prov
 
 **For the experimental surfaces**
 
+- [ ] **An OpenCode session over the v1 routes, live**: a node-started session that
+      calls one of the node's MCP tools, is asked before it, and ends its turn on
+      `session.idle`, against a real provider; and the native window showing that
+      session's history, which the v1 store now holds.
 - [ ] **Codex subscription** signed in through the node's own OAuth flow, by local callback
       and by device code, and with it whether the ChatGPT backend accepts a Codex request
       whose system prompt stays in the message array.
@@ -352,9 +342,9 @@ servers reaching the v2 session runner.
 
 - Everything under "Live proofs still the operator's" is unproven live, including the
   private-repository run and QA verification against a real target.
-- OpenCode sessions run without the node's MCP tools (finding 22 and the 2026-09-28 run):
-  an OpenCode session can code but cannot write documents, submit a review or publish.
-  Claude Code is the working managed harness until the v1 spike settles it.
+- OpenCode is driven over its v1 session routes, which offer the model the node's MCP
+  tools where the v2 runner offered none (findings 22, 23); a real session has not yet
+  run that way. Claude Code is the working managed harness until one has.
 - Required checks run in the harness image, which has no project toolchain, so a
   repository's own check command exits 127 and the operator runs it on the host.
 - macOS releases are unsigned — the publisher holds no Apple Developer ID — and are

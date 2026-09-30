@@ -53,10 +53,10 @@ permission asks come to the node, and it has no native UI of its own. **OpenCode
 driven through its native server API — one isolated `opencode serve` per session,
 every route decided by the node's own gateway, every tool call asked for rather than
 saved as a standing grant, and the session's events synthesised by the node — and is
-*experimental* for now: its v2 session runner offers the model none of the node's MCP
-tools, so an OpenCode session can code but not write documents, submit a review or
-publish. Whether tracon drives its v1 routes instead is
-[an open roadmap decision](docs/ROADMAP.md#now--start-build-ship-from-one-node).
+*experimental* for now: the node drives its v1 session routes, the ones that offer the
+model the node's MCP tools (its v2 runner offers none), and a real session has yet to
+run that way; the
+[live checklist](docs/ROADMAP.md#live-proofs-still-the-operators) says so.
 OpenCode's native web UI is an *optional advanced view* on a session tracon is
 already supervising — a second, unprivileged window on the desktop, a framed route
 inside the installed app on a phone — never the way tracon itself is used, and a node

@@ -1114,6 +1114,21 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE review_revision ADD COLUMN intent_json TEXT;
     ALTER TABLE review_decision ADD COLUMN outputs_json TEXT;
     "#,
+    // 45: idempotency for the v1 OpenCode stream, which has no sequence. What
+    // the adapter translates from it is one milestone of one part — a text
+    // part's final text, a tool part's call and its result, a step's usage —
+    // and each is claimed here exactly once, whether it arrived on the live
+    // stream, on a reconnect's overlap, or from the message list read at
+    // startup (finding 23).
+    r#"
+    CREATE TABLE opencode_part_claim (
+        session_id TEXT NOT NULL REFERENCES session(id),
+        part_id    TEXT NOT NULL,
+        milestone  TEXT NOT NULL,
+        claimed_ms INTEGER NOT NULL,
+        PRIMARY KEY (session_id, part_id, milestone)
+    );
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

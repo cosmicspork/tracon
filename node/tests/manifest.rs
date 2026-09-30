@@ -711,9 +711,10 @@ async fn the_manifests_skill_is_listed_and_the_projects_are_not() {
     };
 
     let directory = urlencode(&work.to_string_lossy());
+    // The v1 list, which is the one the session's turns use (finding 23).
+    // The v2 runner's `/api/skill` has no location to answer for until a v2
+    // session opens one, and this node opens none.
     let skills = ask(format!("/skill?directory={directory}")).await;
-    // The session runner's own list, which the turns actually use.
-    let skills_v2 = ask(format!("/api/skill?directory={directory}")).await;
     let tools = ask(format!("/experimental/tool/ids?directory={directory}")).await;
     handle.close().await.ok();
     runner.kill(&container).await.ok();
@@ -721,10 +722,6 @@ async fn the_manifests_skill_is_listed_and_the_projects_are_not() {
     assert!(
         skills.contains("release-notes"),
         "the manifest's skill is not listed: {skills}"
-    );
-    assert!(
-        skills_v2.contains("release-notes"),
-        "the session runner does not list the manifest's skill: {skills_v2}"
     );
     assert!(
         !skills.contains("planted"),
