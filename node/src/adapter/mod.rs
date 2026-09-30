@@ -6,6 +6,7 @@
 //! cutover without the rest of the node noticing.
 
 pub mod claude;
+pub mod compat;
 pub mod opencode;
 pub mod types;
 
@@ -106,6 +107,29 @@ pub fn adapter_for_id(
 /// against what the harness reports, so an image built elsewhere still fails.
 pub fn pinned_version(cfg: &Config) -> String {
     pinned_version_for(cfg, &cfg.harness.id)
+}
+
+/// One picker list from two harnesses' catalogues, `first` in its own order
+/// ahead of what `more` adds. Claude Code names an Anthropic model bare where
+/// OpenCode names it `anthropic/<id>`; the bare entry takes the qualified
+/// spelling where it stands, since both harnesses accept it and it says which
+/// credential it spends, and the duplicate is dropped.
+pub fn merge_catalogues(first: Vec<ModelOption>, more: Vec<ModelOption>) -> Vec<ModelOption> {
+    let all: Vec<ModelOption> = first.into_iter().chain(more).collect();
+    let qualified: std::collections::HashSet<String> = all
+        .iter()
+        .filter_map(|model| model.value.strip_prefix("anthropic/").map(str::to_string))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    all.into_iter()
+        .map(|mut model| {
+            if !model.value.contains('/') && qualified.contains(&model.value) {
+                model.value = format!("anthropic/{}", model.value);
+            }
+            model
+        })
+        .filter(|model| seen.insert(model.value.clone()))
+        .collect()
 }
 
 /// `[harness] version` pins the configured harness only; any other runs at
@@ -564,6 +588,32 @@ pub trait HarnessHandle: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_merged_catalogue_keeps_one_spelling_of_each_model() {
+        let option = |value: &str| super::ModelOption {
+            value: value.into(),
+            name: value.into(),
+        };
+        let claude = vec![option("claude-opus-5"), option("claude-sonnet-5")];
+        let opencode = vec![
+            option("anthropic/claude-opus-5"),
+            option("openai-codex/gpt-5.5"),
+            option("anthropic/claude-opus-5"),
+        ];
+        let merged: Vec<String> = super::merge_catalogues(claude, opencode)
+            .into_iter()
+            .map(|m| m.value)
+            .collect();
+        assert_eq!(
+            merged,
+            [
+                "anthropic/claude-opus-5",
+                "claude-sonnet-5",
+                "openai-codex/gpt-5.5"
+            ]
+        );
+    }
+
     use super::*;
 
     #[test]

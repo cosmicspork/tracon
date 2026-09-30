@@ -1323,69 +1323,43 @@ async fn the_runner_presents_its_session_token_and_never_a_provider_key() {
     }
 }
 
-/// **OpenCode's own request headers, observed**, which is what the gateway's
-/// subscription shaping has to merge with rather than replace: the beta flags
-/// this binary sets for the Anthropic shape are part of the request the
-/// harness makes, and #166 prepends `oauth-2025-04-20` to them rather than
-/// overwriting. Taking the flags from the wire rather than from the manifest
-/// is the point — the header the gateway has to preserve is whatever the
-/// pinned binary actually sends.
+/// **An Anthropic subscription is Claude Code's alone**, observed against the
+/// pinned binary: Anthropic bills a subscription reached through any other
+/// client as extra usage (the 2026-09-20 `400 You're out of extra usage`), so
+/// the gateway lends it to no OpenCode session and shapes nothing to make
+/// OpenCode pass as Claude Code. The binary's call reaches the gateway, is
+/// refused there with the reason on the session's log, and nothing is
+/// forwarded — the credential never leaves the node.
 #[tokio::test]
-async fn the_subscription_shaping_merges_with_the_flags_the_binary_sends() {
+async fn a_subscription_is_refused_to_opencode_before_anything_is_forwarded() {
     if skip_no_binary() {
         return;
     }
     let node = start_node(&[("anthropic", SHAPE_ANTHROPIC)], SUBSCRIPTION, "127.0.0.1").await;
     let live = launch(&node, "subscription", "anthropic/test-model", Vec::new()).await;
     one_turn(&node, &live, "say ok", LIVE_CALL_TIMEOUT).await;
-    let seen = node
-        .at_the_gateway(Duration::from_secs(5))
+    node.at_the_gateway(Duration::from_secs(5))
         .await
         .expect("no provider call reached the gateway");
     live.shutdown().await;
 
-    let sent = seen
-        .header("anthropic-beta")
-        .unwrap_or_default()
-        .to_string();
     assert!(
-        sent.contains("interleaved-thinking-2025-05-14"),
-        "the pinned binary no longer sends the beta flags the merge was written for: {sent:?}"
+        node.upstream.first(Duration::from_secs(2)).await.is_none(),
+        "the gateway forwarded a subscription call for OpenCode"
     );
-
-    // And what the gateway made of it, with the subscription credential bound
-    // to the session: the harness's own call, forwarded.
-    let upstream = node
-        .upstream
-        .first(Duration::from_secs(10))
-        .await
-        .expect("the gateway forwarded nothing");
-    assert_eq!(
-        upstream.header("authorization"),
-        Some("Bearer real-subscription-token")
-    );
+    let refused = node
+        .store
+        .events_after("s-live", 0, 200)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == "gateway_refused")
+        .expect("the refusal is on the session's log");
     assert!(
-        !format!("{:?}", upstream.headers).contains("never-leaves-the-node"),
-        "the refresh token left the node"
-    );
-    let merged = upstream.header("anthropic-beta").unwrap_or_default();
-    assert!(
-        merged.starts_with("oauth-2025-04-20"),
-        "the subscription flag is not first: {merged}"
-    );
-    for flag in sent.split(',').map(str::trim) {
-        assert!(
-            merged.contains(flag),
-            "the binary's own flag {flag} did not survive the merge: {merged}"
-        );
-    }
-    // And the system prompt opens with the sentence a subscription token is
-    // honoured for, which the harness did not write and does not know about.
-    let body: Value = serde_json::from_str(&upstream.body).expect("a JSON body");
-    let first = body["system"][0]["text"].as_str().unwrap_or_default();
-    assert!(
-        first.starts_with("You are Claude Code"),
-        "the subscription shaping did not apply: {first}"
+        refused.payload["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("Claude Code only")),
+        "{}",
+        refused.payload
     );
 }
 

@@ -367,17 +367,83 @@ impl Manager {
         let _ = self.default_adapter.set(adapter);
     }
 
-    /// The adapter a session runs on: the harness the spec names, or the
-    /// node's configured one. Every supported harness has an image on this
-    /// node, so the answer never depends on which one is the default.
-    fn adapter_for(&self, spec: &NewSession) -> Result<Arc<dyn HarnessAdapter>, SessionError> {
-        let named = spec.harness.as_deref().filter(|h| !h.trim().is_empty());
-        if named.is_none() {
-            if let Some(default) = self.default_adapter.get() {
-                return Ok(default.clone());
+    /// What a model's credential is, as far as choosing a harness goes.
+    /// `None` when the node cannot say: a provider it has no configuration
+    /// for, or a credential it does not hold.
+    fn credential_class(&self, model: &str) -> Option<crate::adapter::compat::CredentialClass> {
+        use crate::adapter::compat::CredentialClass;
+        let Some((provider_name, _)) = model.split_once('/') else {
+            return (!model.trim().is_empty()).then_some(CredentialClass::BareAlias);
+        };
+        let provider = self.cfg.providers.get(provider_name)?;
+        let broker = self.tools.broker.read().ok()?;
+        let kind = broker.get(&provider.credential)?.kind.clone();
+        Some(CredentialClass::classify(&provider.shape, &kind))
+    }
+
+    /// The harness a session runs on and why: the one the spec names, if the
+    /// model's credential runs there; otherwise the only one it runs on; and
+    /// where it runs on either (an Anthropic API key) or the node cannot say,
+    /// the configured `[harness] id`.
+    fn resolve_harness(
+        &self,
+        spec: &NewSession,
+    ) -> Result<(Arc<dyn HarnessAdapter>, &'static str), SessionError> {
+        let class = self.credential_class(&spec.model);
+        if let Some(named) = spec.harness.as_deref().filter(|h| !h.trim().is_empty()) {
+            if !crate::adapter::KNOWN.contains(&named) {
+                return Err(SessionError::Rejected(format!(
+                    "unknown harness `{named}`; this node runs {}",
+                    crate::adapter::KNOWN.join(", ")
+                )));
             }
+            self.check_fit(&spec.model, class, named)?;
+            return Ok((self.adapter_by_id(named)?, "explicit"));
         }
-        let harness = named.unwrap_or(&self.cfg.harness.id);
+        let Some(class) = class else {
+            return Ok((self.default_adapter()?, "node_default"));
+        };
+        match class.harnesses().as_slice() {
+            [only] => Ok((self.adapter_by_id(only)?, "credential")),
+            [] => Err(SessionError::Rejected(format!(
+                "no supported harness runs {}",
+                spec.model
+            ))),
+            both if both.contains(&self.cfg.harness.id.as_str()) => {
+                Ok((self.default_adapter()?, "node_default"))
+            }
+            [first, ..] => Ok((self.adapter_by_id(first)?, "credential")),
+        }
+    }
+
+    fn check_fit(
+        &self,
+        model: &str,
+        class: Option<crate::adapter::compat::CredentialClass>,
+        harness: &str,
+    ) -> Result<(), SessionError> {
+        match class.map(|class| class.fits(harness)) {
+            Some(Err(reason)) => Err(SessionError::Rejected(format!(
+                "{model} cannot run on the `{harness}` harness: {reason}"
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// The configured harness's adapter: the one startup probed, once it has.
+    fn default_adapter(&self) -> Result<Arc<dyn HarnessAdapter>, SessionError> {
+        if let Some(default) = self.default_adapter.get() {
+            return Ok(default.clone());
+        }
+        self.adapter_by_id(&self.cfg.harness.id)
+    }
+
+    /// Every supported harness has an image on this node, so the answer
+    /// never depends on which one is the default.
+    fn adapter_by_id(&self, harness: &str) -> Result<Arc<dyn HarnessAdapter>, SessionError> {
+        if let Some(default) = self.default_adapter.get().filter(|a| a.id() == harness) {
+            return Ok(default.clone());
+        }
         if let Some(registered) = self.adapters.lock().unwrap().get(harness) {
             return Ok(registered.clone());
         }
@@ -607,11 +673,24 @@ impl Manager {
         self.native.lock().await.insert(session_id.to_string(), api);
     }
 
-    /// Whether a channel may run this `provider/model`: the check `create`
-    /// makes before a session starts, asked again by the gateway when a
-    /// native-UI model switch arrives mid-session.
-    pub fn model_authorized(&self, channel: &str, model: &str) -> bool {
-        self.model_usable(channel, model, &self.bindings(channel))
+    /// Whether a session may switch to this `provider/model`: the checks
+    /// `create` makes before a session starts, asked again by the gateway when
+    /// a native-UI model switch arrives mid-session. The channel must be able
+    /// to spend on it, and its credential must run on the session's harness;
+    /// the refusal says which.
+    pub fn model_authorized(
+        &self,
+        channel: &str,
+        model: &str,
+        harness: &str,
+    ) -> Result<(), String> {
+        if !self.model_usable(channel, model, &self.bindings(channel)) {
+            return Err(format!(
+                "{model} is not a model channel {channel} is authorised for"
+            ));
+        }
+        self.check_fit(model, self.credential_class(model), harness)
+            .map_err(|e| e.to_string())
     }
 
     pub fn probe_token(&self) -> &str {
@@ -761,17 +840,24 @@ impl Manager {
     /// row exists before the harness does, so the interface can show a session
     /// that is still starting.
     pub async fn create(&self, spec: NewSession) -> Result<SessionRow, SessionError> {
-        let adapter = self.adapter_for(&spec)?;
-        self.create_with(spec, adapter).await
+        self.create_on(spec, None).await
     }
 
     /// `create`, on an adapter the caller chose. The node's own paths never
-    /// choose: the registry does, from the harness the spec names. This is
-    /// the seam a test drives a fake harness through.
+    /// choose: the harness follows the model's credential. This is the seam a
+    /// test drives a fake harness through.
     pub async fn create_with(
         &self,
-        mut spec: NewSession,
+        spec: NewSession,
         adapter: Arc<dyn HarnessAdapter>,
+    ) -> Result<SessionRow, SessionError> {
+        self.create_on(spec, Some(adapter)).await
+    }
+
+    async fn create_on(
+        &self,
+        mut spec: NewSession,
+        chosen: Option<Arc<dyn HarnessAdapter>>,
     ) -> Result<SessionRow, SessionError> {
         // Asked to run elsewhere: the owner validates and starts it; its row
         // arrives back both in the ack and, shortly, as a mirrored session.
@@ -845,6 +931,16 @@ impl Manager {
         if self.cfg.mesh.hub_url.is_some() && self.store.channel_get(&spec.channel)?.is_none() {
             return Err(SessionError::UnknownChannel(spec.channel.clone()));
         }
+        // The harness follows the model's credential, once everything that
+        // would refuse the session whatever it ran on has had its say.
+        let (adapter, harness_source) = match chosen {
+            Some(adapter) => {
+                let class = self.credential_class(&spec.model);
+                self.check_fit(&spec.model, class, adapter.id())?;
+                (adapter, "caller")
+            }
+            None => self.resolve_harness(&spec)?,
+        };
         if let Some(node) = self.store.get_node(&self.node_id)? {
             if node.state != "ready" {
                 return Err(SessionError::NodeRefused(
@@ -1022,7 +1118,15 @@ impl Manager {
         let started = Instant::now();
         tokio::spawn(async move {
             if let Err(e) = this
-                .start(&id, spec, branch, slug, adapter, started, model_source)
+                .start(
+                    &id,
+                    spec,
+                    branch,
+                    slug,
+                    adapter,
+                    started,
+                    (model_source, harness_source),
+                )
                 .await
             {
                 tracing::error!(session = %id, error = %e, "session failed to start");
@@ -1118,7 +1222,7 @@ impl Manager {
         slug: String,
         adapter: Arc<dyn HarnessAdapter>,
         started: Instant,
-        model_source: &'static str,
+        (model_source, harness_source): (&'static str, &'static str),
     ) -> anyhow::Result<()> {
         if !self.startable(id)? {
             return Ok(());
@@ -1234,7 +1338,18 @@ impl Manager {
                     let bound = bindings["providers"].as_array().is_none_or(|allowed| {
                         allowed.iter().any(|value| value.as_str() == Some(name))
                     });
+                    // A credential this harness may not run on (an Anthropic
+                    // subscription under OpenCode) is not offered at all.
+                    let fits = broker.get(&provider.credential).is_none_or(|credential| {
+                        crate::adapter::compat::CredentialClass::classify(
+                            &provider.shape,
+                            &credential.kind,
+                        )
+                        .fits(adapter.id())
+                        .is_ok()
+                    });
                     bound
+                        && fits
                         && broker
                             .inject_for(
                                 &provider.credential,
@@ -1560,7 +1675,8 @@ impl Manager {
             ref_id: None,
             payload: json!({
                 "model": spec.model, "model_source": model_source,
-                "harness": adapter.id(), "phase": spec.phase.as_str(),
+                "harness": adapter.id(), "harness_source": harness_source,
+                "phase": spec.phase.as_str(),
                 "work_item_id": spec.work_item_id,
                 "policy_version": self.policy.read().version,
                 "harness_agent": compat.agent,
@@ -2125,7 +2241,11 @@ impl Manager {
         if !bindings["archived"].is_null() {
             return Err(SessionError::ChannelArchived(spec.channel.clone()));
         }
-        self.resolve_model(spec, &bindings)?;
+        let (model, _) = self.resolve_model(spec, &bindings)?;
+        self.resolve_harness(&NewSession {
+            model,
+            ..spec.clone()
+        })?;
         Ok(())
     }
 

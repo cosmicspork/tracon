@@ -47,8 +47,11 @@ Not an IDE — the diff is the unit of review, and there is deliberately no file
 and no editor of its own.
 
 **The harnesses.** Two are supported behind one adapter trait. `tracon setup` builds an
-image for each, and every session runs the harness it names; `[harness] id` is the
-default for a session that names none. **Claude Code**, over the stream-json control
+image for each, and a session's harness follows the credential its model spends: an
+Anthropic subscription runs on Claude Code only (through any other client Anthropic
+bills it as extra usage), ChatGPT/Codex and every other provider on OpenCode, and an
+Anthropic API key on either, where `[harness] id` breaks the tie. A session may name
+its harness, and naming one its credential cannot run on is refused with the reason. **Claude Code**, over the stream-json control
 protocol, is the harness daily work runs on today: it reaches the node's tools, its
 permission asks come to the node, and it has no native UI of its own. **OpenCode** is
 driven through its native server API — one isolated `opencode serve` per session,
@@ -637,7 +640,9 @@ which reads a file and needs no node at all. `--help` on any of them says more.
 node_name = "<hostname>"            # how this node is named in the mesh
 
 [harness]
-id = "opencode"                     # "opencode" or "claude" (the supported one today); an unknown id
+id = "opencode"                     # "opencode" or "claude" (the supported one today): the harness
+                                    # for a model either runs (an Anthropic API key) or the node
+                                    # cannot classify; the rest follow their credential. An unknown id
                                     # refuses to start, and a retired one is refused by name with its
                                     # migration path (docs/RECOVERY.md) rather than a bare
                                     # unknown-harness error.

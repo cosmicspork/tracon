@@ -110,3 +110,52 @@ impl HarnessAdapter for FakeAdapter {
         ))
     }
 }
+
+/// The fake harness under a supported harness's name, so a test can see which
+/// harness the node chose for a session without launching a real one.
+pub struct NamedFake {
+    pub id: &'static str,
+    pub inner: FakeAdapter,
+}
+
+impl NamedFake {
+    pub fn new(id: &'static str) -> Self {
+        Self {
+            id,
+            inner: FakeAdapter {
+                tx: Arc::new(Mutex::new(None)),
+                tokens: Arc::new(Mutex::new(100)),
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl HarnessAdapter for NamedFake {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+    fn pinned_version(&self) -> &str {
+        self.inner.pinned_version()
+    }
+    fn protocol(&self) -> ProtocolSupport {
+        self.inner.protocol()
+    }
+    async fn version(&self, r: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
+        self.inner.version(r).await
+    }
+    async fn probe_models(
+        &self,
+        r: &dyn Runner,
+        wiring: &tracon::gateway::model::Wiring,
+    ) -> Result<Vec<ModelOption>, AdapterError> {
+        self.inner.probe_models(r, wiring).await
+    }
+    async fn launch(
+        &self,
+        r: &dyn Runner,
+        spec: LaunchSpec,
+    ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError> {
+        self.inner.launch(r, spec).await
+    }
+}
