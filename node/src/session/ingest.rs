@@ -5,14 +5,16 @@
 //! dropped connection, a restarted node, and a mutation whose answer never
 //! came back. Three things live here and nowhere else.
 //!
-//! **The sequence.** OpenCode's per-session stream is the only one with
-//! replay, anchored on a durable aggregate sequence (finding 6). The adapter
-//! asks for `?after=<seq>`; the *number* belongs here, in the store, because a
-//! number kept in a process's memory is exactly the thing a restart loses. So
-//! ingestion is keyed on (session, seq): admitting a sequence is a conditional
-//! UPDATE that succeeds once, and every path — the live stream, a reconnect's
-//! overlap, a snapshot read at startup — goes through it. A re-delivered event
-//! produces no second tracon event because it is never admitted a second time.
+//! **The claims.** The adapter drives the v1 routes, whose stream has no
+//! sequence and no replay (findings 6, 23). What it translates is one
+//! milestone of one part — a text part's final text, a tool part's call and
+//! its result, a step's usage — and each is claimed here, in the store, as a
+//! conditional INSERT that succeeds once. Every path goes through it: the live
+//! stream, a reconnect's overlap, and the message list read at startup and
+//! after every drop. A part delivered twice produces no second tracon event
+//! because its milestone is never claimed a second time. (The durable
+//! sequence the v2 stream carried is still admitted when present, so a v2
+//! event read by an older path stays idempotent too.)
 //!
 //! **The identities.** `ses_`, `msg_`, `prt_`, `per_`, `que_`, `pty_` are
 //! OpenCode's names; the session, event, and permission ids are the node's.
@@ -47,13 +49,6 @@ use crate::session::state::{event_kind as ek, EndReason, SessionState};
 use crate::session::supervisor::Command;
 use crate::store::{intent_kind, intent_state, now_ms, object_kind, NewEvent, SessionPatch, Store};
 use crate::stream::{Bus, Frame};
-
-/// One page of `history?after=` is capped upstream at 100 (`api-ui.md` §3).
-const HISTORY_PAGE: u64 = 100;
-/// A bound on how far a startup reconciliation will page. A session with more
-/// than this outstanding is one nobody is going to read event by event anyway;
-/// the cap keeps a restart from turning into an unbounded read.
-const HISTORY_PAGES: usize = 50;
 
 /// Why reconciliation is running, which decides how much of it applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,7 +256,11 @@ impl Ingest {
     /// confirms the map rather than rewriting it, and a child session named on
     /// an event the node has already seen is still a child session.
     fn map_identities(&self, event: &Value, seq: i64) {
-        let data = &event["data"];
+        // The v2 stream spells the body `data`; the v1 stream `properties`.
+        let data = match &event["data"] {
+            Value::Null => &event["properties"],
+            data => data,
+        };
         let kind = event["type"].as_str().unwrap_or_default();
         self.note_child(kind, data);
 
@@ -278,6 +277,8 @@ impl Ingest {
             data["requestID"].as_str(),
             data["id"].as_str(),
             data["info"]["id"].as_str(),
+            data["part"]["id"].as_str(),
+            data["part"]["messageID"].as_str(),
         ]
         .into_iter()
         .flatten()
@@ -290,10 +291,16 @@ impl Ingest {
         // A tool call has no id of its own: `callID` is the provider's string.
         // Key it by the assistant message it belongs to, so two providers that
         // both say `call_1` in the same session cannot collide.
-        if let Some(call) = data["callID"].as_str().filter(|c| !c.is_empty()) {
+        let call = data["callID"]
+            .as_str()
+            .or_else(|| data["part"]["callID"].as_str())
+            .or_else(|| data["tool"]["callID"].as_str());
+        if let Some(call) = call.filter(|c| !c.is_empty()) {
             let message = data["assistantMessageID"]
                 .as_str()
                 .or_else(|| data["messageID"].as_str())
+                .or_else(|| data["part"]["messageID"].as_str())
+                .or_else(|| data["tool"]["messageID"].as_str())
                 .unwrap_or("");
             map(
                 object_kind::TOOL_CALL,
@@ -356,71 +363,85 @@ impl Ingest {
             .unwrap_or(false)
     }
 
-    /// Turn one durable event into the tracon events it stands for. Used only
-    /// on the snapshot path: while a stream is running, the adapter is what
-    /// translates, and both go through `admit_seq` so neither can double the
-    /// other.
-    fn ingest_snapshot_event(&self, event: &Value) -> bool {
-        let Some(seq) = event["durable"]["seq"].as_u64() else {
-            return false;
+    /// Claim one milestone of one part. True exactly once.
+    fn claim_part(&self, part_id: &str, milestone: &str) -> bool {
+        self.store
+            .opencode_claim_part(&self.session_id, part_id, milestone)
+            .unwrap_or(false)
+    }
+
+    /// Turn one part of an assistant message, as the message list holds it,
+    /// into the tracon events it stands for. Used on the snapshot path: while
+    /// the stream is up the adapter translates, and both go through the same
+    /// claims so neither can double the other. Returns how many milestones
+    /// were new.
+    fn ingest_part(&self, message_id: &str, part: &Value) -> usize {
+        let Some(part_id) = part["id"].as_str() else {
+            return 0;
         };
-        self.map_identities(event, seq as i64);
-        if !self.admit_seq(seq) {
-            return false;
-        }
-        let kind = event["type"].as_str().unwrap_or_default();
-        let data = &event["data"];
-        let message = data["assistantMessageID"].as_str().map(str::to_string);
-        match kind {
-            "session.next.text.ended" => {
-                let text = data["text"].as_str().unwrap_or_default();
-                if !text.is_empty() {
-                    self.record(ek::MESSAGE, message, json!({ "text": text }));
+        let message = Some(message_id.to_string());
+        let mut recorded = 0;
+        match part["type"].as_str().unwrap_or_default() {
+            kind @ ("text" | "reasoning") if !part["time"]["end"].is_null() => {
+                let text = part["text"].as_str().unwrap_or_default();
+                if !text.is_empty() && self.claim_part(part_id, kind) {
+                    let ek = if kind == "text" {
+                        ek::MESSAGE
+                    } else {
+                        ek::THOUGHT
+                    };
+                    self.record(ek, message, json!({ "text": text }));
+                    recorded += 1;
                 }
             }
-            "session.next.reasoning.ended" => {
-                let text = data["text"].as_str().unwrap_or_default();
-                if !text.is_empty() {
-                    self.record(ek::THOUGHT, message, json!({ "text": text }));
+            "tool" => {
+                let state = &part["state"];
+                let status = state["status"].as_str().unwrap_or_default();
+                let call = part["callID"].as_str().map(str::to_string);
+                if matches!(status, "running" | "completed" | "error")
+                    && self.claim_part(part_id, "tool_called")
+                {
+                    self.record(
+                        ek::TOOL_CALL,
+                        call.clone(),
+                        json!({
+                            "title": part["tool"].as_str().unwrap_or("a tool"),
+                            "kind": "other",
+                            "status": "in_progress",
+                            "raw_input": state["input"].clone(),
+                            "source": "reconciled",
+                        }),
+                    );
+                    recorded += 1;
+                }
+                if matches!(status, "completed" | "error") && self.claim_part(part_id, "tool_done")
+                {
+                    let failed = status == "error";
+                    self.record(
+                        ek::TOOL_RESULT,
+                        call,
+                        json!({
+                            "status": if failed { "failed" } else { "completed" },
+                            "output": if failed { state["error"].clone() } else { state["output"].clone() },
+                            "truncated": false,
+                            "source": "reconciled",
+                        }),
+                    );
+                    recorded += 1;
                 }
             }
-            "session.next.tool.called" => {
-                self.record(
-                    ek::TOOL_CALL,
-                    data["callID"].as_str().map(str::to_string),
-                    json!({
-                        "title": data["tool"].as_str().unwrap_or("a tool"),
-                        "kind": "other",
-                        "status": "in_progress",
-                        "raw_input": data["input"].clone(),
-                        "source": "reconciled",
-                    }),
-                );
-            }
-            "session.next.tool.success" | "session.next.tool.failed" => {
-                let failed = kind.ends_with("failed");
-                self.record(
-                    ek::TOOL_RESULT,
-                    data["callID"].as_str().map(str::to_string),
-                    json!({
-                        "status": if failed { "failed" } else { "completed" },
-                        "output": if failed { data["error"].clone() } else { data["structured"].clone() },
-                        "truncated": false,
-                        "source": "reconciled",
-                    }),
-                );
-            }
-            "session.next.step.ended" => {
-                let usage = usage_of(&data["tokens"]);
+            "step-finish" if self.claim_part(part_id, "step") => {
+                let usage = usage_of(&part["tokens"]);
                 self.record(
                     ek::USAGE,
                     None,
                     json!({ "used": usage, "source": "reconciled" }),
                 );
+                recorded += 1;
             }
             _ => {}
         }
-        true
+        recorded
     }
 
     // ---- reconciliation ---------------------------------------------------
@@ -443,8 +464,8 @@ impl Ingest {
 
         // Does the harness still have it? Everything else is only meaningful
         // if it does.
-        match api.get(&format!("/api/session/{upstream}")).await {
-            Ok(found) if found["data"]["id"].as_str().is_some() => {}
+        match api.get(&format!("/session/{upstream}")).await {
+            Ok(found) if found["id"].as_str().is_some() => {}
             Ok(_) => {
                 self.gone("the harness no longer has this session");
                 report.gone = true;
@@ -462,10 +483,12 @@ impl Ingest {
             }
         }
 
-        if mode == Reconcile::Startup {
-            self.replay_history(api.as_ref(), &upstream, &mut report)
-                .await;
-        }
+        // Both modes: the v1 stream replays nothing on its own, so what a gap
+        // held is in the message list either way, and the claims make
+        // reading it beside a live stream safe. Closing a turn is startup's
+        // alone: with an adapter running, its pump closes the turn it owns.
+        self.replay_messages(api.as_ref(), &upstream, mode, &mut report)
+            .await;
         self.settle_intents(api.as_ref(), &upstream, &mut report)
             .await;
         self.reconcile_permissions(api.as_ref(), &upstream, &mut report)
@@ -517,44 +540,66 @@ impl Ingest {
         self.publish_session();
     }
 
-    /// Everything the durable log holds past what has been ingested. Only on
-    /// the startup path: with a stream running, `?after=` replays the same
-    /// events through the adapter, and reading them here as well would be two
-    /// readers racing for one sequence.
-    async fn replay_history(
+    /// Everything the harness's message list holds that the node has not yet
+    /// recorded. The list is the whole conversation with every part's state,
+    /// so it stands in for the replay the v1 stream does not have.
+    async fn replay_messages(
         &self,
         api: &dyn HarnessSnapshots,
         upstream: &str,
+        mode: Reconcile,
         report: &mut Report,
     ) {
-        let mut finished: Option<Value> = None;
-        for _ in 0..HISTORY_PAGES {
-            let after = self.store.opencode_last_seq(&self.session_id).unwrap_or(0);
-            let path =
-                format!("/api/session/{upstream}/history?after={after}&limit={HISTORY_PAGE}");
-            let Ok(page) = api.get(&path).await else {
-                return;
-            };
-            let events: Vec<Value> = page["data"].as_array().cloned().unwrap_or_default();
-            if events.is_empty() {
-                break;
+        let Ok(listed) = api.get(&format!("/session/{upstream}/message")).await else {
+            return;
+        };
+        let messages = match listed.as_array() {
+            Some(list) => list.clone(),
+            None => listed["data"].as_array().cloned().unwrap_or_default(),
+        };
+        let mut steps_missed = Vec::new();
+        for message in &messages {
+            if message["info"]["role"].as_str() != Some("assistant") {
+                continue;
             }
-            for event in &events {
-                if self.ingest_snapshot_event(event) {
-                    report.ingested += 1;
+            let message_id = message["info"]["id"].as_str().unwrap_or_default();
+            for part in message["parts"].as_array().into_iter().flatten() {
+                let before = report.ingested;
+                report.ingested += self.ingest_part(message_id, part);
+                if report.ingested > before && part["type"].as_str() == Some("step-finish") {
+                    steps_missed.push(part.clone());
                 }
-                if event["type"].as_str() == Some("session.next.step.ended")
-                    && event["data"]["finish"].as_str().unwrap_or_default() != "tool-calls"
-                {
-                    finished = Some(event["data"].clone());
-                }
-            }
-            if page["hasMore"] != true {
-                break;
             }
         }
-        if let Some(step) = finished {
-            report.turn_closed = self.close_turn(&step);
+        // A turn the node still thinks is running, on a session the harness
+        // says is idle, ended while the node was away: close it with the
+        // usage of the steps this read was the first to see.
+        if mode != Reconcile::Startup {
+            return;
+        }
+        let Ok(Some(session)) = self.store.get_session(&self.session_id) else {
+            return;
+        };
+        if session.turn_active == 0 {
+            return;
+        }
+        let Ok(status) = api.get("/session/status").await else {
+            return;
+        };
+        let busy = status[upstream]["type"]
+            .as_str()
+            .is_some_and(|kind| kind != "idle");
+        if !busy {
+            let tokens: u64 = steps_missed.iter().map(|s| usage_of(&s["tokens"])).sum();
+            let finish = steps_missed
+                .last()
+                .and_then(|s| s["reason"].as_str())
+                .unwrap_or("stop");
+            report.turn_closed = self.close_turn(&json!({
+                "tokens_total": tokens,
+                "finish": finish,
+                "cost": steps_missed.iter().filter_map(|s| s["cost"].as_f64()).sum::<f64>(),
+            }));
         }
     }
 
@@ -568,7 +613,7 @@ impl Ingest {
         if session.turn_active == 0 {
             return false;
         }
-        let tokens = usage_of(&step["tokens"]) as i64;
+        let tokens = step["tokens_total"].as_u64().unwrap_or(0) as i64;
         // A turn recovered from the harness's own record is still two
         // sources: what OpenCode says it spent, and what this node's gateway
         // counted on the wire while it was running. The gap between them is
@@ -628,7 +673,7 @@ impl Ingest {
             return;
         }
         let messages = api
-            .get(&format!("/api/session/{upstream}/message"))
+            .get(&format!("/session/{upstream}/message"))
             .await
             .unwrap_or(Value::Null);
         let pending = self.pending_permissions(api, upstream).await;
@@ -659,7 +704,7 @@ impl Ingest {
                     let target = intent.target.clone().unwrap_or_default();
                     if pending.iter().any(|p| p["id"].as_str() == Some(&target)) {
                         let body = reply_body(intent.detail.as_deref().unwrap_or_default());
-                        let path = format!("/api/session/{upstream}/permission/{target}/reply");
+                        let path = format!("/session/{upstream}/permissions/{target}");
                         match api.post(&path, body).await {
                             Ok(_) => {
                                 self.intent_settle(
@@ -694,12 +739,17 @@ impl Ingest {
         }
     }
 
+    /// The v1 pending list is instance-wide and a bare array; only this
+    /// session's requests are its business (finding 5).
     async fn pending_permissions(&self, api: &dyn HarnessSnapshots, upstream: &str) -> Vec<Value> {
-        api.get(&format!("/api/session/{upstream}/permission"))
+        api.get("/permission")
             .await
             .ok()
-            .and_then(|body| body["data"].as_array().cloned())
+            .and_then(|body| body.as_array().cloned())
             .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request["sessionID"].as_str() == Some(upstream))
+            .collect()
     }
 
     /// A permission the harness is blocked on, against what this node knows
@@ -722,9 +772,9 @@ impl Ingest {
             let Some(id) = request["id"].as_str() else {
                 continue;
             };
-            let call = request["source"]["callID"]
+            let call = request["tool"]["callID"]
                 .as_str()
-                .or_else(|| request["tool"]["callID"].as_str());
+                .or_else(|| request["source"]["callID"].as_str());
             let answered = known.iter().find(|row| {
                 row.state == "answered" && call.is_some() && row.tool_call_id.as_deref() == call
             });
@@ -732,7 +782,7 @@ impl Ingest {
                 let option = row.answer_option_id.clone().unwrap_or_default();
                 let intent =
                     self.intent_begin(intent_kind::PERMISSION_REPLY, Some(id), Some(&option));
-                let path = format!("/api/session/{upstream}/permission/{id}/reply");
+                let path = format!("/session/{upstream}/permissions/{id}");
                 match api.post(&path, reply_body(&option)).await {
                     Ok(_) => {
                         self.intent_settle(
@@ -776,9 +826,16 @@ impl Ingest {
     /// is different is only that the answer is posted from here, because the
     /// adapter that raised it originally is no longer waiting for it.
     async fn reraise(&self, upstream: &str, id: &str, request: &Value) -> bool {
-        let action = request["action"].as_str().unwrap_or("unknown").to_string();
-        let resources: Vec<String> = request["resources"]
+        // v1 spells them `permission`/`patterns`; the node's own records still
+        // carry `action`/`resources`.
+        let action = request["permission"]
+            .as_str()
+            .or_else(|| request["action"].as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let resources: Vec<String> = request["patterns"]
             .as_array()
+            .or_else(|| request["resources"].as_array())
             .into_iter()
             .flatten()
             .filter_map(|r| r.as_str().map(str::to_string))
@@ -792,7 +849,10 @@ impl Ingest {
         let (reply_tx, reply_rx) = oneshot::channel();
         let ask = Command::Permission {
             request: PermissionRequest::managed(
-                request["source"]["callID"].as_str().map(str::to_string),
+                request["tool"]["callID"]
+                    .as_str()
+                    .or_else(|| request["source"]["callID"].as_str())
+                    .map(str::to_string),
                 format!("{action}: {}", resources.join(", ")),
                 &action,
                 resource,
@@ -859,7 +919,7 @@ impl Ingest {
                 "answered",
             );
             let Some(api) = api else { return };
-            let path = format!("/api/session/{upstream}/permission/{permission}/reply");
+            let path = format!("/session/{upstream}/permissions/{permission}");
             match api.post(&path, reply_body(&option)).await {
                 Ok(_) => {
                     let _ = store.opencode_intent_settle(&intent, intent_state::ADMITTED, None);
@@ -913,9 +973,10 @@ impl DurableCursor for Ingest {
 
     async fn admit(&self, event: &Value) -> bool {
         let Some(seq) = event["durable"]["seq"].as_u64() else {
-            // Not a durable event: the server-wide stream carries no sequence
-            // at all (finding 6) and is a live tap, so it is passed through
-            // and made idempotent by what it produces, not by a number.
+            // The v1 stream carries no sequence at all (finding 6): what it
+            // names is mapped, and what it produces is made idempotent by the
+            // part claims rather than by a number.
+            self.map_identities(event, 0);
             return true;
         };
         self.map_identities(event, seq as i64);
@@ -931,6 +992,10 @@ impl DurableCursor for Ingest {
         if let Some(upstream) = self.upstream_id() {
             self.native.offer(&upstream, event);
         }
+    }
+
+    fn claim(&self, part_id: &str, milestone: &str) -> bool {
+        self.claim_part(part_id, milestone)
     }
 
     async fn reconnected(&self) {
@@ -951,14 +1016,14 @@ fn object_of(id: &str) -> Option<&'static str> {
     })
 }
 
-/// What `reply` the harness is sent. Allow-once is the only option that
+/// What the harness is sent as an answer. Allow-once is the only option that
 /// allows, and `always` is never sent: it would widen OpenCode's own ruleset
-/// behind the node's back (finding 2).
+/// behind the node's back (finding 2). The v1 route takes `response` alone.
 fn reply_body(option_id: &str) -> Value {
     if option_id == crate::adapter::types::OPTION_ALLOW_ONCE {
-        json!({ "reply": "once" })
+        json!({ "response": "once" })
     } else {
-        json!({ "reply": "reject" })
+        json!({ "response": "reject" })
     }
 }
 
@@ -1006,12 +1071,12 @@ mod tests {
     #[test]
     fn only_allow_once_allows_and_always_is_never_sent() {
         assert_eq!(
-            reply_body(crate::adapter::types::OPTION_ALLOW_ONCE)["reply"],
+            reply_body(crate::adapter::types::OPTION_ALLOW_ONCE)["response"],
             "once"
         );
-        assert_eq!(reply_body("allow_always")["reply"], "reject");
+        assert_eq!(reply_body("allow_always")["response"], "reject");
         assert_eq!(
-            reply_body(crate::adapter::types::OPTION_REJECT_ONCE)["reply"],
+            reply_body(crate::adapter::types::OPTION_REJECT_ONCE)["response"],
             "reject"
         );
     }

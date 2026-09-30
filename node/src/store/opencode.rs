@@ -288,6 +288,24 @@ impl Store {
         )? > 0)
     }
 
+    /// Claim one milestone of one part. True exactly once per
+    /// (session, part, milestone): the v1 stream carries no sequence, so this
+    /// is what keeps a part delivered twice — live, on a reconnect's overlap,
+    /// or from the message list at startup — from being recorded twice.
+    pub fn opencode_claim_part(
+        &self,
+        session_id: &str,
+        part_id: &str,
+        milestone: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "INSERT OR IGNORE INTO opencode_part_claim (session_id, part_id, milestone, claimed_ms)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, part_id, milestone, now_ms()],
+        )? > 0)
+    }
+
     /// Map an upstream id to what it became here. Idempotent on the key, and
     /// never overwrites a mapping with an empty one: a later event that only
     /// carries the id keeps whatever the first one recorded.

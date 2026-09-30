@@ -48,7 +48,8 @@ pub struct Recorded {
 /// on the wire rather than on the adapter's own account of it.
 #[derive(Default)]
 pub struct Seen {
-    /// Every `?after=` the durable stream was reconnected with.
+    /// Every `?after=` the durable stream was reconnected with; on the v1
+    /// stream, which has none, one `0` per connection.
     pub resumed_from: Vec<u64>,
     /// Every `?after=` the durable history was paged from.
     pub history_from: Vec<u64>,
@@ -185,6 +186,12 @@ impl Fake {
         self
     }
 
+    /// The scripted turn already ran, before this node was looking: the
+    /// message list holds it and the stream will not repeat it.
+    pub fn turn_already_ran(&self) {
+        self.prompted.fetch_add(1, Ordering::SeqCst);
+    }
+
     /// The harness no longer has this session.
     pub fn gone(&self) {
         self.alive.store(false, Ordering::SeqCst);
@@ -224,9 +231,11 @@ impl Fake {
         self.pending.lock().unwrap().push(json!({
             "id": id,
             "sessionID": session,
-            "action": "bash",
-            "resources": ["just test"],
-            "source": { "type": "tool", "messageID": "msg_1", "callID": call },
+            "permission": "bash",
+            "patterns": ["just test"],
+            "metadata": {},
+            "always": ["*"],
+            "tool": { "messageID": "msg_1", "callID": call },
         }));
     }
 
@@ -301,6 +310,103 @@ impl Fake {
             ),
         ]
     }
+
+    /// The same turn as the v1 stream publishes it: parts as they reach their
+    /// final state, the ask between the call and its result, and `session.idle`
+    /// at the end (finding 23). The tokens match `script` so a test's totals
+    /// hold on either route.
+    pub fn v1_script(&self) -> Vec<Value> {
+        let mut out = vec![
+            v1_event(
+                "message.updated",
+                json!({
+                    "sessionID": SESSION,
+                    "info": { "id": "msg_1", "role": "assistant", "sessionID": SESSION,
+                              "time": { "created": 1 } },
+                }),
+            ),
+            v1_part(json!({
+                "id": "prt_text_1", "messageID": "msg_1", "sessionID": SESSION,
+                "type": "text", "text": "working on it",
+                "time": { "start": 1, "end": 2 },
+            })),
+            v1_part(json!({
+                "id": "prt_tool_1", "messageID": "msg_1", "sessionID": SESSION,
+                "type": "tool", "tool": "bash", "callID": "call_1",
+                "state": { "status": "running", "input": { "command": "just test" },
+                           "time": { "start": 3 } },
+            })),
+        ];
+        if self.asks.load(Ordering::SeqCst) {
+            let action = self.permission_action.lock().clone();
+            let resources = self.permission_resources.lock().clone();
+            out.push(v1_event(
+                "permission.asked",
+                json!({
+                    "id": PERMISSION,
+                    "sessionID": SESSION,
+                    "permission": action,
+                    "patterns": resources,
+                    "metadata": {},
+                    "always": ["*"],
+                    "tool": { "messageID": "msg_1", "callID": "call_1" },
+                }),
+            ));
+        }
+        out.extend([
+            v1_part(json!({
+                "id": "prt_tool_1", "messageID": "msg_1", "sessionID": SESSION,
+                "type": "tool", "tool": "bash", "callID": "call_1",
+                "state": { "status": "completed", "input": { "command": "just test" },
+                           "output": "ok", "title": "", "metadata": { "exit": 0 },
+                           "time": { "start": 3, "end": 4 } },
+            })),
+            v1_part(json!({
+                "id": "prt_step_1", "messageID": "msg_1", "sessionID": SESSION,
+                "type": "step-finish", "reason": "stop", "cost": 0,
+                "tokens": { "total": 1034, "input": 1000, "output": 20, "reasoning": 4,
+                            "cache": { "read": 8, "write": 2 } },
+            })),
+            v1_event("session.idle", json!({ "sessionID": SESSION })),
+        ]);
+        out
+    }
+
+    /// The message list as the harness holds it once the scripted turn has
+    /// run: the user's prompt and the assistant message with every part in
+    /// its final state. What reconciliation reads after a drop.
+    fn v1_messages(&self) -> Vec<Value> {
+        let mut parts = Vec::new();
+        for event in self.v1_script() {
+            if event["type"] == "message.part.updated" {
+                let part = event["properties"]["part"].clone();
+                parts.retain(|p: &Value| p["id"] != part["id"]);
+                parts.push(part);
+            }
+        }
+        let mut messages = self.messages.lock().unwrap().clone();
+        messages.push(json!({
+            "info": { "id": "msg_1", "role": "assistant", "sessionID": SESSION },
+            "parts": parts,
+        }));
+        messages
+    }
+}
+
+/// One frame as `GET /event` spells it: `properties`, no sequence.
+pub fn v1_event(kind: &str, properties: Value) -> Value {
+    json!({
+        "id": format!("evt_{}", uuid::Uuid::now_v7().simple()),
+        "type": kind,
+        "properties": properties,
+    })
+}
+
+fn v1_part(part: Value) -> Value {
+    v1_event(
+        "message.part.updated",
+        json!({ "sessionID": SESSION, "part": part, "time": 1 }),
+    )
 }
 
 pub fn durable(seq: u64, kind: &str, data: Value) -> Value {
@@ -391,6 +497,125 @@ pub fn app(fake: Fake) -> Router {
                 }))
             }),
         )
+        // --- the v1 session routes the adapter drives (finding 23) ---------
+        .route(
+            "/session",
+            post(
+                |State(fake): State<Fake>,
+                 headers: HeaderMap,
+                 Query(query): Query<std::collections::HashMap<String, String>>| async move {
+                    if let Some(refused) = guard(&fake, &headers).await {
+                        return refused;
+                    }
+                    let directory = query.get("directory").cloned().unwrap_or_default();
+                    fake.seen
+                        .lock()
+                        .unwrap()
+                        .directories
+                        .push(directory.clone());
+                    Json(json!({
+                        "id": SESSION,
+                        "slug": "fake",
+                        "version": fake.version,
+                        "projectID": "p",
+                        "directory": directory,
+                        "title": "t",
+                        "time": { "created": 1, "updated": 1 },
+                    }))
+                    .into_response()
+                },
+            ),
+        )
+        // The merged config the v1 loader built, as the handshake gates on it.
+        .route(
+            "/config",
+            get(|State(fake): State<Fake>, headers: HeaderMap| async move {
+                if let Some(refused) = guard(&fake, &headers).await {
+                    return refused;
+                }
+                Json(json!({
+                    "share": "disabled",
+                    "permission": { "*": "ask", "bash": "ask", "edit": "ask", "read": "ask" },
+                }))
+                .into_response()
+            }),
+        )
+        .route(
+            "/session/status",
+            get(|State(_fake): State<Fake>| async move { Json(json!({})) }),
+        )
+        .route(
+            "/session/{session}",
+            get(
+                |State(fake): State<Fake>, Path(session): Path<String>| async move {
+                    if !fake.alive.load(Ordering::SeqCst) {
+                        return (StatusCode::NOT_FOUND, "no such session").into_response();
+                    }
+                    Json(json!({
+                        "id": session,
+                        "projectID": "p",
+                        "directory": "/work",
+                        "time": { "created": 1, "updated": 2 },
+                        "title": "t",
+                    }))
+                    .into_response()
+                },
+            ),
+        )
+        .route(
+            "/session/{session}/prompt_async",
+            post(
+                |State(fake): State<Fake>,
+                 headers: HeaderMap,
+                 Path(_session): Path<String>,
+                 Json(body): Json<Value>| async move {
+                    if let Some(refused) = guard(&fake, &headers).await {
+                        return refused;
+                    }
+                    let text = body["parts"][0]["text"].as_str().unwrap_or("").to_string();
+                    fake.seen.lock().unwrap().prompts.push(text.clone());
+                    fake.prompted.fetch_add(1, Ordering::SeqCst);
+                    fake.admitted_prompt(&text);
+                    if fake.prompt_times_out.load(Ordering::SeqCst) {
+                        return (StatusCode::GATEWAY_TIMEOUT, "no answer").into_response();
+                    }
+                    StatusCode::NO_CONTENT.into_response()
+                },
+            ),
+        )
+        .route(
+            "/session/{session}/message",
+            get(|State(fake): State<Fake>| async move {
+                // Once a prompt ran, the list holds the scripted turn.
+                if fake.prompted.load(Ordering::SeqCst) > 0 {
+                    Json(Value::Array(fake.v1_messages()))
+                } else {
+                    Json(Value::Array(fake.messages.lock().unwrap().clone()))
+                }
+            }),
+        )
+        .route(
+            "/session/{session}/permissions/{request}",
+            post(
+                |State(fake): State<Fake>,
+                 Path((_session, request)): Path<(String, String)>,
+                 Json(body): Json<Value>| async move {
+                    {
+                        let mut seen = fake.seen.lock().unwrap();
+                        seen.replies.push(json!({ "id": request, "body": body }));
+                    }
+                    fake.pending
+                        .lock()
+                        .unwrap()
+                        .retain(|p| p["id"].as_str() != Some(request.as_str()));
+                    if fake.reply_hangs.load(Ordering::SeqCst) {
+                        std::future::pending::<()>().await;
+                    }
+                    Json(json!(true)).into_response()
+                },
+            ),
+        )
+        .route("/event", get(v1_stream))
         .route(
             "/api/session",
             post(
@@ -854,6 +1079,71 @@ async fn server_stream(State(fake): State<Fake>, headers: HeaderMap) -> Response
             {
                 return;
             }
+        }
+    });
+    Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(Body::from_stream(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
+        .unwrap()
+}
+
+/// The v1 server-wide stream: everything about every session, no replay. It
+/// publishes the scripted turn once a prompt is admitted, and — when the fake
+/// was built to cut — drops the first connection partway. A reconnection
+/// starts over from the top, exactly as the real server would re-publish
+/// nothing and a page reload would re-read everything: what the node does
+/// with the repeat is the thing under test.
+async fn v1_stream(State(fake): State<Fake>, headers: HeaderMap) -> Response {
+    if !authorized(&fake, &headers) {
+        fake.seen.lock().unwrap().unauthenticated += 1;
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let connections = {
+        let mut seen = fake.seen.lock().unwrap();
+        seen.resumed_from.push(0);
+        seen.resumed_from.len()
+    };
+    let cut = if connections == 1 {
+        fake.cut_after
+    } else {
+        usize::MAX
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(16);
+    tokio::spawn(async move {
+        let _ = tx
+            .send(Ok(axum::body::Bytes::from(format!(
+                "data: {}\n\n",
+                v1_event("server.connected", json!({}))
+            ))))
+            .await;
+        while fake.prompted.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if tx.is_closed() {
+                return;
+            }
+        }
+        let script = fake.v1_script();
+        let cut_short = script.len() > cut;
+        for event in script.into_iter().take(cut) {
+            if tx
+                .send(Ok(axum::body::Bytes::from(format!("data: {event}\n\n"))))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        if cut_short {
+            return;
+        }
+        while tx
+            .send(Ok(axum::body::Bytes::from(": heartbeat\n\n")))
+            .await
+            .is_ok()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     });
     Response::builder()

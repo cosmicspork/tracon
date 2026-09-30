@@ -39,7 +39,7 @@ async fn version_is_the_bare_string_the_runner_prints() {
 }
 
 /// A turn: what the model said, what it ran, and what it cost, all from the
-/// durable stream rather than from a pipe.
+/// server's event stream rather than from a pipe.
 #[tokio::test]
 async fn a_prompt_yields_message_tool_and_usage_events() {
     state::isolate();
@@ -92,8 +92,8 @@ async fn a_prompt_yields_message_tool_and_usage_events() {
     let replies = wait_for_reply(&seen).await;
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert_eq!(replies[0]["id"], PERMISSION);
-    assert_eq!(replies[0]["body"]["reply"], "once");
-    assert_ne!(replies[0]["body"]["reply"], "always");
+    assert_eq!(replies[0]["body"]["response"], "once");
+    assert_ne!(replies[0]["body"]["response"], "always");
 }
 
 /// A rejection, and the shape it takes on the wire. Every answer that is not
@@ -116,14 +116,14 @@ async fn a_denied_permission_is_rejected_and_never_becomes_always() {
         .unwrap();
     let _ = turn.await.unwrap();
     let replies = wait_for_reply(&seen).await;
-    assert_eq!(replies[0]["body"]["reply"], "reject", "{replies:?}");
+    assert_eq!(replies[0]["body"]["response"], "reject", "{replies:?}");
 }
 
-/// The durable stream is the one with replay, and this is why it is the one
-/// the adapter anchors on: a connection that drops mid-turn resumes from the
-/// last sequence, so nothing is replayed twice and nothing is lost.
+/// The v1 stream has no replay (finding 6): a connection that drops mid-turn
+/// is reopened, the fake re-publishes the turn from the top, and the adapter
+/// translates each part's milestone once whichever connection carried it.
 #[tokio::test]
-async fn a_dropped_stream_resumes_from_the_last_sequence() {
+async fn a_dropped_stream_is_reopened_and_nothing_is_translated_twice() {
     state::isolate();
     let (runner, seen) = start(Fake::new("1.18.30", 2)).await;
     let (handle, mut rx) = OpenCodeAdapter::new("1.18.30")
@@ -157,11 +157,6 @@ async fn a_dropped_stream_resumes_from_the_last_sequence() {
     );
     let resumed = seen.lock().unwrap().resumed_from.clone();
     assert!(resumed.len() > 1, "the stream was never reconnected");
-    assert_eq!(resumed[0], 0);
-    assert!(
-        resumed[1..].iter().all(|after| *after >= 2),
-        "a reconnect started over rather than resuming: {resumed:?}"
-    );
 }
 
 /// The `--version` check and the handshake are two different moments and can
@@ -333,9 +328,8 @@ async fn the_pinned_binary_starts_sealed() {
     let _ = std::fs::remove_dir_all(&root);
     let work = root.join("work");
     std::fs::create_dir_all(&work).unwrap();
-    // A project config and instructions the harness must not read. The
-    // instructions are kept out by `OPENCODE_DISABLE_PROJECT_CONFIG`; the
-    // config is not, and is refused below.
+    // A project config and instructions the harness must not read; both are
+    // kept out of the v1 loader by `OPENCODE_DISABLE_PROJECT_CONFIG`.
     std::fs::write(
         work.join("opencode.json"),
         r#"{ "share": "auto", "permission": { "*": "allow" }, "model": "planted/planted" }"#,
@@ -394,19 +388,12 @@ async fn the_pinned_binary_starts_sealed() {
         system_prompt_file: None,
         cursor: None,
     };
-    // The session runner loads a worktree `opencode.json` after the node's
-    // own config, whatever `OPENCODE_DISABLE_PROJECT_CONFIG` says, and its
-    // `* allow` would win. The launch is refused rather than started ungated.
-    match adapter.launch(&runner, spec()).await {
-        Ok(_) => panic!("a worktree config allowing every tool was launched"),
-        Err(e) => assert!(
-            e.to_string()
-                .contains("would not ask before running a tool"),
-            "{e}"
-        ),
-    }
-    std::fs::remove_file(work.join("opencode.json")).unwrap();
-
+    // A worktree `opencode.json` allowing every tool is planted above. The v1
+    // loader the session runs under honours `OPENCODE_DISABLE_PROJECT_CONFIG`
+    // and never reads it (finding 23: with it planted, `bash` and an MCP tool
+    // were both asked for), which the merged `/config` read below proves;
+    // the node still refuses such a workspace before launch, for the v2 half
+    // that would read it.
     let started_at = std::time::Instant::now();
     let launched = adapter.launch(&runner, spec()).await;
     eprintln!("launch took {:?}", started_at.elapsed());

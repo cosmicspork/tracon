@@ -91,9 +91,10 @@ than fall back. A harness declares its own state layout and config files; nothin
 outside the trait may spell a harness's name.
 
 Which harness daily work runs on is a roadmap decision, not an architectural one:
-Claude Code today, because OpenCode's v2 session runner offers the model none of the
-node's MCP tools (`reference/opencode-v1.18.30/README.md`, finding 22); the gate below
-is the same for both. That last rule is what made the 2026-09-13 cutover cheap. tracon's first harness was
+Claude Code today; OpenCode is driven over its v1 session routes because the v2 runner
+offers the model none of the node's MCP tools (`reference/opencode-v1.18.30/README.md`,
+findings 22 and 23), and has a real session still to run that way. The gate below is
+the same for both. That last rule is what made the 2026-09-13 cutover cheap. tracon's first harness was
 omp, driven over the Agent Client Protocol; removing it took the adapter, its image,
 its provider wiring and its catalogue workarounds, and nothing else. What survived is
 the shared vocabulary the adapters translate into (`node/src/adapter/types.rs` — tool
@@ -131,12 +132,15 @@ own runner, and everything between it and anyone else is node-owned. In order:
   or command before that policy decision. Display titles never participate in policy;
   an unknown action or a known action without its required target has no exempt kind
   and therefore remains an operator decision unless an explicit deny matches.
-- **Session events are synthesised, not proxied.** The harness's only server-wide stream
+- **Session events are synthesised, not proxied.** The harness's server-wide stream
   has no durable replay and no scoping, so the node never opens one on a browser's
   behalf: it serves that route itself from its own bus, filtered to the one session the
   caller's cookie names and numbered so a client resumes rather than restarts.
-  Correctness rests on the per-session sequenced stream the adapter ingests; this is a
-  view of it.
+  Correctness does not rest on the stream at all: the adapter drives the v1 session
+  routes (the ones that offer the model the node's MCP tools, finding 23), claims each
+  part's milestone in the store exactly once, and after any drop re-reads the harness's
+  own message list, so a repeat is dropped and a gap is filled from the record the
+  harness keeps. The synthesised stream is a view of the same reading.
 - **State is the node's to fence.** Two processes can open the same harness database,
   and an older build opens a newer one silently, so each session's state directory has a
   single writer, its identity is recorded at launch, and backup, upgrade and restore are

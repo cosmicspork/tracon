@@ -199,12 +199,12 @@ async fn an_opencode_read_is_normalized_and_allowed_by_the_supervisor() {
     let replies = wait_for_reply(&seen).await;
     let diagnostics = store.events_after(SESSION_ID, 0, 500).unwrap();
     assert_eq!(
-        replies[0]["body"]["reply"],
+        replies[0]["body"]["response"],
         "once",
         "{replies:?}; state={:?}; events={diagnostics:?}",
         store.get_session(SESSION_ID).unwrap()
     );
-    assert_ne!(replies[0]["body"]["reply"], "always");
+    assert_ne!(replies[0]["body"]["response"], "always");
     assert!(
         store.open_permissions().unwrap().is_empty(),
         "a shipped read exemption interrupted the operator"
@@ -227,13 +227,13 @@ async fn an_opencode_read_is_normalized_and_allowed_by_the_supervisor() {
     let _ = tx.send(Command::Kill).await;
 }
 
-/// A server that re-delivers everything on every connection — which the real
-/// one will do whenever the node asks for a sequence it has already ingested,
-/// and which a reconnect's overlap produces anyway. The node has to recognise
-/// the second delivery and drop it, or a dropped connection duplicates a turn
-/// in the transcript.
+/// A connection that drops mid-turn. The v1 stream replays nothing, so the
+/// node reads the message list on reconnect and the reopened stream carries
+/// the turn again from the top: between the two, and whichever of the adapter
+/// and reconciliation gets to a part first, every milestone reaches the record
+/// exactly once — or a dropped connection duplicates a turn in the transcript.
 #[tokio::test]
-async fn a_sequence_delivered_twice_produces_one_event() {
+async fn a_part_delivered_twice_produces_one_event() {
     state::isolate();
     let store = store_with_session("running");
     let (ingest, _commands) = ingest_for(&store);
@@ -259,23 +259,34 @@ async fn a_sequence_delivered_twice_produces_one_event() {
         .unwrap();
     let result = turn.await.unwrap().expect("the turn completes");
     assert_eq!(result.stop_reason, "end_turn");
-    drain_until(&mut rx, &mut labels, "usage").await;
+    // Whatever the adapter still has to say after the turn ended.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    while let Ok(event) = rx.try_recv() {
+        labels.extend(support::events::label(&event));
+    }
 
+    // Either the adapter translated a milestone or reconciliation recorded it
+    // from the message list; never both, never neither.
+    let adapter = |label: &str| labels.iter().filter(|l| *l == label).count();
+    let recorded = |kind: &str| kinds(&store).iter().filter(|k| *k == kind).count();
     assert_eq!(
-        labels
-            .iter()
-            .filter(|l| *l == "chunk:working on it")
-            .count(),
+        adapter("chunk:working on it") + recorded("message"),
         1,
-        "a re-delivered sequence was translated twice: {labels:?}"
+        "{labels:?} {:?}",
+        kinds(&store)
     );
     assert_eq!(
-        labels.iter().filter(|l| *l == "tool_call:bash").count(),
+        adapter("tool_call:bash") + recorded("tool_call"),
         1,
-        "{labels:?}"
+        "{labels:?} {:?}",
+        kinds(&store)
     );
-    // And the node's own record says how far it got, not the adapter's memory.
-    assert_eq!(store.opencode_last_seq(SESSION_ID).unwrap(), 5);
+    assert_eq!(
+        adapter("usage") + recorded("usage"),
+        1,
+        "{labels:?} {:?}",
+        kinds(&store)
+    );
     assert_eq!(
         store
             .opencode_session_of(SESSION_ID)
@@ -286,12 +297,11 @@ async fn a_sequence_delivered_twice_produces_one_event() {
     );
 }
 
-/// The number `?after=` resumes from is the node's, in its store. A process
-/// that dies mid-turn and comes back must ask for what it has not ingested —
-/// not from zero, which would replay the turn, and not from nothing, which
-/// would lose it.
+/// What has been ingested is the node's, in its store. A process that dies
+/// mid-turn and comes back must not translate a part the dead process already
+/// recorded, and must translate the ones it never saw.
 #[tokio::test]
-async fn a_restart_mid_turn_resumes_from_the_persisted_sequence() {
+async fn a_restart_mid_turn_resumes_from_the_persisted_claims() {
     state::isolate();
     let store = store_with_session("running");
     // A previous process got as far as the text of the turn and then died.
@@ -301,19 +311,9 @@ async fn a_restart_mid_turn_resumes_from_the_persisted_sequence() {
             SESSION,
             HttpApi::connect("127.0.0.1:1".parse().unwrap(), ""),
         );
-        for seq in 1..=2 {
-            assert!(
-                before
-                    .admit(&support::fake_opencode::durable(
-                        seq,
-                        "session.next.text.ended",
-                        json!({ "sessionID": SESSION, "text": "working on it" }),
-                    ))
-                    .await
-            );
-        }
+        assert!(before.claim("prt_text_1", "text"));
+        assert!(!before.claim("prt_text_1", "text"));
     }
-    assert_eq!(store.opencode_last_seq(SESSION_ID).unwrap(), 2);
 
     // A new process, a new adapter, the same store.
     let (ingest, _commands) = ingest_for(&store);
@@ -335,17 +335,15 @@ async fn a_restart_mid_turn_resumes_from_the_persisted_sequence() {
     turn.await.unwrap().expect("the turn completes");
     drain_until(&mut rx, &mut labels, "usage").await;
 
-    assert_eq!(
-        seen.lock().unwrap().resumed_from.first().copied(),
-        Some(2),
-        "the restarted node asked from where the store said, not from zero"
+    assert!(
+        !seen.lock().unwrap().resumed_from.is_empty(),
+        "the stream was never opened"
     );
     assert!(
         !labels.contains(&"chunk:working on it".to_string()),
-        "a sequence the dead process had already ingested was ingested again: {labels:?}"
+        "a part the dead process had already recorded was translated again: {labels:?}"
     );
     assert!(labels.contains(&"tool_call:bash".to_string()), "{labels:?}");
-    assert_eq!(store.opencode_last_seq(SESSION_ID).unwrap(), 5);
 }
 
 /// The server-wide stream that carries permission asks has no replay at all,
@@ -389,7 +387,7 @@ async fn a_permission_pending_upstream_is_reraised_after_a_reconnect() {
     // The answer reaches the harness, and reaches it as `once`.
     let replies = support::fake_opencode::wait_for_reply(&seen).await;
     assert_eq!(replies[0]["id"], PERMISSION);
-    assert_eq!(replies[0]["body"]["reply"], "once");
+    assert_eq!(replies[0]["body"]["response"], "once");
 
     // It was recorded as the same request, so a second reconciliation does not
     // ask the operator twice.
@@ -444,7 +442,7 @@ async fn a_permission_answered_here_but_pending_upstream_is_answered_again() {
     );
     let replies = seen.lock().unwrap().replies.clone();
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert_eq!(replies[0]["body"]["reply"], "once");
+    assert_eq!(replies[0]["body"]["response"], "once");
 }
 
 /// The prompt is the one mediated mutation that must never be re-sent on a
@@ -663,10 +661,10 @@ async fn a_session_gone_upstream_becomes_terminal_with_the_reason() {
     assert!(store.opencode_session_of(SESSION_ID).unwrap().unwrap().gone != 0);
 }
 
-/// Startup, with no stream to replay through: the durable history is read and
-/// ingested, the turn that ended while the node was away is closed with its
-/// usage, and doing it twice changes nothing — the sequence is what makes it
-/// safe to run again.
+/// Startup, with no stream to replay through: the message list is read and
+/// each part's milestones ingested, the turn that ended while the node was
+/// away is closed with its usage, and doing it twice changes nothing — the
+/// claims are what make it safe to run again.
 #[tokio::test]
 async fn a_startup_reconciliation_ingests_the_missed_turn_exactly_once() {
     state::isolate();
@@ -682,6 +680,7 @@ async fn a_startup_reconciliation_ingests_the_missed_turn_exactly_once() {
         .unwrap();
     let (ingest, _commands) = ingest_for(&store);
     let fake = Fake::new("1.18.30", usize::MAX);
+    fake.turn_already_ran();
     let password = fake.password.clone();
     let addr = support::fake_opencode::serve(fake).await;
     ingest.rebind(
@@ -690,7 +689,8 @@ async fn a_startup_reconciliation_ingests_the_missed_turn_exactly_once() {
     );
 
     let report = ingest.reconcile(Reconcile::Startup).await;
-    assert_eq!(report.ingested, 5, "{report:?}");
+    // The text, the call, its result, the step.
+    assert_eq!(report.ingested, 4, "{report:?}");
     assert!(report.turn_closed, "{report:?}");
     let after_first = kinds(&store);
     assert_eq!(after_first.iter().filter(|k| *k == "message").count(), 1);
@@ -710,7 +710,6 @@ async fn a_startup_reconciliation_ingests_the_missed_turn_exactly_once() {
     assert_eq!(again.ingested, 0, "{again:?}");
     assert!(!again.turn_closed);
     assert_eq!(kinds(&store).len(), after_first.len());
-    assert_eq!(store.opencode_last_seq(SESSION_ID).unwrap(), 5);
 }
 
 /// The supervisor tears down its container on exit; these tests have none.

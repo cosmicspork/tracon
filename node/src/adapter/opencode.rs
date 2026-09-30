@@ -3,9 +3,13 @@
 //! OpenCode is not a stdio agent: it is a server that the node starts inside
 //! the runner, reaches on a loopback publish (Podman), the pod's own address
 //! (Kubernetes) or plain loopback (the local runner), and drives with HTTP
-//! requests plus one durable per-session event stream. Everything this adapter
-//! sends and decodes was read from the pinned release's inventory in
-//! `docs/reference/opencode-v1.18.30/` and checked against the pinned binary.
+//! requests plus its server-wide event stream. It drives the *v1* session
+//! routes (`POST /session`, `POST /session/{id}/prompt_async`,
+//! `POST /session/{id}/permissions/{id}`): at the pinned release those are the
+//! ones that offer the model the node's MCP tools, and the v2 session runner
+//! offers none (finding 23). Everything this adapter sends and decodes was read
+//! from the pinned release's inventory in `docs/reference/opencode-v1.18.30/`
+//! and checked against the pinned binary.
 //!
 //! Three properties are load-bearing and are asserted rather than assumed:
 //!
@@ -446,47 +450,47 @@ fn mcp_document(servers: &[Value]) -> Option<Value> {
 const SEALED_GITIGNORE: &str =
     "node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore";
 
-/// Whether the agent every turn runs as (`build`) asks before any tool runs.
+/// Whether the merged config the harness loaded asks before any tool runs.
 ///
-/// v2 appends the config's rules after its built-in defaults and takes the
-/// last rule that matches, so the node's own `* * ask` must be there, and
-/// nothing after it may allow anything but a scratch directory the runtime
-/// itself grants (`external_directory` for its tool output and `/tmp`).
-fn gate_holds(agents: &Value) -> Result<(), String> {
-    let list = agents["data"].as_array().or_else(|| agents.as_array());
-    let build = list
-        .into_iter()
-        .flatten()
-        .find(|agent| agent["id"] == "build" || agent["name"] == "build")
-        .ok_or_else(|| {
-            let ids: Vec<String> = list
-                .into_iter()
-                .flatten()
-                .map(|agent| agent["id"].as_str().unwrap_or("?").to_string())
-                .collect();
-            format!("the harness has no build agent (it lists {ids:?})")
-        })?;
-    let rules = build["permissions"]
-        .as_array()
-        .ok_or("the build agent lists no permissions")?;
-    let field = |rule: &Value, key: &str| rule[key].as_str().unwrap_or_default().to_string();
-    let last_ask = rules
-        .iter()
-        .rposition(|rule| {
-            field(rule, "action") == "*"
-                && field(rule, "resource") == "*"
-                && field(rule, "effect") == "ask"
-        })
-        .ok_or("the node's `* ask` rule is not in the build agent's ruleset")?;
-    if let Some(rule) = rules[last_ask..].iter().find(|rule| {
-        field(rule, "effect") == "allow"
-            && !(field(rule, "action") == "external_directory" && field(rule, "resource") != "*")
-    }) {
+/// The node writes every tool class `ask` and a `*` wildcard for the ones this
+/// build has never heard of (`all_ask`). What the harness reports back has to
+/// say the same: a wildcard that is not `ask`, or a named tool that is
+/// `allow`, is a rule from somewhere the node did not write — a worktree
+/// config, an ambient one — and a tool it names would run with no event at
+/// all (finding 1).
+fn gate_holds(config: &Value) -> Result<(), String> {
+    let Some(rules) = config["permission"].as_object() else {
         return Err(format!(
-            "a later rule allows {} on {}",
-            field(rule, "action"),
-            field(rule, "resource")
+            "the merged config carries no permission ruleset: {}",
+            config["permission"]
         ));
+    };
+    match rules.get("*").and_then(Value::as_str) {
+        Some("ask") => {}
+        other => {
+            return Err(format!(
+                "the wildcard rule is {other:?} rather than \"ask\""
+            ))
+        }
+    }
+    for (tool, rule) in rules {
+        let effect = match rule {
+            Value::String(effect) => effect.as_str(),
+            // An object rule is per-pattern; any `allow` in it is a grant.
+            Value::Object(patterns) => {
+                if let Some((pattern, _)) = patterns
+                    .iter()
+                    .find(|(_, effect)| effect.as_str() == Some("allow"))
+                {
+                    return Err(format!("{tool} allows {pattern:?} unasked"));
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        if effect == "allow" {
+            return Err(format!("{tool} is allowed unasked"));
+        }
     }
     Ok(())
 }
@@ -584,20 +588,17 @@ fn options() -> Vec<PermissionOption> {
 
 /// What a permission answer becomes on the wire. Only the allow-once option
 /// allows, and it allows exactly once: `always` is never sent, whatever was
-/// selected (finding 2).
+/// selected (finding 2). The v1 route takes `response` and nothing else.
 fn reply_body(decision: PermissionReply) -> Value {
     match decision {
         PermissionReply::Selected(option) if option == types::OPTION_ALLOW_ONCE => {
-            json!({ "reply": "once" })
+            json!({ "response": "once" })
         }
-        PermissionReply::Selected(_) | PermissionReply::Edited { .. } => json!({
-            "reply": "reject",
-            "message": "the operator declined this",
-        }),
-        PermissionReply::Cancelled => json!({
-            "reply": "reject",
-            "message": "no answer was given before this expired",
-        }),
+        PermissionReply::Selected(_)
+        | PermissionReply::Edited { .. }
+        | PermissionReply::Cancelled => {
+            json!({ "response": "reject" })
+        }
     }
 }
 
@@ -686,11 +687,11 @@ impl Client {
 #[async_trait]
 impl super::HarnessSnapshots for Client {
     async fn get(&self, path: &str) -> Result<Value, AdapterError> {
-        self.get_json(path).await
+        self.get_json(&self.scoped(path)).await
     }
 
     async fn post(&self, path: &str, body: Value) -> Result<Value, AdapterError> {
-        self.post_json(path, body).await
+        self.post_json(&self.scoped(path), body).await
     }
 }
 
@@ -928,17 +929,21 @@ impl HarnessAdapter for OpenCodeAdapter {
             // declaration, so a turn can say how much of it was used.
             context_size: context_window(&client, &spec.model).await,
             open: Arc::new(Mutex::new(HashMap::new())),
+            turn_state: Arc::new(Mutex::new(TurnState::default())),
+            claimed: Arc::new(Mutex::new(std::collections::HashSet::new())),
         };
-        tokio::spawn(pump.clone().durable_stream(tx.clone()));
-        tokio::spawn(pump.permission_stream(tx.clone()));
+        tokio::spawn(pump.event_stream(tx.clone()));
         tokio::spawn(async move {
             let code = done.await.ok();
             let _ = tx.send(HarnessEvent::Exited { code }).await;
         });
 
+        let (provider, model) = split_model(&spec.model)?;
         let handle = OpenCodeHandle {
             client,
             session_id: started.session_id,
+            provider,
+            model,
             turn,
             compat: HarnessCompat {
                 agent: Self::ID.into(),
@@ -1006,16 +1011,13 @@ async fn handshake(
                 // `catalogue_settled`: a session created before it settles
                 // accepts a prompt and then never runs it.
                 catalogue_settled(client, &provider, &model, stage).await?;
+                // The v1 session, in this session's workspace: `directory` on
+                // the request is what OpenCode treats as authorization to open
+                // that path, and the body names nothing else.
                 let created = client
-                    .post_json(
-                        "/api/session",
-                        json!({
-                            "model": { "providerID": provider, "id": model },
-                            "location": { "directory": spec.cwd_in_runner },
-                        }),
-                    )
+                    .post_json(&client.scoped("/session"), json!({}))
                     .await?;
-                let session_id = created["data"]["id"]
+                let session_id = created["id"]
                     .as_str()
                     .filter(|id| id.starts_with("ses_"))
                     .ok_or_else(|| {
@@ -1024,9 +1026,7 @@ async fn handshake(
                     .to_string();
                 // The session must be pinned to the workspace the node gave
                 // it. Anything else means a request opened another path.
-                let directory = created["data"]["location"]["directory"]
-                    .as_str()
-                    .unwrap_or_default();
+                let directory = created["directory"].as_str().unwrap_or_default();
                 if !same_directory(directory, &spec.cwd_in_runner) {
                     return Err(AdapterError::Protocol(format!(
                         "the harness opened {directory:?} rather than the workspace \
@@ -1034,30 +1034,15 @@ async fn handshake(
                         spec.cwd_in_runner
                     )));
                 }
-                // The ruleset the session runner will actually evaluate, asked
-                // of it rather than assumed from the file this node wrote: the
-                // v2 agent is built from a config loader that ignores
-                // `OPENCODE_CONFIG`, and a worktree config would be applied
-                // after ours. A harness that would run a tool unasked is not
-                // one this node launches.
-                let query: String =
-                    url::form_urlencoded::byte_serialize(spec.cwd_in_runner.as_bytes()).collect();
-                // The agents load after the location opens, and until they
-                // have the list is empty rather than an error.
-                *stage.lock().unwrap() = "waiting for the harness's agents to load".into();
-                let agents = loop {
-                    let agents = client
-                        .get_json(&format!("/api/agent?directory={query}"))
-                        .await?;
-                    if agents["data"]
-                        .as_array()
-                        .is_some_and(|list| !list.is_empty())
-                    {
-                        break agents;
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                };
-                if let Err(why) = gate_holds(&agents) {
+                // The ruleset the v1 session will actually evaluate, asked of
+                // the harness rather than assumed from the file this node
+                // wrote: `/config` is the merged document the v1 loader
+                // built, and a worktree config it read would be in it. A
+                // harness that would run a tool unasked is not one this node
+                // launches.
+                *stage.lock().unwrap() = "reading the harness's merged config".into();
+                let config = client.get_json(&client.scoped("/config")).await?;
+                if let Err(why) = gate_holds(&config) {
                     return Err(AdapterError::Protocol(format!(
                         "the harness would not ask before running a tool: {why}"
                     )));
@@ -1185,16 +1170,22 @@ async fn context_window(client: &Client, model: &str) -> Option<u64> {
         .filter(|context| *context > 0)
 }
 
-/// Reads the harness's two streams and turns them into the events the
-/// supervisor already knows how to persist.
+/// Reads the harness's server-wide stream and turns what names this session
+/// into the events the supervisor already knows how to persist.
+///
+/// The v1 route is what offers the model the node's MCP tools (finding 23),
+/// and it publishes on `GET /event`: instance-wide, `evt_…` ids, no sequence
+/// and no replay (finding 6). So idempotency is not a number here. Each thing
+/// the pump translates is one milestone of one part — a text part's final
+/// text, a tool part's call and its result, a step's usage — and each is
+/// claimed through the cursor exactly once, whether it arrived live, on a
+/// reconnect's overlap, or from the message list reconciliation reads.
 #[derive(Clone)]
 struct Pump {
     client: Client,
     session_id: String,
-    /// The node's own record of what has been ingested. It owns the sequence
-    /// the stream resumes from, so a restart resumes from the store rather
-    /// than from zero, and it is what decides whether an event that arrives
-    /// twice is translated twice.
+    /// The node's own record of what has been ingested: the claims above, the
+    /// identity map, and reconciliation after a dropped stream.
     cursor: Option<Arc<dyn crate::adapter::DurableCursor>>,
     turn: Arc<Mutex<Option<oneshot::Sender<TurnResult>>>>,
     /// The context window this node declared for the session's model, so a
@@ -1203,29 +1194,45 @@ struct Pump {
     /// Permission requests still waiting on the operator, by OpenCode's own
     /// request id.
     open: Arc<Mutex<HashMap<String, ()>>>,
+    /// What the turn in flight has spent so far, summed per step.
+    turn_state: Arc<Mutex<TurnState>>,
+    /// The claims, when no cursor holds them for the node: the adapter driven
+    /// bare still must not translate a re-delivered part twice.
+    claimed: Arc<Mutex<std::collections::HashSet<(String, String)>>>,
+}
+
+/// The milestones one part can reach, each recorded once.
+mod milestone {
+    pub const TEXT: &str = "text";
+    pub const REASONING: &str = "reasoning";
+    pub const TOOL_CALLED: &str = "tool_called";
+    pub const TOOL_DONE: &str = "tool_done";
+    pub const STEP: &str = "step";
 }
 
 impl Pump {
-    /// The durable per-session stream, which is the only one with replay: it
-    /// is anchored on the aggregate sequence and reconnects from the last one
-    /// seen, so a dropped connection loses nothing (finding 6).
-    async fn durable_stream(self, tx: mpsc::Sender<HarnessEvent>) {
-        let mut after: u64 = match &self.cursor {
-            Some(cursor) => cursor.resume_from().await,
-            None => 0,
-        };
-        let mut turn = TurnState::default();
+    /// Whether this milestone of this part is new to the node. Without a
+    /// cursor (the adapter driven bare, in a test) everything is.
+    fn claim(&self, part_id: &str, milestone: &str) -> bool {
+        match &self.cursor {
+            Some(cursor) => cursor.claim(part_id, milestone),
+            None => self
+                .claimed
+                .lock()
+                .unwrap()
+                .insert((part_id.to_string(), milestone.to_string())),
+        }
+    }
+
+    /// The one stream. Filtered to this session, reconnected when it drops,
+    /// and reconciled from the message list after every drop, because nothing
+    /// published while it was down comes back on its own.
+    async fn event_stream(self, tx: mpsc::Sender<HarnessEvent>) {
         loop {
-            // The node's record wins over this loop's memory: reconciliation
-            // may have ingested from a snapshot while the stream was down, and
-            // asking again for what it already recorded would double it.
-            if let Some(cursor) = &self.cursor {
-                after = after.max(cursor.resume_from().await);
-            }
-            let path = format!("/api/session/{}/event?after={after}", self.session_id);
+            self.sweep_pending(&tx).await;
             let response = self
                 .client
-                .request(reqwest::Method::GET, &path)
+                .request(reqwest::Method::GET, &self.client.scoped("/event"))
                 .header(reqwest::header::ACCEPT, "text/event-stream")
                 .send()
                 .await;
@@ -1233,23 +1240,14 @@ impl Pump {
                 Ok(response) if response.status().is_success() => {
                     let mut frames = sse(response);
                     while let Some(event) = frames.next().await {
-                        if let Some(seq) = event["durable"]["seq"].as_u64() {
-                            after = after.max(seq);
-                        }
-                        // An event the node has already ingested is dropped
-                        // here rather than translated again: the resumed
-                        // stream and a reconciled snapshot overlap by design.
-                        // The tap the native UI's live channel is built from
-                        // sees it first either way — a replay is a duplicate
-                        // for the record and still news to a browser that just
-                        // reconnected (finding 20).
                         if let Some(cursor) = &self.cursor {
+                            // The tap the native UI's live channel is built
+                            // from: this is the stream that page wants, and
+                            // the node is its one reader (finding 20).
                             cursor.observe(&event);
-                            if !cursor.admit(&event).await {
-                                continue;
-                            }
+                            cursor.admit(&event).await;
                         }
-                        if !self.on_durable(&event, &tx, &mut turn).await {
+                        if !self.on_event(&event, &tx).await {
                             return;
                         }
                     }
@@ -1273,139 +1271,224 @@ impl Pump {
             if tx.is_closed() {
                 return;
             }
-            // Whatever the stream missed comes back when it resumes; what it
-            // cannot carry — a permission raised while it was down, a session
-            // that is gone — is the node's to reconcile.
+            // Whatever the stream missed is in the harness's message list, and
+            // a permission raised while it was down is in its pending list;
+            // reconciliation reads both. A turn that ended meanwhile is
+            // closed there too, so the sweep below is only for asks.
             if let Some(cursor) = &self.cursor {
                 cursor.reconnected().await;
             }
+            self.finish_if_idle().await;
             tokio::time::sleep(RECONNECT_DELAY).await;
         }
     }
 
-    /// One durable event. Returns false when the pump should stop.
-    async fn on_durable(
-        &self,
-        event: &Value,
-        tx: &mpsc::Sender<HarnessEvent>,
-        turn: &mut TurnState,
-    ) -> bool {
+    /// A turn whose `session.idle` fell into the gap between two connections
+    /// would otherwise wait on the caller's timeout. Ask the harness.
+    async fn finish_if_idle(&self) {
+        if self.turn.lock().unwrap().is_none() {
+            return;
+        }
+        let Ok(status) = self
+            .client
+            .get_json(&self.client.scoped("/session/status"))
+            .await
+        else {
+            return;
+        };
+        let busy = status[&self.session_id]["type"]
+            .as_str()
+            .is_some_and(|kind| kind != "idle");
+        if !busy {
+            let result = self.turn_state.lock().unwrap().end();
+            self.finish_turn(result);
+        }
+    }
+
+    /// Every permission this session has pending, for the gap a dropped stream
+    /// leaves. The v1 list is instance-wide and a bare array (finding 5): it is
+    /// filtered to this session here.
+    async fn sweep_pending(&self, tx: &mpsc::Sender<HarnessEvent>) {
+        let Ok(pending) = self
+            .client
+            .get_json(&self.client.scoped("/permission"))
+            .await
+        else {
+            return;
+        };
+        for request in pending.as_array().into_iter().flatten() {
+            if request["sessionID"].as_str() == Some(self.session_id.as_str()) {
+                self.ask(request, tx).await;
+            }
+        }
+    }
+
+    /// One frame off `/event`. Returns false when the pump should stop.
+    async fn on_event(&self, event: &Value, tx: &mpsc::Sender<HarnessEvent>) -> bool {
+        if tx.is_closed() {
+            return false;
+        }
         let kind = event["type"].as_str().unwrap_or_default();
-        let data = &event["data"];
-        let message_id = data["assistantMessageID"].as_str().map(str::to_string);
+        let props = &event["properties"];
+        let session = props["sessionID"]
+            .as_str()
+            .or_else(|| props["part"]["sessionID"].as_str())
+            .or_else(|| props["info"]["sessionID"].as_str());
+        if session != Some(self.session_id.as_str()) {
+            return true;
+        }
         let send = |event: HarnessEvent| tx.send(event);
         match kind {
-            "session.next.text.ended" => {
-                let text = data["text"].as_str().unwrap_or_default().to_string();
-                if !text.is_empty()
-                    && send(HarnessEvent::MessageChunk { message_id, text })
-                        .await
-                        .is_err()
-                {
-                    return false;
-                }
+            "message.part.updated" => {
+                return self.on_part(&props["part"], tx).await;
             }
-            "session.next.reasoning.ended" => {
-                let text = data["text"].as_str().unwrap_or_default().to_string();
-                if !text.is_empty()
-                    && send(HarnessEvent::ThoughtChunk { message_id, text })
-                        .await
-                        .is_err()
-                {
-                    return false;
-                }
+            "session.idle" => {
+                let result = self.turn_state.lock().unwrap().end();
+                self.finish_turn(result);
             }
-            "session.next.tool.called" => {
-                let tool = data["tool"].as_str().unwrap_or("a tool").to_string();
-                if send(HarnessEvent::ToolCall(ToolCall {
-                    tool_call_id: data["callID"].as_str().unwrap_or_default().to_string(),
-                    title: tool,
-                    kind: Some("other".into()),
-                    status: Some("in_progress".into()),
-                    raw_input: Some(data["input"].clone()),
-                    content: Vec::new(),
-                    locations: Vec::new(),
-                }))
-                .await
-                .is_err()
-                {
-                    return false;
-                }
-            }
-            "session.next.tool.success" | "session.next.tool.failed" => {
-                let failed = kind.ends_with("failed");
-                if send(HarnessEvent::ToolCallUpdate(ToolCallUpdate {
-                    tool_call_id: data["callID"].as_str().unwrap_or_default().to_string(),
-                    status: Some(if failed {
-                        "failed".into()
-                    } else {
-                        "completed".into()
-                    }),
-                    kind: None,
-                    title: None,
-                    content: vec![if failed {
-                        data["error"].clone()
-                    } else {
-                        data["content"].clone()
-                    }],
-                    raw_output: Some(if failed {
-                        data["error"].clone()
-                    } else {
-                        data["structured"].clone()
-                    }),
-                }))
-                .await
-                .is_err()
-                {
-                    return false;
-                }
-            }
-            "session.next.step.ended" => {
-                let usage = usage_of(&data["tokens"]);
-                turn.add(&usage);
-                if send(HarnessEvent::Usage {
-                    size: self.context_size,
-                    used: Some(usage.charged()),
-                    // v2 publishes a hardcoded zero cost (providers.md §6.2),
-                    // so nothing is claimed here: the gateway's own count is
-                    // what a budget is spent against.
-                    cost_usd: data["cost"].as_f64().filter(|cost| *cost > 0.0),
-                })
-                .await
-                .is_err()
-                {
-                    return false;
-                }
-                let finish = data["finish"].as_str().unwrap_or_default();
-                if finish != "tool-calls" {
-                    self.finish_turn(turn.take(stop_reason(finish)));
-                }
-            }
-            "session.next.step.failed" => {
+            "session.error" => {
+                let error = &props["error"];
                 if send(HarnessEvent::Other(json!({
                     "method": kind,
-                    "params": data.clone(),
-                    "provider": data["error"]["type"],
-                    "message": data["error"]["message"],
+                    "params": props.clone(),
+                    "provider": error["name"],
+                    "message": error["data"]["message"].as_str()
+                        .or_else(|| error["message"].as_str())
+                        .unwrap_or("the harness reported an error"),
                 })))
                 .await
                 .is_err()
                 {
                     return false;
                 }
-                self.finish_turn(turn.take("error"));
+                let result = self.turn_state.lock().unwrap().take("error");
+                self.finish_turn(result);
             }
             // The harness's own "the provider refused, I am retrying" notice,
             // shaped so the supervisor's recogniser can be taught this
             // spelling without reaching back into the adapter.
-            "session.next.retried" => {
+            "session.status" if props["status"]["type"].as_str() == Some("retry") => {
                 let notice = HarnessEvent::Other(json!({
-                    "method": kind,
-                    "params": data.clone(),
-                    "attempt": data["attempt"],
-                    "message": data["error"]["message"],
+                    "method": "session.next.retried",
+                    "params": props["status"].clone(),
+                    "attempt": props["status"]["attempt"],
+                    "message": props["status"]["message"],
                 }));
                 if send(notice).await.is_err() {
+                    return false;
+                }
+            }
+            "permission.asked" => self.ask(props, tx).await,
+            // A question is an ask with words rather than a tool. Presenting
+            // it as a permission keeps one queue rather than two.
+            "question.asked" => self.ask_question(props, tx).await,
+            _ => {}
+        }
+        true
+    }
+
+    /// One part as the harness last reported it. A part is updated many times
+    /// on its way to done; only the state that is final for its kind is
+    /// translated, and only once.
+    async fn on_part(&self, part: &Value, tx: &mpsc::Sender<HarnessEvent>) -> bool {
+        let Some(part_id) = part["id"].as_str() else {
+            return true;
+        };
+        let message_id = part["messageID"].as_str().map(str::to_string);
+        let send = |event: HarnessEvent| tx.send(event);
+        match part["type"].as_str().unwrap_or_default() {
+            // Final once `time.end` is set; until then the text is partial and
+            // `message.part.delta` is carrying it.
+            "text" | "reasoning" if part["time"]["end"].is_null() => {}
+            kind @ ("text" | "reasoning") => {
+                let text = part["text"].as_str().unwrap_or_default().to_string();
+                let stone = if kind == "text" {
+                    milestone::TEXT
+                } else {
+                    milestone::REASONING
+                };
+                if text.is_empty() || !self.claim(part_id, stone) {
+                    return true;
+                }
+                let event = if kind == "text" {
+                    HarnessEvent::MessageChunk { message_id, text }
+                } else {
+                    HarnessEvent::ThoughtChunk { message_id, text }
+                };
+                if send(event).await.is_err() {
+                    return false;
+                }
+            }
+            "tool" => {
+                let state = &part["state"];
+                let call_id = part["callID"].as_str().unwrap_or_default().to_string();
+                // `pending` has no input yet; `running` is the call as the
+                // model made it.
+                let status = state["status"].as_str().unwrap_or_default();
+                if matches!(status, "running" | "completed" | "error")
+                    && self.claim(part_id, milestone::TOOL_CALLED)
+                    && send(HarnessEvent::ToolCall(ToolCall {
+                        tool_call_id: call_id.clone(),
+                        title: part["tool"].as_str().unwrap_or("a tool").to_string(),
+                        kind: Some("other".into()),
+                        status: Some("in_progress".into()),
+                        raw_input: Some(state["input"].clone()),
+                        content: Vec::new(),
+                        locations: Vec::new(),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+                match state["status"].as_str().unwrap_or_default() {
+                    status @ ("completed" | "error")
+                        if self.claim(part_id, milestone::TOOL_DONE) =>
+                    {
+                        let failed = status == "error";
+                        let output = if failed {
+                            state["error"].clone()
+                        } else {
+                            state["output"].clone()
+                        };
+                        if send(HarnessEvent::ToolCallUpdate(ToolCallUpdate {
+                            tool_call_id: call_id,
+                            status: Some(if failed {
+                                "failed".into()
+                            } else {
+                                "completed".into()
+                            }),
+                            kind: None,
+                            title: None,
+                            content: vec![output.clone()],
+                            raw_output: Some(output),
+                        }))
+                        .await
+                        .is_err()
+                        {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "step-finish" if self.claim(part_id, milestone::STEP) => {
+                let usage = usage_of(&part["tokens"]);
+                self.turn_state
+                    .lock()
+                    .unwrap()
+                    .add(&usage, part["reason"].as_str().unwrap_or_default());
+                if send(HarnessEvent::Usage {
+                    size: self.context_size,
+                    used: Some(usage.charged()),
+                    // v1 prices a step from the catalogue's cost table, which
+                    // this node declares as zero; the gateway's own count is
+                    // what a budget is spent against.
+                    cost_usd: part["cost"].as_f64().filter(|cost| *cost > 0.0),
+                })
+                .await
+                .is_err()
+                {
                     return false;
                 }
             }
@@ -1420,76 +1503,6 @@ impl Pump {
         }
     }
 
-    /// Permission and question asks. They are not on the durable stream —
-    /// only the server-wide one carries them — so this filters that stream to
-    /// this session and answers from the snapshot after every reconnect, so a
-    /// request raised while the stream was down is still presented.
-    async fn permission_stream(self, tx: mpsc::Sender<HarnessEvent>) {
-        loop {
-            self.sweep_pending(&tx).await;
-            let response = self
-                .client
-                .request(reqwest::Method::GET, "/api/event")
-                .header(reqwest::header::ACCEPT, "text/event-stream")
-                .send()
-                .await;
-            if let Ok(response) = response {
-                if response.status().is_success() {
-                    let mut frames = sse(response);
-                    while let Some(event) = frames.next().await {
-                        // This stream, not the durable one, is where the asks
-                        // and the v1 session events the native app renders
-                        // live. It is the node's one reader of it, so the
-                        // UI's synthesised channel is fed from here rather
-                        // than from a second connection of its own.
-                        if let Some(cursor) = &self.cursor {
-                            cursor.observe(&event);
-                        }
-                        if !self.on_ask(&event, &tx).await {
-                            return;
-                        }
-                    }
-                }
-            }
-            if tx.is_closed() {
-                return;
-            }
-            tokio::time::sleep(RECONNECT_DELAY).await;
-        }
-    }
-
-    /// Every permission this session has pending, for the gap a dropped stream
-    /// leaves: the server-wide stream has no replay at all (finding 6).
-    async fn sweep_pending(&self, tx: &mpsc::Sender<HarnessEvent>) {
-        let path = format!("/api/session/{}/permission", self.session_id);
-        let Ok(pending) = self.client.get_json(&path).await else {
-            return;
-        };
-        for request in pending["data"].as_array().into_iter().flatten() {
-            self.ask(request, tx).await;
-        }
-    }
-
-    async fn on_ask(&self, event: &Value, tx: &mpsc::Sender<HarnessEvent>) -> bool {
-        if tx.is_closed() {
-            return false;
-        }
-        let kind = event["type"].as_str().unwrap_or_default();
-        let data = &event["data"];
-        if data["sessionID"].as_str() != Some(self.session_id.as_str()) {
-            return true;
-        }
-        match kind {
-            "permission.v2.asked" | "permission.asked" => self.ask(data, tx).await,
-            // A question is an ask with words rather than a tool, and the
-            // reply route is shaped the same. Presenting it as a permission
-            // keeps one queue rather than two.
-            "question.v2.asked" | "question.asked" => self.ask_question(data, tx).await,
-            _ => {}
-        }
-        true
-    }
-
     async fn ask(&self, request: &Value, tx: &mpsc::Sender<HarnessEvent>) {
         let Some(id) = request["id"].as_str().map(str::to_string) else {
             return;
@@ -1497,13 +1510,7 @@ impl Pump {
         if self.open.lock().unwrap().insert(id.clone(), ()).is_some() {
             return;
         }
-        let action = request["action"].as_str().unwrap_or("unknown").to_string();
-        let resources: Vec<String> = request["resources"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|r| r.as_str().map(str::to_string))
-            .collect();
+        let (action, resources) = permission_words(request);
         let target = (!resources.is_empty()).then(|| resources.join("\n"));
         let (resource, command) = if action.eq_ignore_ascii_case("bash") {
             (None, target)
@@ -1516,7 +1523,7 @@ impl Pump {
                 request: PermissionRequest::managed(
                     // OpenCode's call id is the provider's own string: it is
                     // mapped, never adopted as a tracon identity.
-                    request["source"]["callID"].as_str().map(str::to_string),
+                    permission_call_id(request),
                     summarize(&action, &resources),
                     &action,
                     resource,
@@ -1541,7 +1548,7 @@ impl Pump {
         tokio::spawn(async move {
             let decision = reply_rx.await.unwrap_or(PermissionReply::Cancelled);
             open.lock().unwrap().remove(&id);
-            let path = format!("/api/session/{session_id}/permission/{id}/reply");
+            let path = client.scoped(&format!("/session/{session_id}/permissions/{id}"));
             if let Err(e) = client.post_json(&path, reply_body(decision)).await {
                 tracing::warn!(error = %e, "answering an OpenCode permission failed");
             }
@@ -1557,6 +1564,7 @@ impl Pump {
         let text = request["question"]
             .as_str()
             .or_else(|| request["text"].as_str())
+            .or_else(|| request["questions"][0]["question"].as_str())
             .unwrap_or("the harness asked a question")
             .to_string();
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1579,21 +1587,48 @@ impl Pump {
             return;
         }
         let client = self.client.clone();
-        let session_id = self.session_id.clone();
         tokio::spawn(async move {
             let decision = reply_rx.await.unwrap_or(PermissionReply::Cancelled);
             let allowed = matches!(&decision, PermissionReply::Selected(option)
                 if option == types::OPTION_ALLOW_ONCE);
-            let path = if allowed {
-                format!("/api/session/{session_id}/question/{id}/reply")
+            // The v1 reply carries answers, and the queue offers none: an
+            // allow is an empty answer, anything else a rejection.
+            let (path, body) = if allowed {
+                (format!("/question/{id}/reply"), json!({ "answers": [] }))
             } else {
-                format!("/api/session/{session_id}/question/{id}/reject")
+                (format!("/question/{id}/reject"), json!({}))
             };
-            if let Err(e) = client.post_json(&path, json!({})).await {
+            if let Err(e) = client.post_json(&client.scoped(&path), body).await {
                 tracing::warn!(error = %e, "answering an OpenCode question failed");
             }
         });
     }
+}
+
+/// The action and the resources a request names, in either vocabulary: v1's
+/// `permission`/`patterns`, or v2's `action`/`resources` as the node's own
+/// re-raised requests still spell them.
+fn permission_words(request: &Value) -> (String, Vec<String>) {
+    let action = request["permission"]
+        .as_str()
+        .or_else(|| request["action"].as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let resources: Vec<String> = request["patterns"]
+        .as_array()
+        .or_else(|| request["resources"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.as_str().map(str::to_string))
+        .collect();
+    (action, resources)
+}
+
+fn permission_call_id(request: &Value) -> Option<String> {
+    request["tool"]["callID"]
+        .as_str()
+        .or_else(|| request["source"]["callID"].as_str())
+        .map(str::to_string)
 }
 
 /// What the turn has accumulated so far. OpenCode reports per-step tokens; a
@@ -1602,14 +1637,24 @@ impl Pump {
 #[derive(Default)]
 struct TurnState {
     usage: Usage,
+    /// The last step's finish reason, which is the turn's once the session
+    /// goes idle: `tool-calls` steps are followed by more steps.
+    finish: String,
 }
 
 impl TurnState {
-    fn add(&mut self, usage: &Usage) {
+    fn add(&mut self, usage: &Usage, finish: &str) {
         self.usage.input_tokens += usage.input_tokens;
         self.usage.output_tokens += usage.output_tokens;
         self.usage.total_tokens += usage.total_tokens;
         self.usage.cached_read_tokens += usage.cached_read_tokens;
+        self.finish = finish.to_string();
+    }
+
+    /// The turn as it stands, with the stop reason its last step gave.
+    fn end(&mut self) -> TurnResult {
+        let finish = std::mem::take(&mut self.finish);
+        self.take(stop_reason(&finish))
     }
 
     fn take(&mut self, stop_reason: &str) -> TurnResult {
@@ -1684,6 +1729,10 @@ fn sse(response: reqwest::Response) -> impl futures_util::Stream<Item = Value> +
 pub struct OpenCodeHandle {
     client: Client,
     session_id: String,
+    /// The v1 prompt route names the model on every prompt; the session
+    /// itself holds none.
+    provider: String,
+    model: String,
     turn: Arc<Mutex<Option<oneshot::Sender<TurnResult>>>>,
     compat: HarnessCompat,
 }
@@ -1714,14 +1763,18 @@ impl HarnessHandle for OpenCodeHandle {
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError> {
         let (tx, rx) = oneshot::channel();
         *self.turn.lock().unwrap() = Some(tx);
-        let path = format!("/api/session/{}/prompt", self.session_id);
-        // The model is the session's, bound when it was created; the prompt
-        // route carries no model of its own.
-        if let Err(e) = self
+        // `prompt_async` answers 204 once the prompt is admitted and runs the
+        // turn behind it; the synchronous `message` route would hold the
+        // request open for the whole turn, permission waits included. The
+        // turn's end is `session.idle` on the stream.
+        let path = self
             .client
-            .post_json(&path, json!({ "prompt": { "text": text } }))
-            .await
-        {
+            .scoped(&format!("/session/{}/prompt_async", self.session_id));
+        let body = json!({
+            "model": { "providerID": self.provider, "modelID": self.model },
+            "parts": [{ "type": "text", "text": text }],
+        });
+        if let Err(e) = self.client.post_json(&path, body).await {
             self.turn.lock().unwrap().take();
             return Err(e);
         }
@@ -1923,52 +1976,34 @@ mod tests {
             .any(|(rel, body)| rel == "xdg/opencode/.gitignore" && body == SEALED_GITIGNORE));
     }
 
-    fn rules(list: &[(&str, &str, &str)]) -> Value {
-        json!({ "data": [{
-            "id": "build",
-            "permissions": list
-                .iter()
-                .map(|(a, r, e)| json!({ "action": a, "resource": r, "effect": e }))
-                .collect::<Vec<_>>(),
-        }]})
-    }
-
-    /// Shapes observed from the pinned binary's `GET /api/agent`.
+    /// Shapes of the pinned binary's merged `GET /config`.
     #[test]
-    fn the_gate_holds_only_when_the_node_s_asks_are_last() {
-        let defaults = [
-            ("*", "*", "allow"),
-            ("external_directory", "*", "ask"),
-            ("external_directory", "/tmp/opencode/*", "allow"),
-            ("read", "*", "allow"),
-        ];
-        // What every OpenCode session ran with: the built-in `* allow` alone.
-        assert!(gate_holds(&rules(&defaults)).is_err());
+    fn the_gate_holds_only_when_every_rule_asks() {
+        // What the node writes.
+        let mut ours = all_ask();
+        assert!(gate_holds(&json!({ "permission": ours })).is_ok());
 
-        let mut ours = defaults.to_vec();
-        ours.extend([
-            ("*", "*", "ask"),
-            ("bash", "*", "ask"),
-            ("edit", "*", "ask"),
-        ]);
-        ours.push((
-            "external_directory",
-            "/root/.opencode/run/data/opencode/tool-output/*",
-            "allow",
-        ));
-        assert!(gate_holds(&rules(&ours)).is_ok());
+        // No ruleset at all is the built-in `* allow`.
+        assert!(gate_holds(&json!({})).is_err());
+        assert!(gate_holds(&json!({ "permission": {} })).is_err());
 
-        // A worktree config is applied after the global one.
-        for widened in [
-            ("*", "*", "allow"),
-            ("bash", "git *", "allow"),
-            ("external_directory", "*", "allow"),
+        // A worktree or ambient config widening it, in each shape a rule takes.
+        for (tool, rule) in [
+            ("*", json!("allow")),
+            ("bash", json!("allow")),
+            ("bash", json!({ "git *": "allow", "*": "ask" })),
+            ("external_directory", json!("allow")),
         ] {
-            let mut after = ours.clone();
-            after.push(widened);
-            assert!(gate_holds(&rules(&after)).is_err(), "{widened:?}");
+            let mut widened = ours.clone();
+            widened[tool] = rule.clone();
+            assert!(
+                gate_holds(&json!({ "permission": widened })).is_err(),
+                "{tool}: {rule}"
+            );
         }
-        assert!(gate_holds(&json!({ "data": [] })).is_err());
+        // A pattern rule that only asks or denies is fine.
+        ours["bash"] = json!({ "rm *": "deny", "*": "ask" });
+        assert!(gate_holds(&json!({ "permission": ours })).is_ok());
     }
 
     /// An `oauth` record is what arms every bundled subscription plugin, and a
@@ -2150,15 +2185,15 @@ mod tests {
     #[test]
     fn a_permission_is_answered_once_and_never_always() {
         let allow = reply_body(PermissionReply::Selected(types::OPTION_ALLOW_ONCE.into()));
-        assert_eq!(allow["reply"], "once");
+        assert_eq!(allow["response"], "once");
         for decision in [
             PermissionReply::Selected(types::OPTION_REJECT_ONCE.into()),
             PermissionReply::Selected("allow_always".into()),
             PermissionReply::Cancelled,
         ] {
             let body = reply_body(decision);
-            assert_eq!(body["reply"], "reject");
-            assert_ne!(body["reply"], "always");
+            assert_eq!(body["response"], "reject");
+            assert_ne!(body["response"], "always");
         }
     }
 

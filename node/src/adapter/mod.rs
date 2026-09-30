@@ -390,9 +390,19 @@ pub trait DurableCursor: Send + Sync {
     /// own loop, and a tap that could block would stall ingestion.
     fn observe(&self, _event: &Value) {}
 
-    /// The stream dropped and is about to be reopened. What was missed comes
-    /// back through the resumed stream itself; this is where anything the
-    /// stream cannot carry — a permission raised while it was down, a session
+    /// Claim one milestone of one part — a text part's final text, a tool
+    /// part's call or result, a step's usage. True exactly once per
+    /// (part, milestone), however many times the part is delivered: the v1
+    /// stream has no sequence, so this is its idempotency (finding 23).
+    /// Synchronous by contract, like `observe`: it runs on the pump's loop.
+    fn claim(&self, _part_id: &str, _milestone: &str) -> bool {
+        true
+    }
+
+    /// The stream dropped and is about to be reopened. Nothing published while
+    /// it was down comes back on its own (finding 6), so this is where the
+    /// harness's message list and pending-permission list are read and
+    /// anything missed — a turn that ended, a permission raised, a session
     /// that no longer exists — is reconciled.
     async fn reconnected(&self);
 }
