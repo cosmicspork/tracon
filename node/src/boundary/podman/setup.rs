@@ -34,18 +34,27 @@ pub const DEFINITIONS_LABEL: &str = "io.tracon.definitions";
 /// `omp` by name — so OpenCode's is the safe answer rather than a panic in
 /// the setup path.
 pub fn harness_dir(cfg: &Config) -> &'static str {
-    match cfg.harness.id.as_str() {
+    harness_dir_for(&cfg.harness.id)
+}
+
+/// Each image the node runs, with the directory it is built from: the
+/// gateway, and one harness image per supported harness. Both harnesses are
+/// built because a session names its own harness and the node runs whichever
+/// it names; the configured `[harness] id` is only the default.
+pub fn images(cfg: &Config) -> Vec<(String, &'static str)> {
+    let mut out = vec![(cfg.boundary.gateway_image.clone(), "gateway")];
+    for id in crate::adapter::KNOWN {
+        out.push((cfg.podman_harness_image(id), harness_dir_for(id)));
+    }
+    out
+}
+
+/// The definitions directory for a harness id.
+pub fn harness_dir_for(harness_id: &str) -> &'static str {
+    match harness_id {
         "claude" => "harness-claude",
         _ => "harness-opencode",
     }
-}
-
-/// Each image the node runs, with the directory it is built from.
-pub fn images(cfg: &Config) -> Vec<(&str, &'static str)> {
-    vec![
-        (cfg.boundary.gateway_image.as_str(), "gateway"),
-        (cfg.boundary.harness_image.as_str(), harness_dir(cfg)),
-    ]
 }
 
 /// A digest of one image's embedded definitions: every file under `dir`, in
@@ -112,6 +121,7 @@ async fn ensure_images(cfg: &Config, rebuild: bool) -> Result<(), BoundaryError>
         std::fs::write(&dest, file.data.as_ref())?;
     }
     for (image, dir) in images(cfg) {
+        let image = image.as_str();
         let digest = definitions_digest(dir);
         let current = podman(&["image", "exists", image]).await.is_ok()
             && image_digest(image).await.as_deref() == Some(digest.as_str());

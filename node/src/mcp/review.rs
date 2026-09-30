@@ -979,6 +979,7 @@ async fn spawn_review_session(
         workspace_id: Some(workspace_id),
         parent_session: None,
         continued_from: None,
+        harness: None,
         model,
         budget_tokens: bindings["phases"]["review"]["budget_tokens"].as_i64(),
         initial_prompt: None,
@@ -987,7 +988,7 @@ async fn spawn_review_session(
         review_id: Some(review_id.to_string()),
         base_sha: Some(r.head_sha.clone()),
     };
-    match manager.create_local(spec).await {
+    match manager.create(spec).await {
         Ok(row) => {
             let _ = store.set_review_session(review_id, &row.id);
             manager.publish_queue().await;

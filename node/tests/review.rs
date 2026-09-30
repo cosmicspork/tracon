@@ -249,7 +249,6 @@ async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> 
         tx: Arc::new(tokio::sync::Mutex::new(None)),
         tokens: Arc::new(tokio::sync::Mutex::new(0)),
     });
-    manager.set_adapter(adapter.clone());
     let state = tracon::http::api::AppState {
         manager: manager.clone(),
         cfg,

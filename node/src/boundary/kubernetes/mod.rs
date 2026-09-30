@@ -51,7 +51,15 @@ impl KubeBackend {
     }
 
     pub fn spec(&self) -> Result<KubeSpec, String> {
-        Ok(KubeSpec::from_config(&self.cfg, self.env.clone()?))
+        self.spec_for(&self.cfg.harness.id)
+    }
+
+    pub fn spec_for(&self, harness_id: &str) -> Result<KubeSpec, String> {
+        Ok(KubeSpec::for_harness(
+            &self.cfg,
+            harness_id,
+            self.env.clone()?,
+        ))
     }
 
     pub async fn runner_for(&self, extra_mounts: Vec<Mount>) -> Result<KubeRunner, String> {
@@ -124,6 +132,10 @@ impl Backend for KubeBackend {
     }
 
     fn runner(&self, extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
+        Backend::runner_for(self, &self.cfg.harness.id, extra_mounts)
+    }
+
+    fn runner_for(&self, harness_id: &str, extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
         let client = match self.client.get() {
             Some(Ok(c)) => c.clone(),
             Some(Err(e)) => return Arc::new(Unavailable(e.clone())),
@@ -133,7 +145,7 @@ impl Backend for KubeBackend {
                 ))
             }
         };
-        match self.spec() {
+        match self.spec_for(harness_id) {
             Ok(mut spec) => {
                 spec.extra_mounts = extra_mounts;
                 Arc::new(KubeRunner::new(client, spec))

@@ -195,9 +195,8 @@ and nothing else — not the old conversation, not its plan, not what it had
 already tried. The archived session stays readable at its own id; ask the new
 session to read from it rather than assuming it can.
 
-One node runs one harness image, so `--harness` has to name the harness the
-node is configured for. To reopen under the other one, change `[harness] id`
-and run `tracon setup` first.
+`--harness` may name either supported harness: `tracon setup` builds an image
+for each, and a session runs the one it names whatever `[harness] id` says.
 
 ## Recovering the node itself
 

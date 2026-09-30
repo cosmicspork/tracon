@@ -1984,6 +1984,30 @@ fn hostname() -> String {
 }
 
 impl Config {
+    /// The Podman image a harness runs in. `[boundary] harness_image` names
+    /// the image for the configured `[harness] id`, as it always has; every
+    /// other supported harness runs from the image `tracon setup` builds for
+    /// it under the conventional name, so a node can hold both without the
+    /// operator naming both.
+    pub fn podman_harness_image(&self, harness_id: &str) -> String {
+        if harness_id == self.harness.id {
+            return self.boundary.harness_image.clone();
+        }
+        format!("localhost/tracon-harness-{harness_id}")
+    }
+
+    /// The same for a pod-hosted node: the configured image for the configured
+    /// harness, the release's own image for the other.
+    pub fn kubernetes_harness_image(&self, harness_id: &str) -> String {
+        if harness_id == self.harness.id {
+            return self.runtime.kubernetes.harness_image.clone();
+        }
+        format!(
+            "ghcr.io/cosmicspork/tracon-harness-{harness_id}:{}",
+            env!("CARGO_PKG_VERSION")
+        )
+    }
+
     /// Where `node.toml` lives.
     ///
     /// Guarded the way `state_dir` is, and for the same reason: the interface

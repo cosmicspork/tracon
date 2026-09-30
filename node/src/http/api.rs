@@ -794,7 +794,7 @@ pub async fn import_transfer(
         .branch
         .clone()
         .unwrap_or_else(|| format!("continuation/{}", id.get(..12).unwrap_or(&id)));
-    // Everything `create_local` would reject outright (an archived channel,
+    // Everything `create` would reject outright (an archived channel,
     // no resolvable model) is checked before materializing or reusing a
     // workspace, so a request doomed to fail never leaks one.
     let preflight_spec = NewSession {
@@ -812,6 +812,7 @@ pub async fn import_transfer(
         workspace_id: None,
         parent_session: None,
         continued_from: None,
+        harness: None,
     };
     if let Err(error) = s.manager.preflight(&preflight_spec) {
         let detail = error.to_string();
@@ -821,7 +822,7 @@ pub async fn import_transfer(
         return Err(error.into());
     }
     // A prior failed attempt may have already materialized and recorded a
-    // workspace (e.g. `create_local` rejected it after import succeeded).
+    // workspace (e.g. `create` rejected it after import succeeded).
     // Reuse it rather than importing — and leaking a runtime volume — again
     // on every retry. `export` is the real existence probe: a volume the
     // backend can no longer produce a valid tree from is not reusable.
@@ -879,8 +880,9 @@ pub async fn import_transfer(
         workspace_id: Some(workspace.id.clone()),
         parent_session: None,
         continued_from: None,
+        harness: None,
     };
-    let session = match s.manager.create_local(spec).await {
+    let session = match s.manager.create(spec).await {
         Ok(session) => session,
         Err(error) => {
             let detail = error.to_string();
@@ -1234,7 +1236,7 @@ pub async fn create_session(
     State(s): State<AppState>,
     Json(spec): Json<NewSession>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    let row = s.manager.create(spec, s.adapter.clone()).await?;
+    let row = s.manager.create(spec).await?;
     Ok((StatusCode::CREATED, Json(json!(row))))
 }
 
@@ -1310,6 +1312,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         workspace_id: c.workspace_id,
         parent_session: None,
         continued_from: None,
+        harness: None,
         branch: c.branch,
         work_item_id: Some(item.id.clone()),
         model: c.model,
@@ -1320,7 +1323,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         review_id: None,
         base_sha: None,
     };
-    match s.manager.create(spec, s.adapter.clone()).await {
+    match s.manager.create(spec).await {
         Ok(row) => Ok((
             StatusCode::CREATED,
             Json(json!({ "work": item, "session": row })),
@@ -1685,8 +1688,8 @@ pub async fn archive_legacy(
 
 #[derive(Deserialize)]
 pub struct ReopenBody {
-    /// The harness the new session runs. Must be the one this node is
-    /// configured for: one node runs one harness image.
+    /// The harness the new session runs: either supported one, since the
+    /// node holds an image for each.
     pub harness: String,
 }
 
@@ -1698,10 +1701,7 @@ pub async fn reopen_session(
     Path(id): Path<String>,
     Json(body): Json<ReopenBody>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    let row = s
-        .manager
-        .reopen(&id, &body.harness, s.adapter.clone())
-        .await?;
+    let row = s.manager.reopen(&id, &body.harness).await?;
     Ok((StatusCode::CREATED, Json(json!(row))))
 }
 
@@ -4804,7 +4804,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                             });
                     }
                     self.manager
-                        .create(spec, self.adapter.clone())
+                        .create(spec)
                         .await
                         .map(|row| json!(row))
                         .map_err(Into::into)

@@ -220,8 +220,8 @@ enum SessionCommand {
     /// note. The archived session is untouched and stays readable.
     Reopen {
         id: String,
-        /// The harness the new session runs. Must be the one this node is
-        /// configured for; one node runs one harness image.
+        /// The harness the new session runs: either supported one, since the
+        /// node holds an image for each.
         #[arg(long, default_value = "opencode")]
         harness: String,
     },
