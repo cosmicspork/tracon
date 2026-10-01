@@ -560,9 +560,13 @@ session is told to launch in it. Checks stay on the repository's image, so a har
 upgrade rebuilds only the layer and no evidence moves. The session's start event
 records the image it ran in, the repository image under it, and the reason when it ran
 in the harness image instead. Dependencies arrive by **preparation**: the entry's `prepare`
-commands run first on the same copy, with the repository's cache volume writable and an
-egress grant for exactly the hosts the entry names, revoked again before the check
-starts with the cache read-only. A grant is one client's: the node serves its own
+commands run once per run, on a copy of the candidate, with a cache writable and an
+egress grant for exactly the hosts the entry names, revoked again before any check
+starts; every check then runs on its own copy of the prepared tree with the cache
+read-only. That cache is the run's own, copied from the repository's base cache and
+removed with the run. The base is written by one thing only — a preparation of the
+default branch, made when the repository's image is built — so a candidate's install,
+which may run the candidate's own scripts, can reach its own evidence and nobody else's. A grant is one client's: the node serves its own
 CONNECT proxy behind a second forward in the gateway, each preparation, QA browser run
 and session presents the token it was issued as proxy credentials, and each is filtered
 by its own host set — so nothing one may reach is reachable by another, none waits for

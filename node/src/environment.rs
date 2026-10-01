@@ -98,8 +98,9 @@ pub struct RepoEnvironment {
     /// when the entry opens it to the repository's sessions. What a session
     /// is told it can reach, in the words its operator used.
     pub session_egress: Vec<String>,
-    /// The repository's dependency cache: written by preparation, read-only
-    /// to a check.
+    /// The repository's base dependency cache: written only by a preparation
+    /// of the default branch, and never mounted into a candidate's run. Each
+    /// candidate, and each session, starts its own cache as a copy of it.
     pub cache_volume: String,
 }
 
@@ -172,7 +173,7 @@ pub fn environment_for(cfg: &Config, store: &Store, repo: Option<&Path>) -> Repo
             .filter(|entry| entry.session_egress && entry.egress_hosts().is_ok())
             .map(|entry| entry.egress.clone())
             .unwrap_or_default(),
-        cache_volume: format!("tracon-cache-{}", &hex::encode(hash.finalize())[..24]),
+        cache_volume: format!("tracon-cache-base-{}", &hex::encode(hash.finalize())[..24]),
         image,
         image_source,
     }
@@ -676,8 +677,8 @@ mod tests {
         assert_eq!(built.image, image);
         assert_eq!(built.image_source, REPOSITORY_DOCKERFILE);
 
-        // One cache per repository and image: two repositories never share
-        // what their preparations fetched.
+        // One base cache per repository and image: two repositories never
+        // share what their preparations fetched.
         assert_ne!(app.cache_volume, notes.cache_volume);
         assert_eq!(
             app.cache_volume,

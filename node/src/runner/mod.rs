@@ -379,6 +379,13 @@ pub mod local {
             )
             .map_err(|e| BoundaryError::Other(e.to_string()))
         }
+        async fn clone_volume(&self, source: &str, destination: &str) -> Result<(), BoundaryError> {
+            crate::boundary::clone_directory_volume(
+                &Config::state_dir().join("local-runtime"),
+                source,
+                destination,
+            )
+        }
         async fn export_workspace(
             &self,
             volume: &str,

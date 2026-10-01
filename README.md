@@ -379,8 +379,8 @@ image it got, and why when it is not the repository's: a base the harness binary
 run on (a musl image, one with no Git) leaves the session in the harness image rather
 than failing to start. A repository with no image yet builds one at its first session,
 which waits; one whose Dockerfile changed starts on the image it has and is rebuilt behind
-the session. Each workspace gets its own dependency cache at `/cache`, which no check
-reads. The layer is root, like every run here, so a tool the Dockerfile installed under
+the session. Each workspace gets its own dependency cache at `/cache`, started as a copy of
+the repository's base cache, which no check reads. The layer is root, like every run here, so a tool the Dockerfile installed under
 another user's home has to be readable and executable by others. OpenCode sessions, and
 sessions on Kubernetes, stay in the harness image.
 
@@ -398,18 +398,23 @@ keep the harness proxy and reach no registry either way.
 
 A check has no network. A repository whose checks need its dependencies names `prepare`
 commands (`bun install --frozen-lockfile`, `composer install`, `cargo fetch --locked`)
-and the registries they may reach (`egress = ["npm", "crates"]`). Those run first, on the
-same copy of the candidate, with the repository's dependency cache writable and proxy
-credentials of their own that reach exactly those hosts; the credentials are revoked
-before the check starts, and the check gets the cache read-only. Three things follow,
-and they are yours to weigh. An install runs the candidate's own lifecycle scripts unless
-the command says otherwise (`--ignore-scripts`, `--no-scripts`), and that is the one step
-that can write the cache a later candidate's check reads; `tracon gc --caches` empties
-it. The grant filters by host, not by method, so a registry that accepts uploads accepts
-them from that preparation — and from nothing else: a session, a QA browser run and
-another preparation each hold their own grant, are refused each other's hosts, and never
-wait for one another. And the image's default user has to be able to write `/work` and
-`/cache`, which under rootless Podman means it runs as root.
+and the registries they may reach (`egress = ["npm", "crates"]`). Those run once per
+run, before the first check that actually executes, on a copy of the candidate, with a
+dependency cache writable and proxy credentials of their own that reach exactly those
+hosts; the credentials are revoked before any check starts. Each check then gets its own
+copy of the prepared tree and the cache read-only, so one check's output is never
+another's input and none of them prepares again. Three things follow, and they are yours
+to weigh. An install runs the candidate's own lifecycle scripts unless the command says
+otherwise (`--ignore-scripts`, `--no-scripts`); what it can write is that run's cache and
+no other. The cache a run prepares into is its own copy of the repository's *base* cache,
+which only a preparation of the default branch ever writes — the node makes one when it
+builds the repository's image — and it is removed with the run, so nothing one candidate
+installed is ever in another's evidence; `tracon gc --caches` empties the base. The grant
+filters by host, not by method, so a registry that accepts uploads accepts them from that
+preparation — and from nothing else: a session, a QA browser run and another preparation
+each hold their own grant, are refused each other's hosts, and never wait for one
+another. And the image's default user has to be able to write `/work` and `/cache`, which
+under rootless Podman means it runs as root.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
 a request for changes. Approval publishes exactly the reviewed bytes with the brokered
 credential; if the branch moved since submit, approval is refused and the changed files
@@ -778,8 +783,8 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # context = "."                     # the build context; left out, the Dockerfile's own directory
 # checks = ["just check"]           # in place of [supervision] checks
 # timeout_secs = 1800               # in place of [supervision] timeout_secs; covers preparation too
-# prepare = ["bun install --frozen-lockfile"]  # run before each check, on the same copy, with the
-                                    # dependency cache writable and `egress` reachable
+# prepare = ["bun install --frozen-lockfile"]  # run once before a run's checks, on a copy each check
+                                    # is then copied from, with a cache writable and `egress` reachable
 # egress = ["npm"]                  # what `prepare` may reach: crates, npm, pypi, packagist, github, or a
                                     # literal host name. Empty is no egress at all
 # session_egress = true             # open `egress` to this repository's sessions too, so an agent can

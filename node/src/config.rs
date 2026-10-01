@@ -1388,11 +1388,11 @@ pub struct Repo {
     /// preparation and checks take longer than the rest.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
-    /// Commands run before each required check, in the same image and on the
-    /// same copy of the candidate, with the repository's dependency cache
-    /// writable and `egress` reachable. This is where `bun install`,
-    /// `composer install` and `cargo fetch` belong: the check that follows
-    /// has neither.
+    /// Commands run once before a run's required checks, in the same image,
+    /// on a copy of the candidate every check is then copied from, with a
+    /// dependency cache writable and `egress` reachable. This is where
+    /// `bun install`, `composer install` and `cargo fetch` belong: the checks
+    /// that follow have neither.
     pub prepare: Vec<String>,
     /// What preparation may reach: a preset (`crates`, `npm`, `pypi`,
     /// `packagist`, `github`) or a literal host name. Empty means preparation

@@ -94,6 +94,19 @@ pub struct CheckReport {
     /// to give: it is neither a pass nor a failure of the candidate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cancelled: Option<String>,
+    /// The preparation this run made, when it made one: once, before the
+    /// first check that actually executed. A run whose checks were all reused
+    /// prepared nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepared: Option<Preparation>,
+}
+
+/// One preparation of a candidate: the repository's `prepare` commands, run
+/// once on a copy every check of the run then starts from.
+#[derive(Debug, Clone, Serialize)]
+pub struct Preparation {
+    pub ok: bool,
+    pub ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,6 +165,9 @@ pub async fn run_required(
     let mut results = Vec::with_capacity(commands.len());
     let mut any_reused = false;
     let mut cancelled = None;
+    // Made by the first check that actually executes and shared by the rest:
+    // the candidate is prepared once, however many checks it has.
+    let mut prepared: Option<(Result<Prepared, Stopped>, u64)> = None;
 
     for (index, command) in commands.iter().enumerate() {
         // Nothing new is started for work that has been withdrawn.
@@ -276,13 +292,56 @@ pub async fn run_required(
             .insert_check_run(&run)
             .map_err(|error| error.to_string())?;
 
-        // A runtime volume seeded from the immutable candidate snapshot,
-        // scoped to this one check execution: never a host path handed to the
-        // runner. Each check gets its own writable copy so its mutations are
-        // never visible to another check and never reach the candidate's own
-        // read-only evidence.
+        // A runtime volume scoped to this one check execution, never a host
+        // path handed to the runner: the immutable candidate snapshot, or a
+        // copy of what preparation made of it. Each check gets its own
+        // writable copy so its mutations are never visible to another check
+        // and never reach the candidate's own read-only evidence.
         let scratch_volume = format!("tracon-check-{run_id}");
-        if let Err(error) = backend.import_volume(&scratch_volume, snapshot).await {
+        let started = std::time::Instant::now();
+        let mut env = Vec::new();
+        let mut mounts = vec![Mount::volume(scratch_volume.clone(), "/work", false)];
+        let mut unprepared = None;
+        let staged = if environment.prepare.is_empty() {
+            backend
+                .import_writable(&scratch_volume, snapshot)
+                .await
+                .map_err(|error| error.to_string())
+        } else {
+            if prepared.is_none() {
+                let preparing = std::time::Instant::now();
+                let outcome = prepare_candidate(
+                    backend,
+                    runner.as_ref(),
+                    &environment,
+                    snapshot,
+                    &run_id,
+                    cancel,
+                )
+                .await;
+                prepared = Some((outcome, preparing.elapsed().as_millis() as u64));
+            }
+            match prepared.as_ref().map(|(outcome, _)| outcome) {
+                Some(Ok(ready)) => {
+                    // The check reads what preparation fetched and can add
+                    // nothing to it: candidate code runs here, and a cache it
+                    // could write is one its own next check would be built on.
+                    env = cache_env();
+                    env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
+                    mounts.push(Mount::volume(ready.cache.clone(), "/cache", true));
+                    backend
+                        .clone_volume(&ready.work, &scratch_volume)
+                        .await
+                        .map_err(|error| error.to_string())
+                }
+                Some(Err(stopped)) => {
+                    unprepared = Some(stopped.clone());
+                    Ok(())
+                }
+                None => unreachable!("preparation was just recorded"),
+            }
+        };
+        if let Err(error) = staged {
             release_check_volume(backend, &scratch_volume).await;
             let message = format!("could not stage check workspace: {error}");
             store
@@ -295,7 +354,7 @@ pub async fn run_required(
                     Some(0),
                     &with_candidate_tree(
                         candidate,
-                        json!({ "execution_backend": backend.kind(), "workspace_error": error.to_string() }),
+                        json!({ "execution_backend": backend.kind(), "workspace_error": error }),
                     ),
                 )
                 .map_err(|error| error.to_string())?;
@@ -311,41 +370,14 @@ pub async fn run_required(
             });
             continue;
         }
-        let started = std::time::Instant::now();
         let runner_name = format!("tracon-c-{index}-{}", &hash(&run_id)[..12]);
         // What the runner will actually call this execution, not what it was
         // asked to: a kill has to name the same thing the runtime named, or
         // it stops nothing at all.
         let running_name = runner.capture_name(&runner_name);
-        // One deadline for the whole execution: a preparation that eats the
-        // budget leaves none for the check, rather than doubling it.
+        // The check's own budget. Preparation had its own, once, so a slow
+        // install is not taken out of the first check's time and no other's.
         let deadline = tokio::time::Instant::now() + timeout;
-        let mut env = Vec::new();
-        let mut mounts = vec![Mount::volume(scratch_volume.clone(), "/work", false)];
-        let mut unprepared = None;
-        if !environment.prepare.is_empty() {
-            unprepared = prepare_check_copy(
-                backend,
-                runner.as_ref(),
-                &environment,
-                &scratch_volume,
-                &runner_name,
-                deadline,
-                cancel,
-            )
-            .await
-            .err();
-            // The check reads what preparation fetched and can add nothing to
-            // it: candidate code runs here, and a cache it could write is a
-            // cache the next candidate's evidence would be built on.
-            env = cache_env();
-            env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
-            mounts.push(Mount::volume(
-                environment.cache_volume.clone(),
-                "/cache",
-                true,
-            ));
-        }
         let cmd = RunnerCommand {
             argv: vec!["sh".into(), "-lc".into(), command.clone()],
             env,
@@ -511,6 +543,12 @@ pub async fn run_required(
             missing_tool,
         });
     }
+    // The checks are over; the tree they were copied from, and the cache
+    // they read, are nobody's now.
+    if let Some((Ok(ready), _)) = &prepared {
+        release_check_volume(backend, &ready.work).await;
+        release_check_volume(backend, &ready.cache).await;
+    }
 
     Ok(CheckReport {
         candidate_id: candidate.id.clone(),
@@ -527,6 +565,10 @@ pub async fn run_required(
         image: recorded_image,
         image_source: environment.image_source,
         cancelled,
+        prepared: prepared.map(|(outcome, ms)| Preparation {
+            ok: outcome.is_ok(),
+            ms,
+        }),
     })
 }
 
@@ -557,7 +599,8 @@ fn missing_tool(command: &str, output: &str) -> String {
 }
 
 /// How an execution ended without its command finishing.
-enum Stopped {
+#[derive(Clone)]
+pub(crate) enum Stopped {
     Cancelled {
         reason: String,
         killed: String,
@@ -565,6 +608,16 @@ enum Stopped {
     TimedOut,
     /// Preparation did not complete, so the check was never started.
     Unprepared(String),
+}
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Stopped::Cancelled { reason, .. } => write!(f, "cancelled: {reason}"),
+            Stopped::TimedOut => write!(f, "timed out"),
+            Stopped::Unprepared(why) => write!(f, "{why}"),
+        }
+    }
 }
 
 /// Drive `work` until it finishes, the deadline passes (`Err(None)`), or the
@@ -597,19 +650,78 @@ async fn until_stopped<T>(
     Err(stopped)
 }
 
-/// Run the repository's `prepare` commands against one check's own copy of the
-/// candidate: same image, the dependency cache writable, and the scoped egress
-/// gateway open to the repository's hosts for exactly as long as they run.
+/// A candidate as preparation left it: the tree every check of the run is
+/// copied from, and the cache they read.
+struct Prepared {
+    work: String,
+    cache: String,
+}
+
+/// Prepare a candidate once: its snapshot in a volume of its own, the
+/// repository's `prepare` commands run on it in the check image, with a cache
+/// writable and its own egress grant for exactly as long as they run. Each
+/// check of the run then starts from a copy of the result.
+///
+/// The cache is this run's alone. It starts as a copy of the repository's
+/// base cache — which only a preparation of the default branch ever writes —
+/// and is removed with the run, so nothing another candidate installed can be
+/// in it and nothing this one installs outlives its own evidence.
 ///
 /// The commands are the operator's; what they execute may not be — an install
 /// runs the candidate's own lifecycle scripts unless the command says
 /// otherwise — which is why this is the only step the cache is writable in and
 /// why it holds no credential.
-async fn prepare_check_copy(
+async fn prepare_candidate(
     backend: &dyn Backend,
     runner: &dyn Runner,
     environment: &RepoEnvironment,
-    scratch_volume: &str,
+    snapshot: &Path,
+    run_id: &str,
+    cancel: &dyn Cancel,
+) -> Result<Prepared, Stopped> {
+    let ready = Prepared {
+        work: format!("tracon-prep-{run_id}"),
+        cache: format!("tracon-prep-cache-{run_id}"),
+    };
+    let staged = async {
+        backend.import_writable(&ready.work, snapshot).await?;
+        backend
+            .clone_volume(&environment.cache_volume, &ready.cache)
+            .await
+    };
+    let steps = async {
+        staged.await.map_err(|error| {
+            Stopped::Unprepared(format!("could not stage preparation: {error}"))
+        })?;
+        run_preparation(
+            backend,
+            runner,
+            environment,
+            (&ready.work, &ready.cache),
+            &format!("tracon-p-{}", &hash(run_id)[..12]),
+            tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs),
+            cancel,
+        )
+        .await
+    };
+    match steps.await {
+        Ok(()) => Ok(ready),
+        Err(stopped) => {
+            release_check_volume(backend, &ready.work).await;
+            release_check_volume(backend, &ready.cache).await;
+            Err(stopped)
+        }
+    }
+}
+
+/// Run `prepare` on `work` with `cache` writable. Shared by a candidate's
+/// preparation and by the default branch's, which is what fills the base
+/// cache candidates start from.
+pub(crate) async fn run_preparation(
+    backend: &dyn Backend,
+    runner: &dyn Runner,
+    environment: &RepoEnvironment,
+    (work, cache): (&str, &str),
     runner_name: &str,
     deadline: tokio::time::Instant,
     cancel: &dyn Cancel,
@@ -633,8 +745,8 @@ async fn prepare_check_copy(
             argv: vec!["sh".into(), "-lc".into(), command.clone()],
             env,
             mounts: vec![
-                Mount::volume(scratch_volume.to_string(), "/work", false),
-                Mount::volume(environment.cache_volume.clone(), "/cache", false),
+                Mount::volume(work.to_string(), "/work", false),
+                Mount::volume(cache.to_string(), "/cache", false),
             ],
             workdir: Some("/work".into()),
             name,
@@ -1324,6 +1436,19 @@ mod tests {
         prepare_exit: i32,
     }
 
+    /// A run's volume by what it is for, without the id that names the run.
+    fn volume_kind(name: &str) -> &'static str {
+        [
+            ("tracon-prep-cache-", "run cache"),
+            ("tracon-prep-", "prepared tree"),
+            ("tracon-check-", "check copy"),
+            ("tracon-cache-base-", "base cache"),
+        ]
+        .into_iter()
+        .find(|(prefix, _)| name.starts_with(prefix))
+        .map_or("unknown", |(_, kind)| kind)
+    }
+
     struct RecordingRunner(std::sync::Arc<Recorded>);
 
     #[async_trait::async_trait]
@@ -1413,6 +1538,18 @@ mod tests {
             "/home/harness".into()
         }
         async fn reconcile(&self, _names: &[String]) {}
+        async fn clone_volume(
+            &self,
+            source: &str,
+            destination: &str,
+        ) -> Result<(), crate::boundary::BoundaryError> {
+            self.0.log.lock().unwrap().push(format!(
+                "clone {} > {}",
+                volume_kind(source),
+                volume_kind(destination)
+            ));
+            Ok(())
+        }
         fn egress_grant(
             &self,
             spec: crate::gateway::proxy::GrantSpec,
@@ -1470,10 +1607,11 @@ mod tests {
     }
 
     /// A repository's entry decides which checks run and what happens before
-    /// them. Preparation gets the cache writable and the scoped gateway open
-    /// to exactly the repository's hosts; the gateway is closed again before
-    /// the check starts, and the check gets the same cache read-only with
-    /// nothing pointing it at the scoped proxy.
+    /// them. Preparation gets the run's own cache writable — a copy of the
+    /// repository's base cache, never the base itself — and an egress grant
+    /// for exactly the repository's hosts; the grant is revoked before the
+    /// check starts, and the check runs on a copy of the prepared tree with
+    /// the same cache read-only and nothing pointing it at the proxy.
     #[tokio::test]
     async fn preparation_fetches_with_egress_and_the_check_runs_without_it() {
         let (store, cfg, candidate) = prepared_repo("prep1");
@@ -1504,12 +1642,15 @@ mod tests {
         assert_eq!(
             *recorded.log.lock().unwrap(),
             [
+                "clone base cache > run cache",
                 "open registry.npmjs.org",
                 "run bun install --frozen-lockfile",
                 "close",
+                "clone prepared tree > check copy",
                 "run just check",
             ]
         );
+        assert!(report.prepared.as_ref().is_some_and(|prepared| prepared.ok));
         {
             let commands = recorded.commands.lock().unwrap();
             let (prepare, check) = (&commands[0], &commands[1]);
@@ -1526,13 +1667,11 @@ mod tests {
                     Some("/cache/bun")
                 );
             }
-            assert_eq!(
-                prepare.mounts[0].volume, check.mounts[0].volume,
-                "preparation installs into the copy the check then runs against"
-            );
+            assert_eq!(volume_kind(&prepare.mounts[0].volume), "prepared tree");
+            assert_eq!(volume_kind(&check.mounts[0].volume), "check copy");
             assert!(!prepare.mounts[1].read_only && check.mounts[1].read_only);
             assert_eq!(prepare.mounts[1].volume, check.mounts[1].volume);
-            assert!(prepare.mounts[1].volume.starts_with("tracon-cache-"));
+            assert_eq!(volume_kind(&prepare.mounts[1].volume), "run cache");
             // Its own credentials, in both spellings of the variable.
             assert_eq!(
                 var(prepare, "HTTPS_PROXY").as_deref(),
@@ -1560,6 +1699,7 @@ mod tests {
         .await
         .unwrap();
         assert!(again.reused);
+        assert!(again.prepared.is_none());
         assert_eq!(recorded.commands.lock().unwrap().len(), 2);
 
         // A changed preparation is a changed check: the pass is not borrowed.
@@ -1625,13 +1765,126 @@ mod tests {
         assert_eq!(
             *recorded.log.lock().unwrap(),
             [
+                "clone base cache > run cache",
                 "open registry.npmjs.org",
                 "run bun install --frozen-lockfile",
                 "close",
+                "clone base cache > run cache",
                 "open registry.npmjs.org",
                 "run bun install --frozen-lockfile",
                 "close",
             ]
         );
+    }
+
+    /// A candidate is prepared once however many checks it has: each check
+    /// starts from its own copy of the prepared tree, so one check's mess is
+    /// never another's input, and none of them prepares again. A preparation
+    /// that fails stops every check of the run, and is not repeated for each.
+    #[tokio::test]
+    async fn one_preparation_serves_every_check_of_the_run() {
+        let (store, mut cfg, candidate) = prepared_repo("prep3");
+        cfg.repo[0].checks = Some(vec!["just check".into(), "just test".into()]);
+        let recorded = std::sync::Arc::new(Recorded::default());
+        let backend = RecordingBackend(recorded.clone());
+        let snapshot = std::env::temp_dir();
+        let report = run_required(
+            &backend,
+            &cfg,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
+        assert!(report.all_required_passed, "{:?}", report.results);
+        assert_eq!(
+            *recorded.log.lock().unwrap(),
+            [
+                "clone base cache > run cache",
+                "open registry.npmjs.org",
+                "run bun install --frozen-lockfile",
+                "close",
+                "clone prepared tree > check copy",
+                "run just check",
+                "clone prepared tree > check copy",
+                "run just test",
+            ]
+        );
+        {
+            let commands = recorded.commands.lock().unwrap();
+            assert_ne!(
+                commands[1].mounts[0].volume, commands[2].mounts[0].volume,
+                "each check has its own copy of the prepared tree"
+            );
+            assert_eq!(commands[1].mounts[1].volume, commands[2].mounts[1].volume);
+        }
+
+        let failing = std::sync::Arc::new(Recorded {
+            prepare_exit: 1,
+            ..Default::default()
+        });
+        let (store, mut cfg, candidate) = prepared_repo("prep4");
+        cfg.repo[0].checks = Some(vec!["just check".into(), "just test".into()]);
+        let report = run_required(
+            &RecordingBackend(failing.clone()),
+            &cfg,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
+        assert!(report
+            .prepared
+            .as_ref()
+            .is_some_and(|prepared| !prepared.ok));
+        assert_eq!(report.results.len(), 2);
+        assert!(report
+            .results
+            .iter()
+            .all(|result| result.outcome == "interrupted"
+                && result.tail.contains("the check was not run")));
+        assert_eq!(failing.commands.lock().unwrap().len(), 1);
+    }
+
+    /// What one candidate installs never reaches another's evidence. Each
+    /// run's cache is its own copy of the repository's base cache, and the
+    /// base itself is never mounted where a candidate could write it.
+    #[tokio::test]
+    async fn no_candidate_writes_a_cache_another_candidate_reads() {
+        let recorded = std::sync::Arc::new(Recorded::default());
+        let backend = RecordingBackend(recorded.clone());
+        let snapshot = std::env::temp_dir();
+        for id in ["iso1", "iso2"] {
+            let (store, cfg, candidate) = prepared_repo(id);
+            run_required(
+                &backend,
+                &cfg,
+                &store,
+                &candidate,
+                &snapshot,
+                false,
+                &RunToCompletion,
+            )
+            .await
+            .unwrap();
+        }
+        let commands = recorded.commands.lock().unwrap();
+        let caches: Vec<&crate::runner::Mount> = commands
+            .iter()
+            .flat_map(|cmd| cmd.mounts.iter().filter(|mount| mount.target == "/cache"))
+            .collect();
+        assert_eq!(caches.len(), 4, "two runs: a preparation and a check each");
+        assert!(caches
+            .iter()
+            .all(|mount| volume_kind(&mount.volume) == "run cache"));
+        assert_eq!(caches[0].volume, caches[1].volume);
+        assert_eq!(caches[2].volume, caches[3].volume);
+        assert_ne!(caches[0].volume, caches[2].volume);
     }
 }

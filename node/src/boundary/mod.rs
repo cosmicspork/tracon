@@ -190,6 +190,19 @@ pub trait Backend: Send + Sync {
         volume: &str,
         source: &std::path::Path,
     ) -> Result<(), BoundaryError>;
+    /// As `import_volume`, for a tree a run will work in. A candidate's
+    /// snapshot is read-only on the node — directories and files alike — and
+    /// carries those modes into the volume, where a run that is root with no
+    /// capabilities cannot override them: it could not create `target/` or
+    /// `node_modules/`, or let a formatter fix a file. A backend whose import
+    /// does not carry modes has nothing to do.
+    async fn import_writable(
+        &self,
+        volume: &str,
+        source: &std::path::Path,
+    ) -> Result<(), BoundaryError> {
+        self.import_volume(volume, source).await
+    }
     /// Copy a runtime-owned directory into a node-owned staging path. Callers
     /// validate the snapshot before interpreting it as source or Git data.
     async fn export_volume(
@@ -248,6 +261,23 @@ pub trait Backend: Send + Sync {
     async fn list_volumes(&self) -> Result<Vec<VolumeInfo>, BoundaryError> {
         Ok(Vec::new())
     }
+    /// Whether the runtime holds a volume of this name.
+    async fn volume_exists(&self, volume: &str) -> bool {
+        self.list_volumes()
+            .await
+            .is_ok_and(|volumes| volumes.iter().any(|held| held.name == volume))
+    }
+    /// Make `destination` a copy of `source`, inside the runtime: neither is
+    /// read by the node, so what a build or an install left in one (symlinks,
+    /// build output) is carried as it is. A source that does not exist leaves
+    /// an empty destination.
+    async fn clone_volume(&self, source: &str, destination: &str) -> Result<(), BoundaryError> {
+        let _ = destination;
+        Err(BoundaryError::Other(format!(
+            "the {} backend cannot copy runtime volume {source}",
+            self.kind()
+        )))
+    }
     /// Remove a runtime volume. One that does not exist is already removed;
     /// one a running harness still mounts is refused, never forced.
     async fn remove_volume(&self, volume: &str) -> Result<(), BoundaryError> {
@@ -305,11 +335,86 @@ pub fn remove_directory_volume(root: &std::path::Path, volume: &str) -> Result<(
     }
 }
 
+/// Copy one directory-backed volume to another, as the runtime's own copy
+/// would: everything, symlinks as symlinks. Nothing here is validated, because
+/// nothing here is read — the node interprets a volume only through an export.
+pub fn clone_directory_volume(
+    root: &std::path::Path,
+    source: &str,
+    destination: &str,
+) -> Result<(), BoundaryError> {
+    for volume in [source, destination] {
+        if volume.is_empty() || volume.contains('/') || volume.contains("..") {
+            return Err(BoundaryError::Other(format!("not a volume name: {volume}")));
+        }
+    }
+    fn copy(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            let target = to.join(entry.file_name());
+            if kind.is_dir() {
+                copy(&entry.path(), &target)?;
+            } else if kind.is_symlink() {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, &target)?;
+            } else {
+                std::fs::copy(entry.path(), &target)?;
+            }
+        }
+        Ok(())
+    }
+    let (from, to) = (root.join(source), root.join(destination));
+    if to.exists() {
+        std::fs::remove_dir_all(&to)?;
+    }
+    match from.is_dir() {
+        true => Ok(copy(&from, &to)?),
+        false => Ok(std::fs::create_dir_all(&to)?),
+    }
+}
+
 /// The backend `[runtime] kind` selects. Detection that needs the host (the
 /// SELinux probe) happens here, once, rather than per session.
 pub async fn backend_for(cfg: &Config) -> Arc<dyn Backend> {
     match cfg.runtime.kind {
         RuntimeKind::Podman => Arc::new(podman::PodmanBackend::detect(cfg).await),
         RuntimeKind::Kubernetes => Arc::new(kubernetes::KubeBackend::new(cfg)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A prepared tree is copied as the runtime would copy it: what an install
+    /// left behind — a `.bin` of symlinks — arrives as it was, where the
+    /// node's own imports and exports would refuse it.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_volume_is_cloned_with_its_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("tracon-prep-a/node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(root.path().join("tracon-prep-a/a.txt"), "one").unwrap();
+        std::os::unix::fs::symlink("../acorn/bin/acorn", bin.join("acorn")).unwrap();
+        std::fs::create_dir_all(root.path().join("tracon-check-b")).unwrap();
+        std::fs::write(root.path().join("tracon-check-b/stale"), "x").unwrap();
+
+        clone_directory_volume(root.path(), "tracon-prep-a", "tracon-check-b").unwrap();
+        let copy = root.path().join("tracon-check-b");
+        assert_eq!(std::fs::read_to_string(copy.join("a.txt")).unwrap(), "one");
+        assert_eq!(
+            std::fs::read_link(copy.join("node_modules/.bin/acorn")).unwrap(),
+            std::path::Path::new("../acorn/bin/acorn")
+        );
+        assert!(!copy.join("stale").exists());
+
+        // A source that does not exist is an empty volume to copy.
+        clone_directory_volume(root.path(), "tracon-cache-base-none", "tracon-prep-cache-c")
+            .unwrap();
+        assert!(root.path().join("tracon-prep-cache-c").is_dir());
+        assert!(clone_directory_volume(root.path(), "../etc", "tracon-x").is_err());
     }
 }

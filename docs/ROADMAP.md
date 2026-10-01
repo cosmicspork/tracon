@@ -411,9 +411,13 @@ servers reaching the v2 session runner.
   when they named none. A Claude Code session on Podman runs in that same image with the
   harness layered on, so it has its checks' tools, and reaches the registries its
   repository opens to sessions (`session_egress`). An OpenCode session, and any session
-  on Kubernetes, stays in the harness image and reaches no registry. Preparation reruns
-  before every check. An image the node builds from a repository's Dockerfile is built
-  on Podman only, and a superseded one is removed only when nothing still runs from it.
+  on Kubernetes, stays in the harness image and reaches no registry. An image the node
+  builds from a repository's Dockerfile is built on Podman only, and a superseded one is
+  removed only when nothing still runs from it.
+- A run's dependency cache and each check's tree are copies. Where the runtime's storage
+  has no reflinks they are full copies, made once per run and once per check. The base
+  cache they start from is filled when the node builds a repository's image; an entry
+  that names a hand-pinned `image` has none, so its runs prepare from empty.
 - Per-client egress — a session's, a preparation's, a QA browser run's — is the Podman
   backend's. The Kubernetes backend issues no grants, so a `[[repo]]` entry that names
   `egress` cannot prepare there. A grant filters by host, not by method: a registry that accepts uploads

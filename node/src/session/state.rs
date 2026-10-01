@@ -188,6 +188,9 @@ pub mod event_kind {
     /// candidate was established — and its evidence row is `not_runnable`,
     /// which is never reusable and never a pass.
     pub const CHECK_NOT_RUNNABLE: &str = "check_not_runnable";
+    /// The candidate's dependencies were prepared for this run's checks
+    /// (`ok`, `ms`): once, before the first check that actually executed.
+    pub const CHECK_PREPARED: &str = "check_prepared";
     /// A mediated mutation's outcome could not be determined — a prompt whose
     /// dispatch never reported, a node that restarted with one in flight — or
     /// has since been established (`reason`, `intent`, `refusing`, or
