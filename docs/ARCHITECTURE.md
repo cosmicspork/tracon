@@ -167,8 +167,9 @@ Rules learned against real harnesses, kept as rules:
   anything needing a human blocks. Degraded means slower, never silently permissive.
 - The node declares client-side filesystem reads unavailable, so the harness reads
   inside its runner rather than turning the node into a file server.
-- Budget accounting includes the large, mostly cached startup context, not just the
-  visible prompt.
+- Budget accounting charges the prompt tokens a call actually processed — fresh input
+  and cache writes — and the output, not the cached context a long session rereads on
+  every step; cache reads are recorded beside the charge.
 - A harness that runs a server is inventoried before it is trusted: the recorded
   cautions in `docs/reference/opencode-v1.18.30/` are the upgrade checklist, not a
   one-time read, because a release that moves which stack resolves a request moves
@@ -915,6 +916,14 @@ two points: session start is refused, and the gateway refuses the model calls of
 sessions already running, so a running session stops spending and the operator
 decides.
 
+**A cache read is recorded, never charged.** Each step of a long session resends its
+whole context, most of it from the provider's cache; charged as input, a planning
+pass on this repository cost 3–4M against a 2M default budget for about 50K tokens of
+new work, so the budget measured context length rather than spend. Both sides charge
+the same quantity — fresh input, cache writes and output — whatever the provider's
+dialect: Anthropic names its cache beside `input_tokens`, OpenAI counts it inside and
+says how much, and the gateway brings both to one meaning before it records the call.
+
 There are two sources for that usage and they are kept side by side, per turn, in
 one ledger. The gateway counts every model call on the wire and that count is what
 budgets and ceilings are charged; the harness reports its own numbers and those are
@@ -926,6 +935,9 @@ provider returned none — and a turn where calls went out and nothing could be 
 is marked `unmetered` rather than charged zero. Unmetered is not free: it is an event,
 a flag on the turn, and a figure the channel's ceiling reports beside the day's
 counted spend, because a meter that has silently stopped is worse than one reading high.
+A turn the session ends under — stopped, killed, its harness gone — will never be
+reported by the harness, so it is settled `interrupted` from the gateway's count
+alone; it used to stay open and cost nothing.
 
 Anything checkable deterministically is checked deterministically, between phases,
 in a container with no credentials. Model supervision is reserved for judgment with

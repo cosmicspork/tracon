@@ -1138,6 +1138,7 @@ impl Supervisor {
                                 "output_tokens": turn.usage.output_tokens,
                                 "total_tokens": turn.usage.total_tokens,
                                 "cached_read_tokens": turn.usage.cached_read_tokens,
+                                "cache_write_tokens": turn.usage.cache_write_tokens,
                             }
                         }),
                         turn.usage.charged() as i64,
@@ -1188,15 +1189,7 @@ impl Supervisor {
         // never got to say anything, and only the first can agree with the
         // gateway.
         let harness_tokens = (kind != ek::ERROR).then_some(tokens);
-        let cost = match (
-            session.as_ref().and_then(|s| s.cost_usd),
-            self.turn_start_cost_usd,
-        ) {
-            (Some(now), Some(before)) => Some((now - before).max(0.0)),
-            (Some(now), None) => Some(now),
-            _ => None,
-        };
-        self.turn_start_cost_usd = None;
+        let cost = self.turn_cost(session.as_ref());
         let usage =
             crate::metrics::settle_turn(&self.store, &self.session_id, harness_tokens, cost);
         let _ = self.store.update_session(
@@ -1273,6 +1266,45 @@ impl Supervisor {
         }
     }
 
+    /// The harness's cost for the turn now ending: what it reports is
+    /// cumulative, so the turn's share is the difference.
+    fn turn_cost(&mut self, session: Option<&crate::store::SessionRow>) -> Option<f64> {
+        let cost = match (session.and_then(|s| s.cost_usd), self.turn_start_cost_usd) {
+            (Some(now), Some(before)) => Some((now - before).max(0.0)),
+            (Some(now), None) => Some(now),
+            _ => None,
+        };
+        self.turn_start_cost_usd = None;
+        cost
+    }
+
+    /// Charge a turn the session is ending under. Its completion will never
+    /// be accepted (the turn is fenced before it is cancelled), so this is the
+    /// only place its spend can land: from the gateway, which saw every call.
+    fn settle_interrupted_turn(&mut self, in_flight: bool) {
+        if !in_flight {
+            return;
+        }
+        let Some(session) = self.store.get_session(&self.session_id).ok().flatten() else {
+            return;
+        };
+        let cost = self.turn_cost(Some(&session));
+        let usage = crate::metrics::settle_interrupted_turn(&self.store, &self.session_id, cost);
+        let _ = self.store.update_session(
+            &self.session_id,
+            SessionPatch {
+                turn_active: Some(false),
+                tokens_used: Some(session.tokens_used + usage.charged),
+                ..Default::default()
+            },
+        );
+        self.record(
+            ek::TURN_END,
+            None,
+            json!({ "stop_reason": "interrupted", "usage": usage.detail() }),
+        );
+    }
+
     async fn shutdown(&mut self, reason: EndReason) {
         let state = match reason {
             EndReason::Budget => SessionState::KilledBudget,
@@ -1280,11 +1312,14 @@ impl Supervisor {
             _ => SessionState::Closed,
         };
         // Fence first. A turn or model request that wakes after this point
-        // cannot move a terminal session back into active work.
-        self.active_turn = None;
+        // cannot move a terminal session back into active work. Whether one was
+        // in flight is read before the fence clears it.
+        let in_flight = self.active_turn.take().is_some();
         self.set_state(state, Some(reason));
         let _ = tokio::time::timeout(CANCEL_TIMEOUT, self.handle.cancel()).await;
         let _ = tokio::time::timeout(CANCEL_TIMEOUT, self.handle.close()).await;
+        // After close, so a model stream the cancel cut has been counted.
+        self.settle_interrupted_turn(in_flight);
         self.remove_container().await;
         self.reject_open_permissions().await;
     }
@@ -1297,6 +1332,11 @@ impl Supervisor {
             return;
         }
         self.reject_open_permissions().await;
+        let in_flight = self.active_turn.take().is_some() || s.turn_active != 0;
+        self.settle_interrupted_turn(in_flight);
+        let Ok(Some(s)) = self.store.get_session(&self.session_id) else {
+            return;
+        };
         if s.budget_tokens > 0 && s.tokens_used >= s.budget_tokens {
             self.set_state(SessionState::KilledBudget, Some(EndReason::Budget));
         } else {

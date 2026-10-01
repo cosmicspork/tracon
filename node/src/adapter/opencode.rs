@@ -1649,6 +1649,7 @@ impl TurnState {
         self.usage.output_tokens += usage.output_tokens;
         self.usage.total_tokens += usage.total_tokens;
         self.usage.cached_read_tokens += usage.cached_read_tokens;
+        self.usage.cache_write_tokens += usage.cache_write_tokens;
         self.finish = finish.to_string();
     }
 
@@ -1682,6 +1683,7 @@ fn usage_of(tokens: &Value) -> Usage {
         output_tokens: output + reasoning,
         total_tokens: input + output + reasoning + cache_read + cache_write,
         cached_read_tokens: cache_read,
+        cache_write_tokens: cache_write,
     }
 }
 
@@ -2256,7 +2258,12 @@ mod tests {
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 25);
         assert_eq!(usage.cached_read_tokens, 7);
-        assert_eq!(usage.charged(), 135);
+        assert_eq!(usage.total_tokens, 135);
+        assert_eq!(
+            usage.charged(),
+            128,
+            "the cache read is recorded, not charged"
+        );
     }
 
     #[test]

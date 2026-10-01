@@ -833,8 +833,8 @@ impl Store {
     pub fn record_usage(&self, u: &UsageRow) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO model_usage (channel, node_id, session_id, provider, model, at_ms, input_tokens, output_tokens, requests, turn)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+            "INSERT INTO model_usage (channel, node_id, session_id, provider, model, at_ms, input_tokens, output_tokens, requests, cache_read_tokens, cache_write_tokens, turn)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                      COALESCE((SELECT turn FROM session WHERE id = ?3), 0))",
             rusqlite::params![
                 u.channel,
@@ -845,7 +845,9 @@ impl Store {
                 u.at_ms,
                 u.input_tokens,
                 u.output_tokens,
-                u.requests
+                u.requests,
+                u.cache_read_tokens,
+                u.cache_write_tokens
             ],
         )?;
         Ok(())
@@ -892,6 +894,19 @@ impl Store {
     /// What the gateway counted on the wire for one turn: `(input, output,
     /// requests)`. Requests is the part that distinguishes "nothing was
     /// spent" from "something was spent and could not be counted".
+    /// What the gateway saw read from a provider's cache during a turn: shown
+    /// beside the charge, never part of it.
+    pub fn turn_gateway_cache_read(&self, session_id: &str, turn: i64) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(cache_read_tokens), 0) FROM model_usage
+             WHERE session_id = ?1 AND turn = ?2",
+            rusqlite::params![session_id, turn],
+            |r| r.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     pub fn turn_gateway_counts(&self, session_id: &str, turn: i64) -> Result<(i64, i64, i64)> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
@@ -913,6 +928,7 @@ impl Store {
         session_id: &str,
         turn: i64,
         gateway: (i64, i64, i64),
+        gateway_cache_read: i64,
         harness_tokens: Option<i64>,
         harness_cost_usd: Option<f64>,
         charged: i64,
@@ -922,12 +938,14 @@ impl Store {
         conn.execute(
             "INSERT INTO turn_usage
                 (session_id, turn, channel, gateway_input, gateway_output, gateway_requests,
-                 harness_tokens, harness_cost_usd, charged_tokens, state, started_ms, settled_ms)
+                 harness_tokens, harness_cost_usd, charged_tokens, state, started_ms, settled_ms,
+                 gateway_cache_read)
              VALUES (?1, ?2, COALESCE((SELECT channel FROM session WHERE id = ?1), ''),
-                     ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+                     ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)
              ON CONFLICT(session_id, turn) DO UPDATE SET
                 gateway_input=?3, gateway_output=?4, gateway_requests=?5, harness_tokens=?6,
-                harness_cost_usd=?7, charged_tokens=?8, state=?9, settled_ms=?10",
+                harness_cost_usd=?7, charged_tokens=?8, state=?9, settled_ms=?10,
+                gateway_cache_read=?11",
             rusqlite::params![
                 session_id,
                 turn,
@@ -939,6 +957,7 @@ impl Store {
                 charged,
                 state,
                 now_ms(),
+                gateway_cache_read,
             ],
         )?;
         Ok(())
@@ -949,7 +968,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT turn, gateway_input, gateway_output, gateway_requests, harness_tokens,
-                    harness_cost_usd, charged_tokens, state, started_ms, settled_ms
+                    harness_cost_usd, charged_tokens, state, started_ms, settled_ms,
+                    gateway_cache_read
              FROM turn_usage WHERE session_id = ?1 ORDER BY turn DESC LIMIT ?2",
         )?;
         let rows = stmt
@@ -965,6 +985,7 @@ impl Store {
                     state: r.get(7)?,
                     started_ms: r.get(8)?,
                     settled_ms: r.get(9)?,
+                    gateway_cache_read: r.get(10)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?;
@@ -1686,9 +1707,17 @@ pub struct UsageRow {
     pub provider: String,
     pub model: Option<String>,
     pub at_ms: i64,
+    /// Prompt tokens not read from a cache: fresh input and cache writes,
+    /// whatever the provider's own spelling. This is what a budget is charged.
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub requests: i64,
+    /// Read from the provider's cache: recorded, never charged.
+    #[serde(default)]
+    pub cache_read_tokens: i64,
+    /// Written to the provider's cache; already inside `input_tokens`.
+    #[serde(default)]
+    pub cache_write_tokens: i64,
 }
 
 /// `(session_id, provider, input_tokens, output_tokens, requests)`.
@@ -1709,6 +1738,9 @@ pub struct TurnUsageRow {
     pub state: String,
     pub started_ms: i64,
     pub settled_ms: Option<i64>,
+    /// Read from a cache during the turn: shown, never charged.
+    #[serde(default)]
+    pub gateway_cache_read: i64,
 }
 
 impl TurnUsageRow {

@@ -591,13 +591,16 @@ fn usage_of(v: &Value) -> Usage {
         .or_else(|| v["total_output_tokens"].as_u64())
         .unwrap_or(0);
     let cached = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+    let written = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
     Usage {
         input_tokens: input,
         output_tokens: output,
-        // The CLI reports no total; `charged()` falls back to the sum, and
-        // stating it here keeps the budget from reading zero.
-        total_tokens: input + output + cached,
+        // The CLI reports no total. Anthropic's `input_tokens` leaves the
+        // cache out, so the total is all four, and `charged()` takes the
+        // reads back out.
+        total_tokens: input + output + cached + written,
         cached_read_tokens: cached,
+        cache_write_tokens: written,
     }
 }
 
@@ -908,9 +911,17 @@ mod tests {
     #[test]
     fn usage_is_charged_even_though_the_cli_reports_no_total() {
         let u = usage_of(&json!({
-            "usage": { "input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 5 }
+            "usage": {
+                "input_tokens": 100, "output_tokens": 20,
+                "cache_read_input_tokens": 5_000, "cache_creation_input_tokens": 30
+            }
         }));
-        assert_eq!(u.charged(), 125);
+        assert_eq!(u.total_tokens, 5_150);
+        assert_eq!(
+            u.charged(),
+            150,
+            "cache writes are charged, cache reads are not"
+        );
     }
 
     #[test]

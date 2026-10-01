@@ -98,12 +98,15 @@ pub mod usage_state {
     /// provider returned no usage and there is no estimator. Not zero, and
     /// not free — unknown, and said so.
     pub const UNMETERED: &str = "unmetered";
+    /// The session ended under the turn (stopped, killed, the harness gone):
+    /// the harness never reported, so the gateway's count is the charge.
+    pub const INTERRUPTED: &str = "interrupted";
 }
 
 /// How far the two sources may differ before it is worth telling the operator.
-/// They legitimately count different things at the edges — cache accounting,
-/// a retried request the harness folded into one turn — so the tolerance is
-/// proportional, with a floor for small turns.
+/// Both leave cache reads out, so what is left at the edges is a retried
+/// request the harness folded into one turn, or a call one side did not see;
+/// the tolerance is proportional, with a floor for small turns.
 const USAGE_TOLERANCE_FRACTION: f64 = 0.1;
 const USAGE_TOLERANCE_TOKENS: i64 = 200;
 
@@ -116,6 +119,8 @@ pub struct Reconciled {
     pub gateway_output: i64,
     pub gateway_tokens: i64,
     pub gateway_requests: i64,
+    /// Read from a provider's cache: shown, never charged.
+    pub gateway_cache_read: i64,
     /// `None` when the harness said nothing at all about this turn.
     pub harness_tokens: Option<i64>,
     pub harness_cost_usd: Option<f64>,
@@ -151,6 +156,7 @@ impl Reconciled {
                 "output_tokens": self.gateway_output,
                 "tokens": self.gateway_tokens,
                 "requests": self.gateway_requests,
+                "cache_read_tokens": self.gateway_cache_read,
             },
             "harness": {
                 "tokens": self.harness_tokens,
@@ -193,6 +199,7 @@ pub fn reconcile(
         gateway_output,
         gateway_tokens,
         gateway_requests,
+        gateway_cache_read: 0,
         harness_tokens,
         harness_cost_usd,
         charged,
@@ -208,15 +215,48 @@ pub fn settle_turn(
     harness_tokens: Option<i64>,
     harness_cost_usd: Option<f64>,
 ) -> Reconciled {
+    settle(store, session_id, harness_tokens, harness_cost_usd, None)
+}
+
+/// Close the ledger row of a turn the session ended under. Nothing from the
+/// harness is coming, so there is nothing to disagree with: the gateway's
+/// count is charged and the row says why it stands alone. Without this a
+/// stopped turn's row stayed open and the session was charged nothing for it.
+pub fn settle_interrupted_turn(
+    store: &Store,
+    session_id: &str,
+    harness_cost_usd: Option<f64>,
+) -> Reconciled {
+    settle(
+        store,
+        session_id,
+        None,
+        harness_cost_usd,
+        Some(usage_state::INTERRUPTED),
+    )
+}
+
+fn settle(
+    store: &Store,
+    session_id: &str,
+    harness_tokens: Option<i64>,
+    harness_cost_usd: Option<f64>,
+    state: Option<&'static str>,
+) -> Reconciled {
     let turn = store.current_turn(session_id).unwrap_or(0);
     let gateway = store
         .turn_gateway_counts(session_id, turn)
         .unwrap_or((0, 0, 0));
-    let out = reconcile(turn, gateway, harness_tokens, harness_cost_usd);
+    let mut out = reconcile(turn, gateway, harness_tokens, harness_cost_usd);
+    if let Some(state) = state {
+        out.state = state;
+    }
+    out.gateway_cache_read = store.turn_gateway_cache_read(session_id, turn).unwrap_or(0);
     if let Err(e) = store.settle_turn(
         session_id,
         turn,
         gateway,
+        out.gateway_cache_read,
         harness_tokens,
         harness_cost_usd,
         out.charged,
@@ -234,11 +274,13 @@ pub fn session_usage(store: &Store, session_id: &str) -> Value {
     let settled = turns.iter().find(|t| t.state != "open");
     let gateway_tokens: i64 = turns.iter().map(|t| t.gateway_tokens()).sum();
     let harness_tokens: i64 = turns.iter().filter_map(|t| t.harness_tokens).sum();
+    let cache_read_tokens: i64 = turns.iter().map(|t| t.gateway_cache_read).sum();
     json!({
         "state": settled.map(|t| t.state.clone()),
         "gateway_tokens": gateway_tokens,
         "harness_tokens": harness_tokens,
         "charged_tokens": turns.iter().map(|t| t.charged_tokens).sum::<i64>(),
+        "cache_read_tokens": cache_read_tokens,
         "unmetered_turns": turns.iter().filter(|t| t.state == usage_state::UNMETERED).count(),
         "mismatched_turns": turns.iter().filter(|t| t.state == usage_state::MISMATCH).count(),
         "turns": turns,

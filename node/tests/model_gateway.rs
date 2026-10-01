@@ -668,6 +668,8 @@ async fn a_channel_at_its_daily_ceiling_is_refused_and_told_once_per_session() {
             input_tokens: 90,
             output_tokens: 10,
             requests: 1,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
         })
         .unwrap();
     for _ in 0..2 {
