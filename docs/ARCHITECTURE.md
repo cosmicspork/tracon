@@ -551,7 +551,13 @@ different one on every node. A check run builds first when the recipe has moved;
 approval only reads, so it cannot start a build, and a merged Dockerfile change is a
 different execution image and therefore different evidence. Image builds are the one
 place repository-authored commands run with the network and outside the boundary,
-which is why the operator names each one. Dependencies arrive by **preparation**: the entry's `prepare`
+which is why the operator names each one. A session runs in the same image with the
+harness layered on: a second image, `FROM` the repository's by digest with the harness
+binary copied out of the harness image, keyed on both digests and probed before any
+session is told to launch in it. Checks stay on the repository's image, so a harness
+upgrade rebuilds only the layer and no evidence moves. The session's start event
+records the image it ran in, the repository image under it, and the reason when it ran
+in the harness image instead. Dependencies arrive by **preparation**: the entry's `prepare`
 commands run first on the same copy, with the repository's cache volume writable and the
 scoped egress gateway opened to exactly the hosts the entry names, and closed again
 before the check starts with the cache read-only. That gateway is the QA browser's, one

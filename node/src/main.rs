@@ -1172,12 +1172,13 @@ fn build_line(build: &serde_json::Value) -> String {
         "failed" => text("error").to_string(),
         _ => String::new(),
     };
+    // `base` is the image checks run in; `session:<harness>` the same image
+    // with that harness layered on.
     format!(
-        "{:<8} {}  {} ({:.12})  {detail}",
+        "{:<8} {:<14} {}  {detail}",
         text("status"),
+        text("kind"),
         text("repo_path"),
-        text("source_ref"),
-        text("source_commit")
     )
 }
 

@@ -371,6 +371,19 @@ build runs on this machine's Podman with the network, outside the boundary — t
 trust `devcontainer up` asks for, which is why it is per repository and yours to name.
 `tracon repo ls` shows each repository's image and any command it has no tool for.
 
+A Claude Code session runs in that image too. The node copies the harness onto the
+repository's image as one more layer, proves it runs there, and launches the session in
+the result, so the agent has the compiler, the test runner and the formatter its checks
+will be run with instead of the bare harness image. The session's start line says which
+image it got, and why when it is not the repository's: a base the harness binary does not
+run on (a musl image, one with no Git) leaves the session in the harness image rather
+than failing to start. A repository with no image yet builds one at its first session,
+which waits; one whose Dockerfile changed starts on the image it has and is rebuilt behind
+the session. Each workspace gets its own dependency cache at `/cache`, which no check
+reads. The layer is root, like every run here, so a tool the Dockerfile installed under
+another user's home has to be readable and executable by others. OpenCode sessions, and
+sessions on Kubernetes, stay in the harness image.
+
 A check has no network. A repository whose checks need its dependencies names `prepare`
 commands (`bun install --frozen-lockfile`, `composer install`, `cargo fetch --locked`)
 and the registries they may reach (`egress = ["npm", "crates"]`). Those run first, on the

@@ -1552,7 +1552,58 @@ impl Manager {
         let container = format!("tracon-h-{slug}");
         let mut mounts = scratch.mounts;
         mounts.push(workspace.mount("/work", false));
-        let runner: Arc<dyn Runner> = self.backend.runner_for(adapter.id(), mounts);
+        // The repository's own image, with the harness layered on, so the
+        // session has the tools its checks will run with. Resolved from the
+        // repository the work came from, which a resumed session's
+        // `workspace://` path only leads back to.
+        let image = match crate::environment::origin_repo(&self.store, id)
+            .ok()
+            .flatten()
+        {
+            Some(origin) => {
+                let announce = || {
+                    self.record(NewEvent {
+                        session_id: id.to_string(),
+                        work_item_id: None,
+                        kind: ek::REPO_IMAGE.into(),
+                        ref_id: None,
+                        payload: json!({ "status": "building", "repo": origin }),
+                        at_ms: now_ms(),
+                        mono_ms: started.elapsed().as_millis() as i64,
+                    })
+                };
+                crate::repo_image::session_image(
+                    &self.backend,
+                    &self.cfg,
+                    &self.store,
+                    &origin,
+                    (adapter.id(), adapter.pinned_version()),
+                    &announce,
+                )
+                .await
+            }
+            None => Default::default(),
+        };
+        // A first build takes minutes, and the operator may have stopped the
+        // session while it ran.
+        if !self.startable(id)? {
+            anyhow::bail!("the session was stopped before its harness started");
+        }
+        let mut cache_env = Vec::new();
+        let runner: Arc<dyn Runner> = match &image.image {
+            Some(session_image) => {
+                // The session's own dependency cache: the agent installs into
+                // it, so no check ever reads it.
+                mounts.push(crate::runner::Mount::volume(
+                    crate::environment::session_cache_volume(&workspace.id),
+                    "/cache",
+                    false,
+                ));
+                cache_env = crate::environment::cache_env();
+                self.backend.runner_in(adapter.id(), session_image, mounts)
+            }
+            None => self.backend.runner_for(adapter.id(), mounts),
+        };
 
         // Record the container name before it exists: it is deterministic, and a
         // launch that fails after the container is created would otherwise leave
@@ -1575,6 +1626,7 @@ impl Manager {
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
         ]);
+        harness_env.extend(cache_env);
 
         // The supervisor's channel exists before the harness does, because the
         // ingestion layer needs it: a permission reconciliation re-raises goes
@@ -1691,6 +1743,10 @@ impl Manager {
                 "harness_expected": adapter.pinned_version(),
                 "harness_protocol": compat.protocol,
                 "toolchain": toolchain,
+                "image": image.image,
+                "image_source": image.source(),
+                "toolchain_image": image.toolchain_image,
+                "image_note": image.note,
             }),
             at_ms: now_ms(),
             mono_ms: started.elapsed().as_millis() as i64,

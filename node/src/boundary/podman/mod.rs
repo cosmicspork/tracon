@@ -274,6 +274,18 @@ impl Backend for PodmanBackend {
         Arc::new(PodmanRunner::new(spec))
     }
 
+    fn runner_in(
+        &self,
+        harness_id: &str,
+        image: &str,
+        extra_mounts: Vec<Mount>,
+    ) -> Arc<dyn Runner> {
+        let mut spec = RunSpec::for_harness(&self.cfg, harness_id, self.selinux);
+        spec.image = image.to_string();
+        spec.extra_mounts = extra_mounts;
+        Arc::new(PodmanRunner::new(spec))
+    }
+
     fn image_builder(&self) -> Option<&dyn super::ImageBuilder> {
         Some(self)
     }
@@ -519,20 +531,12 @@ impl super::ImageBuilder for PodmanBackend {
             let exit = out.status.code().unwrap_or(-1);
             return Err(failure(format!("podman build exited {exit}"), &log));
         }
-        let digest = podman(&["image", "inspect", "--format", "{{.Digest}}", build.tag])
-            .await
-            .map_err(|error| failure(format!("read the built image's digest: {error}"), &log))?;
-        let name = build
-            .tag
-            .rsplit_once(':')
-            .map_or(build.tag, |(name, _)| name);
-        let image = format!("{name}@{}", digest.trim());
-        if crate::config::immutable_image(&image).is_err() {
+        let Some(image) = self.identity(build.tag).await else {
             return Err(failure(
                 format!("the runtime reported no digest for {}", build.tag),
                 &log,
             ));
-        }
+        };
         Ok(super::BuiltImage {
             image,
             log_tail: log_tail(&log),
@@ -541,6 +545,21 @@ impl super::ImageBuilder for PodmanBackend {
 
     async fn exists(&self, image: &str) -> bool {
         podman(&["image", "exists", image]).await.is_ok()
+    }
+
+    async fn identity(&self, image: &str) -> Option<String> {
+        let digest = podman(&["image", "inspect", "--format", "{{.Digest}}", image])
+            .await
+            .ok()?;
+        // A tag is the last `:` after the last `/`; a registry's port is not.
+        let name = match image.rsplit_once(':') {
+            Some((name, tag)) if !tag.contains('/') => name,
+            _ => image,
+        };
+        let identity = format!("{name}@{}", digest.trim());
+        crate::config::immutable_image(&identity)
+            .is_ok()
+            .then_some(identity)
     }
 
     async fn remove(&self, image: &str) {

@@ -91,6 +91,10 @@ impl EndReason {
 pub mod event_kind {
     pub const SESSION_STARTED: &str = "session_started";
     pub const WORKTREE: &str = "worktree";
+    /// The repository's image is being built before the harness can start in
+    /// it (`status`, `repo`). Minutes, once per repository; the start event
+    /// that follows says which image the session got.
+    pub const REPO_IMAGE: &str = "repo_image";
     /// What the session was told at start, so the transcript shows it.
     pub const ORIENTATION: &str = "orientation";
     pub const STATE: &str = "state";

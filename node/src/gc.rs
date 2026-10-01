@@ -9,7 +9,8 @@
 //!
 //! Ownership is read from the name. `tracon-scratch-<session>` belongs to a
 //! session; `tracon-workspace-<id>` to every open session using that
-//! workspace; `tracon-check-<run>` to a check run; `tracon-cache-<hash>` to
+//! workspace; `tracon-cache-w-<id>` to that same workspace, whose sessions
+//! install into it; `tracon-check-<run>` to a check run; `tracon-cache-<hash>` to
 //! nobody (it is rebuilt on demand, so it goes only when asked for). The
 //! node-wide volumes are never candidates, and neither is a name this node
 //! does not recognize.
@@ -152,6 +153,11 @@ pub fn classify_volume(name: &str, created_ms: Option<i64>, owners: &Owners) -> 
         } else {
             verdict(true, "the check run has finished")
         };
+    }
+    // A session's own cache lives and dies with its workspace; the
+    // repositories' shared ones below go only when caches are asked for.
+    if let Some(key) = name.strip_prefix("tracon-cache-w-") {
+        return workspace_verdict(key, created_ms, owners);
     }
     if name.starts_with("tracon-cache-") {
         return if owners.caches {
@@ -330,6 +336,10 @@ mod tests {
         assert!(classify_volume("tracon-workspace-archived", old, &o).0);
         assert!(!classify_volume("tracon-workspace-imported", Some(o.now_ms - 1000), &o).0);
         assert!(classify_volume("tracon-workspace-imported", None, &o).0);
+        // What its sessions installed goes when it does, caches asked for or
+        // not, and never before.
+        assert!(!classify_volume("tracon-cache-w-open", old, &o).0);
+        assert!(classify_volume("tracon-cache-w-archived", old, &o).0);
     }
 
     #[test]

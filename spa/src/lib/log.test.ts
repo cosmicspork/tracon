@@ -10,6 +10,7 @@ import {
   providerErrorLine,
   repetitionHint,
   repetitionLine,
+  sessionImage,
   usageMismatchLine,
   usageUnmeteredLine,
 } from './log'
@@ -86,6 +87,17 @@ test('repetition reads as a signal to look at, not as a verdict', () => {
     'same call 3× in a row · run just test · recorded, not paused',
   )
   expect(repetitionLine({})).toBe('same call 0× in a row · the same tool call · recorded, not paused')
+})
+
+test('the start line says which image the harness is in only when it matters', () => {
+  expect(sessionImage({ image: 'localhost/tracon-repo-app-claude@sha256:abc' })).toBe(
+    " · in the repository's image",
+  )
+  expect(sessionImage({ image: null, image_note: 'podman build exited 1' })).toBe(
+    " · in the harness image, not the repository's: podman build exited 1",
+  )
+  expect(sessionImage({ image: null, image_note: null })).toBe('')
+  expect(sessionImage({})).toBe('')
 })
 
 test('the repetition hint stands only until the harness moves on', () => {

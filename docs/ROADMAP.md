@@ -408,10 +408,12 @@ servers reaching the v2 session runner.
   run that way. Claude Code is the working managed harness until one has.
 - Required checks run in the image, and after the preparation, the operator named for the
   repository (`[[repo]]`), and in the harness image — which has no project toolchain —
-  when they named none. A session does not: it runs in the harness image and cannot fetch
-  a dependency, so it learns what its checks say only by submitting. Preparation reruns
-  before every check. An image the node builds from a repository's Dockerfile is built
-  on Podman only, and a superseded one is removed only when nothing still runs from it.
+  when they named none. A Claude Code session on Podman runs in that same image with the
+  harness layered on, so it has its checks' tools; it still cannot fetch a dependency, so
+  a check that needs one is learnt only by submitting. An OpenCode session, and any
+  session on Kubernetes, stays in the harness image. Preparation reruns before every
+  check. An image the node builds from a repository's Dockerfile is built on Podman only,
+  and a superseded one is removed only when nothing still runs from it.
 - Preparation's egress is the Podman backend's scoped gateway. Kubernetes has none, so a
   `[[repo]]` entry that names `egress` cannot prepare there. The gateway filters by host
   only, one holder at a time: a preparation waits behind a QA browser run, and while
