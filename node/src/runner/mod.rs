@@ -379,6 +379,17 @@ pub mod local {
             )
             .map_err(|e| BoundaryError::Other(e.to_string()))
         }
+        async fn export_workspace(
+            &self,
+            volume: &str,
+            destination: &std::path::Path,
+        ) -> Result<(), BoundaryError> {
+            crate::workspace::copy_checkout(
+                &Config::state_dir().join("local-runtime").join(volume),
+                destination,
+            )
+            .map_err(|e| BoundaryError::Other(e.to_string()))
+        }
         fn harness_host(&self) -> String {
             "localhost".into()
         }

@@ -603,7 +603,11 @@ read and never written — and that seed is copied, never bind-mounted,
 into a runtime-owned volume; the copy strips `.git` hooks, replace refs, grafts,
 alternates, and `config.worktree` before anything node-side or harness-side reads
 it. The harness sees `/work` and no host path. A workspace outlives its session:
-resume it, export a checked snapshot, or download it. It is reclaimed only by an
+resume it, export a checked snapshot, or download it. An export stages the tree
+as Git sees it — the repository, and the tracked and untracked files its ignore
+rules leave in — inside a container with no network and no capabilities, so the
+dependency trees and build output a session leaves behind are neither the
+candidate nor a reason to refuse the snapshot. It is reclaimed only by an
 explicit sweep (`crate::gc`), once no unarchived session uses it; a check run's
 volume is the one removed as soon as its run is over. Harness config is
 materialized into scratch and passed explicitly, so instruction-file discovery by

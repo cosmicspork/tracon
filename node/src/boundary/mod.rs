@@ -106,6 +106,18 @@ pub trait Backend: Send + Sync {
         volume: &str,
         destination: &std::path::Path,
     ) -> Result<(), BoundaryError>;
+    /// Copy a workspace out as Git sees it: its repository, and the tracked
+    /// and untracked files its ignore rules leave in. What a build or an
+    /// install put there — `target/`, `node_modules/` and their symlinks — is
+    /// neither the candidate nor something the snapshot's limits could hold.
+    /// A backend with no way to filter exports the whole volume.
+    async fn export_workspace(
+        &self,
+        volume: &str,
+        destination: &std::path::Path,
+    ) -> Result<(), BoundaryError> {
+        self.export_volume(volume, destination).await
+    }
     /// The name by which a harness reaches the node (the MCP endpoint and the
     /// deep probe's ping).
     fn harness_host(&self) -> String;
