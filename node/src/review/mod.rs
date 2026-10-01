@@ -185,6 +185,23 @@ async fn git(dir: &str, op: &'static str, args: &[&str]) -> Result<String, Revie
     }
 }
 
+/// The object a revision names in `dir`, by hash. For the node's own reads of
+/// a repository it does not own: nothing in that repository's configuration
+/// runs.
+pub(crate) async fn resolve(dir: &str, revision: &str) -> Result<String, ReviewError> {
+    git(
+        dir,
+        "rev-parse",
+        &["rev-parse", "--verify", "--quiet", revision],
+    )
+    .await
+}
+
+/// A blob's bytes, addressed by hash or by `<commit>:<path>`.
+pub(crate) async fn blob(dir: &str, object: &str) -> Result<Vec<u8>, ReviewError> {
+    git_bytes(dir, "cat-file", &["cat-file", "blob", object]).await
+}
+
 /// Whether `head` descends from `ancestor`, a commit this worktree holds. A
 /// commit it does not hold is not an ancestor it can vouch for.
 pub async fn descends_from(worktree: &str, head: &str, ancestor: &str) -> bool {
@@ -389,7 +406,9 @@ impl Drop for CandidateSnapshot {
 
 /// Copy exactly the Git tree named by `head_sha`, not the mutable worktree.
 /// Tree traversal and blob reads address hashes after disabling replacement,
-/// graft, attribute, hook, and executable configuration paths.
+/// graft, attribute, hook, and executable configuration paths. `head_sha` is
+/// any tree-ish: a commit for a candidate, `<commit>:<directory>` for one
+/// directory of it.
 pub async fn snapshot_candidate(
     worktree: &str,
     head_sha: &str,

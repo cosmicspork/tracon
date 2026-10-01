@@ -61,6 +61,46 @@ impl Drop for QaEgressGuard {
     }
 }
 
+/// One image to build: a Containerfile and the directory it may copy from.
+pub struct ImageBuild<'a> {
+    /// `name:tag`. The built image is reported by digest, under `name`.
+    pub tag: &'a str,
+    pub containerfile: &'a std::path::Path,
+    pub context: &'a std::path::Path,
+    pub labels: &'a [(String, String)],
+    pub timeout: std::time::Duration,
+}
+
+/// A build that produced an image, and the end of what it printed.
+#[derive(Debug, Clone)]
+pub struct BuiltImage {
+    /// `name@sha256:…`: the reference a run pins, which a later build under
+    /// the same tag cannot move.
+    pub image: String,
+    pub log_tail: String,
+}
+
+/// A build that produced none.
+#[derive(Debug, Clone)]
+pub struct BuildFailure {
+    pub error: String,
+    pub log_tail: String,
+}
+
+/// A runtime that can build an image where the node's runs will find it. A
+/// build reaches the network and runs the Containerfile's commands outside the
+/// harness boundary, so only what the operator named is ever built.
+#[async_trait]
+pub trait ImageBuilder: Send + Sync {
+    async fn build(&self, build: ImageBuild<'_>) -> Result<BuiltImage, BuildFailure>;
+    /// Whether the runtime still holds this image. One it pruned has to be
+    /// built again before anything can run in it.
+    async fn exists(&self, image: &str) -> bool;
+    /// Drop an image nothing uses any more. Best effort: one a container
+    /// still runs from stays.
+    async fn remove(&self, image: &str);
+}
+
 /// One harness's image as the runtime holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessImage {
@@ -91,6 +131,12 @@ pub trait Backend: Send + Sync {
     /// `check_all` is what refuses a node whose images are not usable.
     async fn harness_images(&self, _cfg: &Config) -> Vec<HarnessImage> {
         Vec::new()
+    }
+    /// What builds a repository's image for this runtime. `None` for a
+    /// runtime that only pulls: its repositories keep the images they are
+    /// given.
+    fn image_builder(&self) -> Option<&dyn ImageBuilder> {
+        None
     }
     /// Copy an explicitly staged directory into runtime-owned storage. The
     /// source is never mounted into a harness.

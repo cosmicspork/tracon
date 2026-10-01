@@ -28,6 +28,7 @@ pub mod policy;
 pub mod process;
 pub mod providers;
 pub mod qa;
+pub mod repo_image;
 pub mod review;
 pub mod runner;
 pub mod service;

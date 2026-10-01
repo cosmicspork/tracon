@@ -542,7 +542,16 @@ the repository's `[[repo]]` entry in the node's own configuration — never a fi
 candidate, which could then choose its own gate — over the node-wide checks and the
 harness image where the entry names none; a command that image has no tool for is
 recorded `not_runnable` — never a pass, never reusable evidence, and never a failure
-the agent is asked to fix. Dependencies arrive by **preparation**: the entry's `prepare`
+the agent is asked to fix. An entry may name the repository's Dockerfile instead of an
+image: the node then builds it (`crate::repo_image`) from the **default branch**, read
+through Git's object store and never from a working tree, adds one layer of its own
+(root, `/work`, no entrypoint), and records the digest it built in its own state — the
+recipe is configuration, the digest is not, because a locally built image has a
+different one on every node. A check run builds first when the recipe has moved; an
+approval only reads, so it cannot start a build, and a merged Dockerfile change is a
+different execution image and therefore different evidence. Image builds are the one
+place repository-authored commands run with the network and outside the boundary,
+which is why the operator names each one. Dependencies arrive by **preparation**: the entry's `prepare`
 commands run first on the same copy, with the repository's cache volume writable and the
 scoped egress gateway opened to exactly the hosts the entry names, and closed again
 before the check starts with the cache read-only. That gateway is the QA browser's, one

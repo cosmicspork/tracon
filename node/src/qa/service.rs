@@ -1033,7 +1033,11 @@ pub async fn build_prototype(
             )
         }
     };
-    let plan = match crate::environment::inspect(&source_snapshot) {
+    let repo = candidate_repo(access.store, &owner_session);
+    let environment =
+        crate::repo_image::environment(backend.as_ref(), access.cfg, access.store, repo.as_deref())
+            .await;
+    let plan = match crate::environment::inspect(&source_snapshot, &environment) {
         Ok(plan) => plan,
         Err(error) => {
             return insert_failed_prototype(
@@ -1061,13 +1065,12 @@ pub async fn build_prototype(
             )
         }
     };
-    let repo = candidate_repo(access.store, &owner_session);
     let prepared = match crate::environment::prepare(
         backend.as_ref(),
         access.cfg,
         &workspace,
         &plan,
-        repo.as_deref(),
+        &environment,
     )
     .await
     {
@@ -1087,14 +1090,10 @@ pub async fn build_prototype(
     // Verification executes only the operator's locked checks in its fresh
     // runtime. The candidate recipe runs exactly once below, in its own
     // configured build image.
-    let verification = crate::environment::verify(
-        backend.as_ref(),
-        &workspace,
-        &prepared,
-        &crate::environment::environment_for(access.cfg, repo.as_deref()).checks,
-    )
-    .await
-    .map_err(|error| format!("prepared environment verification failed: {error}"));
+    let verification =
+        crate::environment::verify(backend.as_ref(), &workspace, &prepared, &environment.checks)
+            .await
+            .map_err(|error| format!("prepared environment verification failed: {error}"));
     let verification = match verification {
         Ok(result) => result,
         Err(error) => {

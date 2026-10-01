@@ -98,6 +98,12 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         days: i64,
     },
+    /// The repositories the node keeps an environment for, and the images it
+    /// built for them (talks to `tracon serve`).
+    Repo {
+        #[command(subcommand)]
+        command: RepoCommand,
+    },
     /// The trail behind a commit: model, prompts, approval, policy version.
     Provenance { sha: String },
     /// Runtime volumes and state directories whose session, workspace or
@@ -112,6 +118,20 @@ enum Command {
         /// Also list what is kept, and why.
         #[arg(long)]
         all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RepoCommand {
+    /// The `[[repo]]` entries and the image each repository last built into.
+    Ls,
+    /// Build a repository's image from the Dockerfile on its default branch,
+    /// and wait for it. Rebuilds an image that is current, and retries a
+    /// build that failed.
+    Build {
+        /// A checkout's path, or the end of a managed clone's (`owner/name`).
+        /// The current directory when left out.
+        repo: Option<String>,
     },
 }
 
@@ -645,6 +665,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Repo { command } => repo_command(command).await,
         Command::Provenance { sha } => {
             use reqwest::Method;
             let v = node_call(Method::GET, &format!("/api/provenance/{sha}"), None, None).await?;
@@ -1062,6 +1083,104 @@ async fn channel_command(cmd: ChannelCommand) -> Result<()> {
 
 /// The running node's operator API. The CLI goes through it rather than the
 /// store so every write is published to the mesh like any other.
+async fn repo_command(command: RepoCommand) -> Result<()> {
+    use reqwest::Method;
+    let list = || node_call(Method::GET, "/api/repos/environments", None, None);
+    match command {
+        RepoCommand::Ls => {
+            let v = list().await?;
+            let entries = v["entries"].as_array().cloned().unwrap_or_default();
+            if entries.is_empty() {
+                println!("no [[repo]] entries in node.toml");
+            }
+            for item in &entries {
+                let entry = &item["entry"];
+                let image = match (entry["dockerfile"].as_str(), entry["image"].as_str()) {
+                    (Some(dockerfile), _) => format!("builds {dockerfile}"),
+                    (None, Some(image)) => image.to_string(),
+                    (None, None) => "harness image".into(),
+                };
+                println!("{}  — {image}", entry["path"].as_str().unwrap_or(""));
+                for build in item["builds"].as_array().into_iter().flatten() {
+                    println!("  {}", build_line(build));
+                }
+            }
+            Ok(())
+        }
+        RepoCommand::Build { repo } => {
+            // A directory that exists is named by where it is; anything else
+            // is left for the node to match against the clones it manages.
+            let repo = match repo {
+                Some(repo) if !std::path::Path::new(&repo).is_dir() => repo,
+                Some(repo) => std::fs::canonicalize(repo)?.to_string_lossy().into_owned(),
+                None => std::env::current_dir()?.to_string_lossy().into_owned(),
+            };
+            let started = node_call(
+                Method::POST,
+                "/api/repos/environments/build",
+                Some(serde_json::json!({ "repo": repo })),
+                None,
+            )
+            .await?;
+            let repo = started["repo"].as_str().unwrap_or_default().to_string();
+            let since = started["since_ms"].as_i64().unwrap_or(0);
+            println!(
+                "building {repo} from {} ({:.12}); a first build can take several minutes",
+                started["source_ref"].as_str().unwrap_or(""),
+                started["source_commit"].as_str().unwrap_or("")
+            );
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let v = list().await?;
+                let build = v["entries"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|item| item["builds"].as_array().into_iter().flatten())
+                    .find(|build| {
+                        build["repo_path"].as_str() == Some(repo.as_str())
+                            && build["started_ms"].as_i64().unwrap_or(0) >= since
+                    })
+                    .cloned();
+                let Some(build) = build else { continue };
+                match build["status"].as_str() {
+                    Some("building") => continue,
+                    Some("ready") => {
+                        println!("{}", build["image"].as_str().unwrap_or(""));
+                        for command in build["warnings"].as_array().into_iter().flatten() {
+                            println!(
+                                "warning: the image has no tool for `{}`",
+                                command.as_str().unwrap_or("")
+                            );
+                        }
+                        return Ok(());
+                    }
+                    _ => {
+                        eprintln!("{}", build["log_tail"].as_str().unwrap_or(""));
+                        anyhow::bail!("{}", build["error"].as_str().unwrap_or("the build failed"));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn build_line(build: &serde_json::Value) -> String {
+    let text = |key: &str| build[key].as_str().unwrap_or("");
+    let detail = match text("status") {
+        "ready" => text("image").to_string(),
+        "failed" => text("error").to_string(),
+        _ => String::new(),
+    };
+    format!(
+        "{:<8} {}  {} ({:.12})  {detail}",
+        text("status"),
+        text("repo_path"),
+        text("source_ref"),
+        text("source_commit")
+    )
+}
+
 fn node_url() -> String {
     std::env::var("TRACON_URL").unwrap_or_else(|_| "http://127.0.0.1:7420".into())
 }

@@ -1058,3 +1058,84 @@ async fn storage_is_swept_by_owner_and_only_removed_when_asked() {
     assert!(state_dir.join(format!("sessions/{open}")).exists());
     assert!(!state_dir.join(format!("sessions/{archived}")).exists());
 }
+
+/// The repository table is readable with what each repository was built into,
+/// and a build is asked for from this machine only. A runtime that cannot
+/// build says so rather than accepting a build it will never run.
+#[tokio::test]
+async fn repository_environments_are_listed_and_built_only_from_this_machine() {
+    let cfg = Config {
+        repo: vec![
+            tracon::config::Repo {
+                path: "/src/app".into(),
+                dockerfile: Some(".devcontainer/Dockerfile".into()),
+                ..Default::default()
+            },
+            tracon::config::Repo {
+                path: "owner/notes".into(),
+                checks: Some(Vec::new()),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let n = node_with(cfg);
+    let build = n
+        .store
+        .start_repo_image(&tracon::store::RepoImageStart {
+            repo_path: "/src/app",
+            kind: tracon::repo_image::BASE,
+            recipe_hash: "r1",
+            source_ref: "origin/main",
+            source_commit: "c1",
+            parent_image: "",
+        })
+        .unwrap();
+    n.store
+        .finish_repo_image(
+            &build,
+            Ok("localhost/tracon-repo-app@sha256:abc"),
+            "built",
+            &["just check".to_string()],
+        )
+        .unwrap();
+
+    let (s, v) = call(&n, "GET", "/api/repos/environments", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["can_build"], json!(false));
+    let entries = v["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(
+        entries[0]["entry"]["dockerfile"],
+        json!(".devcontainer/Dockerfile")
+    );
+    assert_eq!(entries[0]["builds"][0]["status"], json!("ready"));
+    assert_eq!(entries[0]["builds"][0]["warnings"], json!(["just check"]));
+    assert_eq!(entries[1]["builds"], json!([]));
+
+    let body = json!({ "repo": "/src/app" });
+    let (s, _) = call(
+        &n,
+        "POST",
+        "/api/repos/environments/build",
+        Some(REMOTE),
+        Some(body.clone()),
+    )
+    .await;
+    assert_ne!(s, StatusCode::OK);
+    for (repo, why) in [
+        ("/definitely/not/here", "not a directory"),
+        ("owner/unknown", "no managed clone"),
+    ] {
+        let (s, v) = call(
+            &n,
+            "POST",
+            "/api/repos/environments/build",
+            Some(LOCAL),
+            Some(json!({ "repo": repo })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+        assert!(v.to_string().contains(why), "{v}");
+    }
+}
