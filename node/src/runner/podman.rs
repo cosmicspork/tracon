@@ -125,10 +125,13 @@ impl RunSpec {
         // harness that names no such variable (OpenCode decides by HOME and
         // XDG, which its adapter sets) gets none invented for it.
         let state = format!("{}/{}", self.home, self.state_dir);
+        let direct = super::no_proxy(&self.gateway_host);
         for (k, v) in [
             ("HTTPS_PROXY", proxy.as_str()),
             ("HTTP_PROXY", proxy.as_str()),
-            ("NO_PROXY", self.gateway_host.as_str()),
+            // Both spellings: curl reads only the lowercase one.
+            ("NO_PROXY", direct.as_str()),
+            ("no_proxy", direct.as_str()),
             (self.state_env, state.as_str()),
         ] {
             // A value the command sets itself is not also set here: two `-e`
@@ -336,6 +339,13 @@ mod tests {
         assert!(joined.contains("--stop-timeout 10"));
         assert!(joined.contains("--network tracon-int"));
         assert!(joined.contains("HTTPS_PROXY=http://tracon-gw:8888"));
+        // A run's own loopback never goes to the proxy, in either spelling.
+        for name in ["NO_PROXY", "no_proxy"] {
+            assert!(
+                joined.contains(&format!("{name}=tracon-gw,localhost,127.0.0.1,::1")),
+                "{joined}"
+            );
+        }
         // OpenCode names no state-directory variable, so the runner sets
         // none rather than inventing one; where it keeps things is decided by
         // the HOME and XDG values its adapter passes per session.

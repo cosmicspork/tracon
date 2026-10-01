@@ -190,7 +190,8 @@ impl KubeSpec {
             ("HOME", self.home.clone()),
             ("HTTPS_PROXY", proxy.clone()),
             ("HTTP_PROXY", proxy),
-            ("NO_PROXY", self.gateway_host.clone()),
+            ("NO_PROXY", super::no_proxy(&self.gateway_host)),
+            ("no_proxy", super::no_proxy(&self.gateway_host)),
             (self.state_env, state),
         ]
         .into_iter()

@@ -12,6 +12,15 @@ use futures_core::future::BoxFuture;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::Child;
 
+/// What a run reaches without the proxy: the gateway, which is how it reaches
+/// the node, and itself. A test suite that starts a server on its own
+/// loopback and calls it would otherwise send that call to the proxy, which
+/// refuses it — and the test fails for a reason that has nothing to do with
+/// the change under review. Nothing here widens what leaves the runner.
+pub fn no_proxy(gateway_host: &str) -> String {
+    format!("{gateway_host},localhost,127.0.0.1,::1")
+}
+
 /// A runtime-owned directory mounted into a runner. `volume` is a named Podman
 /// volume or a PVC-relative directory; it is never a host path.
 #[derive(Debug, Clone, PartialEq, Eq)]
