@@ -293,7 +293,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/repos/recent", get(api::recent_repos))
         .route("/api/repos/clone", post(api::clone_repo))
-        .route("/api/repos/environments", get(environments::list))
+        .route(
+            "/api/repos/environments",
+            get(environments::list).put(environments::save),
+        )
         .route("/api/repos/environments/build", post(environments::build))
         .route(
             "/api/workspaces/import",

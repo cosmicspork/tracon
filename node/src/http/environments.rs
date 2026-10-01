@@ -18,9 +18,8 @@ use crate::repo_image;
 /// one build.
 pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
     let builds = s.store().repo_images()?;
-    let entries: Vec<Value> = s
-        .cfg
-        .repo
+    let repos = s.cfg.repos();
+    let entries: Vec<Value> = repos
         .iter()
         .enumerate()
         .map(|(index, entry)| {
@@ -28,8 +27,7 @@ pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
             let builds: Vec<_> = builds
                 .iter()
                 .filter(|build| {
-                    s.cfg
-                        .repo
+                    repos
                         .iter()
                         .position(|entry| entry.matches(Path::new(&build.repo_path)))
                         == Some(index)
@@ -40,7 +38,37 @@ pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
         .collect();
     Ok(Json(json!({
         "can_build": s.manager.backend().image_builder().is_some(),
+        "presets": crate::config::egress_presets(),
         "entries": entries,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct SaveBody {
+    entries: Vec<crate::config::Repo>,
+}
+
+/// Replace the table: refused whole if any entry is one the node could not
+/// honour, written to `node.toml`, and in effect for the next session and
+/// the next check without a restart. A session already running keeps the
+/// image and the egress it started with.
+pub async fn save(
+    _: Loopback,
+    State(s): State<AppState>,
+    Json(body): Json<SaveBody>,
+) -> ApiResult<Json<Value>> {
+    crate::config::validate_repos(&body.entries)
+        .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, error))?;
+    let mut file = Config::try_load()
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let changed = json!(file.repo) != json!(body.entries);
+    file.repo = body.entries.clone();
+    file.save()
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    s.cfg.live_repo.set(body.entries);
+    Ok(Json(json!({
+        "changed": changed,
+        "restart_required": false,
     })))
 }
 
@@ -72,7 +100,7 @@ pub async fn build(
             s.manager.backend().kind()
         )));
     }
-    let recipe = repo_image::recipe(&repo, entry)
+    let recipe = repo_image::recipe(&repo, &entry)
         .await
         .map_err(unprocessable)?;
     let since_ms = crate::store::now_ms();

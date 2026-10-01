@@ -541,7 +541,10 @@ files. Required checks run against an isolated copy of the candidate, never the
 worktree, in a throwaway container with no credentials, no egress, and only the tools of
 the image the operator validated for that repository. Which commands and which image is
 the repository's `[[repo]]` entry in the node's own configuration — never a file in the
-candidate, which could then choose its own gate — over the node-wide checks and the
+candidate, which could then choose its own gate, and the one table a running node
+replaces rather than waiting for a restart, so an entry saved from Settings or the CLI
+applies to the next session and check without ending the ones in progress — over the
+node-wide checks and the
 harness image where the entry names none; a command that image has no tool for is
 recorded `not_runnable` — never a pass, never reusable evidence, and never a failure
 the agent is asked to fix. An entry may name the repository's Dockerfile instead of an

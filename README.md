@@ -371,6 +371,14 @@ build runs on this machine's Podman with the network, outside the boundary — t
 trust `devcontainer up` asks for, which is why it is per repository and yours to name.
 `tracon repo ls` shows each repository's image and any command it has no tool for.
 
+The table is edited where you would look for it: **Settings → Repositories**, or
+`tracon repo set <path> --dockerfile .devcontainer/Dockerfile --check "just check"
+--prepare "cargo fetch --locked" --egress crates` (and `show`, `rm`). Either writes
+`node.toml` and takes effect for the next session and the next check without a restart —
+a restart would end every session on the node to change one repository's environment. A
+session already running keeps the image and the egress it started with. Hand edits to
+`node.toml` are read at start, as before.
+
 A Claude Code session runs in that image too. The node copies the harness onto the
 repository's image as one more layer, proves it runs there, and launches the session in
 the result, so the agent has the compiler, the test runner and the formatter its checks
@@ -693,7 +701,7 @@ and revoked the moment the hub loses that key.
 | `tracon skill import <dir[#git-rev]>\|ls\|rm` | skill packages in a channel's launch manifest |
 | `tracon memory ls\|add\|rm\|recall\|batch` | memories, and the promotion batch on demand |
 | `tracon work add\|ls\|ready\|show\|close\|dep\|rm` | the ledger |
-| `tracon repo ls\|build [repo]` | the `[[repo]]` entries, and building a repository's image from its default-branch Dockerfile |
+| `tracon repo ls\|show\|set\|rm\|build [repo]` | the `[[repo]]` entries (also **Settings → Repositories**), and building a repository's image from its default-branch Dockerfile |
 | `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |
 | `tracon metrics [--channel] [--days]`, `provenance <sha>` | what happened |
 | `tracon gc [--apply] [--caches] [--all]` | runtime storage whose owner is over |
@@ -765,7 +773,9 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
                                     # state_claim, state_mount, harness_home, uid, gateway_host
 # approved_images = []              # digest-pinned project images preparation may use besides the harness image
 
-# [[repo]]                          # one repository's environment; everything but `path` is optional and
+# [[repo]]                          # one repository's environment (also Settings → Repositories and
+                                    # `tracon repo set`, which apply without a restart); everything but
+                                    # `path` is optional and
                                     # falls back to the node-wide answer. Yours, never the repository's:
                                     # a candidate that could edit it could pick its own checks
 # path = "github.com/owner/name"    # an absolute path is that repository's root, a relative one a path

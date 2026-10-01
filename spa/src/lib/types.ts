@@ -1255,6 +1255,45 @@ export interface NodeConfig {
   running: { harness_id: string; harness_version: string; node_name: string }
 }
 
+/** One `[[repo]]` entry, as `node.toml` holds it. */
+export interface RepoEntry {
+  path: string
+  image?: string
+  dockerfile?: string
+  context?: string
+  /** Absent: the node-wide checks. Empty: explicitly none. */
+  checks?: string[]
+  timeout_secs?: number
+  prepare: string[]
+  egress: string[]
+  session_egress?: boolean
+}
+
+/** One build of a repository's image on this node. */
+export interface RepoImageBuild {
+  id: string
+  repo_path: string
+  /** `base`: what checks run in. `session:<harness>`: that, with the harness layered on. */
+  kind: string
+  source_ref: string
+  source_commit: string
+  image: string
+  status: 'building' | 'ready' | 'failed'
+  log_tail: string
+  error: string
+  /** Commands the entry names that the image has no tool for. */
+  warnings: string[]
+  started_ms: number
+  finished_ms: number | null
+}
+
+export interface RepoEnvironments {
+  can_build: boolean
+  /** Preset name, and the hosts it opens. */
+  presets: [string, string[]][]
+  entries: { entry: RepoEntry; builds: RepoImageBuild[] }[]
+}
+
 /** One thing an operator put in a channel's launch manifest. */
 export interface ManifestItem {
   channel: string
