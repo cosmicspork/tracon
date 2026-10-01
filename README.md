@@ -301,7 +301,9 @@ metadata refused) and never written back. The harness sees `/work` and no host
 path; your Git configuration, hooks, and credentials stay outside. A workspace
 outlives its session — start another on it, export a checked snapshot, or download
 it as a zip — and publication happens from that snapshot through a separate,
-credential-bearing repository the node owns, never from the agent's clone.
+credential-bearing repository the node owns, never from the agent's clone. A
+snapshot is the workspace as Git sees it: what its ignore rules exclude (a
+`target/`, a `node_modules/`) stays in the volume and is never exported.
 Nothing is removed on its own except a check run's copy once the check is over.
 `tracon gc` (or **Settings → Maintenance → Runtime storage**) lists the volumes
 and state directories whose owner is over (an archived or vanished session, a

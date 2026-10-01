@@ -79,18 +79,105 @@ async fn volume_copy_in(
     }
 }
 
+/// Stages a workspace as Git sees it under `/export`, in the transfer
+/// container's own filesystem. The index names the tracked files and the
+/// ignore rules decide the untracked ones, so a deleted file stays deleted and
+/// build output stays behind. The list and the archive are files rather than a
+/// pipe: a failure on either side of a pipe would stage a partial tree as if
+/// it were the whole one. A volume with no repository is copied as it is.
+const STAGE_WORKSPACE: &str = r#"set -eu
+mkdir -p /export
+cd /data
+if [ -d .git ]; then
+  export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+  git -c safe.directory=/data -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+    ls-files -z -co --exclude-standard > /tmp/tracon-export.list
+  tar --null --ignore-failed-read -T /tmp/tracon-export.list -cf /tmp/tracon-export.tar
+  tar -xf /tmp/tracon-export.tar -C /export
+  rm -f /tmp/tracon-export.tar /tmp/tracon-export.list
+  cp -a .git /export/.git
+else
+  cp -a /data/. /export/
+fi
+"#;
+
+/// Export a workspace volume without what its repository ignores. The
+/// repository's own configuration is the agent's to write, so Git reads it
+/// only here: in a container with no network, no capabilities and the volume
+/// read-only, whose output is validated like any other export.
+async fn workspace_copy_out(
+    podman_bin: &str,
+    image: &str,
+    volume: &str,
+    destination: &Path,
+) -> Result<(), BoundaryError> {
+    let name = format!("tracon-transfer-{}", uuid::Uuid::now_v7().simple());
+    let staged = tokio::process::Command::new(podman_bin)
+        .args([
+            "run",
+            "--name",
+            &name,
+            "--network",
+            "none",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--entrypoint",
+            "sh",
+            "--mount",
+            &format!("type=volume,src={volume},dst=/data,ro"),
+            image,
+            "-c",
+            STAGE_WORKSPACE,
+        ])
+        .output()
+        .await
+        .map_err(BoundaryError::Io);
+    let result = match staged {
+        Ok(staged) if staged.status.success() => {
+            copy_out(podman_bin, &format!("{name}:/export/."), destination).await
+        }
+        Ok(staged) => Err(BoundaryError::Other(format!(
+            "stage workspace export: {}",
+            String::from_utf8_lossy(&staged.stderr).trim()
+        ))),
+        Err(error) => Err(error),
+    };
+    let _ = tokio::process::Command::new(podman_bin)
+        .args(["rm", "-f", &name])
+        .output()
+        .await;
+    result?;
+    crate::workspace::validate_tree(destination).map_err(|e| BoundaryError::Other(e.to_string()))
+}
+
+async fn copy_out(podman_bin: &str, source: &str, destination: &Path) -> Result<(), BoundaryError> {
+    if destination.exists() {
+        std::fs::remove_dir_all(destination)?;
+    }
+    // `podman cp <container>:<dir>/. <dest>` copies into `<dest>`'s parent when
+    // `<dest>` does not exist yet; it must exist first to receive the tree.
+    std::fs::create_dir_all(destination)?;
+    let copied = tokio::process::Command::new(podman_bin)
+        .args(["cp", source, &destination.to_string_lossy()])
+        .output()
+        .await
+        .map_err(BoundaryError::Io)?;
+    if copied.status.success() {
+        Ok(())
+    } else {
+        Err(BoundaryError::Other(format!(
+            "copy out of runtime volume: {}",
+            String::from_utf8_lossy(&copied.stderr).trim()
+        )))
+    }
+}
+
 async fn volume_copy_out(
     podman_bin: &str,
     image: &str,
     volume: &str,
     destination: &Path,
 ) -> Result<(), BoundaryError> {
-    if destination.exists() {
-        std::fs::remove_dir_all(destination)?;
-    }
-    // `podman cp <container>:/data/. <dest>` copies into `<dest>`'s parent when
-    // `<dest>` does not exist yet; it must exist first to receive the tree.
-    std::fs::create_dir_all(destination)?;
     let name = format!("tracon-transfer-{}", uuid::Uuid::now_v7().simple());
     let created = tokio::process::Command::new(podman_bin)
         .args([
@@ -111,26 +198,12 @@ async fn volume_copy_out(
             String::from_utf8_lossy(&created.stderr).trim()
         )));
     }
-    let copied = tokio::process::Command::new(podman_bin)
-        .args([
-            "cp",
-            &format!("{name}:/data/."),
-            &destination.to_string_lossy(),
-        ])
-        .output()
-        .await
-        .map_err(BoundaryError::Io);
+    let copied = copy_out(podman_bin, &format!("{name}:/data/."), destination).await;
     let _ = tokio::process::Command::new(podman_bin)
         .args(["rm", "-f", &name])
         .output()
         .await;
-    let copied = copied?;
-    if !copied.status.success() {
-        return Err(BoundaryError::Other(format!(
-            "copy out of runtime volume: {}",
-            String::from_utf8_lossy(&copied.stderr).trim()
-        )));
-    }
+    copied?;
     crate::workspace::validate_tree(destination).map_err(|e| BoundaryError::Other(e.to_string()))
 }
 
@@ -213,6 +286,20 @@ impl Backend for PodmanBackend {
 
     async fn export_volume(&self, volume: &str, destination: &Path) -> Result<(), BoundaryError> {
         volume_copy_out(
+            &crate::boundary::podman::resolve_podman_env(&self.cfg),
+            &self.cfg.boundary.harness_image,
+            volume,
+            destination,
+        )
+        .await
+    }
+
+    async fn export_workspace(
+        &self,
+        volume: &str,
+        destination: &Path,
+    ) -> Result<(), BoundaryError> {
+        workspace_copy_out(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
             &self.cfg.boundary.harness_image,
             volume,

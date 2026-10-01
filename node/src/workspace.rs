@@ -176,6 +176,22 @@ fn overlay_checkout(source: &Path, destination: &Path) -> Result<(), WorkspaceEr
     copy_dir(source, destination, true, Some(&keep), &mut budget)
 }
 
+/// Copy a workspace the way its own repository sees it: the repository, and
+/// the tracked and untracked files its ignore rules leave in. The host-side
+/// counterpart of what a container backend stages before an export, for a
+/// backend whose volumes are plain directories.
+pub fn copy_checkout(source: &Path, destination: &Path) -> Result<(), WorkspaceError> {
+    if destination.exists() {
+        std::fs::remove_dir_all(destination)?;
+    }
+    let repository = source.join(".git");
+    if !repository.is_dir() {
+        return copy_tree(source, destination, false);
+    }
+    overlay_checkout(source, destination)?;
+    copy_tree(&repository, &destination.join(".git"), false)
+}
+
 struct Keep {
     root: PathBuf,
     paths: std::collections::HashSet<PathBuf>,
@@ -216,7 +232,7 @@ pub async fn export(
     let lock = volume_lock(&workspace.volume);
     let _guard = lock.lock().await;
     backend
-        .export_volume(&workspace.volume, &workspace.snapshot)
+        .export_workspace(&workspace.volume, &workspace.snapshot)
         .await
         .map_err(|e| WorkspaceError::Git {
             op: "runtime export",
@@ -972,6 +988,53 @@ mod tests {
         assert!(!stage.join(".env").exists());
         assert!(!stage.join("app/node_modules").exists());
         let _ = std::fs::remove_dir_all(&stage);
+    }
+
+    /// A session that installed or built leaves dependency trees and build
+    /// output in its workspace. An export takes what Git would show, so their
+    /// symlinks never refuse the snapshot and their size never exhausts it.
+    #[cfg(unix)]
+    #[test]
+    fn an_export_leaves_what_the_repository_ignores_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("volume");
+        std::fs::create_dir_all(&source).unwrap();
+        sh(
+            &source,
+            "git init -q -b main . && git config user.email t@e && git config user.name t \
+             && printf 'node_modules/\\ntarget/\\n' > .gitignore && echo one > a.txt \
+             && echo gone > gone.txt && git add -A && git commit -qm one \
+             && rm gone.txt && echo new > b.txt \
+             && mkdir -p node_modules/.bin target/debug \
+             && ln -s ../acorn node_modules/.bin/acorn && echo built > target/debug/app",
+        );
+        // The whole volume is refused, as it always was.
+        assert!(matches!(
+            validate_tree(&source),
+            Err(WorkspaceError::Unsafe(_))
+        ));
+
+        let exported = tmp.path().join("snapshot");
+        std::fs::create_dir_all(&exported).unwrap();
+        std::fs::write(exported.join("stale.txt"), "from an earlier export").unwrap();
+        copy_checkout(&source, &exported).unwrap();
+        validate_tree(&exported).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(exported.join("b.txt")).unwrap(),
+            "new\n"
+        );
+        assert!(exported.join(".git/HEAD").is_file());
+        for absent in ["node_modules", "target", "gone.txt", "stale.txt"] {
+            assert!(!exported.join(absent).exists(), "{absent} was exported");
+        }
+
+        // A volume that is not a repository has no rules to apply.
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(plain.join("target")).unwrap();
+        std::fs::write(plain.join("target/out"), "kept").unwrap();
+        let copied = tmp.path().join("plain-copy");
+        copy_checkout(&plain, &copied).unwrap();
+        assert!(copied.join("target/out").is_file());
     }
 
     /// Uploads and continuity transfers name their own relative paths, and a
