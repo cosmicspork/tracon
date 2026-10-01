@@ -331,7 +331,14 @@ pub fn for_item(
         Some(c) => store.check_runs_for_candidate(&c.id)?,
         None => Vec::new(),
     };
-    let configured = checks::required_definitions(cfg);
+    // The candidate's repository decides which checks are required of it;
+    // with no candidate yet, the node-wide list is all there is to show.
+    let configured = match &candidate {
+        Some(c) => checks::candidate_environment(store, cfg, c)
+            .map(|environment| environment.checks)
+            .unwrap_or_else(|_| checks::required_definitions(cfg)),
+        None => checks::required_definitions(cfg),
+    };
     let judgements: Vec<_> = store
         .criterion_judgements_for_item(item_id)?
         .into_iter()

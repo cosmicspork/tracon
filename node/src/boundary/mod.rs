@@ -32,9 +32,10 @@ pub enum BoundaryError {
     Other(String),
 }
 
-/// Held for exactly one QA browser run's container. Dropping it restores
-/// the QA egress gateway to deny-all; the mutex permit inside it also keeps
-/// two QA browser runs from ever observing each other's scope.
+/// Held for exactly one scoped run's container: a QA browser run, or one
+/// repository's dependency preparation. Dropping it restores the scoped egress
+/// gateway to deny-all; the mutex permit inside it also keeps two scoped runs
+/// from ever observing each other's hosts.
 pub struct QaEgressGuard {
     _permit: tokio::sync::MutexGuard<'static, ()>,
     reset: Option<Box<dyn FnOnce() + Send>>,
@@ -116,13 +117,14 @@ pub trait Backend: Send + Sync {
     fn proxy_port(&self) -> Option<u16> {
         None
     }
-    /// Restrict this backend's dedicated QA browser egress gateway to
-    /// exactly these hosts for the life of the returned guard. Every QA
-    /// browser run acquires this before its container starts and holds it
-    /// until the container exits. `Err` when this backend has no scoped QA
-    /// gateway wired: the caller refuses to run rather than proceed on the
-    /// harness's own (LLM-provider-only, and shared with every other
-    /// session) egress path.
+    /// Restrict this backend's dedicated scoped egress gateway to exactly
+    /// these hosts for the life of the returned guard. Every QA browser run,
+    /// and every dependency preparation whose repository names egress
+    /// (`environment::scoped_egress`), acquires this before its container
+    /// starts and holds it until the container exits; one holder at a time.
+    /// `Err` when this backend has no scoped gateway wired: the caller
+    /// refuses to run rather than proceed on the harness's own
+    /// (LLM-provider-only, and shared with every other session) egress path.
     async fn scope_qa_egress(
         &self,
         _allowed_hosts: &[String],

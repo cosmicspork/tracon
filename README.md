@@ -312,9 +312,9 @@ Dependency preparation runs first as its own credential-free command in an
 isolated cache: a `devcontainer.json` may name a digest-pinned image, but hooks,
 mounts, sockets, and privilege in it are refused rather than partly honoured, and
 `[runtime] approved_images` is the operator's list of anything else acceptable. A
-repository whose `devcontainer.json` names no image prepares in its
-`[[runtime.toolchain]]` image, so what preparation validates is what its checks run
-in.
+repository whose `devcontainer.json` names no image prepares in the image its `[[repo]]`
+entry names, so what preparation validates is what its checks run in, and reaches the
+registries that entry's `egress` names and nothing else.
 
 ### What a session is told
 
@@ -348,12 +348,27 @@ ask for what it did not get.
 An agent has no forge token and never runs `gh` or `glab`. To publish it commits,
 submits, and waits: the node snapshots the workspace volume itself, runs the
 project's checks against that snapshot in a throwaway container, and refuses a failure
-or an oversized diff before you ever see it. The container is the toolchain image you
-named for that repository (`[[runtime.toolchain]]`, digest-pinned), or the harness image
-when you named none — and a check whose command is not in it is reported as *not
-runnable*, naming the missing tool and the image it looked in, rather than as a failing
-check the agent is told to fix. Checks still have no network and no dependency cache, so
-a project that fetches its dependencies at check time needs them vendored in that image.
+or an oversized diff before you ever see it. Which checks, and what they run in, is that
+repository's `[[repo]]` entry in `node.toml`: its own commands and a digest-pinned
+toolchain image, or the node-wide `[supervision] checks` and the harness image where you
+named none — and a check whose command is not in the image is reported as *not runnable*,
+naming the missing tool and the image it looked in, rather than as a failing check the
+agent is told to fix.
+
+A check has no network. A repository whose checks need its dependencies names `prepare`
+commands (`bun install --frozen-lockfile`, `composer install`, `cargo fetch --locked`)
+and the registries they may reach (`egress = ["npm", "crates"]`). Those run first, on the
+same copy of the candidate, with the repository's dependency cache writable and the
+node's scoped egress gateway opened to exactly those hosts; the gateway closes again
+before the check starts, and the check gets the cache read-only. Three things follow,
+and they are yours to weigh. An install runs the candidate's own lifecycle scripts unless
+the command says otherwise (`--ignore-scripts`, `--no-scripts`), and that is the one step
+that can write the cache a later candidate's check reads; `tracon gc --caches` empties
+it. The gateway filters by host, not by method or client, so a host you name is
+reachable from the node's internal network — sessions included — for as long as a
+preparation holds it open, and a registry that accepts uploads accepts them. And the
+image's default user has to be able to write `/work` and `/cache`, which under rootless
+Podman means it runs as root.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
 a request for changes. Approval publishes exactly the reviewed bytes with the brokered
 credential; if the branch moved since submit, approval is refused and the changed files
@@ -697,16 +712,25 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # [runtime.kubernetes]              # namespace, harness_image,
                                     # state_claim, state_mount, harness_home, uid, gateway_host
 # approved_images = []              # digest-pinned project images preparation may use besides the harness image
-# [[runtime.toolchain]]             # what one repository's required checks and its preparation run in;
-# repo = "github.com/owner/name"    # an absolute path is that repository's root, a relative one a path
+
+# [[repo]]                          # one repository's environment; everything but `path` is optional and
+                                    # falls back to the node-wide answer. Yours, never the repository's:
+                                    # a candidate that could edit it could pick its own checks
+# path = "github.com/owner/name"    # an absolute path is that repository's root, a relative one a path
                                     # suffix, so a managed clone is named without the clone root. The
-                                    # first matching entry wins; a repository with no entry stays on the
-                                    # harness image, which carries no project toolchain
-# image = "localhost/toolchain@sha256:…"  # digest-pinned, always: a check's evidence is keyed on the image
-                                    # identity the runtime confirmed, and a tag is not an identity. A
-                                    # locally built image has a digest too (`podman image inspect` reports
-                                    # `RepoDigests`), so building one here costs nothing; the node refuses
-                                    # to start on a tag rather than run a check it could not pin
+                                    # first matching entry wins
+# image = "localhost/toolchain@sha256:…"  # what its checks and preparation run in. Digest-pinned, always:
+                                    # a check's evidence is keyed on the image identity the runtime
+                                    # confirmed, and a tag is not an identity. A locally built image has
+                                    # a digest too (`podman image inspect` reports `RepoDigests`); the
+                                    # node refuses to start on a tag. Without one, the harness image,
+                                    # which carries no project toolchain
+# checks = ["just check"]           # in place of [supervision] checks
+# timeout_secs = 1800               # in place of [supervision] timeout_secs; covers preparation too
+# prepare = ["bun install --frozen-lockfile"]  # run before each check, on the same copy, with the
+                                    # dependency cache writable and `egress` reachable
+# egress = ["npm"]                  # what `prepare` may reach: crates, npm, pypi, packagist, github, or a
+                                    # literal host name. Empty is no egress at all
 
 [providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
 credential = "anthropic"

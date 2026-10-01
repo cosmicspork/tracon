@@ -2,11 +2,17 @@
 //! operator configuration, and every execution mounts a node-captured Git tree
 //! read-only rather than the agent's mutable worktree.
 //!
-//! What they run *in* is the repository's toolchain image
-//! (`[[runtime.toolchain]]`), or the node's harness image when the operator has
-//! named none — and evidence is pinned only on the identity the runtime
-//! confirmed for that image. A command the image has no tool for is
-//! `not_runnable`: the environment's failing, never the candidate's.
+//! Which checks, and what they run *in*, is the repository's `[[repo]]` entry:
+//! its own commands and toolchain image, or the node-wide checks and the
+//! harness image where the operator has named none — and evidence is pinned
+//! only on the identity the runtime confirmed for that image. A command the
+//! image has no tool for is `not_runnable`: the environment's failing, never
+//! the candidate's.
+//!
+//! A repository that names `prepare` commands has them run first, on the same
+//! copy the check then runs against, with the repository's dependency cache
+//! writable and its named hosts reachable. The check itself gets the cache
+//! read-only and no egress: what it reads is what preparation fetched.
 
 use std::{path::Path, time::Duration};
 
@@ -17,8 +23,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     boundary::Backend,
     config::{Config, RuntimeKind},
-    environment::{toolchain_for, ResolvedToolchain},
-    runner::{Mount, RunnerCommand},
+    environment::{cache_env, environment_for, origin_repo, scoped_egress, RepoEnvironment},
+    runner::{Mount, Runner, RunnerCommand, RunnerError},
     store::{now_ms, CandidateRow, CheckRunRow, Store},
 };
 
@@ -97,6 +103,10 @@ struct CheckDefinition {
 }
 
 /// The trusted required definitions. Candidate files never alter this list.
+///
+/// This is the node-wide list. A repository's `[[repo]]` entry may name its
+/// own in its place; `candidate_environment` is what a candidate actually
+/// answers to.
 pub fn required_definitions(cfg: &Config) -> Vec<String> {
     cfg.supervision
         .checks
@@ -120,9 +130,9 @@ pub async fn run_required(
     force_rerun: bool,
     cancel: &dyn Cancel,
 ) -> Result<CheckReport, String> {
-    let commands = required_definitions(cfg);
-    let toolchain = toolchain_for_candidate(store, cfg, candidate)?;
-    let raw_image = toolchain.configured.clone();
+    let environment = candidate_environment(store, cfg, candidate)?;
+    let commands = environment.checks.clone();
+    let raw_image = environment.image.clone();
     let runner = backend.runner(Vec::new());
     // The identity actually confirmed against the runtime for this backend and
     // *this image*, never the configured string alone: a backend that does not
@@ -132,9 +142,9 @@ pub async fn run_required(
     let resolved_image = runner.resolved_image(Some(&raw_image)).await;
     let recorded_image = resolved_image.clone().unwrap_or_else(|| raw_image.clone());
     let pinned_image = resolved_image.as_deref().and_then(immutable_image_identity);
-    let inputs = check_inputs(cfg);
+    let inputs = check_inputs(cfg, &environment);
     let inputs_json = serde_json::to_string(&inputs).map_err(|error| error.to_string())?;
-    let timeout = Duration::from_secs(cfg.supervision.timeout_secs.max(1));
+    let timeout = Duration::from_secs(environment.timeout_secs);
     let mut results = Vec::with_capacity(commands.len());
     let mut any_reused = false;
     let mut cancelled = None;
@@ -297,53 +307,72 @@ pub async fn run_required(
             });
             continue;
         }
-        let mount = Mount::volume(scratch_volume.clone(), "/work", false);
         let started = std::time::Instant::now();
         let runner_name = format!("tracon-c-{index}-{}", &hash(&run_id)[..12]);
         // What the runner will actually call this execution, not what it was
         // asked to: a kill has to name the same thing the runtime named, or
         // it stops nothing at all.
         let running_name = runner.capture_name(&runner_name);
+        // One deadline for the whole execution: a preparation that eats the
+        // budget leaves none for the check, rather than doubling it.
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut env = Vec::new();
+        let mut mounts = vec![Mount::volume(scratch_volume.clone(), "/work", false)];
+        let mut unprepared = None;
+        if !environment.prepare.is_empty() {
+            unprepared = prepare_check_copy(
+                backend,
+                runner.as_ref(),
+                &environment,
+                &scratch_volume,
+                &runner_name,
+                deadline,
+                cancel,
+            )
+            .await
+            .err();
+            // The check reads what preparation fetched and can add nothing to
+            // it: candidate code runs here, and a cache it could write is a
+            // cache the next candidate's evidence would be built on.
+            env = cache_env();
+            env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
+            mounts.push(Mount::volume(
+                environment.cache_volume.clone(),
+                "/cache",
+                true,
+            ));
+        }
         let cmd = RunnerCommand {
             argv: vec!["sh".into(), "-lc".into(), command.clone()],
-            env: Vec::new(),
-            mounts: vec![mount],
+            env,
+            mounts,
             workdir: Some("/work".into()),
             name: runner_name.clone(),
             image: Some(raw_image.clone()),
             expose: None,
         };
-        // Both ways an execution can be stopped kill the runtime *while the
-        // capture is still held*: an identity released first could be reused
-        // by the runtime before the kill names it.
-        let deadline = tokio::time::Instant::now() + timeout;
-        let finished = async {
-            let capture = runner.run_capture(cmd);
-            tokio::pin!(capture);
-            let mut poll = tokio::time::interval(CANCEL_POLL);
-            poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tokio::select! {
-                    finished = &mut capture => return Ok(finished),
-                    _ = tokio::time::sleep_until(deadline) => {
-                        let _ = runner.kill(&running_name).await;
-                        return Err(None);
-                    }
-                    _ = poll.tick() => {
-                        if let Some(reason) = cancel.cancelled() {
-                            let _ = runner.kill(&running_name).await;
-                            return Err(Some(reason));
-                        }
-                    }
-                }
-            }
-        }
-        .await;
+        let finished = match unprepared {
+            Some(stopped) => Err(stopped),
+            None => until_stopped(
+                runner.run_capture(cmd),
+                deadline,
+                cancel,
+                Some((runner.as_ref(), &running_name)),
+            )
+            .await
+            .map_err(|stop| match stop {
+                Some(reason) => Stopped::Cancelled {
+                    reason,
+                    killed: running_name.clone(),
+                },
+                None => Stopped::TimedOut,
+            }),
+        };
         // Only the output is kept; the copy it ran against is nobody's now.
         release_check_volume(backend, &scratch_volume).await;
         // Cancelled: the runtime is stopped before anything is written down,
         // so the record is never ahead of what is actually running.
-        if let Err(Some(reason)) = finished {
+        if let Err(Stopped::Cancelled { reason, killed }) = finished {
             let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
             store
                 .cancel_running_check(
@@ -354,7 +383,7 @@ pub async fn run_required(
                         json!({
                             "execution_backend": backend.kind(),
                             "cancelled": reason,
-                            "killed": running_name,
+                            "killed": killed,
                         }),
                     ),
                 )
@@ -390,7 +419,11 @@ pub async fn run_required(
                 });
                 if let Some(tool) = &missing {
                     metadata["missing_tool"] = json!(tool);
-                    metadata["execution_image_source"] = json!(toolchain.source);
+                    metadata["execution_image_source"] = json!(environment.image_source);
+                }
+                if !environment.prepare.is_empty() {
+                    metadata["prepared_with"] = json!(environment.prepare);
+                    metadata["cache_volume"] = json!(environment.cache_volume);
                 }
                 (outcome, code, tail(&output_text), metadata)
             }
@@ -400,7 +433,19 @@ pub async fn run_required(
                 format!("could not run: {error}"),
                 json!({ "execution_backend": backend.kind(), "runner_error": error.to_string() }),
             ),
-            // The deadline arm above already killed the runtime.
+            // Nothing about the candidate was established: the check never
+            // started. `interrupted` is never a pass and never reusable.
+            Err(Stopped::Unprepared(message)) => (
+                "interrupted",
+                None,
+                message,
+                json!({
+                    "execution_backend": backend.kind(),
+                    "interrupted": "preparation",
+                    "prepared_with": environment.prepare,
+                }),
+            ),
+            // The deadline arm already killed the runtime.
             Err(_) => (
                 "interrupted",
                 None,
@@ -476,7 +521,7 @@ pub async fn run_required(
         results,
         reused: any_reused,
         image: recorded_image,
-        image_source: toolchain.source,
+        image_source: environment.image_source,
         cancelled,
     })
 }
@@ -507,39 +552,140 @@ fn missing_tool(command: &str, output: &str) -> String {
         .to_string()
 }
 
-/// The image this candidate's checks run in: the toolchain image the operator
-/// named for the repository its session was working in, or the node's harness
-/// image. Resolved once per report, from the candidate, so the run path and the
-/// approval path cannot disagree about what ran. A session the store no longer
-/// has, or one with no repository (a harness the operator runs themselves),
-/// resolves to the harness image, as every candidate did before.
-fn toolchain_for_candidate(
+/// How an execution ended without its command finishing.
+enum Stopped {
+    Cancelled {
+        reason: String,
+        killed: String,
+    },
+    TimedOut,
+    /// Preparation did not complete, so the check was never started.
+    Unprepared(String),
+}
+
+/// Drive `work` until it finishes, the deadline passes (`Err(None)`), or the
+/// work is no longer wanted (`Err(Some(reason))`). Both ways of stopping kill
+/// the named runtime *while `work` is still held*: an identity released first
+/// could be reused by the runtime before the kill names it.
+async fn until_stopped<T>(
+    work: impl std::future::Future<Output = T>,
+    deadline: tokio::time::Instant,
+    cancel: &dyn Cancel,
+    kill: Option<(&dyn Runner, &str)>,
+) -> Result<T, Option<String>> {
+    tokio::pin!(work);
+    let mut poll = tokio::time::interval(CANCEL_POLL);
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let stopped = loop {
+        tokio::select! {
+            finished = &mut work => return Ok(finished),
+            _ = tokio::time::sleep_until(deadline) => break None,
+            _ = poll.tick() => {
+                if let Some(reason) = cancel.cancelled() {
+                    break Some(reason);
+                }
+            }
+        }
+    };
+    if let Some((runner, name)) = kill {
+        let _ = runner.kill(name).await;
+    }
+    Err(stopped)
+}
+
+/// Run the repository's `prepare` commands against one check's own copy of the
+/// candidate: same image, the dependency cache writable, and the scoped egress
+/// gateway open to the repository's hosts for exactly as long as they run.
+///
+/// The commands are the operator's; what they execute may not be — an install
+/// runs the candidate's own lifecycle scripts unless the command says
+/// otherwise — which is why this is the only step the cache is writable in and
+/// why it holds no credential.
+async fn prepare_check_copy(
+    backend: &dyn Backend,
+    runner: &dyn Runner,
+    environment: &RepoEnvironment,
+    scratch_volume: &str,
+    runner_name: &str,
+    deadline: tokio::time::Instant,
+    cancel: &dyn Cancel,
+) -> Result<(), Stopped> {
+    let stopped = |stop: Option<String>, killed: &str| match stop {
+        Some(reason) => Stopped::Cancelled {
+            reason,
+            killed: killed.to_string(),
+        },
+        None => Stopped::TimedOut,
+    };
+    // The gateway has one holder at a time, so this can wait behind another
+    // preparation or a QA browser run. That wait is part of the execution.
+    let egress = until_stopped(
+        scoped_egress(backend, &environment.egress),
+        deadline,
+        cancel,
+        None,
+    )
+    .await
+    .map_err(|stop| stopped(stop, ""))?
+    .map_err(Stopped::Unprepared)?;
+    for (step, command) in environment.prepare.iter().enumerate() {
+        let name = format!("{runner_name}-p{step}");
+        let running = runner.capture_name(&name);
+        let mut env = cache_env();
+        env.extend(egress.env.iter().cloned());
+        let cmd = RunnerCommand {
+            argv: vec!["sh".into(), "-lc".into(), command.clone()],
+            env,
+            mounts: vec![
+                Mount::volume(scratch_volume.to_string(), "/work", false),
+                Mount::volume(environment.cache_volume.clone(), "/cache", false),
+            ],
+            workdir: Some("/work".into()),
+            name,
+            image: Some(environment.image.clone()),
+            expose: None,
+        };
+        let finished: Result<std::process::Output, RunnerError> = until_stopped(
+            runner.run_capture(cmd),
+            deadline,
+            cancel,
+            Some((runner, &running)),
+        )
+        .await
+        .map_err(|stop| stopped(stop, &running))?;
+        let output = finished.map_err(|error| {
+            Stopped::Unprepared(format!("could not run preparation `{command}`: {error}"))
+        })?;
+        if !output.status.success() {
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            return Err(Stopped::Unprepared(format!(
+                "preparation `{command}` failed (exit {}) in {} ({}); the check was not run.\n\n{}",
+                output
+                    .status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "none".into()),
+                environment.image,
+                environment.image_source,
+                tail(&text)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// What this candidate answers to: the `[[repo]]` entry for the repository its
+/// session was working in, over the node-wide defaults. Resolved once per
+/// report, from the candidate, so the run path and the approval path cannot
+/// disagree about which checks ran or what they ran in.
+pub fn candidate_environment(
     store: &Store,
     cfg: &Config,
     candidate: &CandidateRow,
-) -> Result<ResolvedToolchain, String> {
+) -> Result<RepoEnvironment, String> {
     let repo = origin_repo(store, &candidate.owner_session_id)?;
-    Ok(toolchain_for(cfg, repo.as_deref()))
-}
-
-/// The repository a session's work came from. A session resumed on an
-/// existing workspace records `workspace://<id>`, and a workspace's id is the
-/// session that first imported it, so the chain is followed back to a real
-/// path — bounded, because a store is not trusted to be acyclic.
-fn origin_repo(store: &Store, session_id: &str) -> Result<Option<std::path::PathBuf>, String> {
-    let mut id = session_id.to_string();
-    for _ in 0..8 {
-        let Some(session) = store.get_session(&id).map_err(|error| error.to_string())? else {
-            return Ok(None);
-        };
-        match session.repo_path.strip_prefix("workspace://") {
-            Some(workspace) if workspace != id => id = workspace.to_string(),
-            Some(_) => return Ok(None),
-            None if session.repo_path.trim().is_empty() => return Ok(None),
-            None => return Ok(Some(session.repo_path.into())),
-        }
-    }
-    Ok(None)
+    Ok(environment_for(cfg, repo.as_deref()))
 }
 
 /// Every record a check settles as names the tree it ran against. The row a
@@ -589,10 +735,6 @@ pub async fn review_required_checks_current(
     review_id: &str,
     cfg: &Config,
 ) -> Result<(), String> {
-    let required = required_definitions(cfg);
-    if required.is_empty() {
-        return Ok(());
-    }
     let Some(revision) = store
         .latest_review_revision(review_id)
         .map_err(|error| error.to_string())?
@@ -601,6 +743,18 @@ pub async fn review_required_checks_current(
         // image/input provenance. New submissions always create a revision.
         return Ok(());
     };
+    let candidate = store
+        .candidate(&revision.candidate_id)
+        .map_err(|error| error.to_string())?;
+    // The candidate names the repository, and the repository names the checks.
+    // One the store no longer has answers to the node-wide list.
+    let environment = match &candidate {
+        Some(candidate) => candidate_environment(store, cfg, candidate)?,
+        None => environment_for(cfg, None),
+    };
+    if environment.checks.is_empty() {
+        return Ok(());
+    }
     let review = store
         .get_review(review_id)
         .map_err(|error| error.to_string())?
@@ -610,25 +764,21 @@ pub async fn review_required_checks_current(
             "review's current source is not the immutable revision that was checked".into(),
         );
     }
-    let candidate = store
-        .candidate(&revision.candidate_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "review candidate is missing".to_string())?;
+    let candidate = candidate.ok_or_else(|| "review candidate is missing".to_string())?;
     if candidate.head_sha != review.head_sha {
         return Err("review candidate does not match the review's current source".into());
     }
-    let raw_image = toolchain_for_candidate(store, cfg, &candidate)?.configured;
     let resolved_image = backend
         .runner(Vec::new())
-        .resolved_image(Some(&raw_image))
+        .resolved_image(Some(&environment.image))
         .await;
     let pinned_image = resolved_image.as_deref().and_then(immutable_image_identity);
-    let inputs_json =
-        serde_json::to_string(&check_inputs(cfg)).map_err(|error| error.to_string())?;
-    for command in required {
+    let inputs_json = serde_json::to_string(&check_inputs(cfg, &environment))
+        .map_err(|error| error.to_string())?;
+    for command in &environment.checks {
         let definition_json = serde_json::to_string(&CheckDefinition {
             command: command.clone(),
-            timeout_secs: cfg.supervision.timeout_secs.max(1),
+            timeout_secs: environment.timeout_secs,
         })
         .map_err(|error| error.to_string())?;
         let definition_hash = hash(&definition_json);
@@ -664,15 +814,23 @@ fn immutable_image_identity(image: &str) -> Option<String> {
         .then(|| format!("sha256:{digest}"))
 }
 
-fn check_inputs(cfg: &Config) -> serde_json::Value {
-    json!({
+/// Everything besides the command and the image that decides what a check
+/// established. Preparation is part of it only where a repository names some:
+/// a node with none keeps the identity its existing evidence was keyed on.
+fn check_inputs(cfg: &Config, environment: &RepoEnvironment) -> serde_json::Value {
+    let mut inputs = json!({
         "runtime": match cfg.runtime.kind {
             RuntimeKind::Podman => "podman",
             RuntimeKind::Kubernetes => "kubernetes",
         },
-        "timeout_secs": cfg.supervision.timeout_secs.max(1),
+        "timeout_secs": environment.timeout_secs,
         "dependency_inputs": cfg.supervision.dependency_inputs,
-    })
+    });
+    if !environment.prepare.is_empty() {
+        inputs["prepare"] = json!(environment.prepare);
+        inputs["egress"] = json!(environment.egress);
+    }
+    inputs
 }
 
 /// What a run says about the candidate. A `reused` row is a pointer at the run
@@ -743,14 +901,8 @@ mod tests {
         assert_eq!(missing_tool("just check", ""), "just");
     }
 
-    /// A session resumed on a workspace names it, not a repository; its checks
-    /// still belong to the repository the workspace was imported from, or a
-    /// resumed session would lose its toolchain image and run checks in the
-    /// harness image.
-    #[test]
-    fn a_resumed_session_is_traced_back_to_its_repository() {
-        let store = Store::open_in_memory().unwrap();
-        let row = |id: &str, repo: &str| crate::store::SessionRow {
+    fn session_row(id: &str, repo: &str) -> crate::store::SessionRow {
+        crate::store::SessionRow {
             id: id.into(),
             node_id: "n".into(),
             channel: "ch".into(),
@@ -790,7 +942,12 @@ mod tests {
             legacy_ms: None,
             parent_session: None,
             continued_from: None,
-        };
+        }
+    }
+
+    /// A store with the one node every test session belongs to.
+    fn store_with_node() -> Store {
+        let store = Store::open_in_memory().unwrap();
         store
             .put_node(
                 &crate::store::NodeRow::from_json(
@@ -799,17 +956,29 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        store.insert_session(&row("first", "/src/app")).unwrap();
         store
-            .insert_session(&row("resumed", "workspace://first"))
+    }
+
+    /// A session resumed on a workspace names it, not a repository; its checks
+    /// still belong to the repository the workspace was imported from, or a
+    /// resumed session would lose its toolchain image and run checks in the
+    /// harness image.
+    #[test]
+    fn a_resumed_session_is_traced_back_to_its_repository() {
+        let store = store_with_node();
+        store
+            .insert_session(&session_row("first", "/src/app"))
             .unwrap();
         store
-            .insert_session(&row("again", "workspace://resumed"))
+            .insert_session(&session_row("resumed", "workspace://first"))
             .unwrap();
         store
-            .insert_session(&row("loop", "workspace://loop"))
+            .insert_session(&session_row("again", "workspace://resumed"))
             .unwrap();
-        store.insert_session(&row("external", "")).unwrap();
+        store
+            .insert_session(&session_row("loop", "workspace://loop"))
+            .unwrap();
+        store.insert_session(&session_row("external", "")).unwrap();
         let origin = |id: &str| origin_repo(&store, id).unwrap();
         assert_eq!(origin("first"), Some("/src/app".into()));
         assert_eq!(origin("resumed"), Some("/src/app".into()));
@@ -1148,5 +1317,326 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&snapshot);
+    }
+
+    /// What a recording backend saw, in the order it saw it.
+    #[derive(Default)]
+    struct Recorded {
+        log: std::sync::Mutex<Vec<String>>,
+        commands: std::sync::Mutex<Vec<RunnerCommand>>,
+        /// Exit status handed to a preparation command.
+        prepare_exit: i32,
+    }
+
+    struct RecordingRunner(std::sync::Arc<Recorded>);
+
+    #[async_trait::async_trait]
+    impl Runner for RecordingRunner {
+        async fn spawn(&self, _cmd: RunnerCommand) -> Result<crate::runner::Spawned, RunnerError> {
+            Err(RunnerError::Other("not used by these tests".into()))
+        }
+        async fn run_capture(
+            &self,
+            cmd: RunnerCommand,
+        ) -> Result<std::process::Output, RunnerError> {
+            use std::os::unix::process::ExitStatusExt;
+            let preparing = cmd
+                .mounts
+                .iter()
+                .any(|m| m.target == "/cache" && !m.read_only);
+            let exit = if preparing { self.0.prepare_exit } else { 0 };
+            self.0
+                .log
+                .lock()
+                .unwrap()
+                .push(format!("run {}", cmd.argv[2]));
+            self.0.commands.lock().unwrap().push(cmd);
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(exit << 8),
+                stdout: Vec::new(),
+                stderr: if exit == 0 {
+                    Vec::new()
+                } else {
+                    b"error: 403 Forbidden".to_vec()
+                },
+            })
+        }
+        async fn kill(&self, _name: &str) -> Result<(), RunnerError> {
+            Ok(())
+        }
+        async fn resolved_image(&self, image: Option<&str>) -> Option<String> {
+            image.map(str::to_string)
+        }
+    }
+
+    static RECORDED_EGRESS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct RecordingBackend(std::sync::Arc<Recorded>);
+
+    #[async_trait::async_trait]
+    impl Backend for RecordingBackend {
+        fn kind(&self) -> &'static str {
+            "recording"
+        }
+        async fn setup(
+            &self,
+            _cfg: &Config,
+            _rebuild: bool,
+        ) -> Result<(), crate::boundary::BoundaryError> {
+            Ok(())
+        }
+        async fn check_all(&self, _cfg: &Config, _deep: bool) -> crate::boundary::BoundaryReport {
+            crate::boundary::BoundaryReport { checks: Vec::new() }
+        }
+        fn runner(&self, _extra_mounts: Vec<Mount>) -> std::sync::Arc<dyn Runner> {
+            std::sync::Arc::new(RecordingRunner(self.0.clone()))
+        }
+        fn runner_for(
+            &self,
+            _harness_id: &str,
+            _extra_mounts: Vec<Mount>,
+        ) -> std::sync::Arc<dyn Runner> {
+            std::sync::Arc::new(RecordingRunner(self.0.clone()))
+        }
+        fn harness_host(&self) -> String {
+            "gw".into()
+        }
+        async fn import_volume(
+            &self,
+            _volume: &str,
+            _source: &Path,
+        ) -> Result<(), crate::boundary::BoundaryError> {
+            Ok(())
+        }
+        async fn export_volume(
+            &self,
+            _volume: &str,
+            _destination: &Path,
+        ) -> Result<(), crate::boundary::BoundaryError> {
+            Ok(())
+        }
+        fn harness_home(&self) -> String {
+            "/home/harness".into()
+        }
+        async fn reconcile(&self, _names: &[String]) {}
+        async fn scope_qa_egress(
+            &self,
+            allowed_hosts: &[String],
+        ) -> Result<crate::boundary::QaEgressGuard, crate::boundary::BoundaryError> {
+            let permit = RECORDED_EGRESS.lock().await;
+            let recorded = self.0.clone();
+            recorded
+                .log
+                .lock()
+                .unwrap()
+                .push(format!("open {}", allowed_hosts.join(",")));
+            Ok(crate::boundary::QaEgressGuard::new(permit, move || {
+                recorded.log.lock().unwrap().push("close".into());
+            }))
+        }
+        fn qa_proxy_url(&self) -> Option<String> {
+            Some("http://gw:8890".into())
+        }
+    }
+
+    const TOOLCHAIN: &str =
+        "localhost/tc@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    /// A candidate from a session in `/src/app`, on a node whose `[[repo]]`
+    /// entry for it names an image, its own check, a preparation and the
+    /// registry that preparation needs.
+    fn prepared_repo(id: &str) -> (Store, Config, CandidateRow) {
+        let store = store_with_node();
+        store
+            .insert_session(&session_row("s-app", "/src/app"))
+            .unwrap();
+        let candidate = CandidateRow {
+            id: id.into(),
+            head_sha: format!("sha-{id}"),
+            tree_sha: Some(format!("tree-{id}")),
+            channel: "ch".into(),
+            owner_session_id: "s-app".into(),
+            source_kind: "git".into(),
+            captured_ms: now_ms(),
+            capture_json: "{}".into(),
+        };
+        store.insert_candidate(&candidate).unwrap();
+        let mut cfg = Config::default();
+        cfg.runtime.kind = RuntimeKind::Podman;
+        cfg.supervision.checks = vec!["node-wide check".into()];
+        cfg.repo = vec![crate::config::Repo {
+            path: "/src/app".into(),
+            image: Some(TOOLCHAIN.into()),
+            checks: Some(vec!["just check".into()]),
+            timeout_secs: Some(1800),
+            prepare: vec!["bun install --frozen-lockfile".into()],
+            egress: vec!["npm".into()],
+        }];
+        (store, cfg, candidate)
+    }
+
+    /// A repository's entry decides which checks run and what happens before
+    /// them. Preparation gets the cache writable and the scoped gateway open
+    /// to exactly the repository's hosts; the gateway is closed again before
+    /// the check starts, and the check gets the same cache read-only with
+    /// nothing pointing it at the scoped proxy.
+    #[tokio::test]
+    async fn preparation_fetches_with_egress_and_the_check_runs_without_it() {
+        let (store, cfg, candidate) = prepared_repo("prep1");
+        let recorded = std::sync::Arc::new(Recorded::default());
+        let backend = RecordingBackend(recorded.clone());
+        let snapshot = std::env::temp_dir();
+
+        let report = run_required(
+            &backend,
+            &cfg,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
+        assert!(report.all_required_passed, "{:?}", report.results);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(
+            report.results[0].command, "just check",
+            "the repository's own check, never the node-wide one"
+        );
+        assert_eq!(report.image, TOOLCHAIN);
+        assert_eq!(report.image_source, "repository toolchain");
+
+        assert_eq!(
+            *recorded.log.lock().unwrap(),
+            [
+                "open registry.npmjs.org",
+                "run bun install --frozen-lockfile",
+                "close",
+                "run just check",
+            ]
+        );
+        {
+            let commands = recorded.commands.lock().unwrap();
+            let (prepare, check) = (&commands[0], &commands[1]);
+            let var = |cmd: &RunnerCommand, name: &str| {
+                cmd.env
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.clone())
+            };
+            for cmd in [prepare, check] {
+                assert_eq!(cmd.image.as_deref(), Some(TOOLCHAIN));
+                assert_eq!(
+                    var(cmd, "BUN_INSTALL_CACHE_DIR").as_deref(),
+                    Some("/cache/bun")
+                );
+            }
+            assert_eq!(
+                prepare.mounts[0].volume, check.mounts[0].volume,
+                "preparation installs into the copy the check then runs against"
+            );
+            assert!(!prepare.mounts[1].read_only && check.mounts[1].read_only);
+            assert_eq!(prepare.mounts[1].volume, check.mounts[1].volume);
+            assert!(prepare.mounts[1].volume.starts_with("tracon-cache-"));
+            assert_eq!(
+                var(prepare, "HTTPS_PROXY").as_deref(),
+                Some("http://gw:8890")
+            );
+            assert_eq!(
+                var(prepare, "https_proxy").as_deref(),
+                Some("http://gw:8890")
+            );
+            assert_eq!(var(check, "HTTPS_PROXY"), None);
+            assert_eq!(var(check, "CARGO_NET_OFFLINE").as_deref(), Some("true"));
+        }
+
+        // The same candidate again borrows the evidence: nothing is prepared
+        // for a check that does not run.
+        let again = run_required(
+            &backend,
+            &cfg,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
+        assert!(again.reused);
+        assert_eq!(recorded.commands.lock().unwrap().len(), 2);
+
+        // A changed preparation is a changed check: the pass is not borrowed.
+        let mut changed = cfg.clone();
+        changed.repo[0].prepare = vec!["bun install".into()];
+        let rerun = run_required(
+            &backend,
+            &changed,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
+        assert!(!rerun.reused);
+    }
+
+    /// A preparation that fails stops the execution there. The check is never
+    /// started, the result says what failed and where, the gateway is closed,
+    /// and nothing about it is evidence a later submission could borrow.
+    #[tokio::test]
+    async fn a_failed_preparation_never_runs_the_check_or_becomes_evidence() {
+        let (store, cfg, candidate) = prepared_repo("prep2");
+        let recorded = std::sync::Arc::new(Recorded {
+            prepare_exit: 1,
+            ..Default::default()
+        });
+        let backend = RecordingBackend(recorded.clone());
+        let snapshot = std::env::temp_dir();
+
+        for _ in 0..2 {
+            let report = run_required(
+                &backend,
+                &cfg,
+                &store,
+                &candidate,
+                &snapshot,
+                false,
+                &RunToCompletion,
+            )
+            .await
+            .unwrap();
+            assert!(!report.all_required_passed);
+            assert!(!report.reused);
+            let result = &report.results[0];
+            assert_eq!(result.outcome, "interrupted");
+            assert!(
+                result
+                    .tail
+                    .contains("preparation `bun install --frozen-lockfile` failed (exit 1)"),
+                "{}",
+                result.tail
+            );
+            assert!(result.tail.contains("403 Forbidden"), "{}", result.tail);
+            assert!(
+                result.tail.contains("the check was not run"),
+                "{}",
+                result.tail
+            );
+        }
+        assert_eq!(
+            *recorded.log.lock().unwrap(),
+            [
+                "open registry.npmjs.org",
+                "run bun install --frozen-lockfile",
+                "close",
+                "open registry.npmjs.org",
+                "run bun install --frozen-lockfile",
+                "close",
+            ]
+        );
     }
 }

@@ -51,14 +51,25 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 Every item here was found on the 2026-09-20 or 2026-09-28 live runs, or in the daily
 desktop use since.
 
-- [ ] **Fetch dependencies where they can be fetched.** `cargo add`, `npm install`, `pip`
-      and `go get` from inside a session meet the egress proxy's 403, and preparation goes
-      through the same proxy, so the cache cannot be filled either — a check runs in the
-      repository's toolchain image but reaches nothing it has not vendored. Give
-      preparation its own filtered egress (as `scope_qa_egress` does for QA), mount the
-      prepared cache into checks, and make the session-side refusal say "not reachable
-      from a session; add it to preparation". Found while making required checks run
-      (2026-09-30).
+- [ ] **Give the session its repository's toolchain and registries.** Checks now run in
+      the repository's image with its dependencies prepared, but the session itself still
+      runs in the harness image and meets the egress proxy's 403: `cargo add`, `npm
+      install`, `composer require`, `pip` and `go get` fail, and the agent cannot run the
+      tests it will be judged by until it submits. "Add dependency Y and run the tests" and
+      "update package Z" are ordinary tasks and are not possible. Three parts, in order.
+      Build the repository's dev environment: its `.devcontainer` Dockerfile, built by the
+      node from the default branch and never from a candidate's worktree, the digest
+      recorded as the `[[repo]]` image and rebuilt when the Dockerfile's hash changes —
+      only the Dockerfile is honoured; hooks, compose files and features stay refused, and
+      `prepare` takes their place. Layer the harness onto that image, so a session has the
+      tools its checks have. Then let a `[[repo]]` entry open its registry presets to its
+      sessions, opt-in per repository, and make the refusal elsewhere say "not reachable
+      from a session; add it to this repository's egress". Alongside: prepare once per
+      candidate rather than before every check, keep one candidate's install from reaching
+      another's evidence (the cache is per repository and image today), give the scoped
+      gateway a filter per client rather than one holder at a time, and put the table in
+      Settings and the CLI. Found while making required checks run, and reviewing which of the
+      operator's own repositories could pass theirs (2026-09-30).
 - [ ] **Proof of work.** One MCP tool that runs a command in the session's own boundary
       and has the *node* record the command, exit code, bounded output, revision and
       image digest as evidence — the agent cannot type the output. A proof document is
@@ -66,7 +77,7 @@ desktop use since.
       the revision moves, and rerun to verify. This is the Showboat idea with the
       capture owned by the supervisor; the existing attached demonstration (a linked,
       hashed, never-executed document) stays for what a human writes by hand. Depends on
-      the dependency fetching above for anything that needs the project's tools.
+      the session toolchain above for anything that needs the project's tools.
 - [ ] **Weight cached reads in the token budget.** A cache read is charged as a full
       input token, so a planning pass on this repository spends 3–4M of a 2M default
       budget on mostly-cached context. Count cache reads and cache writes at their price
@@ -387,11 +398,15 @@ servers reaching the v2 session runner.
 - OpenCode is driven over its v1 session routes, which offer the model the node's MCP
   tools where the v2 runner offered none (findings 22, 23); a real session has not yet
   run that way. Claude Code is the working managed harness until one has.
-- Required checks run in the toolchain image the operator named for the repository
-  (`[[runtime.toolchain]]`), and in the harness image — which has no project toolchain —
-  when they named none. Neither can fetch dependencies: preparation goes through the same
-  egress proxy as a session, so a check reaches only what its image vendored, and a
-  project that fetches at check time is still run on the host by the operator.
+- Required checks run in the image, and after the preparation, the operator named for the
+  repository (`[[repo]]`), and in the harness image — which has no project toolchain —
+  when they named none. A session does not: it runs in the harness image and cannot fetch
+  a dependency, so it learns what its checks say only by submitting. The toolchain image
+  is built and pinned by hand, and preparation reruns before every check.
+- Preparation's egress is the Podman backend's scoped gateway. Kubernetes has none, so a
+  `[[repo]]` entry that names `egress` cannot prepare there. The gateway filters by host
+  only, one holder at a time: a preparation waits behind a QA browser run, and while
+  either holds it open its hosts are reachable from the whole internal network.
 - macOS releases are unsigned — the publisher holds no Apple Developer ID — and are
   authenticated by GitHub build provenance instead, so Gatekeeper asks once on first open
   (right-click Open, or System Settings > Privacy & Security > Open Anyway).
@@ -439,7 +454,14 @@ Kept as intent, off the plan until the supported configuration has earned them.
   transfer with Git history fetched from the forge, lineage, fencing, chunked transfers
   past 2 MB, compatibility re-evaluated at the destination); the hub roll-ups. The
   homelab node keeps what exists running.
-- **Kubernetes parity.** A scoped QA egress gateway and a refuse-not-drop egress policy.
+- **Repository environments shared across the mesh.** A `[[repo]]` entry is one node's
+  configuration today, so every node that works on a repository repeats it. Share the
+  recipe through the channel — the Dockerfile reference, the checks, the preparation and
+  its egress presets — and never the image digest: a locally built image has a different
+  one on every node, so each node builds and pins its own. Waits on the node building the
+  image itself (Now) and on mesh-wide configuration sync.
+- **Kubernetes parity.** A scoped egress gateway, for QA browsers and for preparation, and
+  a refuse-not-drop egress policy.
 - **Post-publication follow-through and product metrics.** Recording merge, deployment,
   evaluation and customer observation separately; judging tracon by interruptions, time
   to verified work and tokens per accepted change. Reconsider once outcomes exist to

@@ -845,7 +845,7 @@ async fn run_checks(
     snapshot: &std::path::Path,
     force_rerun: bool,
 ) -> Result<review::checks::CheckReport, String> {
-    let commands = review::checks::required_definitions(manager.cfg());
+    let commands = review::checks::candidate_environment(store, manager.cfg(), candidate)?.checks;
     manager.set_checking(&ctx.session_id, true);
     manager.record_event(
         &ctx.session_id,
@@ -945,21 +945,12 @@ async fn run_checks(
         }
         let each = unrunnable
             .iter()
-            .map(|result| {
-                format!(
-                    "check `{}` is not runnable here: `{}` is not installed in the check image \
-                     ({}, {}).",
-                    result.command,
-                    result.missing_tool.as_deref().unwrap_or("its command"),
-                    report.image,
-                    report.image_source,
-                )
-            })
+            .map(|result| not_runnable_line(result, &report))
             .collect::<Vec<_>>()
             .join("\n");
         return Err(format!(
-            "{each}\n\nThis is the environment, not your change. Tell the operator; do not \
-             change the code to work around it."
+            "{each}\n\nNothing was verified. Tell the operator; do not change the code to work \
+             around a missing tool."
         ));
     }
     if let Some(failed) = report.results.iter().find(|result| !result.ok) {
@@ -985,6 +976,32 @@ async fn run_checks(
         return Err(reason);
     }
     Ok(report)
+}
+
+/// One check that could not run, said the way its cause reads. A bare name is
+/// a tool the image lacks, which is the operator's to add. A path into the
+/// workspace is different: no image can supply it, so it is either something
+/// preparation should have installed or something the change itself removed —
+/// and only the second is the agent's to fix.
+fn not_runnable_line(
+    result: &review::checks::CheckResult,
+    report: &review::checks::CheckReport,
+) -> String {
+    let tool = result.missing_tool.as_deref().unwrap_or("its command");
+    if tool.contains('/') && !tool.starts_with('/') {
+        return format!(
+            "check `{}` is not runnable here: `{tool}` does not exist in the checked copy of the \
+             workspace. If your change removed or renamed it, fix that and submit again. \
+             Otherwise it is a dependency this repository's preparation did not install \
+             (`prepare` in its `[[repo]]` entry), which is the environment and not your change.",
+            result.command,
+        );
+    }
+    format!(
+        "check `{}` is not runnable here: `{tool}` is not installed in the check image ({}, {}). \
+         This is the environment, not your change.",
+        result.command, report.image, report.image_source,
+    )
 }
 
 /// A fresh session that reads only the requirements and the diff, when the

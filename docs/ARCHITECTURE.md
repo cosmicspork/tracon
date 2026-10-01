@@ -535,13 +535,21 @@ exact Git tree at the submitted `head_sha`, addressed by hash rather than the
 mutable worktree, kept even after the review moves on — and each file's blob hash
 is recorded at submit so approval of a branch that moved is refused naming the
 files. Required checks run against an isolated copy of the candidate, never the
-worktree, in a throwaway container with no credentials and only the tools of the
-image the operator validated for that repository (`[[runtime.toolchain]]`, or the
-node's harness image when they named none); a command that image has no tool for is
+worktree, in a throwaway container with no credentials, no egress, and only the tools of
+the image the operator validated for that repository. Which commands and which image is
+the repository's `[[repo]]` entry in the node's own configuration — never a file in the
+candidate, which could then choose its own gate — over the node-wide checks and the
+harness image where the entry names none; a command that image has no tool for is
 recorded `not_runnable` — never a pass, never reusable evidence, and never a failure
-the agent is asked to fix. A check's evidence is keyed on source revision, check
-definition, execution image, and dependency inputs, and is reused rather than rerun only
-when every one of those is unchanged — a resubmission that edits only the title,
+the agent is asked to fix. Dependencies arrive by **preparation**: the entry's `prepare`
+commands run first on the same copy, with the repository's cache volume writable and the
+scoped egress gateway opened to exactly the hosts the entry names, and closed again
+before the check starts with the cache read-only. That gateway is the QA browser's, one
+holder at a time, and it filters by host alone: while it is open, the named hosts are
+reachable from anything on the internal network. A check's evidence is keyed on source
+revision, check definition, execution image, dependency inputs, and the preparation and
+egress it was given, and is reused rather than rerun only when every one of those is
+unchanged — a resubmission that edits only the title,
 description, or ticket prose reuses the same candidate's code evidence, and an explicit
 rerun always makes a new record. Diff size is capped at submit, because complexity
 accretes when nothing says no at submission time. An operator's hand-edit travels back

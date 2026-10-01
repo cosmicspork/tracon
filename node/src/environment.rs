@@ -2,7 +2,7 @@
 //! separate, credential-free runner command; it never interprets repository
 //! setup hooks or grants the agent an additional mount.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -13,6 +13,7 @@ use crate::{
     boundary::Backend,
     config::Config,
     runner::{Mount, RunnerCommand},
+    store::Store,
     workspace::Workspace,
 };
 
@@ -68,38 +69,106 @@ pub struct Verification {
     pub elapsed_ms: u64,
 }
 
-/// Which image a repository's work runs in, and where that came from. Both
-/// halves travel together because a reader of a check that could not run has
-/// to be told *whose* image was missing the tool: the operator's entry for this
-/// repository, or the node's own harness image because there is no entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ResolvedToolchain {
-    /// The configured reference, before any runtime confirmed a digest for it.
-    pub configured: String,
-    pub source: &'static str,
+/// Everything the node resolved for one repository's checks and preparation:
+/// the operator's `[[repo]]` entry where there is one, the node-wide answer
+/// for whatever it left out. Resolved once and passed around whole, so the run
+/// path and the approval path cannot disagree about what ran or where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoEnvironment {
+    /// The configured image reference, before any runtime confirmed a digest
+    /// for it.
+    pub image: String,
+    /// Whose image that is. A reader of a check that could not run has to be
+    /// told: the operator's entry for this repository, or the node's own
+    /// harness image because the entry (or the whole table) names none.
+    pub image_source: &'static str,
+    pub checks: Vec<String>,
+    pub timeout_secs: u64,
+    /// Commands run before each check, with `egress` reachable and the cache
+    /// writable.
+    pub prepare: Vec<String>,
+    /// Literal hosts preparation may reach; presets already expanded.
+    pub egress: Vec<String>,
+    /// The repository's dependency cache: written by preparation, read-only
+    /// to a check.
+    pub cache_volume: String,
 }
 
-/// The toolchain image for `repo`: the first matching `[[runtime.toolchain]]`
-/// entry, or the node's harness image when nothing matches.
+/// The environment for `repo`: the first matching `[[repo]]` entry over the
+/// node-wide defaults, or the defaults alone when nothing matches.
 ///
-/// The fallback is what the node did before toolchain images existed, so a node
-/// with no entries behaves exactly as it used to — minus the pretence that a
+/// The fallback is what the node did before the table existed, so a node with
+/// no entries behaves exactly as it used to — minus the pretence that a
 /// missing tool was the agent's failing check.
-pub fn toolchain_for(cfg: &Config, repo: Option<&Path>) -> ResolvedToolchain {
-    for entry in &cfg.runtime.toolchain {
-        // `repo` is `None` for work the node cannot tie to a repository at
-        // all; no entry can claim that, so every one of them is skipped.
-        if repo.is_some_and(|repo| entry.matches(repo)) {
-            return ResolvedToolchain {
-                configured: entry.image.clone(),
-                source: "repository toolchain",
-            };
+pub fn environment_for(cfg: &Config, repo: Option<&Path>) -> RepoEnvironment {
+    // `repo` is `None` for work the node cannot tie to a repository at all; no
+    // entry can claim that, so every one of them is skipped.
+    let entry = repo.and_then(|repo| cfg.repo.iter().find(|entry| entry.matches(repo)));
+    let checks = match entry.and_then(|entry| entry.checks.as_ref()) {
+        Some(checks) => checks,
+        None => &cfg.supervision.checks,
+    };
+    let (image, image_source) = match entry.and_then(|entry| entry.image.clone()) {
+        Some(image) => (image, "repository toolchain"),
+        None => (harness_image(cfg), "harness image"),
+    };
+    let mut hash = Sha256::new();
+    if let Some(repo) = repo {
+        hash.update(repo.as_os_str().as_encoded_bytes());
+    }
+    hash.update([0]);
+    hash.update(image.as_bytes());
+    RepoEnvironment {
+        checks: checks
+            .iter()
+            .map(|command| command.trim())
+            .filter(|command| !command.is_empty())
+            .map(str::to_string)
+            .collect(),
+        timeout_secs: entry
+            .and_then(|entry| entry.timeout_secs)
+            .unwrap_or(cfg.supervision.timeout_secs)
+            .max(1),
+        prepare: entry.map(|entry| entry.prepare.clone()).unwrap_or_default(),
+        // Refused at load when it does not parse; a table built any other way
+        // fails closed, with no egress at all.
+        egress: entry
+            .and_then(|entry| entry.egress_hosts().ok())
+            .unwrap_or_default(),
+        cache_volume: format!("tracon-cache-{}", &hex::encode(hash.finalize())[..24]),
+        image,
+        image_source,
+    }
+}
+
+/// The repository a session's work came from. A session resumed on an
+/// existing workspace records `workspace://<id>`, and a workspace's id is the
+/// session that first imported it, so the chain is followed back to a real
+/// path — bounded, because a store is not trusted to be acyclic. `None` for a
+/// session the store no longer has, or one with no repository (a harness the
+/// operator runs themselves).
+pub fn origin_repo(store: &Store, session_id: &str) -> Result<Option<PathBuf>, String> {
+    let mut id = session_id.to_string();
+    for _ in 0..8 {
+        let Some(session) = store.get_session(&id).map_err(|error| error.to_string())? else {
+            return Ok(None);
+        };
+        match session.repo_path.strip_prefix("workspace://") {
+            Some(workspace) if workspace != id => id = workspace.to_string(),
+            Some(_) => return Ok(None),
+            None if session.repo_path.trim().is_empty() => return Ok(None),
+            None => return Ok(Some(session.repo_path.into())),
         }
     }
-    ResolvedToolchain {
-        configured: harness_image(cfg),
-        source: "harness image",
-    }
+    Ok(None)
+}
+
+/// The environment of the repository a session is working in. A store that
+/// cannot answer resolves to the node-wide defaults, as a session with no
+/// repository does.
+pub fn session_environment(cfg: &Config, store: &Store, session_id: &str) -> RepoEnvironment {
+    let repo = origin_repo(store, session_id).ok().flatten();
+    environment_for(cfg, repo.as_deref())
 }
 
 /// The image the node's own sessions run in, for this runtime kind.
@@ -108,6 +177,70 @@ pub fn harness_image(cfg: &Config) -> String {
         crate::config::RuntimeKind::Podman => cfg.boundary.harness_image.clone(),
         crate::config::RuntimeKind::Kubernetes => cfg.runtime.kubernetes.harness_image.clone(),
     }
+}
+
+/// Where each package manager keeps what it fetched, under the cache mount.
+/// Preparation and the check after it get the same names, so what one
+/// downloaded the other finds.
+pub fn cache_env() -> Vec<(String, String)> {
+    [
+        ("CARGO_HOME", "/cache/cargo"),
+        ("npm_config_cache", "/cache/npm"),
+        ("BUN_INSTALL_CACHE_DIR", "/cache/bun"),
+        ("PIP_CACHE_DIR", "/cache/pip"),
+        ("UV_CACHE_DIR", "/cache/uv"),
+        ("COMPOSER_CACHE_DIR", "/cache/composer"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value.to_string()))
+    .collect()
+}
+
+/// The scoped egress gateway opened to a preparation's hosts, and the proxy
+/// variables that send a container through it instead of through the harness
+/// proxy. Dropping it closes the gateway again.
+pub struct ScopedEgress {
+    _guard: Option<crate::boundary::QaEgressGuard>,
+    pub env: Vec<(String, String)>,
+}
+
+/// Open the backend's scoped egress gateway to exactly `hosts` for one
+/// preparation. It is the gateway a QA browser run uses, with the same
+/// one-holder-at-a-time rule, so a preparation and a browser run never see
+/// each other's hosts. No hosts means nothing is opened and the container
+/// keeps the harness proxy, which serves it nothing.
+///
+/// The gateway filters by host, not by client or by method: for as long as a
+/// preparation holds it open, anything on the internal network that asks the
+/// scoped proxy for one of these hosts is served, and a host that accepts
+/// uploads accepts them. That is the cost of naming a host here.
+pub async fn scoped_egress(
+    backend: &dyn Backend,
+    hosts: &[String],
+) -> Result<ScopedEgress, String> {
+    if hosts.is_empty() {
+        return Ok(ScopedEgress {
+            _guard: None,
+            env: Vec::new(),
+        });
+    }
+    let guard = backend
+        .scope_qa_egress(hosts)
+        .await
+        .map_err(|error| format!("could not open preparation egress: {error}"))?;
+    let proxy = backend
+        .qa_proxy_url()
+        .ok_or_else(|| format!("the {} backend has no scoped egress proxy", backend.kind()))?;
+    // Both spellings: curl and git read the lowercase names, and most package
+    // managers read either.
+    let env = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"]
+        .into_iter()
+        .map(|name| (name.to_string(), proxy.clone()))
+        .collect();
+    Ok(ScopedEgress {
+        _guard: Some(guard),
+        env,
+    })
 }
 
 /// Inspect normal project conventions without executing repository-controlled
@@ -170,7 +303,8 @@ pub fn inspect(workspace: &Path) -> Result<PreparationPlan, EnvironmentError> {
 /// with an immutable digest, or one an operator explicitly approved in config,
 /// can replace the node's own prepared runner image. `repo` is the repository
 /// the workspace came from, so preparation happens in the same toolchain image
-/// its required checks will run in; `None` leaves the harness image.
+/// its required checks will run in and reaches the hosts its `[[repo]]` entry
+/// names; `None` leaves the harness image and no egress.
 pub async fn prepare(
     backend: &dyn Backend,
     cfg: &Config,
@@ -178,20 +312,20 @@ pub async fn prepare(
     plan: &PreparationPlan,
     repo: Option<&Path>,
 ) -> Result<PreparedEnvironment, EnvironmentError> {
-    let image = approved_image(cfg, plan.image.as_deref(), repo)?;
+    let environment = environment_for(cfg, repo);
+    let image = approved_image(&environment, cfg, plan.image.as_deref())?;
+    let egress = scoped_egress(backend, &environment.egress)
+        .await
+        .map_err(EnvironmentError::Runtime)?;
+    let mut env = cache_env();
+    env.push(("HOME".into(), "/cache/home".into()));
+    env.extend(egress.env.iter().cloned());
     let runner = backend.runner(Vec::new());
     let started = Instant::now();
     let output = runner
         .run_capture(RunnerCommand {
             argv: vec!["sh".into(), "-lc".into(), plan.command.clone()],
-            env: vec![
-                ("HOME".into(), "/cache/home".into()),
-                ("CARGO_HOME".into(), "/cache/cargo".into()),
-                ("npm_config_cache".into(), "/cache/npm".into()),
-                ("BUN_INSTALL_CACHE_DIR".into(), "/cache/bun".into()),
-                ("PIP_CACHE_DIR".into(), "/cache/pip".into()),
-                ("COMPOSER_CACHE_DIR".into(), "/cache/composer".into()),
-            ],
+            env,
             mounts: vec![
                 workspace.mount("/work", false),
                 Mount::volume(plan.cache_volume.clone(), "/cache", false),
@@ -201,8 +335,9 @@ pub async fn prepare(
             name: format!("tracon-prepare-{}", workspace.id),
             expose: None,
         })
-        .await
-        .map_err(|e| EnvironmentError::Runtime(e.to_string()))?;
+        .await;
+    drop(egress);
+    let output = output.map_err(|e| EnvironmentError::Runtime(e.to_string()))?;
     let exit = output.status.code().unwrap_or(-1);
     let tail = tail(&[output.stdout, output.stderr].concat());
     if !output.status.success() {
@@ -312,16 +447,16 @@ fn non_empty(value: &Value) -> bool {
 }
 
 fn approved_image(
+    environment: &RepoEnvironment,
     cfg: &Config,
     selected: Option<&str>,
-    repo: Option<&Path>,
 ) -> Result<String, EnvironmentError> {
     match selected {
         // Nothing in the devcontainer: the repository's own toolchain image,
         // which is the harness image when the operator has named none. This is
         // the same resolution required checks use, so preparation validates the
         // environment those checks will actually get.
-        None => Ok(toolchain_for(cfg, repo).configured),
+        None => Ok(environment.image.clone()),
         Some(image)
             if image.contains("@sha256:")
                 || cfg
@@ -347,4 +482,69 @@ fn tail(bytes: &[u8]) -> String {
     const MAX: usize = 4096;
     let start = bytes.len().saturating_sub(MAX);
     String::from_utf8_lossy(&bytes[start..]).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Repo;
+
+    /// An entry answers for what it names and nothing else: a repository with
+    /// no entry, and an entry that leaves a field out, stay on the node-wide
+    /// answer for it.
+    #[test]
+    fn a_repo_entry_overrides_only_what_it_names() {
+        let image =
+            "localhost/tc@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut cfg = Config::default();
+        cfg.boundary.harness_image = "localhost/harness".into();
+        cfg.supervision.checks = vec![" just check ".into(), String::new()];
+        cfg.supervision.timeout_secs = 900;
+        cfg.repo = vec![
+            Repo {
+                path: "/src/app".into(),
+                image: Some(image.into()),
+                checks: Some(vec!["just check".into(), "just test".into()]),
+                timeout_secs: Some(1800),
+                prepare: vec!["composer install".into()],
+                egress: vec!["packagist".into()],
+            },
+            Repo {
+                path: "owner/notes".into(),
+                checks: Some(Vec::new()),
+                ..Default::default()
+            },
+        ];
+
+        let app = environment_for(&cfg, Some(Path::new("/src/app")));
+        assert_eq!(app.image, image);
+        assert_eq!(app.image_source, "repository toolchain");
+        assert_eq!(app.checks, ["just check", "just test"]);
+        assert_eq!(app.timeout_secs, 1800);
+        assert_eq!(app.prepare, ["composer install"]);
+        assert!(app.egress.contains(&"repo.packagist.org".to_string()));
+
+        // No image, no preparation, and explicitly no checks.
+        let notes = environment_for(&cfg, Some(Path::new("/clones/github.com/owner/notes")));
+        assert_eq!(notes.image, "localhost/harness");
+        assert_eq!(notes.image_source, "harness image");
+        assert!(notes.checks.is_empty());
+        assert_eq!(notes.timeout_secs, 900);
+        assert!(notes.prepare.is_empty() && notes.egress.is_empty());
+
+        for unmatched in [Some(Path::new("/src/other")), None] {
+            let other = environment_for(&cfg, unmatched);
+            assert_eq!(other.image_source, "harness image");
+            assert_eq!(other.checks, ["just check"]);
+            assert!(other.prepare.is_empty());
+        }
+
+        // One cache per repository and image: two repositories never share
+        // what their preparations fetched.
+        assert_ne!(app.cache_volume, notes.cache_volume);
+        assert_eq!(
+            app.cache_volume,
+            environment_for(&cfg, Some(Path::new("/src/app"))).cache_volume
+        );
+    }
 }

@@ -1061,12 +1061,13 @@ pub async fn build_prototype(
             )
         }
     };
+    let repo = candidate_repo(access.store, &owner_session);
     let prepared = match crate::environment::prepare(
         backend.as_ref(),
         access.cfg,
         &workspace,
         &plan,
-        candidate_repo(access.store, &owner_session).as_deref(),
+        repo.as_deref(),
     )
     .await
     {
@@ -1090,7 +1091,7 @@ pub async fn build_prototype(
         backend.as_ref(),
         &workspace,
         &prepared,
-        &access.cfg.supervision.checks,
+        &crate::environment::environment_for(access.cfg, repo.as_deref()).checks,
     )
     .await
     .map_err(|error| format!("prepared environment verification failed: {error}"));
@@ -1738,15 +1739,13 @@ fn candidate_owner(candidate: &crate::store::CandidateRow) -> Result<String, Str
 }
 
 /// The repository a candidate's session was working in, which is what selects
-/// its toolchain image. A session the store no longer has is not an error here:
-/// preparation falls back to the harness image, as it did before toolchain
-/// images existed.
+/// its `[[repo]]` entry. A session the store no longer has is not an error
+/// here: preparation falls back to the node-wide defaults, as it did before
+/// the table existed.
 fn candidate_repo(store: &Store, session_id: &str) -> Option<PathBuf> {
-    let repo = store.get_session(session_id).ok().flatten()?.repo_path;
-    if repo.trim().is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(repo))
+    crate::environment::origin_repo(store, session_id)
+        .ok()
+        .flatten()
 }
 
 /// The immutable bytes a candidate-bound build runs against: the Git tree the

@@ -1112,6 +1112,64 @@ async fn a_check_the_image_has_no_tool_for_is_not_the_agents_failure() {
     );
 }
 
+/// A repository's `[[repo]]` entry replaces the node-wide checks for work
+/// that came from it, and its `prepare` commands run first on the very copy
+/// the check then sees. The node-wide check here can only fail, and the
+/// repository's check passes only if preparation ran before it in the same
+/// directory — so a review opening proves both.
+///
+/// The session is on a workspace, as every resumed session is, so this also
+/// proves the entry is found through the session that first imported it.
+#[tokio::test]
+async fn a_repo_entry_names_its_own_checks_and_prepares_before_them() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.supervision.checks = vec!["false".into()];
+        c.repo = vec![tracon::config::Repo {
+            path: "owner/prepared-app".into(),
+            checks: Some(vec!["test -f fetched.txt".into()]),
+            prepare: vec!["echo fetched > fetched.txt".into()],
+            ..Default::default()
+        }];
+    })
+    .await;
+    let workspace = f
+        .store
+        .get_session("s1")
+        .unwrap()
+        .unwrap()
+        .repo_path
+        .strip_prefix("workspace://")
+        .expect("the fixture session is on a workspace")
+        .to_string();
+    f.store
+        .insert_session(&{
+            let mut origin = support::rows::session_row(&workspace, "n1", "work");
+            origin.repo_path = "/clones/github.com/owner/prepared-app".into();
+            origin.state = "closed".into();
+            origin
+        })
+        .unwrap();
+
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    assert!(v["error"].is_null(), "{v}");
+    assert_eq!(f.store.open_reviews().unwrap().len(), 1, "{v}");
+
+    let events = f.store.events_after("s1", 0, 500).unwrap();
+    let started = events
+        .iter()
+        .find(|e| e.kind == "check_started")
+        .expect("checks ran");
+    assert_eq!(
+        started.payload["commands"],
+        json!(["test -f fetched.txt"]),
+        "the repository's checks, never the node-wide list"
+    );
+    let results: Vec<_> = events.iter().filter(|e| e.kind == "check_result").collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].payload["outcome"], "passed");
+}
+
 #[tokio::test]
 async fn candidate_controlled_check_file_cannot_replace_operator_required_checks() {
     state::isolate();
