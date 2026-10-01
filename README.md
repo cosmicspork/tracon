@@ -357,6 +357,20 @@ named none — and a check whose command is not in the image is reported as *not
 naming the missing tool and the image it looked in, rather than as a failing check the
 agent is told to fix.
 
+The image can be the repository's own dev environment. Name its Dockerfile
+(`dockerfile = ".devcontainer/Dockerfile"`) instead of an image and the node builds it
+from the repository's **default branch** — read out of Git, never from a working tree or
+a candidate, which could otherwise choose the image its own checks run in — pins what it
+built, and rebuilds when the Dockerfile or its build context changes there. Only the
+Dockerfile is honoured: a devcontainer's hooks, features, compose files and services are
+not, and `prepare` is where their work belongs. Over it the node adds one layer so every
+run meets the same thing whatever the Dockerfile ended on: root, `HOME=/root`, `/work`,
+no entrypoint. The first check (or `tracon repo build`) pays for the build; a build that
+fails leaves the last image that worked in place and is not retried until you ask. A
+build runs on this machine's Podman with the network, outside the boundary — the same
+trust `devcontainer up` asks for, which is why it is per repository and yours to name.
+`tracon repo ls` shows each repository's image and any command it has no tool for.
+
 A check has no network. A repository whose checks need its dependencies names `prepare`
 commands (`bun install --frozen-lockfile`, `composer install`, `cargo fetch --locked`)
 and the registries they may reach (`egress = ["npm", "crates"]`). Those run first, on the
@@ -649,6 +663,7 @@ and revoked the moment the hub loses that key.
 | `tracon skill import <dir[#git-rev]>\|ls\|rm` | skill packages in a channel's launch manifest |
 | `tracon memory ls\|add\|rm\|recall\|batch` | memories, and the promotion batch on demand |
 | `tracon work add\|ls\|ready\|show\|close\|dep\|rm` | the ledger |
+| `tracon repo ls\|build [repo]` | the `[[repo]]` entries, and building a repository's image from its default-branch Dockerfile |
 | `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |
 | `tracon metrics [--channel] [--days]`, `provenance <sha>` | what happened |
 | `tracon gc [--apply] [--caches] [--all]` | runtime storage whose owner is over |
@@ -727,6 +742,10 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
                                     # a digest too (`podman image inspect` reports `RepoDigests`); the
                                     # node refuses to start on a tag. Without one, the harness image,
                                     # which carries no project toolchain
+# dockerfile = ".devcontainer/Dockerfile"  # in place of `image`: the node builds this from the
+                                    # repository's default branch, pins what it built, and rebuilds
+                                    # when the file or its context changes there
+# context = "."                     # the build context; left out, the Dockerfile's own directory
 # checks = ["just check"]           # in place of [supervision] checks
 # timeout_secs = 1800               # in place of [supervision] timeout_secs; covers preparation too
 # prepare = ["bun install --frozen-lockfile"]  # run before each check, on the same copy, with the

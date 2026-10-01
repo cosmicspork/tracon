@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     boundary::Backend,
-    config::Config,
+    config::{Config, Repo},
     runner::{Mount, RunnerCommand},
     store::Store,
     workspace::Workspace,
@@ -69,6 +69,9 @@ pub struct Verification {
     pub elapsed_ms: u64,
 }
 
+/// `image_source` for an image the node built from the repository's Dockerfile.
+pub const REPOSITORY_DOCKERFILE: &str = "repository Dockerfile";
+
 /// Everything the node resolved for one repository's checks and preparation:
 /// the operator's `[[repo]]` entry where there is one, the node-wide answer
 /// for whatever it left out. Resolved once and passed around whole, so the run
@@ -79,8 +82,10 @@ pub struct RepoEnvironment {
     /// for it.
     pub image: String,
     /// Whose image that is. A reader of a check that could not run has to be
-    /// told: the operator's entry for this repository, or the node's own
-    /// harness image because the entry (or the whole table) names none.
+    /// told: the operator's entry for this repository, the image the node
+    /// built from the repository's Dockerfile, or the node's own harness image
+    /// because the entry (or the whole table) names none — or names a
+    /// Dockerfile nothing has built yet.
     pub image_source: &'static str,
     pub checks: Vec<String>,
     pub timeout_secs: u64,
@@ -100,7 +105,12 @@ pub struct RepoEnvironment {
 /// The fallback is what the node did before the table existed, so a node with
 /// no entries behaves exactly as it used to — minus the pretence that a
 /// missing tool was the agent's failing check.
-pub fn environment_for(cfg: &Config, repo: Option<&Path>) -> RepoEnvironment {
+///
+/// An entry that names a Dockerfile resolves to what this node last built from
+/// it (`repo_image`). This only reads: building is `repo_image::ensure_base`,
+/// which a run calls first and an approval never does, so approving cannot
+/// start a build and both resolve the same image afterwards.
+pub fn environment_for(cfg: &Config, store: &Store, repo: Option<&Path>) -> RepoEnvironment {
     // `repo` is `None` for work the node cannot tie to a repository at all; no
     // entry can claim that, so every one of them is skipped.
     let entry = repo.and_then(|repo| cfg.repo.iter().find(|entry| entry.matches(repo)));
@@ -108,9 +118,28 @@ pub fn environment_for(cfg: &Config, repo: Option<&Path>) -> RepoEnvironment {
         Some(checks) => checks,
         None => &cfg.supervision.checks,
     };
-    let (image, image_source) = match entry.and_then(|entry| entry.image.clone()) {
-        Some(image) => (image, "repository toolchain"),
-        None => (harness_image(cfg), "harness image"),
+    let built = || {
+        let repo = repo?.to_string_lossy();
+        store
+            .ready_repo_image(&repo, crate::repo_image::BASE)
+            .ok()
+            .flatten()
+    };
+    let (image, image_source) = match entry {
+        Some(Repo {
+            image: Some(image), ..
+        }) => (image.clone(), "repository toolchain"),
+        Some(Repo {
+            dockerfile: Some(_),
+            ..
+        }) => match built() {
+            Some(row) => (row.image, REPOSITORY_DOCKERFILE),
+            None => (
+                harness_image(cfg),
+                "harness image (repository image not built)",
+            ),
+        },
+        _ => (harness_image(cfg), "harness image"),
     };
     let mut hash = Sha256::new();
     if let Some(repo) = repo {
@@ -141,6 +170,14 @@ pub fn environment_for(cfg: &Config, repo: Option<&Path>) -> RepoEnvironment {
     }
 }
 
+impl RepoEnvironment {
+    /// Whether the repository's entry answers for the image, so nothing in the
+    /// repository itself is asked.
+    pub fn names_image(&self) -> bool {
+        self.image_source != "harness image"
+    }
+}
+
 /// The repository a session's work came from. A session resumed on an
 /// existing workspace records `workspace://<id>`, and a workspace's id is the
 /// session that first imported it, so the chain is followed back to a real
@@ -168,7 +205,7 @@ pub fn origin_repo(store: &Store, session_id: &str) -> Result<Option<PathBuf>, S
 /// repository does.
 pub fn session_environment(cfg: &Config, store: &Store, session_id: &str) -> RepoEnvironment {
     let repo = origin_repo(store, session_id).ok().flatten();
-    environment_for(cfg, repo.as_deref())
+    environment_for(cfg, store, repo.as_deref())
 }
 
 /// The image the node's own sessions run in, for this runtime kind.
@@ -247,8 +284,18 @@ pub async fn scoped_egress(
 /// commands. `devcontainer.json` supplies an image only when it is a plain,
 /// pinned image configuration; setup hooks, mounts, sockets, privilege, and
 /// feature installers are rejected rather than partially honored.
-pub fn inspect(workspace: &Path) -> Result<PreparationPlan, EnvironmentError> {
-    let image = inspect_devcontainer(workspace)?;
+///
+/// A repository whose `[[repo]]` entry names its image is not asked: the
+/// operator already answered, and a devcontainer that builds (as most do)
+/// would otherwise refuse a preparation the entry makes possible.
+pub fn inspect(
+    workspace: &Path,
+    environment: &RepoEnvironment,
+) -> Result<PreparationPlan, EnvironmentError> {
+    let image = match environment.names_image() {
+        true => None,
+        false => inspect_devcontainer(workspace)?,
+    };
     let mut inputs = Vec::new();
     let mut command = None;
     for (file, prepare) in [
@@ -301,19 +348,18 @@ pub fn inspect(workspace: &Path) -> Result<PreparationPlan, EnvironmentError> {
 
 /// Execute dependency preparation in an isolated cache. Only a project image
 /// with an immutable digest, or one an operator explicitly approved in config,
-/// can replace the node's own prepared runner image. `repo` is the repository
-/// the workspace came from, so preparation happens in the same toolchain image
-/// its required checks will run in and reaches the hosts its `[[repo]]` entry
-/// names; `None` leaves the harness image and no egress.
+/// can replace the node's own prepared runner image. `environment` is that of
+/// the repository the workspace came from, so preparation happens in the same
+/// toolchain image its required checks will run in and reaches the hosts its
+/// `[[repo]]` entry names.
 pub async fn prepare(
     backend: &dyn Backend,
     cfg: &Config,
     workspace: &Workspace,
     plan: &PreparationPlan,
-    repo: Option<&Path>,
+    environment: &RepoEnvironment,
 ) -> Result<PreparedEnvironment, EnvironmentError> {
-    let environment = environment_for(cfg, repo);
-    let image = approved_image(&environment, cfg, plan.image.as_deref())?;
+    let image = approved_image(environment, cfg, plan.image.as_deref())?;
     let egress = scoped_egress(backend, &environment.egress)
         .await
         .map_err(EnvironmentError::Runtime)?;
@@ -508,6 +554,7 @@ mod tests {
                 timeout_secs: Some(1800),
                 prepare: vec!["composer install".into()],
                 egress: vec!["packagist".into()],
+                ..Default::default()
             },
             Repo {
                 path: "owner/notes".into(),
@@ -516,7 +563,8 @@ mod tests {
             },
         ];
 
-        let app = environment_for(&cfg, Some(Path::new("/src/app")));
+        let store = Store::open_in_memory().unwrap();
+        let app = environment_for(&cfg, &store, Some(Path::new("/src/app")));
         assert_eq!(app.image, image);
         assert_eq!(app.image_source, "repository toolchain");
         assert_eq!(app.checks, ["just check", "just test"]);
@@ -525,7 +573,11 @@ mod tests {
         assert!(app.egress.contains(&"repo.packagist.org".to_string()));
 
         // No image, no preparation, and explicitly no checks.
-        let notes = environment_for(&cfg, Some(Path::new("/clones/github.com/owner/notes")));
+        let notes = environment_for(
+            &cfg,
+            &store,
+            Some(Path::new("/clones/github.com/owner/notes")),
+        );
         assert_eq!(notes.image, "localhost/harness");
         assert_eq!(notes.image_source, "harness image");
         assert!(notes.checks.is_empty());
@@ -533,18 +585,51 @@ mod tests {
         assert!(notes.prepare.is_empty() && notes.egress.is_empty());
 
         for unmatched in [Some(Path::new("/src/other")), None] {
-            let other = environment_for(&cfg, unmatched);
+            let other = environment_for(&cfg, &store, unmatched);
             assert_eq!(other.image_source, "harness image");
             assert_eq!(other.checks, ["just check"]);
             assert!(other.prepare.is_empty());
         }
+
+        // An entry that names a Dockerfile resolves to what the node built
+        // from it, and says so while nothing has been built.
+        cfg.repo.push(Repo {
+            path: "/src/built".into(),
+            dockerfile: Some(".devcontainer/Dockerfile".into()),
+            ..Default::default()
+        });
+        let unbuilt = environment_for(&cfg, &store, Some(Path::new("/src/built")));
+        assert_eq!(unbuilt.image, "localhost/harness");
+        assert_eq!(
+            unbuilt.image_source,
+            "harness image (repository image not built)"
+        );
+        assert!(unbuilt.names_image() && !notes.names_image());
+        let build = store
+            .start_repo_image(&crate::store::RepoImageStart {
+                repo_path: "/src/built",
+                kind: crate::repo_image::BASE,
+                recipe_hash: "r1",
+                source_ref: "origin/main",
+                source_commit: "c1",
+                parent_image: "",
+            })
+            .unwrap();
+        assert_eq!(
+            environment_for(&cfg, &store, Some(Path::new("/src/built"))).image,
+            "localhost/harness"
+        );
+        store.finish_repo_image(&build, Ok(image), "", &[]).unwrap();
+        let built = environment_for(&cfg, &store, Some(Path::new("/src/built")));
+        assert_eq!(built.image, image);
+        assert_eq!(built.image_source, REPOSITORY_DOCKERFILE);
 
         // One cache per repository and image: two repositories never share
         // what their preparations fetched.
         assert_ne!(app.cache_volume, notes.cache_volume);
         assert_eq!(
             app.cache_volume,
-            environment_for(&cfg, Some(Path::new("/src/app"))).cache_volume
+            environment_for(&cfg, &store, Some(Path::new("/src/app"))).cache_volume
         );
     }
 }

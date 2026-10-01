@@ -274,6 +274,10 @@ impl Backend for PodmanBackend {
         Arc::new(PodmanRunner::new(spec))
     }
 
+    fn image_builder(&self) -> Option<&dyn super::ImageBuilder> {
+        Some(self)
+    }
+
     async fn import_volume(&self, volume: &str, source: &Path) -> Result<(), BoundaryError> {
         volume_copy_in(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
@@ -473,6 +477,87 @@ pub(crate) fn resolve_podman_env(cfg: &Config) -> String {
 }
 
 /// Run `podman` with args and return stdout, or the stderr as an error.
+#[async_trait]
+impl super::ImageBuilder for PodmanBackend {
+    async fn build(
+        &self,
+        build: super::ImageBuild<'_>,
+    ) -> Result<super::BuiltImage, super::BuildFailure> {
+        let mut command = tokio::process::Command::new(resolve_podman_env(&self.cfg));
+        command.arg("build");
+        for (name, value) in build.labels {
+            command.arg("--label").arg(format!("{name}={value}"));
+        }
+        command
+            .arg("-f")
+            .arg(build.containerfile)
+            .arg("-t")
+            .arg(build.tag)
+            .arg(build.context)
+            .stdin(std::process::Stdio::null())
+            // A build abandoned at its deadline must not keep running.
+            .kill_on_drop(true);
+        let failure = |error: String, log: &[u8]| super::BuildFailure {
+            error,
+            log_tail: log_tail(log),
+        };
+        let out = match tokio::time::timeout(build.timeout, command.output()).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(error)) => return Err(failure(format!("podman build: {error}"), &[])),
+            Err(_) => {
+                return Err(failure(
+                    format!(
+                        "the build did not finish in {} minutes",
+                        build.timeout.as_secs() / 60
+                    ),
+                    &[],
+                ))
+            }
+        };
+        let log = [out.stdout, out.stderr].concat();
+        if !out.status.success() {
+            let exit = out.status.code().unwrap_or(-1);
+            return Err(failure(format!("podman build exited {exit}"), &log));
+        }
+        let digest = podman(&["image", "inspect", "--format", "{{.Digest}}", build.tag])
+            .await
+            .map_err(|error| failure(format!("read the built image's digest: {error}"), &log))?;
+        let name = build
+            .tag
+            .rsplit_once(':')
+            .map_or(build.tag, |(name, _)| name);
+        let image = format!("{name}@{}", digest.trim());
+        if crate::config::immutable_image(&image).is_err() {
+            return Err(failure(
+                format!("the runtime reported no digest for {}", build.tag),
+                &log,
+            ));
+        }
+        Ok(super::BuiltImage {
+            image,
+            log_tail: log_tail(&log),
+        })
+    }
+
+    async fn exists(&self, image: &str) -> bool {
+        podman(&["image", "exists", image]).await.is_ok()
+    }
+
+    async fn remove(&self, image: &str) {
+        let _ = podman(&["image", "rm", image]).await;
+    }
+}
+
+fn log_tail(bytes: &[u8]) -> String {
+    const MAX: usize = 8192;
+    let text = String::from_utf8_lossy(bytes);
+    let start = text.len().saturating_sub(MAX);
+    let start = (start..text.len())
+        .find(|at| text.is_char_boundary(*at))
+        .unwrap_or(text.len());
+    text[start..].to_string()
+}
+
 pub(crate) async fn podman(args: &[&str]) -> Result<String, BoundaryError> {
     let bin = podman_bin();
     let out = tokio::process::Command::new(bin)

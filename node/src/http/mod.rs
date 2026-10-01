@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod api;
 pub mod auth;
+pub mod environments;
 mod mcp;
 mod policy_admin;
 pub mod preview;
@@ -292,6 +293,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/repos/recent", get(api::recent_repos))
         .route("/api/repos/clone", post(api::clone_repo))
+        .route("/api/repos/environments", get(environments::list))
+        .route("/api/repos/environments/build", post(environments::build))
         .route(
             "/api/workspaces/import",
             post(api::import_workspace).layer(DefaultBodyLimit::max(
@@ -508,6 +511,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     store
         .reconcile_interrupted_runs()
         .context("reconcile interrupted checks")?;
+    store
+        .reconcile_repo_images()
+        .context("reconcile interrupted image builds")?;
     // Serving does not need them archived — nothing relaunches a session on
     // startup — but until they are, the ones that never ended read as running
     // and hold up anything that waits for the node to be idle.

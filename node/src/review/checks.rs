@@ -130,7 +130,11 @@ pub async fn run_required(
     force_rerun: bool,
     cancel: &dyn Cancel,
 ) -> Result<CheckReport, String> {
-    let environment = candidate_environment(store, cfg, candidate)?;
+    // The one place a check run may build: the image for the default branch's
+    // Dockerfile as it is now, so a check never runs in an image a merged
+    // change has since replaced.
+    let repo = origin_repo(store, &candidate.owner_session_id)?;
+    let environment = crate::repo_image::environment(backend, cfg, store, repo.as_deref()).await;
     let commands = environment.checks.clone();
     let raw_image = environment.image.clone();
     let runner = backend.runner(Vec::new());
@@ -685,7 +689,7 @@ pub fn candidate_environment(
     candidate: &CandidateRow,
 ) -> Result<RepoEnvironment, String> {
     let repo = origin_repo(store, &candidate.owner_session_id)?;
-    Ok(environment_for(cfg, repo.as_deref()))
+    Ok(environment_for(cfg, store, repo.as_deref()))
 }
 
 /// Every record a check settles as names the tree it ran against. The row a
@@ -750,7 +754,7 @@ pub async fn review_required_checks_current(
     // One the store no longer has answers to the node-wide list.
     let environment = match &candidate {
         Some(candidate) => candidate_environment(store, cfg, candidate)?,
-        None => environment_for(cfg, None),
+        None => environment_for(cfg, store, None),
     };
     if environment.checks.is_empty() {
         return Ok(());
@@ -1471,6 +1475,7 @@ mod tests {
             timeout_secs: Some(1800),
             prepare: vec!["bun install --frozen-lockfile".into()],
             egress: vec!["npm".into()],
+            ..Default::default()
         }];
         (store, cfg, candidate)
     }

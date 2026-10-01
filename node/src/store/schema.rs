@@ -1147,6 +1147,30 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE model_usage ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE turn_usage ADD COLUMN gateway_cache_read INTEGER NOT NULL DEFAULT 0;
     "#,
+    // 48: the images this node built for its repositories. A locally built
+    // image has a different digest on every node, so what was built is this
+    // node's state and never its configuration: `[[repo]]` carries the recipe,
+    // this carries what the recipe produced here. `kind` is `base` for the
+    // image checks and preparation run in.
+    r#"
+    CREATE TABLE repo_image (
+        id TEXT PRIMARY KEY,
+        repo_path TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        recipe_hash TEXT NOT NULL,
+        source_ref TEXT NOT NULL DEFAULT '',
+        source_commit TEXT NOT NULL DEFAULT '',
+        image TEXT NOT NULL DEFAULT '',
+        parent_image TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL,
+        log_tail TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        warnings_json TEXT NOT NULL DEFAULT '[]',
+        started_ms INTEGER NOT NULL,
+        finished_ms INTEGER
+    );
+    CREATE INDEX repo_image_latest ON repo_image(repo_path, kind, started_ms);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

@@ -32,6 +32,7 @@ pub mod operator;
 pub mod policy_rollouts;
 pub mod publication;
 pub mod qa;
+pub mod repo_image;
 pub mod reports;
 pub mod rollups;
 pub mod transfers;
@@ -47,6 +48,7 @@ pub use policy_rollouts::*;
 pub use publication::*;
 pub use qa::*;
 pub use records::*;
+pub use repo_image::*;
 pub use transfers::*;
 pub use ui::*;
 

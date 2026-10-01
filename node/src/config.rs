@@ -1367,6 +1367,19 @@ pub struct Repo {
     /// `RepoDigests`), so this costs a local build nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// The repository's own dev environment, as a path inside it (commonly
+    /// `.devcontainer/Dockerfile`), in place of `image`. The node builds it
+    /// from the repository's default branch — never from a candidate, which
+    /// could otherwise choose the image its own checks run in — and pins what
+    /// it built, rebuilding when the file or its context changes. Only the
+    /// Dockerfile is honoured: a devcontainer's hooks, features and compose
+    /// files are not, and `prepare` is where their work belongs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dockerfile: Option<String>,
+    /// The build context for `dockerfile`, as a path inside the repository.
+    /// Left out, it is the directory the Dockerfile is in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
     /// This repository's required checks, in place of `[supervision] checks`.
     /// An empty list is explicit, as it is there.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1489,6 +1502,30 @@ pub fn validate_repos(repos: &[Repo]) -> Result<(), String> {
         }
         if let Some(image) = &entry.image {
             immutable_image(image).map_err(|e| format!("repo {named}: image {e}"))?;
+        }
+        if entry.image.is_some() && entry.dockerfile.is_some() {
+            return Err(format!(
+                "repo {named}: names both image and dockerfile; the node either runs the image \
+                 it is given or builds one, so keep the one that is meant"
+            ));
+        }
+        if entry.context.is_some() && entry.dockerfile.is_none() {
+            return Err(format!("repo {named}: context has no dockerfile to build"));
+        }
+        for (field, value) in [
+            ("dockerfile", &entry.dockerfile),
+            ("context", &entry.context),
+        ] {
+            // `.` is the repository root, which is a context and never a file.
+            let root = field == "context" && value.as_deref() == Some(".");
+            if value
+                .as_deref()
+                .is_some_and(|value| !root && !safe_relative_path(value))
+            {
+                return Err(format!(
+                    "repo {named}: {field} must be a path inside the repository"
+                ));
+            }
         }
         entry
             .egress_hosts()
@@ -2673,6 +2710,33 @@ mod tests {
             ..Default::default()
         }])
         .is_err());
+
+        // A Dockerfile the node builds stands where an image would, never
+        // beside one, and both it and its context stay inside the repository.
+        let building = |dockerfile: &str, context: Option<&str>| Repo {
+            path: PathBuf::from(repo),
+            dockerfile: Some(dockerfile.into()),
+            context: context.map(str::to_string),
+            ..Default::default()
+        };
+        validate_repos(&[building(".devcontainer/Dockerfile", None)]).unwrap();
+        validate_repos(&[building(".devcontainer/Dockerfile", Some("."))]).unwrap();
+        let both = Repo {
+            image: Some(pinned.into()),
+            ..building("Dockerfile", None)
+        };
+        assert!(validate_repos(&[both]).unwrap_err().contains("both"));
+        for outside in ["/etc/Dockerfile", "../Dockerfile", "a/../../b"] {
+            assert!(validate_repos(&[building(outside, None)]).is_err());
+            assert!(validate_repos(&[building("Dockerfile", Some(outside))]).is_err());
+        }
+        assert!(validate_repos(&[Repo {
+            path: PathBuf::from(repo),
+            context: Some("docker".into()),
+            ..Default::default()
+        }])
+        .unwrap_err()
+        .contains("no dockerfile"));
     }
 
     /// A preset is the hosts a package manager actually talks to; a literal
