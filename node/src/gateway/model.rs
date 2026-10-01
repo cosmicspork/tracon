@@ -667,6 +667,8 @@ pub async fn handle(
         input_tokens: 0,
         output_tokens: 0,
         requests: 1,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
     }));
     // A refused call is the harness's business — it retries inside the turn,
     // with backoff, and says nothing until it gives up, so the
@@ -861,10 +863,26 @@ impl Injection {
 /// scanner that only looked for `input_tokens` would count it as zero — which
 /// is the failure `docs/reference/opencode-v1.18.30/providers.md` §6.3 names,
 /// arrived at from the gateway's side instead of the harness's.
+///
+/// The two dialects disagree about caches, and a budget must not care which
+/// one a provider speaks. Anthropic's `input_tokens` already leaves out what
+/// was read from and written to the cache, and names both beside it; OpenAI's
+/// counts the cached tokens inside `input_tokens` and says how many in
+/// `*_tokens_details.cached_tokens`. Both are brought to one meaning: `input`
+/// is the prompt not read from a cache (fresh input plus cache writes),
+/// `cache_read` is what was. A cache read is not new work — a long session
+/// rereads its whole context every step, which charged at the full rate is
+/// most of what a budget saw — so it is recorded and never charged.
 struct UsageScanner {
     line: Vec<u8>,
+    /// The provider's own `input_tokens`/`prompt_tokens`, whatever it includes.
     input: i64,
     output: i64,
+    /// Anthropic's, outside `input`.
+    cache_read_beside: i64,
+    cache_write: i64,
+    /// OpenAI's, inside `input`.
+    cache_read_within: i64,
 }
 
 impl UsageScanner {
@@ -873,7 +891,19 @@ impl UsageScanner {
             line: Vec::new(),
             input: 0,
             output: 0,
+            cache_read_beside: 0,
+            cache_write: 0,
+            cache_read_within: 0,
         }
+    }
+
+    /// The prompt tokens not read from a cache.
+    fn uncached_input(&self) -> i64 {
+        (self.input - self.cache_read_within).max(0) + self.cache_write
+    }
+
+    fn cache_read(&self) -> i64 {
+        self.cache_read_beside + self.cache_read_within.min(self.input)
     }
 
     fn feed(&mut self, chunk: &[u8]) {
@@ -925,6 +955,18 @@ impl UsageScanner {
         if let Some(o) = o {
             self.output = self.output.max(o);
         }
+        let number = |v: &Value| v.as_i64().filter(|n| *n > 0);
+        if let Some(n) = number(&usage["cache_read_input_tokens"]) {
+            self.cache_read_beside = self.cache_read_beside.max(n);
+        }
+        if let Some(n) = number(&usage["cache_creation_input_tokens"]) {
+            self.cache_write = self.cache_write.max(n);
+        }
+        if let Some(n) = number(&usage["input_tokens_details"]["cached_tokens"])
+            .or_else(|| number(&usage["prompt_tokens_details"]["cached_tokens"]))
+        {
+            self.cache_read_within = self.cache_read_within.max(n);
+        }
     }
 }
 
@@ -944,8 +986,10 @@ impl Counted {
         self.done = true;
         self.scanner.finish();
         let mut row = self.usage.lock().unwrap().clone();
-        row.input_tokens = self.scanner.input;
+        row.input_tokens = self.scanner.uncached_input();
         row.output_tokens = self.scanner.output;
+        row.cache_read_tokens = self.scanner.cache_read();
+        row.cache_write_tokens = self.scanner.cache_write;
         if let Err(e) = self.store.record_usage(&row) {
             tracing::warn!(error = %e, "usage not recorded");
         }
@@ -1302,6 +1346,38 @@ mod tests {
             "TRACON_PROVIDER_KEY_OPENAI_CODEX"
         );
         assert_eq!(key_env_name("my.local"), "TRACON_PROVIDER_KEY_MY_LOCAL");
+    }
+
+    #[test]
+    fn a_cache_read_is_recorded_and_left_out_of_the_input_whichever_dialect() {
+        // Anthropic: the cache is beside `input_tokens`; a write is new work.
+        let mut s = UsageScanner::new();
+        s.feed(b"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"cache_read_input_tokens\":90000,\"cache_creation_input_tokens\":1200,\"output_tokens\":1}}}\n");
+        s.feed(b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":300}}\n");
+        s.finish();
+        assert_eq!(
+            (s.uncached_input(), s.cache_read(), s.output),
+            (1205, 90000, 300)
+        );
+
+        // OpenAI: the cached tokens are inside `input_tokens`.
+        let mut s = UsageScanner::new();
+        s.feed(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":50000,\"input_tokens_details\":{\"cached_tokens\":48000},\"output_tokens\":700}}}\n");
+        s.finish();
+        assert_eq!(
+            (s.uncached_input(), s.cache_read(), s.output),
+            (2000, 48000, 700)
+        );
+        let mut s = UsageScanner::new();
+        s.feed(b"{\"usage\":{\"prompt_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":4},\"completion_tokens\":3}}");
+        s.finish();
+        assert_eq!((s.uncached_input(), s.cache_read()), (6, 4));
+
+        // No cache at all is the old count.
+        let mut s = UsageScanner::new();
+        s.feed(b"{\"usage\":{\"input_tokens\":10,\"output_tokens\":3}}");
+        s.finish();
+        assert_eq!((s.uncached_input(), s.cache_read()), (10, 0));
     }
 
     #[test]

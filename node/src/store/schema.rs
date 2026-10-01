@@ -1137,6 +1137,16 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE node ADD COLUMN harnesses_json TEXT;
     "#,
+    // 47: a cache read is not new work. `input_tokens` now counts the prompt
+    // tokens not read from a cache (fresh input and cache writes), whatever the
+    // provider's own spelling; what was read from or written to a cache is
+    // kept beside it so the operator can still see it. Rows from before this
+    // keep the provider's own `input_tokens` and read zero for both.
+    r#"
+    ALTER TABLE model_usage ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE model_usage ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE turn_usage ADD COLUMN gateway_cache_read INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

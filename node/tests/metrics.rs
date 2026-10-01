@@ -121,6 +121,8 @@ fn usage(session: &str, provider: &str, input: i64, output: i64) -> UsageRow {
         input_tokens: input,
         output_tokens: output,
         requests: 1,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
     }
 }
 

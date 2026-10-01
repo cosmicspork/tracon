@@ -1898,6 +1898,8 @@ impl Rig {
                 input_tokens: input,
                 output_tokens: output,
                 requests: 1,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
             })
             .unwrap();
     }
@@ -1932,6 +1934,37 @@ impl Rig {
     fn ledger(&self) -> Vec<tracon::store::TurnUsageRow> {
         self.store.turn_ledger(&self.session_id, 10).unwrap()
     }
+}
+
+/// Stopping a session mid-turn used to leave the turn's ledger row open and
+/// charge nothing: the harness's report never came and nothing else settled
+/// it. The gateway saw every call, so that is what the stopped turn costs, and
+/// the row says it was interrupted rather than that the sources disagreed.
+#[tokio::test]
+async fn a_turn_the_session_is_stopped_under_is_charged_what_the_gateway_saw() {
+    state::isolate();
+    let rig =
+        Rig::start_with_handle(100_000, Duration::from_secs(60), Arc::new(BlockingHandle)).await;
+    rig.open_turn().await;
+    rig.gateway_counted(4_000, 700);
+    rig.commands.send(Command::Kill).await.unwrap();
+
+    assert!(rig.await_state("closed").await);
+    assert!(rig.await_events("turn_end", 1).await, "{:?}", rig.kinds());
+    let s = rig.store.get_session(&rig.session_id).unwrap().unwrap();
+    assert_eq!(s.tokens_used, 4_700);
+    assert_eq!(s.turn_active, 0);
+    let ledger = rig.ledger();
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0].state, "interrupted");
+    assert_eq!(ledger[0].charged_tokens, 4_700);
+    let events = rig.store.events_after(&rig.session_id, 0, 200).unwrap();
+    let end = events
+        .iter()
+        .find(|e| e.kind == "turn_end")
+        .expect("a turn_end");
+    assert_eq!(end.payload["stop_reason"], "interrupted");
+    assert!(!events.iter().any(|e| e.kind == "usage_mismatch"));
 }
 
 #[tokio::test]

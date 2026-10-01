@@ -48,8 +48,8 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 
 ## Now — start, build, ship from one node
 
-Every item here was found on the 2026-09-20 or 2026-09-28 live runs, or in the daily
-desktop use since.
+Every item here was found on the 2026-09-20, 2026-09-28 or 2026-09-30 live runs, or in
+the daily desktop use since.
 
 - [ ] **Run required checks where they can run.** Checks execute in the harness image,
       which carries no project toolchain or dependencies, so a repository's `just check`
@@ -70,11 +70,19 @@ desktop use since.
       capture owned by the supervisor; the existing attached demonstration (a linked,
       hashed, never-executed document) stays for what a human writes by hand. Depends on
       the toolchain image above for anything that needs the project's tools.
-- [ ] **Weight cached reads in the token budget.** A cache read is charged as a full
-      input token, so a planning pass on this repository spends 3–4M of a 2M default
-      budget on mostly-cached context. Count cache reads and cache writes at their price
-      ratio (or as their own limit), keep the raw counts visible, and never let a cheaper
-      unit hide spend.
+- [ ] **A work item's session starts working on its own.** A session composed from a
+      prompt, or started on an existing item, is sent no first prompt — only a plain
+      prompt session carries `initial_prompt` — so it sits `running` and silent until the
+      operator types something; plan session `01a0f49f` (2026-09-30) waited for a nudge.
+      Send the item, or for execute a kickoff naming the plan document, as the first
+      prompt, so starting work is one action.
+- [ ] **Keep the machine awake while a session works.** The desktop host idle-suspended
+      for 54 minutes in the middle of execute session `01a0f4b3`'s turn (2026-09-30,
+      during the harness's context compaction) and the session simply stopped. Hold a
+      sleep inhibitor while any turn is running or a permission is waiting (logind's
+      `Inhibit` on Linux, a power assertion on macOS), release it when the node is
+      idle, show in the interface when it is held, and record a suspend that happens
+      anyway as an interruption rather than a silent gap.
 - [ ] **Give a node restart its own end reason.** Sessions running when the node restarts
       are ended as `killed_user`, which tells the operator they stopped something they did
       not; record `node_restart` and offer the resume a restart interrupted.
