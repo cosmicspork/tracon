@@ -303,7 +303,9 @@ container capability-dropped with the node holding its exec pipe) and Kubernetes
 (one harness pod per session, a NetworkPolicy making the node the harness's only
 route, the node serving the allowlist proxy itself). Both answer the same checks
 behind the same seam. The harness reaches exactly two things: allowlisted provider
-hosts through the proxy, and the node through the forward.
+hosts through the proxy, and the node through the forward. On Podman a second forward
+carries the node's per-client egress proxy, which opens nothing to a caller that
+presents no grant.
 
 Three things collapse the boundary and must be verified per environment:
 
@@ -558,11 +560,15 @@ session is told to launch in it. Checks stay on the repository's image, so a har
 upgrade rebuilds only the layer and no evidence moves. The session's start event
 records the image it ran in, the repository image under it, and the reason when it ran
 in the harness image instead. Dependencies arrive by **preparation**: the entry's `prepare`
-commands run first on the same copy, with the repository's cache volume writable and the
-scoped egress gateway opened to exactly the hosts the entry names, and closed again
-before the check starts with the cache read-only. That gateway is the QA browser's, one
-holder at a time, and it filters by host alone: while it is open, the named hosts are
-reachable from anything on the internal network. A check's evidence is keyed on source
+commands run first on the same copy, with the repository's cache volume writable and an
+egress grant for exactly the hosts the entry names, revoked again before the check
+starts with the cache read-only. A grant is one client's: the node serves its own
+CONNECT proxy behind a second forward in the gateway, each preparation, QA browser run
+and session presents the token it was issued as proxy credentials, and each is filtered
+by its own host set — so nothing one may reach is reachable by another, none waits for
+another, and a refusal is known to be that client's. Because that proxy dials from the
+node's process, a granted name that resolves to the machine itself or to its link-local
+range is refused whatever the grant says. A check's evidence is keyed on source
 revision, check definition, execution image, dependency inputs, and the preparation and
 egress it was given, and is reused rather than rerun only when every one of those is
 unchanged — a resubmission that edits only the title,

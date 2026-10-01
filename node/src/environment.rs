@@ -239,50 +239,44 @@ pub fn cache_env() -> Vec<(String, String)> {
     .collect()
 }
 
-/// The scoped egress gateway opened to a preparation's hosts, and the proxy
-/// variables that send a container through it instead of through the harness
-/// proxy. Dropping it closes the gateway again.
+/// A preparation's way out, and the proxy variables that send its container
+/// through it instead of through the harness proxy. Dropping it closes it.
 pub struct ScopedEgress {
-    _guard: Option<crate::boundary::QaEgressGuard>,
+    _grant: Option<crate::boundary::EgressGrant>,
     pub env: Vec<(String, String)>,
 }
 
-/// Open the backend's scoped egress gateway to exactly `hosts` for one
-/// preparation. It is the gateway a QA browser run uses, with the same
-/// one-holder-at-a-time rule, so a preparation and a browser run never see
-/// each other's hosts. No hosts means nothing is opened and the container
-/// keeps the harness proxy, which serves it nothing.
+/// What a preparation is told when it asks for a host its repository's entry
+/// does not name.
+pub const PREPARATION_REFUSAL: &str =
+    "not reachable from preparation; add it to this repository's egress";
+
+/// Open the backend's egress to exactly `hosts` for one preparation. The
+/// grant is this preparation's own: its credentials reach these hosts and
+/// nobody else's do, so it neither waits for another run nor widens one. No
+/// hosts means nothing is opened and the container keeps the harness proxy,
+/// which serves it nothing.
 ///
-/// The gateway filters by host, not by client or by method: for as long as a
-/// preparation holds it open, anything on the internal network that asks the
-/// scoped proxy for one of these hosts is served, and a host that accepts
-/// uploads accepts them. That is the cost of naming a host here.
-pub async fn scoped_egress(
-    backend: &dyn Backend,
-    hosts: &[String],
-) -> Result<ScopedEgress, String> {
+/// The grant filters by host, not by method: a host named here that accepts
+/// uploads accepts them from this preparation. That is the cost of naming it.
+pub fn scoped_egress(backend: &dyn Backend, hosts: &[String]) -> Result<ScopedEgress, String> {
     if hosts.is_empty() {
         return Ok(ScopedEgress {
-            _guard: None,
+            _grant: None,
             env: Vec::new(),
         });
     }
-    let guard = backend
-        .scope_qa_egress(hosts)
-        .await
+    let grant = backend
+        .egress_grant(crate::gateway::proxy::GrantSpec {
+            client: "prepare".into(),
+            hosts: hosts.to_vec(),
+            refusal: PREPARATION_REFUSAL.into(),
+            ..Default::default()
+        })
         .map_err(|error| format!("could not open preparation egress: {error}"))?;
-    let proxy = backend
-        .qa_proxy_url()
-        .ok_or_else(|| format!("the {} backend has no scoped egress proxy", backend.kind()))?;
-    // Both spellings: curl and git read the lowercase names, and most package
-    // managers read either.
-    let env = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"]
-        .into_iter()
-        .map(|name| (name.to_string(), proxy.clone()))
-        .collect();
     Ok(ScopedEgress {
-        _guard: Some(guard),
-        env,
+        env: grant.env(),
+        _grant: Some(grant),
     })
 }
 
@@ -366,9 +360,7 @@ pub async fn prepare(
     environment: &RepoEnvironment,
 ) -> Result<PreparedEnvironment, EnvironmentError> {
     let image = approved_image(environment, cfg, plan.image.as_deref())?;
-    let egress = scoped_egress(backend, &environment.egress)
-        .await
-        .map_err(EnvironmentError::Runtime)?;
+    let egress = scoped_egress(backend, &environment.egress).map_err(EnvironmentError::Runtime)?;
     let mut env = cache_env();
     env.push(("HOME".into(), "/cache/home".into()));
     env.extend(egress.env.iter().cloned());

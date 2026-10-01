@@ -61,7 +61,9 @@ async function main() {
   // UDP entirely once a proxy is set).
   const browser = await chromium.launch({
     headless: true,
-    proxy: spec.proxy_url ? { server: spec.proxy_url } : undefined,
+    proxy: spec.proxy_url
+      ? { server: spec.proxy_url, username: spec.proxy_username, password: spec.proxy_password }
+      : undefined,
     args: [
       '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
       '--disable-features=WebRtcHideLocalIpsWithMdns',
