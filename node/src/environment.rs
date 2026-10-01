@@ -118,7 +118,8 @@ pub struct RepoEnvironment {
 pub fn environment_for(cfg: &Config, store: &Store, repo: Option<&Path>) -> RepoEnvironment {
     // `repo` is `None` for work the node cannot tie to a repository at all; no
     // entry can claim that, so every one of them is skipped.
-    let entry = repo.and_then(|repo| cfg.repo.iter().find(|entry| entry.matches(repo)));
+    let repos = cfg.repos();
+    let entry = repo.and_then(|repo| repos.iter().find(|entry| entry.matches(repo)));
     let checks = match entry.and_then(|entry| entry.checks.as_ref()) {
         Some(checks) => checks,
         None => &cfg.supervision.checks,

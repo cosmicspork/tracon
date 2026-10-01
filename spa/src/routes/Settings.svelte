@@ -20,6 +20,7 @@
   import TransferInbox from '../components/TransferInbox.svelte'
   import AdminAccess from '../components/settings/AdminAccess.svelte'
   import Maintenance from '../components/settings/Maintenance.svelte'
+  import Repositories from '../components/settings/Repositories.svelte'
   import MeshAdministration from '../components/settings/MeshAdministration.svelte'
   import PolicyManagement from '../components/settings/PolicyManagement.svelte'
   import ModelPicker from '../components/ModelPicker.svelte'
@@ -61,6 +62,7 @@
     ['general', 'General'],
     ['connections', 'Connections'],
     ['channels', 'Channels'],
+    ['repositories', 'Repositories'],
     ['devices', 'Devices & notifications'],
     ['mesh', 'Mesh'],
     ['policies', 'Permissions & policies'],
@@ -1019,6 +1021,10 @@
       {/if}
     </Card>
   {/if}
+{/if}
+
+{#if activeSection === 'repositories'}
+  <Repositories />
 {/if}
 
 {#if activeSection === 'maintenance'}

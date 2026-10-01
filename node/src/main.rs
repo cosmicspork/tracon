@@ -133,6 +133,52 @@ enum RepoCommand {
         /// The current directory when left out.
         repo: Option<String>,
     },
+    /// One entry as `node.toml` would hold it, and what it was built into.
+    Show {
+        /// The entry's `path`, exactly as written.
+        path: String,
+    },
+    /// Add an entry, or change the fields named on one that exists. It
+    /// applies to the next session and the next check; no restart.
+    Set {
+        /// The entry's `path`: an absolute repository root, or the end of a
+        /// managed clone's (`github.com/owner/name`).
+        path: String,
+        /// A digest-pinned image, in place of a Dockerfile.
+        #[arg(long, conflicts_with = "dockerfile")]
+        image: Option<String>,
+        /// The repository's Dockerfile, for the node to build.
+        #[arg(long)]
+        dockerfile: Option<String>,
+        /// The build context, when it is not the Dockerfile's directory.
+        #[arg(long)]
+        context: Option<String>,
+        /// A required check; repeat for several. Replaces the entry's list.
+        #[arg(long = "check")]
+        checks: Vec<String>,
+        /// Go back to the node-wide `[supervision] checks`.
+        #[arg(long, conflicts_with = "checks")]
+        inherit_checks: bool,
+        /// A preparation command; repeat for several. Replaces the entry's
+        /// list; one empty value clears it.
+        #[arg(long = "prepare")]
+        prepare: Vec<String>,
+        /// A preset (crates, npm, pypi, packagist, github) or a host name;
+        /// repeat for several. Replaces the list; one empty value clears it.
+        #[arg(long = "egress")]
+        egress: Vec<String>,
+        /// Whether the entry's egress is open to its sessions too.
+        #[arg(long)]
+        session_egress: Option<bool>,
+        /// Seconds preparation, and each check, may take.
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+    },
+    /// Remove an entry. The repository goes back to the node-wide answer.
+    Rm {
+        /// The entry's `path`, exactly as written.
+        path: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1107,6 +1153,99 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             }
             Ok(())
         }
+        RepoCommand::Show { path } => {
+            let v = list().await?;
+            let item = v["entries"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|item| item["entry"]["path"].as_str() == Some(path.as_str()))
+                .ok_or_else(|| anyhow::anyhow!("no [[repo]] entry has path {path}"))?;
+            let entry: toml::Value = serde_json::from_value(item["entry"].clone())?;
+            print!("[[repo]]\n{}", toml::to_string(&entry)?);
+            for build in item["builds"].as_array().into_iter().flatten() {
+                println!("\n{}", build_line(build));
+                for command in build["warnings"].as_array().into_iter().flatten() {
+                    println!(
+                        "  warning: the image has no tool for `{}`",
+                        command.as_str().unwrap_or("")
+                    );
+                }
+            }
+            Ok(())
+        }
+        RepoCommand::Set {
+            path,
+            image,
+            dockerfile,
+            context,
+            checks,
+            inherit_checks,
+            prepare,
+            egress,
+            session_egress,
+            timeout_secs,
+        } => {
+            let mut entries = repo_entries().await?;
+            let at = entries
+                .iter()
+                .position(|entry| entry["path"].as_str() == Some(path.as_str()));
+            let mut entry = match at {
+                Some(at) => entries[at].clone(),
+                None => serde_json::json!({ "path": path, "prepare": [], "egress": [] }),
+            };
+            let fields = entry.as_object_mut().expect("an entry is a table");
+            // An image and a Dockerfile answer the same question; naming one
+            // withdraws the other.
+            if let Some(image) = image {
+                fields.insert("image".into(), image.into());
+                fields.remove("dockerfile");
+                fields.remove("context");
+            }
+            if let Some(dockerfile) = dockerfile {
+                fields.insert("dockerfile".into(), dockerfile.into());
+                fields.remove("image");
+            }
+            if let Some(context) = context {
+                fields.insert("context".into(), context.into());
+            }
+            if !checks.is_empty() {
+                fields.insert("checks".into(), flag_list(checks));
+            }
+            if inherit_checks {
+                fields.remove("checks");
+            }
+            if !prepare.is_empty() {
+                fields.insert("prepare".into(), flag_list(prepare));
+            }
+            if !egress.is_empty() {
+                fields.insert("egress".into(), flag_list(egress));
+            }
+            if let Some(open) = session_egress {
+                fields.insert("session_egress".into(), open.into());
+            }
+            if let Some(seconds) = timeout_secs {
+                fields.insert("timeout_secs".into(), seconds.into());
+            }
+            match at {
+                Some(at) => entries[at] = entry,
+                None => entries.push(entry),
+            }
+            save_repo_entries(entries).await?;
+            println!("saved; it applies to the next session and the next check");
+            Ok(())
+        }
+        RepoCommand::Rm { path } => {
+            let mut entries = repo_entries().await?;
+            let before = entries.len();
+            entries.retain(|entry| entry["path"].as_str() != Some(path.as_str()));
+            if entries.len() == before {
+                anyhow::bail!("no [[repo]] entry has path {path}");
+            }
+            save_repo_entries(entries).await?;
+            println!("removed");
+            Ok(())
+        }
         RepoCommand::Build { repo } => {
             // A directory that exists is named by where it is; anything else
             // is left for the node to match against the clones it manages.
@@ -1162,6 +1301,37 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
                 }
             }
         }
+    }
+}
+
+/// The table as the node holds it, for a command that changes one entry of it.
+async fn repo_entries() -> Result<Vec<serde_json::Value>> {
+    let v = node_call(reqwest::Method::GET, "/api/repos/environments", None, None).await?;
+    Ok(v["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| item["entry"].clone())
+        .collect())
+}
+
+async fn save_repo_entries(entries: Vec<serde_json::Value>) -> Result<()> {
+    node_call(
+        reqwest::Method::PUT,
+        "/api/repos/environments",
+        Some(serde_json::json!({ "entries": entries })),
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+/// A repeated flag as the list it stands for: one empty value is an empty
+/// list, which is how a list is cleared.
+fn flag_list(values: Vec<String>) -> serde_json::Value {
+    match values.as_slice() {
+        [only] if only.is_empty() => serde_json::json!([]),
+        _ => serde_json::json!(values),
     }
 }
 

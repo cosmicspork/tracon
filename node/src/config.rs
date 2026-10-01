@@ -21,7 +21,16 @@ pub struct Config {
     pub mesh: Mesh,
     pub runtime: Runtime,
     /// Per-repository environment: image, checks, preparation and its egress.
+    /// As the file had it when this was loaded; `repos()` is what a running
+    /// node resolves against.
     pub repo: Vec<Repo>,
+    /// The table as the operator last saved it through the node, when they
+    /// have. Not part of the file: it is what lets an edit made in Settings
+    /// or with `tracon repo set` apply to the next session and the next check
+    /// without a restart, which would end every session on the node to change
+    /// one repository's environment.
+    #[serde(skip)]
+    pub live_repo: LiveRepos,
     /// Model providers the gateway fronts, by name.
     pub providers: std::collections::BTreeMap<String, Provider>,
     pub memory: Memory,
@@ -1341,6 +1350,24 @@ pub struct Runtime {
     pub approved_images: Vec<String>,
 }
 
+/// The `[[repo]]` table a running node resolves against, once the operator
+/// has saved one through it. Shared by everything holding the same `Config`;
+/// a clone carries the table it saw and is on its own from then on.
+#[derive(Debug, Default)]
+pub struct LiveRepos(parking_lot::RwLock<Option<std::sync::Arc<Vec<Repo>>>>);
+
+impl Clone for LiveRepos {
+    fn clone(&self) -> Self {
+        Self(parking_lot::RwLock::new(self.0.read().clone()))
+    }
+}
+
+impl LiveRepos {
+    pub fn set(&self, repos: Vec<Repo>) {
+        *self.0.write() = Some(std::sync::Arc::new(repos));
+    }
+}
+
 /// What the node does for one repository: the image its required checks and
 /// its preparation run in, the checks themselves, and how its dependencies get
 /// there before they run. Everything but `path` is optional, and what an entry
@@ -1432,6 +1459,12 @@ const EGRESS_PRESETS: &[(&str, &[&str])] = &[
         &["github.com", "api.github.com", "codeload.github.com"],
     ),
 ];
+
+/// The preset names an `egress` entry may use, and the hosts each opens, for
+/// an interface that offers them.
+pub fn egress_presets() -> Vec<(&'static str, &'static [&'static str])> {
+    EGRESS_PRESETS.to_vec()
+}
 
 impl Repo {
     /// Whether this entry is the one for `repo`.
@@ -2055,6 +2088,7 @@ impl Default for Config {
             mesh: Mesh::default(),
             runtime: Runtime::default(),
             repo: Vec::new(),
+            live_repo: LiveRepos::default(),
             providers: default_providers(),
             memory: Memory::default(),
             ui: Ui::default(),
@@ -2319,6 +2353,15 @@ impl Config {
 
     pub fn allow_file() -> PathBuf {
         Self::state_dir().join("gateway/allow.txt")
+    }
+
+    /// The `[[repo]]` table as it stands now: what the operator last saved
+    /// through the running node, else what the file held at load.
+    pub fn repos(&self) -> std::sync::Arc<Vec<Repo>> {
+        match &*self.live_repo.0.read() {
+            Some(live) => live.clone(),
+            None => std::sync::Arc::new(self.repo.clone()),
+        }
     }
 
     /// Where the node serves the per-client egress proxy for the gateway to
@@ -2772,6 +2815,33 @@ mod tests {
         }])
         .unwrap_err()
         .contains("no dockerfile"));
+    }
+
+    /// The table a running node resolves against is the file's until the
+    /// operator saves one through the node, and theirs from then on — for
+    /// everything sharing that `Config`, without a restart. A copy taken
+    /// earlier keeps what it saw.
+    #[test]
+    fn a_table_saved_through_the_node_replaces_the_loaded_one_live() {
+        let entry = |path: &str| Repo {
+            path: PathBuf::from(path),
+            ..Default::default()
+        };
+        let cfg = std::sync::Arc::new(Config {
+            repo: vec![entry("/src/loaded")],
+            ..Default::default()
+        });
+        let shared = cfg.clone();
+        let copied = (*cfg).clone();
+        assert_eq!(shared.repos()[0].path, Path::new("/src/loaded"));
+
+        cfg.live_repo
+            .set(vec![entry("/src/saved"), entry("/src/second")]);
+        assert_eq!(shared.repos().len(), 2);
+        assert_eq!(shared.repos()[0].path, Path::new("/src/saved"));
+        assert_eq!(copied.repos()[0].path, Path::new("/src/loaded"));
+        // It is the node's state, not the file's: saving never writes it.
+        assert!(!toml::to_string(&*cfg).unwrap().contains("live_repo"));
     }
 
     /// A preset is the hosts a package manager actually talks to; a literal

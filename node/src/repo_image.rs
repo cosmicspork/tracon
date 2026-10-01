@@ -93,11 +93,12 @@ fn build_lock(repo: &Path) -> Arc<AsyncMutex<()>> {
 }
 
 /// The `[[repo]]` entry for `repo`, if it names a Dockerfile to build.
-pub fn building_entry<'a>(cfg: &'a Config, repo: &Path) -> Option<&'a Repo> {
-    cfg.repo
+pub fn building_entry(cfg: &Config, repo: &Path) -> Option<Repo> {
+    cfg.repos()
         .iter()
         .find(|entry| entry.matches(repo))
         .filter(|entry| entry.dockerfile.is_some())
+        .cloned()
 }
 
 /// The recipe `entry` names, as the repository's default branch has it now.
@@ -297,8 +298,8 @@ pub async fn session_image(
     (harness_id, harness_version): (&str, &str),
     building: &(dyn Fn() + Send + Sync),
 ) -> SessionImage {
-    let Some(entry) = cfg
-        .repo
+    let repos = cfg.repos();
+    let Some(entry) = repos
         .iter()
         .find(|entry| entry.matches(repo))
         .filter(|entry| entry.image.is_some() || entry.dockerfile.is_some())
@@ -548,7 +549,7 @@ pub async fn ensure_base(
         cfg,
         store,
         repo,
-        entry,
+        &entry,
         &commands,
         force,
     )

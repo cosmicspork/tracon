@@ -21,6 +21,8 @@ import type {
   MeshState,
   ModelOption,
   NodeConfig,
+  RepoEntry,
+  RepoEnvironments,
   NodeInfo,
   OperatorIssue,
   OperatorQuestion,
@@ -441,6 +443,11 @@ export const api = {
   config: () => call<NodeConfig>('GET', '/api/config'),
   putConfig: (patch: unknown) =>
     call<{ changed: string[]; restart_required: boolean }>('PUT', '/api/config', patch),
+  repoEnvironments: () => call<RepoEnvironments>('GET', '/api/repos/environments'),
+  saveRepoEnvironments: (entries: RepoEntry[]) =>
+    call<{ changed: boolean; restart_required: boolean }>('PUT', '/api/repos/environments', { entries }),
+  buildRepoEnvironment: (repo: string) =>
+    call<{ repo: string; since_ms: number }>('POST', '/api/repos/environments/build', { repo }),
   manifest: (channel: string) =>
     call<ManifestView>('GET', `/api/manifest?channel=${encodeURIComponent(channel)}`),
   importSkill: (channel: string, source: string) =>

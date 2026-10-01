@@ -1139,3 +1139,93 @@ async fn repository_environments_are_listed_and_built_only_from_this_machine() {
         assert!(v.to_string().contains(why), "{v}");
     }
 }
+
+/// The table is saved from this machine, written to `node.toml`, and in
+/// effect at once: a restart would end every session to change one
+/// repository's environment. A table the node could not honour is refused
+/// whole and changes nothing.
+#[tokio::test]
+async fn the_repository_table_is_saved_whole_and_applies_without_a_restart() {
+    let n = node();
+    let entries = json!({ "entries": [
+        { "path": "/src/app", "dockerfile": ".devcontainer/Dockerfile",
+          "checks": ["just check"], "prepare": ["cargo fetch --locked"],
+          "egress": ["crates"], "session_egress": true },
+        { "path": "owner/notes", "checks": [], "prepare": [], "egress": [] },
+    ]});
+
+    let (s, _) = call(
+        &n,
+        "PUT",
+        "/api/repos/environments",
+        Some(REMOTE),
+        Some(entries.clone()),
+    )
+    .await;
+    assert_ne!(s, StatusCode::OK);
+
+    let (s, v) = call(
+        &n,
+        "PUT",
+        "/api/repos/environments",
+        Some(LOCAL),
+        Some(entries.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v, json!({ "changed": true, "restart_required": false }));
+
+    // The running node resolves against it already, and the file agrees.
+    let (_, v) = call(&n, "GET", "/api/repos/environments", Some(LOCAL), None).await;
+    let listed = v["entries"].as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0]["entry"]["session_egress"], json!(true));
+    assert_eq!(listed[1]["entry"]["checks"], json!([]));
+    assert!(v["presets"].to_string().contains("registry.npmjs.org"));
+    let file = Config::try_load().unwrap();
+    assert_eq!(file.repo.len(), 2);
+    assert_eq!(file.repo[0].egress, ["crates"]);
+    assert_eq!(file.repo[1].checks.as_deref(), Some(&[][..]));
+
+    // Saving the same table again changes nothing.
+    let (_, v) = call(
+        &n,
+        "PUT",
+        "/api/repos/environments",
+        Some(LOCAL),
+        Some(entries),
+    )
+    .await;
+    assert_eq!(v["changed"], json!(false));
+
+    for (bad, why) in [
+        (
+            json!({ "path": "/src/app", "image": "localhost/tc:latest" }),
+            "pinned",
+        ),
+        (
+            json!({ "path": "/src/app", "image": "a@sha256:0000000000000000000000000000000000000000000000000000000000000000", "dockerfile": "Dockerfile" }),
+            "both",
+        ),
+        (
+            json!({ "path": "/src/app", "egress": ["https://crates.io"] }),
+            "neither a preset",
+        ),
+        (
+            json!({ "path": "/src/app", "session_egress": true }),
+            "egress is empty",
+        ),
+    ] {
+        let (s, v) = call(
+            &n,
+            "PUT",
+            "/api/repos/environments",
+            Some(LOCAL),
+            Some(json!({ "entries": [bad] })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+        assert!(v.to_string().contains(why), "{v}");
+    }
+    assert_eq!(Config::try_load().unwrap().repo.len(), 2);
+}
