@@ -99,6 +99,18 @@ export function repetitionLine(payload: Record<string, unknown>): string {
   return `same call ${count}× in a row · ${title} · recorded, not paused`
 }
 
+/// Where the harness is running, appended to the start line. Said only when
+/// there is something to say: the repository's image, or why a repository
+/// that has one is not being used. A session in the plain harness image, with
+/// no repository image to miss, adds nothing.
+export function sessionImage(payload: Record<string, unknown>): string {
+  if (typeof payload.image === 'string' && payload.image) return " · in the repository's image"
+  if (typeof payload.image_note === 'string' && payload.image_note) {
+    return ` · in the harness image, not the repository's: ${payload.image_note}`
+  }
+  return ''
+}
+
 /// The most recent repetition signal of the current turn, if the harness has
 /// not moved on from it. Anything else since — a turn ending, a pause, a
 /// resume — means the run is over and the hint has nothing left to say.

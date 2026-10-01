@@ -216,6 +216,12 @@ pub fn harness_image(cfg: &Config) -> String {
     }
 }
 
+/// A workspace's own dependency cache, mounted writable into its sessions.
+/// What an agent installs lands here and nowhere a check reads.
+pub fn session_cache_volume(workspace_id: &str) -> String {
+    crate::workspace::volume_name(workspace_id).replacen("tracon-workspace-", "tracon-cache-w-", 1)
+}
+
 /// Where each package manager keeps what it fetched, under the cache mount.
 /// Preparation and the check after it get the same names, so what one
 /// downloaded the other finds.

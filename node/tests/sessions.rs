@@ -3350,6 +3350,11 @@ async fn a_started_session_records_what_the_harness_turned_out_to_be() {
     assert_eq!(start_event.payload["harness_version"], "1.0.0");
     assert_eq!(start_event.payload["harness_expected"], "1.0.0");
     assert_eq!(start_event.payload["harness_protocol"], "fake/1");
+    // No `[[repo]]` entry names an image for this repository, so the harness
+    // is in its own and there is nothing to explain.
+    assert_eq!(start_event.payload["image_source"], "harness image");
+    assert!(start_event.payload["image"].is_null());
+    assert!(start_event.payload["image_note"].is_null());
 
     let app = tracon::http::router(tracon::http::api::AppState {
         manager: manager.clone(),

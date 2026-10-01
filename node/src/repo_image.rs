@@ -216,6 +216,303 @@ fn normalised(source: &str) -> String {
     )
 }
 
+/// How a harness goes onto a repository's image: what is copied out of the
+/// harness's own image, the environment that image sets, and the command that
+/// proves the result runs. Only a harness that is one binary is carried this
+/// way. OpenCode's image is an entrypoint and a toolchain profile the launch
+/// manifest records, and it stays in it.
+struct HarnessLayer {
+    lines: &'static str,
+    probe: &'static str,
+}
+
+fn harness_layer(harness_id: &str) -> Option<HarnessLayer> {
+    match harness_id {
+        crate::adapter::claude::ClaudeAdapter::ID => Some(HarnessLayer {
+            lines:
+                "COPY --from=harness /usr/local/bin/claude /usr/local/bin/claude\n\
+                    ENV CLAUDE_CONFIG_DIR=/root/.claude DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1\n",
+            probe: "claude --version && git --version",
+        }),
+        _ => None,
+    }
+}
+
+/// Bumped when the session layer itself changes.
+const SESSION_LAYER: &str = "1";
+
+/// The harness over a repository's image. The node's own layer is applied
+/// again because the image may be one the operator pinned by hand, which
+/// never had it.
+fn layered(base: &str, harness_image: &str, layer: &HarnessLayer) -> String {
+    format!(
+        "FROM {harness_image} AS harness\n{}{}",
+        normalised(base),
+        layer.lines
+    )
+}
+
+/// The image one session's harness runs in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionImage {
+    /// `None` is the harness's own image.
+    pub image: Option<String>,
+    /// The repository image under it: what its checks run in.
+    pub toolchain_image: Option<String>,
+    /// Why a session whose repository has an image is not running in it.
+    pub note: Option<String>,
+}
+
+impl SessionImage {
+    pub fn source(&self) -> &'static str {
+        match self.image {
+            Some(_) => "repository image",
+            None => "harness image",
+        }
+    }
+
+    fn aside(note: impl Into<String>) -> Self {
+        Self {
+            note: Some(note.into()),
+            ..Default::default()
+        }
+    }
+}
+
+/// The image a session on `repo` runs in: the repository's, with the harness
+/// layered on, where its entry names one.
+///
+/// A repository with no image yet builds one here, and `building` is called
+/// first because that takes minutes. One whose Dockerfile has since moved
+/// starts on the image it has and is rebuilt behind the session, so a
+/// Dockerfile change costs the next session nothing and this one no wait.
+/// Anything that stops the session having its repository's image leaves it in
+/// the harness's own, with the reason: a session that cannot build is still
+/// the one that can fix what broke.
+pub async fn session_image(
+    backend: &Arc<dyn Backend>,
+    cfg: &Arc<Config>,
+    store: &Arc<Store>,
+    repo: &Path,
+    (harness_id, harness_version): (&str, &str),
+    building: &(dyn Fn() + Send + Sync),
+) -> SessionImage {
+    let Some(entry) = cfg
+        .repo
+        .iter()
+        .find(|entry| entry.matches(repo))
+        .filter(|entry| entry.image.is_some() || entry.dockerfile.is_some())
+    else {
+        return SessionImage::default();
+    };
+    let Some(layer) = harness_layer(harness_id) else {
+        return SessionImage::aside(format!(
+            "the {harness_id} harness runs in its own image; it is not layered onto a repository's"
+        ));
+    };
+    let Some(builder) = backend.image_builder() else {
+        return SessionImage::aside(format!(
+            "the {} runtime cannot build images",
+            backend.kind()
+        ));
+    };
+    let base = match &entry.image {
+        Some(image) => image.clone(),
+        None => {
+            let repo_path = repo.to_string_lossy();
+            let standing = match store.ready_repo_image(&repo_path, BASE).ok().flatten() {
+                Some(row) if builder.exists(&row.image).await => Some(row),
+                _ => None,
+            };
+            match standing {
+                Some(row) => {
+                    let moved = recipe(repo, entry)
+                        .await
+                        .is_ok_and(|recipe| recipe.hash != row.recipe_hash);
+                    if moved {
+                        let (backend, cfg, store) = (backend.clone(), cfg.clone(), store.clone());
+                        let repo = repo.to_path_buf();
+                        tokio::spawn(async move {
+                            ensure_base(backend.as_ref(), &cfg, &store, &repo, false).await;
+                        });
+                    }
+                    row.image
+                }
+                None => {
+                    building();
+                    match ensure_base(backend.as_ref(), cfg, store, repo, false).await {
+                        Ensured::Unavailable { reason } => return SessionImage::aside(reason),
+                        ensured => match ensured.image() {
+                            Some(image) => image.to_string(),
+                            None => return SessionImage::default(),
+                        },
+                    }
+                }
+            }
+        }
+    };
+    let runner = backend.runner_for(harness_id, Vec::new());
+    let harness = SessionHarness {
+        id: harness_id,
+        version: harness_version,
+        image: cfg.podman_harness_image(harness_id),
+        layer,
+    };
+    ensure_session_with(builder, runner.as_ref(), store, repo, &base, &harness).await
+}
+
+struct SessionHarness<'a> {
+    id: &'a str,
+    version: &'a str,
+    image: String,
+    layer: HarnessLayer,
+}
+
+async fn ensure_session_with(
+    builder: &dyn ImageBuilder,
+    runner: &dyn Runner,
+    store: &Store,
+    repo: &Path,
+    base: &str,
+    harness: &SessionHarness<'_>,
+) -> SessionImage {
+    let unlayered = |note: String| SessionImage {
+        toolchain_image: Some(base.to_string()),
+        note: Some(note),
+        image: None,
+    };
+    let lock = build_lock(repo);
+    let _building = lock.lock().await;
+    // Keyed on what the harness's tag names now: a harness upgrade rebuilds
+    // this layer and leaves the repository's image, and its evidence, alone.
+    let Some(harness_image) = builder.identity(&harness.image).await else {
+        return unlayered(format!(
+            "the harness image {} is missing; `tracon setup` builds it",
+            harness.image
+        ));
+    };
+    let mut hash = Sha256::new();
+    for part in [SESSION_LAYER, base, &harness_image, harness.layer.lines] {
+        hash.update(part.as_bytes());
+        hash.update([0]);
+    }
+    let key = hex::encode(hash.finalize());
+    let kind = format!("session:{}", harness.id);
+    let repo_path = repo.to_string_lossy();
+    let ready = store.ready_repo_image(&repo_path, &kind).ok().flatten();
+    if let Some(row) = ready.as_ref().filter(|row| row.recipe_hash == key) {
+        if builder.exists(&row.image).await {
+            return SessionImage {
+                image: Some(row.image.clone()),
+                toolchain_image: Some(base.to_string()),
+                note: None,
+            };
+        }
+    }
+    let latest = store.latest_repo_image(&repo_path, &kind).ok().flatten();
+    if let Some(failed) = latest.filter(|row| row.status == "failed" && row.recipe_hash == key) {
+        return unlayered(failed.error);
+    }
+    let started = RepoImageStart {
+        repo_path: &repo_path,
+        kind: &kind,
+        recipe_hash: &key,
+        source_ref: "",
+        source_commit: "",
+        parent_image: base,
+    };
+    let id = match store.start_repo_image(&started) {
+        Ok(id) => id,
+        Err(error) => return unlayered(error.to_string()),
+    };
+    let built = build_session(builder, runner, repo, base, &harness_image, &key, harness).await;
+    match built {
+        Ok(built) => {
+            let _ = store.finish_repo_image(&id, Ok(&built.image), &built.log_tail, &[]);
+            // The layer this replaces, and the repository image under it that
+            // could not go while this layer still stood on it.
+            if let Some(old) = ready.filter(|old| old.image != built.image) {
+                builder.remove(&old.image).await;
+                if old.parent_image != base {
+                    builder.remove(&old.parent_image).await;
+                    let parent = store.repo_image_built_as(&old.parent_image).ok().flatten();
+                    if let Some(parent) = parent {
+                        builder.remove(&source_tag(repo, &parent.recipe_hash)).await;
+                    }
+                }
+            }
+            SessionImage {
+                image: Some(built.image),
+                toolchain_image: Some(base.to_string()),
+                note: None,
+            }
+        }
+        Err(failure) => {
+            tracing::warn!(repo = %repo.display(), error = %failure.error, "session image build failed");
+            let _ = store.finish_repo_image(&id, Err(&failure.error), &failure.log_tail, &[]);
+            unlayered(failure.error)
+        }
+    }
+}
+
+/// Build the layer and prove the harness runs in it before anything is told
+/// to launch there: a base image with a different libc, or without Git, is
+/// found here and not as a session that dies at start.
+async fn build_session(
+    builder: &dyn ImageBuilder,
+    runner: &dyn Runner,
+    repo: &Path,
+    base: &str,
+    harness_image: &str,
+    key: &str,
+    harness: &SessionHarness<'_>,
+) -> Result<BuiltImage, BuildFailure> {
+    let staged = |error: String| BuildFailure {
+        error,
+        log_tail: String::new(),
+    };
+    let stage = tempfile::tempdir().map_err(|e| staged(e.to_string()))?;
+    let containerfile = stage.path().join("Session.Containerfile");
+    std::fs::write(&containerfile, layered(base, harness_image, &harness.layer))
+        .map_err(|e| staged(e.to_string()))?;
+    let empty = stage.path().join("empty");
+    std::fs::create_dir_all(&empty).map_err(|e| staged(e.to_string()))?;
+    let built = builder
+        .build(ImageBuild {
+            tag: &format!("{}-{}:{}", image_name(repo), harness.id, &key[..12]),
+            containerfile: &containerfile,
+            context: &empty,
+            labels: &[(RECIPE_LABEL.to_string(), key.to_string())],
+            timeout: BUILD_TIMEOUT,
+        })
+        .await?;
+    let probe = runner
+        .run_capture(RunnerCommand {
+            argv: ["sh", "-c", harness.layer.probe].map(String::from).to_vec(),
+            image: Some(built.image.clone()),
+            name: format!("tracon-probe-{}", uuid::Uuid::now_v7().simple()),
+            ..Default::default()
+        })
+        .await;
+    let said = match &probe {
+        Ok(out) => String::from_utf8_lossy(&[out.stdout.clone(), out.stderr.clone()].concat())
+            .trim()
+            .to_string(),
+        Err(error) => error.to_string(),
+    };
+    if probe.is_ok_and(|out| out.status.success()) && said.contains(harness.version) {
+        return Ok(built);
+    }
+    builder.remove(&built.image).await;
+    Err(BuildFailure {
+        error: format!(
+            "{} {} does not run in the repository's image",
+            harness.id, harness.version
+        ),
+        log_tail: said,
+    })
+}
+
 /// Make sure the image for `repo`'s current recipe exists, building it if it
 /// does not. `force` rebuilds even an image that is current, and retries a
 /// recipe that already failed.
@@ -520,6 +817,10 @@ mod tests {
         async fn exists(&self, _image: &str) -> bool {
             !*self.pruned.lock().unwrap()
         }
+        async fn identity(&self, image: &str) -> Option<String> {
+            let digest = hex::encode(Sha256::digest(image));
+            Some(format!("{image}@sha256:{digest}"))
+        }
         async fn remove(&self, image: &str) {
             self.removed.lock().unwrap().push(image.to_string());
         }
@@ -740,6 +1041,216 @@ mod tests {
             missing_tools(&LocalRunner, "ignored", &commands).await,
             ["tracon-no-such-tool --check"]
         );
+    }
+
+    /// Answers the harness probe with whatever the test says the image does.
+    struct ProbeRunner {
+        says: &'static str,
+        exit: i32,
+        ran_in: StdMutex<Vec<String>>,
+    }
+
+    impl ProbeRunner {
+        fn saying(says: &'static str, exit: i32) -> Self {
+            Self {
+                says,
+                exit,
+                ran_in: StdMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Runner for ProbeRunner {
+        async fn spawn(
+            &self,
+            _cmd: RunnerCommand,
+        ) -> Result<crate::runner::Spawned, crate::runner::RunnerError> {
+            Err(crate::runner::RunnerError::Other("not used here".into()))
+        }
+        async fn run_capture(
+            &self,
+            cmd: RunnerCommand,
+        ) -> Result<std::process::Output, crate::runner::RunnerError> {
+            use std::os::unix::process::ExitStatusExt;
+            self.ran_in
+                .lock()
+                .unwrap()
+                .push(cmd.image.unwrap_or_default());
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(self.exit << 8),
+                stdout: self.says.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+        async fn kill(&self, _name: &str) -> Result<(), crate::runner::RunnerError> {
+            Ok(())
+        }
+    }
+
+    const BASE_IMAGE: &str =
+        "localhost/tracon-repo-app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn claude(image: &str) -> SessionHarness<'static> {
+        SessionHarness {
+            id: "claude",
+            version: "2.1.247",
+            image: image.to_string(),
+            layer: harness_layer("claude").unwrap(),
+        }
+    }
+
+    /// The harness goes onto the repository's image as a layer, proven to run
+    /// there, and is rebuilt when the harness image moves — which leaves the
+    /// repository's image, and every check's evidence, where it was.
+    #[tokio::test]
+    async fn the_harness_is_layered_onto_the_repository_image_and_follows_the_harness() {
+        let repo = Path::new("/src/app");
+        let store = Store::open_in_memory().unwrap();
+        let builder = FakeBuilder::default();
+        let runner = ProbeRunner::saying("2.1.247 (Claude Code)\ngit version 2.50", 0);
+        let harness = claude("localhost/tracon-harness-claude");
+
+        let first =
+            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+        let image = first.image.clone().expect("the session image is built");
+        assert_eq!(first.toolchain_image.as_deref(), Some(BASE_IMAGE));
+        assert_eq!(first.note, None);
+        assert_eq!(first.source(), "repository image");
+        // Proven in the image that was built, not in the harness's own.
+        assert_eq!(
+            runner.ran_in.lock().unwrap().as_slice(),
+            std::slice::from_ref(&image)
+        );
+        {
+            let builds = builder.builds.lock().unwrap();
+            let text = &builds[0].1;
+            assert!(text.starts_with("FROM localhost/tracon-harness-claude@sha256:"));
+            assert!(text.contains(&format!("FROM {BASE_IMAGE}\n")));
+            assert!(text.contains("COPY --from=harness /usr/local/bin/claude"));
+            assert!(text.contains("USER 0:0") && text.contains("ENTRYPOINT []"));
+        }
+
+        // Asked again, nothing is built and nothing is probed.
+        let again =
+            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+        assert_eq!(again, first);
+        assert_eq!(builder.builds.lock().unwrap().len(), 1);
+
+        // A harness image that moved is a new layer over the same base.
+        let upgraded = claude("localhost/tracon-harness-claude-next");
+        let next =
+            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &upgraded).await;
+        assert_ne!(next.image, first.image);
+        assert_eq!(next.toolchain_image.as_deref(), Some(BASE_IMAGE));
+        let removed = builder.removed.lock().unwrap();
+        assert!(removed.contains(&image));
+        assert!(!removed.iter().any(|gone| gone == BASE_IMAGE));
+    }
+
+    /// A harness that does not run in the repository's image is found when the
+    /// layer is built. The session keeps the harness's own image and is told
+    /// why, and the build is not repeated at every start.
+    #[tokio::test]
+    async fn a_harness_that_does_not_run_in_the_image_leaves_the_session_in_its_own() {
+        let repo = Path::new("/src/musl-app");
+        let store = Store::open_in_memory().unwrap();
+        let builder = FakeBuilder::default();
+        let harness = claude("localhost/tracon-harness-claude");
+        for (says, exit) in [("sh: claude: not found", 127), ("9.9.9 (Claude Code)", 0)] {
+            let store = Store::open_in_memory().unwrap();
+            let runner = ProbeRunner::saying(says, exit);
+            let got =
+                ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+            assert_eq!(got.image, None, "{says}");
+            assert_eq!(got.source(), "harness image");
+            assert!(got.note.unwrap().contains("does not run"), "{says}");
+            let row = store
+                .latest_repo_image("/src/musl-app", "session:claude")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (row.status.as_str(), row.log_tail.as_str()),
+                ("failed", says)
+            );
+        }
+        assert_eq!(builder.removed.lock().unwrap().len(), 2);
+
+        let runner = ProbeRunner::saying("nope", 1);
+        ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+        let builds = builder.builds.lock().unwrap().len();
+        let again =
+            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+        assert!(again.note.is_some());
+        assert_eq!(builder.builds.lock().unwrap().len(), builds);
+    }
+
+    /// Which sessions get a repository image at all: one whose repository has
+    /// an entry naming an image, on a harness that is a single binary, on a
+    /// runtime that can build.
+    #[tokio::test]
+    async fn a_session_keeps_the_harness_image_where_no_repository_image_applies() {
+        let backend: Arc<dyn Backend> = Arc::new(crate::runner::local::LocalBackend);
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let cfg = Arc::new(Config {
+            repo: vec![Repo {
+                path: "/src/app".into(),
+                image: Some(BASE_IMAGE.into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let ask = |repo: &'static str, harness: &'static str| {
+            let (backend, cfg, store) = (backend.clone(), cfg.clone(), store.clone());
+            async move {
+                let quiet = || panic!("nothing is built here");
+                session_image(
+                    &backend,
+                    &cfg,
+                    &store,
+                    Path::new(repo),
+                    (harness, "1"),
+                    &quiet,
+                )
+                .await
+            }
+        };
+        assert_eq!(ask("/src/other", "claude").await, SessionImage::default());
+        let opencode = ask("/src/app", "opencode").await;
+        assert!(opencode.image.is_none());
+        assert!(opencode.note.unwrap().contains("runs in its own image"));
+        let unbuildable = ask("/src/app", "claude").await;
+        assert!(unbuildable.note.unwrap().contains("cannot build images"));
+    }
+
+    /// The layer copies the harness out of its image and has to set what that
+    /// image sets; the image's own definition is the authority for both.
+    #[test]
+    fn the_claude_layer_carries_what_the_harness_image_sets() {
+        let image = include_str!("../../containers/harness-claude/Containerfile");
+        let layer = harness_layer("claude").unwrap().lines;
+        assert!(image.contains("/usr/local/bin/claude"));
+        for variable in [
+            "CLAUDE_CONFIG_DIR=/root/.claude",
+            "DISABLE_AUTOUPDATER=1",
+            "DISABLE_TELEMETRY=1",
+        ] {
+            assert!(
+                image.contains(variable),
+                "{variable} left the harness image"
+            );
+            assert!(layer.contains(variable), "{variable} is not in the layer");
+        }
+        let exported: usize = image
+            .lines()
+            .skip_while(|line| !line.starts_with("ENV "))
+            .take_while(|line| line.starts_with("ENV ") || line.starts_with("    "))
+            .count();
+        assert_eq!(
+            exported, 3,
+            "the harness image sets something the layer does not"
+        );
+        assert!(harness_layer("opencode").is_none());
     }
 
     #[test]

@@ -5,6 +5,7 @@
     groupSummary,
     providerErrorLine,
     repetitionLine,
+    sessionImage,
     missingContext,
     missingLine,
     orientationContext,
@@ -95,7 +96,9 @@
             : ''}
         </div>
       {:else if e.kind === 'session_started'}
-        <div class="sys">harness started · {e.payload.model}{e.payload.phase ? ` · ${e.payload.phase}` : ''}{e.payload.policy_version != null ? ` · policy v${e.payload.policy_version}` : ''}</div>
+        <div class="sys">harness started · {e.payload.model}{e.payload.phase ? ` · ${e.payload.phase}` : ''}{e.payload.policy_version != null ? ` · policy v${e.payload.policy_version}` : ''}{sessionImage(e.payload)}</div>
+      {:else if e.kind === 'repo_image'}
+        <div class="sys">building the repository's image · the harness starts in it when it is ready, which takes minutes the first time</div>
       {:else if e.kind === 'check_started'}
         <div class="mark">checks started · {((e.payload.commands as string[]) ?? []).join(' · ')}</div>
       {:else if e.kind === 'check_result'}

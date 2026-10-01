@@ -155,6 +155,21 @@ impl Store {
             .optional()?)
     }
 
+    /// The build that produced `image`.
+    pub fn repo_image_built_as(&self, image: &str) -> Result<Option<RepoImageRow>> {
+        Ok(self
+            .repo_image_conn()?
+            .query_row(
+                &format!(
+                    "SELECT {COLUMNS} FROM repo_image WHERE image = ?1 \
+                     ORDER BY started_ms DESC LIMIT 1"
+                ),
+                params![image],
+                row,
+            )
+            .optional()?)
+    }
+
     /// Every repository this node has built for, with its newest build.
     pub fn repo_images(&self) -> Result<Vec<RepoImageRow>> {
         let conn = self.repo_image_conn()?;

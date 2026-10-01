@@ -96,6 +96,9 @@ pub trait ImageBuilder: Send + Sync {
     /// Whether the runtime still holds this image. One it pruned has to be
     /// built again before anything can run in it.
     async fn exists(&self, image: &str) -> bool;
+    /// `name@sha256:…` for an image the runtime holds under a tag: what the
+    /// tag names right now, which a rebuild under the same tag changes.
+    async fn identity(&self, image: &str) -> Option<String>;
     /// Drop an image nothing uses any more. Best effort: one a container
     /// still runs from stays.
     async fn remove(&self, image: &str);
@@ -126,6 +129,19 @@ pub trait Backend: Send + Sync {
     /// configured harness is only the default; a session runs the one it
     /// names.
     fn runner_for(&self, harness_id: &str, extra_mounts: Vec<Mount>) -> Arc<dyn Runner>;
+    /// A runner for a named harness in an image other than its own: the
+    /// repository's, with the harness layered on. Everything else is the
+    /// boundary's, exactly as `runner_for` has it. A runtime that cannot run
+    /// one keeps the harness's image.
+    fn runner_in(
+        &self,
+        harness_id: &str,
+        image: &str,
+        extra_mounts: Vec<Mount>,
+    ) -> Arc<dyn Runner> {
+        let _ = image;
+        self.runner_for(harness_id, extra_mounts)
+    }
     /// Each supported harness's image and its state: `current`, `stale`,
     /// `missing`, or `unknown` where this runtime cannot say. For display;
     /// `check_all` is what refuses a node whose images are not usable.
