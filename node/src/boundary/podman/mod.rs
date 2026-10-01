@@ -267,10 +267,20 @@ impl Backend for PodmanBackend {
             ));
         }
         let permit = QA_EGRESS.lock().await;
+        let gateway = self.cfg.boundary.gateway_container.clone();
         setup::write_qa_allowlist(allowed_hosts)?;
-        Ok(super::QaEgressGuard::new(permit, || {
+        if let Err(error) = reload_scoped_filter(&gateway).await {
+            // Nothing was opened, and nothing is left written for a later
+            // reload to open by accident.
+            let _ = setup::write_qa_allowlist(&[]);
+            return Err(error);
+        }
+        Ok(super::QaEgressGuard::new(permit, move || {
             if let Err(error) = setup::write_qa_allowlist(&[]) {
-                tracing::error!(%error, "could not reset QA browser egress allowlist");
+                tracing::error!(%error, "could not reset scoped egress allowlist");
+            }
+            if let Err(error) = reload_scoped_filter_blocking(&gateway) {
+                tracing::error!(%error, "could not close the scoped egress gateway");
             }
         }))
     }
@@ -288,6 +298,39 @@ impl Backend for PodmanBackend {
 /// sessions never touch this — their egress is the separate, static
 /// `allow_hosts` filter, unaffected by QA runs.
 static QA_EGRESS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// tinyproxy reads its filter file once and again only on `SIGUSR1`, so a
+/// rewritten allow file changes nothing until the scoped proxy is told. It is
+/// the gateway's second tinyproxy, not its PID 1, so the signal goes by its
+/// pid file rather than through `podman kill`.
+const RELOAD_SCOPED_FILTER: &str = r#"kill -USR1 "$(cat /run/tinyproxy-qa.pid)""#;
+
+/// How long the scoped proxy gets to act on the signal before a caller starts
+/// the container that depends on it. The reload is the next thing its accept
+/// loop does; this only has to outlast that.
+const RELOAD_SETTLE: Duration = Duration::from_millis(250);
+
+async fn reload_scoped_filter(gateway: &str) -> Result<(), BoundaryError> {
+    podman(&["exec", gateway, "sh", "-c", RELOAD_SCOPED_FILTER]).await?;
+    tokio::time::sleep(RELOAD_SETTLE).await;
+    Ok(())
+}
+
+/// The same reload from a `Drop`, which cannot await. Closing does not wait
+/// for the reload to settle: nothing is about to depend on it.
+fn reload_scoped_filter_blocking(gateway: &str) -> Result<(), BoundaryError> {
+    let out = std::process::Command::new(podman_bin())
+        .args(["exec", gateway, "sh", "-c", RELOAD_SCOPED_FILTER])
+        .output()
+        .map_err(BoundaryError::Io)?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(BoundaryError::Podman(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ))
+    }
+}
 
 static PODMAN_BIN: OnceLock<String> = OnceLock::new();
 
