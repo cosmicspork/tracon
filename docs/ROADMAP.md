@@ -51,33 +51,15 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 Every item here was found on the 2026-09-20, 2026-09-28 or 2026-09-30 live runs, or in
 the daily desktop use since.
 
-- [ ] **Give the session its repository's toolchain and registries.** Checks now run in
-      the repository's image with its dependencies prepared, but the session itself still
-      runs in the harness image and meets the egress proxy's 403: `cargo add`, `npm
-      install`, `composer require`, `pip` and `go get` fail, and the agent cannot run the
-      tests it will be judged by until it submits. "Add dependency Y and run the tests" and
-      "update package Z" are ordinary tasks and are not possible. Three parts, in order.
-      Build the repository's dev environment: its `.devcontainer` Dockerfile, built by the
-      node from the default branch and never from a candidate's worktree, the digest
-      recorded as the `[[repo]]` image and rebuilt when the Dockerfile's hash changes —
-      only the Dockerfile is honoured; hooks, compose files and features stay refused, and
-      `prepare` takes their place. Layer the harness onto that image, so a session has the
-      tools its checks have. Then let a `[[repo]]` entry open its registry presets to its
-      sessions, opt-in per repository, and make the refusal elsewhere say "not reachable
-      from a session; add it to this repository's egress". Alongside: prepare once per
-      candidate rather than before every check, keep one candidate's install from reaching
-      another's evidence (the cache is per repository and image today), give the scoped
-      gateway a filter per client rather than one holder at a time, and put the table in
-      Settings and the CLI. Found while making required checks run, and reviewing which of the
-      operator's own repositories could pass theirs (2026-09-30).
 - [ ] **Proof of work.** One MCP tool that runs a command in the session's own boundary
       and has the *node* record the command, exit code, bounded output, revision and
       image digest as evidence — the agent cannot type the output. A proof document is
       assembled from those records, shown beside the diff in review, marked stale when
       the revision moves, and rerun to verify. This is the Showboat idea with the
       capture owned by the supervisor; the existing attached demonstration (a linked,
-      hashed, never-executed document) stays for what a human writes by hand. Depends on
-      the session toolchain above for anything that needs the project's tools.
+      hashed, never-executed document) stays for what a human writes by hand. The
+      session's own image already carries the project's tools, so the command runs where
+      the agent's did.
 - [ ] **A work item's session starts working on its own.** A session composed from a
       prompt, or started on an existing item, is sent no first prompt — only a plain
       prompt session carries `initial_prompt` — so it sits `running` and silent until the
@@ -337,12 +319,22 @@ work that does not need it, and nothing on it may be described elsewhere as prov
 - [ ] **A private repository end to end**, through preparation, agent work, checks in the
       project's toolchain image, and authorized publication to GitHub, with nothing in the
       published result naming tracon.
+- [ ] **A session in its repository's own image, driven by an agent.** The image built
+      from the default-branch Dockerfile, the harness layered on, a dependency added
+      through `session_egress`, the project's tests run by the agent before it submits,
+      and the same checks passing after. Each piece was run by hand against rootless
+      Podman on 2026-10-01 (the built and layered images, a session grant fetching from
+      crates and npm with `pypi.org` refused and recorded, preparation once from a warmed
+      base cache, tracon's own `just check` through fmt, clippy and the offline test
+      build); a session with a model behind it doing all of it in one sitting has not.
 - [ ] **The normal workflow, proven as a workflow**: client disconnect and reconnect,
       interrupted execution, retained drafts, a node restart, and recovery through
       completion, with what actually ran, what stayed uncertain, and where the operator
       intervened recorded. Fixture screenshots and fake-provider tests are not evidence.
 - [ ] **The macOS desktop leg**: the bundle, its self-update against a published release,
-      and the Edit menu that makes copy and paste work.
+      and the Edit menu that makes copy and paste work. And, behind a Podman machine: an
+      image built from a repository's Dockerfile, and the per-client egress proxy reached
+      over `[gateway] egress_port` rather than a socket.
 
 **For the experimental surfaces**
 
@@ -417,11 +409,13 @@ servers reaching the v2 session runner.
 - A run's dependency cache and each check's tree are copies. Where the runtime's storage
   has no reflinks they are full copies, made once per run and once per check. The base
   cache they start from is filled when the node builds a repository's image; an entry
-  that names a hand-pinned `image` has none, so its runs prepare from empty.
+  that names a hand-pinned `image` has none, so its runs prepare from empty. A run keeps
+  no build output: every run of a compiled project's checks builds from nothing (three
+  minutes for tracon's own test build, 2026-10-01).
 - Per-client egress — a session's, a preparation's, a QA browser run's — is the Podman
   backend's. The Kubernetes backend issues no grants, so a `[[repo]]` entry that names
-  `egress` cannot prepare there. A grant filters by host, not by method: a registry that accepts uploads
-  accepts them from the client that was granted it.
+  `egress` cannot prepare there. A grant filters by host, not by method: a registry that
+  accepts uploads accepts them from the client that was granted it.
 - macOS releases are unsigned — the publisher holds no Apple Developer ID — and are
   authenticated by GitHub build provenance instead, so Gatekeeper asks once on first open
   (right-click Open, or System Settings > Privacy & Security > Open Anyway).
@@ -473,8 +467,8 @@ Kept as intent, off the plan until the supported configuration has earned them.
   configuration today, so every node that works on a repository repeats it. Share the
   recipe through the channel — the Dockerfile reference, the checks, the preparation and
   its egress presets — and never the image digest: a locally built image has a different
-  one on every node, so each node builds and pins its own. Waits on the node building the
-  image itself (Now) and on mesh-wide configuration sync.
+  one on every node, so each node builds and pins its own. Waits on mesh-wide
+  configuration sync; a node already builds the image itself.
 - **Kubernetes parity.** Per-client egress grants, for QA browsers and for preparation —
   the node already serves the proxy there; it needs the grants — and a refuse-not-drop
   egress policy.

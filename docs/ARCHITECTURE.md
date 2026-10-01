@@ -199,7 +199,9 @@ Rules learned against real harnesses, kept as rules:
 Skills, standing instructions, agents, the approved plugin list, the language
 servers and formatters turned on, the effective provider set and the policy
 revision are built into one per-channel manifest with a content digest and a
-revision number, and every session records the digest it launched under. A new
+revision number, and every session records the digest it launched under. The image a
+session runs in is not part of it: that is the repository's, resolved at launch and
+recorded on the session's start event with the repository image under it. A new
 revision never changes a running session: the files were staged at launch, and
 the next launch is what picks the change up. The node builds the manifest rather
 than letting the harness resolve one because upstream's own resolution is not
