@@ -568,7 +568,12 @@ and session presents the token it was issued as proxy credentials, and each is f
 by its own host set — so nothing one may reach is reachable by another, none waits for
 another, and a refusal is known to be that client's. Because that proxy dials from the
 node's process, a granted name that resolves to the machine itself or to its link-local
-range is refused whatever the grant says. A check's evidence is keyed on source
+range is refused whatever the grant says. A Claude Code session holds a grant for its
+whole life: the hosts every harness may reach, plus its repository's `egress` where the
+entry sets `session_egress`. What it is refused is recorded on the session once per host,
+with the sentence that says what would change the answer, and the orientation says the
+same before the first tool call. OpenCode keeps the gateway's static proxy: it installs
+plugins on its own, and what its image baked is the rule for those. A check's evidence is keyed on source
 revision, check definition, execution image, dependency inputs, and the preparation and
 egress it was given, and is reused rather than rerun only when every one of those is
 unchanged — a resubmission that edits only the title,

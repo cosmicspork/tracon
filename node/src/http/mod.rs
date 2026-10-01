@@ -644,6 +644,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         store: store.clone(),
         manager: manager.clone(),
     });
+    manager.record_egress_refusals();
     // With a hub configured, every frame this node publishes is tapped into
     // the mesh client's outbox, and peer state is pulled into the same tables.
     let mesh = cfg.mesh.hub_url.as_ref().map(|url| {

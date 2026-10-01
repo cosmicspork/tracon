@@ -97,6 +97,8 @@
         </div>
       {:else if e.kind === 'session_started'}
         <div class="sys">harness started · {e.payload.model}{e.payload.phase ? ` · ${e.payload.phase}` : ''}{e.payload.policy_version != null ? ` · policy v${e.payload.policy_version}` : ''}{sessionImage(e.payload)}</div>
+      {:else if e.kind === 'egress_refused'}
+        <div class="mark wait">{e.payload.host} · not reachable from a session; add it to this repository's egress</div>
       {:else if e.kind === 'repo_image'}
         <div class="sys">building the repository's image · the harness starts in it when it is ready, which takes minutes the first time</div>
       {:else if e.kind === 'check_started'}

@@ -4,6 +4,7 @@
 #[path = "support/mod.rs"]
 mod support;
 use support::state;
+use support::{harness::harness, rows::session_row};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -303,4 +304,50 @@ async fn a_plain_http_origin_is_forwarded_only_for_a_grant_that_names_it() {
         !asked.to_ascii_lowercase().contains("proxy-authorization"),
         "{asked}"
     );
+}
+
+/// A package manager retries, and the operator needs to hear a refusal once.
+/// The proxy knows which grant asked, so what a session was refused lands on
+/// that session — and what a preparation was refused lands on none.
+#[tokio::test]
+async fn a_sessions_refusals_are_recorded_on_it_once_per_host() {
+    let h = harness().await;
+    h.store
+        .insert_session(&session_row("s1", "n1", "personal"))
+        .unwrap();
+    let grants = Grants::default();
+    grants.on_refusal(h.manager.egress_refusal_observer());
+    let session = grants
+        .issue(GrantSpec {
+            client: "session".into(),
+            session_id: Some("s1".into()),
+            refusal: "not reachable from a session; add it to this repository's egress".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let prepare = grants
+        .issue(GrantSpec {
+            client: "prepare".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let addr = granted(&grants).await;
+    for (host, user, token) in [
+        ("registry.npmjs.org", "session", &session),
+        ("registry.npmjs.org", "session", &session),
+        ("crates.io", "session", &session),
+        ("pypi.org", "prepare", &prepare),
+    ] {
+        let line = exchange(addr, &connect(host, &basic(user, token))).await;
+        assert!(line.starts_with("HTTP/1.1 403"), "{line}");
+    }
+    let refused: Vec<String> = h
+        .store
+        .events_after("s1", 0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "egress_refused")
+        .map(|event| event.payload["host"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(refused, ["registry.npmjs.org", "crates.io"]);
 }

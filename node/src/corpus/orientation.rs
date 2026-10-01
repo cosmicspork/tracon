@@ -105,6 +105,11 @@ pub struct Facts<'a> {
         &'a crate::corpus::context::Delivered,
         &'a crate::corpus::context::Receipt,
     )>,
+    /// What this session's repository opens to it, as the operator wrote it
+    /// (`crates`, `npm`, a host name); empty when it opens nothing. `None`
+    /// for a session whose egress is not its own grant, where the node has
+    /// nothing true to say about a refusal.
+    pub egress: Option<&'a [String]>,
 }
 
 /// Context this orientation could not carry in full. Named, with the call
@@ -227,6 +232,30 @@ fn push_node(out: &mut String, facts: &Facts) {
         "- Your worktree is `{}`; the main checkout is not yours.\n",
         facts.worktree
     ));
+    // The one refusal an agent meets as a bare status code from a package
+    // manager. Said up front, in the words the refusal itself uses, so it is
+    // read as the boundary and not as a fault to route around.
+    match facts.egress {
+        Some([]) => out.push_str(
+            "- Network: no registry or other host is reachable from this session, so a \
+             package manager answers 403. It is not reachable from a session; the operator \
+             can add it to this repository's egress. Say what you needed and why. Do not \
+             look for another way to fetch it.\n",
+        ),
+        Some(opened) => out.push_str(&format!(
+            "- Network: this repository opens {} to its sessions, through the proxy already \
+             in your environment, so installing from there works. Any other host answers \
+             403: it is not reachable from a session, and the operator can add it to this \
+             repository's egress. Say what you needed and why. Do not look for another way \
+             to fetch it.\n",
+            opened
+                .iter()
+                .map(|entry| format!("`{entry}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        None => {}
+    }
     if facts.tools.is_empty() {
         out.push_str("- No node tools are offered on this channel.\n\n");
     } else {
@@ -715,7 +744,7 @@ mod tests {
                 "body": "run just test", "source_session": null, "source_node": null, "confidence": 1.0,
                 "state": "active", "created_ms": 1, "updated_ms": 1}))
             .unwrap();
-        let facts = Facts {
+        let mut facts = Facts {
             node_name: "laptop",
             node_id: "0123456789abcdef",
             backend: "podman",
@@ -733,6 +762,7 @@ mod tests {
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
+            egress: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         assert!(missing.is_empty(), "{missing:?}");
@@ -740,6 +770,27 @@ mod tests {
             text.find(s)
                 .unwrap_or_else(|| panic!("missing {s:?} in:\n{text}"))
         };
+        // A session with no grant of its own is told nothing about the
+        // network; one with a grant is told what it reaches and what a 403 is,
+        // in the words the refusal itself uses.
+        assert!(!text.contains("Network:"));
+        let opened = ["crates".to_string(), "npm".to_string()];
+        for (egress, said) in [
+            (
+                &opened[..],
+                "this repository opens `crates`, `npm` to its sessions",
+            ),
+            (
+                &[][..],
+                "no registry or other host is reachable from this session",
+            ),
+        ] {
+            facts.egress = Some(egress);
+            let (told, _) = assemble(&store, &Policy::shipped(), &facts);
+            assert!(told.contains(said), "{told}");
+            assert!(told.contains("not reachable from a session"));
+            assert!(told.contains("add it to this repository's egress"));
+        }
         assert!(i("## Pinned documents") < i("Conventional commits"));
         assert!(!text.contains("not pinned"));
         assert!(!text.contains("HTML must not become orientation"));
@@ -833,6 +884,7 @@ mod tests {
             review: None,
             manifest: &manifest,
             context: None,
+            egress: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         let i = |s: &str| {
@@ -891,6 +943,7 @@ mod tests {
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
+            egress: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains(&"x".repeat(KNOWN_CHARS)), "{text}");
@@ -932,6 +985,7 @@ mod tests {
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
+            egress: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains(&ready_title), "ready work bypassed the cap");
@@ -979,6 +1033,7 @@ mod tests {
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
+            egress: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains("old guidance"), "{text}");
@@ -1024,6 +1079,7 @@ mod tests {
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
+            egress: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(
@@ -1074,6 +1130,7 @@ mod tests {
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
+            egress: None,
         };
         let (text, _) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains("should not appear"), "{text}");
@@ -1116,6 +1173,7 @@ mod tests {
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
+            egress: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         // All three pinned documents survive in full: none was capped,
@@ -1168,6 +1226,7 @@ mod tests {
                 review: None,
                 manifest,
                 context: None,
+                egress: None,
             }
         }
         let (bare, _) = assemble(&store, &Policy::default(), &facts(&item, &manifest));
@@ -1242,6 +1301,7 @@ mod tests {
                 review: None,
                 manifest,
                 context: None,
+                egress: None,
             }
         }
 
@@ -1308,6 +1368,7 @@ mod tests {
             review: None,
             manifest: &manifest,
             context: None,
+            egress: None,
         };
         let (text, _) = assemble(&store, &Policy::shipped(), &facts);
 
@@ -1399,6 +1460,7 @@ mod tests {
             review: None,
             manifest: &manifest,
             context: Some((&delivered, &receipt)),
+            egress: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         let i = |s: &str| {
@@ -1448,6 +1510,7 @@ mod tests {
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
+            egress: None,
         };
         let (text, _) = assemble(&store, &Policy::shipped(), &facts);
         assert!(text.contains("## Working agreements"), "{text}");

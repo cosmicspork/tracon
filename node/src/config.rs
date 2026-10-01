@@ -1398,6 +1398,13 @@ pub struct Repo {
     /// `packagist`, `github`) or a literal host name. Empty means preparation
     /// runs with no egress at all.
     pub egress: Vec<String>,
+    /// Open `egress` to this repository's sessions too, so an agent can add a
+    /// dependency and run what it installed. Off unless asked for: a session
+    /// is long-lived and runs what a model decides, and a host that accepts
+    /// uploads (`github` and `packagist` both carry `api.github.com`) accepts
+    /// them from it for as long as it runs.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub session_egress: bool,
 }
 
 /// The hosts each egress preset stands for. A preset is the registry and the
@@ -1536,6 +1543,11 @@ pub fn validate_repos(repos: &[Repo]) -> Result<(), String> {
             .any(|command| command.trim().is_empty())
         {
             return Err(format!("repo {named}: prepare has an empty command"));
+        }
+        if entry.session_egress && entry.egress.is_empty() {
+            return Err(format!(
+                "repo {named}: session_egress opens `egress` to sessions, and egress is empty"
+            ));
         }
         if entry.timeout_secs == Some(0) {
             return Err(format!("repo {named}: timeout_secs must be at least 1"));
@@ -2721,6 +2733,18 @@ mod tests {
             ..Default::default()
         }])
         .is_err());
+
+        // Opening nothing to sessions is a mistake worth saying at load.
+        let opened = |egress: &[&str]| Repo {
+            path: PathBuf::from(repo),
+            egress: egress.iter().map(|host| host.to_string()).collect(),
+            session_egress: true,
+            ..Default::default()
+        };
+        validate_repos(&[opened(&["crates"])]).unwrap();
+        assert!(validate_repos(&[opened(&[])])
+            .unwrap_err()
+            .contains("egress is empty"));
 
         // A Dockerfile the node builds stands where an image would, never
         // beside one, and both it and its context stay inside the repository.

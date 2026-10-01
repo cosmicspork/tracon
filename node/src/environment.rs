@@ -94,6 +94,10 @@ pub struct RepoEnvironment {
     pub prepare: Vec<String>,
     /// Literal hosts preparation may reach; presets already expanded.
     pub egress: Vec<String>,
+    /// `egress` as the entry wrote it — preset names and hosts — and only
+    /// when the entry opens it to the repository's sessions. What a session
+    /// is told it can reach, in the words its operator used.
+    pub session_egress: Vec<String>,
     /// The repository's dependency cache: written by preparation, read-only
     /// to a check.
     pub cache_volume: String,
@@ -163,6 +167,10 @@ pub fn environment_for(cfg: &Config, store: &Store, repo: Option<&Path>) -> Repo
         // fails closed, with no egress at all.
         egress: entry
             .and_then(|entry| entry.egress_hosts().ok())
+            .unwrap_or_default(),
+        session_egress: entry
+            .filter(|entry| entry.session_egress && entry.egress_hosts().is_ok())
+            .map(|entry| entry.egress.clone())
             .unwrap_or_default(),
         cache_volume: format!("tracon-cache-{}", &hex::encode(hash.finalize())[..24]),
         image,
@@ -244,6 +252,35 @@ pub fn cache_env() -> Vec<(String, String)> {
 pub struct ScopedEgress {
     _grant: Option<crate::boundary::EgressGrant>,
     pub env: Vec<(String, String)>,
+}
+
+/// What a session is told when it asks for a host its repository does not
+/// open to it. It names the one thing that changes the answer, which is the
+/// operator's to change and not the agent's to work around.
+pub const SESSION_REFUSAL: &str =
+    "not reachable from a session; add it to this repository's egress";
+
+/// A session's own way out: the hosts every harness may reach, and its
+/// repository's registries where the entry opens them to sessions. Held for
+/// the life of the session. Every refusal under it is this session's, and is
+/// recorded on it (`gateway::proxy::Grants::on_refusal`).
+pub fn session_grant(
+    cfg: &Config,
+    environment: &RepoEnvironment,
+    session_id: &str,
+) -> crate::gateway::proxy::GrantSpec {
+    let hosts = match environment.session_egress.is_empty() {
+        true => Vec::new(),
+        false => environment.egress.clone(),
+    };
+    crate::gateway::proxy::GrantSpec {
+        client: "session".into(),
+        session_id: Some(session_id.to_string()),
+        hosts,
+        patterns: cfg.gateway.allow_hosts.clone(),
+        refusal: SESSION_REFUSAL.into(),
+        ..Default::default()
+    }
 }
 
 /// What a preparation is told when it asks for a host its repository's entry
@@ -569,6 +606,23 @@ mod tests {
         assert_eq!(app.timeout_secs, 1800);
         assert_eq!(app.prepare, ["composer install"]);
         assert!(app.egress.contains(&"repo.packagist.org".to_string()));
+        // Preparation's hosts are not a session's until the entry says so.
+        assert!(app.session_egress.is_empty());
+        cfg.repo[0].session_egress = true;
+        let closed = session_grant(&cfg, &app, "s1");
+        assert!(closed.hosts.is_empty());
+        assert_eq!(closed.patterns, cfg.gateway.allow_hosts);
+        cfg.repo[0].session_egress = true;
+        let opened = environment_for(&cfg, &store, Some(Path::new("/src/app")));
+        assert_eq!(opened.session_egress, ["packagist"]);
+        // The session's grant: the registries, expanded to the hosts they
+        // are, beside what every harness may reach, and no plain HTTP.
+        let grant = session_grant(&cfg, &opened, "s1");
+        assert_eq!(grant.hosts, opened.egress);
+        assert_eq!(grant.patterns, cfg.gateway.allow_hosts);
+        assert_eq!(grant.session_id.as_deref(), Some("s1"));
+        assert_eq!(grant.refusal, SESSION_REFUSAL);
+        assert!(!grant.plain_http);
 
         // No image, no preparation, and explicitly no checks.
         let notes = environment_for(
