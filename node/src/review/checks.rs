@@ -518,13 +518,28 @@ fn toolchain_for_candidate(
     cfg: &Config,
     candidate: &CandidateRow,
 ) -> Result<ResolvedToolchain, String> {
-    let repo = store
-        .get_session(&candidate.owner_session_id)
-        .map_err(|error| error.to_string())?
-        .map(|session| session.repo_path)
-        .filter(|repo| !repo.trim().is_empty())
-        .map(std::path::PathBuf::from);
+    let repo = origin_repo(store, &candidate.owner_session_id)?;
     Ok(toolchain_for(cfg, repo.as_deref()))
+}
+
+/// The repository a session's work came from. A session resumed on an
+/// existing workspace records `workspace://<id>`, and a workspace's id is the
+/// session that first imported it, so the chain is followed back to a real
+/// path — bounded, because a store is not trusted to be acyclic.
+fn origin_repo(store: &Store, session_id: &str) -> Result<Option<std::path::PathBuf>, String> {
+    let mut id = session_id.to_string();
+    for _ in 0..8 {
+        let Some(session) = store.get_session(&id).map_err(|error| error.to_string())? else {
+            return Ok(None);
+        };
+        match session.repo_path.strip_prefix("workspace://") {
+            Some(workspace) if workspace != id => id = workspace.to_string(),
+            Some(_) => return Ok(None),
+            None if session.repo_path.trim().is_empty() => return Ok(None),
+            None => return Ok(Some(session.repo_path.into())),
+        }
+    }
+    Ok(None)
 }
 
 /// Every record a check settles as names the tree it ran against. The row a
@@ -726,6 +741,82 @@ mod tests {
         // something the node established.
         assert_eq!(missing_tool("just check", "boom\n"), "just");
         assert_eq!(missing_tool("just check", ""), "just");
+    }
+
+    /// A session resumed on a workspace names it, not a repository; its checks
+    /// still belong to the repository the workspace was imported from, or a
+    /// resumed session would lose its toolchain image and run checks in the
+    /// harness image.
+    #[test]
+    fn a_resumed_session_is_traced_back_to_its_repository() {
+        let store = Store::open_in_memory().unwrap();
+        let row = |id: &str, repo: &str| crate::store::SessionRow {
+            id: id.into(),
+            node_id: "n".into(),
+            channel: "ch".into(),
+            work_item_id: None,
+            repo_path: repo.into(),
+            worktree_path: None,
+            branch: "b".into(),
+            harness_id: "claude".into(),
+            harness_version: "1".into(),
+            harness_agent: None,
+            harness_found: None,
+            harness_protocol: None,
+            harness_session_id: None,
+            container_name: None,
+            model: "m".into(),
+            project_id: None,
+            phase: "execute".into(),
+            policy_version: None,
+            manifest_digest: None,
+            review_id: None,
+            budget_tokens: 0,
+            tokens_used: 0,
+            cost_usd: None,
+            context_used: None,
+            context_size: None,
+            state: "closed".into(),
+            end_reason: None,
+            last_error: None,
+            turn_active: 0,
+            draft: None,
+            draft_updated_ms: None,
+            created_ms: 0,
+            started_mono_ms: None,
+            ended_mono_ms: None,
+            updated_ms: 0,
+            archived_ms: None,
+            legacy_ms: None,
+            parent_session: None,
+            continued_from: None,
+        };
+        store
+            .put_node(
+                &crate::store::NodeRow::from_json(
+                    &json!({ "id": "n", "harness": { "id": "claude" } }),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        store.insert_session(&row("first", "/src/app")).unwrap();
+        store
+            .insert_session(&row("resumed", "workspace://first"))
+            .unwrap();
+        store
+            .insert_session(&row("again", "workspace://resumed"))
+            .unwrap();
+        store
+            .insert_session(&row("loop", "workspace://loop"))
+            .unwrap();
+        store.insert_session(&row("external", "")).unwrap();
+        let origin = |id: &str| origin_repo(&store, id).unwrap();
+        assert_eq!(origin("first"), Some("/src/app".into()));
+        assert_eq!(origin("resumed"), Some("/src/app".into()));
+        assert_eq!(origin("again"), Some("/src/app".into()));
+        assert_eq!(origin("loop"), None);
+        assert_eq!(origin("external"), None);
+        assert_eq!(origin("gone"), None);
     }
 
     /// `not_runnable` must never become reusable evidence: nothing about the
