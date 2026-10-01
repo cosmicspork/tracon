@@ -68,6 +68,48 @@ pub struct Verification {
     pub elapsed_ms: u64,
 }
 
+/// Which image a repository's work runs in, and where that came from. Both
+/// halves travel together because a reader of a check that could not run has
+/// to be told *whose* image was missing the tool: the operator's entry for this
+/// repository, or the node's own harness image because there is no entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolvedToolchain {
+    /// The configured reference, before any runtime confirmed a digest for it.
+    pub configured: String,
+    pub source: &'static str,
+}
+
+/// The toolchain image for `repo`: the first matching `[[runtime.toolchain]]`
+/// entry, or the node's harness image when nothing matches.
+///
+/// The fallback is what the node did before toolchain images existed, so a node
+/// with no entries behaves exactly as it used to — minus the pretence that a
+/// missing tool was the agent's failing check.
+pub fn toolchain_for(cfg: &Config, repo: Option<&Path>) -> ResolvedToolchain {
+    for entry in &cfg.runtime.toolchain {
+        // `repo` is `None` for work the node cannot tie to a repository at
+        // all; no entry can claim that, so every one of them is skipped.
+        if repo.is_some_and(|repo| entry.matches(repo)) {
+            return ResolvedToolchain {
+                configured: entry.image.clone(),
+                source: "repository toolchain",
+            };
+        }
+    }
+    ResolvedToolchain {
+        configured: harness_image(cfg),
+        source: "harness image",
+    }
+}
+
+/// The image the node's own sessions run in, for this runtime kind.
+pub fn harness_image(cfg: &Config) -> String {
+    match cfg.runtime.kind {
+        crate::config::RuntimeKind::Podman => cfg.boundary.harness_image.clone(),
+        crate::config::RuntimeKind::Kubernetes => cfg.runtime.kubernetes.harness_image.clone(),
+    }
+}
+
 /// Inspect normal project conventions without executing repository-controlled
 /// commands. `devcontainer.json` supplies an image only when it is a plain,
 /// pinned image configuration; setup hooks, mounts, sockets, privilege, and
@@ -126,14 +168,17 @@ pub fn inspect(workspace: &Path) -> Result<PreparationPlan, EnvironmentError> {
 
 /// Execute dependency preparation in an isolated cache. Only a project image
 /// with an immutable digest, or one an operator explicitly approved in config,
-/// can replace the node's own prepared runner image.
+/// can replace the node's own prepared runner image. `repo` is the repository
+/// the workspace came from, so preparation happens in the same toolchain image
+/// its required checks will run in; `None` leaves the harness image.
 pub async fn prepare(
     backend: &dyn Backend,
     cfg: &Config,
     workspace: &Workspace,
     plan: &PreparationPlan,
+    repo: Option<&Path>,
 ) -> Result<PreparedEnvironment, EnvironmentError> {
-    let image = approved_image(cfg, plan.image.as_deref())?;
+    let image = approved_image(cfg, plan.image.as_deref(), repo)?;
     let runner = backend.runner(Vec::new());
     let started = Instant::now();
     let output = runner
@@ -266,12 +311,17 @@ fn non_empty(value: &Value) -> bool {
     }
 }
 
-fn approved_image(cfg: &Config, selected: Option<&str>) -> Result<String, EnvironmentError> {
+fn approved_image(
+    cfg: &Config,
+    selected: Option<&str>,
+    repo: Option<&Path>,
+) -> Result<String, EnvironmentError> {
     match selected {
-        None => Ok(match cfg.runtime.kind {
-            crate::config::RuntimeKind::Podman => cfg.boundary.harness_image.clone(),
-            crate::config::RuntimeKind::Kubernetes => cfg.runtime.kubernetes.harness_image.clone(),
-        }),
+        // Nothing in the devcontainer: the repository's own toolchain image,
+        // which is the harness image when the operator has named none. This is
+        // the same resolution required checks use, so preparation validates the
+        // environment those checks will actually get.
+        None => Ok(toolchain_for(cfg, repo).configured),
         Some(image)
             if image.contains("@sha256:")
                 || cfg

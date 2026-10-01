@@ -311,7 +311,10 @@ node-wide volumes and any name it does not recognize never.
 Dependency preparation runs first as its own credential-free command in an
 isolated cache: a `devcontainer.json` may name a digest-pinned image, but hooks,
 mounts, sockets, and privilege in it are refused rather than partly honoured, and
-`[runtime] approved_images` is the operator's list of anything else acceptable.
+`[runtime] approved_images` is the operator's list of anything else acceptable. A
+repository whose `devcontainer.json` names no image prepares in its
+`[[runtime.toolchain]]` image, so what preparation validates is what its checks run
+in.
 
 ### What a session is told
 
@@ -345,12 +348,16 @@ ask for what it did not get.
 An agent has no forge token and never runs `gh` or `glab`. To publish it commits,
 submits, and waits: the node snapshots the workspace volume itself, runs the
 project's checks against that snapshot in a throwaway container, and refuses a failure
-or an oversized diff before you ever see it. (The check container is the harness image,
-which has no project toolchain yet, so a check that needs one exits 127 today and the
-operator runs it on the host; a per-repository toolchain image is the first roadmap item.) You approve, reject with a reason, or — on a desktop —
-edit the diff and send it back as a request for changes. Approval publishes exactly
-the reviewed bytes with the brokered credential; if the branch moved since submit,
-approval is refused and the changed files are named.
+or an oversized diff before you ever see it. The container is the toolchain image you
+named for that repository (`[[runtime.toolchain]]`, digest-pinned), or the harness image
+when you named none — and a check whose command is not in it is reported as *not
+runnable*, naming the missing tool and the image it looked in, rather than as a failing
+check the agent is told to fix. Checks still have no network and no dependency cache, so
+a project that fetches its dependencies at check time needs them vendored in that image.
+You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
+a request for changes. Approval publishes exactly the reviewed bytes with the brokered
+credential; if the branch moved since submit, approval is refused and the changed files
+are named.
 
 A review either opens a new pull or merge request or updates one the branch
 already has (`change`, named at first submit). The review's title and body are the
@@ -690,6 +697,16 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # [runtime.kubernetes]              # namespace, harness_image,
                                     # state_claim, state_mount, harness_home, uid, gateway_host
 # approved_images = []              # digest-pinned project images preparation may use besides the harness image
+# [[runtime.toolchain]]             # what one repository's required checks and its preparation run in;
+# repo = "github.com/owner/name"    # an absolute path is that repository's root, a relative one a path
+                                    # suffix, so a managed clone is named without the clone root. The
+                                    # first matching entry wins; a repository with no entry stays on the
+                                    # harness image, which carries no project toolchain
+# image = "localhost/toolchain@sha256:…"  # digest-pinned, always: a check's evidence is keyed on the image
+                                    # identity the runtime confirmed, and a tag is not an identity. A
+                                    # locally built image has a digest too (`podman image inspect` reports
+                                    # `RepoDigests`), so building one here costs nothing; the node refuses
+                                    # to start on a tag rather than run a check it could not pin
 
 [providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
 credential = "anthropic"

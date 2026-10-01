@@ -448,7 +448,7 @@ export interface CandidateCheckRun {
   execution_image: string | null
   inputs_json: string | null
   reuse_key: string | null
-  outcome: 'running' | 'passed' | 'failed' | 'interrupted' | 'cancelled' | 'reused'
+  outcome: 'running' | 'passed' | 'failed' | 'not_runnable' | 'interrupted' | 'cancelled' | 'reused'
   source_outcome: string | null
   exit_code: number | null
   log: string

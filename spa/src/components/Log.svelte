@@ -105,6 +105,11 @@
         </details>
       {:else if e.kind === 'check_cancelled'}
         <div class="mark crit">checks cancelled · {e.payload.reason} · nothing was verified</div>
+      {:else if e.kind === 'check_not_runnable'}
+        <div class="mark crit">
+          not runnable · {e.payload.command} · {e.payload.missing_tool ?? 'its command'} is not in
+          {e.payload.image} ({e.payload.image_source}) · the environment, not the change
+        </div>
       {:else if e.kind === 'repetition'}
         <div class="mark wait">{repetitionLine(e.payload)}</div>
       {:else if e.kind === 'late_refused'}

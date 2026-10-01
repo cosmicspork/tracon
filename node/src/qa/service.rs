@@ -1061,21 +1061,28 @@ pub async fn build_prototype(
             )
         }
     };
-    let prepared =
-        match crate::environment::prepare(backend.as_ref(), access.cfg, &workspace, &plan).await {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return insert_failed_prototype(
-                    access,
-                    &candidate,
-                    &recipe,
-                    &id,
-                    started_ms,
-                    plan_json,
-                    format!("could not prepare build environment: {error}"),
-                )
-            }
-        };
+    let prepared = match crate::environment::prepare(
+        backend.as_ref(),
+        access.cfg,
+        &workspace,
+        &plan,
+        candidate_repo(access.store, &owner_session).as_deref(),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return insert_failed_prototype(
+                access,
+                &candidate,
+                &recipe,
+                &id,
+                started_ms,
+                plan_json,
+                format!("could not prepare build environment: {error}"),
+            )
+        }
+    };
     // Verification executes only the operator's locked checks in its fresh
     // runtime. The candidate recipe runs exactly once below, in its own
     // configured build image.
@@ -1728,6 +1735,18 @@ fn candidate_owner(candidate: &crate::store::CandidateRow) -> Result<String, Str
     } else {
         Ok(session.into())
     }
+}
+
+/// The repository a candidate's session was working in, which is what selects
+/// its toolchain image. A session the store no longer has is not an error here:
+/// preparation falls back to the harness image, as it did before toolchain
+/// images existed.
+fn candidate_repo(store: &Store, session_id: &str) -> Option<PathBuf> {
+    let repo = store.get_session(session_id).ok().flatten()?.repo_path;
+    if repo.trim().is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(repo))
 }
 
 /// The immutable bytes a candidate-bound build runs against: the Git tree the

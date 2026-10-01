@@ -144,13 +144,17 @@ pub trait Runner: Send + Sync {
     fn capture_name(&self, name: &str) -> String {
         name.to_string()
     }
-    /// The image identity this runner actually used (or will use), confirmed
-    /// against the runtime rather than merely read from configuration.
+    /// The image identity this runner actually used (or will use) for a
+    /// command, confirmed against the runtime rather than merely read from
+    /// configuration. `image` is the command's own image override, when it has
+    /// one, so a caller that is about to run something in a project toolchain
+    /// image is told about *that* image and not the runner's default.
     /// `None` means no confirmed identity exists — evidence keyed on it must
     /// never be treated as reusable. A runner that does not run inside an
     /// image (`LocalRunner`) may report a stable non-digest identity here;
     /// it exists for the audit trail, never for pinning.
-    async fn resolved_image(&self) -> Option<String> {
+    async fn resolved_image(&self, image: Option<&str>) -> Option<String> {
+        let _ = image;
         None
     }
 }
@@ -319,10 +323,11 @@ pub mod local {
             Ok(())
         }
 
-        // Direct host execution has no image at all. The identity is
-        // deliberately not digest-shaped, so `immutable_image_identity`
-        // (review::checks) never mistakes it for a pinned one.
-        async fn resolved_image(&self) -> Option<String> {
+        // Direct host execution has no image at all, whatever a command asked
+        // for. The identity is deliberately not digest-shaped, so
+        // `immutable_image_identity` (review::checks) never mistakes it for a
+        // pinned one.
+        async fn resolved_image(&self, _image: Option<&str>) -> Option<String> {
             Some("local:direct-execution".to_string())
         }
     }

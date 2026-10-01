@@ -535,15 +535,18 @@ exact Git tree at the submitted `head_sha`, addressed by hash rather than the
 mutable worktree, kept even after the review moves on — and each file's blob hash
 is recorded at submit so approval of a branch that moved is refused naming the
 files. Required checks run against an isolated copy of the candidate, never the
-worktree, in a throwaway container with no credentials and no tools; a check's
-evidence is keyed on source revision, check definition, execution image, and
-dependency inputs, and is reused rather than rerun only when every one of those is
-unchanged — a resubmission that edits only the title, description, or ticket prose
-reuses the same candidate's code evidence, and an explicit rerun always makes a new
-record. Diff size is capped at submit, because complexity accretes when nothing
-says no at submission time. An operator's hand-edit travels back as a request for
-changes: the agent applies it and resubmits, and **the agent remains the only
-writer to the worktree.** Every decision is recorded against the revision it
+worktree, in a throwaway container with no credentials and only the tools of the
+image the operator validated for that repository (`[[runtime.toolchain]]`, or the
+node's harness image when they named none); a command that image has no tool for is
+recorded `not_runnable` — never a pass, never reusable evidence, and never a failure
+the agent is asked to fix. A check's evidence is keyed on source revision, check
+definition, execution image, and dependency inputs, and is reused rather than rerun only
+when every one of those is unchanged — a resubmission that edits only the title,
+description, or ticket prose reuses the same candidate's code evidence, and an explicit
+rerun always makes a new record. Diff size is capped at submit, because complexity
+accretes when nothing says no at submission time. An operator's hand-edit travels back
+as a request for changes: the agent applies it and resubmits, and **the agent remains
+the only writer to the worktree.** Every decision is recorded against the revision it
 decided, with the requirements pinned as they were at submission — and bound to
 it: approve, reject and request-changes all name the revision the operator
 inspected, compared inside the statement that records the decision, locally and

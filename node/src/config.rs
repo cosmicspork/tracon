@@ -1337,6 +1337,79 @@ pub struct Runtime {
     /// Immutable project images the operator explicitly accepts in addition to
     /// digest-addressed images from safe devcontainer metadata.
     pub approved_images: Vec<String>,
+    /// A repository's validated toolchain image: what its required checks and
+    /// its preparation run in. Empty leaves every repository on the node's own
+    /// harness image, which carries no project toolchain.
+    pub toolchain: Vec<ProjectToolchain>,
+}
+
+/// One repository's toolchain image.
+///
+/// `repo` is matched against a session's *repository*, not its worktree, so
+/// every worktree of a checkout resolves to the same image. An absolute path
+/// must equal the repository root; a relative one matches a path suffix
+/// (`github.com/owner/name` names a managed clone wherever the clone root is).
+/// The first matching entry wins, so a more specific path belongs above a more
+/// general one.
+///
+/// `image` is digest-pinned. Evidence keyed on a mutable tag is not evidence:
+/// the same `repo:tag` can be two different toolchains on either side of a
+/// pull, and a check's reuse key would not know. A locally built image has a
+/// digest too (`podman image inspect` reports `RepoDigests`), so this costs a
+/// local build nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ProjectToolchain {
+    pub repo: PathBuf,
+    pub image: String,
+}
+
+impl ProjectToolchain {
+    /// Whether this entry is the one for `repo`.
+    pub fn matches(&self, repo: &Path) -> bool {
+        let configured = expand_home(&self.repo);
+        let want: Vec<_> = configured.components().collect();
+        if want.is_empty() {
+            return false;
+        }
+        let have: Vec<_> = repo.components().collect();
+        // Component-wise, never textual: `…/name` must not match `…/name2`.
+        if configured.is_absolute() {
+            return have == want;
+        }
+        have.len() >= want.len() && have[have.len() - want.len()..] == want[..]
+    }
+}
+
+impl Runtime {
+    /// Refuse a toolchain table the node could not honour. A configured image
+    /// that can never pin, or a repository named twice with two images, is
+    /// worse silently ignored at check time than refused at load: the operator
+    /// would read a `not runnable` (or an unpinnable check) and have nothing
+    /// pointing at the line that caused it.
+    pub fn validate(&self) -> Result<(), String> {
+        let mut seen: Vec<PathBuf> = Vec::new();
+        for entry in &self.toolchain {
+            let named = entry.repo.display();
+            if entry.repo.as_os_str().is_empty() {
+                return Err(
+                    "runtime.toolchain entry has no repo: name the repository this image is for"
+                        .into(),
+                );
+            }
+            immutable_image(&entry.image)
+                .map_err(|e| format!("runtime.toolchain repo {named}: image {e}"))?;
+            let repo = expand_home(&entry.repo);
+            if seen.contains(&repo) {
+                return Err(format!(
+                    "runtime.toolchain names repo {named} twice: the first match wins, so the \
+                     second entry could never apply"
+                ));
+            }
+            seen.push(repo);
+        }
+        Ok(())
+    }
 }
 
 /// The pod-hosted boundary: one harness Pod per session, created by the node
@@ -2163,6 +2236,10 @@ impl Config {
                     .qa
                     .validate()
                     .map_err(|error| format!("{}: {error}", path.display()))?;
+                config
+                    .runtime
+                    .validate()
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
                 Ok(config)
             }
             Err(_) => Ok(Self::default()),
@@ -2409,6 +2486,68 @@ mod tests {
             parsed.providers["anthropic"].upstream,
             d.providers["anthropic"].upstream
         );
+    }
+
+    /// A toolchain entry is matched against the repository, component by
+    /// component: an absolute path is that repository's root exactly, and a
+    /// relative one is a suffix, which is how a managed clone is named without
+    /// writing the node's clone root into the config.
+    #[test]
+    fn a_toolchain_entry_matches_the_repository_it_names() {
+        let absolute = ProjectToolchain {
+            repo: PathBuf::from("/srv/code/tracon"),
+            image: String::new(),
+        };
+        assert!(absolute.matches(Path::new("/srv/code/tracon")));
+        assert!(!absolute.matches(Path::new("/srv/code/tracon-hub")));
+        // A worktree under the repository is not the repository.
+        assert!(!absolute.matches(Path::new("/srv/code/tracon/.tracon/worktrees/x")));
+
+        let managed = ProjectToolchain {
+            repo: PathBuf::from("github.com/owner/name"),
+            image: String::new(),
+        };
+        assert!(managed.matches(Path::new("/var/lib/tracon/repos/github.com/owner/name")));
+        // A suffix is whole path components, never characters.
+        assert!(!managed.matches(Path::new("/var/lib/tracon/repos/github.com/owner/name2")));
+        assert!(!managed.matches(Path::new("/var/lib/tracon/repos/github.com/other/name")));
+
+        let empty = ProjectToolchain::default();
+        assert!(!empty.matches(Path::new("/srv/code/tracon")));
+    }
+
+    /// A toolchain image that could never pin, and a repository named twice,
+    /// are refused at load with the entry in the message. Both would otherwise
+    /// only show up as a check that will not run.
+    #[test]
+    fn a_toolchain_image_that_cannot_pin_is_refused_at_load() {
+        let pinned =
+            "localhost/tc@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let repo = "/srv/code/tracon";
+        let entry = |repo: &str, image: &str| ProjectToolchain {
+            repo: PathBuf::from(repo),
+            image: image.into(),
+        };
+        let runtime = |entries: Vec<ProjectToolchain>| Runtime {
+            toolchain: entries,
+            ..Default::default()
+        };
+
+        runtime(vec![entry(repo, pinned)]).validate().unwrap();
+
+        // A mutable tag, and a digest that is not 64 hex characters.
+        let mutable = runtime(vec![entry(repo, "localhost/tc:latest")]);
+        let error = mutable.validate().unwrap_err();
+        assert!(error.contains(repo), "{error}");
+        assert!(error.contains("pinned"), "{error}");
+        let truncated = runtime(vec![entry(repo, &pinned[..40])]);
+        assert!(truncated.validate().is_err());
+
+        let unnamed = runtime(vec![entry("", pinned)]);
+        assert!(unnamed.validate().unwrap_err().contains("no repo"));
+
+        let twice = runtime(vec![entry(repo, pinned), entry(repo, pinned)]);
+        assert!(twice.validate().unwrap_err().contains("twice"));
     }
 
     #[test]

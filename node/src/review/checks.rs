@@ -1,6 +1,12 @@
 //! Candidate-bound deterministic checks. Required commands originate only in
 //! operator configuration, and every execution mounts a node-captured Git tree
 //! read-only rather than the agent's mutable worktree.
+//!
+//! What they run *in* is the repository's toolchain image
+//! (`[[runtime.toolchain]]`), or the node's harness image when the operator has
+//! named none — and evidence is pinned only on the identity the runtime
+//! confirmed for that image. A command the image has no tool for is
+//! `not_runnable`: the environment's failing, never the candidate's.
 
 use std::{path::Path, time::Duration};
 
@@ -11,6 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     boundary::Backend,
     config::{Config, RuntimeKind},
+    environment::{toolchain_for, ResolvedToolchain},
     runner::{Mount, RunnerCommand},
     store::{now_ms, CandidateRow, CheckRunRow, Store},
 };
@@ -49,13 +56,20 @@ pub struct CheckResult {
     pub command: String,
     pub ok: bool,
     pub exit: Option<i32>,
-    /// `passed`, `failed`, `interrupted`, `cancelled`, or `reused`.
+    /// `passed`, `failed`, `not_runnable`, `interrupted`, `cancelled`, or
+    /// `reused`.
     pub outcome: String,
     /// The last few KiB of stdout+stderr, or the retained output of reused
     /// evidence.
     pub tail: String,
     pub ms: u64,
     pub reused_from: Option<String>,
+    /// For a `not_runnable` outcome: the tool the shell said it could not find,
+    /// as the shell reported it. Best effort and never a claim the node
+    /// verified anything — a compound command can exit 127 on its second word,
+    /// and a script can exit 127 for its own reasons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_tool: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +79,11 @@ pub struct CheckReport {
     pub required_count: usize,
     pub all_required_passed: bool,
     pub reused: bool,
+    /// What the checks ran in — the identity the runtime confirmed where it
+    /// could — and where that image came from. A check that could not run is a
+    /// fact about this image, so a reader is never left guessing which one.
+    pub image: String,
+    pub image_source: &'static str,
     /// Why the run stopped early, when it did. A cancelled run has no verdict
     /// to give: it is neither a pass nor a failure of the candidate.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -102,14 +121,15 @@ pub async fn run_required(
     cancel: &dyn Cancel,
 ) -> Result<CheckReport, String> {
     let commands = required_definitions(cfg);
-    let raw_image = execution_image(cfg);
+    let toolchain = toolchain_for_candidate(store, cfg, candidate)?;
+    let raw_image = toolchain.configured.clone();
     let runner = backend.runner(Vec::new());
-    // The identity actually confirmed against the runtime for this backend,
-    // never the configured string alone: a backend that does not (or
-    // cannot) run the configured image must never have its evidence pinned
+    // The identity actually confirmed against the runtime for this backend and
+    // *this image*, never the configured string alone: a backend that does not
+    // (or cannot) run the configured image must never have its evidence pinned
     // as if it had (`LocalRunner` reports a local, never-pinnable identity;
     // Podman/Kubernetes resolve the real digest they ran).
-    let resolved_image = runner.resolved_image().await;
+    let resolved_image = runner.resolved_image(Some(&raw_image)).await;
     let recorded_image = resolved_image.clone().unwrap_or_else(|| raw_image.clone());
     let pinned_image = resolved_image.as_deref().and_then(immutable_image_identity);
     let inputs = check_inputs(cfg);
@@ -205,6 +225,7 @@ pub async fn run_required(
                 tail: source.log,
                 ms: source.duration_ms.unwrap_or_default().max(0) as u64,
                 reused_from: Some(source.id),
+                missing_tool: None,
             });
             any_reused = true;
             continue;
@@ -272,6 +293,7 @@ pub async fn run_required(
                 tail: message,
                 ms: 0,
                 reused_from: None,
+                missing_tool: None,
             });
             continue;
         }
@@ -288,7 +310,7 @@ pub async fn run_required(
             mounts: vec![mount],
             workdir: Some("/work".into()),
             name: runner_name.clone(),
-            image: None,
+            image: Some(raw_image.clone()),
             expose: None,
         };
         // Both ways an execution can be stopped kill the runtime *while the
@@ -349,17 +371,28 @@ pub async fn run_required(
             Ok(Ok(output)) => {
                 let mut output_text = String::from_utf8_lossy(&output.stdout).into_owned();
                 output_text.push_str(&String::from_utf8_lossy(&output.stderr));
-                let outcome = if output.status.success() {
-                    "passed"
-                } else {
-                    "failed"
+                let code = output.status.code();
+                // 127 is the shell saying it could not find the command. That
+                // is the check environment's failing, not the candidate's, so
+                // it is neither a pass nor a failure the agent is told to fix
+                // — and `latest_reusable_check` does not accept the outcome,
+                // so it can never become evidence either.
+                let missing = (!output.status.success() && code == Some(127))
+                    .then(|| missing_tool(command, &output_text));
+                let outcome = match (output.status.success(), &missing) {
+                    (true, _) => "passed",
+                    (false, Some(_)) => "not_runnable",
+                    (false, None) => "failed",
                 };
-                (
-                    outcome,
-                    output.status.code(),
-                    tail(&output_text),
-                    json!({ "execution_backend": backend.kind(), "timeout_secs": timeout.as_secs() }),
-                )
+                let mut metadata = json!({
+                    "execution_backend": backend.kind(),
+                    "timeout_secs": timeout.as_secs(),
+                });
+                if let Some(tool) = &missing {
+                    metadata["missing_tool"] = json!(tool);
+                    metadata["execution_image_source"] = json!(toolchain.source);
+                }
+                (outcome, code, tail(&output_text), metadata)
             }
             Ok(Err(error)) => (
                 "interrupted",
@@ -380,6 +413,10 @@ pub async fn run_required(
             ),
         };
         let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let missing_tool = metadata
+            .get("missing_tool")
+            .and_then(|tool| tool.as_str())
+            .map(str::to_string);
         let recorded = store
             .finish_check_run(
                 &run_id,
@@ -422,6 +459,7 @@ pub async fn run_required(
             tail: tail_text,
             ms: duration_ms.max(0) as u64,
             reused_from: None,
+            missing_tool,
         });
     }
 
@@ -437,8 +475,56 @@ pub async fn run_required(
         required_count: commands.len(),
         results,
         reused: any_reused,
+        image: recorded_image,
+        image_source: toolchain.source,
         cancelled,
     })
+}
+
+/// The tool the shell said was missing, read out of the shell's own wording:
+/// dash says `sh: 1: just: not found` and bash says
+/// `bash: line 1: just: command not found`. Neither is a contract, so the
+/// command's first word is the fallback — better a name that is merely likely
+/// than a message that names nothing at all.
+fn missing_tool(command: &str, output: &str) -> String {
+    for line in output.lines().rev() {
+        let line = line.trim_end();
+        for suffix in [": command not found", ": not found"] {
+            if let Some(head) = line.strip_suffix(suffix) {
+                if let Some(name) = head.rsplit(": ").next() {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        return name.to_string();
+                    }
+                }
+            }
+        }
+    }
+    command
+        .split_whitespace()
+        .next()
+        .unwrap_or(command)
+        .to_string()
+}
+
+/// The image this candidate's checks run in: the toolchain image the operator
+/// named for the repository its session was working in, or the node's harness
+/// image. Resolved once per report, from the candidate, so the run path and the
+/// approval path cannot disagree about what ran. A session the store no longer
+/// has, or one with no repository (a harness the operator runs themselves),
+/// resolves to the harness image, as every candidate did before.
+fn toolchain_for_candidate(
+    store: &Store,
+    cfg: &Config,
+    candidate: &CandidateRow,
+) -> Result<ResolvedToolchain, String> {
+    let repo = store
+        .get_session(&candidate.owner_session_id)
+        .map_err(|error| error.to_string())?
+        .map(|session| session.repo_path)
+        .filter(|repo| !repo.trim().is_empty())
+        .map(std::path::PathBuf::from);
+    Ok(toolchain_for(cfg, repo.as_deref()))
 }
 
 /// Every record a check settles as names the tree it ran against. The row a
@@ -472,6 +558,7 @@ fn cancelled_result(command: &str, reason: &str, ms: u64) -> CheckResult {
         tail: format!("cancelled: {reason}"),
         ms,
         reused_from: None,
+        missing_tool: None,
     }
 }
 
@@ -515,7 +602,11 @@ pub async fn review_required_checks_current(
     if candidate.head_sha != review.head_sha {
         return Err("review candidate does not match the review's current source".into());
     }
-    let resolved_image = backend.runner(Vec::new()).resolved_image().await;
+    let raw_image = toolchain_for_candidate(store, cfg, &candidate)?.configured;
+    let resolved_image = backend
+        .runner(Vec::new())
+        .resolved_image(Some(&raw_image))
+        .await;
     let pinned_image = resolved_image.as_deref().and_then(immutable_image_identity);
     let inputs_json =
         serde_json::to_string(&check_inputs(cfg)).map_err(|error| error.to_string())?;
@@ -550,13 +641,6 @@ pub async fn review_required_checks_current(
         }
     }
     Ok(())
-}
-
-fn execution_image(cfg: &Config) -> String {
-    match cfg.runtime.kind {
-        RuntimeKind::Podman => cfg.boundary.harness_image.clone(),
-        RuntimeKind::Kubernetes => cfg.runtime.kubernetes.harness_image.clone(),
-    }
 }
 
 fn immutable_image_identity(image: &str) -> Option<String> {
@@ -618,6 +702,105 @@ mod tests {
         assert_eq!(required_definitions(&cfg), vec!["cargo test".to_string()]);
     }
 
+    /// The missing tool is read out of the shell's own report, because that is
+    /// the only place it exists — and the command's first word when the shell
+    /// worded it some third way, so the message always names something.
+    #[test]
+    fn the_missing_tool_comes_from_whichever_shell_reported_it() {
+        assert_eq!(
+            missing_tool("just check", "sh: 1: just: not found\n"),
+            "just"
+        );
+        assert_eq!(
+            missing_tool("just check", "bash: line 1: just: command not found\n"),
+            "just"
+        );
+        // A compound command 127s on a later word; the shell names that word,
+        // not the first one.
+        assert_eq!(
+            missing_tool("cd spa && bun run check", "sh: 1: bun: not found\n"),
+            "bun"
+        );
+        // An exit 127 the shell said nothing about: the command's own first
+        // word, which is a guess and is worded as the shell's report, never as
+        // something the node established.
+        assert_eq!(missing_tool("just check", "boom\n"), "just");
+        assert_eq!(missing_tool("just check", ""), "just");
+    }
+
+    /// `not_runnable` must never become reusable evidence: nothing about the
+    /// candidate was established, so there is nothing for a later submission to
+    /// borrow. It holds by construction — `latest_reusable_check` accepts three
+    /// outcomes and this is not one — and this test is what keeps it true if
+    /// that query is ever widened.
+    #[test]
+    fn a_check_that_could_not_run_is_never_reusable_evidence() {
+        let store = Store::open_in_memory().unwrap();
+        let candidate = CandidateRow {
+            id: "cand3".into(),
+            head_sha: "sha3".into(),
+            tree_sha: Some("tree3".into()),
+            channel: "ch".into(),
+            owner_session_id: "s1".into(),
+            source_kind: "git".into(),
+            captured_ms: now_ms(),
+            capture_json: "{}".into(),
+        };
+        store.insert_candidate(&candidate).unwrap();
+        let run = |id: &str| CheckRunRow {
+            id: id.into(),
+            candidate_id: Some(candidate.id.clone()),
+            session_id: candidate.owner_session_id.clone(),
+            command: Some("just check".into()),
+            definition_json: "{}".into(),
+            definition_hash: Some("def".into()),
+            execution_image: Some("registry/example@sha256:aaaa".into()),
+            inputs_json: Some("{}".into()),
+            reuse_key: Some("key".into()),
+            outcome: "running".into(),
+            source_outcome: None,
+            exit_code: None,
+            log: String::new(),
+            duration_ms: None,
+            started_ms: now_ms(),
+            finished_ms: None,
+            rerun_of: None,
+            reused_from_id: None,
+            metadata_json: "{}".into(),
+        };
+
+        store.insert_check_run(&run("r1")).unwrap();
+        store
+            .finish_check_run(
+                "r1",
+                "not_runnable",
+                None,
+                Some(127),
+                "sh: 1: just: not found",
+                Some(1),
+                &json!({ "missing_tool": "just" }),
+            )
+            .unwrap();
+        assert!(
+            store
+                .latest_reusable_check(&candidate.id, "key")
+                .unwrap()
+                .is_none(),
+            "a check that could not run must never be offered as evidence"
+        );
+
+        // The same row settled as a real failure *is* reusable, so the
+        // assertion above is about the outcome and not about the query.
+        store.insert_check_run(&run("r2")).unwrap();
+        store
+            .finish_check_run("r2", "failed", None, Some(1), "nope", Some(1), &json!({}))
+            .unwrap();
+        assert!(store
+            .latest_reusable_check(&candidate.id, "key")
+            .unwrap()
+            .is_some());
+    }
+
     /// The container/pod name `run_required` builds for a check
     /// (`tracon-c-{index}-{hash}`) becomes, unmodified apart from
     /// `KubeRunner::run_capture`'s `-{pid}` suffix, both the Kubernetes pod
@@ -671,7 +854,7 @@ mod tests {
             async fn kill(&self, _name: &str) -> Result<(), RunnerError> {
                 Ok(())
             }
-            async fn resolved_image(&self) -> Option<String> {
+            async fn resolved_image(&self, _image: Option<&str>) -> Option<String> {
                 Some(
                     "registry/example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_string(),

@@ -174,6 +174,12 @@ pub mod event_kind {
     /// was paused or ended (`candidate_id`, `head_sha`, `reason`). Its
     /// evidence row is `cancelled`, which is never reusable and never a pass.
     pub const CHECK_CANCELLED: &str = "check_cancelled";
+    /// A required check could not run in the check image at all: the shell
+    /// could not find its command (`candidate_id`, `command`, `missing_tool`,
+    /// `image`, `image_source`). Not a failing check — nothing about the
+    /// candidate was established — and its evidence row is `not_runnable`,
+    /// which is never reusable and never a pass.
+    pub const CHECK_NOT_RUNNABLE: &str = "check_not_runnable";
     /// A mediated mutation's outcome could not be determined — a prompt whose
     /// dispatch never reported, a node that restarted with one in flight — or
     /// has since been established (`reason`, `intent`, `refusing`, or

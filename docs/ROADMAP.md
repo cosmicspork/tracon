@@ -51,17 +51,14 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 Every item here was found on the 2026-09-20 or 2026-09-28 live runs, or in the daily
 desktop use since.
 
-- [ ] **Run required checks where they can run.** Checks execute in the harness image,
-      which carries no project toolchain or dependencies, so a repository's `just check`
-      exits 127 and the operator runs it on the host and relays the result. Let the
-      operator name a validated toolchain image per repository (the repositories' own
-      `.devcontainer/` Dockerfiles are the obvious source), snapshotted per execution
-      with validation invalidated when its inputs change, and run checks and preparation
-      in it. A command that cannot be found is reported as "not runnable here" with the
-      missing tool named, never as a failing check the agent is asked to fix. Dependency
-      fetches belong here too: `cargo add`, `npm install`, `pip` and `go get` from inside a
-      session meet the egress proxy's 403, so preparation fills the cache before launch and
-      the refusal says "not reachable from a session; add it to preparation".
+- [ ] **Fetch dependencies where they can be fetched.** `cargo add`, `npm install`, `pip`
+      and `go get` from inside a session meet the egress proxy's 403, and preparation goes
+      through the same proxy, so the cache cannot be filled either — a check runs in the
+      repository's toolchain image but reaches nothing it has not vendored. Give
+      preparation its own filtered egress (as `scope_qa_egress` does for QA), mount the
+      prepared cache into checks, and make the session-side refusal say "not reachable
+      from a session; add it to preparation". Found while making required checks run
+      (2026-09-30).
 - [ ] **Proof of work.** One MCP tool that runs a command in the session's own boundary
       and has the *node* record the command, exit code, bounded output, revision and
       image digest as evidence — the agent cannot type the output. A proof document is
@@ -69,7 +66,7 @@ desktop use since.
       the revision moves, and rerun to verify. This is the Showboat idea with the
       capture owned by the supervisor; the existing attached demonstration (a linked,
       hashed, never-executed document) stays for what a human writes by hand. Depends on
-      the toolchain image above for anything that needs the project's tools.
+      the dependency fetching above for anything that needs the project's tools.
 - [ ] **Weight cached reads in the token budget.** A cache read is charged as a full
       input token, so a planning pass on this repository spends 3–4M of a 2M default
       budget on mostly-cached context. Count cache reads and cache writes at their price
@@ -390,8 +387,11 @@ servers reaching the v2 session runner.
 - OpenCode is driven over its v1 session routes, which offer the model the node's MCP
   tools where the v2 runner offered none (findings 22, 23); a real session has not yet
   run that way. Claude Code is the working managed harness until one has.
-- Required checks run in the harness image, which has no project toolchain, so a
-  repository's own check command exits 127 and the operator runs it on the host.
+- Required checks run in the toolchain image the operator named for the repository
+  (`[[runtime.toolchain]]`), and in the harness image — which has no project toolchain —
+  when they named none. Neither can fetch dependencies: preparation goes through the same
+  egress proxy as a session, so a check reaches only what its image vendored, and a
+  project that fetches at check time is still run on the host by the operator.
 - macOS releases are unsigned — the publisher holds no Apple Developer ID — and are
   authenticated by GitHub build provenance instead, so Gatekeeper asks once on first open
   (right-click Open, or System Settings > Privacy & Security > Open Anyway).

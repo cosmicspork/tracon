@@ -426,6 +426,10 @@ async fn submit(
             required_count: 0,
             all_required_passed: true,
             reused: false,
+            // No check ran here, so there is no image to name: whatever the
+            // external harness ran is in an environment this node cannot see.
+            image: String::new(),
+            image_source: "external harness",
             cancelled: None,
         }
     } else {
@@ -912,6 +916,51 @@ async fn run_checks(
                 "reused": report.reused,
             }),
         );
+    }
+    // A check the image has no tool for establishes nothing about the
+    // candidate. It is reported as the environment's failing, with the image
+    // named, and no `review_rejected` is recorded: the agent is not asked to
+    // fix a repository that is not broken. Every not-runnable check is
+    // reported at once, so one submission surfaces every missing tool rather
+    // than one per round trip.
+    let unrunnable: Vec<&review::checks::CheckResult> = report
+        .results
+        .iter()
+        .filter(|result| result.outcome == "not_runnable")
+        .collect();
+    if !unrunnable.is_empty() {
+        for result in &unrunnable {
+            manager.record_event(
+                &ctx.session_id,
+                ek::CHECK_NOT_RUNNABLE,
+                json!({
+                    "candidate_id": candidate.id,
+                    "command": result.command,
+                    "missing_tool": result.missing_tool,
+                    "image": report.image,
+                    "image_source": report.image_source,
+                    "tail": result.tail,
+                }),
+            );
+        }
+        let each = unrunnable
+            .iter()
+            .map(|result| {
+                format!(
+                    "check `{}` is not runnable here: `{}` is not installed in the check image \
+                     ({}, {}).",
+                    result.command,
+                    result.missing_tool.as_deref().unwrap_or("its command"),
+                    report.image,
+                    report.image_source,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!(
+            "{each}\n\nThis is the environment, not your change. Tell the operator; do not \
+             change the code to work around it."
+        ));
     }
     if let Some(failed) = report.results.iter().find(|result| !result.ok) {
         let reason = format!(
