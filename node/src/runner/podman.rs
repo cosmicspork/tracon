@@ -282,20 +282,18 @@ impl Runner for PodmanRunner {
         )
     }
 
-    /// Ask podman itself for the digest of `spec.image` rather than trusting
-    /// the configured string: podman resolves exactly this reference to
-    /// whatever it has cached locally under that name, and that resolution —
-    /// not the operator's text — is what every `podman run` with this spec
-    /// actually executes. `None` on any failure (image absent, no digest
+    /// Ask podman itself for the digest of the image this command will run in
+    /// rather than trusting a configured string: podman resolves exactly that
+    /// reference to whatever it has cached locally under that name, and that
+    /// resolution — not the operator's text — is what `podman run` actually
+    /// executes. `image` is a command's own override (a project toolchain
+    /// image, a preparation image); without one this is the runner's spec
+    /// image, as before. `None` on any failure (image absent, no digest
     /// recorded, podman unreachable): evidence must never invent a pin.
-    async fn resolved_image(&self) -> Option<String> {
+    async fn resolved_image(&self, image: Option<&str>) -> Option<String> {
+        let image = image.unwrap_or(&self.spec.image);
         let output = Command::new(&self.spec.podman_bin)
-            .args([
-                "inspect",
-                "--format",
-                "{{index .RepoDigests 0}}",
-                &self.spec.image,
-            ])
+            .args(["inspect", "--format", "{{index .RepoDigests 0}}", image])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()

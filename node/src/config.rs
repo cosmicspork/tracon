@@ -20,6 +20,8 @@ pub struct Config {
     pub publish: Publish,
     pub mesh: Mesh,
     pub runtime: Runtime,
+    /// Per-repository environment: image, checks, preparation and its egress.
+    pub repo: Vec<Repo>,
     /// Model providers the gateway fronts, by name.
     pub providers: std::collections::BTreeMap<String, Provider>,
     pub memory: Memory,
@@ -1339,6 +1341,180 @@ pub struct Runtime {
     pub approved_images: Vec<String>,
 }
 
+/// What the node does for one repository: the image its required checks and
+/// its preparation run in, the checks themselves, and how its dependencies get
+/// there before they run. Everything but `path` is optional, and what an entry
+/// leaves out stays on the node-wide answer (`[supervision]`, the harness
+/// image, no preparation).
+///
+/// The table is the operator's and lives in the node's configuration, never in
+/// the repository: a candidate that could edit it could pick its own checks.
+///
+/// `path` is matched against a session's *repository*, not its worktree, so
+/// every worktree of a checkout resolves to the same entry. An absolute path
+/// must equal the repository root; a relative one matches a path suffix
+/// (`github.com/owner/name` names a managed clone wherever the clone root is).
+/// The first matching entry wins, so a more specific path belongs above a more
+/// general one.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Repo {
+    pub path: PathBuf,
+    /// The toolchain image, digest-pinned. Evidence keyed on a mutable tag is
+    /// not evidence: the same `repo:tag` can be two different toolchains on
+    /// either side of a pull, and a check's reuse key would not know. A locally
+    /// built image has a digest too (`podman image inspect` reports
+    /// `RepoDigests`), so this costs a local build nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// This repository's required checks, in place of `[supervision] checks`.
+    /// An empty list is explicit, as it is there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checks: Option<Vec<String>>,
+    /// In place of `[supervision] timeout_secs`, for a repository whose
+    /// preparation and checks take longer than the rest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// Commands run before each required check, in the same image and on the
+    /// same copy of the candidate, with the repository's dependency cache
+    /// writable and `egress` reachable. This is where `bun install`,
+    /// `composer install` and `cargo fetch` belong: the check that follows
+    /// has neither.
+    pub prepare: Vec<String>,
+    /// What preparation may reach: a preset (`crates`, `npm`, `pypi`,
+    /// `packagist`, `github`) or a literal host name. Empty means preparation
+    /// runs with no egress at all.
+    pub egress: Vec<String>,
+}
+
+/// The hosts each egress preset stands for. A preset is the registry and the
+/// hosts it redirects downloads to, and nothing else. `packagist` carries
+/// GitHub's archive hosts because that is where Composer's `dist` downloads
+/// actually come from.
+const EGRESS_PRESETS: &[(&str, &[&str])] = &[
+    (
+        "crates",
+        &["crates.io", "index.crates.io", "static.crates.io"],
+    ),
+    ("npm", &["registry.npmjs.org"]),
+    ("pypi", &["pypi.org", "files.pythonhosted.org"]),
+    (
+        "packagist",
+        &[
+            "packagist.org",
+            "repo.packagist.org",
+            "api.github.com",
+            "codeload.github.com",
+        ],
+    ),
+    (
+        "github",
+        &["github.com", "api.github.com", "codeload.github.com"],
+    ),
+];
+
+impl Repo {
+    /// Whether this entry is the one for `repo`.
+    pub fn matches(&self, repo: &Path) -> bool {
+        let configured = expand_home(&self.path);
+        let want: Vec<_> = configured.components().collect();
+        if want.is_empty() {
+            return false;
+        }
+        let have: Vec<_> = repo.components().collect();
+        // Component-wise, never textual: `…/name` must not match `…/name2`.
+        if configured.is_absolute() {
+            return have == want;
+        }
+        have.len() >= want.len() && have[have.len() - want.len()..] == want[..]
+    }
+
+    /// The literal hosts `egress` names, presets expanded, in the order
+    /// written and without repeats.
+    pub fn egress_hosts(&self) -> Result<Vec<String>, String> {
+        let mut hosts: Vec<String> = Vec::new();
+        for entry in &self.egress {
+            let entry = entry.trim();
+            let expanded: Vec<&str> = match EGRESS_PRESETS.iter().find(|(name, _)| *name == entry) {
+                Some((_, preset)) => preset.to_vec(),
+                None if literal_host(entry) => vec![entry],
+                None => {
+                    return Err(format!(
+                        "egress {entry:?} is neither a preset ({}) nor a host name",
+                        EGRESS_PRESETS
+                            .iter()
+                            .map(|(name, _)| *name)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                }
+            };
+            for host in expanded {
+                if !hosts.iter().any(|seen| seen == host) {
+                    hosts.push(host.to_string());
+                }
+            }
+        }
+        Ok(hosts)
+    }
+}
+
+/// A plain DNS name: no scheme, port, path, wildcard or pattern. The scoped
+/// gateway matches these exactly, so anything else would be a host that can
+/// never match rather than a wider rule.
+fn literal_host(value: &str) -> bool {
+    value.contains('.')
+        && value.len() <= 253
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+}
+
+/// Refuse a repository table the node could not honour. An image that can
+/// never pin, an egress entry that is not a host, or a repository named twice
+/// is worse silently ignored at check time than refused at load: the operator
+/// would read a `not runnable` (or a preparation that reaches nothing) and
+/// have nothing pointing at the line that caused it.
+pub fn validate_repos(repos: &[Repo]) -> Result<(), String> {
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for entry in repos {
+        let named = entry.path.display();
+        if entry.path.as_os_str().is_empty() {
+            return Err("repo entry has no path: name the repository it is for".into());
+        }
+        if let Some(image) = &entry.image {
+            immutable_image(image).map_err(|e| format!("repo {named}: image {e}"))?;
+        }
+        entry
+            .egress_hosts()
+            .map_err(|e| format!("repo {named}: {e}"))?;
+        if entry
+            .prepare
+            .iter()
+            .any(|command| command.trim().is_empty())
+        {
+            return Err(format!("repo {named}: prepare has an empty command"));
+        }
+        if entry.timeout_secs == Some(0) {
+            return Err(format!("repo {named}: timeout_secs must be at least 1"));
+        }
+        let path = expand_home(&entry.path);
+        if seen.contains(&path) {
+            return Err(format!(
+                "repo {named} is named twice: the first match wins, so the second entry could \
+                 never apply"
+            ));
+        }
+        seen.push(path);
+    }
+    Ok(())
+}
+
 /// The pod-hosted boundary: one harness Pod per session, created by the node
 /// through the API, isolated by the NetworkPolicies the deployment carries
 /// (`deploy/kubernetes/base`), sharing one RWO volume with the node.
@@ -1824,6 +2000,7 @@ impl Default for Config {
             node_name: hostname(),
             mesh: Mesh::default(),
             runtime: Runtime::default(),
+            repo: Vec::new(),
             providers: default_providers(),
             memory: Memory::default(),
             ui: Ui::default(),
@@ -2163,6 +2340,8 @@ impl Config {
                     .qa
                     .validate()
                     .map_err(|error| format!("{}: {error}", path.display()))?;
+                validate_repos(&config.repo)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
                 Ok(config)
             }
             Err(_) => Ok(Self::default()),
@@ -2409,6 +2588,159 @@ mod tests {
             parsed.providers["anthropic"].upstream,
             d.providers["anthropic"].upstream
         );
+    }
+
+    /// A repository entry is matched against the repository, component by
+    /// component: an absolute path is that repository's root exactly, and a
+    /// relative one is a suffix, which is how a managed clone is named without
+    /// writing the node's clone root into the config.
+    #[test]
+    fn a_repo_entry_matches_the_repository_it_names() {
+        let at = |path: &str| Repo {
+            path: PathBuf::from(path),
+            ..Default::default()
+        };
+        let absolute = at("/srv/code/tracon");
+        assert!(absolute.matches(Path::new("/srv/code/tracon")));
+        assert!(!absolute.matches(Path::new("/srv/code/tracon-hub")));
+        // A worktree under the repository is not the repository.
+        assert!(!absolute.matches(Path::new("/srv/code/tracon/.tracon/worktrees/x")));
+
+        let managed = at("github.com/owner/name");
+        assert!(managed.matches(Path::new("/var/lib/tracon/repos/github.com/owner/name")));
+        // A suffix is whole path components, never characters.
+        assert!(!managed.matches(Path::new("/var/lib/tracon/repos/github.com/owner/name2")));
+        assert!(!managed.matches(Path::new("/var/lib/tracon/repos/github.com/other/name")));
+
+        let empty = Repo::default();
+        assert!(!empty.matches(Path::new("/srv/code/tracon")));
+    }
+
+    /// An image that could never pin, a repository named twice, and an egress
+    /// entry that is not a host are refused at load with the entry in the
+    /// message. Each would otherwise only show up as a check that will not run.
+    #[test]
+    fn a_repo_entry_the_node_could_not_honour_is_refused_at_load() {
+        let pinned =
+            "localhost/tc@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let repo = "/srv/code/tracon";
+        let entry = |path: &str, image: &str| Repo {
+            path: PathBuf::from(path),
+            image: Some(image.into()),
+            ..Default::default()
+        };
+
+        validate_repos(&[entry(repo, pinned)]).unwrap();
+        // An entry may name no image at all: checks and preparation alone.
+        validate_repos(&[Repo {
+            path: PathBuf::from(repo),
+            checks: Some(vec!["just check".into()]),
+            ..Default::default()
+        }])
+        .unwrap();
+
+        // A mutable tag, and a digest that is not 64 hex characters.
+        let error = validate_repos(&[entry(repo, "localhost/tc:latest")]).unwrap_err();
+        assert!(error.contains(repo), "{error}");
+        assert!(error.contains("pinned"), "{error}");
+        assert!(validate_repos(&[entry(repo, &pinned[..40])]).is_err());
+
+        assert!(validate_repos(&[entry("", pinned)])
+            .unwrap_err()
+            .contains("no path"));
+        assert!(validate_repos(&[entry(repo, pinned), entry(repo, pinned)])
+            .unwrap_err()
+            .contains("twice"));
+
+        let reaching = |egress: &str| Repo {
+            path: PathBuf::from(repo),
+            egress: vec![egress.into()],
+            ..Default::default()
+        };
+        for refused in [
+            "https://crates.io",
+            "crates.io:443",
+            ".*",
+            "*.npmjs.org",
+            "nmp",
+        ] {
+            let error = validate_repos(&[reaching(refused)]).unwrap_err();
+            assert!(error.contains("neither a preset"), "{refused}: {error}");
+        }
+        assert!(validate_repos(&[Repo {
+            path: PathBuf::from(repo),
+            prepare: vec!["  ".into()],
+            ..Default::default()
+        }])
+        .is_err());
+    }
+
+    /// A preset is the hosts a package manager actually talks to; a literal
+    /// host is itself; and naming a host twice (a preset and its own member)
+    /// allows it once.
+    #[test]
+    fn egress_presets_expand_to_literal_hosts() {
+        let repo = Repo {
+            egress: vec![
+                "crates".into(),
+                "npm".into(),
+                "static.crates.io".into(),
+                "ghcr.io".into(),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            repo.egress_hosts().unwrap(),
+            [
+                "crates.io",
+                "index.crates.io",
+                "static.crates.io",
+                "registry.npmjs.org",
+                "ghcr.io"
+            ]
+        );
+        assert!(Repo::default().egress_hosts().unwrap().is_empty());
+    }
+
+    /// The table is written as `[[repo]]`, and an entry round-trips through
+    /// the file without growing keys it never had.
+    #[test]
+    fn a_repo_table_loads_from_the_operators_file() {
+        let dir = std::env::temp_dir().join(format!("tracon-cfg-repo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[repo]]
+path = "github.com/owner/name"
+image = "localhost/tc@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+checks = ["just check", "just test"]
+prepare = ["composer install --no-interaction"]
+egress = ["packagist"]
+timeout_secs = 1800
+
+[[repo]]
+path = "/srv/code/notes"
+checks = []
+"#,
+        )
+        .unwrap();
+        let config = Config::try_load_from(&path).unwrap();
+        assert_eq!(config.repo.len(), 2);
+        assert_eq!(config.repo[0].timeout_secs, Some(1800));
+        assert_eq!(config.repo[0].prepare.len(), 1);
+        assert_eq!(config.repo[1].checks.as_deref(), Some(&[][..]));
+        assert!(config.repo[1].image.is_none());
+        config.save_to(&path).unwrap();
+        let back = Config::try_load_from(&path).unwrap();
+        assert_eq!(back.repo.len(), 2);
+        assert_eq!(back.repo[1].checks.as_deref(), Some(&[][..]));
+        assert!(back.repo[1].image.is_none() && back.repo[1].timeout_secs.is_none());
+
+        std::fs::write(&path, "[[repo]]\npath = \"/srv/x\"\negress = [\"nope\"]\n").unwrap();
+        assert!(Config::try_load_from(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

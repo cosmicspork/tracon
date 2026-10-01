@@ -607,10 +607,11 @@ impl Runner for KubeRunner {
     }
 
     /// The kubelet's `imageID` for the most recent `run_capture`, when one
-    /// was confirmed against content addressing. `None` before any run, on
-    /// failure, or when the runtime reported no digest — evidence must never
-    /// invent a pin.
-    async fn resolved_image(&self) -> Option<String> {
+    /// was confirmed against content addressing. That is already the image the
+    /// command actually ran in — `KubeSpec::pod` honours `cmd.image` — so the
+    /// override is not consulted here. `None` before any run, on failure, or
+    /// when the runtime reported no digest: evidence must never invent a pin.
+    async fn resolved_image(&self, _image: Option<&str>) -> Option<String> {
         self.last_image.lock().await.clone()
     }
 }

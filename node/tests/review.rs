@@ -1055,6 +1055,121 @@ async fn operator_required_checks_refuse_submission_and_record_each_outcome() {
     assert_eq!(checks[1]["ok"], true);
 }
 
+/// A required check whose command the check image does not have is the
+/// environment's failing, not the candidate's. The submission still stops —
+/// nothing was verified — but the refusal names the missing tool and the image
+/// it looked in, never tells the agent to fix its code, and records no
+/// `review_rejected`: there is nothing about the change to reject.
+///
+/// This runs on `LocalBackend`, which executes on the host and honours no image
+/// at all, so what it proves is the reporting. That the check runs in the
+/// repository's toolchain image is the Podman runner's business and is covered
+/// by `review::checks`' own tests.
+#[tokio::test]
+async fn a_check_the_image_has_no_tool_for_is_not_the_agents_failure() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.supervision.checks = vec!["tracon-no-such-tool --check".into()];
+    })
+    .await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let err = v["error"].as_str().unwrap_or_default().to_string();
+    assert!(err.contains("not runnable here"), "{v}");
+    assert!(
+        err.contains("tracon-no-such-tool"),
+        "the refusal names the tool that is missing: {v}"
+    );
+    assert!(
+        !err.contains("Fix it and submit again"),
+        "the agent is never asked to fix an environment it does not control: {v}"
+    );
+    assert!(f.store.open_reviews().unwrap().is_empty());
+
+    let events = f.store.events_after("s1", 0, 500).unwrap();
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+    assert!(kinds.contains(&"check_not_runnable"), "{kinds:?}");
+    assert!(
+        !kinds.contains(&"review_rejected"),
+        "nothing about the candidate was established, so nothing is rejected: {kinds:?}"
+    );
+    let not_runnable = events
+        .iter()
+        .find(|e| e.kind == "check_not_runnable")
+        .unwrap();
+    assert_eq!(not_runnable.payload["missing_tool"], "tracon-no-such-tool");
+    // The durable evidence row says it could not run, which is what keeps it
+    // out of `latest_reusable_check`.
+    let result = events
+        .iter()
+        .find(|e| e.kind == "check_result")
+        .expect("the check still leaves a durable result");
+    assert_eq!(result.payload["outcome"], "not_runnable");
+    assert_eq!(result.payload["ok"], false, "not runnable is never a pass");
+    assert_eq!(
+        f.store.get_session("s1").unwrap().unwrap().state,
+        "running",
+        "back to running, as after any check"
+    );
+}
+
+/// A repository's `[[repo]]` entry replaces the node-wide checks for work
+/// that came from it, and its `prepare` commands run first on the very copy
+/// the check then sees. The node-wide check here can only fail, and the
+/// repository's check passes only if preparation ran before it in the same
+/// directory — so a review opening proves both.
+///
+/// The session is on a workspace, as every resumed session is, so this also
+/// proves the entry is found through the session that first imported it.
+#[tokio::test]
+async fn a_repo_entry_names_its_own_checks_and_prepares_before_them() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.supervision.checks = vec!["false".into()];
+        c.repo = vec![tracon::config::Repo {
+            path: "owner/prepared-app".into(),
+            checks: Some(vec!["test -f fetched.txt".into()]),
+            prepare: vec!["echo fetched > fetched.txt".into()],
+            ..Default::default()
+        }];
+    })
+    .await;
+    let workspace = f
+        .store
+        .get_session("s1")
+        .unwrap()
+        .unwrap()
+        .repo_path
+        .strip_prefix("workspace://")
+        .expect("the fixture session is on a workspace")
+        .to_string();
+    f.store
+        .insert_session(&{
+            let mut origin = support::rows::session_row(&workspace, "n1", "work");
+            origin.repo_path = "/clones/github.com/owner/prepared-app".into();
+            origin.state = "closed".into();
+            origin
+        })
+        .unwrap();
+
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    assert!(v["error"].is_null(), "{v}");
+    assert_eq!(f.store.open_reviews().unwrap().len(), 1, "{v}");
+
+    let events = f.store.events_after("s1", 0, 500).unwrap();
+    let started = events
+        .iter()
+        .find(|e| e.kind == "check_started")
+        .expect("checks ran");
+    assert_eq!(
+        started.payload["commands"],
+        json!(["test -f fetched.txt"]),
+        "the repository's checks, never the node-wide list"
+    );
+    let results: Vec<_> = events.iter().filter(|e| e.kind == "check_result").collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].payload["outcome"], "passed");
+}
+
 #[tokio::test]
 async fn candidate_controlled_check_file_cannot_replace_operator_required_checks() {
     state::isolate();

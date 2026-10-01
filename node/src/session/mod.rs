@@ -1724,7 +1724,7 @@ impl Manager {
             Some(ingest) => sup.with_ingest(ingest),
             None => sup,
         }
-        .with_checks(self.cfg.supervision.checks.clone());
+        .with_checks(crate::environment::session_environment(&self.cfg, &self.store, id).checks);
         let live = self.live.clone();
         let tokens = self.tokens.clone();
         let native = self.native.clone();

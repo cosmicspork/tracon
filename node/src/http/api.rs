@@ -1151,10 +1151,22 @@ pub async fn prepare_workspace(
     };
     let plan = crate::environment::inspect(&workspace.snapshot)
         .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
-    let prepared =
-        crate::environment::prepare(s.manager.backend().as_ref(), &s.cfg, &workspace, &plan)
-            .await
-            .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    // Prepare in the repository's own toolchain image, so what preparation
+    // validates is what its required checks will run in. `id` is a session or
+    // the workspace a session imported, which carries that session's id, so
+    // either is traced back to the repository it came from.
+    let repo = crate::environment::origin_repo(s.store(), &id)
+        .ok()
+        .flatten();
+    let prepared = crate::environment::prepare(
+        s.manager.backend().as_ref(),
+        &s.cfg,
+        &workspace,
+        &plan,
+        repo.as_deref(),
+    )
+    .await
+    .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(prepared))
 }
 

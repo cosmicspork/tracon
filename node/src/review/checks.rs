@@ -1,6 +1,18 @@
 //! Candidate-bound deterministic checks. Required commands originate only in
 //! operator configuration, and every execution mounts a node-captured Git tree
 //! read-only rather than the agent's mutable worktree.
+//!
+//! Which checks, and what they run *in*, is the repository's `[[repo]]` entry:
+//! its own commands and toolchain image, or the node-wide checks and the
+//! harness image where the operator has named none — and evidence is pinned
+//! only on the identity the runtime confirmed for that image. A command the
+//! image has no tool for is `not_runnable`: the environment's failing, never
+//! the candidate's.
+//!
+//! A repository that names `prepare` commands has them run first, on the same
+//! copy the check then runs against, with the repository's dependency cache
+//! writable and its named hosts reachable. The check itself gets the cache
+//! read-only and no egress: what it reads is what preparation fetched.
 
 use std::{path::Path, time::Duration};
 
@@ -11,7 +23,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     boundary::Backend,
     config::{Config, RuntimeKind},
-    runner::{Mount, RunnerCommand},
+    environment::{cache_env, environment_for, origin_repo, scoped_egress, RepoEnvironment},
+    runner::{Mount, Runner, RunnerCommand, RunnerError},
     store::{now_ms, CandidateRow, CheckRunRow, Store},
 };
 
@@ -49,13 +62,20 @@ pub struct CheckResult {
     pub command: String,
     pub ok: bool,
     pub exit: Option<i32>,
-    /// `passed`, `failed`, `interrupted`, `cancelled`, or `reused`.
+    /// `passed`, `failed`, `not_runnable`, `interrupted`, `cancelled`, or
+    /// `reused`.
     pub outcome: String,
     /// The last few KiB of stdout+stderr, or the retained output of reused
     /// evidence.
     pub tail: String,
     pub ms: u64,
     pub reused_from: Option<String>,
+    /// For a `not_runnable` outcome: the tool the shell said it could not find,
+    /// as the shell reported it. Best effort and never a claim the node
+    /// verified anything — a compound command can exit 127 on its second word,
+    /// and a script can exit 127 for its own reasons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_tool: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +85,11 @@ pub struct CheckReport {
     pub required_count: usize,
     pub all_required_passed: bool,
     pub reused: bool,
+    /// What the checks ran in — the identity the runtime confirmed where it
+    /// could — and where that image came from. A check that could not run is a
+    /// fact about this image, so a reader is never left guessing which one.
+    pub image: String,
+    pub image_source: &'static str,
     /// Why the run stopped early, when it did. A cancelled run has no verdict
     /// to give: it is neither a pass nor a failure of the candidate.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,6 +103,10 @@ struct CheckDefinition {
 }
 
 /// The trusted required definitions. Candidate files never alter this list.
+///
+/// This is the node-wide list. A repository's `[[repo]]` entry may name its
+/// own in its place; `candidate_environment` is what a candidate actually
+/// answers to.
 pub fn required_definitions(cfg: &Config) -> Vec<String> {
     cfg.supervision
         .checks
@@ -101,20 +130,21 @@ pub async fn run_required(
     force_rerun: bool,
     cancel: &dyn Cancel,
 ) -> Result<CheckReport, String> {
-    let commands = required_definitions(cfg);
-    let raw_image = execution_image(cfg);
+    let environment = candidate_environment(store, cfg, candidate)?;
+    let commands = environment.checks.clone();
+    let raw_image = environment.image.clone();
     let runner = backend.runner(Vec::new());
-    // The identity actually confirmed against the runtime for this backend,
-    // never the configured string alone: a backend that does not (or
-    // cannot) run the configured image must never have its evidence pinned
+    // The identity actually confirmed against the runtime for this backend and
+    // *this image*, never the configured string alone: a backend that does not
+    // (or cannot) run the configured image must never have its evidence pinned
     // as if it had (`LocalRunner` reports a local, never-pinnable identity;
     // Podman/Kubernetes resolve the real digest they ran).
-    let resolved_image = runner.resolved_image().await;
+    let resolved_image = runner.resolved_image(Some(&raw_image)).await;
     let recorded_image = resolved_image.clone().unwrap_or_else(|| raw_image.clone());
     let pinned_image = resolved_image.as_deref().and_then(immutable_image_identity);
-    let inputs = check_inputs(cfg);
+    let inputs = check_inputs(cfg, &environment);
     let inputs_json = serde_json::to_string(&inputs).map_err(|error| error.to_string())?;
-    let timeout = Duration::from_secs(cfg.supervision.timeout_secs.max(1));
+    let timeout = Duration::from_secs(environment.timeout_secs);
     let mut results = Vec::with_capacity(commands.len());
     let mut any_reused = false;
     let mut cancelled = None;
@@ -205,6 +235,7 @@ pub async fn run_required(
                 tail: source.log,
                 ms: source.duration_ms.unwrap_or_default().max(0) as u64,
                 reused_from: Some(source.id),
+                missing_tool: None,
             });
             any_reused = true;
             continue;
@@ -272,56 +303,76 @@ pub async fn run_required(
                 tail: message,
                 ms: 0,
                 reused_from: None,
+                missing_tool: None,
             });
             continue;
         }
-        let mount = Mount::volume(scratch_volume.clone(), "/work", false);
         let started = std::time::Instant::now();
         let runner_name = format!("tracon-c-{index}-{}", &hash(&run_id)[..12]);
         // What the runner will actually call this execution, not what it was
         // asked to: a kill has to name the same thing the runtime named, or
         // it stops nothing at all.
         let running_name = runner.capture_name(&runner_name);
+        // One deadline for the whole execution: a preparation that eats the
+        // budget leaves none for the check, rather than doubling it.
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut env = Vec::new();
+        let mut mounts = vec![Mount::volume(scratch_volume.clone(), "/work", false)];
+        let mut unprepared = None;
+        if !environment.prepare.is_empty() {
+            unprepared = prepare_check_copy(
+                backend,
+                runner.as_ref(),
+                &environment,
+                &scratch_volume,
+                &runner_name,
+                deadline,
+                cancel,
+            )
+            .await
+            .err();
+            // The check reads what preparation fetched and can add nothing to
+            // it: candidate code runs here, and a cache it could write is a
+            // cache the next candidate's evidence would be built on.
+            env = cache_env();
+            env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
+            mounts.push(Mount::volume(
+                environment.cache_volume.clone(),
+                "/cache",
+                true,
+            ));
+        }
         let cmd = RunnerCommand {
             argv: vec!["sh".into(), "-lc".into(), command.clone()],
-            env: Vec::new(),
-            mounts: vec![mount],
+            env,
+            mounts,
             workdir: Some("/work".into()),
             name: runner_name.clone(),
-            image: None,
+            image: Some(raw_image.clone()),
             expose: None,
         };
-        // Both ways an execution can be stopped kill the runtime *while the
-        // capture is still held*: an identity released first could be reused
-        // by the runtime before the kill names it.
-        let deadline = tokio::time::Instant::now() + timeout;
-        let finished = async {
-            let capture = runner.run_capture(cmd);
-            tokio::pin!(capture);
-            let mut poll = tokio::time::interval(CANCEL_POLL);
-            poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tokio::select! {
-                    finished = &mut capture => return Ok(finished),
-                    _ = tokio::time::sleep_until(deadline) => {
-                        let _ = runner.kill(&running_name).await;
-                        return Err(None);
-                    }
-                    _ = poll.tick() => {
-                        if let Some(reason) = cancel.cancelled() {
-                            let _ = runner.kill(&running_name).await;
-                            return Err(Some(reason));
-                        }
-                    }
-                }
-            }
-        }
-        .await;
+        let finished = match unprepared {
+            Some(stopped) => Err(stopped),
+            None => until_stopped(
+                runner.run_capture(cmd),
+                deadline,
+                cancel,
+                Some((runner.as_ref(), &running_name)),
+            )
+            .await
+            .map_err(|stop| match stop {
+                Some(reason) => Stopped::Cancelled {
+                    reason,
+                    killed: running_name.clone(),
+                },
+                None => Stopped::TimedOut,
+            }),
+        };
         // Only the output is kept; the copy it ran against is nobody's now.
         release_check_volume(backend, &scratch_volume).await;
         // Cancelled: the runtime is stopped before anything is written down,
         // so the record is never ahead of what is actually running.
-        if let Err(Some(reason)) = finished {
+        if let Err(Stopped::Cancelled { reason, killed }) = finished {
             let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
             store
                 .cancel_running_check(
@@ -332,7 +383,7 @@ pub async fn run_required(
                         json!({
                             "execution_backend": backend.kind(),
                             "cancelled": reason,
-                            "killed": running_name,
+                            "killed": killed,
                         }),
                     ),
                 )
@@ -349,17 +400,32 @@ pub async fn run_required(
             Ok(Ok(output)) => {
                 let mut output_text = String::from_utf8_lossy(&output.stdout).into_owned();
                 output_text.push_str(&String::from_utf8_lossy(&output.stderr));
-                let outcome = if output.status.success() {
-                    "passed"
-                } else {
-                    "failed"
+                let code = output.status.code();
+                // 127 is the shell saying it could not find the command. That
+                // is the check environment's failing, not the candidate's, so
+                // it is neither a pass nor a failure the agent is told to fix
+                // — and `latest_reusable_check` does not accept the outcome,
+                // so it can never become evidence either.
+                let missing = (!output.status.success() && code == Some(127))
+                    .then(|| missing_tool(command, &output_text));
+                let outcome = match (output.status.success(), &missing) {
+                    (true, _) => "passed",
+                    (false, Some(_)) => "not_runnable",
+                    (false, None) => "failed",
                 };
-                (
-                    outcome,
-                    output.status.code(),
-                    tail(&output_text),
-                    json!({ "execution_backend": backend.kind(), "timeout_secs": timeout.as_secs() }),
-                )
+                let mut metadata = json!({
+                    "execution_backend": backend.kind(),
+                    "timeout_secs": timeout.as_secs(),
+                });
+                if let Some(tool) = &missing {
+                    metadata["missing_tool"] = json!(tool);
+                    metadata["execution_image_source"] = json!(environment.image_source);
+                }
+                if !environment.prepare.is_empty() {
+                    metadata["prepared_with"] = json!(environment.prepare);
+                    metadata["cache_volume"] = json!(environment.cache_volume);
+                }
+                (outcome, code, tail(&output_text), metadata)
             }
             Ok(Err(error)) => (
                 "interrupted",
@@ -367,7 +433,19 @@ pub async fn run_required(
                 format!("could not run: {error}"),
                 json!({ "execution_backend": backend.kind(), "runner_error": error.to_string() }),
             ),
-            // The deadline arm above already killed the runtime.
+            // Nothing about the candidate was established: the check never
+            // started. `interrupted` is never a pass and never reusable.
+            Err(Stopped::Unprepared(message)) => (
+                "interrupted",
+                None,
+                message,
+                json!({
+                    "execution_backend": backend.kind(),
+                    "interrupted": "preparation",
+                    "prepared_with": environment.prepare,
+                }),
+            ),
+            // The deadline arm already killed the runtime.
             Err(_) => (
                 "interrupted",
                 None,
@@ -380,6 +458,10 @@ pub async fn run_required(
             ),
         };
         let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let missing_tool = metadata
+            .get("missing_tool")
+            .and_then(|tool| tool.as_str())
+            .map(str::to_string);
         let recorded = store
             .finish_check_run(
                 &run_id,
@@ -422,6 +504,7 @@ pub async fn run_required(
             tail: tail_text,
             ms: duration_ms.max(0) as u64,
             reused_from: None,
+            missing_tool,
         });
     }
 
@@ -437,8 +520,172 @@ pub async fn run_required(
         required_count: commands.len(),
         results,
         reused: any_reused,
+        image: recorded_image,
+        image_source: environment.image_source,
         cancelled,
     })
+}
+
+/// The tool the shell said was missing, read out of the shell's own wording:
+/// dash says `sh: 1: just: not found` and bash says
+/// `bash: line 1: just: command not found`. Neither is a contract, so the
+/// command's first word is the fallback — better a name that is merely likely
+/// than a message that names nothing at all.
+fn missing_tool(command: &str, output: &str) -> String {
+    for line in output.lines().rev() {
+        let line = line.trim_end();
+        for suffix in [": command not found", ": not found"] {
+            if let Some(head) = line.strip_suffix(suffix) {
+                if let Some(name) = head.rsplit(": ").next() {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        return name.to_string();
+                    }
+                }
+            }
+        }
+    }
+    command
+        .split_whitespace()
+        .next()
+        .unwrap_or(command)
+        .to_string()
+}
+
+/// How an execution ended without its command finishing.
+enum Stopped {
+    Cancelled {
+        reason: String,
+        killed: String,
+    },
+    TimedOut,
+    /// Preparation did not complete, so the check was never started.
+    Unprepared(String),
+}
+
+/// Drive `work` until it finishes, the deadline passes (`Err(None)`), or the
+/// work is no longer wanted (`Err(Some(reason))`). Both ways of stopping kill
+/// the named runtime *while `work` is still held*: an identity released first
+/// could be reused by the runtime before the kill names it.
+async fn until_stopped<T>(
+    work: impl std::future::Future<Output = T>,
+    deadline: tokio::time::Instant,
+    cancel: &dyn Cancel,
+    kill: Option<(&dyn Runner, &str)>,
+) -> Result<T, Option<String>> {
+    tokio::pin!(work);
+    let mut poll = tokio::time::interval(CANCEL_POLL);
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let stopped = loop {
+        tokio::select! {
+            finished = &mut work => return Ok(finished),
+            _ = tokio::time::sleep_until(deadline) => break None,
+            _ = poll.tick() => {
+                if let Some(reason) = cancel.cancelled() {
+                    break Some(reason);
+                }
+            }
+        }
+    };
+    if let Some((runner, name)) = kill {
+        let _ = runner.kill(name).await;
+    }
+    Err(stopped)
+}
+
+/// Run the repository's `prepare` commands against one check's own copy of the
+/// candidate: same image, the dependency cache writable, and the scoped egress
+/// gateway open to the repository's hosts for exactly as long as they run.
+///
+/// The commands are the operator's; what they execute may not be — an install
+/// runs the candidate's own lifecycle scripts unless the command says
+/// otherwise — which is why this is the only step the cache is writable in and
+/// why it holds no credential.
+async fn prepare_check_copy(
+    backend: &dyn Backend,
+    runner: &dyn Runner,
+    environment: &RepoEnvironment,
+    scratch_volume: &str,
+    runner_name: &str,
+    deadline: tokio::time::Instant,
+    cancel: &dyn Cancel,
+) -> Result<(), Stopped> {
+    let stopped = |stop: Option<String>, killed: &str| match stop {
+        Some(reason) => Stopped::Cancelled {
+            reason,
+            killed: killed.to_string(),
+        },
+        None => Stopped::TimedOut,
+    };
+    // The gateway has one holder at a time, so this can wait behind another
+    // preparation or a QA browser run. That wait is part of the execution.
+    let egress = until_stopped(
+        scoped_egress(backend, &environment.egress),
+        deadline,
+        cancel,
+        None,
+    )
+    .await
+    .map_err(|stop| stopped(stop, ""))?
+    .map_err(Stopped::Unprepared)?;
+    for (step, command) in environment.prepare.iter().enumerate() {
+        let name = format!("{runner_name}-p{step}");
+        let running = runner.capture_name(&name);
+        let mut env = cache_env();
+        env.extend(egress.env.iter().cloned());
+        let cmd = RunnerCommand {
+            argv: vec!["sh".into(), "-lc".into(), command.clone()],
+            env,
+            mounts: vec![
+                Mount::volume(scratch_volume.to_string(), "/work", false),
+                Mount::volume(environment.cache_volume.clone(), "/cache", false),
+            ],
+            workdir: Some("/work".into()),
+            name,
+            image: Some(environment.image.clone()),
+            expose: None,
+        };
+        let finished: Result<std::process::Output, RunnerError> = until_stopped(
+            runner.run_capture(cmd),
+            deadline,
+            cancel,
+            Some((runner, &running)),
+        )
+        .await
+        .map_err(|stop| stopped(stop, &running))?;
+        let output = finished.map_err(|error| {
+            Stopped::Unprepared(format!("could not run preparation `{command}`: {error}"))
+        })?;
+        if !output.status.success() {
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            return Err(Stopped::Unprepared(format!(
+                "preparation `{command}` failed (exit {}) in {} ({}); the check was not run.\n\n{}",
+                output
+                    .status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "none".into()),
+                environment.image,
+                environment.image_source,
+                tail(&text)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// What this candidate answers to: the `[[repo]]` entry for the repository its
+/// session was working in, over the node-wide defaults. Resolved once per
+/// report, from the candidate, so the run path and the approval path cannot
+/// disagree about which checks ran or what they ran in.
+pub fn candidate_environment(
+    store: &Store,
+    cfg: &Config,
+    candidate: &CandidateRow,
+) -> Result<RepoEnvironment, String> {
+    let repo = origin_repo(store, &candidate.owner_session_id)?;
+    Ok(environment_for(cfg, repo.as_deref()))
 }
 
 /// Every record a check settles as names the tree it ran against. The row a
@@ -472,6 +719,7 @@ fn cancelled_result(command: &str, reason: &str, ms: u64) -> CheckResult {
         tail: format!("cancelled: {reason}"),
         ms,
         reused_from: None,
+        missing_tool: None,
     }
 }
 
@@ -487,10 +735,6 @@ pub async fn review_required_checks_current(
     review_id: &str,
     cfg: &Config,
 ) -> Result<(), String> {
-    let required = required_definitions(cfg);
-    if required.is_empty() {
-        return Ok(());
-    }
     let Some(revision) = store
         .latest_review_revision(review_id)
         .map_err(|error| error.to_string())?
@@ -499,6 +743,18 @@ pub async fn review_required_checks_current(
         // image/input provenance. New submissions always create a revision.
         return Ok(());
     };
+    let candidate = store
+        .candidate(&revision.candidate_id)
+        .map_err(|error| error.to_string())?;
+    // The candidate names the repository, and the repository names the checks.
+    // One the store no longer has answers to the node-wide list.
+    let environment = match &candidate {
+        Some(candidate) => candidate_environment(store, cfg, candidate)?,
+        None => environment_for(cfg, None),
+    };
+    if environment.checks.is_empty() {
+        return Ok(());
+    }
     let review = store
         .get_review(review_id)
         .map_err(|error| error.to_string())?
@@ -508,21 +764,21 @@ pub async fn review_required_checks_current(
             "review's current source is not the immutable revision that was checked".into(),
         );
     }
-    let candidate = store
-        .candidate(&revision.candidate_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "review candidate is missing".to_string())?;
+    let candidate = candidate.ok_or_else(|| "review candidate is missing".to_string())?;
     if candidate.head_sha != review.head_sha {
         return Err("review candidate does not match the review's current source".into());
     }
-    let resolved_image = backend.runner(Vec::new()).resolved_image().await;
+    let resolved_image = backend
+        .runner(Vec::new())
+        .resolved_image(Some(&environment.image))
+        .await;
     let pinned_image = resolved_image.as_deref().and_then(immutable_image_identity);
-    let inputs_json =
-        serde_json::to_string(&check_inputs(cfg)).map_err(|error| error.to_string())?;
-    for command in required {
+    let inputs_json = serde_json::to_string(&check_inputs(cfg, &environment))
+        .map_err(|error| error.to_string())?;
+    for command in &environment.checks {
         let definition_json = serde_json::to_string(&CheckDefinition {
             command: command.clone(),
-            timeout_secs: cfg.supervision.timeout_secs.max(1),
+            timeout_secs: environment.timeout_secs,
         })
         .map_err(|error| error.to_string())?;
         let definition_hash = hash(&definition_json);
@@ -552,28 +808,29 @@ pub async fn review_required_checks_current(
     Ok(())
 }
 
-fn execution_image(cfg: &Config) -> String {
-    match cfg.runtime.kind {
-        RuntimeKind::Podman => cfg.boundary.harness_image.clone(),
-        RuntimeKind::Kubernetes => cfg.runtime.kubernetes.harness_image.clone(),
-    }
-}
-
 fn immutable_image_identity(image: &str) -> Option<String> {
     let (_, digest) = image.split_once("@sha256:")?;
     (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| format!("sha256:{digest}"))
 }
 
-fn check_inputs(cfg: &Config) -> serde_json::Value {
-    json!({
+/// Everything besides the command and the image that decides what a check
+/// established. Preparation is part of it only where a repository names some:
+/// a node with none keeps the identity its existing evidence was keyed on.
+fn check_inputs(cfg: &Config, environment: &RepoEnvironment) -> serde_json::Value {
+    let mut inputs = json!({
         "runtime": match cfg.runtime.kind {
             RuntimeKind::Podman => "podman",
             RuntimeKind::Kubernetes => "kubernetes",
         },
-        "timeout_secs": cfg.supervision.timeout_secs.max(1),
+        "timeout_secs": environment.timeout_secs,
         "dependency_inputs": cfg.supervision.dependency_inputs,
-    })
+    });
+    if !environment.prepare.is_empty() {
+        inputs["prepare"] = json!(environment.prepare);
+        inputs["egress"] = json!(environment.egress);
+    }
+    inputs
 }
 
 /// What a run says about the candidate. A `reused` row is a pointer at the run
@@ -616,6 +873,192 @@ mod tests {
         let mut cfg = Config::default();
         cfg.supervision.checks = vec!["  cargo test  ".into(), "".into()];
         assert_eq!(required_definitions(&cfg), vec!["cargo test".to_string()]);
+    }
+
+    /// The missing tool is read out of the shell's own report, because that is
+    /// the only place it exists — and the command's first word when the shell
+    /// worded it some third way, so the message always names something.
+    #[test]
+    fn the_missing_tool_comes_from_whichever_shell_reported_it() {
+        assert_eq!(
+            missing_tool("just check", "sh: 1: just: not found\n"),
+            "just"
+        );
+        assert_eq!(
+            missing_tool("just check", "bash: line 1: just: command not found\n"),
+            "just"
+        );
+        // A compound command 127s on a later word; the shell names that word,
+        // not the first one.
+        assert_eq!(
+            missing_tool("cd spa && bun run check", "sh: 1: bun: not found\n"),
+            "bun"
+        );
+        // An exit 127 the shell said nothing about: the command's own first
+        // word, which is a guess and is worded as the shell's report, never as
+        // something the node established.
+        assert_eq!(missing_tool("just check", "boom\n"), "just");
+        assert_eq!(missing_tool("just check", ""), "just");
+    }
+
+    fn session_row(id: &str, repo: &str) -> crate::store::SessionRow {
+        crate::store::SessionRow {
+            id: id.into(),
+            node_id: "n".into(),
+            channel: "ch".into(),
+            work_item_id: None,
+            repo_path: repo.into(),
+            worktree_path: None,
+            branch: "b".into(),
+            harness_id: "claude".into(),
+            harness_version: "1".into(),
+            harness_agent: None,
+            harness_found: None,
+            harness_protocol: None,
+            harness_session_id: None,
+            container_name: None,
+            model: "m".into(),
+            project_id: None,
+            phase: "execute".into(),
+            policy_version: None,
+            manifest_digest: None,
+            review_id: None,
+            budget_tokens: 0,
+            tokens_used: 0,
+            cost_usd: None,
+            context_used: None,
+            context_size: None,
+            state: "closed".into(),
+            end_reason: None,
+            last_error: None,
+            turn_active: 0,
+            draft: None,
+            draft_updated_ms: None,
+            created_ms: 0,
+            started_mono_ms: None,
+            ended_mono_ms: None,
+            updated_ms: 0,
+            archived_ms: None,
+            legacy_ms: None,
+            parent_session: None,
+            continued_from: None,
+        }
+    }
+
+    /// A store with the one node every test session belongs to.
+    fn store_with_node() -> Store {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_node(
+                &crate::store::NodeRow::from_json(
+                    &json!({ "id": "n", "harness": { "id": "claude" } }),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        store
+    }
+
+    /// A session resumed on a workspace names it, not a repository; its checks
+    /// still belong to the repository the workspace was imported from, or a
+    /// resumed session would lose its toolchain image and run checks in the
+    /// harness image.
+    #[test]
+    fn a_resumed_session_is_traced_back_to_its_repository() {
+        let store = store_with_node();
+        store
+            .insert_session(&session_row("first", "/src/app"))
+            .unwrap();
+        store
+            .insert_session(&session_row("resumed", "workspace://first"))
+            .unwrap();
+        store
+            .insert_session(&session_row("again", "workspace://resumed"))
+            .unwrap();
+        store
+            .insert_session(&session_row("loop", "workspace://loop"))
+            .unwrap();
+        store.insert_session(&session_row("external", "")).unwrap();
+        let origin = |id: &str| origin_repo(&store, id).unwrap();
+        assert_eq!(origin("first"), Some("/src/app".into()));
+        assert_eq!(origin("resumed"), Some("/src/app".into()));
+        assert_eq!(origin("again"), Some("/src/app".into()));
+        assert_eq!(origin("loop"), None);
+        assert_eq!(origin("external"), None);
+        assert_eq!(origin("gone"), None);
+    }
+
+    /// `not_runnable` must never become reusable evidence: nothing about the
+    /// candidate was established, so there is nothing for a later submission to
+    /// borrow. It holds by construction — `latest_reusable_check` accepts three
+    /// outcomes and this is not one — and this test is what keeps it true if
+    /// that query is ever widened.
+    #[test]
+    fn a_check_that_could_not_run_is_never_reusable_evidence() {
+        let store = Store::open_in_memory().unwrap();
+        let candidate = CandidateRow {
+            id: "cand3".into(),
+            head_sha: "sha3".into(),
+            tree_sha: Some("tree3".into()),
+            channel: "ch".into(),
+            owner_session_id: "s1".into(),
+            source_kind: "git".into(),
+            captured_ms: now_ms(),
+            capture_json: "{}".into(),
+        };
+        store.insert_candidate(&candidate).unwrap();
+        let run = |id: &str| CheckRunRow {
+            id: id.into(),
+            candidate_id: Some(candidate.id.clone()),
+            session_id: candidate.owner_session_id.clone(),
+            command: Some("just check".into()),
+            definition_json: "{}".into(),
+            definition_hash: Some("def".into()),
+            execution_image: Some("registry/example@sha256:aaaa".into()),
+            inputs_json: Some("{}".into()),
+            reuse_key: Some("key".into()),
+            outcome: "running".into(),
+            source_outcome: None,
+            exit_code: None,
+            log: String::new(),
+            duration_ms: None,
+            started_ms: now_ms(),
+            finished_ms: None,
+            rerun_of: None,
+            reused_from_id: None,
+            metadata_json: "{}".into(),
+        };
+
+        store.insert_check_run(&run("r1")).unwrap();
+        store
+            .finish_check_run(
+                "r1",
+                "not_runnable",
+                None,
+                Some(127),
+                "sh: 1: just: not found",
+                Some(1),
+                &json!({ "missing_tool": "just" }),
+            )
+            .unwrap();
+        assert!(
+            store
+                .latest_reusable_check(&candidate.id, "key")
+                .unwrap()
+                .is_none(),
+            "a check that could not run must never be offered as evidence"
+        );
+
+        // The same row settled as a real failure *is* reusable, so the
+        // assertion above is about the outcome and not about the query.
+        store.insert_check_run(&run("r2")).unwrap();
+        store
+            .finish_check_run("r2", "failed", None, Some(1), "nope", Some(1), &json!({}))
+            .unwrap();
+        assert!(store
+            .latest_reusable_check(&candidate.id, "key")
+            .unwrap()
+            .is_some());
     }
 
     /// The container/pod name `run_required` builds for a check
@@ -671,7 +1114,7 @@ mod tests {
             async fn kill(&self, _name: &str) -> Result<(), RunnerError> {
                 Ok(())
             }
-            async fn resolved_image(&self) -> Option<String> {
+            async fn resolved_image(&self, _image: Option<&str>) -> Option<String> {
                 Some(
                     "registry/example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_string(),
@@ -874,5 +1317,326 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&snapshot);
+    }
+
+    /// What a recording backend saw, in the order it saw it.
+    #[derive(Default)]
+    struct Recorded {
+        log: std::sync::Mutex<Vec<String>>,
+        commands: std::sync::Mutex<Vec<RunnerCommand>>,
+        /// Exit status handed to a preparation command.
+        prepare_exit: i32,
+    }
+
+    struct RecordingRunner(std::sync::Arc<Recorded>);
+
+    #[async_trait::async_trait]
+    impl Runner for RecordingRunner {
+        async fn spawn(&self, _cmd: RunnerCommand) -> Result<crate::runner::Spawned, RunnerError> {
+            Err(RunnerError::Other("not used by these tests".into()))
+        }
+        async fn run_capture(
+            &self,
+            cmd: RunnerCommand,
+        ) -> Result<std::process::Output, RunnerError> {
+            use std::os::unix::process::ExitStatusExt;
+            let preparing = cmd
+                .mounts
+                .iter()
+                .any(|m| m.target == "/cache" && !m.read_only);
+            let exit = if preparing { self.0.prepare_exit } else { 0 };
+            self.0
+                .log
+                .lock()
+                .unwrap()
+                .push(format!("run {}", cmd.argv[2]));
+            self.0.commands.lock().unwrap().push(cmd);
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(exit << 8),
+                stdout: Vec::new(),
+                stderr: if exit == 0 {
+                    Vec::new()
+                } else {
+                    b"error: 403 Forbidden".to_vec()
+                },
+            })
+        }
+        async fn kill(&self, _name: &str) -> Result<(), RunnerError> {
+            Ok(())
+        }
+        async fn resolved_image(&self, image: Option<&str>) -> Option<String> {
+            image.map(str::to_string)
+        }
+    }
+
+    static RECORDED_EGRESS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct RecordingBackend(std::sync::Arc<Recorded>);
+
+    #[async_trait::async_trait]
+    impl Backend for RecordingBackend {
+        fn kind(&self) -> &'static str {
+            "recording"
+        }
+        async fn setup(
+            &self,
+            _cfg: &Config,
+            _rebuild: bool,
+        ) -> Result<(), crate::boundary::BoundaryError> {
+            Ok(())
+        }
+        async fn check_all(&self, _cfg: &Config, _deep: bool) -> crate::boundary::BoundaryReport {
+            crate::boundary::BoundaryReport { checks: Vec::new() }
+        }
+        fn runner(&self, _extra_mounts: Vec<Mount>) -> std::sync::Arc<dyn Runner> {
+            std::sync::Arc::new(RecordingRunner(self.0.clone()))
+        }
+        fn runner_for(
+            &self,
+            _harness_id: &str,
+            _extra_mounts: Vec<Mount>,
+        ) -> std::sync::Arc<dyn Runner> {
+            std::sync::Arc::new(RecordingRunner(self.0.clone()))
+        }
+        fn harness_host(&self) -> String {
+            "gw".into()
+        }
+        async fn import_volume(
+            &self,
+            _volume: &str,
+            _source: &Path,
+        ) -> Result<(), crate::boundary::BoundaryError> {
+            Ok(())
+        }
+        async fn export_volume(
+            &self,
+            _volume: &str,
+            _destination: &Path,
+        ) -> Result<(), crate::boundary::BoundaryError> {
+            Ok(())
+        }
+        fn harness_home(&self) -> String {
+            "/home/harness".into()
+        }
+        async fn reconcile(&self, _names: &[String]) {}
+        async fn scope_qa_egress(
+            &self,
+            allowed_hosts: &[String],
+        ) -> Result<crate::boundary::QaEgressGuard, crate::boundary::BoundaryError> {
+            let permit = RECORDED_EGRESS.lock().await;
+            let recorded = self.0.clone();
+            recorded
+                .log
+                .lock()
+                .unwrap()
+                .push(format!("open {}", allowed_hosts.join(",")));
+            Ok(crate::boundary::QaEgressGuard::new(permit, move || {
+                recorded.log.lock().unwrap().push("close".into());
+            }))
+        }
+        fn qa_proxy_url(&self) -> Option<String> {
+            Some("http://gw:8890".into())
+        }
+    }
+
+    const TOOLCHAIN: &str =
+        "localhost/tc@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    /// A candidate from a session in `/src/app`, on a node whose `[[repo]]`
+    /// entry for it names an image, its own check, a preparation and the
+    /// registry that preparation needs.
+    fn prepared_repo(id: &str) -> (Store, Config, CandidateRow) {
+        let store = store_with_node();
+        store
+            .insert_session(&session_row("s-app", "/src/app"))
+            .unwrap();
+        let candidate = CandidateRow {
+            id: id.into(),
+            head_sha: format!("sha-{id}"),
+            tree_sha: Some(format!("tree-{id}")),
+            channel: "ch".into(),
+            owner_session_id: "s-app".into(),
+            source_kind: "git".into(),
+            captured_ms: now_ms(),
+            capture_json: "{}".into(),
+        };
+        store.insert_candidate(&candidate).unwrap();
+        let mut cfg = Config::default();
+        cfg.runtime.kind = RuntimeKind::Podman;
+        cfg.supervision.checks = vec!["node-wide check".into()];
+        cfg.repo = vec![crate::config::Repo {
+            path: "/src/app".into(),
+            image: Some(TOOLCHAIN.into()),
+            checks: Some(vec!["just check".into()]),
+            timeout_secs: Some(1800),
+            prepare: vec!["bun install --frozen-lockfile".into()],
+            egress: vec!["npm".into()],
+        }];
+        (store, cfg, candidate)
+    }
+
+    /// A repository's entry decides which checks run and what happens before
+    /// them. Preparation gets the cache writable and the scoped gateway open
+    /// to exactly the repository's hosts; the gateway is closed again before
+    /// the check starts, and the check gets the same cache read-only with
+    /// nothing pointing it at the scoped proxy.
+    #[tokio::test]
+    async fn preparation_fetches_with_egress_and_the_check_runs_without_it() {
+        let (store, cfg, candidate) = prepared_repo("prep1");
+        let recorded = std::sync::Arc::new(Recorded::default());
+        let backend = RecordingBackend(recorded.clone());
+        let snapshot = std::env::temp_dir();
+
+        let report = run_required(
+            &backend,
+            &cfg,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
+        assert!(report.all_required_passed, "{:?}", report.results);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(
+            report.results[0].command, "just check",
+            "the repository's own check, never the node-wide one"
+        );
+        assert_eq!(report.image, TOOLCHAIN);
+        assert_eq!(report.image_source, "repository toolchain");
+
+        assert_eq!(
+            *recorded.log.lock().unwrap(),
+            [
+                "open registry.npmjs.org",
+                "run bun install --frozen-lockfile",
+                "close",
+                "run just check",
+            ]
+        );
+        {
+            let commands = recorded.commands.lock().unwrap();
+            let (prepare, check) = (&commands[0], &commands[1]);
+            let var = |cmd: &RunnerCommand, name: &str| {
+                cmd.env
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.clone())
+            };
+            for cmd in [prepare, check] {
+                assert_eq!(cmd.image.as_deref(), Some(TOOLCHAIN));
+                assert_eq!(
+                    var(cmd, "BUN_INSTALL_CACHE_DIR").as_deref(),
+                    Some("/cache/bun")
+                );
+            }
+            assert_eq!(
+                prepare.mounts[0].volume, check.mounts[0].volume,
+                "preparation installs into the copy the check then runs against"
+            );
+            assert!(!prepare.mounts[1].read_only && check.mounts[1].read_only);
+            assert_eq!(prepare.mounts[1].volume, check.mounts[1].volume);
+            assert!(prepare.mounts[1].volume.starts_with("tracon-cache-"));
+            assert_eq!(
+                var(prepare, "HTTPS_PROXY").as_deref(),
+                Some("http://gw:8890")
+            );
+            assert_eq!(
+                var(prepare, "https_proxy").as_deref(),
+                Some("http://gw:8890")
+            );
+            assert_eq!(var(check, "HTTPS_PROXY"), None);
+            assert_eq!(var(check, "CARGO_NET_OFFLINE").as_deref(), Some("true"));
+        }
+
+        // The same candidate again borrows the evidence: nothing is prepared
+        // for a check that does not run.
+        let again = run_required(
+            &backend,
+            &cfg,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
+        assert!(again.reused);
+        assert_eq!(recorded.commands.lock().unwrap().len(), 2);
+
+        // A changed preparation is a changed check: the pass is not borrowed.
+        let mut changed = cfg.clone();
+        changed.repo[0].prepare = vec!["bun install".into()];
+        let rerun = run_required(
+            &backend,
+            &changed,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
+        assert!(!rerun.reused);
+    }
+
+    /// A preparation that fails stops the execution there. The check is never
+    /// started, the result says what failed and where, the gateway is closed,
+    /// and nothing about it is evidence a later submission could borrow.
+    #[tokio::test]
+    async fn a_failed_preparation_never_runs_the_check_or_becomes_evidence() {
+        let (store, cfg, candidate) = prepared_repo("prep2");
+        let recorded = std::sync::Arc::new(Recorded {
+            prepare_exit: 1,
+            ..Default::default()
+        });
+        let backend = RecordingBackend(recorded.clone());
+        let snapshot = std::env::temp_dir();
+
+        for _ in 0..2 {
+            let report = run_required(
+                &backend,
+                &cfg,
+                &store,
+                &candidate,
+                &snapshot,
+                false,
+                &RunToCompletion,
+            )
+            .await
+            .unwrap();
+            assert!(!report.all_required_passed);
+            assert!(!report.reused);
+            let result = &report.results[0];
+            assert_eq!(result.outcome, "interrupted");
+            assert!(
+                result
+                    .tail
+                    .contains("preparation `bun install --frozen-lockfile` failed (exit 1)"),
+                "{}",
+                result.tail
+            );
+            assert!(result.tail.contains("403 Forbidden"), "{}", result.tail);
+            assert!(
+                result.tail.contains("the check was not run"),
+                "{}",
+                result.tail
+            );
+        }
+        assert_eq!(
+            *recorded.log.lock().unwrap(),
+            [
+                "open registry.npmjs.org",
+                "run bun install --frozen-lockfile",
+                "close",
+                "open registry.npmjs.org",
+                "run bun install --frozen-lockfile",
+                "close",
+            ]
+        );
     }
 }

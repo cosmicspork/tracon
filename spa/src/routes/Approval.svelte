@@ -395,8 +395,8 @@
           {#if authoritativeChecks.length}
             {#each authoritativeChecks as run (run.id)}
               <div class="run">
-                <span class:ok={run.outcome === 'passed' || run.source_outcome === 'passed'} class:bad={run.outcome === 'failed' || run.outcome === 'interrupted' || run.outcome === 'cancelled'}>
-                  {run.outcome}{run.outcome === 'reused' ? ` · ${run.source_outcome ?? 'unknown source'}` : ''}
+                <span class:ok={run.outcome === 'passed' || run.source_outcome === 'passed'} class:bad={run.outcome === 'failed' || run.outcome === 'not_runnable' || run.outcome === 'interrupted' || run.outcome === 'cancelled'}>
+                  {run.outcome === 'not_runnable' ? 'not runnable' : run.outcome}{run.outcome === 'reused' ? ` · ${run.source_outcome ?? 'unknown source'}` : ''}
                 </span>
                 <code>{run.command ?? 'command not recorded'}</code>
                 <code>{run.execution_image ?? 'image identity not recorded'}</code>

@@ -1061,21 +1061,29 @@ pub async fn build_prototype(
             )
         }
     };
-    let prepared =
-        match crate::environment::prepare(backend.as_ref(), access.cfg, &workspace, &plan).await {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return insert_failed_prototype(
-                    access,
-                    &candidate,
-                    &recipe,
-                    &id,
-                    started_ms,
-                    plan_json,
-                    format!("could not prepare build environment: {error}"),
-                )
-            }
-        };
+    let repo = candidate_repo(access.store, &owner_session);
+    let prepared = match crate::environment::prepare(
+        backend.as_ref(),
+        access.cfg,
+        &workspace,
+        &plan,
+        repo.as_deref(),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return insert_failed_prototype(
+                access,
+                &candidate,
+                &recipe,
+                &id,
+                started_ms,
+                plan_json,
+                format!("could not prepare build environment: {error}"),
+            )
+        }
+    };
     // Verification executes only the operator's locked checks in its fresh
     // runtime. The candidate recipe runs exactly once below, in its own
     // configured build image.
@@ -1083,7 +1091,7 @@ pub async fn build_prototype(
         backend.as_ref(),
         &workspace,
         &prepared,
-        &access.cfg.supervision.checks,
+        &crate::environment::environment_for(access.cfg, repo.as_deref()).checks,
     )
     .await
     .map_err(|error| format!("prepared environment verification failed: {error}"));
@@ -1728,6 +1736,16 @@ fn candidate_owner(candidate: &crate::store::CandidateRow) -> Result<String, Str
     } else {
         Ok(session.into())
     }
+}
+
+/// The repository a candidate's session was working in, which is what selects
+/// its `[[repo]]` entry. A session the store no longer has is not an error
+/// here: preparation falls back to the node-wide defaults, as it did before
+/// the table existed.
+fn candidate_repo(store: &Store, session_id: &str) -> Option<PathBuf> {
+    crate::environment::origin_repo(store, session_id)
+        .ok()
+        .flatten()
 }
 
 /// The immutable bytes a candidate-bound build runs against: the Git tree the
