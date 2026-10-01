@@ -225,6 +225,15 @@ is `ask`, policy runs on the node, and a file in the worktree can ask for
 something but cannot approve it. Nothing about the manifest, the orientation, or
 the gate changes if a repository adds one.
 
+**A settings file is not an instruction file.** Claude Code is launched with
+`--setting-sources project` because that is what loads the repository's
+`CLAUDE.md`, and the same source loads `.claude/settings.json`: permission rules
+that allow a tool before the node hears the ask, and hooks and a status line that
+run commands. So a workspace carrying one is refused at launch, as one carrying
+`opencode.json` is for OpenCode, and the shipped policy refuses a write to any
+`.claude/settings…` path or into `.git/` mid-session. Ignored files never reach a
+workspace, so a checkout's own gitignored settings are unaffected.
+
 ### Model auth
 
 **Model credentials are brokered like every other credential.** The harness holds

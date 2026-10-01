@@ -526,9 +526,10 @@ pub trait HarnessAdapter: Send + Sync {
         None
     }
 
-    /// Entries at the root of a workspace this harness would load as its own
-    /// configuration. A session whose workspace carries one is refused: the
-    /// repository would be configuring the harness the node configures.
+    /// Paths, relative to the workspace root, that this harness would load as
+    /// its own configuration. A session whose workspace carries one is
+    /// refused: the repository would be configuring the harness the node
+    /// configures.
     fn refused_workspace_entries(&self) -> &'static [&'static str] {
         &[]
     }

@@ -942,7 +942,20 @@ The shipped bundle runs the reads unattended — queries, lookups, searches,
 pipeline and check status, job logs, documents, memory, the ledger, an item's
 brief — and asks before every write that others see: a comment, an edited or new
 ticket, a pipeline run, a document other than working notes, a line added to a
-brief.
+brief. Edits inside the session's worktree (`/work/`) run unattended too, because
+nothing reaches anyone until you approve the diff, except an edit to the harness's
+settings (`.claude/settings…`) or to Git's internals (`.git/`), which is refused. For a
+file action an allow pattern ending in `/` covers what is under it. A shell line that
+chains commands with `|`, `&&`, `||` or `;` runs unattended when every command in it
+would on its own; a redirection, substitution or variable is still asked.
+
+Two things are allowed without a rule. One of your required checks
+(`[supervision] checks`), run exactly as configured, does not ask before it runs. And
+a card offers **Allow … for this session** beside Allow and Deny: the call is
+answered once, and later calls in the same scope run unasked until the session ends —
+a command by its tool and subcommand (`cargo test …`), a one-word command or a chain
+only exactly as written, a brokered tool by name. Both are recorded in the session's
+log with the rule that let the call through, and neither reaches past a signed deny.
 
 ### Granting authority
 
