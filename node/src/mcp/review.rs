@@ -431,6 +431,7 @@ async fn submit(
             image: String::new(),
             image_source: "external harness",
             cancelled: None,
+            prepared: None,
         }
     } else {
         run_checks(
@@ -872,6 +873,13 @@ async fn run_checks(
     .await;
     manager.set_checking(&ctx.session_id, false);
     let report = report?;
+    if let Some(prepared) = &report.prepared {
+        manager.record_event(
+            &ctx.session_id,
+            ek::CHECK_PREPARED,
+            json!({ "candidate_id": candidate.id, "ok": prepared.ok, "ms": prepared.ms }),
+        );
+    }
     for result in &report.results {
         manager.record_event(
             &ctx.session_id,

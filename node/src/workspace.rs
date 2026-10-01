@@ -259,7 +259,18 @@ pub async fn from_snapshot(
         volume: volume_name(id),
         snapshot: snapshot_path(id),
     };
-    import(backend, &workspace, source).await?;
+    let lock = volume_lock(&workspace.volume);
+    let _guard = lock.lock().await;
+    validate_tree(source)?;
+    // Writable, because a candidate's snapshot is read-only and what is built
+    // from it here — a prototype's install, a browser run's output — is not.
+    backend
+        .import_writable(&workspace.volume, source)
+        .await
+        .map_err(|e| WorkspaceError::Git {
+            op: "runtime import",
+            message: e.to_string(),
+        })?;
     Ok(workspace)
 }
 

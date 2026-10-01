@@ -542,7 +542,7 @@ pub async fn ensure_base(
         .into_iter()
         .chain(commands.prepare)
         .collect();
-    ensure_with(
+    let ensured = ensure_with(
         builder,
         runner.as_ref(),
         cfg,
@@ -552,7 +552,60 @@ pub async fn ensure_base(
         &commands,
         force,
     )
-    .await
+    .await;
+    if matches!(ensured, Ensured::Rebuilt(_)) {
+        warm_base_cache(backend, cfg, store, repo).await;
+    }
+    ensured
+}
+
+/// Fill the repository's base dependency cache by preparing its default
+/// branch in the image just built. This is the only thing that ever writes
+/// that cache: what is in it came from source the operator already merged,
+/// through the entry's own `prepare` and `egress`, so every candidate and
+/// every session can start from a copy of it without inheriting anything
+/// another candidate installed. A warm-up that fails leaves a cache that is
+/// merely colder.
+async fn warm_base_cache(backend: &dyn Backend, cfg: &Config, store: &Store, repo: &Path) {
+    let environment = crate::environment::environment_for(cfg, store, Some(repo));
+    if environment.prepare.is_empty() {
+        return;
+    }
+    let warmed = async {
+        let (_, commit) = default_commit(repo).await?;
+        let tree = crate::review::snapshot_candidate(
+            &repo.to_string_lossy(),
+            &commit,
+            cfg.supervision.max_snapshot_bytes,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let id = uuid::Uuid::now_v7().simple().to_string();
+        let work = format!("tracon-warm-{id}");
+        backend
+            .import_writable(&work, &tree.root)
+            .await
+            .map_err(|error| error.to_string())?;
+        let runner = backend.runner(Vec::new());
+        let prepared = crate::review::checks::run_preparation(
+            backend,
+            runner.as_ref(),
+            &environment,
+            (&work, &environment.cache_volume),
+            &format!("tracon-w-{}", &id[..12]),
+            tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs),
+            &crate::review::checks::RunToCompletion,
+        )
+        .await;
+        let _ = backend.remove_volume(&work).await;
+        prepared.map_err(|stopped| stopped.to_string())
+    };
+    match warmed.await {
+        Ok(()) => tracing::info!(repo = %repo.display(), "base dependency cache warmed"),
+        Err(error) => {
+            tracing::warn!(repo = %repo.display(), %error, "base dependency cache not warmed")
+        }
+    }
 }
 
 /// The environment a run in `repo` gets, with its image built first if the

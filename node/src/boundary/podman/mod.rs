@@ -304,6 +304,30 @@ impl Backend for PodmanBackend {
         .await
     }
 
+    async fn import_writable(&self, volume: &str, source: &Path) -> Result<(), BoundaryError> {
+        self.import_volume(volume, source).await?;
+        // The owner may always change its own modes, so this needs no
+        // capability, and nothing leaves the volume.
+        podman(&[
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--entrypoint",
+            "chmod",
+            "--mount",
+            &format!("type=volume,src={volume},dst=/data"),
+            &self.cfg.boundary.harness_image,
+            "-R",
+            "u+w",
+            "/data",
+        ])
+        .await
+        .map(|_| ())
+    }
+
     async fn export_volume(&self, volume: &str, destination: &Path) -> Result<(), BoundaryError> {
         volume_copy_out(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
@@ -362,6 +386,37 @@ impl Backend for PodmanBackend {
             Err(BoundaryError::Podman(stderr)) if stderr.contains("no such volume") => Ok(()),
             Err(error) => Err(error),
         }
+    }
+
+    async fn volume_exists(&self, volume: &str) -> bool {
+        podman(&["volume", "exists", volume]).await.is_ok()
+    }
+
+    /// A reflink where the storage has them, so a prepared tree or a warmed
+    /// cache costs a clone almost nothing; an ordinary copy where it does not.
+    /// The copying container has no network and no capabilities, and reads
+    /// its source read-only. A source that does not exist is created empty by
+    /// the mount, which is what an empty destination is a copy of.
+    async fn clone_volume(&self, source: &str, destination: &str) -> Result<(), BoundaryError> {
+        podman(&[
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--entrypoint",
+            "sh",
+            "--mount",
+            &format!("type=volume,src={source},dst=/from,ro"),
+            "--mount",
+            &format!("type=volume,src={destination},dst=/to"),
+            &self.cfg.boundary.harness_image,
+            "-c",
+            "cp -a --reflink=auto /from/. /to/",
+        ])
+        .await
+        .map(|_| ())
     }
 
     fn egress_grants(&self) -> Option<&crate::gateway::proxy::Grants> {

@@ -210,6 +210,14 @@ impl Backend for KubeBackend {
             .map_err(|e| BoundaryError::Other(e.to_string()))
     }
 
+    async fn clone_volume(&self, source: &str, destination: &str) -> Result<(), BoundaryError> {
+        super::clone_directory_volume(
+            &self.cfg.runtime.kubernetes.state_mount,
+            source,
+            destination,
+        )
+    }
+
     fn harness_host(&self) -> String {
         self.cfg.runtime.kubernetes.gateway_host.clone()
     }

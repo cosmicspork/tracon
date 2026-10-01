@@ -10,7 +10,8 @@
 //! Ownership is read from the name. `tracon-scratch-<session>` belongs to a
 //! session; `tracon-workspace-<id>` to every open session using that
 //! workspace; `tracon-cache-w-<id>` to that same workspace, whose sessions
-//! install into it; `tracon-check-<run>` to a check run; `tracon-cache-<hash>` to
+//! install into it; `tracon-check-<run>` to a check run, as `tracon-prep-…` and
+//! `tracon-warm-…` are to the run that made them; `tracon-cache-<hash>` to
 //! nobody (it is rebuilt on demand, so it goes only when asked for). The
 //! node-wide volumes are never candidates, and neither is a name this node
 //! does not recognize.
@@ -152,6 +153,22 @@ pub fn classify_volume(name: &str, created_ms: Option<i64>, owners: &Owners) -> 
             verdict(false, "the check is running")
         } else {
             verdict(true, "the check run has finished")
+        };
+    }
+    // What one check run or one cache warm-up made for itself, and removes
+    // itself when it ends. One still here a day later was left by a run that
+    // did not finish.
+    if ["tracon-prep-", "tracon-warm-"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+    {
+        return if created_ms.is_some_and(|created| owners.now_ms - created < WORKSPACE_GRACE_MS) {
+            verdict(
+                false,
+                "made by a run in the last day; it may still be using it",
+            )
+        } else {
+            verdict(true, "left by a run that did not finish")
         };
     }
     // A session's own cache lives and dies with its workspace; the
@@ -336,6 +353,18 @@ mod tests {
         assert!(classify_volume("tracon-workspace-archived", old, &o).0);
         assert!(!classify_volume("tracon-workspace-imported", Some(o.now_ms - 1000), &o).0);
         assert!(classify_volume("tracon-workspace-imported", None, &o).0);
+        // A run's own volumes are its to remove; one a day old was left.
+        for left in [
+            "tracon-prep-0199",
+            "tracon-prep-cache-0199",
+            "tracon-warm-0199",
+        ] {
+            assert!(classify_volume(left, old, &o).0, "{left}");
+            assert!(
+                !classify_volume(left, Some(o.now_ms - 1000), &o).0,
+                "{left}"
+            );
+        }
         // What its sessions installed goes when it does, caches asked for or
         // not, and never before.
         assert!(!classify_volume("tracon-cache-w-open", old, &o).0);

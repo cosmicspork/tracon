@@ -1612,12 +1612,20 @@ impl Manager {
         let runner: Arc<dyn Runner> = match &image.image {
             Some(session_image) => {
                 // The session's own dependency cache: the agent installs into
-                // it, so no check ever reads it.
-                mounts.push(crate::runner::Mount::volume(
-                    crate::environment::session_cache_volume(&workspace.id),
-                    "/cache",
-                    false,
-                ));
+                // it, so no check ever reads it. It starts as a copy of the
+                // repository's base cache, so a first `cargo build` does not
+                // begin by fetching what the default branch already needs.
+                let cache = crate::environment::session_cache_volume(&workspace.id);
+                if !self.backend.volume_exists(&cache).await {
+                    if let Err(error) = self
+                        .backend
+                        .clone_volume(&environment.cache_volume, &cache)
+                        .await
+                    {
+                        tracing::warn!(session = %id, %error, "session cache starts empty");
+                    }
+                }
+                mounts.push(crate::runner::Mount::volume(cache, "/cache", false));
                 cache_env = crate::environment::cache_env();
                 self.backend.runner_in(adapter.id(), session_image, mounts)
             }

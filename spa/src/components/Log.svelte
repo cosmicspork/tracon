@@ -103,6 +103,8 @@
         <div class="sys">building the repository's image · the harness starts in it when it is ready, which takes minutes the first time</div>
       {:else if e.kind === 'check_started'}
         <div class="mark">checks started · {((e.payload.commands as string[]) ?? []).join(' · ')}</div>
+      {:else if e.kind === 'check_prepared'}
+        <div class={e.payload.ok ? 'mark' : 'mark crit'}>dependencies {e.payload.ok ? 'prepared' : 'not prepared'} · once for this run · {Math.round(((e.payload.ms as number) ?? 0) / 1000)}s</div>
       {:else if e.kind === 'check_result'}
         <details class="fold" open={e.payload.ok !== true}>
           <summary class={e.payload.ok ? '' : 'crit'}>{e.payload.ok ? '✓' : '✗'} {e.payload.command} · exit {e.payload.exit ?? 'none'} · {Math.round(((e.payload.ms as number) ?? 0) / 1000)}s</summary>
