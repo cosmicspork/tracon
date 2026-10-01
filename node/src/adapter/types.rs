@@ -339,6 +339,9 @@ pub enum PermissionOutcome {
 
 pub const OPTION_ALLOW_ONCE: &str = "allow_once";
 pub const OPTION_REJECT_ONCE: &str = "reject_once";
+/// Offered by the node, never by a harness: allow this, and what shares its
+/// scope, for the rest of the session. The harness is answered `allow_once`.
+pub const OPTION_ALLOW_SESSION: &str = "allow_session";
 
 pub mod methods {
     pub const INITIALIZE: &str = "initialize";

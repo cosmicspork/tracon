@@ -162,6 +162,14 @@ pub struct Supervisor {
     /// The intent of the prompt currently in flight, settled when the turn
     /// reports and marked uncertain when it does not.
     prompt_intent: Option<String>,
+    /// See `with_checks`.
+    checks: Vec<String>,
+    /// What the operator allowed for the rest of this session, by
+    /// `policy::SessionGrant::key`. Consulted only after the signed policy
+    /// asked, so a grant never reaches past a denial.
+    grants: std::collections::HashSet<String>,
+    /// The grant each open request offered, by permission id.
+    offered: HashMap<String, crate::policy::SessionGrant>,
 }
 
 impl Supervisor {
@@ -194,6 +202,9 @@ impl Supervisor {
             paused_turn: None,
             ingest: None,
             prompt_intent: None,
+            checks: Vec::new(),
+            grants: Default::default(),
+            offered: HashMap::new(),
             self_tx,
             runner,
             container,
@@ -214,6 +225,18 @@ impl Supervisor {
     /// a stdio harness has nothing to reconcile against and gets none.
     pub fn with_ingest(mut self, ingest: Arc<crate::session::ingest::Ingest>) -> Self {
         self.ingest = Some(ingest);
+        self
+    }
+
+    /// The operator's required check commands. Running one exactly as
+    /// configured is what the operator already asked for at review, so it is
+    /// not asked again before it runs.
+    pub fn with_checks(mut self, checks: Vec<String>) -> Self {
+        self.checks = checks
+            .into_iter()
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect();
         self
     }
 
@@ -791,7 +814,7 @@ impl Supervisor {
 
     async fn on_permission(
         &mut self,
-        request: PermissionRequest,
+        mut request: PermissionRequest,
         reply: oneshot::Sender<PermissionReply>,
     ) {
         // Policy sees the adapter's canonical subject, never the display
@@ -826,14 +849,38 @@ impl Supervisor {
             );
             return;
         }
-        let decision = self.policy.read().decide(&crate::policy::Request {
+        let subject = crate::policy::Request {
             channel: &self.channel,
             action: &request.action,
             kind: request.kind.as_deref(),
             resource: request.resource.as_deref(),
             command: request.command.as_deref(),
             arguments: None,
-        });
+        };
+        let mut decision = self.policy.read().decide(&subject);
+        let grant = crate::policy::session_grant(&subject);
+        if decision.verdict == crate::policy::Verdict::Ask {
+            let check = request.kind.as_deref() == Some("execute")
+                && request
+                    .command
+                    .as_deref()
+                    .is_some_and(|c| self.checks.iter().any(|k| k == c.trim()));
+            if check {
+                decision = crate::policy::Decision {
+                    verdict: crate::policy::Verdict::Allow,
+                    rule_id: Some("operator-checks".into()),
+                    reason: Some(
+                        "One of the operator's required checks, exactly as configured.".into(),
+                    ),
+                };
+            } else if grant.as_ref().is_some_and(|g| self.grants.contains(&g.key)) {
+                decision = crate::policy::Decision {
+                    verdict: crate::policy::Verdict::Allow,
+                    rule_id: Some("session-grant".into()),
+                    reason: Some("The operator allowed this for the rest of the session.".into()),
+                };
+            }
+        }
         match decision.verdict {
             crate::policy::Verdict::Allow | crate::policy::Verdict::Deny => {
                 let allow = decision.verdict == crate::policy::Verdict::Allow;
@@ -865,6 +912,15 @@ impl Supervisor {
             crate::policy::Verdict::Ask => {}
         }
 
+        if let Some(grant) = &grant {
+            request
+                .options
+                .push(crate::adapter::types::PermissionOption {
+                    option_id: crate::adapter::types::OPTION_ALLOW_SESSION.into(),
+                    name: grant.label.clone(),
+                    kind: crate::adapter::types::OPTION_ALLOW_SESSION.into(),
+                });
+        }
         let row = permission_row(
             &self.session_id,
             &self.node_id,
@@ -881,6 +937,9 @@ impl Supervisor {
             return;
         }
         self.open.lock().await.insert(id.clone(), reply);
+        if let Some(grant) = grant {
+            self.offered.insert(id.clone(), grant);
+        }
         self.record(
             ek::PERMISSION_REQUEST,
             Some(id.clone()),
@@ -903,18 +962,46 @@ impl Supervisor {
         if self.is_fenced() {
             return Err("session is paused".into());
         }
+        // A session grant answers this request as an ordinary allow; the
+        // harness never learns a wider answer than once. What widens is the
+        // node's own memory of what the operator said.
+        let grant = if option_id == crate::adapter::types::OPTION_ALLOW_SESSION {
+            if arguments.is_some() {
+                return Err("a session grant allows the call as asked, not edited".into());
+            }
+            Some(
+                self.offered
+                    .get(permission_id)
+                    .cloned()
+                    .ok_or("this request offered no session grant")?,
+            )
+        } else {
+            None
+        };
+        let reply_option = if grant.is_some() {
+            crate::adapter::types::OPTION_ALLOW_ONCE
+        } else {
+            option_id
+        };
         on_answer_row(
             &self.store,
             &mut *self.open.lock().await,
             permission_id,
-            option_id,
+            reply_option,
             arguments.clone(),
             self.mono_ms(),
         )?;
+        self.offered.remove(permission_id);
+        if let Some(grant) = &grant {
+            self.grants.insert(grant.key.clone());
+        }
         self.record(
             ek::PERMISSION_ANSWER,
             Some(permission_id.to_string()),
-            json!({ "permission_id": permission_id, "option_id": option_id, "arguments": arguments }),
+            json!({
+                "permission_id": permission_id, "option_id": option_id, "arguments": arguments,
+                "grant": grant.map(|g| g.key),
+            }),
         );
         self.back_to_running().await;
         Ok(())
@@ -943,6 +1030,7 @@ impl Supervisor {
                     crate::adapter::types::OPTION_REJECT_ONCE.into(),
                 ));
             }
+            self.offered.remove(&id);
             let _ = self
                 .store
                 .resolve_permission(&id, "expired", None, self.mono_ms());

@@ -122,19 +122,192 @@ impl Rule {
                 });
         }
         let Some(command) = req.command else {
-            return false;
+            // A file action is matched on its path: a pattern ending in `/` is
+            // a directory and covers what is under it, anything else names one
+            // path. A path that climbs (`..`) is under nothing.
+            return req.resource.is_some_and(|path| {
+                !path.split('/').any(|part| part == "..")
+                    && self.matches.iter().any(|pat| {
+                        let pat = pat.trim();
+                        !pat.is_empty()
+                            && if pat.ends_with('/') {
+                                path.starts_with(pat)
+                            } else {
+                                path == pat
+                            }
+                    })
+            });
         };
         let cmd = command.trim().to_ascii_lowercase();
         // A shell metacharacter means the line does more than its leading token
-        // says; such a command is asked, not auto-allowed.
+        // says; such a command is asked, not auto-allowed. A chain of commands
+        // each allowed on its own is decided by `Policy::decide_chain`.
         if cmd.contains(['&', '|', ';', '`', '>', '<', '$', '\n', '\r']) {
             return false;
         }
+        self.leads(&cmd)
+    }
+
+    /// Whether a simple command's leading words are one of this rule's
+    /// patterns. `catnip` is not `cat`.
+    fn leads(&self, cmd: &str) -> bool {
+        let cmd = cmd.trim().to_ascii_lowercase();
         self.matches.iter().any(|pat| {
             let pat = pat.trim().to_ascii_lowercase();
             !pat.is_empty() && (cmd == pat || cmd.starts_with(&format!("{pat} ")))
         })
     }
+
+    fn scoped_to(&self, req: &Request) -> bool {
+        (self.channels.is_empty() || self.channels.iter().any(|c| c == req.channel))
+            && (self.kinds.is_empty() || self.kinds.iter().any(|k| Some(k.as_str()) == req.kind))
+    }
+}
+
+/// Split a shell line into the simple commands it chains with `|`, `||`, `&&`
+/// or `;`, or `None` when it does anything else: redirect, substitute, expand
+/// a variable, run in the background, group, or span lines.
+///
+/// Quoting is honoured, because `grep -n "a|b" f` is one command and asking
+/// about it is noise: inside single quotes nothing is special, inside double
+/// quotes only `$` and a backtick are. The redirections that only discard
+/// output (`2>/dev/null`, `>/dev/null`, `2>&1`) are dropped first; they change
+/// where output goes, never what runs.
+pub fn simple_commands(line: &str) -> Option<Vec<String>> {
+    let mut text = format!(" {} ", line.trim());
+    for harmless in [" 2>/dev/null ", " >/dev/null ", " 2>&1 ", " &>/dev/null "] {
+        while text.contains(harmless) {
+            text = text.replace(harmless, " ");
+        }
+    }
+    let chars: Vec<char> = text.trim().chars().collect();
+    let mut commands = Vec::new();
+    let mut current = String::new();
+    let (mut single, mut double) = (false, false);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        if single {
+            single = c != '\'';
+            current.push(c);
+        } else if double {
+            match c {
+                '"' => double = false,
+                '$' | '`' => return None,
+                '\\' => {
+                    current.push(c);
+                    i += 1;
+                    current.push(*chars.get(i)?);
+                    i += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            current.push(c);
+        } else {
+            match c {
+                '\'' => {
+                    single = true;
+                    current.push(c);
+                }
+                '"' => {
+                    double = true;
+                    current.push(c);
+                }
+                '\\' => {
+                    let escaped = *chars.get(i + 1)?;
+                    if escaped == '\n' {
+                        return None;
+                    }
+                    current.push(c);
+                    current.push(escaped);
+                    i += 1;
+                }
+                '|' | ';' => {
+                    commands.push(std::mem::take(&mut current));
+                    if c == '|' && next == Some('|') {
+                        i += 1;
+                    }
+                }
+                '&' if next == Some('&') => {
+                    commands.push(std::mem::take(&mut current));
+                    i += 1;
+                }
+                '&' | '>' | '<' | '$' | '`' | '(' | ')' | '{' | '}' | '\n' | '\r' => return None,
+                _ => current.push(c),
+            }
+        }
+        i += 1;
+    }
+    if single || double {
+        return None;
+    }
+    commands.push(current);
+    let commands: Vec<String> = commands.iter().map(|c| c.trim().to_string()).collect();
+    if commands.iter().any(String::is_empty) {
+        return None;
+    }
+    Some(commands)
+}
+
+/// What answering "allow for this session" grants: the scope a later request
+/// must share to be allowed without asking, and how the card words it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionGrant {
+    pub key: String,
+    pub label: String,
+}
+
+/// The session-scoped grant a request offers.
+///
+/// A command is granted by its tool and subcommand (`cargo test`, `just
+/// check`), so the next `cargo test -p node` is not asked again. A one-word
+/// command or a chain is granted only exactly as written: "always `grep`" or
+/// "always this pipeline" is wider than what the operator read. A brokered
+/// tool is granted by name, anything else for the same action on the same
+/// target. A grant is consulted only after the signed policy asked, so it never
+/// reaches past a denial.
+pub fn session_grant(req: &Request) -> Option<SessionGrant> {
+    if let Some(command) = req.command {
+        let command = command.trim();
+        if command.is_empty() {
+            return None;
+        }
+        let word = |w: &str| {
+            w.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                && w.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+        };
+        let plain = !command.contains(|c: char| {
+            !(c.is_ascii_graphic() || c == ' ') || "|;&<>$`()'\"\\".contains(c)
+        });
+        let mut words = command.split_whitespace();
+        if let (true, Some(first), Some(second)) = (plain, words.next(), words.next()) {
+            if word(first) && word(second) {
+                let prefix = format!("{first} {second}").to_ascii_lowercase();
+                return Some(SessionGrant {
+                    key: format!("command:{prefix}"),
+                    label: format!("Allow `{prefix} …` for this session"),
+                });
+            }
+        }
+        return Some(SessionGrant {
+            key: format!("exact:{command}"),
+            label: "Allow this exact command for this session".into(),
+        });
+    }
+    if req.kind == Some(crate::mcp::TOOL_KIND) {
+        return Some(SessionGrant {
+            key: format!("tool:{}", req.action),
+            label: format!("Allow `{}` for this session", req.action),
+        });
+    }
+    let (kind, resource) = (req.kind?, req.resource?);
+    Some(SessionGrant {
+        key: format!("{kind}:{}:{resource}", req.action),
+        label: "Allow this for this session".into(),
+    })
 }
 
 /// `*` matches any run of characters; nothing else is special.
@@ -277,14 +450,40 @@ impl Policy {
                 _ => {}
             }
         }
-        match allow {
-            Some(rule) => Decision {
+        if let Some(rule) = allow {
+            return Decision {
                 verdict: Verdict::Allow,
                 rule_id: Some(rule.id.clone()),
                 reason: Some(rule.reason.clone()),
-            },
-            None => Decision::ask(),
+            };
         }
+        self.decide_chain(req).unwrap_or_else(Decision::ask)
+    }
+
+    /// A chain of simple commands is allowed when every command in it would be
+    /// allowed on its own, by whichever rules allow each. The whole line has
+    /// already met every denial, so a chain cannot carry a denied command past
+    /// the rule that refuses it.
+    fn decide_chain(&self, req: &Request) -> Option<Decision> {
+        let commands = simple_commands(req.command?)?;
+        let mut ids: Vec<&str> = Vec::new();
+        for command in &commands {
+            let rule = self.rules.iter().find(|rule| {
+                rule.verdict == Verdict::Allow
+                    && rule.args.is_empty()
+                    && !rule.matches.is_empty()
+                    && rule.scoped_to(req)
+                    && rule.leads(command)
+            })?;
+            if !ids.contains(&rule.id.as_str()) {
+                ids.push(&rule.id);
+            }
+        }
+        Some(Decision {
+            verdict: Verdict::Allow,
+            rule_id: Some(ids.join("+")),
+            reason: Some("Every command in the chain is one the policy allows on its own.".into()),
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -639,6 +838,144 @@ mod tests {
             Verdict::Ask
         );
     }
+    #[test]
+    fn the_session_cannot_configure_its_own_harness() {
+        let write = |path: &'static str| Request {
+            channel: "work",
+            action: "edit",
+            kind: Some("write"),
+            resource: Some(path),
+            command: None,
+            arguments: None,
+        };
+        for (path, rule) in [
+            ("/work/.claude/settings.json", "harness-settings"),
+            (".claude/settings.json", "harness-settings"),
+            ("/root/.claude/settings.local.json", "harness-settings"),
+            ("/work/.git/hooks/pre-commit", "git-internals"),
+            ("/work/.git/config", "git-internals"),
+        ] {
+            let d = policy().decide(&write(path));
+            assert_eq!(d.verdict, Verdict::Deny, "{path}");
+            assert_eq!(d.rule_id.as_deref(), Some(rule), "{path}");
+        }
+        let shell = policy().decide(&req(
+            "echo '{\"permissions\":{}}' > .claude/settings.json",
+            "work",
+        ));
+        assert_eq!(shell.rule_id.as_deref(), Some("harness-settings"));
+
+        // The work itself is edited unattended, `.github/` included; reading
+        // Git's state is still free.
+        for path in [
+            "/work/src/main.rs",
+            "/work/.github/workflows/ci.yml",
+            "/work/.claude/commands/x.md",
+        ] {
+            let d = policy().decide(&write(path));
+            assert_eq!(d.verdict, Verdict::Allow, "{path}");
+            assert_eq!(d.rule_id.as_deref(), Some("worktree-edits"), "{path}");
+        }
+        assert_eq!(
+            policy().decide(&req("git status", "work")).verdict,
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn only_edits_inside_the_worktree_are_unattended() {
+        let write = |path: &'static str| Request {
+            channel: "work",
+            action: "write",
+            kind: Some("write"),
+            resource: Some(path),
+            command: None,
+            arguments: None,
+        };
+        for path in [
+            "/tmp/x",
+            "/root/notes.md",
+            "/work",
+            "/workspace/x",
+            "/work/../root/.bashrc",
+            "work/x",
+        ] {
+            assert_eq!(
+                policy().decide(&write(path)).verdict,
+                Verdict::Ask,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chain_of_allowed_commands_is_allowed_and_anything_more_is_asked() {
+        for cmd in [
+            "grep -n foo src/a.rs | head -20",
+            "git log --oneline -5 && git status",
+            "ls node/src; cat README.md",
+            "grep -n \"a|b\" src/x.rs",
+            "grep -rn 'x > y' . 2>/dev/null | head",
+            "git show HEAD --stat || git log -1",
+        ] {
+            let d = policy().decide(&req(cmd, "work"));
+            assert_eq!(d.verdict, Verdict::Allow, "{cmd}");
+        }
+        assert_eq!(
+            policy()
+                .decide(&req("git log -3 | head", "work"))
+                .rule_id
+                .as_deref(),
+            Some("read-only-git+read-only-shell")
+        );
+        for cmd in [
+            "grep foo . | sh",
+            "cat a && rm -rf /work",
+            "cat a > b",
+            "cat \"$HOME/x\"",
+            "cat a | tee b",
+            "ls & curl x",
+            "(cat a)",
+            "cat 'unterminated | sh",
+            "cat a |",
+            "cat a\nrm b",
+            "for f in *; do cat $f; done",
+        ] {
+            assert_eq!(
+                policy().decide(&req(cmd, "work")).verdict,
+                Verdict::Ask,
+                "{cmd}"
+            );
+        }
+        // A denied command cannot ride in on a chain of reads.
+        assert_eq!(
+            policy()
+                .decide(&req("git status && git push", "work"))
+                .verdict,
+            Verdict::Deny
+        );
+    }
+
+    #[test]
+    fn a_session_grant_is_as_wide_as_the_operator_read() {
+        let grant = |cmd: &'static str| session_grant(&req(cmd, "work")).unwrap().key;
+        assert_eq!(grant("cargo test -p tracon"), "command:cargo test");
+        assert_eq!(grant("cargo test"), grant("cargo test --no-fail-fast"));
+        assert_eq!(grant("just check"), "command:just check");
+        // One word, or anything a shell would do more with, is exact.
+        assert_eq!(grant("make"), "exact:make");
+        assert_eq!(grant("grep -n foo x"), "exact:grep -n foo x");
+        assert_eq!(grant("cargo test; rm -rf /"), "exact:cargo test; rm -rf /");
+        assert_ne!(grant("cargo test | sh"), grant("cargo test"));
+        assert_ne!(grant("cargo $(rm x)"), "command:cargo $(rm");
+
+        let args = serde_json::json!({});
+        assert_eq!(
+            session_grant(&tool("pr_comment", &args, "")).unwrap().key,
+            "tool:pr_comment"
+        );
+    }
+
     #[test]
     fn unknown_managed_actions_are_asked_or_explicitly_denied() {
         let benign = Request {

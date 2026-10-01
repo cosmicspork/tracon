@@ -890,6 +890,30 @@ impl Rig {
         permission_timeout: Duration,
         handle: Arc<dyn HarnessHandle>,
     ) -> Self {
+        Self::start_full(budget, permission_timeout, handle, Vec::new()).await
+    }
+
+    /// A rig whose operator requires `checks` at review.
+    async fn start_with_checks(checks: &[&str]) -> Self {
+        Self::start_full(
+            10_000,
+            Duration::from_secs(60),
+            Arc::new(FakeHandle {
+                prompts: Arc::new(Mutex::new(Vec::new())),
+                tokens: Arc::new(Mutex::new(1500)),
+                killed: Arc::new(Mutex::new(false)),
+            }),
+            checks.iter().map(|c| c.to_string()).collect(),
+        )
+        .await
+    }
+
+    async fn start_full(
+        budget: i64,
+        permission_timeout: Duration,
+        handle: Arc<dyn HarnessHandle>,
+        checks: Vec<String>,
+    ) -> Self {
         let store = Arc::new(Store::open_in_memory().unwrap());
         store
             .put_node(&NodeRow {
@@ -944,7 +968,8 @@ impl Rig {
             "tracon-h-test".into(),
             Default::default(),
             "personal".into(),
-        );
+        )
+        .with_checks(checks);
         tokio::spawn(sup.run(ev_rx, cmd_rx));
         let rig = Self {
             store,
@@ -993,16 +1018,20 @@ impl Rig {
     }
 
     async fn request_permission(&self) -> oneshot::Receiver<PermissionReply> {
+        self.request_command("just test").await
+    }
+
+    async fn request_command(&self, command: &str) -> oneshot::Receiver<PermissionReply> {
         let (reply, wait) = oneshot::channel();
         self.events
             .send(HarnessEvent::Permission {
                 request: tracon::adapter::PermissionRequest {
                     tool_call_id: Some("call|fc".into()),
-                    title: "run just test".into(),
+                    title: format!("run {command}"),
                     action: "bash".into(),
                     kind: Some("execute".into()),
                     resource: None,
-                    command: Some("just test".into()),
+                    command: Some(command.into()),
                     raw_input: None,
                     options: vec![],
                 },
@@ -1012,6 +1041,82 @@ impl Rig {
             .unwrap();
         wait
     }
+
+    async fn answer(&self, permission_id: &str, option_id: &str) -> Result<(), String> {
+        let (ack, done) = oneshot::channel();
+        self.commands
+            .send(Command::Answer {
+                permission_id: permission_id.into(),
+                option_id: option_id.into(),
+                arguments: None,
+                ack,
+            })
+            .await
+            .unwrap();
+        done.await.unwrap()
+    }
+}
+
+/// "Allow for this session" answers the harness once, and the node remembers
+/// it: the next call in the same scope runs without asking, a call outside it
+/// is still asked, and the log says which rule let each one through.
+#[tokio::test]
+async fn a_session_grant_answers_once_and_spares_the_next_ask_in_its_scope() {
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    let first = rig.request_command("cargo test -p tracon").await;
+    assert!(rig.await_state("waiting_on_you").await);
+    let open = rig.store.open_permissions().unwrap();
+    let offered: Vec<serde_json::Value> = serde_json::from_str(&open[0].options).unwrap();
+    let grant = offered
+        .iter()
+        .find(|o| o["kind"] == "allow_session")
+        .expect("the node offers a session grant");
+    assert_eq!(grant["name"], "Allow `cargo test …` for this session");
+
+    rig.answer(&open[0].id, "allow_session").await.unwrap();
+    match first.await.unwrap() {
+        PermissionReply::Selected(o) => assert_eq!(o, "allow_once", "the harness is answered once"),
+        other => panic!("expected a selection, got {other:?}"),
+    }
+
+    let second = rig.request_command("cargo test --no-fail-fast").await;
+    match second.await.unwrap() {
+        PermissionReply::Selected(o) => assert_eq!(o, "allow_once"),
+        other => panic!("expected a selection, got {other:?}"),
+    }
+    let events = rig.store.events_after(&rig.session_id, 0, 200).unwrap();
+    let answer = events
+        .iter()
+        .find(|e| e.kind == "permission_answer")
+        .unwrap();
+    assert_eq!(answer.payload["grant"], "command:cargo test");
+    assert!(events
+        .iter()
+        .any(|e| e.kind == "policy_allowed" && e.payload["rule"] == "session-grant"));
+
+    // Outside the grant's scope it is asked again.
+    let _third = rig.request_command("cargo build").await;
+    assert!(rig.await_state("waiting_on_you").await);
+}
+
+/// The operator's own required checks run without asking when the session
+/// runs them exactly as configured; anything else on the same tool is asked.
+#[tokio::test]
+async fn the_operators_required_checks_run_without_asking() {
+    state::isolate();
+    let rig = Rig::start_with_checks(&["just check"]).await;
+    match rig.request_command(" just check ").await.await.unwrap() {
+        PermissionReply::Selected(o) => assert_eq!(o, "allow_once"),
+        other => panic!("expected a selection, got {other:?}"),
+    }
+    let events = rig.store.events_after(&rig.session_id, 0, 200).unwrap();
+    assert!(events
+        .iter()
+        .any(|e| e.kind == "policy_allowed" && e.payload["rule"] == "operator-checks"));
+
+    let _other = rig.request_command("just check && just deploy").await;
+    assert!(rig.await_state("waiting_on_you").await);
 }
 
 #[tokio::test]

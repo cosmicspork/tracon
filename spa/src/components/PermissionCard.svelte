@@ -57,8 +57,9 @@
   }
 
   function label(kind: string, name: string): string {
-    // Only the two once-options are offered: "always" is a policy decision the
-    // gate does not delegate to a card.
+    // A harness's own "always" is never offered: it would widen the harness's
+    // standing rules, which are the node's. The node's session grant is
+    // offered instead, and its name says exactly how wide it is.
     return { allow_once: 'Allow', reject_once: 'Deny' }[kind] ?? name
   }
 </script>
@@ -94,6 +95,11 @@
     {:else}
       {#each options.filter((o) => o.kind === 'reject_once') as o (o.option_id)}
         <button class="lnk d" disabled={busy} onclick={() => answer(o.option_id)}
+          >{label(o.kind, o.name)}</button
+        >
+      {/each}
+      {#each options.filter((o) => o.kind === 'allow_session') as o (o.option_id)}
+        <button class="lnk" disabled={busy} title="Recorded on the session; a signed denial still wins" onclick={() => answer(o.option_id)}
           >{label(o.kind, o.name)}</button
         >
       {/each}

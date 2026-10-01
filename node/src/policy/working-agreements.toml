@@ -6,7 +6,7 @@
 # Anything not matched here is asked, so adding a rule can only ever reduce the
 # number of interruptions, never widen what an agent may do unattended.
 
-version = 10
+version = 11
 
 # --- 1. Worktree, not the main checkout -------------------------------------
 # Structurally true already: the harness only ever sees its own worktree at
@@ -33,6 +33,27 @@ matches = [
     "cd /users/",
     "cd /root",
 ]
+
+# The harness's own configuration is the node's to write, not the session's.
+# Claude Code reads `.claude/settings.json` from the worktree (a session whose
+# repository carries one is refused at launch), and a settings file written
+# mid-session could allow tools without asking or add a hook that runs commands.
+# Git's internals are not the work either: a hook or a config change there runs
+# on whoever next commits in that tree. Matched as substrings so a relative
+# path, an absolute one and a shell line naming it are all caught.
+
+[[rule]]
+id = "harness-settings"
+verdict = "deny"
+reason = "The harness's settings are the node's, not the session's: a settings file could allow tools without asking. Change the work, not the harness."
+matches = [".claude/settings"]
+
+[[rule]]
+id = "git-internals"
+verdict = "deny"
+reason = "Git's internals are not the work: a hook or config written there runs on whoever commits next. Change tracked files and commit them."
+kinds = ["write"]
+matches = [".git/"]
 
 # --- 2. Review before publish ------------------------------------------------
 # The agent holds no forge token, so these would fail anyway. Denying them makes
@@ -100,8 +121,9 @@ matches = [
     "git remote -v",
 ]
 
-# Leading-token match: the command must *start* with one of these, and carry no
-# shell chaining or redirection, or it is asked rather than auto-allowed.
+# Leading-token match: the command must *start* with one of these. A chain
+# joined by `|`, `&&`, `||` or `;` is allowed only when every command in it is
+# allowed on its own; a redirection, substitution or variable is asked.
 [[rule]]
 id = "read-only-shell"
 verdict = "allow"
@@ -114,6 +136,21 @@ id = "reads-and-thoughts"
 verdict = "allow"
 reason = "Reading a file or updating the plan changes nothing outside the session."
 kinds = ["read", "think"]
+
+# --- Editing the work --------------------------------------------------------
+# An edit inside the session's own worktree reaches nothing until the operator
+# approves the diff at review, which is where an edit is actually judged. Asking
+# about each one first was most of the queue on a real implementation session
+# (46 of 50 asks) and taught the operator to approve without reading. Edits to
+# the harness's settings and to Git's internals are refused above whatever
+# this says, and a path that climbs out of /work is not under it.
+
+[[rule]]
+id = "worktree-edits"
+verdict = "allow"
+reason = "An edit in the session's own worktree reaches nothing until the operator approves the diff at review."
+kinds = ["write"]
+matches = ["/work/"]
 
 # --- Brokered tools ----------------------------------------------------------
 # What the node does on the agent's behalf is decided here too, before the

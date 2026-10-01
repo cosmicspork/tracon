@@ -653,6 +653,14 @@ impl HarnessAdapter for ClaudeAdapter {
         Self::layout()
     }
 
+    /// `--setting-sources project` is what loads the repository's `CLAUDE.md`,
+    /// and it loads `.claude/settings.json` with it: permission rules that
+    /// allow tools without the node seeing the ask, and hooks and a status
+    /// line that run commands. `settings.local.json` is not a project source.
+    fn refused_workspace_entries(&self) -> &'static [&'static str] {
+        &[".claude/settings.json"]
+    }
+
     async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
         let out = runner
             .run_capture(RunnerCommand {
@@ -903,6 +911,16 @@ mod tests {
             "usage": { "input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 5 }
         }));
         assert_eq!(u.charged(), 125);
+    }
+
+    #[test]
+    fn a_repository_that_would_grant_the_harness_tools_is_refused() {
+        let refused = ClaudeAdapter::new("1").refused_workspace_entries();
+        assert_eq!(refused, &[".claude/settings.json"]);
+        assert!(
+            !refused.iter().any(|e| e.contains("local")),
+            "settings.local.json is not a project source and a checkout may keep one"
+        );
     }
 
     #[test]

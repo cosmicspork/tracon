@@ -1295,11 +1295,10 @@ impl Manager {
             .find(|entry| std::fs::symlink_metadata(snapshot.join(entry)).is_ok())
         {
             anyhow::bail!(
-                "the workspace carries `{entry}` at its root. The {} harness would load it as its \
-                 own configuration after the node's, where it could allow tools without asking or \
-                 start MCP servers and plugins, so the session was not started. Remove or rename \
-                 it on the branch this work starts from, or run this repository under the Claude \
-                 Code harness (`[harness] id = \"claude\"`), which does not read it.",
+                "the workspace carries `{entry}`. The {} harness would load it as its own \
+                 configuration after the node's, where it could allow tools without asking or \
+                 run commands and plugins, so the session was not started. Remove or rename it \
+                 on the branch this work starts from.",
                 adapter.id()
             );
         }
@@ -1724,7 +1723,8 @@ impl Manager {
         let sup = match ingest {
             Some(ingest) => sup.with_ingest(ingest),
             None => sup,
-        };
+        }
+        .with_checks(self.cfg.supervision.checks.clone());
         let live = self.live.clone();
         let tokens = self.tokens.clone();
         let native = self.native.clone();
