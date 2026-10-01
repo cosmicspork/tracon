@@ -747,6 +747,31 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         tokio::spawn(crate::gateway::proxy::serve(port, allow));
         tracing::info!(port, "connect proxy listening");
     }
+    // Where a gateway container does carry the harness proxy, the node still
+    // serves the per-client one behind the gateway's second forward: who may
+    // reach what is decided here, by the grant each client presents.
+    if let Some(grants) = backend.egress_grants() {
+        let granted = crate::gateway::proxy::Granted::new(grants.clone());
+        let listen = cfg.egress_listen();
+        tracing::info!(%listen, "egress listener");
+        match listen {
+            crate::config::HarnessListen::Tcp(addr) => {
+                let l = tokio::net::TcpListener::bind(addr)
+                    .await
+                    .with_context(|| format!("bind egress listener {addr}"))?;
+                tokio::spawn(crate::gateway::proxy::serve_granted(l, granted));
+            }
+            crate::config::HarnessListen::Unix(path) => {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                let _ = std::fs::remove_file(&path);
+                let l = tokio::net::UnixListener::bind(&path)
+                    .with_context(|| format!("bind {}", path.display()))?;
+                tokio::spawn(crate::gateway::proxy::serve_granted_unix(l, granted));
+            }
+        }
+    }
     let harness_app = harness_router(state.clone());
     tracing::info!(listen = %cfg.gateway.harness_listen, "harness listener");
     match &cfg.gateway.harness_listen {

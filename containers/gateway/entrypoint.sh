@@ -1,12 +1,13 @@
 #!/bin/sh
-# Gateway: allowlist HTTPS CONNECT proxy for the harness, plus a forward from the
+# Gateway: allowlist HTTPS CONNECT proxy for the harness, plus forwards from the
 # internal network to the node. TRACON_UPSTREAM is a socat address such as
 # UNIX-CONNECT:/run/tracon/node.sock or TCP:host.containers.internal:7421.
 #
-# TRACON_QA_PROXY_PORT, when set, starts a second, independent CONNECT proxy
-# filtered by qa_allow.txt instead of allow.txt: a QA browser run's egress
-# and an ordinary harness session's egress are two separate filters, so
-# rewriting one (the node does, per QA run) never widens the other.
+# TRACON_EGRESS_UPSTREAM, when set, is forwarded the same way from
+# TRACON_EGRESS_PORT: the node's own per-client egress proxy, where a QA
+# browser run, a dependency preparation and a session each present their own
+# credentials and are filtered by their own grant. Nothing here decides what
+# any of them may reach; this only carries the connection to the node.
 set -eu
 : "${TRACON_UPSTREAM:?TRACON_UPSTREAM is required}"
 : "${TRACON_LISTEN_IP:=10.89.0.2}"
@@ -16,15 +17,8 @@ test -r /etc/tinyproxy/allow.txt || { echo "allow.txt missing" >&2; exit 1; }
 conf=/tmp/tinyproxy.conf
 sed "s/^Listen .*/Listen ${TRACON_LISTEN_IP}/" /etc/tinyproxy/tinyproxy.conf > "$conf"
 socat "TCP-LISTEN:7421,bind=${TRACON_LISTEN_IP},fork,reuseaddr" "${TRACON_UPSTREAM}" &
-if [ -n "${TRACON_QA_PROXY_PORT:-}" ]; then
-  test -r /etc/tinyproxy/qa_allow.txt || { echo "qa_allow.txt missing" >&2; exit 1; }
-  qa_conf=/tmp/qa-tinyproxy.conf
-  sed \
-    -e "s/^Listen .*/Listen ${TRACON_LISTEN_IP}/" \
-    -e "s/^Port .*/Port ${TRACON_QA_PROXY_PORT}/" \
-    -e 's#^PidFile .*#PidFile "/run/tinyproxy-qa.pid"#' \
-    -e 's#^Filter .*#Filter "/etc/tinyproxy/qa_allow.txt"#' \
-    /etc/tinyproxy/tinyproxy.conf > "$qa_conf"
-  tinyproxy -d -c "$qa_conf" &
+if [ -n "${TRACON_EGRESS_UPSTREAM:-}" ]; then
+  : "${TRACON_EGRESS_PORT:?TRACON_EGRESS_PORT is required with TRACON_EGRESS_UPSTREAM}"
+  socat "TCP-LISTEN:${TRACON_EGRESS_PORT},bind=${TRACON_LISTEN_IP},fork,reuseaddr" "${TRACON_EGRESS_UPSTREAM}" &
 fi
 exec tinyproxy -d -c "$conf"

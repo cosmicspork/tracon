@@ -621,17 +621,9 @@ async fn prepare_check_copy(
         },
         None => Stopped::TimedOut,
     };
-    // The gateway has one holder at a time, so this can wait behind another
-    // preparation or a QA browser run. That wait is part of the execution.
-    let egress = until_stopped(
-        scoped_egress(backend, &environment.egress),
-        deadline,
-        cancel,
-        None,
-    )
-    .await
-    .map_err(|stop| stopped(stop, ""))?
-    .map_err(Stopped::Unprepared)?;
+    // This preparation's own grant: nothing to wait for, and nothing another
+    // run's hosts can widen.
+    let egress = scoped_egress(backend, &environment.egress).map_err(Stopped::Unprepared)?;
     for (step, command) in environment.prepare.iter().enumerate() {
         let name = format!("{runner_name}-p{step}");
         let running = runner.capture_name(&name);
@@ -1373,8 +1365,6 @@ mod tests {
         }
     }
 
-    static RECORDED_EGRESS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
     struct RecordingBackend(std::sync::Arc<Recorded>);
 
     #[async_trait::async_trait]
@@ -1423,23 +1413,22 @@ mod tests {
             "/home/harness".into()
         }
         async fn reconcile(&self, _names: &[String]) {}
-        async fn scope_qa_egress(
+        fn egress_grant(
             &self,
-            allowed_hosts: &[String],
-        ) -> Result<crate::boundary::QaEgressGuard, crate::boundary::BoundaryError> {
-            let permit = RECORDED_EGRESS.lock().await;
+            spec: crate::gateway::proxy::GrantSpec,
+        ) -> Result<crate::boundary::EgressGrant, crate::boundary::BoundaryError> {
             let recorded = self.0.clone();
             recorded
                 .log
                 .lock()
                 .unwrap()
-                .push(format!("open {}", allowed_hosts.join(",")));
-            Ok(crate::boundary::QaEgressGuard::new(permit, move || {
-                recorded.log.lock().unwrap().push("close".into());
-            }))
-        }
-        fn qa_proxy_url(&self) -> Option<String> {
-            Some("http://gw:8890".into())
+                .push(format!("open {}", spec.hosts.join(",")));
+            Ok(crate::boundary::EgressGrant::new(
+                "http://gw:8890".into(),
+                spec.client,
+                "token".into(),
+                move || recorded.log.lock().unwrap().push("close".into()),
+            ))
         }
     }
 
@@ -1544,13 +1533,14 @@ mod tests {
             assert!(!prepare.mounts[1].read_only && check.mounts[1].read_only);
             assert_eq!(prepare.mounts[1].volume, check.mounts[1].volume);
             assert!(prepare.mounts[1].volume.starts_with("tracon-cache-"));
+            // Its own credentials, in both spellings of the variable.
             assert_eq!(
                 var(prepare, "HTTPS_PROXY").as_deref(),
-                Some("http://gw:8890")
+                Some("http://prepare:token@gw:8890")
             );
             assert_eq!(
                 var(prepare, "https_proxy").as_deref(),
-                Some("http://gw:8890")
+                Some("http://prepare:token@gw:8890")
             );
             assert_eq!(var(check, "HTTPS_PROXY"), None);
             assert_eq!(var(check, "CARGO_NET_OFFLINE").as_deref(), Some("true"));

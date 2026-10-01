@@ -492,8 +492,8 @@ fn identity_ok(value: &str) -> bool {
 
 /// The program placed into a trusted runtime volume before a browser run. It
 /// uses Playwright's network interception for every request and WebSocket,
-/// and its `proxy_url` when set is the same run's scoped egress gateway
-/// (`Backend::scope_qa_egress`) — the container's own network boundary,
+/// and its `proxy_url` when set is the same run's own egress grant
+/// (`Backend::egress_grant`) — the container's own network boundary,
 /// narrowed to the configured target origin(s) for exactly this run, not
 /// the harness's LLM-provider-only allowlist. Route interception is defence
 /// in depth on top of that network boundary, not a substitute for it.

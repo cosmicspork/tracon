@@ -302,11 +302,21 @@ async fn check_network(cfg: &Config, c: &serde_json::Value) -> CheckResult {
     )
 }
 
+const ANONYMOUS_GRANT: &str = "GRANT_ANONYMOUS_OK";
+
 /// Actively prove the boundary from inside it: no direct egress, allowlisted
 /// hosts reachable through the proxy, unlisted hosts refused.
 async fn check_egress(cfg: &Config, selinux: bool) -> CheckResult {
     let spec = RunSpec::from_config(cfg, selinux);
-    let script = egress_script(&cfg.boundary.gateway_container, cfg.gateway.forward_port);
+    // The per-client proxy must serve nobody who presents no grant. A node
+    // that is not running answers nothing at all, which proves the same. Asked
+    // first: the script's last command is what decides its exit status.
+    let script = format!(
+        "curl -s -o /dev/null -m 10 -x http://{}:{} https://example.com/ && echo {ANONYMOUS_GRANT}; {}",
+        cfg.boundary.gateway_container,
+        cfg.gateway.qa_proxy_port,
+        egress_script(&cfg.boundary.gateway_container, cfg.gateway.forward_port),
+    );
     let cmd = RunnerCommand {
         argv: vec!["sh".into(), "-c".into(), script],
         ..Default::default()
@@ -319,6 +329,10 @@ async fn check_egress(cfg: &Config, selinux: bool) -> CheckResult {
     match podman(&argv).await {
         // The internal network has no route out at all, so a denied
         // destination fails at `connect(2)`. The probe is what proves it.
+        Ok(out) if out.contains(ANONYMOUS_GRANT) => CheckResult::fail(
+            CheckId::Egress,
+            "the per-client egress proxy served a request that presented no grant",
+        ),
         Ok(out) => egress_verdict(&out, Denial::Rejects),
         Err(e) => CheckResult::fail(CheckId::Egress, format!("probe failed: {e}")),
     }

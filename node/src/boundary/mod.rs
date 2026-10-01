@@ -32,31 +32,60 @@ pub enum BoundaryError {
     Other(String),
 }
 
-/// Held for exactly one scoped run's container: a QA browser run, or one
-/// repository's dependency preparation. Dropping it restores the scoped egress
-/// gateway to deny-all; the mutex permit inside it also keeps two scoped runs
-/// from ever observing each other's hosts.
-pub struct QaEgressGuard {
-    _permit: tokio::sync::MutexGuard<'static, ()>,
-    reset: Option<Box<dyn FnOnce() + Send>>,
+/// One client's way out: proxy credentials that open exactly the hosts they
+/// were issued for, for as long as this is held. A QA browser run, a
+/// repository's dependency preparation and a session each hold their own, so
+/// none of them is ever served what another was granted. Dropping it revokes
+/// the credentials.
+pub struct EgressGrant {
+    /// `http://host:port`, without credentials: what a browser is given.
+    pub server: String,
+    pub username: String,
+    pub password: String,
+    revoke: Option<Box<dyn FnOnce() + Send>>,
 }
 
-impl QaEgressGuard {
+impl EgressGrant {
     pub fn new(
-        permit: tokio::sync::MutexGuard<'static, ()>,
-        reset: impl FnOnce() + Send + 'static,
+        server: String,
+        username: String,
+        password: String,
+        revoke: impl FnOnce() + Send + 'static,
     ) -> Self {
         Self {
-            _permit: permit,
-            reset: Some(Box::new(reset)),
+            server,
+            username,
+            password,
+            revoke: Some(Box::new(revoke)),
         }
+    }
+
+    /// The proxy as a URL carrying its credentials, which is how every
+    /// package manager and Git take one.
+    pub fn url(&self) -> String {
+        match self.server.split_once("://") {
+            Some((scheme, rest)) => {
+                format!("{scheme}://{}:{}@{rest}", self.username, self.password)
+            }
+            None => self.server.clone(),
+        }
+    }
+
+    /// The proxy variables that send a container through this grant instead
+    /// of the harness proxy. Both spellings: curl and Git read the lowercase
+    /// names, and most package managers read either.
+    pub fn env(&self) -> Vec<(String, String)> {
+        ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"]
+            .into_iter()
+            .map(|name| (name.to_string(), self.url()))
+            .collect()
     }
 }
 
-impl Drop for QaEgressGuard {
+impl Drop for EgressGrant {
     fn drop(&mut self) {
-        if let Some(reset) = self.reset.take() {
-            reset();
+        if let Some(revoke) = self.revoke.take() {
+            revoke();
         }
     }
 }
@@ -191,27 +220,26 @@ pub trait Backend: Send + Sync {
     fn proxy_port(&self) -> Option<u16> {
         None
     }
-    /// Restrict this backend's dedicated scoped egress gateway to exactly
-    /// these hosts for the life of the returned guard. Every QA browser run,
-    /// and every dependency preparation whose repository names egress
-    /// (`environment::scoped_egress`), acquires this before its container
-    /// starts and holds it until the container exits; one holder at a time.
-    /// `Err` when this backend has no scoped gateway wired: the caller
+    /// The grants this backend's containers present to the node's own proxy,
+    /// which the node serves (`gateway::proxy::serve_granted`). `None` for a
+    /// backend with no per-client egress.
+    fn egress_grants(&self) -> Option<&crate::gateway::proxy::Grants> {
+        None
+    }
+    /// Open a way out for one client, to exactly what `spec` names, until the
+    /// returned grant is dropped. Each client is filtered by its own grant:
+    /// there is no shared allow list to widen and nothing to wait for.
+    /// `Err` when this backend has no per-client egress wired: the caller
     /// refuses to run rather than proceed on the harness's own
     /// (LLM-provider-only, and shared with every other session) egress path.
-    async fn scope_qa_egress(
+    fn egress_grant(
         &self,
-        _allowed_hosts: &[String],
-    ) -> Result<QaEgressGuard, BoundaryError> {
+        _spec: crate::gateway::proxy::GrantSpec,
+    ) -> Result<EgressGrant, BoundaryError> {
         Err(BoundaryError::Other(format!(
-            "the {} backend has no QA browser egress gateway",
+            "the {} backend has no per-client egress",
             self.kind()
         )))
-    }
-    /// `http://host:port` a QA browser container gives Playwright as its
-    /// proxy once `scope_qa_egress` succeeds. `None` when it always errors.
-    fn qa_proxy_url(&self) -> Option<String> {
-        None
     }
     /// Remove harnesses left over from a previous run, by name.
     async fn reconcile(&self, names: &[String]);

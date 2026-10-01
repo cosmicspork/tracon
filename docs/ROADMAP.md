@@ -392,7 +392,7 @@ work that does not need it, and nothing on it may be described elsewhere as prov
       deployment-status scope), the `cloud` login written into the node-owned home, the
       target's attested `origin_suffix` and app name, an identity endpoint on the
       application that returns its build commit, and a digest-pinned browser image.
-      Podman-only until the Kubernetes backend has a scoped QA egress gateway.
+      Podman-only until the Kubernetes backend issues egress grants.
 
 **Upstream contributions worth a bounded PR** (not blockers): a flag that turns the
 web-UI fallback into a 404; a flag check on nested instruction attachment; invoking the
@@ -414,15 +414,15 @@ servers reaching the v2 session runner.
   session on Kubernetes, stays in the harness image. Preparation reruns before every
   check. An image the node builds from a repository's Dockerfile is built on Podman only,
   and a superseded one is removed only when nothing still runs from it.
-- Preparation's egress is the Podman backend's scoped gateway. Kubernetes has none, so a
-  `[[repo]]` entry that names `egress` cannot prepare there. The gateway filters by host
-  only, one holder at a time: a preparation waits behind a QA browser run, and while
-  either holds it open its hosts are reachable from the whole internal network.
+- Per-client egress — a preparation's, a QA browser run's — is the Podman backend's. The
+  Kubernetes backend issues no grants, so a `[[repo]]` entry that names `egress` cannot
+  prepare there. A grant filters by host, not by method: a registry that accepts uploads
+  accepts them from the client that was granted it.
 - macOS releases are unsigned — the publisher holds no Apple Developer ID — and are
   authenticated by GitHub build provenance instead, so Gatekeeper asks once on first open
   (right-click Open, or System Settings > Privacy & Security > Open Anyway).
-- The Kubernetes runtime backend has no scoped QA browser egress gateway; `scope_qa_egress`
-  always refuses there, so browser verification is Podman-only.
+- The Kubernetes runtime backend issues no egress grants; `egress_grant` always refuses
+  there, so browser verification is Podman-only.
 - The Kubernetes backend **drops** denied egress rather than refusing it. A NetworkPolicy
   has no reject verb and no portable CNI option turns a drop into an ICMP or RST refusal,
   so what Podman gets from having no route out has to come from the cluster. Until one that
@@ -471,8 +471,9 @@ Kept as intent, off the plan until the supported configuration has earned them.
   its egress presets — and never the image digest: a locally built image has a different
   one on every node, so each node builds and pins its own. Waits on the node building the
   image itself (Now) and on mesh-wide configuration sync.
-- **Kubernetes parity.** A scoped egress gateway, for QA browsers and for preparation, and
-  a refuse-not-drop egress policy.
+- **Kubernetes parity.** Per-client egress grants, for QA browsers and for preparation —
+  the node already serves the proxy there; it needs the grants — and a refuse-not-drop
+  egress policy.
 - **Post-publication follow-through and product metrics.** Recording merge, deployment,
   evaluation and customer observation separately; judging tracon by interruptions, time
   to verified work and tokens per accepted change. Reconsider once outcomes exist to

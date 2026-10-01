@@ -1492,21 +1492,29 @@ async fn run_browser_runtime(
     credential_env: &[(String, String)],
 ) -> Result<BrowserRuntime, String> {
     let backend = access.manager.backend();
-    // Scoped for the life of this one run: the container's egress gateway
-    // narrows to exactly the configured target origin(s), never the
-    // harness's LLM-provider-only allowlist and never open egress. Held
-    // across the whole container run below; dropping it restores deny-all.
+    // This run's own way out: credentials that reach exactly the configured
+    // target origin(s), never the harness's LLM-provider-only allowlist and
+    // never open egress. Held across the whole container run below; dropping
+    // it revokes them, which is also why they may sit in the run's scenario
+    // file: by the time that file is exported as evidence they open nothing.
     let allowed_hosts = origin_hosts(&plan.allowed_origins)?;
     let egress = backend
-        .scope_qa_egress(&allowed_hosts)
-        .await
+        .egress_grant(crate::gateway::proxy::GrantSpec {
+            client: "qa".into(),
+            hosts: allowed_hosts,
+            plain_http: plan
+                .allowed_origins
+                .iter()
+                .any(|origin| origin.starts_with("http://")),
+            refusal: "outside this QA target's origins".into(),
+            ..Default::default()
+        })
         .map_err(|error| format!("could not scope QA browser egress: {error}"))?;
-    let proxy_url = backend.qa_proxy_url();
     let transfer =
         tempfile::tempdir().map_err(|error| format!("could not stage browser runner: {error}"))?;
     fs::write(transfer.path().join("browser-runner.cjs"), BROWSER_RUNNER)
         .map_err(|error| format!("could not stage browser runner: {error}"))?;
-    let spec = browser_runtime_spec(target, plan, proxy_url.as_deref())?;
+    let spec = browser_runtime_spec(target, plan, Some(&egress))?;
     fs::write(
         transfer.path().join("browser.json"),
         serde_json::to_vec(&spec).expect("browser spec serializes"),
@@ -1568,7 +1576,7 @@ fn origin_hosts(origins: &[String]) -> Result<Vec<String>, String> {
 fn browser_runtime_spec(
     target: &QaTarget,
     plan: &BrowserPlan,
-    proxy_url: Option<&str>,
+    proxy: Option<&crate::boundary::EgressGrant>,
 ) -> Result<Value, String> {
     let origin = crate::config::qa_origin(&target.origin)?;
     let steps: Result<Vec<Value>, String> = plan
@@ -1591,7 +1599,9 @@ fn browser_runtime_spec(
         "steps": steps?,
         "assertions": plan.assertions,
         "timeout_ms": target.browser.timeout_secs * 1000,
-        "proxy_url": proxy_url,
+        "proxy_url": proxy.map(|proxy| proxy.server.clone()),
+        "proxy_username": proxy.map(|proxy| proxy.username.clone()),
+        "proxy_password": proxy.map(|proxy| proxy.password.clone()),
     }))
 }
 

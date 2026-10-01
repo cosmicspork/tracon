@@ -228,6 +228,9 @@ fn parse_volume_list(out: &str) -> Vec<super::VolumeInfo> {
 pub struct PodmanBackend {
     cfg: Config,
     selinux: bool,
+    /// Who may leave through the node's proxy, and to where. Issued here,
+    /// honoured by the listener the node serves behind the gateway's forward.
+    grants: crate::gateway::proxy::Grants,
 }
 
 impl PodmanBackend {
@@ -238,6 +241,7 @@ impl PodmanBackend {
         Self {
             cfg: cfg.clone(),
             selinux: selinux_enabled().await,
+            grants: Default::default(),
         }
     }
 
@@ -360,77 +364,34 @@ impl Backend for PodmanBackend {
         }
     }
 
-    async fn scope_qa_egress(
+    fn egress_grants(&self) -> Option<&crate::gateway::proxy::Grants> {
+        Some(&self.grants)
+    }
+
+    fn egress_grant(
         &self,
-        allowed_hosts: &[String],
-    ) -> Result<super::QaEgressGuard, BoundaryError> {
+        spec: crate::gateway::proxy::GrantSpec,
+    ) -> Result<super::EgressGrant, BoundaryError> {
         if self.cfg.gateway.qa_proxy_port == 0 {
             return Err(BoundaryError::Podman(
-                "qa browser egress gateway is not configured (gateway.qa_proxy_port)".into(),
+                "per-client egress is not configured (gateway.qa_proxy_port)".into(),
             ));
         }
-        let permit = QA_EGRESS.lock().await;
-        let gateway = self.cfg.boundary.gateway_container.clone();
-        setup::write_qa_allowlist(allowed_hosts)?;
-        if let Err(error) = reload_scoped_filter(&gateway).await {
-            // Nothing was opened, and nothing is left written for a later
-            // reload to open by accident.
-            let _ = setup::write_qa_allowlist(&[]);
-            return Err(error);
-        }
-        Ok(super::QaEgressGuard::new(permit, move || {
-            if let Err(error) = setup::write_qa_allowlist(&[]) {
-                tracing::error!(%error, "could not reset scoped egress allowlist");
-            }
-            if let Err(error) = reload_scoped_filter_blocking(&gateway) {
-                tracing::error!(%error, "could not close the scoped egress gateway");
-            }
-        }))
-    }
-
-    fn qa_proxy_url(&self) -> Option<String> {
-        Some(format!(
-            "http://{}:{}",
-            self.cfg.boundary.gateway_container, self.cfg.gateway.qa_proxy_port
-        ))
-    }
-}
-
-/// Serializes QA browser egress scoping: two runs writing the QA allow file
-/// at once would let one leak into the other's scope. Ordinary harness
-/// sessions never touch this — their egress is the separate, static
-/// `allow_hosts` filter, unaffected by QA runs.
-static QA_EGRESS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// tinyproxy reads its filter file once and again only on `SIGUSR1`, so a
-/// rewritten allow file changes nothing until the scoped proxy is told. It is
-/// the gateway's second tinyproxy, not its PID 1, so the signal goes by its
-/// pid file rather than through `podman kill`.
-const RELOAD_SCOPED_FILTER: &str = r#"kill -USR1 "$(cat /run/tinyproxy-qa.pid)""#;
-
-/// How long the scoped proxy gets to act on the signal before a caller starts
-/// the container that depends on it. The reload is the next thing its accept
-/// loop does; this only has to outlast that.
-const RELOAD_SETTLE: Duration = Duration::from_millis(250);
-
-async fn reload_scoped_filter(gateway: &str) -> Result<(), BoundaryError> {
-    podman(&["exec", gateway, "sh", "-c", RELOAD_SCOPED_FILTER]).await?;
-    tokio::time::sleep(RELOAD_SETTLE).await;
-    Ok(())
-}
-
-/// The same reload from a `Drop`, which cannot await. Closing does not wait
-/// for the reload to settle: nothing is about to depend on it.
-fn reload_scoped_filter_blocking(gateway: &str) -> Result<(), BoundaryError> {
-    let out = std::process::Command::new(podman_bin())
-        .args(["exec", gateway, "sh", "-c", RELOAD_SCOPED_FILTER])
-        .output()
-        .map_err(BoundaryError::Io)?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(BoundaryError::Podman(
-            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        let username = spec.client.clone();
+        let token = self
+            .grants
+            .issue(spec)
+            .map_err(|error| BoundaryError::Other(format!("egress grant: {error}")))?;
+        let grants = self.grants.clone();
+        let revoked = token.clone();
+        Ok(super::EgressGrant::new(
+            format!(
+                "http://{}:{}",
+                self.cfg.boundary.gateway_container, self.cfg.gateway.qa_proxy_port
+            ),
+            username,
+            token,
+            move || grants.revoke(&revoked),
         ))
     }
 }
@@ -488,7 +449,6 @@ pub(crate) fn resolve_podman_env(cfg: &Config) -> String {
     )
 }
 
-/// Run `podman` with args and return stdout, or the stderr as an error.
 #[async_trait]
 impl super::ImageBuilder for PodmanBackend {
     async fn build(
@@ -577,6 +537,7 @@ fn log_tail(bytes: &[u8]) -> String {
     text[start..].to_string()
 }
 
+/// Run `podman` with args and return stdout, or the stderr as an error.
 pub(crate) async fn podman(args: &[&str]) -> Result<String, BoundaryError> {
     let bin = podman_bin();
     let out = tokio::process::Command::new(bin)

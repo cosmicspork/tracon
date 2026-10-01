@@ -387,17 +387,17 @@ sessions on Kubernetes, stay in the harness image.
 A check has no network. A repository whose checks need its dependencies names `prepare`
 commands (`bun install --frozen-lockfile`, `composer install`, `cargo fetch --locked`)
 and the registries they may reach (`egress = ["npm", "crates"]`). Those run first, on the
-same copy of the candidate, with the repository's dependency cache writable and the
-node's scoped egress gateway opened to exactly those hosts; the gateway closes again
+same copy of the candidate, with the repository's dependency cache writable and proxy
+credentials of their own that reach exactly those hosts; the credentials are revoked
 before the check starts, and the check gets the cache read-only. Three things follow,
 and they are yours to weigh. An install runs the candidate's own lifecycle scripts unless
 the command says otherwise (`--ignore-scripts`, `--no-scripts`), and that is the one step
 that can write the cache a later candidate's check reads; `tracon gc --caches` empties
-it. The gateway filters by host, not by method or client, so a host you name is
-reachable from the node's internal network — sessions included — for as long as a
-preparation holds it open, and a registry that accepts uploads accepts them. And the
-image's default user has to be able to write `/work` and `/cache`, which under rootless
-Podman means it runs as root.
+it. The grant filters by host, not by method, so a registry that accepts uploads accepts
+them from that preparation — and from nothing else: a session, a QA browser run and
+another preparation each hold their own grant, are refused each other's hosts, and never
+wait for one another. And the image's default user has to be able to write `/work` and
+`/cache`, which under rootless Podman means it runs as root.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
 a request for changes. Approval publishes exactly the reviewed bytes with the brokered
 credential; if the branch moved since submit, approval is refused and the changed files
@@ -493,9 +493,9 @@ exact commit and plays the configured manual deploy job inside it, or refuses
 outright if no such pipeline exists. Browser verification then runs a real,
 headless browser against that deployment inside its own network boundary: the
 container reaches only the QA target's configured origin(s) for that one run,
-nothing else, through a dedicated egress gateway distinct from the harness's
-own — the Kubernetes backend has no such gateway yet, so QA browser runs are a
-Podman-only capability today. A scenario's steps and assertions are declarative
+nothing else, on proxy credentials issued for that run alone and distinct from the
+harness's own egress — the Kubernetes backend issues none yet, so QA browser runs are
+a Podman-only capability today. A scenario's steps and assertions are declarative
 — no script, no arbitrary URL — and a dedicated test-account credential may
 only be filled into a password-type input, never screenshotted while its form
 is still on screen. Every deployment observation, browser run, assertion, log,
@@ -729,6 +729,11 @@ allow_hosts = ['^api\.anthropic\.com$', '^api\.openai\.com$', '^chatgpt\.com$',
 proxy_port = 8888
 forward_port = 7421
 # harness_listen = "127.0.0.1:7421" # or a socket path; the platform default is right
+# qa_proxy_port = 8890              # where a container reaches the node's per-client egress
+                                    # proxy: preparation, QA browser runs. Each presents its own
+                                    # credentials; the name is from when only QA used it
+# egress_port = 7424                # where the node serves that proxy when harness_listen is a
+                                    # TCP address; with a socket path it is a socket beside it
 
 [session]
 budget_tokens = 2000000             # per session

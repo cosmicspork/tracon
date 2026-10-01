@@ -1751,15 +1751,20 @@ pub struct Gateway {
     /// filter. Everything else is denied.
     pub allow_hosts: Vec<String>,
     pub proxy_port: u16,
-    /// A second CONNECT proxy in the same gateway container, filtered by a
-    /// separate allow file the node rewrites for the life of one QA browser
-    /// run (see `Backend::scope_qa_egress`). Never shares `allow_hosts`: a
-    /// QA target origin never becomes reachable from an ordinary harness
-    /// session, and an LLM provider host never becomes reachable from a QA
-    /// browser.
+    /// The port, on the gateway's internal address, where a container
+    /// reaches the node's per-client egress proxy (`Backend::egress_grant`):
+    /// a QA browser run, a dependency preparation, a session whose repository
+    /// opens registries to it. Each presents its own credentials and is
+    /// filtered by its own grant, so a QA target origin never becomes
+    /// reachable from a session and a registry never from a QA browser. The
+    /// name is from when only QA used it.
     pub qa_proxy_port: u16,
     /// Port the gateway forwards from the internal network to the node.
     pub forward_port: u16,
+    /// Where the node serves that egress proxy when the harness listener is a
+    /// TCP address (a Podman machine): the same loopback address, this port.
+    /// On a Linux host it is a socket beside the harness socket instead.
+    pub egress_port: u16,
     /// Where the node listens for the harness. Loopback: the gateway reaches it
     /// through the Podman machine's host route, and nothing else can.
     /// Where the node listens for the gateway's forward. A socket address on
@@ -2079,6 +2084,7 @@ impl Default for Config {
                 proxy_port: 8888,
                 qa_proxy_port: 8890,
                 forward_port: 7421,
+                egress_port: 7424,
                 harness_listen: HarnessListen::default(),
             },
             consulta: Consulta {
@@ -2303,11 +2309,16 @@ impl Config {
         Self::state_dir().join("gateway/allow.txt")
     }
 
-    /// The QA browser egress allow file: rewritten for the life of one QA
-    /// browser run (`Backend::scope_qa_egress`), never during an ordinary
-    /// harness session. Deny-all — an empty file — outside that window.
-    pub fn qa_allow_file() -> PathBuf {
-        Self::state_dir().join("gateway/qa_allow.txt")
+    /// Where the node serves the per-client egress proxy for the gateway to
+    /// forward to: beside the harness listener, in whichever form that takes.
+    pub fn egress_listen(&self) -> HarnessListen {
+        match &self.gateway.harness_listen {
+            HarnessListen::Tcp(addr) => HarnessListen::Tcp(std::net::SocketAddr::new(
+                addr.ip(),
+                self.gateway.egress_port,
+            )),
+            HarnessListen::Unix(path) => HarnessListen::Unix(path.with_file_name("egress.sock")),
+        }
     }
 
     /// The harness's own state directory, node-owned. Only the harness's
