@@ -409,14 +409,14 @@ servers reaching the v2 session runner.
 - Required checks run in the image, and after the preparation, the operator named for the
   repository (`[[repo]]`), and in the harness image — which has no project toolchain —
   when they named none. A Claude Code session on Podman runs in that same image with the
-  harness layered on, so it has its checks' tools; it still cannot fetch a dependency, so
-  a check that needs one is learnt only by submitting. An OpenCode session, and any
-  session on Kubernetes, stays in the harness image. Preparation reruns before every
-  check. An image the node builds from a repository's Dockerfile is built on Podman only,
-  and a superseded one is removed only when nothing still runs from it.
-- Per-client egress — a preparation's, a QA browser run's — is the Podman backend's. The
-  Kubernetes backend issues no grants, so a `[[repo]]` entry that names `egress` cannot
-  prepare there. A grant filters by host, not by method: a registry that accepts uploads
+  harness layered on, so it has its checks' tools, and reaches the registries its
+  repository opens to sessions (`session_egress`). An OpenCode session, and any session
+  on Kubernetes, stays in the harness image and reaches no registry. Preparation reruns
+  before every check. An image the node builds from a repository's Dockerfile is built
+  on Podman only, and a superseded one is removed only when nothing still runs from it.
+- Per-client egress — a session's, a preparation's, a QA browser run's — is the Podman
+  backend's. The Kubernetes backend issues no grants, so a `[[repo]]` entry that names
+  `egress` cannot prepare there. A grant filters by host, not by method: a registry that accepts uploads
   accepts them from the client that was granted it.
 - macOS releases are unsigned — the publisher holds no Apple Developer ID — and are
   authenticated by GitHub build provenance instead, so Gatekeeper asks once on first open

@@ -384,6 +384,18 @@ reads. The layer is root, like every run here, so a tool the Dockerfile installe
 another user's home has to be readable and executable by others. OpenCode sessions, and
 sessions on Kubernetes, stay in the harness image.
 
+A session reaches no registry unless you say so. `session_egress = true` on the
+repository's entry opens its `egress` list to that repository's sessions, through proxy
+credentials that are the session's own, so "add this dependency and run the tests" is an
+ordinary task: `cargo add`, `bun add`, `composer require` work, and a host the entry does
+not name is refused. The refusal reads *not reachable from a session; add it to this
+repository's egress* — in the proxy's answer, on the session's log (once per host, so you
+see what the agent wanted), and in the orientation the session starts with, which tells
+it this is the boundary and not something to work around. It is opt-in because a session
+is long-lived and runs what a model decides: a host that accepts uploads accepts them from
+it, and the `github` and `packagist` presets both carry `api.github.com`. OpenCode sessions
+keep the harness proxy and reach no registry either way.
+
 A check has no network. A repository whose checks need its dependencies names `prepare`
 commands (`bun install --frozen-lockfile`, `composer install`, `cargo fetch --locked`)
 and the registries they may reach (`egress = ["npm", "crates"]`). Those run first, on the
@@ -770,6 +782,9 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
                                     # dependency cache writable and `egress` reachable
 # egress = ["npm"]                  # what `prepare` may reach: crates, npm, pypi, packagist, github, or a
                                     # literal host name. Empty is no egress at all
+# session_egress = true             # open `egress` to this repository's sessions too, so an agent can
+                                    # add a dependency. Off by default: a session that can reach a host
+                                    # that accepts uploads can upload to it
 
 [providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
 credential = "anthropic"

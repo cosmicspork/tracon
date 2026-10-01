@@ -95,6 +95,10 @@ pub mod event_kind {
     /// it (`status`, `repo`). Minutes, once per repository; the start event
     /// that follows says which image the session got.
     pub const REPO_IMAGE: &str = "repo_image";
+    /// The session asked for a host its repository does not open to it
+    /// (`host`). Once per host: the agent saw a 403 from a package manager,
+    /// and this is where the operator sees what it wanted.
+    pub const EGRESS_REFUSED: &str = "egress_refused";
     /// What the session was told at start, so the transcript shows it.
     pub const ORIENTATION: &str = "orientation";
     pub const STATE: &str = "state";

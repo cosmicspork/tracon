@@ -1378,6 +1378,22 @@ impl Manager {
         // Recorded, not just built: the revision this returns is the one this
         // session ran, and the next edit mints a different one that leaves
         // this session alone.
+        // The session's own way out, where the runtime issues one and the
+        // harness is a single process whose fetches are the agent's. OpenCode
+        // installs plugins on its own, and what its image baked is the rule
+        // for those, so it keeps the harness proxy and reaches no registry.
+        let environment = crate::environment::session_environment(&self.cfg, &self.store, id);
+        let egress = (adapter.id() == crate::adapter::claude::ClaudeAdapter::ID)
+            .then(|| {
+                self.backend
+                    .egress_grant(crate::environment::session_grant(
+                        &self.cfg,
+                        &environment,
+                        id,
+                    ))
+                    .ok()
+            })
+            .flatten();
         let mut wiring = wiring;
         let manifest = {
             let (skills, instructions, agents) = self.store.manifest_contents(&spec.channel)?;
@@ -1473,6 +1489,9 @@ impl Manager {
                     review: review.as_ref(),
                     manifest: &manifest,
                     context: context.as_ref().map(|(d, r)| (d, r)),
+                    egress: egress
+                        .as_ref()
+                        .map(|_| environment.session_egress.as_slice()),
                 },
             );
             (assembled, context.map(|(_, receipt)| receipt))
@@ -1627,6 +1646,9 @@ impl Manager {
             ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
         ]);
         harness_env.extend(cache_env);
+        if let Some(egress) = &egress {
+            harness_env.extend(egress.env());
+        }
 
         // The supervisor's channel exists before the harness does, because the
         // ingestion layer needs it: a permission reconciliation re-raises goes
@@ -1780,7 +1802,7 @@ impl Manager {
             Some(ingest) => sup.with_ingest(ingest),
             None => sup,
         }
-        .with_checks(crate::environment::session_environment(&self.cfg, &self.store, id).checks);
+        .with_checks(environment.checks);
         let live = self.live.clone();
         let tokens = self.tokens.clone();
         let native = self.native.clone();
@@ -1791,6 +1813,8 @@ impl Manager {
             live.lock().await.remove(&sid);
             // The token dies with the session; a later call with it is refused.
             tokens.lock().await.remove(&sid);
+            // And its way out with it.
+            drop(egress);
             // So does the gateway's route to its harness: the endpoint is
             // gone, and a later request must not be forwarded to whatever
             // took the port.
@@ -2184,6 +2208,39 @@ impl Manager {
         detail["state"] = json!(state);
         tracing::warn!(session = %id, %what, %state, "refused a late transition");
         self.record_event(id, ek::LATE_REFUSED, detail);
+    }
+
+    /// Record each host a session's own grant refused, once per session and
+    /// host: a package manager retries, and the operator needs to hear it
+    /// once. The proxy knows which grant asked, so the refusal lands on the
+    /// session that met it, in the words that say what to change.
+    pub fn record_egress_refusals(&self) {
+        if let Some(grants) = self.backend.egress_grants() {
+            grants.on_refusal(self.egress_refusal_observer());
+        }
+    }
+
+    /// What `record_egress_refusals` installs.
+    pub fn egress_refusal_observer(&self) -> crate::gateway::proxy::OnRefusal {
+        let manager = self.clone();
+        let seen = std::sync::Mutex::new(std::collections::HashSet::new());
+        Arc::new(move |grant, host| {
+            let Some(session) = &grant.session_id else {
+                return;
+            };
+            {
+                let mut seen = seen.lock().unwrap();
+                // Bounded: a node that runs for months forgets, and at worst
+                // says a refusal twice.
+                if seen.len() > 10_000 {
+                    seen.clear();
+                }
+                if !seen.insert((session.clone(), host.to_string())) {
+                    return;
+                }
+            }
+            manager.record_event(session, ek::EGRESS_REFUSED, json!({ "host": host }));
+        })
     }
 
     /// Record an event on a session from outside the supervisor.
