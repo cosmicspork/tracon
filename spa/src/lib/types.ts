@@ -894,7 +894,7 @@ export interface CeilingInfo {
 }
 
 /** The verdict on one turn's two usage sources. */
-export type UsageState = 'open' | 'reconciled' | 'mismatch' | 'unmetered'
+export type UsageState = 'open' | 'reconciled' | 'mismatch' | 'unmetered' | 'interrupted'
 
 /** One turn as both sources saw it. `charged_tokens` is what the budget paid:
  *  never less than the gateway counted on the wire. */
@@ -909,6 +909,8 @@ export interface TurnUsage {
   state: UsageState
   started_ms: number
   settled_ms: number | null
+  /** Read from a provider's cache: shown, never charged. Absent from an older node. */
+  gateway_cache_read?: number
 }
 
 export interface SessionUsage {
@@ -917,6 +919,8 @@ export interface SessionUsage {
   gateway_tokens: number
   harness_tokens: number
   charged_tokens: number
+  /** Read from a provider's cache: shown, never charged. Absent from an older node. */
+  cache_read_tokens?: number
   unmetered_turns: number
   mismatched_turns: number
   turns: TurnUsage[]

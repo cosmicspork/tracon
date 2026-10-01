@@ -176,16 +176,26 @@ pub struct Usage {
     pub total_tokens: u64,
     #[serde(default)]
     pub cached_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
 }
 
 impl Usage {
-    /// Tokens to charge the budget for this turn. `totalTokens` is what the
-    /// harness reports and is preferred, but it is `#[serde(default)]`: a harness
-    /// that reports the parts and omits the total would otherwise charge zero and
-    /// never hit the budget. Fall back to the sum so the meter fails closed.
+    /// Tokens to charge the budget for this turn: fresh input, cache writes and
+    /// output, the same quantity the gateway counts. A cache read is the model
+    /// rereading context it already paid for, and a long session rereads its
+    /// whole history every step, so charging it at the full rate made a budget
+    /// mostly a measure of context length. It stays in `total_tokens` and
+    /// `cached_read_tokens` for the record. A harness that reports only a total
+    /// is charged that total less what it says it read, so the meter fails
+    /// closed rather than reading zero.
     pub fn charged(&self) -> u64 {
-        self.total_tokens
-            .max(self.input_tokens + self.output_tokens + self.cached_read_tokens)
+        let parts = self.input_tokens + self.output_tokens + self.cache_write_tokens;
+        if parts > 0 {
+            parts
+        } else {
+            self.total_tokens.saturating_sub(self.cached_read_tokens)
+        }
     }
 }
 
@@ -365,24 +375,30 @@ mod tests {
     use super::Usage;
 
     #[test]
-    fn charged_prefers_total_but_falls_back_to_the_sum() {
-        // A harness reporting the total is charged the total.
+    fn a_cache_read_is_never_charged() {
+        // Parts reported: fresh input, cache writes and output; not the reads.
         let u = Usage {
             input_tokens: 10,
             output_tokens: 5,
-            total_tokens: 100,
-            cached_read_tokens: 2,
+            total_tokens: 100_015,
+            cached_read_tokens: 100_000,
+            cache_write_tokens: 0,
         };
-        assert_eq!(u.charged(), 100);
-
-        // A harness that omits `totalTokens` (it is `#[serde(default)]`) is
-        // charged the parts, not zero, so the budget still bites.
+        assert_eq!(u.charged(), 15);
         let u = Usage {
-            input_tokens: 40,
-            output_tokens: 30,
-            total_tokens: 0,
-            cached_read_tokens: 5,
+            cache_write_tokens: 1_200,
+            ..u
         };
-        assert_eq!(u.charged(), 75);
+        assert_eq!(u.charged(), 1_215);
+
+        // Only a total: charged the total less what was read, never zero.
+        let u = Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 900,
+            cached_read_tokens: 600,
+            cache_write_tokens: 0,
+        };
+        assert_eq!(u.charged(), 300);
     }
 }

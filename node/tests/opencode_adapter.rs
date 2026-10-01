@@ -74,7 +74,9 @@ async fn a_prompt_yields_message_tool_and_usage_events() {
     assert_eq!(result.stop_reason, "end_turn");
     // input + output + reasoning + cache read + cache write.
     assert_eq!(result.usage.total_tokens, 1034);
-    assert_eq!(result.usage.charged(), 1034);
+    // The cache read is in the total and out of the charge.
+    assert_eq!(result.usage.cached_read_tokens, 8);
+    assert_eq!(result.usage.charged(), 1026);
 
     drain_until(&mut rx, &mut labels, "usage").await;
     assert!(

@@ -138,7 +138,10 @@
   // as an ordinary one.
   const usageNote = $derived.by(() => {
     if (!usage || usage.state === null) return null
-    const both = `gw ${formatTokens(usage.gateway_tokens)} · harness ${formatTokens(usage.harness_tokens)}`
+    // Cache reads are the model rereading context it already paid for: shown,
+    // so a long session's context is visible, and never part of the charge.
+    const cached = usage.cache_read_tokens ? ` · ${formatTokens(usage.cache_read_tokens)} cached, not charged` : ''
+    const both = `gw ${formatTokens(usage.gateway_tokens)} · harness ${formatTokens(usage.harness_tokens)}${cached}`
     if (usage.unmetered_turns > 0)
       return {
         warn: true,

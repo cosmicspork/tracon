@@ -46,10 +46,11 @@ impl HarnessHandle for FakeHandle {
         Ok(TurnResult {
             stop_reason: "end_turn".into(),
             usage: tracon::adapter::types::Usage {
-                input_tokens: 10,
-                output_tokens: 5,
+                input_tokens: total.saturating_sub(5),
+                output_tokens: total.min(5),
                 total_tokens: total,
                 cached_read_tokens: 0,
+                cache_write_tokens: 0,
             },
         })
     }
