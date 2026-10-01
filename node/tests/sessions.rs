@@ -1608,6 +1608,36 @@ async fn repeated_harness_failures_pause_the_session_before_more_work() {
     }));
 }
 
+/// A harness that states its own retry bound is recovering, not stuck: its
+/// retries are surfaced, and pausing waits for it to give up and end the turn
+/// in error. Claude Code sends ten attempts a second or two apart, so pausing
+/// on the third cut a turn short on a network blip it was about to ride out.
+#[tokio::test]
+async fn retries_the_harness_bounds_itself_are_surfaced_without_pausing() {
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    for attempt in 1..=5 {
+        rig.events
+            .send(HarnessEvent::Other(json!({
+                "type": "system", "subtype": "api_retry", "attempt": attempt,
+                "max_retries": 10, "error_status": 502, "error": "server_error"
+            })))
+            .await
+            .unwrap();
+    }
+    assert!(rig.await_events("provider_error", 5).await);
+    let events = rig.store.events_after(&rig.session_id, 0, 100).unwrap();
+    let retries: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "provider_error")
+        .collect();
+    assert_eq!(retries[4].payload["status"], 502);
+    assert_eq!(retries[4].payload["max_retries"], 10);
+    assert!(!events.iter().any(|event| event.kind == "session_paused"));
+    let row = rig.store.get_session(&rig.session_id).unwrap().unwrap();
+    assert_eq!(row.state, "running");
+}
+
 /// Repetition is recorded and surfaced; it is never acted on. A harness that
 /// issues the same call over and over is worth the operator's attention, but
 /// repeating a command is also how a great deal of legitimate work gets done,

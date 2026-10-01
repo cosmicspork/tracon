@@ -735,7 +735,15 @@ impl Supervisor {
             }
             HarnessEvent::Other(v) => {
                 if let Some(retry) = retry_notice(&v) {
-                    self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                    // A harness that states its own bound is recovering and
+                    // will end the turn in error if it gives up, which the
+                    // turn's end counts. Pausing on its early attempts cut
+                    // turns short on a one-second network blip. A harness
+                    // that states no bound may retry for ever, so its
+                    // notices still count.
+                    if retry.max_retries.is_none() {
+                        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                    }
                     let attempt = retry.attempt.unwrap_or_else(|| {
                         self.store
                             .count_events_this_turn(&self.session_id, ek::PROVIDER_ERROR)
@@ -750,6 +758,7 @@ impl Supervisor {
                             "status": retry.status,
                             "message": retry.message,
                             "attempt": attempt,
+                            "max_retries": retry.max_retries,
                             "source": "harness",
                         }),
                     );
@@ -1253,6 +1262,8 @@ struct RetryNotice {
     status: Option<i64>,
     message: Option<String>,
     attempt: Option<i64>,
+    /// The harness's own bound on retries, when it states one.
+    max_retries: Option<i64>,
 }
 
 /// Run a turn until it answers, goes `idle` without any harness activity, or
@@ -1321,9 +1332,16 @@ fn retry_notice(v: &serde_json::Value) -> Option<RetryNotice> {
     };
     Some(RetryNotice {
         provider: string(&["provider", "providerId", "providerID"]),
-        status: number(&["status", "statusCode", "status_code", "code"]),
+        status: number(&[
+            "status",
+            "statusCode",
+            "status_code",
+            "error_status",
+            "code",
+        ]),
         message: string(&["message", "reason", "error"]),
         attempt: number(&["attempt", "attempts", "retry"]).filter(|n| *n > 0),
+        max_retries: number(&["max_retries", "maxRetries"]).filter(|n| *n > 0),
     })
 }
 
@@ -1572,8 +1590,18 @@ mod tests {
                 status: Some(429),
                 message: Some("Error".into()),
                 attempt: Some(2),
+                max_retries: None,
             }
         );
+        // As Claude Code 2.1.247 actually sends it.
+        let bounded = retry_notice(&json!({
+            "type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 10,
+            "retry_delay_ms": 582, "error_status": 502, "error": "server_error"
+        }))
+        .expect("claude's api_retry");
+        assert_eq!(bounded.status, Some(502));
+        assert_eq!(bounded.max_retries, Some(10));
+        assert_eq!(bounded.message.as_deref(), Some("server_error"));
         // OpenCode's `session.next.retried`, as its adapter forwards it: past
         // tense, and the fields in the event's own payload rather than beside
         // the discriminator.
