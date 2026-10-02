@@ -36,12 +36,15 @@ dev:
     cargo run --bin tracon -- serve &
     cd spa && bun run dev
 
+# CI runs the tests under nextest, one process per test; plain `cargo test` is
+# the fallback where nextest is not installed.
+#
 # Everything CI runs.
 check:
     ./scripts/check-tests.sh
     cargo fmt --all --check
     cargo clippy --all-targets -- -D warnings
-    cargo test
+    if cargo nextest --version >/dev/null 2>&1; then cargo nextest run --no-fail-fast && cargo test --doc; else cargo test; fi
     cd spa && bun run check && bun test
 
 fmt:
@@ -73,12 +76,20 @@ boundary:
     cargo run --bin tracon -- check-boundary --deep
 
 # Static Linux binaries, as the release ships them. musl because the glibc on
-# a host we do not control is not ours to depend on. Needs the musl C toolchain
-# (`musl-tools` on Debian, `musl-cross` from Homebrew).
+# a host we do not control is not ours to depend on. Needs a musl C toolchain:
+# `musl-tools` on Debian, `musl-cross` from Homebrew on a Mac. A host with
+# neither (an immutable Fedora has no musl-gcc to install) builds through
+# `cargo-zigbuild`, which brings its own.
 musl: spa
+    #!/usr/bin/env sh
+    set -e
     rustup target add x86_64-unknown-linux-musl
-    cargo build --release --target x86_64-unknown-linux-musl --bin tracon --bin tracon-hub
-    @file target/x86_64-unknown-linux-musl/release/tracon
+    build=build
+    if ! command -v x86_64-linux-musl-gcc >/dev/null 2>&1 && ! command -v musl-gcc >/dev/null 2>&1; then
+        build=zigbuild
+    fi
+    cargo $build --release --target x86_64-unknown-linux-musl --bin tracon --bin tracon-hub
+    file target/x86_64-unknown-linux-musl/release/tracon
 
 # The desktop bundle (the AppImage here, the .dmg on a Mac) with the node
 # carried inside it as a sidecar, built in the same container as `wrapper`
