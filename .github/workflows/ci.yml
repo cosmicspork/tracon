@@ -8,9 +8,18 @@ on:
 permissions:
   contents: read
 
+# A newer push to a PR makes the older run pointless. A run on main is the
+# record of that commit, and the one whose caches every PR reads, so it is
+# never cancelled.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Full debuginfo for the workspace crates is a third of the test build, and
+  # nothing here opens a debugger. Line tables keep file and line in a
+  # backtrace, which is the part a failed run is read for.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   # A PR title without a conventional-commit type squash-merges as a subject
@@ -19,6 +28,7 @@ jobs:
   title:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       pull-requests: read
     steps:
@@ -37,8 +47,42 @@ jobs:
             ci
             perf
 
-  spa:
+  # A roadmap edit used to wait six minutes on four builds that could not
+  # notice it. The list of what counts as prose is deliberately short: the
+  # tests read README.md, docs/reference and spec/vectors, so those are code.
+  #
+  # The jobs below are skipped by a job-level `if`, not a `paths` filter on the
+  # workflow: a skipped job reports to the branch rule as passed, and a workflow
+  # that never starts leaves its required checks pending for ever. They test for
+  # `!= 'false'` so that this job failing runs everything instead of nothing.
+  changes:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          code=true
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            files=$(gh api --paginate "repos/${{ github.repository }}/pulls/$PR/files" --jq '.[].filename')
+            echo "$files"
+            if [ -n "$files" ] && ! echo "$files" | grep -qvE '^docs/([^/]+\.md|media/.+)$'; then
+              code=false
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+  spa:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -53,8 +97,13 @@ jobs:
       - run: bun run build
         working-directory: spa
 
-  node:
+  # Formatting and lints, apart from the tests: clippy's check build shares
+  # nothing with the test build, so in one job the tests waited behind it.
+  lint:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -62,14 +111,57 @@ jobs:
           toolchain: 1.98.1
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       # Every test binary must carry the guard that keeps it out of a real
       # state directory; see node/tests/support/state.rs.
       - run: ./scripts/check-tests.sh
       # No SPA build here on purpose: build.rs writes a placeholder so the Rust
-      # job never depends on the JS toolchain.
+      # jobs never depend on the JS toolchain.
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+
+  test:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-nextest@0.9.146
+      # nextest rather than `cargo test`: that runs the sixty-odd test binaries
+      # one after another, and this runs their tests across all of them at
+      # once, each in its own process and so its own state directory.
+      - run: cargo nextest run --no-fail-fast
+      # nextest does not run doctests. There are none today; this is what makes
+      # the first one written count.
+      - run: cargo test --doc
+
+  # The check the branch rule names. `lint` and `test` are the two halves of
+  # what was one job called `node`, and a rule cannot be told about a rename
+  # from here, so the name stays and is green only if both halves were (or
+  # both were skipped, for a change that builds nothing).
+  node:
+    needs: [lint, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - run: |
+          echo "lint: ${{ needs.lint.result }}, test: ${{ needs.test.result }}"
+          for result in "${{ needs.lint.result }}" "${{ needs.test.result }}"; do
+            case "$result" in success | skipped) ;; *) exit 1 ;; esac
+          done
 
   # The node has a launchd path and a macOS worktree root; a release leg that
   # only compiles it for the first time on the day of the release would fail
@@ -79,7 +171,10 @@ jobs:
   # release that failed. A debug build is enough to catch that; the release
   # profile's LTO build cost most of this job and is left to the release leg.
   macos:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -90,8 +185,12 @@ jobs:
           workspaces: |
             .
             wrapper
-      - run: cargo build --bin tracon
-      - run: cargo test -p tracon --lib
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      # One invocation, so the library's plain and test builds compile side by
+      # side instead of one after the other. `--bin tracon` is what compiles
+      # and links main.rs here; its own two tests come along.
+      - run: cargo test -p tracon --lib --bin tracon
       # The SPA is what the window loads; tauri-build wants it present.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -104,10 +203,13 @@ jobs:
         working-directory: wrapper
 
   # The desktop wrapper is its own workspace and needs webkit and gtk headers,
-  # so it is built here rather than by the `node` job — which must keep working
+  # so it is built here rather than by the `test` job, which must keep working
   # on a machine that has neither.
   wrapper:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The runner image ships Google's Chrome apt source, which nothing here
@@ -125,6 +227,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: wrapper
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       # The SPA is what the window loads; tauri-build wants it present.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -145,7 +249,18 @@ jobs:
   # a dependency that cannot build against musl is caught by the PR that adds
   # it — that is how sqlite-vec's missing typedefs were found.
   musl:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # The release profile's thin LTO over one codegen unit was nearly all of
+      # this job, repeated on every push because the workspace crates are never
+      # cached. What this job is for is whether everything compiles and links
+      # statically against musl, and an optimised build without LTO answers
+      # that. The release leg still builds what ships.
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: |
@@ -159,6 +274,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: x86_64-unknown-linux-musl
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       - run: cargo build --release --target x86_64-unknown-linux-musl --bin tracon --bin tracon-hub
       - name: assert the binaries are actually static
         run: |
