@@ -112,7 +112,7 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          save-if: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       # Every test binary must carry the guard that keeps it out of a real
       # state directory; see node/tests/support/state.rs.
@@ -134,7 +134,7 @@ jobs:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          save-if: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
@@ -143,6 +143,10 @@ jobs:
       # one after another, and this runs their tests across all of them at
       # once, each in its own process and so its own state directory.
       - run: cargo nextest run --no-fail-fast
+      # build.rs has just written the placeholder SPA, which is newer than the
+      # build script's own run, so the next cargo invocation would take it for
+      # a change and compile the node a second time. Backdating it stops that.
+      - run: touch -d 2000-01-01 spa/dist spa/dist/index.html
       # nextest does not run doctests. There are none today; this is what makes
       # the first one written count.
       - run: cargo test --doc
@@ -185,7 +189,7 @@ jobs:
           workspaces: |
             .
             wrapper
-          save-if: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       # One invocation, so the library's plain and test builds compile side by
       # side instead of one after the other. `--bin tracon` is what compiles
@@ -227,7 +231,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: wrapper
-          save-if: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       # The SPA is what the window loads; tauri-build wants it present.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -274,7 +278,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: x86_64-unknown-linux-musl
-          save-if: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - run: cargo build --release --target x86_64-unknown-linux-musl --bin tracon --bin tracon-hub
       - name: assert the binaries are actually static
