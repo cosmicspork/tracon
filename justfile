@@ -100,8 +100,17 @@ gui: spa
     cp target/release/tracon wrapper/binaries/tracon-$(rustc -vV | sed -n 's/^host: //p')
     distrobox enter tracon-build -- bash -c 'cd {{justfile_directory()}}/wrapper && APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=true npx --yes @tauri-apps/cli@2.11.4 build --bundles appimage --config "{\"bundle\":{\"externalBin\":[\"binaries/tracon\"]}}"'
 
+# Homebrew's webkitgtk carries the wrapper's headers on a host that cannot
+# install Fedora's -devel packages (an immutable one). Only the wrapper recipes
+# put the brew prefix on the pkg-config path: anywhere else it would let brew's
+# libraries win over the system's for every build. The xkbcommon keg is named
+# because brew can leave it unlinked.
+brew_pkg_config := `b=$(brew --prefix 2>/dev/null) && [ -d "$b/opt/webkitgtk" ] && echo "$b/lib/pkgconfig:$b/share/pkgconfig:$b/opt/libxkbcommon/lib/pkgconfig" || true`
+
 # The desktop wrapper: its own workspace, and it needs webkit and gtk headers.
-# On an immutable host, build it in a container that has them:
+# Built on the host when pkg-config can find them (system packages, or
+# `brew install webkitgtk libayatana-appindicator librsvg`). Otherwise in a
+# container that has them:
 #   distrobox create --name tracon-build --image registry.fedoraproject.org/fedora@sha256:f315f29f764e4c74fa5b1c60c5be42630fe9276134079fbfb12b44131d08967c --yes
 #   distrobox enter tracon-build -- sudo dnf install -y \
 #     webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel rust cargo clippy rustfmt
@@ -109,13 +118,20 @@ gui: spa
 # Container CLI: `devcontainer up --workspace-folder .` once, then
 # `devcontainer exec --workspace-folder . just wrapper-check`.
 wrapper:
-    distrobox enter tracon-build -- bash -c 'cd {{justfile_directory()}}/wrapper && cargo build --release'
+    #!/usr/bin/env sh
+    set -e
+    export PKG_CONFIG_PATH="{{brew_pkg_config}}${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    if ! pkg-config --exists webkit2gtk-4.1 && command -v distrobox >/dev/null 2>&1; then
+        exec distrobox enter tracon-build -- bash -c 'cd {{justfile_directory()}}/wrapper && cargo build --release'
+    fi
+    cd {{justfile_directory()}}/wrapper && cargo build --release
 
 wrapper-check:
     #!/usr/bin/env sh
     set -e
-    cd {{justfile_directory()}}/wrapper
-    if command -v distrobox >/dev/null 2>&1; then
+    export PKG_CONFIG_PATH="{{brew_pkg_config}}${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    if ! pkg-config --exists webkit2gtk-4.1 && command -v distrobox >/dev/null 2>&1; then
         exec distrobox enter tracon-build -- bash -c 'cd {{justfile_directory()}}/wrapper && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test'
     fi
+    cd {{justfile_directory()}}/wrapper
     cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
