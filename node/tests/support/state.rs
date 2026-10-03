@@ -113,13 +113,13 @@ pub fn scratch(name: &str) -> PathBuf {
 
 /// `node.toml` is one file per test binary (`Config::config_path`, guarded by
 /// `TRACON_CONFIG_DIR` the same way `TRACON_STATE_DIR` is above), unlike
-/// `Store::open_in_memory()`, which every test gets its own copy of. A test
-/// that writes through a loopback endpoint and then asserts what actually
-/// landed on disk races against any other test doing the same — `cargo
-/// test`'s default threading runs every `#[tokio::test]` in a file
-/// concurrently. Hold this for the span of such a test — an async
-/// `tokio::sync::Mutex`, not `std::sync::Mutex`, because the span crosses
-/// `.await` points.
+/// `Store::open_in_memory()`, which every test gets its own copy of. The node
+/// keeps concurrent edits of it from losing each other (`Config::edit_lock`),
+/// so tests that change different keys need nothing more. Two tests that
+/// change the same key and assert what landed on disk still interleave under
+/// `cargo test`, which runs every `#[tokio::test]` in a file concurrently:
+/// hold this for the span of such a test. An async `tokio::sync::Mutex`, not
+/// `std::sync::Mutex`, because the span crosses `.await` points.
 #[allow(dead_code)]
 pub async fn config_lock() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
