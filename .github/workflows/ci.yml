@@ -8,11 +8,13 @@ on:
 permissions:
   contents: read
 
-# A newer push to a PR makes the older run pointless. A run on main is the
-# record of that commit, and the one whose caches every PR reads, so it is
-# never cancelled.
+# A newer push to a PR makes the older run pointless, so PR runs share a group
+# and cancel. Each push to main gets a group of its own: a run on main is the
+# record of that commit, and the one whose caches every PR reads, and GitHub
+# keeps only one pending run per group, so a shared group would silently drop a
+# queued main run whenever another merge landed behind it.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
