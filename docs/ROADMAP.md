@@ -505,3 +505,4 @@ Kept as intent, off the plan until the supported configuration has earned them.
 - Business-domain features such as invoicing and billing.
 - Arbitrary host execution through the node API. Service/CLI installation and node restarts
   remain explicit desktop/CLI operations; file imports use a picker/upload flow.
+
