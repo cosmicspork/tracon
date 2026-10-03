@@ -1092,7 +1092,6 @@ fn swap_bundles(app_root: &Path, staged: &Path, old: &Path) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -1180,12 +1179,14 @@ mod tests {
         Target::MacApp(PathBuf::from("/Applications/tracon.app"))
     }
 
+    /// A fresh directory for one test, so `label` must be unique to it. Named
+    /// by the process rather than the clock: tests run concurrently, and two
+    /// starting within the clock's resolution (a microsecond on macOS) got the
+    /// same directory, which `create_dir` refused with `File exists`.
     fn scratch(label: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("tracon-updater-{label}-{unique}"));
+        let dir =
+            std::env::temp_dir().join(format!("tracon-updater-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -1522,12 +1523,7 @@ mod tests {
 
     #[tokio::test]
     async fn verified_download_replaces_the_appimage_and_keeps_its_mode() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("tracon-updater-{unique}"));
-        fs::create_dir(&dir).await.unwrap();
+        let dir = scratch("download");
         let destination = dir.join("tracon.AppImage");
         fs::write(&destination, b"old").await.unwrap();
         #[cfg(unix)]
@@ -1568,12 +1564,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_downloads_leave_the_appimage_unchanged() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("tracon-updater-{unique}"));
-        fs::create_dir(&dir).await.unwrap();
+        let dir = scratch("invalid-download");
         let destination = dir.join("tracon.AppImage");
         fs::write(&destination, b"old").await.unwrap();
         let body = b"new".to_vec();

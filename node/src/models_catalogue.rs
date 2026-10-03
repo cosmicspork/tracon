@@ -66,11 +66,9 @@ fn load_from_disk() -> Option<Catalogue> {
 }
 
 /// Atomic write: a temp file beside the target, renamed into place — the
-/// same shape as `Broker::save_at` (`node/src/broker/mod.rs:296`).
-/// `Config::save`/`save_to` write their TOML directly with no temp file, so
-/// they are not actually atomic; the sealed store's pattern is the one this
-/// follows for a file a concurrent reader (another process, or this one's own
-/// next `cached()` call) could otherwise catch half-written.
+/// same shape as `Broker::save_at` (`node/src/broker/mod.rs:296`), for a file
+/// a concurrent reader (another process, or this one's own next `cached()`
+/// call) could otherwise catch half-written.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;

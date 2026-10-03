@@ -2455,6 +2455,18 @@ impl Config {
         self.save_to(&Self::config_path())
     }
 
+    /// Held from `try_load` to `save` by every edit of `node.toml` this
+    /// process makes. `save_to` writes the difference between the file as it
+    /// is now and `self`, so an edit loaded before another one was saved
+    /// writes that other edit's keys back to what it loaded: two settings
+    /// saved together, or an enrolment finishing while the repository table
+    /// is saved, would otherwise lose one of them. A `std` guard, so a
+    /// handler cannot hold it across an `.await`.
+    pub fn edit_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Write what changed, and only that.
     ///
     /// The file keeps every key it already had, and gains or changes only the
@@ -2486,8 +2498,27 @@ impl Config {
         let after = toml::Table::try_from(self).map_err(std::io::Error::other)?;
         write_changes(&mut doc, &before, &after, &[]);
         let text = toml::to_string_pretty(&doc).map_err(std::io::Error::other)?;
-        std::fs::write(path, text)
+        write_replacing(path, text.as_bytes())
     }
+}
+
+/// Replace `path` by renaming a finished file over it, so a reader never sees
+/// it truncated or half-written: `try_load` does not hold `edit_lock`, and an
+/// empty file parses as the defaults. A symlinked `node.toml` keeps its link,
+/// and the file keeps its mode.
+fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let tmp = target.with_extension(format!("toml.{}.tmp", uuid::Uuid::now_v7()));
+    let written = std::fs::write(&tmp, bytes).and_then(|()| {
+        if let Ok(meta) = std::fs::metadata(&target) {
+            std::fs::set_permissions(&tmp, meta.permissions())?;
+        }
+        std::fs::rename(&tmp, &target)
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// Carry into `doc` every value that differs between `before` (what the file
@@ -2577,6 +2608,31 @@ mod tests {
         assert!(text.contains("budget_tokens = 5"), "{text}");
         assert!(!text.contains("harness_image"), "{text}");
         assert_eq!(Config::try_load_from(&path).unwrap().harness.id, "claude");
+    }
+
+    /// The save renames a new file into place, which must not turn a
+    /// symlinked `node.toml` into a copy or reset its mode.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_keeps_the_files_link_and_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.toml");
+        let link = dir.path().join("node.toml");
+        std::fs::write(&real, "node_name = \"n\"\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut cfg = Config::try_load_from(&link).unwrap();
+        cfg.harness.id = "claude".into();
+        cfg.save_to(&link).unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::read_to_string(&real).unwrap().contains("claude"));
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     /// A provider the file never named is a default entry; editing it must not

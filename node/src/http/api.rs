@@ -5287,6 +5287,7 @@ pub async fn create_provider(
 
     // try_load, never load: a node.toml that does not parse must be
     // reported, not silently replaced with defaults plus this provider.
+    let _edit = Config::edit_lock();
     let mut cfg = Config::try_load().map_err(|e| {
         ApiError(
             StatusCode::CONFLICT,
@@ -5352,6 +5353,7 @@ pub async fn put_config(
 ) -> ApiResult<Json<serde_json::Value>> {
     // try_load, never load: a node.toml that does not parse must be reported,
     // not silently replaced with defaults plus this patch.
+    let _edit = Config::edit_lock();
     let mut cfg = Config::try_load().map_err(|e| {
         ApiError(
             StatusCode::CONFLICT,
@@ -5614,6 +5616,7 @@ pub async fn mesh_init(
         .0;
     crate::mesh::channels::create(s.store(), &identity, proto::frame::MESH_CHANNEL)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let _edit = Config::edit_lock();
     let mut cfg = Config::try_load().map_err(|e| {
         ApiError(
             StatusCode::CONFLICT,
@@ -5641,6 +5644,7 @@ pub async fn mesh_unpair(
     _: super::auth::Loopback,
     State(_): State<AppState>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let _edit = Config::edit_lock();
     let mut cfg = Config::try_load().map_err(|e| {
         ApiError(
             StatusCode::CONFLICT,
@@ -5763,6 +5767,7 @@ pub async fn start_enroll(
                 // The hub is written only once the mesh has actually taken
                 // this node: a config pointing at a hub that refused it is
                 // worse than no config at all.
+                let _edit = Config::edit_lock();
                 match Config::try_load() {
                     Ok(mut cfg) => {
                         cfg.mesh.hub_url = Some(hub.clone());
