@@ -75,6 +75,17 @@ setup: images
 boundary:
     cargo run --bin tracon -- check-boundary --deep
 
+# Run an unreleased build as this machine's own node: build `ref` in its own
+# worktree, back up the node's state, and point the user service at the build
+# through a systemd drop-in. Refuses while a session is running. Linux only.
+node-dev ref="origin/main":
+    ./scripts/node-swap.sh dev {{ref}}
+
+# Run the released node again. `just node-release restore` also puts back the
+# state backed up when the dev build went in.
+node-release mode="":
+    ./scripts/node-swap.sh release {{mode}}
+
 # Static Linux binaries, as the release ships them. musl because the glibc on
 # a host we do not control is not ours to depend on. Needs a musl C toolchain:
 # `musl-tools` on Debian, `musl-cross` from Homebrew on a Mac. A host with
