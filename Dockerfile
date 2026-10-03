@@ -2,7 +2,11 @@
 # runtime needs nothing but CA roots (for nothing today; kept for parity with
 # the other images and any future outbound call).
 
-FROM docker.io/library/rust@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS builder
+# Third-party crates are built in their own layer, keyed on a recipe that
+# cargo-chef derives from the manifests alone. The source differs on every
+# release, so without this every release recompiled every dependency. The
+# recipe masks the workspace's own version, so a release-please bump keeps it.
+FROM docker.io/library/rust@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS chef
 # The replica's SQLite is bundled and compiled in.
 # Debian's live suite is mutable; this official snapshot fixes every apt
 # dependency selected below.
@@ -14,7 +18,16 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && apt-get -o Acquire::Check-Valid-Until=false update \
     && apt-get install -y --no-install-recommends gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --locked --version 0.1.78
 WORKDIR /build
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release -p tracon-hub --recipe-path recipe.json
 COPY . .
 RUN cargo build -p tracon-hub --release
 

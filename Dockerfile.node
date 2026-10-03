@@ -65,8 +65,21 @@ RUN set -eu; \
     echo "opencode-ui tree digest $digest"; \
     chmod -R a+rX /opt/tracon/opencode-ui
 
-FROM docker.io/library/rust@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS builder
+# Third-party crates are built in their own layer, keyed on a recipe that
+# cargo-chef derives from the manifests alone. The source differs on every
+# release, so without this every release recompiled every dependency. The
+# recipe masks the workspace's own version, so a release-please bump keeps it.
+FROM docker.io/library/rust@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS chef
+RUN cargo install cargo-chef --locked --version 0.1.78
 WORKDIR /build
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release -p tracon --bin tracon --recipe-path recipe.json
 COPY . .
 COPY --from=spa /build/spa/dist spa/dist
 RUN cargo build -p tracon --release --bin tracon
