@@ -1141,6 +1141,22 @@ just setup && just boundary
 container (it needs webkit2gtk headers an immutable host lacks). The interface's
 screenshots regenerate without a node: `cd spa && bun scripts/screenshots.mjs`.
 
+To run an unreleased build as your own node on Linux, against your real state and
+credentials, use `just node-dev [ref]` (default `origin/main`). It builds the ref in a
+worktree under `~/.cache/tracon/node-dev` and refuses while a managed session is
+running. It then stops the node and copies its state and config directories to
+`~/.local/state/tracon-backups/`, then runs the build's `setup`. Finally it starts the
+service on `~/.local/bin/tracon-dev` through a systemd drop-in and runs
+`check-boundary --deep`. Running it again replaces the build and keeps the first
+backup. `just node-release` removes the drop-in, rebuilds the boundary from the
+release's own definitions and starts the release again. `just node-release restore`
+also puts back the backed-up state, keeping what the dev build wrote beside it.
+
+A drop-in is used instead of replacing `~/.local/bin/tracon` because the desktop
+app owns that path and reinstalls it whenever its version differs. Migrations run
+forward only, which is why the backup is taken. Podman volumes and images the dev
+build created are not backed up or removed.
+
 ## Escape hatch
 
 The node is developed by agents running inside it, so a bad build must not lock you
