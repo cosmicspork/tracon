@@ -32,6 +32,29 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.26.0](https://github.com/cosmicspork/tracon/compare/v0.25.0...v0.26.0) (2026-10-03)
+
+
+### Features
+
+* **gateway:** give each egress client its own grant ([#319](https://github.com/cosmicspork/tracon/issues/319)) ([8a6fe21](https://github.com/cosmicspork/tracon/commit/8a6fe21aab79d33b4d53de688b75567b72a2e35a))
+* **policy:** ask less, and refuse Claude Code settings carried by the workspace ([#313](https://github.com/cosmicspork/tracon/issues/313)) ([ef688a4](https://github.com/cosmicspork/tracon/commit/ef688a411dede37235491887e737b4479a74e55d))
+* **repo:** build a repository's toolchain image from its default-branch Dockerfile ([#317](https://github.com/cosmicspork/tracon/issues/317)) ([2c1c1d1](https://github.com/cosmicspork/tracon/commit/2c1c1d14ecc804e018eb8ef5885d42cdcf761468))
+* **review:** prepare once per candidate, in a cache no other candidate wrote ([#321](https://github.com/cosmicspork/tracon/issues/321)) ([5dfc9b3](https://github.com/cosmicspork/tracon/commit/5dfc9b3c5f59fc12a5840418b353516da443f4a0))
+* **review:** run required checks in the repository's own environment ([#314](https://github.com/cosmicspork/tracon/issues/314)) ([5a2bcd4](https://github.com/cosmicspork/tracon/commit/5a2bcd4d15b3379e4b5571311e4106360be39d7a))
+* **session:** open a repository's registries to its sessions ([#320](https://github.com/cosmicspork/tracon/issues/320)) ([120a399](https://github.com/cosmicspork/tracon/commit/120a3993361254cff665eace6b39c714b6e2856c))
+* **session:** run a Claude session in its repository's image ([#318](https://github.com/cosmicspork/tracon/issues/318)) ([ead490c](https://github.com/cosmicspork/tracon/commit/ead490ce0aeb2431623ca3f3e15f90b620a9ac21))
+* **settings:** the repository table in Settings and the CLI ([#323](https://github.com/cosmicspork/tracon/issues/323)) ([815a7f3](https://github.com/cosmicspork/tracon/commit/815a7f3663b3f62fd438de97fcbb74599e686b6e))
+
+
+### Bug Fixes
+
+* **config:** stop concurrent node.toml edits losing each other ([#329](https://github.com/cosmicspork/tracon/issues/329)) ([62ca620](https://github.com/cosmicspork/tracon/commit/62ca620b50b66a11440649801a4f7b06a2464ae0))
+* **runner:** keep a run's own loopback off the proxy ([#322](https://github.com/cosmicspork/tracon/issues/322)) ([b4ce123](https://github.com/cosmicspork/tracon/commit/b4ce1235eadaf7ce7fa40ca88da61ea7e8df3101))
+* **session:** let a harness ride out the retries it bounds itself before the watchdog pauses ([#311](https://github.com/cosmicspork/tracon/issues/311)) ([55c173b](https://github.com/cosmicspork/tracon/commit/55c173bb4e46e6cb4acf57f99d1755c409c7c358))
+* **usage:** charge new work, not cache reads, and settle a turn the session is stopped under ([#315](https://github.com/cosmicspork/tracon/issues/315)) ([0c9b76f](https://github.com/cosmicspork/tracon/commit/0c9b76fbc6f022b63c9da83f2358486226d084f2))
+* **workspace:** export a workspace as Git sees it ([#316](https://github.com/cosmicspork/tracon/issues/316)) ([962d109](https://github.com/cosmicspork/tracon/commit/962d109c81b6d988164f69e6752aefa5db061e51))
+
 ## [0.25.0](https://github.com/cosmicspork/tracon/compare/v0.24.0...v0.25.0) (2026-09-30)
 
 
