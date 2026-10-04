@@ -23,6 +23,7 @@
   } from '../lib/types'
   import { baseFromDiff, buildPatch, fileSection } from '../lib/patch'
   import { isNarrativeReport } from '../lib/reports'
+  import { leaveAfterVerdict } from '../lib/verdict-nav'
   import { COVERAGE, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
 
   let { id }: { id: string } = $props()
@@ -54,11 +55,14 @@
   let busy = $state(false)
   let error = $state<string | null>(null)
   let loaded = $state(false)
+  /** The route this review was opened from; a verdict goes back to it. */
+  let openedFrom: string | null = null
   const report = $derived(review && isNarrativeReport(review) ? review : null)
 
   $effect(() => {
     void id
     loaded = false
+    openedFrom = router.previous
     api
       .review(id)
       .then((d) => {
@@ -301,11 +305,14 @@
         }
       }
       await store.refetch()
-      if (res.published) {
-        router.go(`/sessions/${review.session_id}`)
-      } else {
-        router.go('/')
-      }
+      // The outcome is on the review and on the session, so a verdict that
+      // finishes after the operator has gone to read something else leaves
+      // them there rather than hauling them back.
+      leaveAfterVerdict(router, {
+        reviewId: id,
+        from: openedFrom,
+        fallback: res.published ? `/sessions/${review.session_id}` : '/',
+      })
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
     } finally {

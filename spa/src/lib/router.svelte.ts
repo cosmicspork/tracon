@@ -8,9 +8,20 @@ class Router {
   search = $state(location.search)
   hash = $state(location.hash)
   revision = $state(0)
+  /**
+   * The route the last in-app navigation left, so a screen can put the
+   * operator back where they came from. Null on a cold load and after a
+   * history jump: nothing is behind a page that was typed in, and what Back
+   * left is ahead of where it landed, not behind it.
+   *
+   * Deliberately not reactive — it is read when a screen opens, and a screen
+   * that re-read it on every navigation would be recording its own.
+   */
+  previous: string | null = null
 
   start() {
     window.addEventListener('popstate', () => {
+      this.previous = null
       this.path = location.pathname
       this.search = location.search
       this.hash = location.hash
@@ -30,7 +41,10 @@ class Router {
 
   go(path: string) {
     const current = this.path + this.search + this.hash
-    if (path !== current) history.pushState(null, '', path)
+    if (path !== current) {
+      this.previous = current
+      history.pushState(null, '', path)
+    }
     this.path = location.pathname
     this.search = location.search
     this.hash = location.hash
