@@ -34,11 +34,15 @@ struct Fixture {
     worktree: String,
 }
 
+// A fixture's Git is the one an agent would run, so it must honour replace refs
+// even where the suite itself runs with them off: a node session sets
+// GIT_NO_REPLACE_OBJECTS, and inheriting it left the planted ref inert.
 fn sh(dir: &std::path::Path, script: &str) {
     let out = std::process::Command::new("sh")
         .arg("-c")
         .arg(script)
         .current_dir(dir)
+        .env_remove("GIT_NO_REPLACE_OBJECTS")
         .output()
         .unwrap();
     assert!(
@@ -54,6 +58,7 @@ fn sh_out(dir: &std::path::Path, script: &str) -> String {
         .arg("-c")
         .arg(script)
         .current_dir(dir)
+        .env_remove("GIT_NO_REPLACE_OBJECTS")
         .output()
         .unwrap();
     assert!(
