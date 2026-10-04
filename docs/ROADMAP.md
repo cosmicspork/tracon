@@ -48,8 +48,8 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 
 ## Now — start, build, ship from one node
 
-Every item here was found on the 2026-09-20, 2026-09-28 or 2026-09-30 live runs, or in
-the daily desktop use since.
+Every item here was found on the 2026-09-20, 2026-09-28, 2026-09-30 or 2026-10-03 live
+runs, or in the daily desktop use since.
 
 - [ ] **Proof of work.** One MCP tool that runs a command in the session's own boundary
       and has the *node* record the command, exit code, bounded output, revision and
@@ -72,7 +72,11 @@ the daily desktop use since.
       sleep inhibitor while any turn is running or a permission is waiting (logind's
       `Inhibit` on Linux, a power assertion on macOS), release it when the node is
       idle, show in the interface when it is held, and record a suspend that happens
-      anyway as an interruption rather than a silent gap.
+      anyway as an interruption rather than a silent gap. It happened again on
+      2026-10-03 (session `01a10447`): about 19 minutes asleep while a permission card
+      waited, and because a card's expiry is measured on the wall clock it was answered
+      "denied: unanswered" the moment the host woke, leaving the agent's work in a
+      `git stash`. A card's deadline should count only time the node was awake.
 - [ ] **Give a node restart its own end reason.** Sessions running when the node restarts
       are ended as `killed_user`, which tells the operator they stopped something they did
       not; record `node_restart` and offer the resume a restart interrupted.
@@ -104,7 +108,17 @@ the daily desktop use since.
       offers the identity (in `external show` and as a tool result the harness applies as
       repo-local config) and checks authorship at `submit_review` and publish: a commit
       whose author is not an identity of the target forge account is named in the review,
-      and rewriting it is an operator-approved step, never silent.
+      and rewriting it is an operator-approved step, never silent. Still true on
+      2026-10-03: #333, published from session `01a10447`, carries a
+      `tracon@localhost` commit.
+- [ ] **Close the loop on a published session.** Once its review is approved and
+      published, session `01a10447` (2026-10-03, #333) went on sitting `running` in its
+      container, holding its egress grant, with nothing on the session naming the pull
+      request: the URL is only on the review, and the agent had ended its turn rather
+      than wait on `review_status`. Record the publication on the session (`published`,
+      with the URL) and show it there, then suspend a published session after an idle
+      period — container stopped, grant revoked, workspace kept — so a CI failure or a
+      review comment can resume it. Ending it stays the operator's.
 - [ ] **Open external links through a clean Linux host launcher**: the AppImage's bundled
       `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
       host environment for the child only and keep the URL and origin restrictions.
@@ -319,14 +333,6 @@ work that does not need it, and nothing on it may be described elsewhere as prov
 - [ ] **A private repository end to end**, through preparation, agent work, checks in the
       project's toolchain image, and authorized publication to GitHub, with nothing in the
       published result naming tracon.
-- [ ] **A session in its repository's own image, driven by an agent.** The image built
-      from the default-branch Dockerfile, the harness layered on, a dependency added
-      through `session_egress`, the project's tests run by the agent before it submits,
-      and the same checks passing after. Each piece was run by hand against rootless
-      Podman on 2026-10-01 (the built and layered images, a session grant fetching from
-      crates and npm with `pypi.org` refused and recorded, preparation once from a warmed
-      base cache, tracon's own `just check` through fmt, clippy and the offline test
-      build); a session with a model behind it doing all of it in one sitting has not.
 - [ ] **The normal workflow, proven as a workflow**: client disconnect and reconnect,
       interrupted execution, retained drafts, a node restart, and recovery through
       completion, with what actually ran, what stayed uncertain, and where the operator
@@ -359,9 +365,6 @@ work that does not need it, and nothing on it may be described elsewhere as prov
       together, rather than each against a stand-in; and **the browser and PWA runs against
       the real pinned bundle**, which needs `containers/opencode-ui/build.sh` to have been
       run on the machine.
-- [ ] **The UI bundle fetched from a published release**: `tracon setup` fetches and
-      verifies `opencode-ui-v1.18.30.tar.gz`, but no release has published that asset yet,
-      so only the offline `--ui-bundle` path has been exercised against real bytes.
 - [ ] **Physical devices**: install from the always-on node over HTTPS on iOS Safari and
       Android Chrome, and confirm the framed native view authenticates with cross-site
       tracking prevention on. Safari is the open one; if the frame is refused there the
