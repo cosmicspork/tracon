@@ -465,21 +465,7 @@ impl Pump {
                     for block in v["message"]["content"].as_array().into_iter().flatten() {
                         if block["type"] == "tool_result" {
                             let _ = tx
-                                .send(HarnessEvent::ToolCallUpdate(ToolCallUpdate {
-                                    tool_call_id: block["tool_use_id"]
-                                        .as_str()
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                    status: Some(if block["is_error"].as_bool().unwrap_or(false) {
-                                        "failed".into()
-                                    } else {
-                                        "completed".into()
-                                    }),
-                                    kind: None,
-                                    title: None,
-                                    content: vec![block["content"].clone()],
-                                    raw_output: None,
-                                }))
+                                .send(HarnessEvent::ToolCallUpdate(tool_result_update(block)))
                                 .await;
                         }
                     }
@@ -601,6 +587,40 @@ fn usage_of(v: &Value) -> Usage {
         total_tokens: input + output + cached + written,
         cached_read_tokens: cached,
         cache_write_tokens: written,
+    }
+}
+
+/// A `tool_result` block as the terminal update of its tool call. The ledger
+/// records `raw_output`, so it carries the result as text: Claude Code sends
+/// either a string or an array of content blocks.
+fn tool_result_update(block: &Value) -> ToolCallUpdate {
+    let output = match &block["content"] {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .map(|part| match part["text"].as_str() {
+                Some(text) if part["type"] == "text" => text.to_string(),
+                _ => format!("[{}]", part["type"].as_str().unwrap_or("content")),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    };
+    ToolCallUpdate {
+        tool_call_id: block["tool_use_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        status: Some(if block["is_error"].as_bool().unwrap_or(false) {
+            "failed".into()
+        } else {
+            "completed".into()
+        }),
+        kind: None,
+        title: None,
+        content: vec![block["content"].clone()],
+        raw_output: Some(Value::String(output)),
     }
 }
 
@@ -855,6 +875,47 @@ mod tests {
         assert_eq!(server["headers"]["Authorization"], "Bearer tok");
         // Long enough for an operator to answer an ask.
         assert_eq!(server["timeout"], MCP_CALL_TIMEOUT_MS);
+    }
+
+    /// The ledger keeps what a tool returned, whichever shape Claude Code sent
+    /// it in, and a failure keeps its message.
+    #[test]
+    fn a_tool_result_carries_its_output_to_the_ledger() {
+        let plain = tool_result_update(&json!({
+            "type": "tool_result",
+            "tool_use_id": "t1",
+            "content": "b95f6b6 fix(spa): leave a verdict's navigation",
+            "is_error": false,
+        }));
+        assert_eq!(plain.tool_call_id, "t1");
+        assert_eq!(plain.status.as_deref(), Some("completed"));
+        assert_eq!(
+            plain.raw_output,
+            Some(json!("b95f6b6 fix(spa): leave a verdict's navigation"))
+        );
+
+        let blocks = tool_result_update(&json!({
+            "type": "tool_result",
+            "tool_use_id": "t2",
+            "content": [
+                { "type": "text", "text": "232 pass" },
+                { "type": "image", "source": {} },
+                { "type": "text", "text": "0 fail" },
+            ],
+        }));
+        assert_eq!(blocks.raw_output, Some(json!("232 pass\n[image]\n0 fail")));
+
+        let failed = tool_result_update(&json!({
+            "type": "tool_result",
+            "tool_use_id": "t3",
+            "content": "Error: worktree is for a harness you run yourself",
+            "is_error": true,
+        }));
+        assert_eq!(failed.status.as_deref(), Some("failed"));
+        assert_eq!(
+            failed.raw_output,
+            Some(json!("Error: worktree is for a harness you run yourself"))
+        );
     }
 
     #[test]
