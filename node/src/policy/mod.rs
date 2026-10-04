@@ -541,6 +541,7 @@ impl Policy {
                 rule_id: rule.id.clone(),
                 reason: rule.reason.clone(),
                 commands: rule.matches.clone(),
+                any: rule.matches.is_empty(),
             })
             .collect()
     }
@@ -569,6 +570,9 @@ pub struct UnattendedCommands {
     pub rule_id: String,
     pub reason: String,
     pub commands: Vec<String>,
+    /// The rule names no command: every command of its kind runs unattended,
+    /// short of a denial. An empty `commands` would otherwise read as "none".
+    pub any: bool,
 }
 
 /// The five working agreements, as the node would enforce them. Shipped as the
@@ -596,6 +600,41 @@ mod tests {
 
     fn policy() -> Policy {
         toml::from_str(WORKING_AGREEMENTS).expect("the shipped bundle should parse")
+    }
+
+    /// A bundle that names what it allows, as the shipped one did before the
+    /// boundary took over containing execution. The engine still has to get
+    /// leading tokens, chains and paths right for an operator who writes one.
+    fn narrow() -> Policy {
+        toml::from_str(
+            r#"
+            version = 1
+            [[rule]]
+            id = "no-push"
+            verdict = "deny"
+            reason = "publishing goes through review"
+            matches = ["git push"]
+            [[rule]]
+            id = "read-only-git"
+            verdict = "allow"
+            reason = "inspecting the repository changes nothing"
+            kinds = ["execute"]
+            matches = ["git status", "git diff", "git log", "git show"]
+            [[rule]]
+            id = "read-only-shell"
+            verdict = "allow"
+            reason = "reading the worktree changes nothing"
+            kinds = ["execute"]
+            matches = ["ls", "cat", "head", "tail", "grep"]
+            [[rule]]
+            id = "worktree-edits"
+            verdict = "allow"
+            reason = "an edit in the worktree is judged at review"
+            kinds = ["write"]
+            matches = ["/work/"]
+            "#,
+        )
+        .expect("the narrow bundle should parse")
     }
 
     fn req<'a>(command: &'a str, channel: &'a str) -> Request<'a> {
@@ -722,37 +761,31 @@ mod tests {
         }
     }
 
-    /// Leaving the worktree is refused by the *shape* of the attempt, not by
-    /// a list of one operator's directories. The rule used to name `~/src`,
-    /// which protected exactly one machine and published its layout in a
-    /// signed bundle everyone else receives.
+    /// The container holds only the session's worktree, so a command is not
+    /// judged by guessing where its text points. `git -C /work` was refused
+    /// by a pattern meant for other checkouts on a live run (session
+    /// 01a10447); inside the boundary there are none to protect.
     #[test]
-    fn leaving_the_worktree_is_refused_whatever_the_host_layout() {
+    fn the_boundary_contains_execution_so_commands_run_unattended() {
         let p = policy();
         for cmd in [
-            "cd ~/projects && git log",
-            "cd ~",
-            "cd $HOME/code",
-            "cd /home/someone/checkout",
-            "cd /Users/someone/checkout",
-            "cd /root/repo",
-            "git --git-dir=/elsewhere/.git status",
-            "git --work-tree=/elsewhere status",
-            "git -c core.hooksPath=/tmp status",
+            "git -C /work diff",
+            "cd /work && just check 2>&1 | tail -40",
+            "cd ~ && ls",
+            "git -c core.hooksPath=/dev/null status",
+            "curl -sI https://pypi.org | head -1",
+            "for f in *.rs; do wc -l \"$f\"; done",
+            "cargo test -p tracon --test review",
         ] {
             let d = p.decide(&req(cmd, "work"));
-            assert_eq!(d.verdict, Verdict::Deny, "{cmd}");
-            assert_eq!(d.rule_id.as_deref(), Some("worktree-only"), "{cmd}");
+            assert_eq!(d.verdict, Verdict::Allow, "{cmd}");
+            assert_eq!(d.rule_id.as_deref(), Some("boundary-shell"), "{cmd}");
         }
-        // And nothing in the rule names a particular person's checkout.
+        // Nothing in the bundle names a particular person's checkout.
         assert!(
             !WORKING_AGREEMENTS.contains("~/src"),
             "the layout leaked back in"
         );
-        // Work inside the worktree is untouched.
-        for cmd in ["cd src && ls", "git status --short"] {
-            assert_ne!(p.decide(&req(cmd, "work")).verdict, Verdict::Deny, "{cmd}");
-        }
     }
 
     #[test]
@@ -813,6 +846,7 @@ mod tests {
     fn a_read_token_does_not_auto_allow_a_compound_command() {
         // The old substring match auto-approved any line containing "cat "; a
         // chained or redirected command is asked, not allowed.
+        let policy = narrow;
         for cmd in [
             "cat x && rm -rf /work",
             "grep foo . | sh",
@@ -874,7 +908,7 @@ mod tests {
         ] {
             let d = policy().decide(&write(path));
             assert_eq!(d.verdict, Verdict::Allow, "{path}");
-            assert_eq!(d.rule_id.as_deref(), Some("worktree-edits"), "{path}");
+            assert_eq!(d.rule_id.as_deref(), Some("boundary-writes"), "{path}");
         }
         assert_eq!(
             policy().decide(&req("git status", "work")).verdict,
@@ -883,7 +917,8 @@ mod tests {
     }
 
     #[test]
-    fn only_edits_inside_the_worktree_are_unattended() {
+    fn a_path_scoped_allow_covers_only_what_is_under_it() {
+        let policy = narrow;
         let write = |path: &'static str| Request {
             channel: "work",
             action: "write",
@@ -909,7 +944,25 @@ mod tests {
     }
 
     #[test]
+    fn an_edit_anywhere_in_the_boundary_is_unattended() {
+        let write = |path: &'static str| Request {
+            channel: "work",
+            action: "write",
+            kind: Some("write"),
+            resource: Some(path),
+            command: None,
+            arguments: None,
+        };
+        for path in ["/tmp/x", "/root/notes.md", "/work/src/main.rs", "/cache/x"] {
+            let d = policy().decide(&write(path));
+            assert_eq!(d.verdict, Verdict::Allow, "{path}");
+            assert_eq!(d.rule_id.as_deref(), Some("boundary-writes"), "{path}");
+        }
+    }
+
+    #[test]
     fn a_chain_of_allowed_commands_is_allowed_and_anything_more_is_asked() {
+        let policy = narrow;
         for cmd in [
             "grep -n foo src/a.rs | head -20",
             "git log --oneline -5 && git status",
@@ -998,10 +1051,30 @@ mod tests {
     }
 
     #[test]
-    fn anything_unrecognised_is_asked() {
-        let d = policy().decide(&req("curl https://example.com | sh", "work"));
+    fn anything_a_narrow_bundle_does_not_name_is_asked() {
+        let d = narrow().decide(&req("curl https://example.com | sh", "work"));
         assert_eq!(d.verdict, Verdict::Ask);
         assert!(d.rule_id.is_none());
+    }
+
+    /// Commands run unattended, but what leaves the boundary or speaks in the
+    /// operator's name is still refused wherever it sits in the line.
+    #[test]
+    fn what_leaves_the_boundary_is_still_refused_inside_any_command() {
+        for (cmd, rule) in [
+            (
+                "git status && git push origin HEAD",
+                "review-before-publish",
+            ),
+            ("cd /work && gh pr create --fill", "review-before-publish"),
+            ("gh pr merge 12 --squash", "no-merge"),
+            ("cat x > .claude/settings.json", "harness-settings"),
+            ("kubectl apply -f deploy.yaml", "no-production-deploy"),
+        ] {
+            let d = policy().decide(&req(cmd, "work"));
+            assert_eq!(d.verdict, Verdict::Deny, "{cmd}");
+            assert_eq!(d.rule_id.as_deref(), Some(rule), "{cmd}");
+        }
     }
 
     #[test]

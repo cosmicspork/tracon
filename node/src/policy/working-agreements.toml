@@ -1,46 +1,39 @@
-# The five working agreements, as rules the node enforces rather than prose an
+# The working agreements, as rules the node enforces rather than prose an
 # agent is asked to remember.
+#
+# The boundary does the containing. A session runs unprivileged in its own
+# container, with no route out but the egress it is granted, no credential the
+# node did not lend it for one call, and nothing it makes reaching anyone until
+# the operator approves the diff at review. Inside that, a shell command, an
+# edit or a read is the session's own business: asking about each one put
+# dozens of cards in front of the operator on every real session, nearly all of
+# them for work that could not leave the container, and taught them to approve
+# without reading. So reads, writes and shell commands run unattended, and
+# this bundle is about what crosses the boundary or speaks in the operator's
+# name: publishing, merging, moving a ticket, a production deploy, the
+# harness's own configuration, and every brokered tool that writes somewhere
+# others will read.
 #
 # Denials are deliberate and explained: the agent reads the reason and stops,
 # instead of meeting a confusing auth error and looking for another way round.
-# Anything not matched here is asked, so adding a rule can only ever reduce the
-# number of interruptions, never widen what an agent may do unattended.
+# A denial wins over any allow, whatever the order. An action no rule names —
+# a brokered write, a tool whose kind the node does not know — is asked.
 
-version = 11
+version = 12
 
-# --- 1. Worktree, not the main checkout -------------------------------------
-# Structurally true already: the harness only ever sees its own worktree at
-# /work. The rule exists so an attempt to reach outside it is refused with a
-# reason rather than failing as a missing path.
-#
-# What is named here is the *shape* of leaving the worktree — pointing git at
-# another repository, or changing into a home directory — and never one
-# installation's directory layout. A rule that hard-codes where a particular
-# operator keeps their checkouts protects nobody else's, and ships that
-# operator's filesystem in a signed bundle everyone receives.
-
-[[rule]]
-id = "worktree-only"
-verdict = "deny"
-reason = "Sessions work in their own worktree at /work. Another checkout may hold work that is not yours."
-matches = [
-    "git -c ",
-    "git --git-dir",
-    "git --work-tree",
-    "cd ~",
-    "cd $home",
-    "cd /home/",
-    "cd /users/",
-    "cd /root",
-]
-
+# --- 1. The harness and Git's internals stay the node's ---------------------
 # The harness's own configuration is the node's to write, not the session's.
 # Claude Code reads `.claude/settings.json` from the worktree (a session whose
 # repository carries one is refused at launch), and a settings file written
 # mid-session could allow tools without asking or add a hook that runs commands.
-# Git's internals are not the work either: a hook or a config change there runs
-# on whoever next commits in that tree. Matched as substrings so a relative
-# path, an absolute one and a shell line naming it are all caught.
+# It is also the one edit that would leave the boundary through the diff: a
+# settings file committed to the branch configures the harness of whoever
+# checks it out. Git's internals are not the work either: a hook or a config
+# change there runs on whoever next commits in that tree. The settings rule is
+# matched as a substring so a relative path, an absolute one and a shell line
+# naming it are all caught; the Git rule covers the edit tools, and a shell
+# line that writes under `.git/` meets a node that reads every candidate with
+# hooks off and replace refs ignored.
 
 [[rule]]
 id = "harness-settings"
@@ -101,35 +94,13 @@ matches = [
     "kubectl apply",
 ]
 
-# --- Reading is free ---------------------------------------------------------
-# Inspection changes nothing and asking about it trains the operator to approve
-# without reading, which is how a gate stops being one.
-
-[[rule]]
-id = "read-only-git"
-verdict = "allow"
-reason = "Inspecting the repository changes nothing."
-kinds = ["execute"]
-matches = [
-    "git status",
-    "git diff",
-    "git log",
-    "git show",
-    "git branch --list",
-    "git rev-parse",
-    "git ls-files",
-    "git remote -v",
-]
-
-# Leading-token match: the command must *start* with one of these. A chain
-# joined by `|`, `&&`, `||` or `;` is allowed only when every command in it is
-# allowed on its own; a redirection, substitution or variable is asked.
-[[rule]]
-id = "read-only-shell"
-verdict = "allow"
-reason = "Reading the worktree changes nothing."
-kinds = ["execute"]
-matches = ["ls", "cat", "head", "tail", "wc", "file", "pwd", "which", "grep"]
+# --- Inside the boundary -----------------------------------------------------
+# Reading, editing and running commands in the session's own container. What a
+# command could reach outside it is decided by the egress the session holds,
+# not by guessing from its text; what an edit could change for anyone else is
+# decided at review, where the diff is read. The denials above still see every
+# line and every path first, so `git push` or a settings file is refused here
+# as anywhere.
 
 [[rule]]
 id = "reads-and-thoughts"
@@ -137,20 +108,17 @@ verdict = "allow"
 reason = "Reading a file or updating the plan changes nothing outside the session."
 kinds = ["read", "think"]
 
-# --- Editing the work --------------------------------------------------------
-# An edit inside the session's own worktree reaches nothing until the operator
-# approves the diff at review, which is where an edit is actually judged. Asking
-# about each one first was most of the queue on a real implementation session
-# (46 of 50 asks) and taught the operator to approve without reading. Edits to
-# the harness's settings and to Git's internals are refused above whatever
-# this says, and a path that climbs out of /work is not under it.
+[[rule]]
+id = "boundary-shell"
+verdict = "allow"
+reason = "A command runs inside the session's boundary: no route out but its granted egress, no credentials, and nothing it makes is published until the operator approves it at review."
+kinds = ["execute"]
 
 [[rule]]
-id = "worktree-edits"
+id = "boundary-writes"
 verdict = "allow"
-reason = "An edit in the session's own worktree reaches nothing until the operator approves the diff at review."
+reason = "An edit inside the session's boundary reaches nothing until the operator approves the diff at review."
 kinds = ["write"]
-matches = ["/work/"]
 
 # --- Brokered tools ----------------------------------------------------------
 # What the node does on the agent's behalf is decided here too, before the

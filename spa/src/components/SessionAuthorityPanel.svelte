@@ -120,7 +120,7 @@
     <ul>
       {#each view.unattended_commands as rule (rule.rule_id)}
         <li>
-          <code>{rule.commands.join(' · ')}</code>
+          <code>{rule.any ? 'any command' : rule.commands.join(' · ')}</code>
           <small>{rule.reason} <em>{rule.rule_id}</em></small>
         </li>
       {/each}
