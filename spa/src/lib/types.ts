@@ -829,6 +829,8 @@ export interface UnattendedCommands {
   rule_id: string
   reason: string
   commands: string[]
+  /** The rule names no command: every command runs unattended, short of a denial. */
+  any: boolean
 }
 
 /** One named action and what the node would answer for it right now. */

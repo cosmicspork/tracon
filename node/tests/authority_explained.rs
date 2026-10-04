@@ -263,13 +263,14 @@ async fn unattended_commands_come_from_the_rules_that_allow_them() {
 
     let rules = view["unattended_commands"].as_array().unwrap();
     assert!(!rules.is_empty());
-    let all: Vec<&str> = rules
+    // The shipped bundle lets the boundary contain execution: its rule names
+    // no command, and says so rather than listing nothing.
+    let shell = rules
         .iter()
-        .flat_map(|r| r["commands"].as_array().unwrap())
-        .map(|c| c.as_str().unwrap())
-        .collect();
-    assert!(all.contains(&"git status"), "{all:?}");
-    assert!(all.contains(&"ls"), "{all:?}");
+        .find(|r| r["rule_id"] == "boundary-shell")
+        .unwrap_or_else(|| panic!("{rules:?}"));
+    assert_eq!(shell["any"], true);
+    assert!(shell["commands"].as_array().unwrap().is_empty());
     // Every one of them carries the rule that allows it, so the operator can
     // go and read it rather than taking this list's word.
     assert!(rules
@@ -278,8 +279,18 @@ async fn unattended_commands_come_from_the_rules_that_allow_them() {
     assert!(rules
         .iter()
         .all(|r| !r["reason"].as_str().unwrap().is_empty()));
-    // A write is nowhere in it. The explanation must never be the place an
-    // operator learns that something unattended was added quietly.
+    // A rule that names its commands is listed by them, and is not "any".
+    let all: Vec<&str> = rules
+        .iter()
+        .flat_map(|r| r["commands"].as_array().unwrap())
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    assert!(rules
+        .iter()
+        .filter(|r| !r["commands"].as_array().unwrap().is_empty())
+        .all(|r| r["any"] == false));
+    // A publication is nowhere in it. The explanation must never be the place
+    // an operator learns that something unattended was added quietly.
     assert!(!all.iter().any(|c| c.starts_with("git push")), "{all:?}");
 }
 

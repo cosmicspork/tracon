@@ -1048,24 +1048,34 @@ matches = ["doc_write"]
 args = { slug = ["note-*", "repo-*", "meeting-*", "inbox-*"] }
 ```
 
-The shipped bundle runs the reads unattended — queries, lookups, searches,
-pipeline and check status, job logs, documents, memory, the ledger, an item's
-brief — and asks before every write that others see: a comment, an edited or new
-ticket, a pipeline run, a document other than working notes, a line added to a
-brief. Edits inside the session's worktree (`/work/`) run unattended too, because
-nothing reaches anyone until you approve the diff, except an edit to the harness's
-settings (`.claude/settings…`) or to Git's internals (`.git/`), which is refused. For a
-file action an allow pattern ending in `/` covers what is under it. A shell line that
-chains commands with `|`, `&&`, `||` or `;` runs unattended when every command in it
-would on its own; a redirection, substitution or variable is still asked.
+The shipped bundle lets the boundary do the containing. Inside a session's
+container, reading, editing and running shell commands go unasked: the container
+has no route out but the egress it is granted and no credentials, and nothing it
+makes reaches anyone until you approve the diff. What the bundle guards is what
+crosses that boundary or speaks in your name. It refuses publishing, merging,
+moving a ticket and production deploys anywhere in a line. It also refuses an edit
+to the harness's settings (`.claude/settings…`), which would configure the harness of
+whoever checks the branch out, and an edit tool's write into Git's internals
+(`.git/`). It runs the brokered reads unattended — queries, lookups, searches,
+pipeline and check status, job logs, documents, memory, the ledger, an item's brief —
+and asks before every brokered write that others see: a comment, an edited or new
+ticket, a pipeline run, a document other than working notes, a line added to a brief.
+A tool whose kind the node does not know is asked.
 
-Two things are allowed without a rule. One of your required checks
-(`[supervision] checks`), run exactly as configured, does not ask before it runs. And
-a card offers **Allow … for this session** beside Allow and Deny: the call is
-answered once, and later calls in the same scope run unasked until the session ends —
-a command by its tool and subcommand (`cargo test …`), a one-word command or a chain
-only exactly as written, a brokered tool by name. Both are recorded in the session's
-log with the rule that let the call through, and neither reaches past a signed deny.
+A bundle of your own can be narrower. An allow can name commands by their leading
+words (`git status`, `cat`), and then a line that chains commands with `|`, `&&`,
+`||` or `;` is allowed only when every command in it would be on its own, with a
+redirection, substitution or variable asked. For a file action, an allow pattern
+ending in `/` covers what is under it.
+
+Two things are allowed without a rule, which matters under a narrower bundle. One
+of your required checks (`[supervision] checks`), run exactly as configured, does
+not ask before it runs. And a card offers **Allow … for this session** beside Allow
+and Deny: the call is answered once, and later calls in the same scope run unasked
+until the session ends — a command by its tool and subcommand (`cargo test …`), a
+one-word command or a chain only exactly as written, a brokered tool by name. Both
+are recorded in the session's log with the rule that let the call through, and
+neither reaches past a signed deny.
 
 ### Granting authority
 
