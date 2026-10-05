@@ -391,11 +391,8 @@ fn fields_from(
         }
         match k.as_str() {
             "summary" | "description" => {
-                let s = v
-                    .as_str()
-                    .ok_or_else(|| format!("{k} expects a string"))?
-                    .trim();
-                if k == "summary" && s.is_empty() {
+                let s = v.as_str().ok_or_else(|| format!("{k} expects a string"))?;
+                if k == "summary" && s.trim().is_empty() {
                     return Err("summary cannot be empty".into());
                 }
                 fields.insert(k.clone(), json!(s));
@@ -414,8 +411,8 @@ fn fields_from(
                     .ok_or("labels expects a list of strings")?
                     .iter()
                     .map(|l| {
-                        let l = l.as_str().ok_or("labels expects a list of strings")?.trim();
-                        if l.is_empty() {
+                        let l = l.as_str().ok_or("labels expects a list of strings")?;
+                        if l.trim().is_empty() {
                             return Err("a label cannot be empty".to_string());
                         }
                         if l.chars().any(char::is_whitespace) {
@@ -487,5 +484,24 @@ mod tests {
         assert_eq!(f["parent"], json!({ "key": "WRK-9" }));
         assert_eq!(f["labels"], json!(["a", "b"]));
         assert!(!f.contains_key("key"));
+    }
+
+    #[test]
+    fn summary_description_and_labels_are_sent_as_given() {
+        let f = fields_from(
+            &json!({ "summary": "  Fix it ", "description": "\n body \n", "labels": ["a"] }),
+            ISSUE_UPDATE,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(f["summary"], json!("  Fix it "));
+        assert_eq!(f["description"], json!("\n body \n"));
+        let e = fields_from(&json!({ "summary": "  " }), ISSUE_UPDATE, &[]).unwrap_err();
+        assert!(e.contains("summary cannot be empty"), "{e}");
+        let e = fields_from(&json!({ "labels": [" "] }), ISSUE_UPDATE, &[]).unwrap_err();
+        assert!(e.contains("cannot be empty"), "{e}");
+        // A padded label is refused, not trimmed into a different one.
+        let e = fields_from(&json!({ "labels": [" a"] }), ISSUE_UPDATE, &[]).unwrap_err();
+        assert!(e.contains("whitespace"), "{e}");
     }
 }
