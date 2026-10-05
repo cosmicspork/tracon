@@ -105,7 +105,8 @@ pub async fn handle_external(
         Ok(None) => None,
         Err(e) => return rpc_error(StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let mut response = answer_external(&s, channel, client.as_deref(), &msg)
+    let lane = lane_label(&headers);
+    let mut response = answer_external(&s, channel, client.as_deref(), lane.as_deref(), &msg)
         .await
         .into_response();
     if let Some(value) = client.and_then(|id| HeaderValue::from_str(&id).ok()) {
@@ -116,6 +117,17 @@ pub async fn handle_external(
 
 /// The header MCP's streamable HTTP transport names a session with.
 const SESSION_HEADER: &str = "mcp-session-id";
+
+/// The header a harness labels its calls with, so the operator can tell its
+/// agents apart. A label only: nothing is authorized, owned or routed by it.
+const LANE_HEADER: &str = "x-tracon-agent";
+
+/// The label a harness sent, trimmed and bounded so a stored column is not
+/// whatever a caller sends. Absent, empty or not text is no label.
+fn lane_label(headers: &HeaderMap) -> Option<String> {
+    let label = headers.get(LANE_HEADER)?.to_str().ok()?.trim();
+    (!label.is_empty()).then(|| label.chars().take(200).collect())
+}
 
 /// The id a client echoes, if any. The transport allows visible ASCII; the
 /// length bound keeps a stored column from being whatever a caller sends.
@@ -137,19 +149,29 @@ async fn answer_external(
     s: &AppState,
     channel: String,
     client: Option<&str>,
+    lane: Option<&str>,
     msg: &Value,
 ) -> (StatusCode, Json<Value>) {
     let session_id = match s.manager.attach_external(&channel, client).await {
         Ok(id) => id,
         Err(e) => return rpc_error(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
     };
-    if s.manager
-        .store()
-        .get_session(&session_id)
-        .ok()
-        .flatten()
-        .is_some_and(|row| row.state == crate::session::state::SessionState::Paused.as_str())
-    {
+    let row = s.manager.store().get_session(&session_id).ok().flatten();
+    if let Some(lane) = lane {
+        if row
+            .as_ref()
+            .is_some_and(|r| r.harness_agent.as_deref() != Some(lane))
+        {
+            let _ = s.manager.store().update_session(
+                &session_id,
+                crate::store::SessionPatch {
+                    harness_agent: Some(lane.to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    if row.is_some_and(|row| row.state == crate::session::state::SessionState::Paused.as_str()) {
         return rpc_error(
             StatusCode::CONFLICT,
             "this external harness is still running; Tracon paused only its broker access and cannot control the host process",
@@ -179,7 +201,7 @@ async fn answer_external(
         s.manager.record_event(
             &session_id,
             crate::session::state::event_kind::TOOL_CALL,
-            json!({ "title": title, "kind": crate::mcp::TOOL_KIND }),
+            json!({ "title": title, "kind": crate::mcp::TOOL_KIND, "lane": lane }),
         );
     }
     if let Err(error) = s.manager.ensure_active(&session_id) {

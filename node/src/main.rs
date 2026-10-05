@@ -553,6 +553,10 @@ enum ChannelCommand {
 enum ExternalCommand {
     /// How to point your own harness at this node, and what is attached now.
     Show,
+    /// Print the header that labels a harness's calls, for Claude Code's
+    /// `headersHelper`: the repository and branch it was started in, and the
+    /// process that started it. Needs no running node.
+    Lane,
     /// End every attachment on a channel. The next call from each harness
     /// attaches a new one.
     Detach { channel: String },
@@ -1674,10 +1678,58 @@ fn short_client(id: &str) -> &str {
     id.get(id.len().saturating_sub(8)..).unwrap_or(id)
 }
 
+/// The label `tracon external lane` prints: `<repository>:<branch>#<pid>`.
+/// The repository is named by its main checkout, so a linked worktree is
+/// still its repository; the pid is the harness process that ran this, which
+/// stays the same across its reconnects and tells apart two agents started in
+/// one checkout.
+fn external_lane() -> String {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let repo = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .map(std::path::PathBuf::from)
+        .and_then(|common| {
+            let checkout = if common.ends_with(".git") {
+                common.parent()?.to_path_buf()
+            } else {
+                common
+            };
+            checkout
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .or_else(|| cwd.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "unknown".into());
+    let branch =
+        git(&["branch", "--show-current"]).or_else(|| git(&["rev-parse", "--short", "HEAD"]));
+    let place = match branch {
+        Some(branch) => format!("{repo}:{branch}"),
+        None => repo,
+    };
+    format!("{place}#{}", std::os::unix::process::parent_id())
+}
+
 async fn external_command(cmd: ExternalCommand) -> Result<()> {
     use reqwest::Method;
+    // The helper runs on every connection a harness makes, node or no node.
+    if let ExternalCommand::Lane = cmd {
+        println!(
+            "{}",
+            serde_json::json!({ "X-Tracon-Agent": external_lane() })
+        );
+        return Ok(());
+    }
     let v = node_call(Method::GET, "/api/external", None, None).await?;
     match cmd {
+        ExternalCommand::Lane => unreachable!("answered above, without asking the node"),
         ExternalCommand::Show => {
             if v["enabled"] != true {
                 println!(
@@ -1699,6 +1751,24 @@ async fn external_command(cmd: ExternalCommand) -> Result<()> {
                 let Some(name) = c.as_str() else { continue };
                 println!("  claude mcp add --transport http tracon-{name} {base}/mcp/external/{name}{header}");
             }
+            // Claude Code runs the helper once per connection, in the
+            // directory it was started from, as the process's own child.
+            let exe = std::env::current_exe()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "tracon".into());
+            let auth = if header.is_empty() {
+                String::new()
+            } else {
+                r#","headers":{"Authorization":"Bearer ${TRACON_TOKEN}"}"#.to_string()
+            };
+            println!("\nOr, so the interface can tell your Claude Code agents apart:\n");
+            for c in v["channels"].as_array().unwrap_or(&vec![]) {
+                let Some(name) = c.as_str() else { continue };
+                println!(
+                    "  claude mcp add-json --scope user tracon-{name} \
+                     '{{\"type\":\"http\",\"url\":\"{base}/mcp/external/{name}\",\"headersHelper\":\"{exe} external lane\"{auth}}}'"
+                );
+            }
             let stopped = v["stopped"].as_array().cloned().unwrap_or_default();
             if !stopped.is_empty() {
                 println!("\nStopped (tracon external clear <channel> to allow again):");
@@ -1712,9 +1782,14 @@ async fn external_command(cmd: ExternalCommand) -> Result<()> {
             } else {
                 println!("\nAttached now:");
                 for a in attached {
-                    let client = a["client"]
+                    let client = a["lane"]
                         .as_str()
-                        .map(|c| format!(" · client {}", short_client(c)))
+                        .map(|lane| format!(" · {lane}"))
+                        .or_else(|| {
+                            a["client"]
+                                .as_str()
+                                .map(|c| format!(" · client {}", short_client(c)))
+                        })
                         .unwrap_or_default();
                     println!(
                         "  {}{client} · session {}",

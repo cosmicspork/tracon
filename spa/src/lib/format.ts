@@ -57,10 +57,12 @@ export function digits(s: string): number {
 }
 
 /**
- * Which of a channel's external agents a session is: the tail of the id the
- * node handed it at `initialize`, since a v7 id's head is a timestamp two
- * agents started together share. Empty for a client that echoes no id.
+ * Which of a channel's external agents a session is: the lane the harness
+ * labels itself with, else the tail of the id the node handed it at
+ * `initialize`, since a v7 id's head is a timestamp two agents started
+ * together share. Empty for a client that sends neither.
  */
-export function externalAgent(clientId: string | null | undefined): string {
+export function externalAgent(clientId: string | null | undefined, lane?: string | null): string {
+  if (lane) return lane
   return clientId ? `agent ${clientId.slice(-8)}` : ''
 }

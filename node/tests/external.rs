@@ -1011,6 +1011,46 @@ async fn what_the_node_was_asked_to_do_lands_in_the_session_log() {
     assert!(kinds.contains(&"tool_result"), "{kinds:?}");
 }
 
+/// A harness that labels its calls is shown by its label: on its session, in
+/// the attachment list, and on each call it makes.
+#[tokio::test]
+async fn a_labelled_harness_is_shown_by_its_lane() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/mcp/external/work")
+        .header("host", "127.0.0.1:7420")
+        .header("content-type", "application/json")
+        .header("mcp-session-id", "agent-a")
+        .header("x-tracon-agent", "  tracon:feat/x#4242  ")
+        .body(Body::from(
+            tool_call("recall", json!({ "query": "x" })).to_string(),
+        ))
+        .unwrap();
+    let res = h.operator.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let row = row_for(&h, "agent-a");
+    assert_eq!(row.harness_agent.as_deref(), Some("tracon:feat/x#4242"));
+    let (_, external) = call(&h.operator, "GET", "/api/external", None).await;
+    assert_eq!(
+        external["attachments"][0]["lane"], "tracon:feat/x#4242",
+        "{external}"
+    );
+    let (_, events) = call(
+        &h.operator,
+        "GET",
+        &format!("/api/sessions/{}/events", row.id),
+        None,
+    )
+    .await;
+    assert!(
+        events.to_string().contains("tracon:feat/x#4242"),
+        "{events}"
+    );
+}
+
 #[tokio::test]
 async fn the_door_answers_one_post_per_message_and_opens_no_stream() {
     state::isolate();

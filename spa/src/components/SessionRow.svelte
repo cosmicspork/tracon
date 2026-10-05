@@ -82,7 +82,7 @@
     {session.branch}
     <small
       >{stale && owner?.last_seen_ms ? `last seen ${formatAge(owner.last_seen_ms, clock.now)} · ` : ''}{external
-        ? ['your own harness', externalAgent(session.harness_session_id), session.channel].filter(Boolean).join(' · ')
+        ? ['your own harness', externalAgent(session.harness_session_id, session.harness_agent), session.channel].filter(Boolean).join(' · ')
         : `${repo} · ${session.phase} · ${session.model.split('/').at(-1)} · ${session.channel}`}{failure
         ? ` · ${failure}`
         : ''}</small

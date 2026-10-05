@@ -273,7 +273,7 @@
 {:else}
   <header class="sess">
     <a class="lnk" href="/">‹ Queue</a>
-    <span class="model">{session.harness_id === 'external' ? ['External agent', externalAgent(session.harness_session_id)].filter(Boolean).join(' · ') : session.model}</span>
+    <span class="model">{session.harness_id === 'external' ? ['External agent', externalAgent(session.harness_session_id, session.harness_agent)].filter(Boolean).join(' · ') : session.model}</span>
     <span class="chip">{session.phase}</span>
     <span class="chip" class:self={owner?.is_self} class:off={unreachable !== null}
       >{chipLabel(store.nodes, session.node_id)}{unreachable !== null && owner?.last_seen_ms
