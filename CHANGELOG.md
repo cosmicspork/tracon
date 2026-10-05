@@ -32,6 +32,23 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.27.0](https://github.com/cosmicspork/tracon/compare/v0.26.1...v0.27.0) (2026-10-05)
+
+
+### Features
+
+* **broker:** hold operator-decided calls as approvals instead of blocking ([#349](https://github.com/cosmicspork/tracon/issues/349)) ([d18bea0](https://github.com/cosmicspork/tracon/commit/d18bea0107a1e7aab7fb419bce704791f0c28bb6))
+* **external:** label an external agent's calls with its lane ([#348](https://github.com/cosmicspork/tracon/issues/348)) ([427109a](https://github.com/cosmicspork/tracon/commit/427109a796e18fa8decf089b94cbe5adb705e62f))
+
+
+### Bug Fixes
+
+* **external:** answer the server/discover probe without attaching a session ([#347](https://github.com/cosmicspork/tracon/issues/347)) ([a48a38e](https://github.com/cosmicspork/tracon/commit/a48a38eaf10fa27587c17ef45277f27a7e3dfa75))
+* **mcp:** send brokered writes exactly as approved ([#345](https://github.com/cosmicspork/tracon/issues/345)) ([14dbbc1](https://github.com/cosmicspork/tracon/commit/14dbbc1090c49cb06102cf67f0f329b94161d14a))
+* **publish:** publish exactly the approved description and comment ([#346](https://github.com/cosmicspork/tracon/issues/346)) ([f097af9](https://github.com/cosmicspork/tracon/commit/f097af96939a0ea41e077b529449c8fddbac67f4))
+* **review:** report changed files, not changed lines, from submit_review ([#344](https://github.com/cosmicspork/tracon/issues/344)) ([218e32c](https://github.com/cosmicspork/tracon/commit/218e32cd6b876aa3cedc82667dbe2f3577bf51eb))
+* **service:** reload the LaunchAgent on restart so an updated binary starts ([#342](https://github.com/cosmicspork/tracon/issues/342)) ([bd1b504](https://github.com/cosmicspork/tracon/commit/bd1b504f2bb9fac5bddc32f43c097fd5f4fc43e0))
+
 ## [0.26.1](https://github.com/cosmicspork/tracon/compare/v0.26.0...v0.26.1) (2026-10-05)
 
 
