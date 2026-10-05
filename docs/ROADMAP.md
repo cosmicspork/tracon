@@ -51,32 +51,37 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 Every item here was found on the 2026-09-20, 2026-09-28, 2026-09-30 or 2026-10-03 live
 runs, or in the daily desktop use since.
 
-- [ ] **Proof of work.** One MCP tool that runs a command in the session's own boundary
-      and has the *node* record the command, exit code, bounded output, revision and
-      image digest as evidence — the agent cannot type the output. A proof document is
-      assembled from those records, shown beside the diff in review, marked stale when
-      the revision moves, and rerun to verify. This is the Showboat idea with the
-      capture owned by the supervisor; the existing attached demonstration (a linked,
-      hashed, never-executed document) stays for what a human writes by hand. The
-      session's own image already carries the project's tools, so the command runs where
-      the agent's did.
+- [ ] **Showing work.** The gap between "work completed" and "ready to merge" is the
+      operator's to close, and a diff alone often does not close it: a changed screen, a
+      before and after, a short account of what was tried. A `show_work` tool attaches
+      what the agent built — Markdown, an HTML bundle with its images, or plain files — to
+      its session and to the review its candidate is in, through the existing HTML bundle
+      store, rendered on the isolated preview origin under a strict content security
+      policy with no network. The agent builds it inside the boundary however it likes;
+      the node vouches only for what it already knows: the revision the work was submitted
+      at, a stale mark once the candidate moves, and the required-check results it ran
+      anyway. Shown work is the agent's account to help the operator decide, not
+      verification, and it stays in tracon: the pull request gets prose only. This
+      replaces the node-run proof capture planned here before, extends the attached
+      demonstration, and absorbs "files back to the operator". Screenshots wait on a
+      browser in the boundary (the service sidecar under **Next**); Markdown and files do
+      not.
+- [ ] **Ask before egress, rather than refuse it.** Inside the boundary writes and
+      commands run unasked (policy v12); what leaves is the operator's to decide, and today
+      it cannot be decided mid-task: a host outside the repository's `egress` list is
+      refused, recorded as `egress_refused`, and the session fails quietly — PyPI in session
+      `01a10447` (2026-10-03). A refused CONNECT raises a card naming the session and host
+      (allow once, for this session, or save to the repository's `egress`), and the
+      refusal's reason line tells the agent an ask is pending and to retry after it is
+      answered, since a CONNECT cannot be held open while the operator decides. A blocking
+      `request_egress` tool covers what the agent knows it needs before it tries. Podman
+      only, as grants are.
 - [ ] **A work item's session starts working on its own.** A session composed from a
       prompt, or started on an existing item, is sent no first prompt — only a plain
       prompt session carries `initial_prompt` — so it sits `running` and silent until the
       operator types something; plan session `01a0f49f` (2026-09-30) waited for a nudge.
       Send the item, or for execute a kickoff naming the plan document, as the first
       prompt, so starting work is one action.
-- [ ] **Keep the machine awake while a session works.** The desktop host idle-suspended
-      for 54 minutes in the middle of execute session `01a0f4b3`'s turn (2026-09-30,
-      during the harness's context compaction) and the session simply stopped. Hold a
-      sleep inhibitor while any turn is running or a permission is waiting (logind's
-      `Inhibit` on Linux, a power assertion on macOS), release it when the node is
-      idle, show in the interface when it is held, and record a suspend that happens
-      anyway as an interruption rather than a silent gap. It happened again on
-      2026-10-03 (session `01a10447`): about 19 minutes asleep while a permission card
-      waited, and because a card's expiry is measured on the wall clock it was answered
-      "denied: unanswered" the moment the host woke, leaving the agent's work in a
-      `git stash`. A card's deadline should count only time the node was awake.
 - [ ] **Give a node restart its own end reason.** Sessions running when the node restarts
       are ended as `killed_user`, which tells the operator they stopped something they did
       not; record `node_restart` and offer the resume a restart interrupted.
@@ -122,6 +127,17 @@ runs, or in the daily desktop use since.
 - [ ] **Open external links through a clean Linux host launcher**: the AppImage's bundled
       `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
       host environment for the child only and keep the URL and origin restrictions.
+- [ ] **Keep the machine awake while a session works.** The desktop host idle-suspended
+      for 54 minutes in the middle of execute session `01a0f4b3`'s turn (2026-09-30,
+      during the harness's context compaction) and the session simply stopped. Hold a
+      sleep inhibitor while any turn is running or a permission is waiting (logind's
+      `Inhibit` on Linux, a power assertion on macOS), release it when the node is
+      idle, show in the interface when it is held, and record a suspend that happens
+      anyway as an interruption rather than a silent gap. It happened again on
+      2026-10-03 (session `01a10447`): about 19 minutes asleep while a permission card
+      waited, and because a card's expiry is measured on the wall clock it was answered
+      "denied: unanswered" the moment the host woke, leaving the agent's work in a
+      `git stash`. A card's deadline should count only time the node was awake.
 
 ## Next — the working loop, made comfortable
 
@@ -147,12 +163,42 @@ Needed for daily use, but not blocking it today.
       cannot turn a claim into verification.
 - [ ] Distinguish ready-to-investigate, ready-to-verify and ready-to-publish. Surface
       missing project checks or publication prerequisites before spending a session on
-      that path; do not require forge credentials, QA setup or a product brief for an
+      that path; do not require forge credentials or a product brief for an
       investigation.
 - [ ] Preview preparation and explain incompatibility before launch, without turning
-      unsupported scripts or devcontainer features into silent host execution. Let the
-      agent propose project checks and setup, but require operator validation; it cannot
-      waive checks or authorize its own environment.
+      unsupported scripts or devcontainer features into silent host execution.
+- [ ] **Service sidecars, the browser first.** A `[[service]]` catalogue in `node.toml` —
+      a digest-pinned image, its port, a readiness probe — from which a session asks for a
+      service by name (`service_start`, which blocks until the probe passes or a bounded
+      timeout, then `service_status`), never naming an image or a command. Each service is
+      its own authority under the policy bundle, so a browser can be allowed while a
+      database is asked. A sidecar shares the session's network namespace, so it reaches
+      exactly what the session's grants open and nothing of its own, and it stops and
+      suspends with the session. The first entry is a headless browser exposing CDP on the
+      session's loopback, which any harness can drive (Playwright `connectOverCDP`, a
+      browser MCP, a small screenshot helper in the harness layer) without a browser in
+      every repository's image or a node-run scenario language; the screenshots it takes
+      are what **Showing work** displays. Local databases, caches and mail catchers
+      follow as entries, which is also how an application that needs services runs in a
+      session without tracon reading its compose files.
+- [ ] **Keep a session's build output.** Every run builds a compiled project from nothing —
+      `just check` took 4m47s in session `01a10447` (2026-10-03), most of it compiling.
+      Give sessions a persistent per-repository build cache (Cargo's `target/`, a bundler's
+      cache, the dependencies a session added) that survives the session. Required checks
+      keep starting from the trusted base cache: a directory the agent wrote must not be
+      able to make the review gate pass. A node-built cache of the default branch for
+      checks is the follow-on.
+- [ ] **Help set up a repository once.** Node tools that draft a `[[repo]]` entry (image,
+      checks, egress) from what the repository already holds — its devcontainer,
+      `package.json` scripts, a `just` recipe — try it in a fresh container and report
+      what failed, and propose it on a card; the node writes the entry once the operator
+      approves, never the agent. Egress asks approved while trying become suggested
+      `egress` entries. A built-in setup skill ships through channel manifests for managed
+      harnesses, and the tool descriptions carry enough for an external one. How to run an
+      application and give it data stays the agent's job on each task, with optional
+      free-text notes in the operator notes, so a recipe is set up once rather than kept
+      in step with the code. The agent proposes checks and setup; it cannot waive checks
+      or authorize its own environment.
 
 **What the boundary defeats, and what replaces it.** The harnesses offer tools the
 isolation silently breaks — the proxy answers 403, the agent sees a network error and
@@ -171,19 +217,35 @@ hit on a real task.
 - [ ] `repo_fetch`: the node refreshes the workspace's remote refs with its own credential
       and records the sha, so a session can rebase onto a `main` that moved since launch.
       Inside the boundary `git fetch` has neither a credential nor a route.
-- [ ] Refusals the agent can read: what the boundary refuses, and which brokered tool to
-      use instead, stated in the orientation; where the node can intercept a refused egress,
-      a tool-shaped message rather than a bare 403.
-- [ ] Files back to the operator: an artefact a session made (a diagram, a screenshot, a
-      generated report) attached to the session and downloadable from its screen, without
-      committing it. Only `report_issue` carries attachments today.
-- [ ] Seeing a running app: the QA browser pointed at the session's own dev server, one
-      screenshot per call, recorded — the same capture the proof-of-work item wants.
-- [ ] Secrets for project checks: a credential class injected into preparation and check
-      runs only (a test database URL, a sandbox key), never into the session.
+- [ ] Refusals the agent can read: what the boundary refuses and which brokered tool to
+      use instead, stated in the orientation. A refused egress is the egress ask's (under
+      **Now**); this covers the rest.
+- [ ] **Lend application credentials through the gateway**, as model credentials are lent
+      today. A broker entry names an upstream, how its key is attached, and the channel or
+      repository it is bound to; the session gets the upstream as a base URL on the gateway
+      and its own session token as the key (`STRIPE_BASE_URL`, `STRIPE_SECRET`), as
+      environment, never a file in the workspace. Two attachment modes: a header, and
+      SigV4 re-signing, which keeps an AWS SDK pointed at `AWS_ENDPOINT_URL` working
+      without the secret entering the boundary. Scope is the upstream host, the binding and
+      the session's lifetime, with every request (method, path, status) recorded; a
+      (method, path) list is optional. What a key can do is limited where it is issued —
+      test-mode, restricted or sandbox keys — which is the operator's choice of what to put
+      in the broker. What cannot be lent this way can be passed as a plain secret,
+      labelled as visible to the agent and to the model provider, with its upstream's
+      egress opened beside it. Preparation and check runs get the same injection, which
+      replaces the separate "secrets for project checks" item.
 
 **Review and publication**
 
+- [ ] Follow a published pull or merge request after it opens: subscribe to its CI runs,
+      draft/ready and open/merged/closed transitions, review verdicts and new comments or
+      threads, and record each as an event on the review and its work item. Notify through
+      the existing push channel with the change named ("CI failed on `node`", "marked
+      ready", "2 new comments"), and let a session that is still attached pick the change
+      up through the forge tools (#297, #298) rather than the operator relaying it. Polling
+      through the brokered token first; webhooks only where the node is reachable. A
+      subscription ends when the request closes, and it never merges, approves or retries
+      anything on its own.
 - [ ] What ships under the operator's name is reviewed: the branch name and the commits.
       Today the candidate is the tree, the review shows the diff and the forge prose, and
       the commits and branch are pushed as the agent wrote them (the default branch even
@@ -198,15 +260,6 @@ hit on a real task.
       kebab branch, no ticket keys) whose rules come from the channel or the repository's
       own guidelines, so a bad message fails before the card reaches the operator. Record
       the "reviewed tree, not reviewed bytes" reframing in ARCHITECTURE and DESIGN.
-- [ ] Follow a published pull or merge request after it opens: subscribe to its CI runs,
-      draft/ready and open/merged/closed transitions, review verdicts and new comments or
-      threads, and record each as an event on the review and its work item. Notify through
-      the existing push channel with the change named ("CI failed on `node`", "marked
-      ready", "2 new comments"), and let a session that is still attached pick the change
-      up through the forge tools (#297, #298) rather than the operator relaying it. Polling
-      through the brokered token first; webhooks only where the node is reachable. A
-      subscription ends when the request closes, and it never merges, approves or retries
-      anything on its own.
 - [ ] Durable review drafts: unsent feedback and publication prose survive navigation,
       reconnect and device changes with explicit saved/conflict state. Desktop diff drafts
       remain revision-keyed. The acceptance test is the reconnect: leave feedback, switch
@@ -264,9 +317,12 @@ wait until **Now** and **Next** have made a day's work unremarkable.
 
 **Product engineering, the part that survived**
 
-- [ ] Show the preview link and the proof document beside the diff in review, with the
-      criteria coverage the brief already carries. The diff and runtime checks stay the
-      authoritative record; this adds the two things a product judgement needs and no more.
+- [ ] Show the criteria coverage the brief already carries beside the diff and the shown
+      work in review. The diff and runtime checks stay the authoritative record; this adds
+      what a product judgement needs and no more.
+- [ ] Design planning and review in the same frame: an agent-built HTML bundle proposing
+      layouts or flows, attached like shown work and labelled as a proposal rather than an
+      account of finished work.
 - [ ] Separate authorization to publish, technical verification and human acceptance of the
       outcome. Support optional published/awaiting-evaluation work rather than closing it
       merely because a PR opened. Bind acceptance to the evaluated candidate and criteria;
@@ -276,13 +332,30 @@ wait until **Now** and **Next** have made a day's work unremarkable.
       threads bound to revision, path and side, returned through the agent review contract
       and kept across resubmission. Addressed, unresolved and outdated are distinct; a moved
       anchor must not silently attach to unrelated code. Anchoring to criteria and
-      screenshots only if the proof document makes it worth it.
+      screenshots only if shown work makes it worth it, and screen recordings or browser
+      traces beside screenshots on the same evidence.
 - [ ] Exit proof: one independent operator's complete loop on a real project — capture a
       user's problem and source, agree on good, delegate with selected context, capture a
-      candidate, obtain a preview, try the task, record the result, inspect a revision and
-      explicitly accept. In a PR-first preview workflow, publish the candidate, fail the
-      user task in the preview, and show that the outcome stays unaccepted with an obvious
-      continuation path. Fixtures are not substitutes.
+      candidate, judge it from the diff and the shown work, record the result, inspect a
+      revision and explicitly accept. Show that a candidate whose shown work fails the
+      user task stays unaccepted with an obvious continuation path. Fixtures are not
+      substitutes.
+
+**The boundary, extended when a task needs it**
+
+- [ ] More catalogue services, with an optional persistent volume per repository (a
+      database's data, a browser profile).
+- [ ] A keyed per-repository stash for artefacts that are expensive to rebuild
+      (`stash_put` / `stash_get`, keyed on a digest of named input paths so a stale one is
+      never silently reused); cached "before" screenshots of the default branch are a
+      candidate. Knowledge stays in memories; this holds bytes. A seeded database is cheap
+      to rebuild and does not justify it.
+- [ ] A brokered provider CLI for operations an agent is asked to do (list a bucket,
+      invalidate a cache): an operator-configured binary run on the node with the
+      credential as environment only, never in argv, output bounded and redacted.
+- [ ] A node-side TCP forward for a remote service that is not HTTP, with its credential
+      passed as a visible secret. A local catalogue service is the better answer for
+      development and comes first.
 
 **Portable data**
 
@@ -456,6 +529,12 @@ servers reaching the v2 session runner.
   LLVM shared objects rust-analyzer and rustfmt link against. The dist channel publishes no
   self-contained build of either, and a rustfmt from anywhere else formats differently from
   the workspace's pinned one.
+- Nothing reaches into the boundary. A provider that delivers webhooks through an
+  outbound forwarder (`stripe listen`) works with egress and a credential, and an OAuth
+  callback lands wherever the browser that followed it runs; a provider that must reach a
+  public URL has no route in.
+- What an agent shows is its own account, not verification: the node vouches for the
+  revision and the required checks, not for a screenshot.
 
 ## Deferred
 
@@ -472,12 +551,16 @@ Kept as intent, off the plan until the supported configuration has earned them.
   its egress presets — and never the image digest: a locally built image has a different
   one on every node, so each node builds and pins its own. Waits on mesh-wide
   configuration sync; a node already builds the image itself.
-- **Kubernetes parity.** Per-client egress grants, for QA browsers and for preparation —
-  the node already serves the proxy there; it needs the grants — and a refuse-not-drop
-  egress policy.
+- **Kubernetes parity.** Per-client egress grants, for sessions and for preparation —
+  the node already serves the proxy there; it needs the grants — a refuse-not-drop
+  egress policy, the egress ask, and service sidecars as pods of their own. What earns it:
+  work left running unattended belongs on an always-on node, which is the homelab
+  cluster, not a laptop that sleeps. Deferred until the laptop node is good.
 - **Post-publication follow-through and product metrics.** Recording merge, deployment,
   evaluation and customer observation separately; judging tracon by interruptions, time
-  to verified work and tokens per accepted change. Reconsider once outcomes exist to
+  to verified work and tokens per accepted change. Checking a deployed preview
+  environment after its pull request opens belongs here too, without requiring the
+  application to report its build commit to tracon. Reconsider once outcomes exist to
   count.
 - **Installation-to-first-task for another operator.** After the author's own loop is
   proven.
@@ -503,7 +586,13 @@ Kept as intent, off the plan until the supported configuration has earned them.
 - A general-purpose multi-harness framework: two concrete adapters behind one trait, not a
   plugin system for harnesses.
 - Forking and maintaining the OpenCode UI.
-- Required tracon configuration files installed into project repositories.
+- Required tracon configuration files installed into project repositories, or any other
+  requirement on a repository made for tracon's sake: an endpoint or header, a seeder, a
+  tool in its image.
+- Publishing shown work to the forge.
+- A declarative browser scenario language run by the node; the agent drives the browser.
+- Intercepting TLS to attach credentials; a credential is lent only where the client
+  points at the gateway.
 - A full IDE, general file editor, or per-project editor configuration.
 - Business-domain features such as invoicing and billing.
 - Arbitrary host execution through the node API. Service/CLI installation and node restarts

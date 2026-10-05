@@ -25,9 +25,17 @@ human and existing coding agents. It does not implement an agent loop.
   are drop-in and replaceable; anything that tracks harness features will rot.
 - **Enforcement over instruction.** A rule the node cannot enforce is a suggestion.
   Where enforcement is impossible, say so explicitly rather than implying uniformity.
+- **Contain execution; ask about what leaves.** Inside the boundary an agent writes and
+  runs commands unasked: the boundary holds no credential and reaches only what it was
+  granted, so what happens there stays there. The node decides, or asks, where something crosses it —
+  egress, a brokered credential, publication. This is the node's own answer to unattended
+  work, so it does not depend on any harness's permission mode.
 - **Local-first.** A hub outage degrades the system. It does not stop work.
 - **Nothing in project repos.** No `.claude/`, no `AGENTS.md`, no tracon files of any
-  kind. Config is materialized into scratch directories at session start.
+  kind, and no requirement made for tracon's sake: no endpoint or header in the
+  application, no seeder, no tool added to its image. A repository supplies what it
+  already has — its Dockerfile, its scripts, its tests — and the node supplies the rest.
+  Config is materialized into scratch directories at session start.
 - **The corpus outlives the tooling.** Memory, docs, work items, and events use
   boring schemas with plain-text export. When the orchestration layer becomes
   obsolete, the accumulated context must survive it.
@@ -599,6 +607,13 @@ revision, because a resubmission may carry the same `head_sha` with different
 requirements or prose; a verdict from a tab that read the revision it replaced
 is refused and the review waits for a fresh reading. Unchanged code may reuse
 its checks, never an unseen human decision.
+
+**The node vouches for the revision and the checks; what an agent shows is its own
+account.** The candidate's tree, the required checks run against it and every decision
+bound to it are records the node made. An attached demonstration — commands, output,
+images — is the agent's or the operator's account, linked and hashed, never executed,
+and flagged stale once it changes. It exists to help the operator judge a change, not to
+settle it, and it stays with the review rather than going to the forge.
 
 **Narrative reports are not publication candidates.** `submit_report` creates an
 owner/channel/session-bound report without Git or a repository. Acknowledgement
