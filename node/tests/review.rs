@@ -544,6 +544,37 @@ async fn a_review_waits_in_the_queue_until_it_is_decided() {
         .is_some());
 }
 
+/// A review mirrored from another node is read here but owned there: its
+/// worktree path names the owner's disk, and its candidate and checks never
+/// left it. Reading them locally would report "changed since submit" and
+/// "evidence missing" about a change that is neither, and disable approval
+/// for a verdict that is forwarded to the owner anyway.
+#[tokio::test]
+async fn a_mirrored_review_is_not_judged_by_what_this_node_lacks() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let local = f.submit().await;
+    let mut mirrored = f.store.get_review(&local).unwrap().unwrap();
+    mirrored.id = uuid::Uuid::now_v7().to_string();
+    mirrored.node_id = "peer-node".into();
+    mirrored.target = json!({"worktree": "/nowhere/on/this/node"}).to_string();
+    f.store.insert_review(&mirrored).unwrap();
+
+    let (status, body) = f
+        .call("GET", &format!("/api/reviews/{}", mirrored.id), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["remote_owner"], "peer-node");
+    assert!(body["stale"].as_array().unwrap().is_empty(), "{body}");
+    assert!(body["evidence"].is_null());
+    assert!(body["intent"].is_null());
+
+    // The node's own review is still read as before.
+    let (_, body) = f.call("GET", &format!("/api/reviews/{local}"), None).await;
+    assert!(body["remote_owner"].is_null());
+    assert!(body["intent"].is_object());
+}
+
 /// An MCP client fails the call long before a human decides, and a failed call
 /// loses the turn. However long the agent asks to wait, the node comes back
 /// inside the client's budget with something the agent can act on.

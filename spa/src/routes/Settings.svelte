@@ -700,6 +700,18 @@
         {#if desktopSetup?.sidecar_version && desktopSetup.cli_version !== desktopSetup.sidecar_version}<button class="btn" disabled={desktopBusy} onclick={() => runDesktop(installDesktopCli)}>Install CLI v{desktopSetup.sidecar_version}</button>{/if}
       </div>
     </Card>
+  {:else if !desktopUpdatesAvailable()}
+    <Card title="Version" note="This page, and the release each node runs.">
+      <dl class="facts">
+        <div><dt>This page</dt><dd>{__TRACON_VERSION__ ? `v${__TRACON_VERSION__}` : 'unknown build'}</dd></div>
+        {#each store.nodes as node (node.id)}
+          <div>
+            <dt>{node.name}{node.is_self ? ' · serving' : ''}</dt>
+            <dd>{node.application_version ? `v${node.application_version}` : 'not reported'}{node.is_self || node.reachable ? '' : ' · last reported'}</dd>
+          </div>
+        {/each}
+      </dl>
+    </Card>
   {/if}
 {/if}
 

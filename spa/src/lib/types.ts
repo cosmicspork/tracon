@@ -474,7 +474,13 @@ export interface ReviewDetails {
    * What approving this revision sends to the forge besides its commits, as
    * the agent asked. Absent from a node that predates it.
    */
-  intent?: ReviewIntent
+  intent?: ReviewIntent | null
+  /**
+   * The node that owns a review mirrored here. Its worktree, candidate and
+   * checks stay there, so `stale`, `evidence` and `criteria` are empty and
+   * `intent` is null; a verdict is forwarded to it. Null for a local review.
+   */
+  remote_owner?: string | null
   stale: string[]
   /** Pinned to the revision at submit time; never the live work item. */
   requirements: PinnedRequirements | null
