@@ -548,17 +548,7 @@ pub fn install() -> Result<()> {
 
     if cfg!(target_os = "macos") {
         let target = format!("gui/{}", uid()?);
-        // Booting out first makes this idempotent: launchd refuses to load a
-        // label that is already loaded.
-        let _ = run("launchctl", &["bootout", &target, &path.to_string_lossy()]);
-        run(
-            "launchctl",
-            &["bootstrap", &target, &path.to_string_lossy()],
-        )?;
-        run(
-            "launchctl",
-            &["kickstart", "-k", &format!("{target}/{MAC_LABEL}")],
-        )?;
+        reload_agent(&target, &path)?;
         println!(
             "tracon is running under launchd; `launchctl print {target}/{MAC_LABEL}` for detail"
         );
@@ -578,6 +568,36 @@ pub fn install() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Unload and load the LaunchAgent, which starts it on the binary at its path.
+///
+/// `kickstart -k` alone is not enough after the binary is replaced: launchd's
+/// background task management pins the code identity it saw at load, and the
+/// ad-hoc signature changes with every build, so it refuses to spawn the new
+/// binary ("Unable to get updated LWCR", exit 78) until the job is loaded
+/// again. Booting out first also makes this idempotent, since launchd refuses
+/// to load a label that is already loaded.
+fn reload_agent(target: &str, path: &Path) -> Result<()> {
+    let path = path.to_string_lossy();
+    let _ = run("launchctl", &["bootout", target, &path]);
+    // The old job can take a moment to leave the domain after bootout
+    // returns, and bootstrap fails with an I/O error until it has.
+    let mut attempt = 0;
+    loop {
+        match run("launchctl", &["bootstrap", target, &path]) {
+            Ok(()) => break,
+            Err(_) if attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    run(
+        "launchctl",
+        &["kickstart", &format!("{target}/{MAC_LABEL}")],
+    )
 }
 
 /// Whether the user's services survive logout.
@@ -600,10 +620,7 @@ pub fn restart() -> Result<()> {
         );
     }
     if cfg!(target_os = "macos") {
-        run(
-            "launchctl",
-            &["kickstart", "-k", &format!("gui/{}/{MAC_LABEL}", uid()?)],
-        )?;
+        reload_agent(&format!("gui/{}", uid()?), &path)?;
     } else {
         run("systemctl", &["--user", "restart", LINUX_UNIT])?;
     }
