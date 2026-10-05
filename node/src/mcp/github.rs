@@ -71,7 +71,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": PR_COMMENT,
             "description": "Post one comment on a GitHub pull request. The operator is asked \
-                            before it posts.",
+                            before it posts: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -113,7 +113,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": PR_REPLY,
             "description": "Reply to one review thread on a GitHub pull request, and optionally \
-                            resolve it. The operator is asked before it posts.",
+                            resolve it. The operator is asked before it posts: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

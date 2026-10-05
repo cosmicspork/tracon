@@ -12,6 +12,7 @@
 // a number look better.
 
 import { unreachableReason } from './nodes'
+import { isApproval } from './permission'
 import type {
   MeshState,
   NodeInfo,
@@ -94,9 +95,16 @@ const YOURS: Verdict = { lane: 'decision', reason: null }
  */
 export function permissionVerdict(p: Permission, held: string | null, now: number): Verdict {
   if (held !== null) return { lane: 'external', reason: `${held} · cannot be decided until it returns` }
+  const approval = isApproval(p)
   if (p.expires_ms <= now) {
-    return { lane: 'agent', reason: 'expired unanswered · denied by default' }
+    return {
+      lane: 'agent',
+      reason: approval ? 'expired unanswered · nothing ran' : 'expired unanswered · denied by default',
+    }
   }
+  // An approval is run by the node, so the session that asked having ended
+  // leaves it as much yours to decide as before.
+  if (approval) return YOURS
   const state = p.intent?.session_state
   if (state === 'closed' || state === 'killed_budget' || state === 'failed') {
     return { lane: 'agent', reason: 'session ended · denied by default, nothing left to allow' }

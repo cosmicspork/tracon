@@ -7,6 +7,7 @@
 //! way a tool is the only shape a credential ever reaches the harness in — as
 //! something it may ask the node to do, never as something it holds.
 
+pub mod approvals;
 pub mod consulta;
 pub mod docs;
 pub mod github;
@@ -22,10 +23,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::{
-    adapter::{
-        types::{PermissionOption, OPTION_ALLOW_ONCE, OPTION_REJECT_ONCE},
-        PermissionReply, PermissionRequest,
-    },
+    adapter::types::OPTION_ALLOW_ONCE,
     broker::SharedBroker,
     config::Config,
     policy::{Decision, Policy, Request, Verdict},
@@ -87,7 +85,6 @@ pub struct CallContext {
 }
 
 struct GatedCall {
-    arguments: Option<Value>,
     one_shot: bool,
 }
 
@@ -171,6 +168,7 @@ impl Tools {
             // report do not touch a credential or widen a tool policy.
             out.extend(operator::definitions());
             out.extend(work::definitions());
+            out.extend(approvals::definitions());
         }
         out
     }
@@ -206,30 +204,52 @@ impl Tools {
             return operator::call(&access.store, &access.manager, &self.cfg, ctx, name, args)
                 .await;
         }
+        if name == approvals::STATUS {
+            let access = self
+                .session
+                .get()
+                .ok_or("approvals are not available on this node")?;
+            return approvals::status(access, ctx, args).await;
+        }
         if consequential_name(name) && consequential(name, args).is_none() {
             return Err(
                 "consequential calls require a valid operation_id and canonical arguments".into(),
             );
         }
-        let gated = if plan_write {
-            GatedCall {
-                arguments: None,
-                one_shot: false,
+        if !plan_write {
+            let decision = self.decide(ctx, name, args);
+            match decision.verdict {
+                Verdict::Allow => {}
+                Verdict::Deny => return Err(refusal(decision)),
+                // Nothing waits on the operator: the call is held as an
+                // approval and the caller is told so at once.
+                Verdict::Ask => return self.request_approval(ctx, name, args).await,
             }
-        } else {
-            self.gate(ctx, name, args).await?
-        };
-        let args = gated.arguments.as_ref().unwrap_or(args);
-        // The operator may have edited the arguments in the prompt; a default
-        // they removed is put back the same visible way.
-        let defaulted = with_provider_defaults(name, args);
-        let args = defaulted.as_ref().unwrap_or(args);
+        }
         if let Some(access) = self.session.get() {
             access
                 .manager
                 .ensure_active(&ctx.session_id)
                 .map_err(|error| error.to_string())?;
         }
+        self.dispatch(ctx, name, args, false).await
+    }
+
+    /// Run a call that is allowed: by policy, by a grant, or by the operator
+    /// (`one_shot`). Everything a call is checked against is checked again
+    /// here, because an approved call runs long after it was asked.
+    async fn dispatch(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+        one_shot: bool,
+    ) -> Result<Value, String> {
+        // The operator may have edited the arguments in the prompt; a default
+        // they removed is put back the same visible way.
+        let defaulted = with_provider_defaults(name, args);
+        let args = defaulted.as_ref().unwrap_or(args);
+        let gated = GatedCall { one_shot };
         if consequential_name(name) && consequential(name, args).is_none() {
             return Err(
                 "consequential calls require a valid operation_id and canonical arguments".into(),
@@ -741,69 +761,171 @@ impl Tools {
     /// proceeds. A tool the policy does not mention is therefore asked, not
     /// run — adding a tool never widens what runs unattended. Returns the
     /// arguments the operator rewrote on the card, when they did.
-    async fn gate(&self, ctx: &CallContext, name: &str, args: &Value) -> Result<GatedCall, String> {
+    /// Hold a call the operator must decide as an approval and say so. Asking
+    /// again for the same thing on the channel while it waits is the same
+    /// approval, so a client that retries does not queue a second card.
+    async fn request_approval(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+    ) -> Result<Value, String> {
+        use crate::store::approvals::{ApprovalRow, PENDING};
+        let access = self
+            .session
+            .get()
+            .ok_or("this call needs the operator's approval and this node cannot hold one")?;
+        let request_key = request_key(name, args);
         let summary = summarize(name, args);
-        let decision = self.decide(ctx, name, args);
-        match decision.verdict {
-            Verdict::Allow => Ok(GatedCall {
-                arguments: None,
-                one_shot: false,
-            }),
-            Verdict::Deny => Err(refusal(decision)),
-            Verdict::Ask => {
-                let access = self
-                    .session
-                    .get()
-                    .ok_or("this call needs the operator's approval and no session can ask")?;
-                let request = PermissionRequest {
-                    tool_call_id: None,
-                    title: summary,
-                    action: name.to_string(),
-                    kind: Some(TOOL_KIND.into()),
-                    resource: None,
-                    command: None,
-                    raw_input: Some(json!({ "tool": name, "arguments": args })),
-                    options: vec![
-                        PermissionOption {
-                            option_id: OPTION_ALLOW_ONCE.into(),
-                            name: "Allow once".into(),
-                            kind: "allow_once".into(),
-                        },
-                        PermissionOption {
-                            option_id: OPTION_REJECT_ONCE.into(),
-                            name: "Reject".into(),
-                            kind: "reject_once".into(),
-                        },
-                    ],
+        let existing = access
+            .store
+            .pending_approval(&ctx.channel, &request_key)
+            .map_err(|e| e.to_string())?;
+        let approval = match existing {
+            Some(approval) => approval,
+            None => {
+                let now = crate::store::now_ms();
+                let row = ApprovalRow {
+                    id: uuid::Uuid::now_v7().to_string(),
+                    channel: ctx.channel.clone(),
+                    session_id: ctx.session_id.clone(),
+                    node_id: ctx.node_id.clone(),
+                    lane: None,
+                    tool: name.to_string(),
+                    arguments: args.to_string(),
+                    request_key,
+                    title: summary.clone(),
+                    state: PENDING.into(),
+                    answer_option_id: None,
+                    edited_arguments: None,
+                    result: None,
+                    reason: None,
+                    created_ms: now,
+                    decided_ms: None,
+                    finished_ms: None,
+                    expires_ms: now + (self.cfg.session.approval_expiry_secs.max(1) as i64) * 1000,
                 };
-                match access
-                    .manager
-                    .ask_permission(&ctx.session_id, request)
-                    .await
-                    .map_err(|e| e.to_string())?
-                {
-                    PermissionReply::Selected(o) if o == OPTION_ALLOW_ONCE => Ok(GatedCall {
-                        arguments: None,
-                        one_shot: true,
-                    }),
-                    // What runs is the operator's rewrite, and a refusal is
-                    // final whoever wrote the words.
-                    PermissionReply::Edited {
-                        option_id,
-                        arguments,
-                    } if option_id == OPTION_ALLOW_ONCE => {
-                        let edited = self.decide(ctx, name, &arguments);
-                        if edited.verdict == Verdict::Deny {
-                            return Err(refusal(edited));
-                        }
-                        Ok(GatedCall {
-                            arguments: Some(arguments),
-                            one_shot: true,
-                        })
-                    }
-                    _ => Err("the operator did not allow this call".into()),
-                }
+                access
+                    .store
+                    .insert_approval(&row)
+                    .map_err(|e| e.to_string())?;
+                access.manager.approval_requested(&row).await;
+                row
             }
+        };
+        Ok(json!({
+            "state": "awaiting_operator",
+            "approval_id": approval.id,
+            "summary": approval.title,
+            "message": format!(
+                "Nothing has run yet. The operator decides this call; once allowed, the node \
+                 runs it and keeps the result. Call {} with this approval_id to wait for the \
+                 outcome.",
+                approvals::STATUS
+            ),
+        }))
+    }
+
+    /// The operator's answer to an approval. Allowing it runs the call, with
+    /// their edit when they made one, held to every refusal the call itself
+    /// would meet. The answer returns once the decision is recorded; the run
+    /// and its result belong to the approval, not to whoever answered.
+    pub async fn answer_approval(
+        self: &Arc<Self>,
+        id: &str,
+        option_id: &str,
+        arguments: Option<Value>,
+    ) -> Result<(), String> {
+        use crate::store::approvals::{REJECTED, RUNNING};
+        let access = self.session.get().ok_or("approvals are not available")?;
+        let approval = access
+            .store
+            .get_approval(id)
+            .map_err(|e| e.to_string())?
+            .ok_or("no such approval")?;
+        if option_id != OPTION_ALLOW_ONCE {
+            if !access
+                .store
+                .decide_approval(
+                    id,
+                    REJECTED,
+                    option_id,
+                    None,
+                    Some("the operator did not allow this call"),
+                )
+                .map_err(|e| e.to_string())?
+            {
+                return Err("this approval is no longer waiting".into());
+            }
+            access.manager.approval_decided(&approval, REJECTED).await;
+            return Ok(());
+        }
+        let original: Value =
+            serde_json::from_str(&approval.arguments).map_err(|e| e.to_string())?;
+        let ctx = CallContext {
+            session_id: approval.session_id.clone(),
+            channel: approval.channel.clone(),
+            node_id: approval.node_id.clone(),
+        };
+        // What runs is the operator's rewrite, and a refusal is final whoever
+        // wrote the words.
+        let run_args = arguments.clone().unwrap_or(original);
+        let edited = arguments.as_ref().map(Value::to_string);
+        if !access
+            .store
+            .decide_approval(id, RUNNING, option_id, edited.as_deref(), None)
+            .map_err(|e| e.to_string())?
+        {
+            return Err("this approval is no longer waiting".into());
+        }
+        access.manager.approval_decided(&approval, RUNNING).await;
+        let tools = Arc::clone(self);
+        let name = approval.tool.clone();
+        let id = id.to_string();
+        tokio::spawn(async move {
+            let outcome = tools.run_approved(&ctx, &name, &run_args).await;
+            tools.settle_approval(&id, outcome).await;
+        });
+        Ok(())
+    }
+
+    async fn run_approved(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+    ) -> Result<Value, String> {
+        let decision = self.decide(ctx, name, args);
+        if decision.verdict == Verdict::Deny {
+            return Err(refusal(decision));
+        }
+        let access = self.session.get().ok_or("approvals are not available")?;
+        access
+            .manager
+            .approval_runnable(&ctx.session_id, &ctx.channel)
+            .map_err(|e| e.to_string())?;
+        self.dispatch(ctx, name, args, true).await
+    }
+
+    async fn settle_approval(&self, id: &str, outcome: Result<Value, String>) {
+        use crate::store::approvals::{FAILED, SUCCEEDED, UNCERTAIN};
+        let Some(access) = self.session.get() else {
+            return;
+        };
+        let (state, result, reason) = match &outcome {
+            Ok(value) => (SUCCEEDED, Some(value.to_string()), None),
+            Err(error) if remote_outcome_unknown(error) => (UNCERTAIN, None, Some(error.clone())),
+            Err(error) => (FAILED, None, Some(error.clone())),
+        };
+        if let Err(e) =
+            access
+                .store
+                .finish_approval(id, state, result.as_deref(), reason.as_deref())
+        {
+            tracing::error!(error = %e, approval = id, "failed to record an approval's outcome");
+        }
+        if let Ok(Some(approval)) = access.store.get_approval(id) {
+            access.manager.approval_decided(&approval, state).await;
         }
     }
 
@@ -1187,6 +1309,15 @@ fn canonical_consequential_payload(name: &str, args: &Value) -> Option<Value> {
         })),
         _ => None,
     }
+}
+
+/// What makes two asks the same request on a channel: the tool and its
+/// canonical arguments. A consequential call is keyed on the payload its
+/// replay record would compare; anything else on its arguments, whose object
+/// keys serialize in order.
+fn request_key(name: &str, args: &Value) -> String {
+    let payload = canonical_consequential_payload(name, args).unwrap_or_else(|| args.clone());
+    crate::corpus::hash_body(&format!("{name}\u{1f}{payload}"))
 }
 
 /// Only a failed mutation transport or server error has an unknown remote

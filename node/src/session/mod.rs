@@ -1971,7 +1971,6 @@ impl Manager {
             node_id: self.node_id.clone(),
             store: self.store.clone(),
             bus: self.bus.clone(),
-            permission_timeout: Duration::from_secs(self.cfg.session.permission_timeout_secs),
             idle_timeout: Duration::from_secs(self.cfg.external.idle_timeout_secs.max(60)),
             last_seen,
         };
@@ -2065,20 +2064,6 @@ impl Manager {
         }
     }
 
-    /// Put a request to the operator on a live session's queue and wait for
-    /// the answer. Used by brokered tool calls the policy does not decide.
-    pub async fn ask_permission(
-        &self,
-        id: &str,
-        request: crate::adapter::PermissionRequest,
-    ) -> Result<crate::adapter::PermissionReply, SessionError> {
-        let (reply, wait) = oneshot::channel();
-        self.send(id, Command::Permission { request, reply })
-            .await?;
-        wait.await
-            .map_err(|_| SessionError::Rejected("session ended before answering".into()))
-    }
-
     pub async fn prompt(&self, id: &str, text: String) -> Result<(), SessionError> {
         self.ensure_active(id)?;
         let (ack, wait) = oneshot::channel();
@@ -2117,6 +2102,17 @@ impl Manager {
         option_id: String,
         arguments: Option<serde_json::Value>,
     ) -> Result<(), SessionError> {
+        // An approval this node holds is answered here, not by a session:
+        // nothing is waiting on it, and the node runs the call itself.
+        if let Some(approval) = self.store.get_approval(id)? {
+            if approval.node_id == self.node_id {
+                return self
+                    .tools
+                    .answer_approval(id, &option_id, arguments)
+                    .await
+                    .map_err(SessionError::Rejected);
+            }
+        }
         let perm = self
             .store
             .get_permission(id)?
@@ -2151,6 +2147,85 @@ impl Manager {
                 .await
                 .map(|_| ()),
             Err(e) => Err(e),
+        }
+    }
+
+    /// A call was held for the operator: put it in the waiting bay and say so
+    /// in the asking session's log. The session itself goes on working.
+    pub async fn approval_requested(&self, approval: &crate::store::approvals::ApprovalRow) {
+        self.record(NewEvent {
+            session_id: approval.session_id.clone(),
+            work_item_id: None,
+            kind: ek::PERMISSION_REQUEST.into(),
+            ref_id: Some(approval.id.clone()),
+            payload: json!({
+                "approval_id": approval.id, "permission_id": approval.id,
+                "title": approval.title, "kind": "tool", "tool": approval.tool,
+                "raw_input": { "tool": approval.tool, "arguments": serde_json::from_str::<serde_json::Value>(&approval.arguments).unwrap_or_default() },
+                "expires_ms": approval.expires_ms,
+            }),
+            at_ms: now_ms(),
+            mono_ms: 0,
+        });
+        self.publish_queue().await;
+    }
+
+    /// An approval moved on: answered, run, or expired.
+    pub async fn approval_decided(
+        &self,
+        approval: &crate::store::approvals::ApprovalRow,
+        state: &str,
+    ) {
+        use crate::store::approvals as a;
+        let kind = match state {
+            a::RUNNING | a::REJECTED => ek::PERMISSION_ANSWER,
+            a::EXPIRED => ek::PERMISSION_EXPIRED,
+            _ => ek::APPROVAL_SETTLED,
+        };
+        self.record(NewEvent {
+            session_id: approval.session_id.clone(),
+            work_item_id: None,
+            kind: kind.into(),
+            ref_id: Some(approval.id.clone()),
+            payload: json!({
+                "approval_id": approval.id, "permission_id": approval.id,
+                "tool": approval.tool, "state": state, "reason": approval.reason,
+                "option_id": approval.answer_option_id,
+            }),
+            at_ms: now_ms(),
+            mono_ms: 0,
+        });
+        self.publish_queue().await;
+    }
+
+    /// Whether an approved call may still run for this session. A session
+    /// that has ended does not stop it: the approval belongs to the channel.
+    /// A paused session, or a channel the operator stopped, does.
+    pub fn approval_runnable(&self, session_id: &str, channel: &str) -> Result<(), SessionError> {
+        self.channel_usable(channel)?;
+        if let Some(row) = self.store.get_session(session_id)? {
+            if row.state == SessionState::Paused.as_str() {
+                return Err(SessionError::Rejected("session is paused".into()));
+            }
+            if row.harness_id == external::HARNESS_ID
+                && self.bindings(channel)["external_stopped"] == true
+            {
+                return Err(SessionError::Rejected(
+                    "external broker access was stopped by the operator".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Expire approvals nobody answered in time.
+    pub async fn expire_approvals(&self) {
+        let Ok(expired) = self.store.expire_due_approvals() else {
+            return;
+        };
+        for approval in &expired {
+            self.approval_decided(approval, crate::store::approvals::EXPIRED)
+                .await;
         }
     }
 

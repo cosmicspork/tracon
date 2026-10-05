@@ -1173,6 +1173,36 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX repo_image_latest ON repo_image(repo_path, kind, started_ms);
     "#,
+    // 49: an approval outlives the call that asked for it. A consequential
+    // call the operator must decide returns at once with this row's id; the
+    // node runs the call itself once it is approved and keeps the outcome
+    // here for `approval_status`. `request_key` is the channel-scoped identity
+    // of what was asked, so asking again while one is pending is the same
+    // approval. `lane` is the caller's attribution label, when it gives one.
+    r#"
+    CREATE TABLE approval (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        lane TEXT,
+        tool TEXT NOT NULL,
+        arguments TEXT NOT NULL,
+        request_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        state TEXT NOT NULL,
+        answer_option_id TEXT,
+        edited_arguments TEXT,
+        result TEXT,
+        reason TEXT,
+        created_ms INTEGER NOT NULL,
+        decided_ms INTEGER,
+        finished_ms INTEGER,
+        expires_ms INTEGER NOT NULL
+    );
+    CREATE INDEX approval_request ON approval(channel, request_key, state);
+    CREATE INDEX approval_open ON approval(state, created_ms);
+    "#,
 ];
 
 /// The first N migrations, for tests that build a database as an older build

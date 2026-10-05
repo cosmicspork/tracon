@@ -220,3 +220,11 @@ test('a card says what the session was started to do, and copes when it cannot',
   )
   expect(intentLabel(permission({ intent: null }))).toBe('intent unavailable')
 })
+
+test('an approval stays yours when the session that asked has ended', () => {
+  const raw_input = JSON.stringify({ tool: 'doc_write', arguments: {}, approval_id: 'a1' })
+  const ended = permission({ raw_input, intent: { ...permission().intent!, session_state: 'closed' } })
+  expect(permissionVerdict(ended, null, NOW)).toEqual({ lane: 'decision', reason: null })
+  const lapsed = permissionVerdict(permission({ raw_input, expires_ms: NOW }), null, NOW)
+  expect(lapsed.reason).toBe('expired unanswered · nothing ran')
+})

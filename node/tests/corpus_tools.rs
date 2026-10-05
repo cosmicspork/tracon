@@ -228,8 +228,8 @@ async fn documents_are_written_by_the_operator_read_by_the_agent_and_edits_confl
     let doc = serde_json::from_str::<Value>(&text(&v)).unwrap();
     assert_eq!(doc["hash"], hash);
     assert!(doc["body"].as_str().unwrap().contains("just test"));
-    // doc_write is not named by the bundle: it is asked, and with no live
-    // session to carry the question it is refused rather than run.
+    // doc_write is not named by the bundle: it is held for the operator, and
+    // nothing is written until they allow it.
     let v = mcp(
         &h.harness,
         "s1",
@@ -241,7 +241,8 @@ async fn documents_are_written_by_the_operator_read_by_the_agent_and_edits_confl
         ),
     )
     .await;
-    assert_eq!(v["result"]["isError"], true, "{v}");
+    assert_ne!(v["result"]["isError"], true, "{v}");
+    assert!(text(&v).contains("awaiting_operator"), "{v}");
     assert_eq!(
         h.store
             .doc_get("personal", "guide-workspace")

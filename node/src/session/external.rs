@@ -3,26 +3,25 @@
 //! There is no process here to supervise: the harness is a terminal the
 //! operator started, outside the boundary, and it reaches the node through the
 //! operator door rather than the gateway's forward. What it still needs is a
-//! session, because that is where a brokered call the policy does not name
-//! becomes a card on the home: the queue is keyed on a session row, the answer
-//! comes back through the same command channel, and the log of what was asked
-//! for belongs somewhere the operator can read it afterwards.
+//! session: the log of what was asked for belongs somewhere the operator can
+//! read it afterwards, and a pause fences it. A brokered call the operator
+//! must decide is held as an approval the channel owns, not a card this loop
+//! waits on, so nothing here blocks on the operator.
 //!
 //! So each client on a channel gets one attached session and a loop that
-//! handles only what an attachment can produce: a permission request, its answer, its expiry, and
-//! the end. No turns, no budget, no container. A `Supervisor` with a stubbed
-//! harness would have to fake all three.
+//! handles only what an attachment can produce: a pause, a resume, and the
+//! end. No turns, no budget, no container.
 
-use std::{collections::HashMap, sync::Arc, time::Duration, time::Instant};
+use std::{sync::Arc, time::Duration, time::Instant};
 
 use serde_json::json;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::{
-    adapter::{PermissionReply, PermissionRequest},
+    adapter::PermissionReply,
     session::{
         state::{event_kind as ek, EndReason, SessionState},
-        supervisor::{on_answer_row, permission_row, Command, PauseSource},
+        supervisor::{Command, PauseSource},
     },
     store::{now_ms, NewEvent, SessionPatch, Store},
     stream::{Bus, Frame},
@@ -32,9 +31,6 @@ use crate::{
 /// launched, and `adapter_for` never sees it. The interface keys its wording
 /// off this, and `recent_repos` filters on it.
 pub const HARNESS_ID: &str = "external";
-
-/// Why a card whose call was dropped cannot be answered.
-const ABANDONED: &str = "withdrawn: the harness stopped waiting; nothing was run";
 
 /// A channel and the `Mcp-Session-Id` its client echoes, if it echoes one.
 pub(super) type Key = (String, Option<String>);
@@ -52,7 +48,6 @@ pub(super) struct Loop {
     pub node_id: String,
     pub store: Arc<Store>,
     pub bus: Bus,
-    pub permission_timeout: Duration,
     pub idle_timeout: Duration,
     pub last_seen: Arc<std::sync::Mutex<Instant>>,
 }
@@ -61,47 +56,23 @@ impl Loop {
     /// Until the attachment is killed, goes quiet, or the node stops.
     pub(super) async fn run(self, mut commands: mpsc::Receiver<Command>) {
         let started = Instant::now();
-        let mut open: HashMap<String, oneshot::Sender<PermissionReply>> = HashMap::new();
         let mut ticker = tokio::time::interval(Duration::from_secs(5));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
                 cmd = commands.recv() => match cmd {
-                    Some(Command::Permission { request, reply }) => {
-                        if self.is_paused() {
-                            let _ = reply.send(PermissionReply::Cancelled);
-                        } else {
-                            self.on_permission(&mut open, started, request, reply);
-                        }
+                    // Nothing asks through an attachment any more: a call the
+                    // operator decides is an approval. Refuse rather than
+                    // leave a caller waiting on a card nobody will raise.
+                    Some(Command::Permission { reply, .. }) => {
+                        let _ = reply.send(PermissionReply::Cancelled);
                     }
-                    Some(Command::Answer { permission_id, option_id, arguments, ack }) => {
-                        let done = if self.is_paused() {
-                            Err("broker access is paused for this external harness".into())
-                        } else if open.get(&permission_id).is_some_and(|reply| reply.is_closed()) {
-                            self.withdraw_abandoned(&mut open, started);
-                            Err(ABANDONED.into())
-                        } else {
-                            let done = on_answer_row(
-                                &self.store,
-                                &mut open,
-                                &permission_id,
-                                &option_id,
-                                arguments.clone(),
-                                started.elapsed().as_millis() as i64,
-                            );
-                            if done.is_ok() {
-                                self.record(
-                                    ek::PERMISSION_ANSWER,
-                                    Some(permission_id.clone()),
-                                    json!({ "permission_id": permission_id, "option_id": option_id, "arguments": arguments }),
-                                    started,
-                                );
-                                self.back_to_running(&open);
-                            }
-                            done
-                        };
-                        let _ = ack.send(done);
+                    Some(Command::Answer { ack, .. }) => {
+                        let _ = ack.send(Err(
+                            "nothing is waiting on this attachment; approvals are answered on their own"
+                                .into(),
+                        ));
                     }
                     Some(Command::Prompt { ack, .. }) => {
                         // The operator is already talking to this harness; the
@@ -112,7 +83,7 @@ impl Loop {
                         ));
                     }
                     Some(Command::Pause { source, reason, ack }) => {
-                        self.pause(&mut open, started, source, &reason);
+                        self.pause(started, source, &reason);
                         let _ = ack.send(Ok(()));
                     }
                     Some(Command::Resume { source, reason, ack }) => {
@@ -120,12 +91,12 @@ impl Loop {
                         let _ = ack.send(done);
                     }
                     Some(Command::Kill) => {
-                        self.close(&mut open, started, EndReason::KilledUser);
+                        self.set_state(SessionState::Closed, Some(EndReason::KilledUser), started);
                         break;
                     }
                     Some(Command::EndAfterTurn(reason)) => {
                         // No turn to wait for.
-                        self.close(&mut open, started, reason);
+                        self.set_state(SessionState::Closed, Some(reason), started);
                         break;
                     }
                     // A turn cannot happen here; the harness reports none.
@@ -133,10 +104,8 @@ impl Loop {
                     None => break,
                 },
                 _ = ticker.tick() => {
-                    self.withdraw_abandoned(&mut open, started);
-                    self.expire(&mut open, started);
-                    if !self.is_paused() && open.is_empty() && self.idle_elapsed() > self.idle_timeout {
-                        self.close(&mut open, started, EndReason::Detached);
+                    if !self.is_paused() && self.idle_elapsed() > self.idle_timeout {
+                        self.set_state(SessionState::Closed, Some(EndReason::Detached), started);
                         break;
                     }
                 }
@@ -155,30 +124,9 @@ impl Loop {
     /// There is no process to suspend outside the boundary. Pausing an
     /// attachment fences its broker access and makes that explicit to the
     /// external harness rather than pretending we stopped its terminal.
-    fn pause(
-        &self,
-        open: &mut HashMap<String, oneshot::Sender<PermissionReply>>,
-        started: Instant,
-        source: PauseSource,
-        reason: &str,
-    ) {
+    fn pause(&self, started: Instant, source: PauseSource, reason: &str) {
         if self.is_paused() {
             return;
-        }
-        for (id, sender) in open.drain() {
-            let _ = sender.send(PermissionReply::Cancelled);
-            let _ = self.store.resolve_permission(
-                &id,
-                "expired",
-                None,
-                started.elapsed().as_millis() as i64,
-            );
-            self.record(
-                ek::PERMISSION_EXPIRED,
-                Some(id),
-                json!({ "reason": "denied: broker access paused" }),
-                started,
-            );
         }
         self.set_state(SessionState::Paused, None, started);
         self.record(
@@ -233,148 +181,6 @@ impl Loop {
             .lock()
             .map(|t| t.elapsed())
             .unwrap_or_default()
-    }
-
-    /// The gate already decided this needs the operator, so unlike the
-    /// supervisor's path there is no policy to re-run: what arrives here has
-    /// been asked for.
-    fn on_permission(
-        &self,
-        open: &mut HashMap<String, oneshot::Sender<PermissionReply>>,
-        started: Instant,
-        request: PermissionRequest,
-        reply: oneshot::Sender<PermissionReply>,
-    ) {
-        let row = permission_row(
-            &self.session_id,
-            &self.node_id,
-            started.elapsed().as_millis() as i64,
-            self.permission_timeout,
-            &request,
-        );
-        if let Err(e) = self.store.insert_permission(&row) {
-            tracing::error!(error = %e, "failed to record permission request");
-            let _ = reply.send(PermissionReply::Selected(
-                crate::adapter::types::OPTION_REJECT_ONCE.into(),
-            ));
-            return;
-        }
-        let id = row.id.clone();
-        open.insert(id.clone(), reply);
-        self.record(
-            ek::PERMISSION_REQUEST,
-            Some(id.clone()),
-            json!({
-                "permission_id": id, "title": request.title, "kind": request.kind,
-                "raw_input": request.raw_input, "options": request.options,
-                "expires_ms": row.expires_ms
-            }),
-            started,
-        );
-        self.set_state(SessionState::WaitingOnYou, None, started);
-    }
-
-    /// A card whose call is gone. The harness hung up on its request — a
-    /// client timeout, a cancelled tool call — and the door dropped the call
-    /// waiting on this answer, so allowing it now would run nothing while
-    /// looking like consent was acted on. Withdrawn rather than left to expire.
-    fn withdraw_abandoned(
-        &self,
-        open: &mut HashMap<String, oneshot::Sender<PermissionReply>>,
-        started: Instant,
-    ) {
-        let gone: Vec<String> = open
-            .iter()
-            .filter(|(_, reply)| reply.is_closed())
-            .map(|(id, _)| id.clone())
-            .collect();
-        if gone.is_empty() {
-            return;
-        }
-        for id in gone {
-            open.remove(&id);
-            let _ = self.store.resolve_permission(
-                &id,
-                "expired",
-                None,
-                started.elapsed().as_millis() as i64,
-            );
-            self.record(
-                ek::PERMISSION_EXPIRED,
-                Some(id.clone()),
-                json!({ "permission_id": id, "reason": ABANDONED }),
-                started,
-            );
-        }
-        self.back_to_running(open);
-    }
-
-    /// Silence is a refusal here too.
-    fn expire(
-        &self,
-        open: &mut HashMap<String, oneshot::Sender<PermissionReply>>,
-        started: Instant,
-    ) {
-        let now = now_ms();
-        let due: Vec<String> = match self.store.open_permissions() {
-            Ok(rows) => rows
-                .into_iter()
-                .filter(|r| r.session_id == self.session_id && r.expires_ms <= now)
-                .map(|r| r.id)
-                .collect(),
-            Err(_) => return,
-        };
-        if due.is_empty() {
-            return;
-        }
-        for id in due {
-            if let Some(sender) = open.remove(&id) {
-                let _ = sender.send(PermissionReply::Selected(
-                    crate::adapter::types::OPTION_REJECT_ONCE.into(),
-                ));
-            }
-            let _ = self.store.resolve_permission(
-                &id,
-                "expired",
-                None,
-                started.elapsed().as_millis() as i64,
-            );
-            self.record(
-                ek::PERMISSION_EXPIRED,
-                Some(id.clone()),
-                json!({ "permission_id": id, "reason": "denied: unanswered" }),
-                started,
-            );
-        }
-        self.back_to_running(open);
-    }
-
-    fn close(
-        &self,
-        open: &mut HashMap<String, oneshot::Sender<PermissionReply>>,
-        started: Instant,
-        reason: EndReason,
-    ) {
-        for (_, sender) in open.drain() {
-            let _ = sender.send(PermissionReply::Cancelled);
-        }
-        self.set_state(SessionState::Closed, Some(reason), started);
-    }
-
-    fn back_to_running(&self, open: &HashMap<String, oneshot::Sender<PermissionReply>>) {
-        if open.is_empty() {
-            if let Ok(Some(s)) = self.store.get_session(&self.session_id) {
-                if s.state == SessionState::WaitingOnYou.as_str() {
-                    let _ = self.store.update_session_unless(
-                        &self.session_id,
-                        SessionState::TERMINAL,
-                        SessionPatch::state(SessionState::Running.as_str()),
-                    );
-                    self.publish_session();
-                }
-            }
-        }
-        self.publish_queue();
     }
 
     /// The attachment's own transition writer, fenced exactly as the
