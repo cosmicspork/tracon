@@ -377,17 +377,6 @@ work that does not need it, and nothing on it may be described elsewhere as prov
 - [ ] **Real project workflows on Kubernetes**: preparation, a coding task, checks, review.
       An OpenCode session started on the homelab cluster and ran gated tools on
       2026-09-29 (after #291, #294); the whole workflow has not.
-- [ ] **QA deploy and browser verification against a real target** (the Laravel Cloud
-      preview target). The documented recipe *discovers* rather than creates: it finds the
-      preview environment Cloud's pull-request automation made for the candidate's published
-      branch, waits for it, compares the deployed commit to the candidate, and leaves
-      teardown to the platform. `cloud` v0.5.0 cannot deploy a bare commit, so an
-      unpublished candidate is refused with that reason rather than deploying a branch head.
-      Still the operator's: a Cloud API token in the broker as `laravel-cloud` (read and
-      deployment-status scope), the `cloud` login written into the node-owned home, the
-      target's attested `origin_suffix` and app name, an identity endpoint on the
-      application that returns its build commit, and a digest-pinned browser image.
-      Podman-only until the Kubernetes backend issues egress grants.
 
 **Upstream contributions worth a bounded PR** (not blockers): a flag that turns the
 web-UI fallback into a 404; a flag check on nested instruction attachment; invoking the
@@ -397,7 +386,7 @@ servers reaching the v2 session runner.
 ## Current limitations
 
 - Everything under "Live proofs still the operator's" is unproven live, including the
-  private-repository run and QA verification against a real target.
+  private-repository run.
 - OpenCode is driven over its v1 session routes, which offer the model the node's MCP
   tools where the v2 runner offered none (findings 22, 23); a real session has not yet
   run that way. Claude Code is the working managed harness until one has.
@@ -415,15 +404,13 @@ servers reaching the v2 session runner.
   that names a hand-pinned `image` has none, so its runs prepare from empty. A run keeps
   no build output: every run of a compiled project's checks builds from nothing (three
   minutes for tracon's own test build, 2026-10-01).
-- Per-client egress — a session's, a preparation's, a QA browser run's — is the Podman
+- Per-client egress — a session's, a preparation's — is the Podman
   backend's. The Kubernetes backend issues no grants, so a `[[repo]]` entry that names
   `egress` cannot prepare there. A grant filters by host, not by method: a registry that
   accepts uploads accepts them from the client that was granted it.
 - macOS releases are unsigned — the publisher holds no Apple Developer ID — and are
   authenticated by GitHub build provenance instead, so Gatekeeper asks once on first open
   (right-click Open, or System Settings > Privacy & Security > Open Anyway).
-- The Kubernetes runtime backend issues no egress grants; `egress_grant` always refuses
-  there, so browser verification is Podman-only.
 - The Kubernetes backend **drops** denied egress rather than refusing it. A NetworkPolicy
   has no reject verb and no portable CNI option turns a drop into an ICMP or RST refusal,
   so what Podman gets from having no route out has to come from the cluster. Until one that

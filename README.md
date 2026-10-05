@@ -419,8 +419,8 @@ which only a preparation of the default branch ever writes — the node makes on
 builds the repository's image — and it is removed with the run, so nothing one candidate
 installed is ever in another's evidence; `tracon gc --caches` empties the base. The grant
 filters by host, not by method, so a registry that accepts uploads accepts them from that
-preparation — and from nothing else: a session, a QA browser run and another preparation
-each hold their own grant, are refused each other's hosts, and never wait for one
+preparation — and from nothing else: a session and another preparation each hold their
+own grant, are refused each other's hosts, and never wait for one
 another. And the image's default user has to be able to write `/work` and `/cache`, which
 under rootless Podman means it runs as root.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
@@ -462,10 +462,9 @@ and images) can be attached beside the authoritative record; it is linked and
 hashed, never executed, and flagged stale if the document changed since.
 
 **Work → Evidence** browses captured candidates without requiring an ID. Reviews,
-sessions, and work items link to the corresponding owner and channel. Peer detail
-shows that owner's recorded checks, deployments, and browser proof read-only;
-artifact downloads and new QA actions remain on the owner. A missing local
-candidate is not evidence that a peer has none.
+sessions, and work items link to the corresponding owner and channel; a peer's
+candidates are read from that owner. A missing local candidate is not evidence
+that a peer has none.
 
 ### Asking, pinging, and complaining
 
@@ -508,37 +507,6 @@ same card, or `tracon external stop <channel>`, stops a channel with nothing
 attached. A watchdog pauses a session on its own after repeated harness-turn
 failures, with the reason on the record, rather than restarting the same loop
 indefinitely.
-
-### QA verification
-
-Once a candidate is captured, an operator-configured QA target can deploy and
-prove it before anyone reviews the diff. Deploy never creates a GitLab pipeline
-on a moving ref — it finds the pipeline GitLab already ran at the candidate's
-exact commit and plays the configured manual deploy job inside it, or refuses
-outright if no such pipeline exists. Browser verification then runs a real,
-headless browser against that deployment inside its own network boundary: the
-container reaches only the QA target's configured origin(s) for that one run,
-nothing else, on proxy credentials issued for that run alone and distinct from the
-harness's own egress — the Kubernetes backend issues none yet, so QA browser runs are
-a Podman-only capability today. A scenario's steps and assertions are declarative
-— no script, no arbitrary URL — and a dedicated test-account credential may
-only be filled into a password-type input, never screenshotted while its form
-is still on screen. Every deployment observation, browser run, assertion, log,
-and screenshot attaches to the candidate as evidence, and a stale deployment
-(the target moved since the browser ran) is marked so rather than silently
-trusted. Deploying and verifying are their own scoped authority grants, kept
-separate from merge, publish, and ticket-transition grants.
-
-### Repository-derived prototypes
-
-A prototype is a static, sandboxed preview built from a candidate's own
-repository rather than hand-authored: the node prepares the pinned build
-image the same way a check would, runs the operator-configured build command
-in that isolated environment, and imports the resulting HTML/asset output
-through the same bundle importer and capability-scoped viewer as any other
-document — no host file serving, and no bind-mount exception for the
-prototype's own assets. Each build records its source revision and build
-image so a prototype is always traceable to the exact candidate it came from.
 
 ## Using the tools from your own harness
 
@@ -755,8 +723,8 @@ proxy_port = 8888
 forward_port = 7421
 # harness_listen = "127.0.0.1:7421" # or a socket path; the platform default is right
 # qa_proxy_port = 8890              # where a container reaches the node's per-client egress
-                                    # proxy: preparation, QA browser runs. Each presents its own
-                                    # credentials; the name is from when only QA used it
+                                    # proxy: preparation and sessions. Each presents its own
+                                    # credentials; the name is from the retired QA browser
 # egress_port = 7424                # where the node serves that proxy when harness_listen is a
                                     # TCP address; with a socket path it is a socket beside it
 
@@ -846,9 +814,6 @@ timeout_secs = 900
 max_diff_lines = 10000              # added plus removed lines; a bigger submission is refused before any check runs
 max_files = 200
 
-[qa]                                # no targets by default: QA has no implicit environment
-# [qa.targets.<name>]               # see QA targets below. A name containing "production" is refused.
-
 [notify]
 # contact = "mailto:you@example.com"    # what a push service may write to about this sender
 
@@ -899,126 +864,6 @@ preview origin configured with `preview_url`.
 CLI import, put, and export remain Markdown-only. Agents can read HTML through
 `doc_read`; HTML creation and replacement use the operator's import flow, not
 `doc_write`.
-
-### QA targets
-
-A QA target is where a candidate goes to be proved by a browser. Nothing about
-one is inferred: the operator names the destination, attests that it is
-private, and says how a candidate gets there. Two kinds do the getting.
-
-**`kind = "gitlab"`** (the default) plays an operator-named manual job in a
-pipeline GitLab already ran at the candidate's exact SHA. It never creates a
-pipeline, because GitLab resolves a pipeline `ref` only against a branch or a
-tag, so creating one would mean deploying whatever that ref holds now.
-
-**`kind = "command"`** runs an argv on the node — directly, with no shell —
-and observes the result through further argv. It exists because most hosts are
-not GitLab, and their integration is their own CLI. The credential comes from
-the broker as *environment only*: it is bound to the candidate's channel and
-to this node, it never appears in an argument, and every value it holds is
-scrubbed out of the recorded output before that becomes evidence. Configuration
-that puts a credential-shaped word in argv, names a shell or an interpreter as
-the binary, or names a filesystem path in an argument is refused at startup.
-The binary is either one of an allowlist of deployment CLIs (`aws`, `cloud`,
-`doctl`, `flyctl`, `gh`, `glab`, `heroku`, `helm`, `kubectl`, `netlify`,
-`railway`, `render`, `vercel`, `wrangler`) or an absolute path, which says
-exactly which file will run.
-
-Placeholders in argv are `{sha}`, `{short_sha}`, `{branch}`, `{target}`, plus
-anything under `deployment.args` (so `{app}` is configuration, not a tracon
-concept), plus `{env_id}` and `{env_url}` in a status command. The same facts
-reach the command as `TRACON_CANDIDATE_SHA`, `TRACON_CANDIDATE_BRANCH`, and
-`TRACON_QA_TARGET`. A placeholder with no value is a configuration error, so an
-unsubstituted brace can never survive into a command line.
-
-A command target's equivalent of `execution_image` is a digest of the argv, the
-injected environment's key names, the resolved absolute path of the binary, and
-what that binary reports as its version. Upgrade the deploy CLI and the
-evidence identity changes, which is what the pinned image buys the GitLab kind.
-
-#### Laravel Cloud
-
-Laravel Cloud is the worked example. Its CLI (`cloud`, v0.5.0) has no flag for
-deploying a specific commit: `cloud deploy <app> <environment>` builds whatever
-the environment's branch holds. **So the candidate must be published first** —
-tracon refuses the deploy otherwise, naming that reason, rather than deploying a
-branch head that may have moved. Publication already pushes the candidate's
-branch and opens the pull request; the deploy asks for the publication record
-that observed the forge holding the candidate's *exact* SHA, and uses its
-branch name.
-
-The default recipe below is **discovery**: it creates nothing and deletes
-nothing. Laravel Cloud can be configured to open a preview environment when a
-pull request opens and delete it when the pull request merges, so tracon's job
-is to find the environment the automation made for the candidate's branch,
-wait for it, and record it. Teardown stays the platform's; an environment that
-has disappeared after the evidence was recorded is normal, not a failure. The
-credential therefore needs read and deployment-status scope only.
-
-<!-- qa-target-example -->
-```toml
-[qa.targets.cloud-qa]
-private = true                        # the operator attests this destination is not public
-identity_path = "/_tracon/deployment" # on whatever origin the discovered environment has
-identity_header = "x-tracon-deployment-id"
-
-[qa.targets.cloud-qa.deployment]
-kind = "command"
-env_credential = "laravel-cloud"      # broker entry, injected as environment, never in argv
-args = { app = "my-app" }             # supplies {app} below
-command = []                          # nothing is triggered: the PR automation builds the branch
-deploy_timeout_secs = 1800
-poll_interval_secs = 15
-
-[qa.targets.cloud-qa.deployment.discover]
-command = ["cloud", "environment:list", "{app}", "--json", "-n"]
-branch_field = "branch"
-id_field = "id"
-url_field = "url"
-state_field = "status"
-prefer_field = "createdFromAutomation"   # the automation's environment, not one made by hand
-ready_states = ["running"]
-origin_suffix = "laravel.cloud"          # a discovered origin must live under this
-
-[qa.targets.cloud-qa.deployment.status]
-command = ["cloud", "deployment:list", "{env_id}", "--json", "-n"]
-id_field = "id"
-state_field = "status"
-commit_field = "commitHash"              # must equal the candidate's SHA
-ready_states = ["success"]
-failed_states = ["failed", "cancelled"]
-
-[qa.targets.cloud-qa.browser]
-image = "ghcr.io/cosmicspork/tracon-qa-browser@sha256:0000000000000000000000000000000000000000000000000000000000000000"
-timeout_secs = 120
-```
-
-Notes on the recipe:
-
-- **The credential.** `cloud` v0.5.0 reads its API token from
-  `~/.config/cloud/config.json` and offers no token environment variable. The
-  node clears the environment and sets `HOME` to node-owned state
-  (`<state>/qa-command-home/<target>/`), so the operator authenticates once
-  into that home — `HOME=<state>/qa-command-home/cloud-qa cloud auth -n` — or
-  puts `HOME` in the `laravel-cloud` broker entry pointing at a directory only
-  the node can read. Either way the operator's own `cloud` login is never what
-  a deploy uses. A CLI that does take a token variable needs only the variable
-  in the broker entry.
-- **Flags.** Always `-n`; `--json` on reads; never `-q`/`--silent`, which would
-  leave nothing to parse. `environment:get` output is never stored: a
-  production environment's build command can carry a credential in clear text
-  and the CLI prints it unmasked, so the node reads only the fields named above
-  and redacts every brokered value out of the tail it keeps.
-- **The identity check.** The application must return its deployed commit in
-  `identity_header` at `identity_path`. Without that the deployment is bound to
-  the candidate only by what the host said; set
-  `identity_matches_candidate = false` under `[…deployment]` to accept that
-  explicitly, rather than having it happen silently.
-- **Repos without the PR automation.** Drop `discover`, give the target a fixed
-  `origin` and `identity_url`, and set
-  `command = ["cloud", "deploy", "{app}", "qa", "-n"]` with the same `status`
-  block. The environment is then the operator's standing QA environment, whose
-  branch the publication's push updates.
 
 ### Policy
 

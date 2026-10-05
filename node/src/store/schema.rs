@@ -622,7 +622,9 @@ const MIGRATIONS: &[&str] = &[
     "#,
     // 28: append-only QA observations and repository-derived prototypes. These
     // are node-owned execution evidence, not replicated demonstrations: an
-    // offline peer cannot truthfully inherit a runtime observation.
+    // offline peer cannot truthfully inherit a runtime observation. The QA
+    // tools that wrote them are retired; the tables stay so nothing a node
+    // recorded is dropped by an upgrade.
     r#"
     CREATE TABLE qa_deployment (
         id                   TEXT PRIMARY KEY,

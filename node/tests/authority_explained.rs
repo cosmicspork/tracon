@@ -330,8 +330,6 @@ async fn every_action_a_grant_can_carry_is_explained() {
         "publish",
         "ticket_transition",
         "deploy",
-        "browser_verify",
-        "browser_test_account",
         "terminal",
     ] {
         assert!(

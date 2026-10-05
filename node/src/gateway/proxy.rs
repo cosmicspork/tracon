@@ -4,8 +4,8 @@
 //! else is forwarded — a plain `GET http://…` gets a refusal, not a fetch.
 //!
 //! The same proxy also serves **grants** (`serve_granted`): one client, one
-//! token, one set of hosts. A session, a dependency preparation and a QA
-//! browser run each present their own token as proxy credentials and are
+//! token, one set of hosts. A session and a dependency preparation each
+//! present their own token as proxy credentials and are
 //! filtered by their own grant, so nothing one of them may reach is reachable
 //! by another, and a refusal is known to be *that* client's.
 
@@ -157,7 +157,7 @@ async fn handle(
 #[derive(Debug, Clone, Default)]
 pub struct GrantSpec {
     /// Who this is, for the log and for the credentials' user name: `session`,
-    /// `prepare`, `qa`.
+    /// `prepare`.
     pub client: String,
     /// The session a refusal should be recorded against, when there is one.
     pub session_id: Option<String>,
@@ -166,8 +166,8 @@ pub struct GrantSpec {
     /// Anchored patterns, as `[gateway] allow_hosts` writes them.
     pub patterns: Vec<String>,
     /// Whether a plain `http://` request to a granted host is forwarded, on
-    /// whatever port it names. Only a QA target's own origin needs this; a
-    /// registry is always HTTPS.
+    /// whatever port it names. No current client asks for it: a registry is
+    /// always HTTPS.
     pub plain_http: bool,
     /// The sentence a refused host gets back, as the status line's reason
     /// and the body: what to change, for whoever reads the failure.
@@ -527,7 +527,7 @@ mod tests {
         ] {
             assert!(internal_address(&internal.parse().unwrap()), "{internal}");
         }
-        // A LAN address is somewhere else: a QA target on the operator's own
+        // A LAN address is somewhere else: a host on the operator's own
         // network is a legitimate thing to name.
         for external in ["192.168.1.20", "10.0.0.5", "1.1.1.1", "2606:4700::1111"] {
             assert!(!internal_address(&external.parse().unwrap()), "{external}");

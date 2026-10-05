@@ -70,7 +70,7 @@
       channel: item.candidate.channel,
     })
     if (item.candidate.owner_node_id) query.set('owner', item.candidate.owner_node_id)
-    return `/qa?${query}`
+    return `/evidence?${query}`
   }
 
   $effect(() => {

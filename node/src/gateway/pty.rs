@@ -161,7 +161,7 @@ pub(super) fn decide(s: &AppState, session_id: &str, channel: &str, api: &Native
     let target = authority::terminal_target(session_id, &api.directory);
     let args = json!({ "workspace": api.directory, "session": session_id });
     // The same bundle every other authority decision is made against
-    // (`http/qa.rs`, `mcp/mod.rs`): a capability and a forge action must not
+    // (`mcp/mod.rs`): a capability and a forge action must not
     // be able to disagree about which policy is in force.
     let decision = {
         let policy = s.tools.policy.read();

@@ -77,8 +77,6 @@ const AUTHORITY_ACTIONS: &[&str] = &[
     authority::PUBLISH,
     authority::TICKET_TRANSITION,
     authority::DEPLOY,
-    authority::BROWSER_VERIFY,
-    authority::BROWSER_TEST_ACCOUNT,
     authority::TERMINAL,
 ];
 

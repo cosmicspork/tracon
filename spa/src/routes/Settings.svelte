@@ -283,7 +283,7 @@
     grantResource === 'repository'
       ? 'github:owner/repo:pr:42'
       : grantResource === 'deployment'
-        ? 'gitlab:group/project:environment:qa — or qa:<target>:command:<binary> for a command target'
+        ? 'gitlab:group/project:environment:staging'
         : grantResource === 'ticket'
           ? 'github:owner/repo:issue:42'
           : 'canonical, no-space identifier',
@@ -1001,7 +1001,7 @@
         <div class="grid">
           <label><span>Action</span><select bind:value={grant.action} disabled={!local}><option value="merge">merge</option><option value="publish">publish</option><option value="ticket_transition">ticket transition</option><option value="deploy">deploy</option><option value="terminal">terminal</option></select></label>
           <label><span>Decision</span><select bind:value={grant.verdict} disabled={!local}><option value="ask">ask · safe default</option><option value="allow">allow</option><option value="deny">deny</option></select></label>
-          <label><span>Resource type</span><select bind:value={grantResource} disabled={!local}><option value="repository">pull or merge request</option><option value="deployment">QA deployment</option><option value="ticket">ticket transition</option><option value="advanced">advanced canonical target</option></select></label>
+          <label><span>Resource type</span><select bind:value={grantResource} disabled={!local}><option value="repository">pull or merge request</option><option value="deployment">GitLab deployment</option><option value="ticket">ticket transition</option><option value="advanced">advanced canonical target</option></select></label>
           <label><span>Channel scope</span><input bind:value={grant.channel} disabled={!local} placeholder={store.node?.default_channel ?? 'personal'} /></label>
           <label class="wide"><span>Exact target</span><input bind:value={grant.target} disabled={!local} placeholder={grantTargetHint} spellcheck="false" /><small>One canonical identifier, no spaces. This is the only target the grant can match.</small></label>
           <label class="wide"><span>Reason</span><input bind:value={grant.reason} disabled={!local} placeholder="why this exact scoped action is needed" /></label>
