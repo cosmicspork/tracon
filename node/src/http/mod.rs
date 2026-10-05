@@ -853,6 +853,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
             loop {
                 tick.tick().await;
+                // An approval waits for the operator until it expires; the
+                // caller is not blocked on it, so nothing else would end it.
+                manager.expire_approvals().await;
                 let stale = store
                     .stale_claims(grace.as_millis() as i64)
                     .unwrap_or_default();

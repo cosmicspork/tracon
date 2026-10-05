@@ -734,7 +734,8 @@ forward_port = 7421
 
 [session]
 budget_tokens = 2000000             # per session
-permission_timeout_secs = 900       # an unanswered ask is a deny
+permission_timeout_secs = 900       # a harness's own unanswered ask is a deny
+approval_expiry_secs = 86400        # a brokered call held for the operator expires unanswered
 # default_channel = "work"          # the channel the composer starts on; empty is no preference
 claim_grace_secs = 60               # a review claim lapses this long after the client vanishes
 # worktree_root = "/private/tmp"    # on macOS; the system temp directory elsewhere

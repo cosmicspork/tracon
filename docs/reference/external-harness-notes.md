@@ -55,20 +55,24 @@ Three consequences follow, and none is mitigated in code:
 
 ## Shapes that were not obvious
 
-**A session was mandatory, and it was the interesting part.** `Verdict::Ask`
-reaches the operator through `Manager::ask_permission`, which needs a live
-command channel in `Manager.live`; the queue is `permission_request` rows, whose
-`session_id` is a foreign key onto `session`. There is no operator queue
-independent of a session. Adding one would have meant relaxing the key and
-touching every consumer, so an attachment gets a real session row and a loop
-that answers on it, and the whole queue, notification, answer and expiry path
-works with no change at all.
+**A session was mandatory, and it was the interesting part.** It no longer
+carries the asking. `Verdict::Ask` used to reach the operator through
+`Manager::ask_permission`, which needed a live command channel and a
+`permission_request` row keyed onto the session, and the call blocked until
+the operator answered. A client that gave up waiting left a card that ran
+nothing when allowed (#272). A brokered call the operator decides is now an
+`approval` row the channel owns: the call returns `awaiting_operator` with its
+`approval_id` at once, the operator's queue shows it beside permission
+requests, allowing it makes the node run the call (with any edit, held to the
+same refusals) and keep the result, and the caller reads that result with
+`approval_status`, for one id or a list. Every harness asks this way, the
+boundary harness included; only a harness's own permission prompt (OpenCode
+asking to run a command) still waits, because the harness itself does.
 
 **A `Supervisor` was the wrong thing to reuse.** It owns a harness handle, a
 runner, a container, a budget and a turn model, and stubbing all five to get a
-permission loop is more code than the loop. What it did make sense to share is
-the row: `permission_row` and `on_answer_row` are the supervisor's own, lifted
-out so both callers ask in exactly the same shape.
+permission loop is more code than the loop. The attachment's loop now handles only a
+pause, a resume and the end.
 
 **The row's honest placeholders.** `repo_path` is empty because no repository
 was involved, and that immediately turned up in `recent_repos`, which groups

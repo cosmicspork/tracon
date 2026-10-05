@@ -459,97 +459,116 @@ async fn an_attachment_closes_an_item_by_id_and_stays_attached() {
     assert_eq!(attached(&h).unwrap().state, "running");
 }
 
-/// The inverse of the unit test that pinned the old dead end: with no session
-/// able to ask, a tool the bundle did not name could not run at all. Now it
-/// reaches the queue and the operator's answer reaches the caller.
-#[tokio::test]
-async fn a_tool_the_policy_does_not_cover_is_asked_through_the_attachment() {
-    state::isolate();
-    let h = harness_with(enabled()).await;
-    // doc_write is asked for anything but working notes: a plan is the
-    // operator's artifact.
-    let app = h.operator.clone();
-    let call_task = tokio::spawn(async move {
-        mcp(
-            &app,
-            "work",
-            tool_call("doc_write", json!({ "slug": "plan-x", "body": "hello" })),
-        )
-        .await
-    });
-
-    let mut waiting = None;
-    for _ in 0..100 {
-        let open = h.store.open_permissions().unwrap();
-        if let Some(p) = open.first() {
-            waiting = Some(p.clone());
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let waiting = waiting.expect("the call should be waiting on the operator");
-    assert_eq!(waiting.kind.as_deref(), Some("tool"));
-    assert!(waiting.title.starts_with("doc_write"), "{}", waiting.title);
-    assert_eq!(waiting.session_id, attached(&h).unwrap().id);
-
-    let (status, _) = call(
-        &h.operator,
-        "POST",
-        &format!("/api/permissions/{}/answer", waiting.id),
-        Some(json!({ "option_id": "allow_once" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    let (_, v) = call_task.await.unwrap();
-    assert_ne!(
-        v["result"]["isError"],
-        json!(true),
-        "the operator allowed it: {v}"
-    );
+/// Ask for something the operator decides: the call answers at once with an
+/// approval and runs nothing.
+async fn ask(h: &Harness, name: &str, args: Value) -> String {
+    let (_, v) = mcp(&h.operator, "work", tool_call(name, args)).await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    assert_eq!(out["state"], "awaiting_operator", "{out}");
+    out["approval_id"].as_str().unwrap().to_string()
 }
 
-/// The id of the first card waiting on the operator.
-async fn waiting_card(h: &Harness) -> String {
+async fn answer(h: &Harness, id: &str, body: Value) -> (StatusCode, Value) {
+    call(
+        &h.operator,
+        "POST",
+        &format!("/api/permissions/{id}/answer"),
+        Some(body),
+    )
+    .await
+}
+
+/// `approval_status` for one id, waiting up to `wait` seconds.
+async fn approval(h: &Harness, id: &str, wait: u64) -> Value {
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call(
+            "approval_status",
+            json!({ "approval_id": id, "wait_secs": wait }),
+        ),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    out
+}
+
+/// What an approval settled as, waiting for the run to finish.
+async fn settled(h: &Harness, id: &str) -> Value {
     for _ in 0..100 {
-        if let Some(p) = h.store.open_permissions().unwrap().first() {
-            return p.id.clone();
+        let out = approval(h, id, 0).await;
+        if !matches!(out["state"].as_str(), Some("still_waiting" | "running")) {
+            return out;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("the call should be waiting on the operator");
+    panic!("approval {id} never settled");
+}
+
+/// A tool the policy does not decide is held for the operator. The call does
+/// not wait: it says so at once, the card is on the queue, and allowing it
+/// runs the call and keeps its result for the caller.
+#[tokio::test]
+async fn a_call_the_operator_decides_returns_at_once_and_runs_once_allowed() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-x", "body": "hello" }),
+    )
+    .await;
+    assert!(h.store.doc_get("work", "plan-x").unwrap().is_none());
+    let queue = h.store.open_permission_views().unwrap();
+    let card = queue.iter().find(|p| p.id == id).expect("a card for it");
+    assert_eq!(card.kind.as_deref(), Some("tool"));
+    assert!(card.title.starts_with("doc_write"), "{}", card.title);
+    assert_eq!(approval(&h, &id, 0).await["state"], "still_waiting");
+    // The attachment goes on working: nothing is waiting on the operator.
+    assert_eq!(attached(&h).unwrap().state, "running");
+
+    let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(out["result"]["slug"], "plan-x", "{out}");
+    assert_eq!(
+        h.store.doc_get("work", "plan-x").unwrap().unwrap().body,
+        "hello"
+    );
+    assert!(h
+        .store
+        .open_permission_views()
+        .unwrap()
+        .iter()
+        .all(|p| p.id != id));
 }
 
 #[tokio::test]
 async fn an_edited_answer_runs_the_tool_with_the_operators_words() {
     state::isolate();
     let h = harness_with(enabled()).await;
-    let app = h.operator.clone();
-    let call_task = tokio::spawn(async move {
-        mcp(
-            &app,
-            "work",
-            tool_call(
-                "doc_write",
-                json!({ "slug": "plan-x", "body": "the agent's draft" }),
-            ),
-        )
-        .await
-    });
-    let id = waiting_card(&h).await;
-    let (status, _) = call(
-        &h.operator,
-        "POST",
-        &format!("/api/permissions/{id}/answer"),
-        Some(json!({
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-x", "body": "the agent's draft" }),
+    )
+    .await;
+    let (status, _) = answer(
+        &h,
+        &id,
+        json!({
             "option_id": "allow_once",
             "arguments": { "slug": "plan-x", "body": "the operator's words" }
-        })),
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let (_, v) = call_task.await.unwrap();
-    assert_ne!(v["result"]["isError"], json!(true), "{v}");
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(out["edited_arguments"]["body"], "the operator's words");
     let doc = h.store.doc_get("work", "plan-x").unwrap().unwrap();
     assert_eq!(doc.body, "the operator's words");
 }
@@ -558,30 +577,29 @@ async fn an_edited_answer_runs_the_tool_with_the_operators_words() {
 async fn an_edit_is_held_to_the_same_refusals_as_the_call() {
     state::isolate();
     let h = harness_with(enabled()).await;
-    let app = h.operator.clone();
-    let call_task = tokio::spawn(async move {
-        mcp(
-            &app,
-            "work",
-            tool_call("doc_write", json!({ "slug": "plan-y", "body": "a draft" })),
-        )
-        .await
-    });
-    let id = waiting_card(&h).await;
-    call(
-        &h.operator,
-        "POST",
-        &format!("/api/permissions/{id}/answer"),
-        Some(json!({
-            "option_id": "allow_once",
-            "arguments": { "slug": "plan-y", "body": "then git push origin main" }
-        })),
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-y", "body": "a draft" }),
     )
     .await;
-    let (_, v) = call_task.await.unwrap();
-    assert_eq!(v["result"]["isError"], json!(true), "{v}");
-    let text = v["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("refused by policy"), "{text}");
+    answer(
+        &h,
+        &id,
+        json!({
+            "option_id": "allow_once",
+            "arguments": { "slug": "plan-y", "body": "then git push origin main" }
+        }),
+    )
+    .await;
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "failed", "{out}");
+    assert!(
+        out["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("refused by policy")),
+        "{out}"
+    );
     assert!(h.store.doc_get("work", "plan-y").unwrap().is_none());
 }
 
@@ -589,35 +607,248 @@ async fn an_edit_is_held_to_the_same_refusals_as_the_call() {
 async fn a_refused_call_says_the_operator_refused_it() {
     state::isolate();
     let h = harness_with(enabled()).await;
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-x", "body": "hello" }),
+    )
+    .await;
+    let (status, _) = answer(&h, &id, json!({ "option_id": "reject_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let out = approval(&h, &id, 0).await;
+    assert_eq!(out["state"], "rejected");
+    assert!(
+        out["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("did not allow")),
+        "{out}"
+    );
+    // Answered once is answered.
+    let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    assert_ne!(status, StatusCode::OK);
+    assert!(h.store.doc_get("work", "plan-x").unwrap().is_none());
+}
+
+/// A client that retries — or a reconnect that asks again — does not queue a
+/// second card for the same request.
+#[tokio::test]
+async fn asking_again_while_it_waits_is_the_same_approval() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let args = json!({ "slug": "plan-x", "body": "hello" });
+    let first = ask(&h, "doc_write", args.clone()).await;
+    let again = ask(&h, "doc_write", args).await;
+    assert_eq!(first, again);
+    let other = ask(&h, "doc_write", json!({ "slug": "plan-x", "body": "else" })).await;
+    assert_ne!(first, other);
+    let cards = h.store.open_permission_views().unwrap();
+    assert_eq!(cards.iter().filter(|p| p.id == first).count(), 1);
+    assert_eq!(cards.len(), 2);
+}
+
+#[tokio::test]
+async fn an_unanswered_approval_expires() {
+    state::isolate();
+    let mut cfg = enabled();
+    cfg.session.approval_expiry_secs = 1;
+    let h = harness_with(cfg).await;
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-x", "body": "hello" }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let out = approval(&h, &id, 0).await;
+    assert_eq!(out["state"], "expired", "{out}");
+    assert!(h.store.open_permission_views().unwrap().is_empty());
+    let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    assert_ne!(status, StatusCode::OK);
+    assert!(h.store.doc_get("work", "plan-x").unwrap().is_none());
+}
+
+/// One wait covers several approvals and ends when any one is decided.
+#[tokio::test]
+async fn one_wait_covers_a_list_and_returns_when_any_is_decided() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let a = ask(&h, "doc_write", json!({ "slug": "plan-a", "body": "a" })).await;
+    let b = ask(&h, "doc_write", json!({ "slug": "plan-b", "body": "b" })).await;
     let app = h.operator.clone();
-    let call_task = tokio::spawn(async move {
+    let ids = json!([a.clone(), b.clone()]);
+    let started = std::time::Instant::now();
+    let waiting = tokio::spawn(async move {
         mcp(
             &app,
             "work",
-            tool_call("doc_write", json!({ "slug": "plan-x", "body": "hello" })),
+            tool_call(
+                "approval_status",
+                json!({ "approval_ids": ids, "wait_secs": 30 }),
+            ),
         )
         .await
     });
-    let mut waiting = None;
-    for _ in 0..100 {
-        if let Some(p) = h.store.open_permissions().unwrap().first() {
-            waiting = Some(p.clone());
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let waiting = waiting.expect("waiting on the operator");
-    call(
-        &h.operator,
-        "POST",
-        &format!("/api/permissions/{}/answer", waiting.id),
-        Some(json!({ "option_id": "reject_once" })),
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    answer(&h, &b, json!({ "option_id": "reject_once" })).await;
+    let (_, v) = waiting.await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    assert_eq!(out["still_waiting"], false);
+    let states: Vec<(String, String)> = out["approvals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| {
+            (
+                v["approval_id"].as_str().unwrap().to_string(),
+                v["state"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        states,
+        [(a, "still_waiting".into()), (b, "rejected".into())]
+    );
+}
+
+/// An approval is not a card some connection waits on. A caller that has gone
+/// away loses nothing: the operator can still allow it, and it runs.
+#[tokio::test]
+async fn an_approval_outlives_the_attachment_that_asked() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-x", "body": "hello" }),
     )
     .await;
-    let (_, v) = call_task.await.unwrap();
-    assert_eq!(v["result"]["isError"], json!(true));
-    let text = v["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("did not allow"), "{text}");
+    let session = attached(&h).unwrap().id;
+    let (status, _) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/sessions/{session}/kill"),
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{status}");
+    wait_for_state(&h, &session, "closed").await;
+    let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(settled(&h, &id).await["state"], "succeeded");
+    assert!(h.store.doc_get("work", "plan-x").unwrap().is_some());
+}
+
+/// A GitHub-shaped forge for one pull request whose head the test can move.
+async fn fake_github(head: Arc<std::sync::Mutex<String>>) -> std::net::SocketAddr {
+    let pulls = head.clone();
+    let app = axum::Router::new()
+        .route(
+            "/repos/o/n/pulls/1",
+            axum::routing::get(move || {
+                let head = pulls.lock().unwrap().clone();
+                async move { axum::Json(json!({ "number": 1, "head": { "sha": head } })) }
+            }),
+        )
+        .route(
+            "/repos/o/n/pulls/1/merge",
+            axum::routing::put(|| async {
+                axum::Json(json!({ "merged": true, "sha": "merged1", "message": "ok" }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+async fn with_github(h: &Harness, head: &str) -> Arc<std::sync::Mutex<String>> {
+    let head = Arc::new(std::sync::Mutex::new(head.to_string()));
+    let addr = fake_github(head.clone()).await;
+    h.tools.broker.write().unwrap().put(
+        "gh",
+        tracon::broker::Credential {
+            env: [
+                ("GH_TOKEN".to_string(), "t".to_string()),
+                ("GITHUB_API".to_string(), format!("http://{addr}")),
+            ]
+            .into_iter()
+            .collect(),
+            channels: vec!["work".into()],
+            ..Default::default()
+        },
+    );
+    head
+}
+
+fn merge_args(operation_id: &str) -> Value {
+    json!({
+        "repo": "o/n", "number": 1, "head_sha": "abcdef1",
+        "operation_id": operation_id,
+    })
+}
+
+/// A scoped grant still decides a call on the spot: it runs inline and the
+/// caller gets its result, with no approval in between.
+#[tokio::test]
+async fn a_call_a_grant_covers_runs_inline() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    with_github(&h, "abcdef1").await;
+    h.store
+        .authority_grant_insert(&tracon::store::AuthorityGrantRow {
+            id: "g1".into(),
+            action: "merge".into(),
+            verdict: "allow".into(),
+            target: "github:o/n:pr:1".into(),
+            channel: "work".into(),
+            session_id: None,
+            revision: None,
+            expires_ms: None,
+            revoked_ms: None,
+            reason: "test".into(),
+            created_ms: tracon::store::now_ms(),
+        })
+        .unwrap();
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("pr_merge", merge_args("op-grant-1")),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    assert_eq!(out["merged"], true, "{out}");
+    assert!(h.store.open_permission_views().unwrap().is_empty());
+}
+
+/// What was true when the call was asked is checked again when it runs: a
+/// pull request whose head moved in between is not merged on the old approval.
+#[tokio::test]
+async fn an_approved_merge_checks_the_head_again_when_it_runs() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let head = with_github(&h, "abcdef1").await;
+    let id = ask(&h, "pr_merge", merge_args("op-recheck-1")).await;
+    *head.lock().unwrap() = "fedcba9".into();
+    answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "failed", "{out}");
+    assert!(
+        out["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("head changed")),
+        "{out}"
+    );
+
+    // The same request with the head where it was approved merges.
+    *head.lock().unwrap() = "abcdef1".into();
+    let id = ask(&h, "pr_merge", merge_args("op-recheck-2")).await;
+    answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(out["result"]["merged"], true, "{out}");
 }
 
 /// The kinds and payloads of an attachment's log.
@@ -630,86 +861,6 @@ async fn log(h: &Harness, id: &str) -> Vec<Value> {
     )
     .await;
     v.as_array().cloned().unwrap_or_default()
-}
-
-/// A harness that hung up on a call waiting for the operator: its card is
-/// withdrawn, not left to take an approval that would run nothing.
-#[tokio::test]
-async fn a_card_whose_caller_hung_up_cannot_be_approved() {
-    state::isolate();
-    let h = harness_with(enabled()).await;
-    let app = h.operator.clone();
-    let call_task = tokio::spawn(async move {
-        mcp(
-            &app,
-            "work",
-            tool_call("doc_write", json!({ "slug": "plan-x", "body": "hello" })),
-        )
-        .await
-    });
-    let card = waiting_card(&h).await;
-    let session = attached(&h).unwrap().id;
-    // What a client timeout does to the request: the handler is dropped.
-    call_task.abort();
-    let _ = call_task.await;
-
-    let (status, v) = call(
-        &h.operator,
-        "POST",
-        &format!("/api/permissions/{card}/answer"),
-        Some(json!({ "option_id": "allow_once" })),
-    )
-    .await;
-    assert_ne!(status, StatusCode::OK, "{v}");
-    assert!(v.to_string().contains("nothing was run"), "{v}");
-    assert!(h.store.doc_get("work", "plan-x").unwrap().is_none());
-    assert!(h.store.open_permissions().unwrap().is_empty());
-    wait_for_state(&h, &session, "running").await;
-
-    let events = log(&h, &session).await;
-    assert!(
-        events.iter().any(|e| e["kind"] == "tool_result"
-            && e["payload"]["status"] == "abandoned"
-            && e["payload"]["title"]
-                .as_str()
-                .is_some_and(|t| t.starts_with("doc_write"))),
-        "{events:?}"
-    );
-    assert!(
-        events.iter().any(|e| e["kind"] == "permission_expired"
-            && e["payload"]["reason"]
-                .as_str()
-                .is_some_and(|r| r.starts_with("withdrawn"))),
-        "{events:?}"
-    );
-}
-
-/// Nobody has to try the card for it to go: the loop's tick finds it.
-#[tokio::test]
-async fn an_orphaned_card_is_withdrawn_without_an_answer() {
-    state::isolate();
-    let h = harness_with(enabled()).await;
-    let app = h.operator.clone();
-    let call_task = tokio::spawn(async move {
-        mcp(
-            &app,
-            "work",
-            tool_call("doc_write", json!({ "slug": "plan-x", "body": "hello" })),
-        )
-        .await
-    });
-    waiting_card(&h).await;
-    let session = attached(&h).unwrap().id;
-    call_task.abort();
-    let _ = call_task.await;
-    for _ in 0..400 {
-        if h.store.open_permissions().unwrap().is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(h.store.open_permissions().unwrap().is_empty());
-    wait_for_state(&h, &session, "running").await;
 }
 
 /// A call that finishes is not also logged as abandoned.
@@ -731,23 +882,6 @@ async fn a_finished_call_is_not_logged_as_abandoned() {
         .map(|e| e["payload"]["status"].clone())
         .collect();
     assert_eq!(statuses, [json!("ok")]);
-}
-
-#[tokio::test]
-async fn an_unanswered_request_expires_here_too() {
-    state::isolate();
-    let mut cfg = enabled();
-    cfg.session.permission_timeout_secs = 1;
-    let h = harness_with(cfg).await;
-    let (_, v) = mcp(
-        &h.operator,
-        "work",
-        tool_call("doc_write", json!({ "slug": "plan-x", "body": "hello" })),
-    )
-    .await;
-    assert_eq!(v["result"]["isError"], json!(true));
-    let open = h.store.open_permissions().unwrap();
-    assert!(open.is_empty(), "{open:?}");
 }
 
 #[tokio::test]

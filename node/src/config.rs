@@ -1184,6 +1184,10 @@ pub struct SessionDefaults {
     /// Per-session cap; zero means no token cap.
     pub budget_tokens: i64,
     pub permission_timeout_secs: u64,
+    /// How long a brokered call held for the operator waits before it
+    /// expires unanswered. Nothing is blocked while it waits, so this can be
+    /// long.
+    pub approval_expiry_secs: u64,
     /// How long a call the API gateway forwards to a session's harness may
     /// take before its outcome is recorded as unknown. A mediated mutation
     /// that outlives this is neither sent nor not-sent: the intent is on the
@@ -1284,6 +1288,7 @@ impl Default for Config {
             session: SessionDefaults {
                 budget_tokens: 0,
                 permission_timeout_secs: 900,
+                approval_expiry_secs: 86_400,
                 harness_api_timeout_secs: 30,
                 default_channel: String::new(),
                 claim_grace_secs: 60,

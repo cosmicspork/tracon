@@ -450,9 +450,8 @@ async fn a_session_reads_the_brief_and_is_held_to_what_it_can_claim() {
     );
     assert!(v["summary"].as_str().unwrap().contains("1 decided"), "{v}");
 
-    // Writing one is not: the agreements name no `brief_note`, so it is put
-    // to the operator — and with no live session to carry the question here,
-    // refused rather than run.
+    // Writing one is not: the agreements name no `brief_note`, so it is held
+    // for the operator and nothing is written until they allow it.
     let v = mcp(
         &h.harness,
         "s1",
@@ -461,7 +460,7 @@ async fn a_session_reads_the_brief_and_is_held_to_what_it_can_claim() {
         json!({ "field": "problem", "provenance": "inferred", "text": "the sort is the cause" }),
     )
     .await;
-    assert_eq!(v["error"], true, "{v}");
+    assert_eq!(v["state"], "awaiting_operator", "{v}");
 
     // And what a session may claim is the node's rule, not the agent's: a
     // session never records a decision, and never an observation with

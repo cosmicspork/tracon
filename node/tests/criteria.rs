@@ -595,11 +595,10 @@ async fn an_agent_proposes_what_good_means_and_the_operator_decides_it() {
     });
 
     // The shipped agreements name no `criteria_link`: a line in the operator's
-    // own record of what the work is for is put to the operator first. With no
-    // live session here to carry the question, it is refused rather than run,
-    // and nothing lands in the document.
+    // own record of what the work is for is held for the operator first, and
+    // nothing lands in the document until they allow it.
     let asked = tool(&h.harness, "s1", &token, "criteria_link", call_args.clone()).await;
-    assert_eq!(asked["error"], true, "{asked}");
+    assert_eq!(asked["state"], "awaiting_operator", "{asked}");
     assert!(!brief_body(&h, &id).contains("just check"), "{asked}");
 
     // What this test is about is the line once it lands, not the asking, so the

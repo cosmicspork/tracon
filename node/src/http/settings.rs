@@ -24,6 +24,7 @@ pub fn config_view(cfg: &Config) -> Value {
         "session": {
             "budget_tokens": cfg.session.budget_tokens,
             "permission_timeout_secs": cfg.session.permission_timeout_secs,
+            "approval_expiry_secs": cfg.session.approval_expiry_secs,
             "default_channel": cfg.session.default_channel,
         },
         "review": {
@@ -130,6 +131,12 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
                             &mut cfg.session.permission_timeout_secs,
                             v,
                             "session.permission_timeout_secs",
+                            &mut changed,
+                        )?,
+                        "approval_expiry_secs" => set_u64(
+                            &mut cfg.session.approval_expiry_secs,
+                            v,
+                            "session.approval_expiry_secs",
                             &mut changed,
                         )?,
                         "default_channel" => set_string(

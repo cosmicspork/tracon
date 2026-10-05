@@ -18,6 +18,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod approvals;
 pub mod authority;
 pub use authority::*;
 pub mod context;
@@ -798,9 +799,14 @@ impl Store {
              LEFT JOIN work_item w ON w.id = s.work_item_id AND w.deleted = 0
              WHERE p.state='new' ORDER BY p.created_ms ASC",
         )?;
-        let rows = stmt
+        let mut rows: Vec<PermissionView> = stmt
             .query_map([], PermissionView::from_joined_row)?
             .collect::<std::result::Result<_, _>>()?;
+        drop(stmt);
+        drop(conn);
+        // Approvals wait in the same bay: one queue, one way to answer.
+        rows.extend(self.open_approval_cards(approvals::CARD_OPTIONS)?);
+        rows.sort_by_key(|r| r.created_ms);
         Ok(rows)
     }
 

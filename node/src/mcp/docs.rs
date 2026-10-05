@@ -103,7 +103,7 @@ pub fn definitions() -> Vec<Value> {
             "description": "Create or replace a document on this channel. Slugs are `<kind>-<name>` with \
                             kind one of note, repo, meeting, inbox, proposal, plan, guide, ref, \
                             architecture. Pass if_hash (from doc_read) to refuse overwriting an edit \
-                            you have not seen. The operator is asked before this runs.",
+                            you have not seen. The operator is asked before this runs: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

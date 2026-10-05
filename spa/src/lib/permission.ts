@@ -1,5 +1,19 @@
 import type { Permission } from './types'
 
+/**
+ * A brokered call held for the operator. Nothing waits on it: allowing it
+ * makes the node run the call, so it outlives the session that asked and an
+ * ended session does not make it moot.
+ */
+export function isApproval(p: Pick<Permission, 'raw_input'>): boolean {
+  if (!p.raw_input) return false
+  try {
+    return typeof JSON.parse(p.raw_input)?.approval_id === 'string'
+  } catch {
+    return false
+  }
+}
+
 export interface EditableField {
   key: string
   value: string

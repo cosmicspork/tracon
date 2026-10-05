@@ -4,7 +4,7 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
-  import { editableFields, editedArguments } from '../lib/permission'
+  import { editableFields, editedArguments, isApproval } from '../lib/permission'
   import { permissionOptions, type Permission } from '../lib/types'
   import { store } from '../lib/store.svelte'
 
@@ -25,6 +25,9 @@
   // node keeps, and once it has lapsed there is no decision left to offer.
   // Leaving the buttons live would let a deferral be recorded as consent.
   const lapsed = $derived(permission.expires_ms <= clock.now)
+  // A brokered call held for you rather than a harness waiting on you: the
+  // node runs it when you allow it, and the caller reads the outcome later.
+  const approval = $derived(isApproval(permission))
   const request = $derived.by(() => {
     if (!permission.raw_input) return null
     try {
@@ -70,12 +73,16 @@
     <span class="mono head">{formatAge(permission.created_ms, clock.now)}</span>
   {/if}
   <span class="t">
-    <em>Permission</em>
+    <em>{approval ? 'Approval' : 'Permission'}</em>
     {permission.title}
     <small
       ><span class="chip" class:self={owner?.is_self} class:off={held !== null}>{chipLabel(store.nodes, permission.node_id)}</span> · {permission.kind ?? 'tool'} · {lapsed
-        ? 'expired · denied by default'
-        : formatExpiry(permission.expires_ms, clock.now)}{command &&
+        ? approval
+          ? 'expired · nothing ran'
+          : 'expired · denied by default'
+        : formatExpiry(permission.expires_ms, clock.now)}{approval && !lapsed
+        ? ' · nothing is waiting; allowing it runs the call'
+        : ''}{command &&
       command !== permission.title
         ? ` · ${command}`
         : ''}{error ? ` · ${error}` : ''}</small
@@ -91,7 +98,9 @@
     {#if held !== null}
       <span class="why">{held} · cannot be decided until it returns</span>
     {:else if lapsed}
-      <span class="why">denied by default · the session was not made to wait</span>
+      <span class="why"
+        >{approval ? 'expired unanswered · nothing ran' : 'denied by default · the session was not made to wait'}</span
+      >
     {:else}
       {#each options.filter((o) => o.kind === 'reject_once') as o (o.option_id)}
         <button class="lnk d" disabled={busy} onclick={() => answer(o.option_id)}
