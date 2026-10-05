@@ -6,7 +6,9 @@ intervene from anywhere, and keep ownership of the results and history.
 Coding with an agent should not mean keeping a terminal open and watching every
 turn. Start with a repository and a prompt. Let the node keep the session running
 when you close the client, then return from a browser or phone to see what changed,
-inspect the evidence, and answer the decisions that need you.
+inspect the evidence, and answer the decisions that need you. It is the self-hosted
+counterpart to a hosted cloud agent: sessions run on your own machines, reached from a
+browser, the installed web app or the desktop app, and optionally over a private mesh.
 
 tracon is built for one operator, not an organization chart of agents. A laptop
 node is a complete installation, and almost everything above a session is
@@ -19,9 +21,11 @@ fewer interruptions, not the largest number of agents running.
 
 The node supervises existing harnesses (OpenCode and Claude Code), rather than
 running its own model loop. Managed agents work in isolated workspaces; credentials stay
-with the node, which decides what it will do on their behalf. Proposed publication
-comes with a diff and revision-bound evidence, not just an agent's assurance that
-it finished. External harnesses can use the broker too, with a deliberately
+with the node, which decides what it will do on their behalf. Inside that boundary an
+agent edits, builds and runs its tests unasked; what would leave it — network access the
+repository did not open, a credential, a publication — is the node's to decide or to ask
+you about. Proposed publication comes with a diff and revision-bound evidence, not just
+an agent's assurance that it finished. External harnesses can use the broker too, with a deliberately
 narrower guarantee: they never need its credentials, but do not gain its isolation.
 
 Your work should outlive the tool. Workspaces outlive sessions, documents can be
