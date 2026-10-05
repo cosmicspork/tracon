@@ -176,6 +176,8 @@ impl Tools {
     }
 
     pub async fn call(&self, ctx: &CallContext, name: &str, args: &Value) -> Result<Value, String> {
+        let defaulted = with_provider_defaults(name, args);
+        let args = defaulted.as_ref().unwrap_or(args);
         // A plan session's own plan document is the phase's artifact: writing
         // that one slug is what the session exists to do, so it is not asked.
         let plan_write = name == docs::DOC_WRITE && self.is_plan_artifact(ctx, args);
@@ -218,6 +220,10 @@ impl Tools {
             self.gate(ctx, name, args).await?
         };
         let args = gated.arguments.as_ref().unwrap_or(args);
+        // The operator may have edited the arguments in the prompt; a default
+        // they removed is put back the same visible way.
+        let defaulted = with_provider_defaults(name, args);
+        let args = defaulted.as_ref().unwrap_or(args);
         if let Some(access) = self.session.get() {
             access
                 .manager
@@ -1130,6 +1136,25 @@ fn consequential(name: &str, args: &Value) -> Option<(&'static str, String, Opti
     }
 }
 
+/// The arguments with the provider's defaults written in, so the permission
+/// prompt, the authority match and the replay record all show what will be
+/// sent rather than leaving it to the provider call. `None` when nothing was
+/// missing.
+fn with_provider_defaults(name: &str, args: &Value) -> Option<Value> {
+    let (key, default) = match name {
+        github::PR_MERGE => ("method", Value::from("squash")),
+        gitlab::MR_MERGE => ("squash", Value::from(true)),
+        _ => return None,
+    };
+    let map = args.as_object()?;
+    if map.get(key).is_some_and(|v| !v.is_null()) {
+        return None;
+    }
+    let mut map = map.clone();
+    map.insert(key.into(), default);
+    Some(Value::Object(map))
+}
+
 /// Normalize provider defaults and ignore arguments a consequential provider
 /// does not consume before comparing a stable operation id on replay.
 fn canonical_consequential_payload(name: &str, args: &Value) -> Option<Value> {
@@ -1211,6 +1236,28 @@ fn tool_result(value: &Value, is_error: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_merge_default_is_written_into_the_arguments_that_are_approved() {
+        let pr = json!({ "repo": "o/n", "number": 1, "head_sha": "abcdef1", "operation_id": "op" });
+        let resolved = with_provider_defaults(github::PR_MERGE, &pr).unwrap();
+        assert_eq!(resolved["method"], "squash");
+        assert_eq!(
+            canonical_consequential_payload(github::PR_MERGE, &resolved),
+            canonical_consequential_payload(github::PR_MERGE, &pr),
+        );
+        let chosen = json!({ "method": "rebase", "repo": "o/n" });
+        assert!(with_provider_defaults(github::PR_MERGE, &chosen).is_none());
+
+        let mr = json!({ "project": "g/p", "iid": 2, "head_sha": "abc", "operation_id": "op" });
+        assert_eq!(
+            with_provider_defaults(gitlab::MR_MERGE, &mr).unwrap()["squash"],
+            true
+        );
+        let kept = json!({ "squash": false });
+        assert!(with_provider_defaults(gitlab::MR_MERGE, &kept).is_none());
+        assert!(with_provider_defaults(github::PR_COMMENT, &pr).is_none());
+    }
 
     fn tools(store: &str) -> Tools {
         Tools {

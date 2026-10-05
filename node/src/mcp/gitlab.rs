@@ -163,7 +163,7 @@ pub fn definitions() -> Vec<Value> {
                 "properties": {
                     "project": { "type": "string" },
                     "job_id": { "type": "integer" },
-                    "variables": { "type": "object", "description": "Job variables, name to value." },
+                    "variables": { "type": "object", "description": "Job variables, name to string value. Values are sent as given; a number or boolean is refused, so quote it." },
                 },
                 "required": ["project", "job_id"],
             },
@@ -178,7 +178,7 @@ pub fn definitions() -> Vec<Value> {
                 "properties": {
                     "project": { "type": "string" },
                     "ref": { "type": "string", "description": "The branch." },
-                    "variables": { "type": "object", "description": "Pipeline variables, name to value." },
+                    "variables": { "type": "object", "description": "Pipeline variables, name to string value. Values are sent as given; a number or boolean is refused, so quote it." },
                 },
                 "required": ["project", "ref"],
             },
@@ -679,10 +679,12 @@ fn pipeline_variables(v: Option<&Value>) -> Result<Vec<Value>, String> {
         .ok_or("variables is an object of name to value")?;
     map.iter()
         .map(|(k, v)| {
-            let value = match v {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
+            // Anything else would be sent as its JSON text, which is not
+            // the value that was approved.
+            let value = v
+                .as_str()
+                .ok_or_else(|| format!("variable {k} must be a string, e.g. \"{v}\""))?
+                .to_string();
             if value.to_ascii_lowercase().contains("production") {
                 return Err(format!(
                     "variable {k} names production; a production deploy is run by hand"
@@ -855,8 +857,18 @@ mod tests {
     fn a_production_variable_is_refused_by_name() {
         let e = pipeline_variables(Some(&json!({ "ENVIRONMENT": "Production" }))).unwrap_err();
         assert!(e.contains("ENVIRONMENT"), "{e}");
-        let ok = pipeline_variables(Some(&json!({ "DEPLOY": "staging", "N": 2 }))).unwrap();
+        let ok = pipeline_variables(Some(&json!({ "DEPLOY": "staging", "N": "2" }))).unwrap();
         assert_eq!(ok.len(), 2);
         assert!(pipeline_variables(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_variable_that_is_not_a_string_is_refused_rather_than_converted() {
+        for value in [json!(2), json!(true), json!({ "a": 1 }), json!(["x"])] {
+            let e = pipeline_variables(Some(&json!({ "N": value }))).unwrap_err();
+            assert!(e.contains("N must be a string"), "{e}");
+        }
+        let ok = pipeline_variables(Some(&json!({ "N": " 2 " }))).unwrap();
+        assert_eq!(ok, vec![json!({ "key": "N", "value": " 2 " })]);
     }
 }
