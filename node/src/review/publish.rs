@@ -294,9 +294,8 @@ pub struct Publication<'a> {
     pub channel: &'a str,
     pub node_id: &'a str,
     /// The publication record's id, which is also the publisher directory's
-    /// name and the marker written into the opened change. It has to be
-    /// derived from the review, revision, target and commit so that a retry
-    /// looks for what the interrupted attempt would have left.
+    /// name. It has to be derived from the review, revision, target and
+    /// commit so that a retry resumes the record the interrupted attempt left.
     pub id: &'a str,
     /// A node-owned snapshot made immediately before approval, never the
     /// mutable agent workspace.
@@ -599,13 +598,14 @@ async fn attempt(
             let url = match found {
                 Some(url) => url,
                 None => {
+                    // Exactly the approved text: nothing is added that the
+                    // operator did not see.
                     let description = p.outputs.description.clone().unwrap_or_default();
-                    let body = format!("{}\n\n{}", description.body, marker_comment(p.id));
                     let args = open_change_args(
                         provider,
                         p.target,
                         &description.title,
-                        body,
+                        description.body,
                         p.outputs.draft,
                     );
                     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -803,7 +803,9 @@ async fn edit_description(
 }
 
 /// Post the comment unless a resumed attempt finds this publication already
-/// posted it: a comment, unlike a description, is not idempotent.
+/// posted it: a comment, unlike a description, is not idempotent. The comment
+/// is posted exactly as approved, so on resume it is recognised by its text —
+/// or by the marker earlier versions appended.
 async fn post_comment_once(
     provider: Provider,
     cfg: &Config,
@@ -814,7 +816,7 @@ async fn post_comment_once(
     comment: &str,
 ) -> Result<(), PublishError> {
     let path = comments_path(provider, p.target, number);
-    let marker = marker_comment(p.id);
+    let marker = legacy_marker(p.id);
     if p.resume {
         let listed = forge_api(
             provider,
@@ -835,14 +837,13 @@ async fn post_comment_once(
         let posted = listed.as_array().into_iter().flatten().any(|c| {
             c.get("body")
                 .and_then(Value::as_str)
-                .is_some_and(|body| body.contains(&marker))
+                .is_some_and(|body| body.contains(&marker) || same_text(body, comment))
         });
         if posted {
             return Ok(());
         }
     }
-    let body = format!("{comment}\n\n{marker}");
-    forge_api(provider, cfg, dir, env, "POST", &path, &[("body", &body)]).await?;
+    forge_api(provider, cfg, dir, env, "POST", &path, &[("body", comment)]).await?;
     Ok(())
 }
 
@@ -902,12 +903,19 @@ fn open_change_args_ready(
     }
 }
 
-/// The marker that identifies a change this publication opened. A merge
-/// request is not addressable by anything the node chose — the forge assigns
-/// the number — so the publication's own id goes in the body, where a resumed
-/// attempt can find it again.
-pub fn marker_comment(id: &str) -> String {
+/// The marker earlier versions appended to an opened change's body and to its
+/// comment. Nothing writes it any more — approval publishes exactly the text
+/// the operator saw — but a publication those versions interrupted is still
+/// recognised by it when resumed.
+pub fn legacy_marker(id: &str) -> String {
     format!("<!-- tracon-publication:{id} -->")
+}
+
+/// Whether text read back from a forge is the text that was sent. Forges
+/// normalise line endings and trailing whitespace, and nothing else.
+fn same_text(found: &str, sent: &str) -> bool {
+    let norm = |s: &str| s.replace("\r\n", "\n").trim().to_string();
+    norm(found) == norm(sent)
 }
 
 /// What the forge's branch points at, or `None` when the branch is absent. An
@@ -938,9 +946,16 @@ async fn remote_sha(
         .map(str::to_string))
 }
 
-/// The change this publication already opened, if it did. Matching is on the
-/// marker in the body, not on the source branch alone: a change somebody else
-/// opened from the same branch is not this publication's.
+/// The change this publication already opened, if it did.
+///
+/// A change carries nothing the node chose — the forge assigns the number —
+/// so it is recognised by what it was opened with: this branch of this
+/// repository, into this base, at the reviewed commit, with exactly the
+/// approved title and description. A change from the branch at another commit
+/// is not this publication's. One at this commit whose text differs, or more
+/// than one that matches, is not guessed between: the outcome is `Unknown`
+/// and the operator verifies it. A change an earlier version opened is
+/// recognised by the marker it wrote into the body.
 async fn existing_change(
     provider: Provider,
     cfg: &Config,
@@ -961,7 +976,7 @@ async fn existing_change(
             "--limit".into(),
             "50".into(),
             "--json".into(),
-            "url,body".into(),
+            "url,title,body,headRefOid,baseRefName,isCrossRepository".into(),
         ],
         Provider::Gitlab => vec![
             "mr".into(),
@@ -992,23 +1007,104 @@ async fn existing_change(
             provider.noun()
         ))
     })?;
-    let marker = marker_comment(p.id);
-    Ok(parsed
+    let changes: Vec<Listed> = parsed
         .as_array()
         .into_iter()
         .flatten()
-        .find(|change| {
-            ["body", "description"]
-                .iter()
-                .filter_map(|key| change.get(*key).and_then(Value::as_str))
-                .any(|body| body.contains(&marker))
+        .map(|change| Listed::read(provider, change))
+        .collect();
+    match recognise(&changes, p) {
+        Recognised::Ours(url) => Ok(Some(url)),
+        Recognised::None => Ok(None),
+        Recognised::Ambiguous(why) => Err(PublishError::Unknown(format!(
+            "{why}; verify which {} this publication opened before retrying",
+            provider.noun()
+        ))),
+    }
+}
+
+/// One change as a forge's list reports it.
+#[derive(Debug, Default)]
+struct Listed {
+    url: String,
+    title: String,
+    body: String,
+    head_sha: String,
+    base: String,
+    cross_repository: bool,
+}
+
+impl Listed {
+    fn read(provider: Provider, change: &Value) -> Self {
+        let text = |key: &str| {
+            change
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        match provider {
+            Provider::Github => Listed {
+                url: text("url"),
+                title: text("title"),
+                body: text("body"),
+                head_sha: text("headRefOid"),
+                base: text("baseRefName"),
+                cross_repository: change
+                    .get("isCrossRepository")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            },
+            Provider::Gitlab => Listed {
+                url: text("web_url"),
+                title: text("title"),
+                body: text("description"),
+                head_sha: text("sha"),
+                base: text("target_branch"),
+                cross_repository: change.get("source_project_id")
+                    != change.get("target_project_id"),
+            },
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Recognised {
+    Ours(String),
+    None,
+    Ambiguous(String),
+}
+
+fn recognise(changes: &[Listed], p: &Publication<'_>) -> Recognised {
+    let marker = legacy_marker(p.id);
+    if let Some(change) = changes.iter().find(|c| c.body.contains(&marker)) {
+        return Recognised::Ours(change.url.clone());
+    }
+    let at_head: Vec<&Listed> = changes
+        .iter()
+        .filter(|c| !c.cross_repository && c.base == p.target.base && c.head_sha == p.head_sha)
+        .collect();
+    if at_head.is_empty() {
+        return Recognised::None;
+    }
+    let description = p.outputs.description.clone().unwrap_or_default();
+    let ours: Vec<&&Listed> = at_head
+        .iter()
+        .filter(|c| {
+            c.title.trim() == description.title.trim() && same_text(&c.body, &description.body)
         })
-        .and_then(|change| {
-            ["url", "web_url"]
-                .iter()
-                .find_map(|key| change.get(*key).and_then(Value::as_str))
-        })
-        .map(str::to_string))
+        .collect();
+    match ours.as_slice() {
+        [one] => Recognised::Ours(one.url.clone()),
+        [] => Recognised::Ambiguous(format!(
+            "{} is open at the reviewed commit, but not with the approved title and description",
+            at_head[0].url
+        )),
+        many => Recognised::Ambiguous(format!(
+            "{} changes match the reviewed commit and the approved text",
+            many.len()
+        )),
+    }
 }
 
 fn publisher_dir(id: &str) -> Result<PathBuf, PublishError> {
@@ -1167,6 +1263,94 @@ mod tests {
             before_push: None,
             journal,
         }
+    }
+
+    fn listed(url: &str, title: &str, body: &str, head: &str) -> Listed {
+        Listed {
+            url: url.into(),
+            title: title.into(),
+            body: body.into(),
+            head_sha: head.into(),
+            base: "main".into(),
+            cross_repository: false,
+        }
+    }
+
+    fn approved() -> (Target, Outputs) {
+        let target = Target {
+            provider: "github".into(),
+            project: "owner/name".into(),
+            base: "main".into(),
+            branch: "feat/x".into(),
+            worktree: None,
+            change: None,
+        };
+        let outputs = Outputs {
+            description: Some(Description {
+                title: "feat: x".into(),
+                body: "why\nand how".into(),
+            }),
+            ..Outputs::default()
+        };
+        (target, outputs)
+    }
+
+    #[test]
+    fn a_resumed_publication_recognises_its_change_by_commit_and_approved_text() {
+        let (target, outputs) = approved();
+        let journal = NoJournal;
+        let p = publication(&target, &outputs, &journal);
+        let changes = [
+            // An earlier change from the branch, at another commit.
+            listed("u/1", "feat: x", "why\nand how", "0ld"),
+            // The forge hands the body back with its own line endings.
+            listed("u/2", "feat: x", "why\r\nand how\n", "deadbeef"),
+        ];
+        assert_eq!(recognise(&changes, &p), Recognised::Ours("u/2".into()));
+    }
+
+    #[test]
+    fn a_change_only_at_another_commit_is_not_this_publications() {
+        let (target, outputs) = approved();
+        let journal = NoJournal;
+        let p = publication(&target, &outputs, &journal);
+        let mut elsewhere = listed("u/1", "feat: x", "why\nand how", "deadbeef");
+        elsewhere.base = "release".into();
+        let mut fork = listed("u/2", "feat: x", "why\nand how", "deadbeef");
+        fork.cross_repository = true;
+        let changes = [
+            listed("u/3", "feat: x", "why\nand how", "0ld"),
+            elsewhere,
+            fork,
+        ];
+        assert_eq!(recognise(&changes, &p), Recognised::None);
+    }
+
+    #[test]
+    fn a_change_at_the_commit_with_other_text_or_two_matches_is_not_guessed_between() {
+        let (target, outputs) = approved();
+        let journal = NoJournal;
+        let p = publication(&target, &outputs, &journal);
+        let edited = [listed("u/1", "feat: x", "someone edited this", "deadbeef")];
+        assert!(matches!(
+            recognise(&edited, &p),
+            Recognised::Ambiguous(why) if why.contains("u/1")
+        ));
+        let twice = [
+            listed("u/1", "feat: x", "why\nand how", "deadbeef"),
+            listed("u/2", "feat: x", "why\nand how", "deadbeef"),
+        ];
+        assert!(matches!(recognise(&twice, &p), Recognised::Ambiguous(_)));
+    }
+
+    #[test]
+    fn a_change_an_earlier_version_marked_is_still_recognised() {
+        let (target, outputs) = approved();
+        let journal = NoJournal;
+        let p = publication(&target, &outputs, &journal);
+        let body = format!("why\nand how\n\n{}", legacy_marker("pub1"));
+        let changes = [listed("u/9", "feat: x", &body, "deadbeef")];
+        assert_eq!(recognise(&changes, &p), Recognised::Ours("u/9".into()));
     }
 
     #[test]

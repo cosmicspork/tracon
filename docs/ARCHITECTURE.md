@@ -608,13 +608,18 @@ ID into a local action.
 **Publication is two side effects the node cannot take back, so it writes down
 what it is about to do before it does it.** Approval imports the candidate into a
 fresh publisher repository, pushes the reviewed commit, reads the ref back from
-the forge to confirm it is actually there, and then opens the change with a
-marker in its body. Each step is recorded before it is attempted, keyed on the
+the forge to confirm it is actually there, and then opens the change with
+exactly the approved title and description — nothing is appended that the
+operator did not see. Each step is recorded before it is attempted, keyed on the
 review, revision, target and commit — so an attempt a crash interrupted is
 resumed rather than repeated: the next attempt asks the forge what the branch
-holds and whether that marker is already on an open change, and continues from
-what it observes. A forge that cannot be reached settles nothing, and is recorded
-as `uncertain` rather than reported as either success or failure. Every Git
+holds and whether a change from it, into the same base, at the reviewed commit,
+with the approved text, already exists, and continues from what it observes. A
+change at that commit whose text differs, or more than one that matches, is not
+guessed between. A comment is recognised the same way, by its approved text.
+A forge that cannot be reached, or an answer that does not settle which change
+is this publication's, is recorded as `uncertain` rather than reported as
+either success or failure. Every Git
 command that can reach a forge — clone, fetch, ls-remote, push — is built in one
 place with a brokered credential or none: an ambient host helper, an askpass
 program, or an `ssh-agent` identity can never answer for the node, and there is
