@@ -2,11 +2,11 @@ pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod environments;
+pub mod evidence;
 mod mcp;
 mod policy_admin;
 pub mod preview;
 pub mod push;
-pub mod qa;
 pub mod settings;
 mod spa;
 mod stream;
@@ -220,18 +220,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/docs/{channel}/{slug}/preview", post(api::preview_doc))
         .route(
-            "/api/qa/candidates/{candidate_id}",
-            get(qa::candidate_evidence),
+            "/api/evidence/candidates/{candidate_id}/summary",
+            get(evidence::candidate_summary),
         )
-        .route(
-            "/api/qa/candidates/{candidate_id}/targets",
-            get(qa::candidate_targets),
-        )
-        .route("/api/qa/deployments", post(qa::deploy))
-        .route("/api/qa/browser-runs", post(qa::browser_verify))
-        .route("/api/qa/browser-runs/{id}", get(qa::browser_run))
-        .route("/api/prototypes", post(qa::build_prototype))
-        .route("/api/prototypes/{candidate_id}", get(qa::prototypes))
         .route(
             "/api/memories",
             get(api::list_memories).post(api::add_memory),
@@ -396,7 +387,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/reviews/{id}/file", get(api::review_file))
         .route("/api/reviews/{id}/verdict", post(api::decide_review))
         .route("/api/reviews/{id}/release", post(api::release_review))
-        .route("/api/evidence/candidates", get(qa::list_candidates))
+        .route("/api/evidence/candidates", get(evidence::list_candidates))
         .route(
             "/api/evidence/candidates/by-commit/{head_sha}",
             get(api::candidate_by_commit),

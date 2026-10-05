@@ -16,7 +16,7 @@
   import OpencodeShell from './routes/OpencodeShell.svelte'
   import Enroll from './routes/Enroll.svelte'
   import Login from './routes/Login.svelte'
-  import Qa from './routes/Qa.svelte'
+  import Evidence from './routes/Evidence.svelte'
   import { attention } from './lib/attention'
   import { stashToken, tokenFromHash } from './lib/auth'
   import { shellSessionId } from './lib/opencode'
@@ -96,7 +96,7 @@
           : router.path.startsWith('/memories')
             ? 'memories'
             : router.path.startsWith('/work') || router.path.startsWith('/sessions') ||
-                router.path.startsWith('/qa') || router.path === '/metrics'
+                router.path.startsWith('/evidence') || router.path === '/metrics'
               ? 'work'
               : 'home'
   )
@@ -179,7 +179,7 @@
       <nav class="work-nav" aria-label="Work navigation">
         <a href="/work" class:on={router.path.startsWith('/work')}>Tasks</a>
         <a href="/sessions" class:on={router.path.startsWith('/sessions')}>Sessions</a>
-        <a href="/qa" class:on={router.path.startsWith('/qa')}>Evidence</a>
+        <a href="/evidence" class:on={router.path.startsWith('/evidence')}>Evidence</a>
         <a href="/metrics" class:on={router.path === '/metrics'}>Usage</a>
       </nav>
     {/if}
@@ -227,8 +227,8 @@
       <WorkItem id={workId} />
     {:else if router.path === '/work'}
       <Work />
-    {:else if router.path === '/qa'}
-      <Qa />
+    {:else if router.path === '/evidence'}
+      <Evidence />
     {:else if docRef}
       <Doc channel={docRef[1]} slug={docRef[2]} edit={docEdit} />
     {:else if nav === 'docs'}

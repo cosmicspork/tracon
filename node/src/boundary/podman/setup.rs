@@ -217,8 +217,7 @@ fn write_allowlist(cfg: &Config) -> Result<(), BoundaryError> {
 /// Anchor one literal hostname as an exact-match tinyproxy filter entry.
 /// Unlike [`anchor`] (for the operator-authored, regex-capable
 /// `[gateway] allow_hosts`), every regex metacharacter in the host itself is
-/// escaped: a host built from a parsed URL — a QA target's, or a provider
-/// upstream's when `POST /api/providers` widens the allowlist for it — never
+/// escaped: a host built from a parsed URL — a provider upstream's when `POST /api/providers` widens the allowlist for it — never
 /// an operator writing a pattern, so a literal dot must never accidentally
 /// match any character.
 pub(crate) fn anchor_literal_host(host: &str) -> String {

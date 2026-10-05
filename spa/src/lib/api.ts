@@ -56,12 +56,7 @@ import type {
   WorkContext,
   WorkItem,
   WorkView,
-  QaEvidence,
-  QaDeployment,
-  QaBrowserRun,
-  QaAsset,
-  Prototype,
-  QaTarget,
+  CandidateDetail,
   ManifestView,
   ToolchainStatus,
 } from './types'
@@ -633,42 +628,11 @@ export const api = {
       'GET',
       `/api/metrics${sinceMs ? `?since_ms=${sinceMs}` : ''}`,
     ),
-  // Candidate-bound QA. Inputs name a stored candidate and configured target;
-  // this surface accepts neither host commands nor browser credential values.
-  qaEvidence: (candidateId: string, source: { owner?: string; channel?: string } = {}) => {
+  candidateDetail: (candidateId: string, source: { owner?: string; channel?: string } = {}) => {
     const query = new URLSearchParams()
     if (source.owner) query.set('owner', source.owner)
     if (source.channel) query.set('channel', source.channel)
     const suffix = query.size ? `?${query}` : ''
-    return call<QaEvidence>('GET', `/api/qa/candidates/${encodeURIComponent(candidateId)}${suffix}`)
+    return call<CandidateDetail>('GET', `/api/evidence/candidates/${encodeURIComponent(candidateId)}/summary${suffix}`)
   },
-  qaTargets: (candidateId: string) =>
-    call<{ targets: QaTarget[] }>('GET', `/api/qa/candidates/${encodeURIComponent(candidateId)}/targets`),
-  deployCandidate: (candidateId: string, target: string) =>
-    call<QaDeployment>('POST', '/api/qa/deployments', { candidate_id: candidateId, target }),
-  browserVerify: (
-    deploymentId: string,
-    scenario: {
-      start_path: string
-      steps?: (
-        | { kind: 'navigate'; path: string }
-        | { kind: 'click'; selector: string }
-        | { kind: 'fill'; selector: string; value?: string; credential_env?: string }
-        | { kind: 'wait_for'; selector: string }
-      )[]
-      assertions?: (
-        | { kind: 'url_path_is'; path: string }
-        | { kind: 'title_contains'; text: string }
-        | { kind: 'text_visible'; selector: string; text: string }
-        | { kind: 'element_count'; selector: string; count: number }
-        | { kind: 'screenshot'; label: string }
-      )[]
-    },
-  ) => call<{ run: QaBrowserRun; assets: QaAsset[]; artifact_error: string | null }>(
-    'POST',
-    '/api/qa/browser-runs',
-    { deployment_id: deploymentId, scenario },
-  ),
-  buildPrototype: (candidateId: string) =>
-    call<Prototype>('POST', '/api/prototypes', { candidate_id: candidateId }),
 }

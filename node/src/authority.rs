@@ -15,8 +15,6 @@ pub const MERGE: &str = "merge";
 pub const PUBLISH: &str = "publish";
 pub const TICKET_TRANSITION: &str = "ticket_transition";
 pub const DEPLOY: &str = "deploy";
-pub const BROWSER_VERIFY: &str = "browser_verify";
-pub const BROWSER_TEST_ACCOUNT: &str = "browser_test_account";
 /// An interactive terminal inside one session's workspace. Unlike the forge
 /// actions, this one authorises a *surface* rather than a single external
 /// side effect: `POST /pty` is arbitrary command execution with no permission
@@ -34,13 +32,7 @@ pub const CAPABILITY_KIND: &str = "capability";
 pub fn valid_action(action: &str) -> bool {
     matches!(
         action,
-        MERGE
-            | PUBLISH
-            | TICKET_TRANSITION
-            | DEPLOY
-            | BROWSER_VERIFY
-            | BROWSER_TEST_ACCOUNT
-            | TERMINAL
+        MERGE | PUBLISH | TICKET_TRANSITION | DEPLOY | TERMINAL
     )
 }
 

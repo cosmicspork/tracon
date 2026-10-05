@@ -4,8 +4,8 @@
 //! was met. Append-only: a later verdict supersedes an earlier one and both are
 //! kept, because "the operator changed their mind" is itself worth reading.
 //!
-//! Node-local for the reason the QA rows are: this node's operator judging this
-//! node's candidate must not become another node's observation. Nothing here
+//! Node-local: this node's operator judging this node's candidate must not
+//! become another node's observation. Nothing here
 //! replicates, and no agent-reachable path writes it — the only writer is
 //! `corpus::criteria::judge`, which refuses a session outright.
 //!

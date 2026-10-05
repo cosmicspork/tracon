@@ -4818,10 +4818,10 @@ impl crate::mesh::forward::CommandExecutor for AppState {
         use proto::frame::Command as C;
         let r: Result<serde_json::Value, ApiError> = match command {
             C::EvidenceCandidate { request } => {
-                crate::http::qa::forwarded_candidate_evidence(self, sender, request)
+                crate::http::evidence::forwarded_candidate_evidence(self, sender, request)
             }
             C::EvidenceCandidates { query } => {
-                crate::http::qa::forwarded_candidates(self, sender, query)
+                crate::http::evidence::forwarded_candidates(self, sender, query)
             }
             C::Create { spec, work_item } => {
                 async {

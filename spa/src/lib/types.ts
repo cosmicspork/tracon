@@ -1058,8 +1058,6 @@ export interface AuthorityGrant {
     | 'publish'
     | 'ticket_transition'
     | 'deploy'
-    | 'browser_verify'
-    | 'browser_test_account'
     /** An interactive terminal in one session's workspace. Bound to that session. */
     | 'terminal'
   verdict: 'allow' | 'ask' | 'deny'
@@ -1344,113 +1342,17 @@ export interface EnrollStatus {
   restart_required: boolean
 }
 
-/** Candidate-bound, node-authoritative QA deployment observation. */
-export interface QaDeployment {
-  id: string
-  candidate_id: string
-  channel: string
-  target_id: string
-  build_id: string
-  execution_image: string
-  origin: string
-  environment_identity: string | null
-  identity_state: 'fresh' | 'unknown' | 'failed'
-  observed_ms: number
-  started_ms: number
-  finished_ms: number
-  outcome: 'succeeded' | 'failed' | 'unknown'
-  detail_json: string
-}
-
-export interface BrowserAssertionResult {
-  kind: string
-  ok: boolean
-  detail: string
-}
-
-export interface QaBrowserRun {
-  id: string
-  deployment_id: string
-  candidate_id: string
-  channel: string
-  target_id: string
-  authorized_origins_json: string
-  test_credential: string | null
-  assertions_json: string
-  outcome: 'passed' | 'failed' | 'unknown'
-  environment_before: string | null
-  environment_after: string | null
-  evidence_state: 'fresh' | 'stale' | 'unknown'
-  log_tail: string
-  started_ms: number
-  finished_ms: number
-}
-
-export interface QaAsset {
-  id: string
-  browser_run_id: string
-  candidate_id: string
-  channel: string
-  kind: 'screenshots' | 'browser-log' | 'demonstration'
-  document_id: string
-  document_hash: string
-  slug: string
-  created_ms: number
-}
-
-export interface Prototype {
-  id: string
-  candidate_id: string
-  channel: string
-  source_revision: string
-  source_identity_json: string
-  build_image: string
-  build_inputs_json: string
-  document_id: string | null
-  document_hash: string | null
-  slug: string
-  entry_path: string
-  outcome: 'succeeded' | 'failed' | 'unknown'
-  detail: string
-  created_ms: number
-  finished_ms: number
-}
-
-export interface QaTarget {
-  id: string
-  /** `gitlab` plays a manual pipeline job; `command` runs a brokered argv on the node. */
-  kind: 'gitlab' | 'command'
-  /** A discovery target reports the attested host suffix (`*.example.com`) instead. */
-  origin: string
-  /** A discovery target reports its identity path, which hangs off whatever origin it finds. */
-  identity_url: string
-  identity_header: string
-  /** Empty for a command target: its equivalent is a digest, and it exists only per deployment. */
-  execution_image: string
-  /** Command targets only: the configured argv, before placeholder substitution. */
-  deploy_command: string[]
-  /** Command targets only: the broker entry whose environment the command receives. */
-  env_credential: string
-  browser_image: string
-  test_credential: string | null
-  missing_grants: string[]
-}
-
-export interface QaEvidence {
+/** One captured candidate, as the node that holds it describes it. */
+export interface CandidateDetail {
   candidate: {
     id: string
     channel: string
     head_sha: string
     owner_session_id: string
-    /** The node that captured every deployment and browser-proof row below. */
+    /** The node that captured this candidate. */
     owner_node_id: string
     captured_ms: number
   }
-  targets: QaTarget[]
-  deployments: QaDeployment[]
-  browser_runs: QaBrowserRun[]
-  assets: QaAsset[]
-  prototypes: Prototype[]
 }
 
 /** One runtime volume or state directory, and what a storage sweep makes of it. */

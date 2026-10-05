@@ -263,7 +263,7 @@ pub async fn from_snapshot(
     let _guard = lock.lock().await;
     validate_tree(source)?;
     // Writable, because a candidate's snapshot is read-only and what is built
-    // from it here — a prototype's install, a browser run's output — is not.
+    // from it here — a check's build output, a preparation's install — is not.
     backend
         .import_writable(&workspace.volume, source)
         .await

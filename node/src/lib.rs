@@ -27,7 +27,6 @@ pub mod oauth;
 pub mod policy;
 pub mod process;
 pub mod providers;
-pub mod qa;
 pub mod repo_image;
 pub mod review;
 pub mod runner;

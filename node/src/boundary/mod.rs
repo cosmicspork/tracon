@@ -33,8 +33,8 @@ pub enum BoundaryError {
 }
 
 /// One client's way out: proxy credentials that open exactly the hosts they
-/// were issued for, for as long as this is held. A QA browser run, a
-/// repository's dependency preparation and a session each hold their own, so
+/// were issued for, for as long as this is held. A repository's dependency
+/// preparation and a session each hold their own, so
 /// none of them is ever served what another was granted. Dropping it revokes
 /// the credentials.
 pub struct EgressGrant {
