@@ -1229,6 +1229,26 @@ async fn an_unknown_id_attaches_again_under_the_same_name() {
     assert_ne!(first, second);
 }
 
+/// The probe a newer client sends before `initialize` is refused as an
+/// unknown method, so the client falls back, and it attaches nothing: no
+/// session row, and no id handed out.
+#[tokio::test]
+async fn a_discovery_probe_attaches_nothing() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let (status, body, echoed) = mcp_as(
+        &h.operator,
+        "work",
+        None,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "server/discover" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["error"]["code"], -32601, "{body}");
+    assert_eq!(echoed, None);
+    assert!(external_rows(&h).is_empty());
+}
+
 /// A named client's pause outlives the node: after a restart its id finds the
 /// paused row, and nothing else on the channel is held back.
 #[tokio::test]

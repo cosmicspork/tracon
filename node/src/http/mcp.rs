@@ -82,6 +82,21 @@ pub async fn handle_external(
         )
         .into_response();
     }
+    // A newer client probes with `server/discover` before it initializes, and
+    // falls back to `initialize` when the method is unknown. The probe is not
+    // a client of this channel yet, so it is answered without attaching one.
+    if msg.get("method").and_then(Value::as_str) == Some("server/discover") {
+        let id = msg.get("id").cloned().unwrap_or(Value::Null);
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32601, "message": "unsupported method server/discover" },
+            })),
+        )
+            .into_response();
+    }
     let client = match client_id(&headers) {
         Ok(Some(id)) => Some(id),
         Ok(None) if msg.get("method").and_then(Value::as_str) == Some("initialize") => {
