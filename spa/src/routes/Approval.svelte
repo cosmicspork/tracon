@@ -6,6 +6,7 @@
   import { formatAge } from '../lib/format'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
+  import { nodeLabel } from '../lib/nodes'
   import { autogrow } from '../lib/autogrow'
   import { surface } from '../lib/surface.svelte'
   import {
@@ -32,6 +33,8 @@
   /** The revision this screen is showing; the verdict names it. */
   let revision = $state<ReviewRevisionRef | null>(null)
   let stale = $state<string[]>([])
+  /** The node that owns a review mirrored here; null when this node does. */
+  let remoteOwner = $state<string | null>(null)
   let evidence = $state<CandidateEvidence | null>(null)
   let requirements = $state<PinnedRequirements | null>(null)
   /** The pinned item's criteria against this revision's candidate, if any. */
@@ -69,6 +72,7 @@
         review = d.review
         revision = d.revision
         stale = d.stale
+        remoteOwner = d.remote_owner ?? null
         evidence = d.evidence
         requirements = d.requirements
         criteria = d.criteria
@@ -285,7 +289,9 @@
         reason: verdict === 'approve' ? undefined : reason,
         title: verdict === 'approve' ? title : undefined,
         body: verdict === 'approve' ? body : undefined,
-        outputs: verdict === 'approve' ? outputs : undefined,
+        // A mirrored review's outputs are the owner's revision's own; this
+        // screen never read them, so it sends no edit of them.
+        outputs: verdict === 'approve' && !remoteOwner ? outputs : undefined,
         // An edit is a request for changes, never an approval of something
         // the operator changed: the agent applies it and resubmits.
         patch: verdict === 'revise' && patch ? patch : undefined,
@@ -363,7 +369,12 @@
     <dt>Session</dt>
     <dd class="m"><a href="/sessions/{review.session_id}">{review.session_id.slice(0, 8)}</a></dd>
   </dl>
-  {#if !evidence}
+  {#if remoteOwner}
+    <div class="banner">
+      held by {nodeLabel(store.nodes, remoteOwner)}
+      <b>· its checks and evidence stay on that node, and it checks the branch for changes again when you decide</b>
+    </div>
+  {:else if !evidence}
     <div class="banner crit">
       verification evidence missing <b>· this review predates immutable candidate capture</b>
     </div>
@@ -571,7 +582,10 @@
     <textarea class="edit body" bind:value={body} use:autogrow={body} disabled={busy || publishing || surface.phone}></textarea>
   {/if}
 
-  <div class="h4">On the forge <b>{surface.phone ? 'edited on the desktop' : 'what approval sends besides the commits'}</b></div>
+  <div class="h4">On the forge <b>{remoteOwner ? `as the agent asked · edited on ${nodeLabel(store.nodes, remoteOwner)}` : surface.phone ? 'edited on the desktop' : 'what approval sends besides the commits'}</b></div>
+  {#if remoteOwner}
+    <div class="note dim">Approving publishes what the agent asked the forge to show; to change it, open this review on the node that holds it.</div>
+  {:else}
   <label class="toggle">
     <input type="checkbox" bind:checked={describe} disabled={busy || publishing || surface.phone} />
     {change ? `Replace the ${noun}'s title and description` : `Describe the ${noun} separately from the summary`}
@@ -589,6 +603,7 @@
   {/if}
   {#if change && !describe && !(commenting && comment.trim())}
     <div class="note dim">Approving only pushes; the {noun}'s text is left as it is.</div>
+  {/if}
   {/if}
   {#if edited}
     <div class="note">Edited. Approving publishes what is written here, not what was submitted.</div>
@@ -640,7 +655,9 @@
     <Diff diff={review.diff} perFile={surface.phone} />
   {/if}
 
-  {#if !surface.phone}
+  {#if remoteOwner}
+    <p class="note">Editing the diff needs the worktree, which is on {nodeLabel(store.nodes, remoteOwner)}.</p>
+  {:else if !surface.phone}
     <div class="editbar">
       {#if !editing}
         <button class="btn" disabled={busy || publishing} onclick={startEditing}>Edit the diff</button>

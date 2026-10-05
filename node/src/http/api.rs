@@ -1863,12 +1863,22 @@ pub async fn get_review(
             "publications": [],
         })));
     }
-    let stale = staleness_of(&s, &r).await;
+    // A review mirrored from another node is shown here but owned there: its
+    // worktree, candidate and checks never leave the owner, and a verdict is
+    // forwarded to it, where staleness is checked again before anything is
+    // published. Reading them here would only report their absence as if it
+    // were a finding about the change.
+    let remote_owner = (r.node_id != s.node_id).then(|| r.node_id.clone());
+    let stale = if remote_owner.is_some() {
+        Vec::new()
+    } else {
+        staleness_of(&s, &r).await
+    };
     s.manager.publish_queue().await;
     let revision = s.store().latest_review_revision(&id)?;
-    let evidence = match revision.as_ref() {
-        Some(revision) => Some(s.store().candidate_evidence(&revision.candidate_id)?),
-        None => None,
+    let evidence = match (&remote_owner, revision.as_ref()) {
+        (None, Some(revision)) => Some(s.store().candidate_evidence(&revision.candidate_id)?),
+        _ => None,
     };
     // Pinned on the revision at submit time: what the operator is deciding
     // on must never silently drift because the work item was re-scoped after
@@ -1895,8 +1905,10 @@ pub async fn get_review(
     // looking at, and a verdict given here is about this attempt and no other.
     // Null only when the revision has no item, or its item/brief is gone.
     // Every other criteria failure is a failed review read, not missing data.
+    // Criteria verdicts are node-local, about this node's candidate.
     let criteria = if let Some(item) = revision
         .as_ref()
+        .filter(|_| remote_owner.is_none())
         .and_then(|revision| revision.requirements_work_item_id.as_deref())
     {
         let candidate = revision
@@ -1931,13 +1943,19 @@ pub async fn get_review(
     });
     // What approval would send to the forge, as this revision asked for it;
     // the screen edits a copy and sends it back with the verdict.
-    let intent = crate::authority::revision_intent(
-        s.store(),
-        revision.as_ref().map(|revision| revision.id.as_str()),
-    )
-    .unwrap_or_default();
+    // Null for a mirrored review: the owner publishes its revision's own
+    // outputs, and a default invented here would be sent back as an edit.
+    let intent = match remote_owner {
+        Some(_) => serde_json::Value::Null,
+        None => json!(crate::authority::revision_intent(
+            s.store(),
+            revision.as_ref().map(|revision| revision.id.as_str()),
+        )
+        .unwrap_or_default()),
+    };
     Ok(Json(json!({
         "review": r,
+        "remote_owner": remote_owner,
         "revision": revision_ref,
         "intent": intent,
         "stale": stale,
