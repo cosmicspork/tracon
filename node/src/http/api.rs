@@ -2583,7 +2583,13 @@ pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::V
         .await
         .into_iter()
         .map(|(channel, client, session_id)| {
-            json!({ "channel": channel, "client": client, "session_id": session_id })
+            let lane = s
+                .store()
+                .get_session(&session_id)
+                .ok()
+                .flatten()
+                .and_then(|row| row.harness_agent);
+            json!({ "channel": channel, "client": client, "session_id": session_id, "lane": lane })
         })
         .collect();
     Ok(Json(json!({
