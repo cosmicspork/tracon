@@ -652,6 +652,8 @@ async fn an_external_review_publishes_from_the_worktree_it_names() {
         log.contains("GH_TOKEN=brokered-token-not-the-operators"),
         "{log}"
     );
+    // The description is the approved text, with nothing appended.
+    assert!(!log.contains("tracon-publication"), "{log}");
 }
 
 #[tokio::test]
@@ -2196,8 +2198,9 @@ async fn a_publication_interrupted_after_its_push_resumes_without_pushing_again(
 }
 
 /// The crash inside the call that opens the change. A pull request may exist
-/// with nothing recorded about it. The resumed attempt finds it by the marker
-/// it wrote into the body and records that one, rather than opening a second.
+/// with nothing recorded about it. The resumed attempt recognises it by the
+/// reviewed commit and the approved text, and records that one rather than
+/// opening a second.
 #[tokio::test]
 async fn a_publication_interrupted_while_opening_records_the_change_it_already_opened() {
     state::isolate();
@@ -2208,11 +2211,16 @@ async fn a_publication_interrupted_while_opening_records_the_change_it_already_o
         &f.dir.join("wt"),
         &format!("git push -q origin {head}:refs/heads/feat/x"),
     );
-    let marker = tracon::review::publish::marker_comment(&f.publication_id(&id));
     gh_that_lists(
         &f,
-        &json!([{ "url": "https://github.test/pull/7", "body": format!("why\n\n{marker}") }])
-            .to_string(),
+        &json!([
+            // An older change from the same branch is not this one.
+            { "url": "https://github.test/pull/3", "title": "feat: the thing", "body": "what the diff does not say",
+              "headRefOid": "0000000", "baseRefName": "main", "isCrossRepository": false },
+            { "url": "https://github.test/pull/7", "title": "feat: the thing", "body": "what the diff does not say\r\n",
+              "headRefOid": head, "baseRefName": "main", "isCrossRepository": false },
+        ])
+        .to_string(),
     );
     f.interrupted_attempt(&id, "opening", Some(&head));
     f.forget_logs();
@@ -3023,11 +3031,13 @@ async fn a_prose_only_update_pushes_nothing() {
     let (status, body) = f.approve(&id).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(!f.git_log().contains("push origin"), "{}", f.git_log());
-    assert!(f.gh_log().contains("ready again"));
+    let gh = f.gh_log();
+    assert!(gh.contains("body=ready again\n"), "{gh}");
+    assert!(!gh.contains("tracon-publication"), "{gh}");
 }
 
-/// A resumed publication finds the comment it already posted by its marker
-/// and does not post it twice.
+/// A resumed publication finds the comment it already posted by its text and
+/// does not post it twice.
 #[tokio::test]
 async fn a_resumed_update_does_not_comment_twice() {
     state::isolate();
@@ -3044,10 +3054,9 @@ async fn a_resumed_update_does_not_comment_twice() {
     // The interrupted attempt pushed and commented, then the node died.
     f.forge_holds(&review.head_sha);
     let publication = f.publication_id(&id);
-    let marker = tracon::review::publish::marker_comment(&publication);
     std::fs::write(
         f.dir.join("comments.json"),
-        json!([{ "body": format!("once\n\n{marker}") }]).to_string(),
+        json!([{ "body": "once" }]).to_string(),
     )
     .unwrap();
     f.store
