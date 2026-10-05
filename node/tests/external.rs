@@ -303,7 +303,7 @@ fn repo_with_worktree(name: &str) -> (std::path::PathBuf, String) {
          && git config user.email t@e && git config user.name t \
          && echo base > a.txt && git add -A && git commit -qm base && git push -q origin main \
          && git worktree add -b feat/x ../../wt 2>/dev/null \
-         && cd ../../wt && echo change >> a.txt && git add -A && git commit -qm work",
+         && cd ../../wt && printf 'one\\ntwo\\n' >> a.txt && git add -A && git commit -qm work",
     );
     (
         dir.join("root"),
@@ -346,6 +346,10 @@ async fn an_external_harness_puts_its_own_worktree_up_for_review() {
     .await;
     let (err, out) = outcome(&v);
     assert!(!err, "{out}");
+    // One file changed by two added lines: the count is files, not lines.
+    assert_eq!(out["files"], 1, "{out}");
+    assert_eq!(out["added"], 2, "{out}");
+    assert_eq!(out["removed"], 0, "{out}");
     let r = h
         .store
         .get_review(out["review_id"].as_str().unwrap())
