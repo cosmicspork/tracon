@@ -177,7 +177,7 @@ fn a_candidate(h: &Harness, session: &str, head: &str, captured_ms: i64) -> Stri
             head_sha: head.into(),
             tree_sha: Some("1".repeat(40)),
             channel: "personal".into(),
-            owner_session_id: session.into(),
+            owner_session_id: Some(session.into()),
             source_kind: "git".into(),
             captured_ms,
             capture_json: "{}".into(),
@@ -191,7 +191,7 @@ fn a_check_run(h: &Harness, candidate: &str, command: &str, outcome: &str) {
         .insert_check_run(&CheckRunRow {
             id: format!("run-{candidate}-{}", command.replace(' ', "-")),
             candidate_id: Some(candidate.into()),
-            session_id: "s1".into(),
+            session_id: Some("s1".into()),
             command: Some(command.into()),
             definition_json: json!({ "command": command }).to_string(),
             definition_hash: None,
@@ -852,7 +852,7 @@ async fn the_review_screen_carries_the_criteria_of_the_item_it_was_pinned_to() {
         .insert_review_with_revision(
             &ReviewRow {
                 id: "rv1".into(),
-                session_id: "s1".into(),
+                session_id: Some("s1".into()),
                 node_id: "n1".into(),
                 channel: "personal".into(),
                 kind: "pr".into(),
@@ -880,6 +880,7 @@ async fn the_review_screen_carries_the_criteria_of_the_item_it_was_pinned_to() {
                 review_session_id: None,
                 ai_verdict_json: None,
                 revision_patch: None,
+                lane: None,
             },
             &ReviewRevisionRow {
                 id: "revision-1".into(),

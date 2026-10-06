@@ -1014,7 +1014,9 @@ impl Supervisor {
         let due: Vec<String> = match self.store.open_permissions() {
             Ok(rows) => rows
                 .into_iter()
-                .filter(|r| r.session_id == self.session_id && r.expires_ms <= now)
+                .filter(|r| {
+                    r.session_id.as_deref() == Some(self.session_id.as_str()) && r.expires_ms <= now
+                })
                 .map(|r| r.id)
                 .collect(),
             Err(_) => return,
@@ -1047,7 +1049,10 @@ impl Supervisor {
         let still_open = self
             .store
             .open_permissions()
-            .map(|r| r.iter().any(|p| p.session_id == self.session_id))
+            .map(|r| {
+                r.iter()
+                    .any(|p| p.session_id.as_deref() == Some(self.session_id.as_str()))
+            })
             .unwrap_or(false);
         if !still_open {
             if let Ok(Some(s)) = self.store.get_session(&self.session_id) {
@@ -1523,7 +1528,7 @@ pub(super) fn permission_row(
 ) -> PermissionRow {
     PermissionRow {
         id: uuid::Uuid::now_v7().to_string(),
-        session_id: session_id.to_string(),
+        session_id: Some(session_id.to_string()),
         node_id: node_id.to_string(),
         rpc_id: 0,
         tool_call_id: request.tool_call_id.clone(),

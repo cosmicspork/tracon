@@ -418,7 +418,7 @@ async fn a_permission_answered_here_but_pending_upstream_is_answered_again() {
     // The node's own record of that request, already answered.
     let row = tracon::store::PermissionRow {
         id: "p1".into(),
-        session_id: SESSION_ID.into(),
+        session_id: Some(SESSION_ID.into()),
         node_id: "n1".into(),
         rpc_id: 0,
         tool_call_id: Some("call_1".into()),

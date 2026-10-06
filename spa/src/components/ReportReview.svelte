@@ -43,7 +43,7 @@
 
 <dl class="meta">
   <div><dt>Channel</dt><dd>{report.channel}</dd></div>
-  <div><dt>Source</dt><dd><a href="/sessions/{report.session_id}">Session record</a></dd></div>
+  <div><dt>Source</dt><dd>{#if report.session_id}<a href="/sessions/{report.session_id}">Session record</a>{:else}{report.lane ?? 'an external agent'}{/if}</dd></div>
   <div><dt>Submitted</dt><dd>{formatAge(report.created_ms, clock.now)} ago</dd></div>
   <div><dt>Version</dt><dd>{report.head_sha.slice(0, 12)}</dd></div>
 </dl>

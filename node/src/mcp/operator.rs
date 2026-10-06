@@ -77,7 +77,7 @@ async fn ask(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Valu
         None => {
             let row = OperatorQuestionRow {
                 id: uuid::Uuid::now_v7().to_string(),
-                session_id: ctx.row().to_string(),
+                session_id: Some(ctx.row().to_string()),
                 channel: ctx.channel.clone(),
                 node_id: ctx.node_id.clone(),
                 request_key: Some(request_key),
@@ -298,7 +298,7 @@ fn report(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, 
     store
         .insert_issue_draft(&IssueDraftRow {
             id: id.clone(),
-            session_id: ctx.row().to_string(),
+            session_id: Some(ctx.row().to_string()),
             channel: ctx.channel.clone(),
             title,
             body,

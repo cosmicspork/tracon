@@ -75,7 +75,7 @@ fn session_row(id: &str, harness: &str, state: &str) -> SessionRow {
 fn pending_approval(id: &str, session_id: &str) -> PermissionRow {
     PermissionRow {
         id: id.into(),
-        session_id: session_id.into(),
+        session_id: Some(session_id.into()),
         node_id: "n1".into(),
         rpc_id: 1,
         tool_call_id: None,

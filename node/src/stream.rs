@@ -27,6 +27,9 @@ pub enum Frame {
         payload: Value,
         at_ms: i64,
     },
+    /// A call from a harness the operator runs themselves. Its seq is the
+    /// channel log's, not the event table's, so it is never an SSE id.
+    ExternalEvent(Box<crate::store::external::ExternalEventRow>),
     Chunk {
         session_id: String,
         message_id: Option<String>,
@@ -71,6 +74,7 @@ impl Frame {
     pub fn name(&self) -> &'static str {
         match self {
             Frame::Event { .. } => "event",
+            Frame::ExternalEvent(_) => "external_event",
             Frame::Chunk { .. } => "chunk",
             Frame::ToolUpdate { .. } => "tool_update",
             Frame::Session(_) => "session",

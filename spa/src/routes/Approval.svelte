@@ -227,7 +227,7 @@
   })
   const verdict = $derived(review ? reviewVerdict(review) : null)
   const checks = $derived(review ? reviewChecks(review) : [])
-  const session = $derived(review ? store.sessions.get(review.session_id) : undefined)
+  const session = $derived(review?.session_id ? store.sessions.get(review.session_id) : undefined)
   const reviewer = $derived(review?.review_session_id ? store.sessions.get(review.review_session_id) : undefined)
   const edited = $derived(
     review !== null &&
@@ -317,7 +317,7 @@
       leaveAfterVerdict(router, {
         reviewId: id,
         from: openedFrom,
-        fallback: res.published ? `/sessions/${review.session_id}` : '/',
+        fallback: res.published && review.session_id ? `/sessions/${review.session_id}` : '/',
       })
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
@@ -366,8 +366,13 @@
       {/if}
     </dd>
 
-    <dt>Session</dt>
-    <dd class="m"><a href="/sessions/{review.session_id}">{review.session_id.slice(0, 8)}</a></dd>
+    {#if review.session_id}
+      <dt>Session</dt>
+      <dd class="m"><a href="/sessions/{review.session_id}">{review.session_id.slice(0, 8)}</a></dd>
+    {:else}
+      <dt>Submitted by</dt>
+      <dd class="m">{review.lane ?? 'an external agent'}</dd>
+    {/if}
   </dl>
   {#if remoteOwner}
     <div class="banner">

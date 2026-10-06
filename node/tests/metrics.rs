@@ -76,7 +76,7 @@ fn session(id: &str, channel: &str, phase: &str, item: Option<&str>) -> SessionR
 fn review(id: &str, session: &str, sha: &str, state: &str, reviewer: Option<&str>) -> ReviewRow {
     ReviewRow {
         id: id.into(),
-        session_id: session.into(),
+        session_id: Some(session.into()),
         node_id: "n1".into(),
         channel: "work".into(),
         kind: "pr".into(),
@@ -107,6 +107,7 @@ fn review(id: &str, session: &str, sha: &str, state: &str, reviewer: Option<&str
         ai_verdict_json: reviewer
             .map(|_| r#"{"verdict":"approve","summary":"fine","findings":[]}"#.into()),
         revision_patch: None,
+        lane: None,
     }
 }
 
@@ -230,7 +231,7 @@ async fn approvals_and_tokens_per_accepted_change_are_numbers_you_can_read() {
         store
             .insert_permission(&PermissionRow {
                 id: id.clone(),
-                session_id: "e1".into(),
+                session_id: Some("e1".into()),
                 node_id: "n1".into(),
                 rpc_id: i,
                 tool_call_id: None,

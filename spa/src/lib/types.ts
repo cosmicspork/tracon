@@ -301,7 +301,7 @@ export interface PermissionIntent {
 
 export interface Permission {
   id: string
-  session_id: string
+  session_id: string | null
   node_id: string
   title: string
   kind: string | null
@@ -316,7 +316,7 @@ export interface Permission {
 
 export interface OperatorQuestion {
   id: string
-  session_id: string
+  session_id: string | null
   channel: string
   node_id: string
   prompt: string
@@ -330,7 +330,7 @@ export interface OperatorQuestion {
 
 export interface OperatorIssue {
   id: string
-  session_id: string
+  session_id: string | null
   channel: string
   title: string
   body: string
@@ -344,7 +344,9 @@ export interface OperatorIssue {
 
 export interface Review {
   id: string
-  session_id: string
+  session_id: string | null
+  /** The submitting external agent's label, when it gave one. */
+  lane?: string | null
   node_id: string
   channel: string
   kind: string
@@ -389,7 +391,7 @@ export interface CandidateEvidence {
     head_sha: string
     tree_sha: string | null
     channel: string
-    owner_session_id: string
+    owner_session_id: string | null
     source_kind: string
     captured_ms: number
     capture_json: string
@@ -440,7 +442,7 @@ export interface CandidateEvidence {
 export interface CandidateCheckRun {
   id: string
   candidate_id: string | null
-  session_id: string
+  session_id: string | null
   /** The operator-configured command that ran; null on a pre-migration row. */
   command: string | null
   definition_json: string
@@ -1354,7 +1356,7 @@ export interface CandidateDetail {
     id: string
     channel: string
     head_sha: string
-    owner_session_id: string
+    owner_session_id: string | null
     /** The node that captured this candidate. */
     owner_node_id: string
     captured_ms: number

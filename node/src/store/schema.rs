@@ -1203,15 +1203,131 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX approval_request ON approval(channel, request_key, state);
     CREATE INDEX approval_open ON approval(state, created_ms);
     "#,
+    // 50: a harness the operator runs themselves calls with no session. What
+    // it asked for is logged per channel, labelled with the lane it gave, and
+    // a review it submits carries that lane in place of a session.
+    r#"
+    CREATE TABLE external_event (
+        seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        lane    TEXT,
+        kind    TEXT NOT NULL,
+        ref_id  TEXT,
+        payload TEXT NOT NULL,
+        at_ms   INTEGER NOT NULL
+    );
+    CREATE INDEX external_event_channel ON external_event(channel, seq);
+    CREATE INDEX external_event_lane ON external_event(channel, lane, seq);
+    ALTER TABLE review ADD COLUMN lane TEXT;
+    CREATE UNIQUE INDEX operator_question_channel_request_key
+        ON operator_question(channel, request_key)
+        WHERE session_id IS NULL AND request_key IS NOT NULL;
+    "#,
+    // 51: the rows such a caller writes have no session to name. The columns
+    // that named one become nullable; see `relax_session_columns`.
+    "",
 ];
+
+/// Migrations that SQL alone cannot express, run right after the numbered
+/// entry's SQL.
+type CodeMigration = fn(&Connection) -> rusqlite::Result<()>;
+
+const CODE_MIGRATIONS: &[(usize, CodeMigration)] = &[(51, relax_session_columns)];
+
+/// The columns a session-less caller leaves empty, as each was declared.
+const RELAXED: &[(&str, &str, &str)] = &[
+    (
+        "review",
+        "session_id",
+        "session_id      TEXT NOT NULL REFERENCES session(id)",
+    ),
+    ("approval", "session_id", "session_id TEXT NOT NULL"),
+    (
+        "operator_question",
+        "session_id",
+        "session_id TEXT NOT NULL",
+    ),
+    ("operator_issue", "session_id", "session_id TEXT NOT NULL"),
+    (
+        "candidate",
+        "owner_session_id",
+        "owner_session_id TEXT NOT NULL",
+    ),
+    (
+        "authority_action",
+        "session_id",
+        "session_id  TEXT NOT NULL",
+    ),
+    ("check_run", "session_id", "session_id       TEXT NOT NULL"),
+];
+
+/// Drop `NOT NULL` from [`RELAXED`] by editing the stored schema, the
+/// procedure SQLite documents for removing a NOT NULL constraint. `review`
+/// and `candidate` are referenced by other tables, so the copy-and-rename
+/// rebuild would have to run with foreign keys off; this changes nothing on
+/// disk but the declaration.
+fn relax_session_columns(conn: &Connection) -> rusqlite::Result<()> {
+    let version: i64 = conn.pragma_query_value(None, "schema_version", |r| r.get(0))?;
+    conn.pragma_update(None, "writable_schema", true)?;
+    let edited = (|| {
+        for (table, _, declared) in RELAXED {
+            let relaxed = declared.replace(" NOT NULL", "");
+            let changed = conn.execute(
+                "UPDATE sqlite_schema SET sql = replace(sql, ?1, ?2)
+                  WHERE type = 'table' AND name = ?3 AND instr(sql, ?1) > 0",
+                rusqlite::params![declared, relaxed, table],
+            )?;
+            if changed != 1 {
+                return Err(migration_failed(format!(
+                    "{table}: the declaration to relax was not found"
+                )));
+            }
+        }
+        Ok(())
+    })();
+    conn.pragma_update(None, "writable_schema", false)?;
+    edited?;
+    conn.pragma_update(None, "schema_version", version + 1)?;
+    for (table, column, _) in RELAXED {
+        let notnull: bool = conn.query_row(
+            &format!("SELECT \"notnull\" FROM pragma_table_info('{table}') WHERE name = ?1"),
+            [column],
+            |r| r.get(0),
+        )?;
+        if notnull {
+            return Err(migration_failed(format!(
+                "{table}.{column} is still NOT NULL"
+            )));
+        }
+    }
+    let check: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    if check != "ok" {
+        return Err(migration_failed(format!(
+            "integrity check after relaxing session columns: {check}"
+        )));
+    }
+    Ok(())
+}
+
+fn apply(conn: &Connection, index: usize) -> rusqlite::Result<()> {
+    conn.execute_batch(MIGRATIONS[index])?;
+    let number = index + 1;
+    for (at, run) in CODE_MIGRATIONS {
+        if *at == number {
+            run(conn)?;
+        }
+    }
+    Ok(())
+}
 
 /// The first N migrations, for tests that build a database as an older build
 /// left it and then migrate it forward.
 #[cfg(test)]
 pub(crate) fn migrate_to(conn: &Connection, version: usize) -> rusqlite::Result<()> {
     conn.pragma_update(None, "foreign_keys", true)?;
-    for ddl in &MIGRATIONS[..version] {
-        conn.execute_batch(ddl)?;
+    for index in 0..version {
+        apply(conn, index)?;
     }
     conn.pragma_update(None, "user_version", version as i64)?;
     Ok(())
@@ -1222,10 +1338,10 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    for (i, ddl) in MIGRATIONS.iter().enumerate() {
+    for i in 0..MIGRATIONS.len() {
         let target = i as i64 + 1;
         if version < target {
-            conn.execute_batch(ddl)?;
+            apply(conn, i)?;
             conn.pragma_update(None, "user_version", target)?;
         }
     }
@@ -1251,4 +1367,11 @@ pub fn reconcile_interrupted_runs(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
     Ok(())
+}
+
+fn migration_failed(message: String) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+        Some(message),
+    )
 }

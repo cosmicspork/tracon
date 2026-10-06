@@ -194,7 +194,10 @@ impl RepoEnvironment {
 /// path — bounded, because a store is not trusted to be acyclic. `None` for a
 /// session the store no longer has, or one with no repository (a harness the
 /// operator runs themselves).
-pub fn origin_repo(store: &Store, session_id: &str) -> Result<Option<PathBuf>, String> {
+pub fn origin_repo(store: &Store, session_id: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let Some(session_id) = session_id else {
+        return Ok(None);
+    };
     let mut id = session_id.to_string();
     for _ in 0..8 {
         let Some(session) = store.get_session(&id).map_err(|error| error.to_string())? else {
@@ -214,7 +217,7 @@ pub fn origin_repo(store: &Store, session_id: &str) -> Result<Option<PathBuf>, S
 /// cannot answer resolves to the node-wide defaults, as a session with no
 /// repository does.
 pub fn session_environment(cfg: &Config, store: &Store, session_id: &str) -> RepoEnvironment {
-    let repo = origin_repo(store, session_id).ok().flatten();
+    let repo = origin_repo(store, Some(session_id)).ok().flatten();
     environment_for(cfg, store, repo.as_deref())
 }
 

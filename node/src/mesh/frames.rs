@@ -48,7 +48,11 @@ pub fn to_payloads(frame: &Frame, store: &Store, self_id: &str) -> Vec<(String, 
             // One payload per member channel, possibly empty: an empty list is
             // how a peer learns a request it mirrored has been answered.
             grouped(store, self_id, waiting, |p: &PermissionView| {
-                &p.request.session_id
+                match p.request.session_id.as_deref() {
+                    Some(id) => channel_of(store, id),
+                    // A session-less caller's card carries its channel.
+                    None => p.intent.channel.clone(),
+                }
             })
             .into_iter()
             .map(|(c, rows)| (c, Payload::Queue { waiting: rows }))
@@ -140,8 +144,10 @@ pub fn snapshots(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
             .iter()
             .filter(|r| r.node_id == self_id && r.channel == c)
             .collect();
-        let review_session_ids: Vec<&str> =
-            r.iter().map(|review| review.session_id.as_str()).collect();
+        let review_session_ids: Vec<&str> = r
+            .iter()
+            .filter_map(|review| review.session_id.as_deref())
+            .collect();
         let s: Vec<Value> = sessions
             .iter()
             .filter(|s| {
@@ -158,7 +164,12 @@ pub fn snapshots(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
             .collect();
         let w: Vec<Value> = waiting
             .iter()
-            .filter(|p| p.node_id == self_id && session_ids.contains(&p.session_id.as_str()))
+            .filter(|p| {
+                p.node_id == self_id
+                    && p.session_id
+                        .as_deref()
+                        .is_some_and(|id| session_ids.contains(&id))
+            })
             .map(|p| json!(p))
             .collect();
         out.push((
@@ -213,11 +224,11 @@ fn channel_of(store: &Store, session_id: &str) -> Option<String> {
         .map(|s| s.channel)
 }
 
-fn grouped<'a, T: serde::Serialize>(
+fn grouped<T: serde::Serialize>(
     store: &Store,
     self_id: &str,
-    rows: &'a [T],
-    session_of: impl Fn(&'a T) -> &'a String,
+    rows: &[T],
+    channel_of_row: impl Fn(&T) -> Option<String>,
 ) -> Vec<(String, Vec<Value>)> {
     let mut out: Vec<(String, Vec<Value>)> = store
         .node_channels(self_id)
@@ -226,7 +237,7 @@ fn grouped<'a, T: serde::Serialize>(
         .map(|c| (c, Vec::new()))
         .collect();
     for row in rows {
-        let Some(c) = channel_of(store, session_of(row)) else {
+        let Some(c) = channel_of_row(row) else {
             continue;
         };
         if let Some(slot) = out.iter_mut().find(|(name, _)| *name == c) {

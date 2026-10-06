@@ -356,7 +356,7 @@ impl Fixture {
                 head_sha: capture.head_sha.clone(),
                 tree_sha: Some(tree),
                 channel: "work".into(),
-                owner_session_id: session.into(),
+                owner_session_id: Some(session.into()),
                 source_kind: "git".into(),
                 captured_ms: now_ms(),
                 capture_json: "{}".into(),
@@ -366,7 +366,7 @@ impl Fixture {
         self.store
             .insert_review(&ReviewRow {
                 id: id.clone(),
-                session_id: session.into(),
+                session_id: Some(session.into()),
                 node_id: "n1".into(),
                 channel: "work".into(),
                 kind: "pr".into(),
@@ -394,6 +394,7 @@ impl Fixture {
                 review_session_id: None,
                 ai_verdict_json: None,
                 revision_patch: None,
+                lane: None,
             })
             .unwrap();
         id
@@ -2012,7 +2013,7 @@ async fn publication_refuses_a_candidate_whose_tree_is_not_the_reviewed_one() {
             head_sha: head.clone(),
             tree_sha: Some("0".repeat(40)),
             channel: "work".into(),
-            owner_session_id: "s1".into(),
+            owner_session_id: Some("s1".into()),
             source_kind: "git".into(),
             captured_ms: now_ms(),
             capture_json: "{}".into(),
@@ -2057,7 +2058,7 @@ async fn publication_proceeds_when_the_recorded_tree_is_the_one_being_pushed() {
             head_sha: review.head_sha.clone(),
             tree_sha: Some(tree),
             channel: "work".into(),
-            owner_session_id: "s1".into(),
+            owner_session_id: Some("s1".into()),
             source_kind: "git".into(),
             captured_ms: now_ms(),
             capture_json: "{}".into(),

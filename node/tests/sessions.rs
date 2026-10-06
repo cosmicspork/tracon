@@ -570,7 +570,7 @@ async fn the_queue_orders_waiting_before_running() {
     h.store
         .insert_permission(&tracon::store::PermissionRow {
             id: "p1".into(),
-            session_id: id.clone(),
+            session_id: Some(id.clone()),
             node_id: "n1".into(),
             rpc_id: 0,
             tool_call_id: None,
@@ -710,7 +710,7 @@ async fn requests_outliving_their_session_are_denied_rather_than_left_waiting() 
 fn permission_row(id: &str, session_id: &str) -> tracon::store::PermissionRow {
     tracon::store::PermissionRow {
         id: id.into(),
-        session_id: session_id.into(),
+        session_id: Some(session_id.into()),
         node_id: "n1".into(),
         rpc_id: 0,
         tool_call_id: None,

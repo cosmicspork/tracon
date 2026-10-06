@@ -25,6 +25,7 @@ pub mod context;
 pub mod corpus;
 pub mod criteria;
 pub mod evidence;
+pub mod external;
 pub mod manifest;
 pub mod metrics;
 pub mod opencode;
@@ -1597,15 +1598,15 @@ impl Store {
             "INSERT INTO review (id, session_id, node_id, channel, kind, title, body, edited_title,
                 edited_body, provider, target, diff, files, head_sha, base_ref, added, removed, state,
                 verdict_reason, publish_result, claimed_ms, created_ms, created_mono_ms,
-                resolved_mono_ms, updated_ms)
+                resolved_mono_ms, updated_ms, lane)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-                ?23,?24,?25)
+                ?23,?24,?25,?26)
              ON CONFLICT(id) DO UPDATE SET title=?6, body=?7, edited_title=?8, edited_body=?9,
                 diff=?12, files=?13, head_sha=?14, added=?16, removed=?17, state=?18,
                 verdict_reason=?19, publish_result=?20, claimed_ms=?21, resolved_mono_ms=?24,
                 updated_ms=?25
              WHERE node_id=excluded.node_id AND channel=excluded.channel
-                AND session_id=excluded.session_id AND kind=excluded.kind",
+                AND session_id IS excluded.session_id AND kind=excluded.kind",
             rusqlite::params![
                 r.id,
                 r.session_id,
@@ -1631,7 +1632,8 @@ impl Store {
                 r.created_ms,
                 r.created_mono_ms,
                 r.resolved_mono_ms,
-                r.updated_ms
+                r.updated_ms,
+                r.lane
             ],
         )?;
         Ok(changed == 1)
@@ -2256,7 +2258,7 @@ mod records {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct PermissionRow {
         pub id: String,
-        pub session_id: String,
+        pub session_id: Option<String>,
         pub node_id: String,
         pub rpc_id: i64,
         pub tool_call_id: Option<String>,
@@ -2358,7 +2360,9 @@ mod records {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ReviewRow {
         pub id: String,
-        pub session_id: String,
+        /// The session that submitted it; none for a harness the operator
+        /// runs themselves.
+        pub session_id: Option<String>,
         pub node_id: String,
         pub channel: String,
         pub kind: String,
@@ -2396,6 +2400,9 @@ mod records {
         /// but the agent writes to the worktree.
         #[serde(default)]
         pub revision_patch: Option<String>,
+        /// The label the submitting external harness gave, for display.
+        #[serde(default)]
+        pub lane: Option<String>,
     }
 
     impl ReviewRow {
@@ -2439,6 +2446,7 @@ mod records {
                 review_session_id: r.get("review_session_id")?,
                 ai_verdict_json: r.get("ai_verdict_json")?,
                 revision_patch: r.get("revision_patch")?,
+                lane: r.get("lane")?,
             })
         }
     }
@@ -2800,9 +2808,10 @@ impl Store {
             "INSERT INTO review (id, session_id, node_id, channel, kind, title, body, edited_title,
                 edited_body, provider, target, diff, files, head_sha, base_ref, added, removed,
                 state, verdict_reason, publish_result, claimed_ms, created_ms, created_mono_ms,
-                resolved_mono_ms, updated_ms, checks_json, review_session_id, ai_verdict_json, revision_patch)
+                resolved_mono_ms, updated_ms, checks_json, review_session_id, ai_verdict_json, revision_patch,
+                lane)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,
-                ?22,?23,?24,?25,?26,?27,?28,?29)",
+                ?22,?23,?24,?25,?26,?27,?28,?29,?30)",
             rusqlite::params![
                 r.id,
                 r.session_id,
@@ -2832,7 +2841,8 @@ impl Store {
                 r.checks_json,
                 r.review_session_id,
                 r.ai_verdict_json,
-                r.revision_patch
+                r.revision_patch,
+                r.lane
             ],
         )?;
         Ok(())
@@ -3283,7 +3293,7 @@ mod tests {
 
         let report = ReviewRow {
             id: "shared-id".into(),
-            session_id: "owner-session".into(),
+            session_id: Some("owner-session".into()),
             node_id: owner.clone(),
             channel: "personal".into(),
             kind: reports::KIND.into(),
@@ -3311,11 +3321,12 @@ mod tests {
             review_session_id: None,
             ai_verdict_json: None,
             revision_patch: None,
+            lane: None,
         };
         store.insert_review(&report).unwrap();
 
         let mut collision = report.clone();
-        collision.session_id = "sender-session".into();
+        collision.session_id = Some("sender-session".into());
         collision.node_id = "n2".into();
         collision.channel = "other".into();
         collision.title = "attacker replacement".into();
@@ -3328,6 +3339,53 @@ mod tests {
         assert_eq!(preserved.channel, "personal");
         assert_eq!(preserved.title, "original");
         assert_eq!(preserved.state, reports::ACKNOWLEDGED);
+    }
+
+    /// A peer's review that names no session mirrors and re-mirrors: the
+    /// owner check compares a missing session as equal to itself.
+    #[test]
+    fn a_session_less_review_mirrors_and_updates() {
+        let store = Store::open_in_memory().unwrap();
+        node(&store);
+        store.ensure_peer_node("n2").unwrap();
+        let mut review = ReviewRow {
+            id: "external-review".into(),
+            session_id: None,
+            node_id: "n2".into(),
+            channel: "personal".into(),
+            kind: "github".into(),
+            title: "t".into(),
+            body: "b".into(),
+            edited_title: None,
+            edited_body: None,
+            provider: "github".into(),
+            target: "{}".into(),
+            diff: String::new(),
+            files: "[]".into(),
+            head_sha: "h".into(),
+            base_ref: "main".into(),
+            added: 0,
+            removed: 0,
+            state: "new".into(),
+            verdict_reason: None,
+            publish_result: None,
+            claimed_ms: None,
+            created_ms: now_ms(),
+            created_mono_ms: 0,
+            resolved_mono_ms: None,
+            updated_ms: now_ms(),
+            checks_json: None,
+            review_session_id: None,
+            ai_verdict_json: None,
+            revision_patch: None,
+            lane: Some("tracon:main".into()),
+        };
+        assert!(store.upsert_review_mirror(&review).unwrap());
+        review.title = "retitled".into();
+        assert!(store.upsert_review_mirror(&review).unwrap());
+        let stored = store.get_review("external-review").unwrap().unwrap();
+        assert_eq!(stored.title, "retitled");
+        assert_eq!(stored.session_id, None);
     }
 
     #[test]
@@ -3402,7 +3460,7 @@ mod tests {
         session(&store, "s1", &nid);
         let mut review = ReviewRow {
             id: "rv1".into(),
-            session_id: "s1".into(),
+            session_id: Some("s1".into()),
             node_id: nid,
             channel: "ch".into(),
             kind: "pr".into(),
@@ -3430,6 +3488,7 @@ mod tests {
             review_session_id: None,
             ai_verdict_json: None,
             revision_patch: None,
+            lane: None,
         };
         store.insert_review(&review).unwrap();
         review.id = "rv2".into();
@@ -3472,7 +3531,7 @@ mod tests {
         session(&store, "s1", &nid);
         let review = ReviewRow {
             id: "rv1".into(),
-            session_id: "s1".into(),
+            session_id: Some("s1".into()),
             node_id: nid,
             channel: "ch".into(),
             kind: "pr".into(),
@@ -3500,6 +3559,7 @@ mod tests {
             review_session_id: None,
             ai_verdict_json: None,
             revision_patch: None,
+            lane: None,
         };
         let revision_a = crate::store::ReviewRevisionRow {
             id: "revA".into(),
@@ -3524,7 +3584,7 @@ mod tests {
                 head_sha: "sha1".into(),
                 tree_sha: Some("tree".into()),
                 channel: "ch".into(),
-                owner_session_id: "s1".into(),
+                owner_session_id: Some("s1".into()),
                 source_kind: "git".into(),
                 captured_ms: now_ms(),
                 capture_json: "{}".into(),
@@ -3594,7 +3654,7 @@ mod tests {
         session(&store, "s1", &nid);
         let p = PermissionRow {
             id: "p1".into(),
-            session_id: "s1".into(),
+            session_id: Some("s1".into()),
             node_id: nid,
             rpc_id: 0,
             tool_call_id: Some("call|fc".into()),
@@ -3677,6 +3737,62 @@ mod migration_tests {
         // Idempotent.
         store.rekey_self_node("abcd", "abcd").unwrap();
         assert_eq!(store.list_nodes().unwrap().len(), 1);
+    }
+
+    /// A caller with no session leaves the session columns empty, and a
+    /// review that does name one must still name a real one.
+    #[test]
+    fn session_columns_accept_no_session_but_keep_their_references() {
+        let conn = Connection::open_in_memory().unwrap();
+        schema::migrate_to(&conn, 50).unwrap();
+        conn.execute_batch(
+            "INSERT INTO node (id, name, state, harness_id, harness_pinned) VALUES ('u1','n','ready','omp','1');
+             INSERT INTO session (id, node_id, channel, repo_path, branch, harness_id, harness_version, model,
+                budget_tokens, state, created_ms, updated_ms)
+                VALUES ('s1','u1','personal','/r','b','omp','1','m',10,'closed',0,0);",
+        )
+        .unwrap();
+        let review = |id: &str, session: Option<&str>| {
+            conn.execute(
+                "INSERT INTO review (id, session_id, node_id, channel, kind, title, body, provider,
+                    target, diff, files, head_sha, base_ref, state, created_ms, created_mono_ms,
+                    updated_ms)
+                 VALUES (?1, ?2, 'u1', 'personal', 'code', 't', 'b', 'github', '{}', '', '[]',
+                    'h', 'main', 'new', 0, 0, 0)",
+                rusqlite::params![id, session],
+            )
+        };
+        review("r1", Some("s1")).unwrap();
+        assert!(review("r0", None).is_err(), "still NOT NULL before 51");
+
+        schema::migrate(&conn).unwrap();
+        review("r2", None).unwrap();
+        assert!(review("r3", Some("nobody")).is_err());
+        for sql in [
+            "INSERT INTO approval (id, channel, session_id, node_id, tool, arguments, request_key,
+                title, state, created_ms, expires_ms)
+             VALUES ('a1', 'personal', NULL, 'u1', 't', '{}', 'k', 't', 'pending', 0, 0)",
+            "INSERT INTO operator_question (id, session_id, channel, node_id, prompt, choices_json,
+                state, created_ms)
+             VALUES ('q1', NULL, 'personal', 'u1', 'p', '[]', 'open', 0)",
+            "INSERT INTO operator_issue (id, session_id, channel, title, body, attachments_json,
+                state, created_ms)
+             VALUES ('i1', NULL, 'personal', 't', 'b', '[]', 'draft', 0)",
+            "INSERT INTO candidate (id, head_sha, channel, owner_session_id, source_kind,
+                captured_ms, capture_json)
+             VALUES ('c1', 'h', 'personal', NULL, 'worktree', 0, '{}')",
+            "INSERT INTO authority_action (id, action, target, channel, session_id, evidence,
+                state, created_ms, updated_ms)
+             VALUES ('x1', 'merge', 't', 'personal', NULL, '{}', 'pending', 0, 0)",
+        ] {
+            conn.execute(sql, []).unwrap();
+        }
+        let dangling: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(dangling, 0);
     }
 
     #[test]

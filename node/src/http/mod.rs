@@ -869,8 +869,11 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                     // created reading: duration 0 means not measured, which is
                     // the truth, rather than a negative span.
                     let _ = store.resolve_permission(&p.id, "expired", None, p.created_mono_ms);
+                    let Some(session_id) = p.session_id.clone() else {
+                        continue;
+                    };
                     let _ = store.append_event(&crate::store::NewEvent {
-                        session_id: p.session_id.clone(),
+                        session_id,
                         work_item_id: None,
                         kind: crate::session::state::event_kind::PERMISSION_EXPIRED.into(),
                         ref_id: Some(p.id.clone()),
