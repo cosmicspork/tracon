@@ -599,6 +599,15 @@ continues to replicate, while code publication and review-session creation rejec
 report IDs. Notification delivery records only push-service acceptance, never
 human receipt; `report_status` exposes the separate operator decision.
 
+**An issue draft reports back to whoever drafted it.** `report_issue` stores a
+draft the operator publishes to GitHub or discards; publication records the
+issue number beside its URL, and a discard records the operator's reason.
+`issue_report_status` reads that outcome under the same ownership rule as
+`review_status`: the drafting session, or the channel's external callers when
+there was none, on the node that drafted it. Like `approval_status`, it is
+dispatched before the policy is consulted, so a signed bundle that predates it
+cannot turn reading one's own draft into a question for the operator.
+
 **Evidence reads preserve ownership.** Candidate lists and detail requests carry
 their runner/owner and ordinary channel. Mesh handlers authenticate both channel
 memberships, verify the candidate's actual channel and owner, refuse third-node

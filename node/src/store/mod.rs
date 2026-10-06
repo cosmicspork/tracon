@@ -3795,6 +3795,69 @@ mod migration_tests {
         assert_eq!(dangling, 0);
     }
 
+    /// An issue published before its number was recorded gets it back from
+    /// the URL; anything that is not an issue URL is left alone.
+    #[test]
+    fn published_issue_drafts_recover_their_number() {
+        let conn = Connection::open_in_memory().unwrap();
+        schema::migrate_to(&conn, 51).unwrap();
+        let draft = |id: &str, state: &str, url: Option<&str>| {
+            conn.execute(
+                "INSERT INTO operator_issue (id, session_id, channel, title, body,
+                    attachments_json, state, published_url, created_ms)
+                 VALUES (?1, NULL, 'personal', 't', 'b', '[]', ?2, ?3, 0)",
+                rusqlite::params![id, state, url],
+            )
+            .unwrap();
+        };
+        draft(
+            "i1",
+            "published",
+            Some("https://github.com/acme/widgets/issues/361"),
+        );
+        draft(
+            "i2",
+            "published",
+            Some("https://github.com/acme/widgets/pull/7"),
+        );
+        draft(
+            "i3",
+            "published",
+            Some("https://github.com/acme/issues/issues/"),
+        );
+        draft("i4", "draft", None);
+        schema::migrate(&conn).unwrap();
+        let store = Store {
+            conn: Mutex::new(conn),
+        };
+        let number = |id: &str| store.issue_draft(id).unwrap().unwrap().published_number;
+        assert_eq!(number("i1"), Some(361));
+        assert_eq!(number("i2"), None);
+        assert_eq!(number("i3"), None);
+        assert_eq!(number("i4"), None);
+        let open = store.issue_draft("i4").unwrap().unwrap();
+        assert_eq!(open.node_id, None);
+        assert!(store.discard_issue_draft("i4", Some("duplicate")).unwrap());
+        let discarded = store.issue_draft("i4").unwrap().unwrap();
+        assert_eq!(discarded.state, "discarded");
+        assert_eq!(discarded.discard_reason.as_deref(), Some("duplicate"));
+        assert!(discarded.decided_ms.is_some());
+        assert!(
+            !store.discard_issue_draft("i1", None).unwrap(),
+            "a published issue cannot be discarded"
+        );
+    }
+
+    #[test]
+    fn issue_numbers_come_only_from_issue_urls() {
+        assert_eq!(issue_number("https://github.com/a/b/issues/12\n"), Some(12));
+        assert_eq!(issue_number("https://github.com/a/b/issues/12/"), Some(12));
+        assert_eq!(issue_number("https://github.com/a/b/pull/12"), None);
+        assert_eq!(issue_number("https://github.com/a/b/issues/x12"), None);
+        assert_eq!(issue_number("https://github.com/a/b/issues/"), None);
+        assert_eq!(issue_number(""), None);
+    }
+
     #[test]
     fn append_event_derives_node_id_from_session() {
         let store = Store::open_in_memory().unwrap();

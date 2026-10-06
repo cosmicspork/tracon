@@ -158,8 +158,9 @@ test('issue drafts: authorize is yours, publication and its uncertainty are not'
   expect(issueVerdict(issue())?.lane).toBe('decision')
   expect(issueVerdict(issue({ state: 'publishing' }))?.lane).toBe('external')
   expect(issueVerdict(issue({ state: 'uncertain' }))?.reason).toContain('reconcile')
-  // A published draft is done and belongs in no lane.
+  // A published or discarded draft is done and belongs in no lane.
   expect(issueVerdict(issue({ state: 'published' }))).toBeNull()
+  expect(issueVerdict(issue({ state: 'discarded', discard_reason: 'duplicate' }))).toBeNull()
 })
 
 test('the count is the decision lane, and nothing is dropped from the other two', () => {

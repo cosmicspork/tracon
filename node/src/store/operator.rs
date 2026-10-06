@@ -49,6 +49,10 @@ pub struct IssueDraftRow {
     pub publish_error: Option<String>,
     pub created_ms: i64,
     pub approved_ms: Option<i64>,
+    pub published_number: Option<i64>,
+    pub decided_ms: Option<i64>,
+    pub discard_reason: Option<String>,
+    pub node_id: Option<String>,
 }
 
 impl IssueDraftRow {
@@ -65,6 +69,10 @@ impl IssueDraftRow {
             publish_error: r.get("publish_error")?,
             created_ms: r.get("created_ms")?,
             approved_ms: r.get("approved_ms")?,
+            published_number: r.get("published_number")?,
+            decided_ms: r.get("decided_ms")?,
+            discard_reason: r.get("discard_reason")?,
+            node_id: r.get("node_id")?,
         })
     }
 }
@@ -225,7 +233,7 @@ impl Store {
     }
     pub fn insert_issue_draft(&self, row: &IssueDraftRow) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("INSERT INTO operator_issue (id,session_id,channel,title,body,attachments_json,state,published_url,publish_error,created_ms,approved_ms) VALUES (?1,?2,?3,?4,?5,?6,'draft',NULL,NULL,?7,NULL)", params![row.id,row.session_id,row.channel,row.title,row.body,row.attachments_json,row.created_ms])?;
+        conn.execute("INSERT INTO operator_issue (id,session_id,channel,title,body,attachments_json,state,published_url,publish_error,created_ms,approved_ms,node_id) VALUES (?1,?2,?3,?4,?5,?6,'draft',NULL,NULL,?7,NULL,?8)", params![row.id,row.session_id,row.channel,row.title,row.body,row.attachments_json,row.created_ms,row.node_id])?;
         Ok(())
     }
     pub fn issue_drafts(&self, open_only: bool) -> Result<Vec<IssueDraftRow>> {
@@ -258,10 +266,19 @@ impl Store {
     pub fn finish_issue_publication(&self, id: &str, url: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE operator_issue SET state='published', published_url=?2, publish_error=NULL WHERE id=?1 AND state='publishing'",
-            params![id, url],
+            "UPDATE operator_issue SET state='published', published_url=?2, published_number=?3, publish_error=NULL, decided_ms=?4 WHERE id=?1 AND state='publishing'",
+            params![id, url, issue_number(url), now_ms()],
         )?;
         Ok(())
+    }
+    /// An uncertain draft can be discarded too: that is the operator's word
+    /// that it is not one to track here, whatever reached GitHub.
+    pub fn discard_issue_draft(&self, id: &str, reason: Option<&str>) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE operator_issue SET state='discarded', discard_reason=?2, decided_ms=?3 WHERE id=?1 AND state IN ('draft','uncertain')",
+            params![id, reason, now_ms()],
+        )? == 1)
     }
     pub fn mark_issue_publication_uncertain(&self, id: &str, reason: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -404,4 +421,16 @@ impl Store {
         conn.execute("DELETE FROM operator_notification WHERE id=?1", [id])?;
         Ok(())
     }
+}
+
+/// The number GitHub gave an issue, from the URL `gh issue create` prints.
+pub fn issue_number(url: &str) -> Option<i64> {
+    let (path, number) = url.trim().trim_end_matches('/').rsplit_once('/')?;
+    if !path.ends_with("/issues")
+        || number.is_empty()
+        || !number.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    number.parse().ok()
 }

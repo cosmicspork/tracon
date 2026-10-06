@@ -16,6 +16,7 @@ pub mod jira;
 pub mod memory;
 pub mod operator;
 pub mod review;
+pub mod wait;
 pub mod work;
 
 use std::sync::Arc;
@@ -252,7 +253,10 @@ impl Tools {
                 review::SUBMIT
             ));
         }
-        if matches!(name, operator::ASK | operator::NOTIFY | operator::REPORT) {
+        if matches!(
+            name,
+            operator::ASK | operator::NOTIFY | operator::REPORT | operator::REPORT_STATUS
+        ) {
             let access = self
                 .session
                 .get()
