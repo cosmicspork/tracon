@@ -18,6 +18,7 @@ pub mod memory;
 pub mod operator;
 pub mod review;
 pub mod schema;
+pub mod show;
 pub mod wait;
 pub mod work;
 
@@ -229,6 +230,9 @@ impl Tools {
             // Asking for a host only asks: the operator's answer is what
             // opens anything, and it opens only this session's own grant.
             out.extend(egress::definitions());
+            // Showing work reaches the operator and nothing else: it is read
+            // from the node's own snapshot and never leaves tracon.
+            out.extend(show::definitions());
             out.extend(work::definitions());
             out.extend(approvals::definitions());
         }
@@ -279,6 +283,17 @@ impl Tools {
                 .caller_active(ctx)
                 .map_err(|error| error.to_string())?;
             return egress::call(access, ctx, args).await;
+        }
+        if name == show::SHOW {
+            let access = self
+                .session
+                .get()
+                .ok_or("showing work is not available on this node")?;
+            access
+                .manager
+                .caller_active(ctx)
+                .map_err(|error| error.to_string())?;
+            return show::call(access, ctx, args).await;
         }
         if name == approvals::STATUS {
             let access = self

@@ -1,6 +1,6 @@
 // Documents can arrive from agents and mesh peers. Keep Markdown's generated
 // markup, but treat embedded HTML and URL attributes as untrusted input.
-import { marked, type Tokens } from 'marked'
+import { Marked, marked, type Tokens } from 'marked'
 
 marked.setOptions({ gfm: true, breaks: false })
 
@@ -24,16 +24,19 @@ export function safeUrl(value: string, image = false): string | null {
   return escapeHtml(href)
 }
 
+function link(text: string, href: string, title?: string | null): string {
+  const clean = safeUrl(href)
+  if (clean === null) return text
+  return `<a href="${clean}"${title ? ` title="${escapeHtml(title)}"` : ''}>${text}</a>`
+}
+
 marked.use({
   renderer: {
     html({ text }: Tokens.HTML | Tokens.Tag) {
       return escapeHtml(text)
     },
     link({ href, title, tokens }: Tokens.Link) {
-      const text = this.parser.parseInline(tokens)
-      const clean = safeUrl(href)
-      if (clean === null) return text
-      return `<a href="${clean}"${title ? ` title="${escapeHtml(title)}"` : ''}>${text}</a>`
+      return link(this.parser.parseInline(tokens), href, title)
     },
     image({ href, title, text, tokens }: Tokens.Image) {
       if (tokens) text = this.parser.parseInline(tokens, this.parser.textRenderer)
@@ -46,4 +49,28 @@ marked.use({
 
 export function render(md: string): string {
   return marked.parse(md, { async: false }) as string
+}
+
+// An agent's account of its work is read with no network, like its pages: an
+// image would be a request to wherever the agent pointed it, from the
+// operator's browser and outside the session's egress. It is named instead.
+const offline = new Marked({ gfm: true, breaks: false })
+offline.use({
+  renderer: {
+    html({ text }: Tokens.HTML | Tokens.Tag) {
+      return escapeHtml(text)
+    },
+    link({ href, title, tokens }: Tokens.Link) {
+      return link(this.parser.parseInline(tokens), href, title)
+    },
+    image({ title, text, tokens }: Tokens.Image) {
+      if (tokens) text = this.parser.parseInline(tokens, this.parser.textRenderer)
+      const label = text || title || 'image'
+      return `<span class="no-fetch">[${escapeHtml(label)}]</span>`
+    },
+  },
+})
+
+export function renderWithoutFetching(md: string): string {
+  return offline.parse(md, { async: false }) as string
 }

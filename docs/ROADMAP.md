@@ -51,21 +51,6 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 Every item here was found on the 2026-09-20, 2026-09-28, 2026-09-30 or 2026-10-03 live
 runs, or in the daily desktop use since.
 
-- [ ] **Showing work.** The gap between "work completed" and "ready to merge" is the
-      operator's to close, and a diff alone often does not close it: a changed screen, a
-      before and after, a short account of what was tried. A `show_work` tool attaches
-      what the agent built — Markdown, an HTML bundle with its images, or plain files — to
-      its session and to the review its candidate is in, through the existing HTML bundle
-      store, rendered on the isolated preview origin under a strict content security
-      policy with no network. The agent builds it inside the boundary however it likes;
-      the node vouches only for what it already knows: the revision the work was submitted
-      at, a stale mark once the candidate moves, and the required-check results it ran
-      anyway. Shown work is the agent's account to help the operator decide, not
-      verification, and it stays in tracon: the pull request gets prose only. This
-      replaces the node-run proof capture planned here before, extends the attached
-      demonstration, and absorbs "files back to the operator". Screenshots wait on a
-      browser in the boundary (the service sidecar under **Next**); Markdown and files do
-      not.
 - [ ] **A work item's session starts working on its own.** A session composed from a
       prompt, or started on an existing item, is sent no first prompt — only a plain
       prompt session carries `initial_prompt` — so it sits `running` and silent until the
@@ -168,7 +153,7 @@ Needed for daily use, but not blocking it today.
       session's loopback, which any harness can drive (Playwright `connectOverCDP`, a
       browser MCP, a small screenshot helper in the harness layer) without a browser in
       every repository's image or a node-run scenario language; the screenshots it takes
-      are what **Showing work** displays. Local databases, caches and mail catchers
+      are what `show_work` displays. Local databases, caches and mail catchers
       follow as entries, which is also how an application that needs services runs in a
       session without tracon reading its compose files.
 - [ ] **Keep a session's build output.** Every run builds a compiled project from nothing —

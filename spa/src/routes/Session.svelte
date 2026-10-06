@@ -3,6 +3,7 @@
   import OperatorQuestionCard from '../components/OperatorQuestionCard.svelte'
   import PermissionCard from '../components/PermissionCard.svelte'
   import SessionAuthorityPanel from '../components/SessionAuthorityPanel.svelte'
+  import ShownWork from '../components/ShownWork.svelte'
   import TransferExport from '../components/TransferExport.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
@@ -19,6 +20,7 @@
     type CeilingInfo,
     type OperatorQuestion,
     type SessionUsage,
+    type ShownWork as ShownWorkItem,
     type ToolchainStatus,
   } from '../lib/types'
   import { store } from '../lib/store.svelte'
@@ -46,12 +48,14 @@
   // nothing has been decided for the operator.
   const repeating = $derived(repetitionHint(store.events))
   let questions = $state<OperatorQuestion[]>([])
+  let shownWork = $state<ShownWorkItem[]>([])
   async function refreshQuestions() {
     const result = await api.session(id)
     questions = result.questions
     usage = result.usage
     ceiling = result.ceiling
     toolchain = result.toolchain
+    shownWork = result.shown_work ?? []
   }
 
   /** What the header says about the baked language toolchain. Nothing at all
@@ -439,6 +443,7 @@
   {/if}
 
   <Log events={store.events} openChunks={store.openChunks} toolProgress={store.toolProgress} />
+  <ShownWork items={shownWork} />
   <TransferExport channel={session.channel} />
 
   {#each questions as question (question.id)}

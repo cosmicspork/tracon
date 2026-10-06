@@ -1447,6 +1447,7 @@ pub async fn get_session(
         "usage": usage,
         "ceiling": ceiling,
         "toolchain": toolchain,
+        "shown_work": s.store().shown_work_for_session(&id)?,
     })))
 }
 
@@ -1965,6 +1966,7 @@ pub async fn get_review(
             "evidence": null,
             "legacy_check_events": [],
             "publications": [],
+            "shown_work": [],
         })));
     }
     // A review mirrored from another node is shown here but owned there: its
@@ -2037,6 +2039,13 @@ pub async fn get_review(
     // attempt is visible here — including the `uncertain` one an operator has
     // to verify on the forge — rather than only in the log.
     let publications = s.store().publications_for_review(&id)?;
+    // What the agent showed of its work, each marked stale once the candidate
+    // moved past the commit it was shown at. Node-local, like the checks: a
+    // mirror never had the workspace it was read from.
+    let shown_work = match remote_owner {
+        Some(_) => Vec::new(),
+        None => s.store().shown_work_for_review(&r)?,
+    };
     // The identity a verdict from this screen must name. The commit is not
     // it: a resubmission may carry the same one with different requirements
     // or prose, and a decision written against this screen must not settle
@@ -2072,6 +2081,7 @@ pub async fn get_review(
         "evidence": evidence,
         "legacy_check_events": legacy_check_events,
         "publications": publications,
+        "shown_work": shown_work,
     })))
 }
 
