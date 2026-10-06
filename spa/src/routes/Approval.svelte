@@ -679,7 +679,7 @@
     <div class="banner crit">refused <b>· {error}</b></div>
   {/if}
 
-  <div class="verdict">
+  <div class="decide">
     <button class="btn p" disabled={busy || publishing || stale.length > 0} onclick={() => decide('approve')}>
       Approve and publish
     </button>
@@ -1150,7 +1150,7 @@
   .files .bad {
     color: var(--crit);
   }
-  .verdict {
+  .decide {
     display: flex;
     gap: 10px;
     flex-wrap: wrap;
@@ -1158,7 +1158,7 @@
     border-top: 1px solid var(--rule);
     padding-top: 14px;
   }
-  .verdict input {
+  .decide input {
     flex: 1;
     min-width: 200px;
     background: var(--s1);
