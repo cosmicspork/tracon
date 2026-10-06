@@ -338,6 +338,137 @@ async fn an_external_harness_puts_its_own_worktree_up_for_review() {
     // The operator's toolchain is where its checks run, not a container.
     assert!(r.checks_json.is_none());
     assert_eq!(r.session_id, None);
+    // Publication is held to the tree hash, so it is there when the call
+    // returns; the files a transfer carries follow once the review exists.
+    let candidate_id = out["candidate_id"].as_str().unwrap();
+    let candidate = h.store.candidate(candidate_id).unwrap().unwrap();
+    assert!(candidate.tree_sha.is_some_and(|tree| tree.len() == 40));
+    let mut materialized = false;
+    for _ in 0..200 {
+        let capture: Value = serde_json::from_str(
+            &h.store
+                .candidate(candidate_id)
+                .unwrap()
+                .unwrap()
+                .capture_json,
+        )
+        .unwrap();
+        if capture["materialized"] == json!(true) {
+            materialized = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(materialized, "the candidate's files were never kept");
+    let files = h.store.candidate_files(candidate_id).unwrap();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert_eq!(files[0].content, b"base\none\ntwo\n");
+}
+
+#[tokio::test]
+async fn a_retried_submission_answers_with_the_review_it_already_made() {
+    state::isolate();
+    let (root, wt) = repo_with_worktree("retry");
+    let h = harness_with(with_roots(&root)).await;
+    let submit = || {
+        mcp(
+            &h.operator,
+            "work",
+            tool_call("submit_review", submit_args(&wt)),
+        )
+    };
+    // A retry while the first is still running waits for it rather than
+    // racing it to a second row.
+    let ((_, first), (_, second)) = tokio::join!(submit(), submit());
+    let (_, first) = outcome(&first);
+    let (_, second) = outcome(&second);
+    let id = first["review_id"].as_str().unwrap().to_string();
+    assert_eq!(second["review_id"], json!(id), "{second}");
+    let (_, third) = outcome(&submit().await.1);
+    assert_eq!(third["review_id"], json!(id), "{third}");
+    assert_eq!(third["already_submitted"], json!(true), "{third}");
+    assert_eq!(h.store.open_reviews().unwrap().len(), 1);
+
+    // Different words for the same commit revise that review.
+    let mut args = submit_args(&wt);
+    args["body"] = json!("a better why");
+    let (err, revised) = outcome(
+        &mcp(&h.operator, "work", tool_call("submit_review", args))
+            .await
+            .1,
+    );
+    assert!(!err, "{revised}");
+    assert_eq!(revised["review_id"], json!(id), "{revised}");
+    assert_eq!(h.store.open_reviews().unwrap().len(), 1);
+    assert_eq!(
+        h.store.get_review(&id).unwrap().unwrap().body,
+        "a better why"
+    );
+}
+
+#[tokio::test]
+async fn a_forge_that_does_not_answer_does_not_hold_up_a_submission() {
+    state::isolate();
+    let (root, wt) = repo_with_worktree("slow-forge");
+    let bin = state::scratch("external-slow-forge-bin");
+    let gh = bin.join("gh");
+    let called = bin.join("called");
+    std::fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = probe ] && exit 0\necho \"$*\" >> {}\nexec sleep 30\n",
+            called.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // A child another test forks while the script is being written holds it
+    // open for writing until that child execs, and running it meanwhile
+    // fails with "text file busy". Wait until it runs.
+    for _ in 0..100 {
+        if std::process::Command::new(&gh)
+            .arg("probe")
+            .status()
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut cfg = with_roots(&root);
+    cfg.publish.gh = gh.to_string_lossy().into_owned();
+    cfg.publish.forge_timeout_secs = 1;
+    let h = harness_with(cfg).await;
+    h.tools.broker.write().unwrap().put(
+        "gh",
+        tracon::broker::Credential {
+            env: [("GH_TOKEN".to_string(), "t".to_string())]
+                .into_iter()
+                .collect(),
+            channels: vec!["work".into()],
+            ..Default::default()
+        },
+    );
+    let started = std::time::Instant::now();
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("submit_review", submit_args(&wt)),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    assert!(out["review_id"].is_string(), "{out}");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "{:?}",
+        started.elapsed()
+    );
+    let asked = std::fs::read_to_string(&called).unwrap_or_default();
+    assert!(asked.contains("pulls?state=open"), "{asked}");
 }
 
 #[tokio::test]

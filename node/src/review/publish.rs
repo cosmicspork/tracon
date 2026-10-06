@@ -609,7 +609,7 @@ async fn attempt(
                         p.outputs.draft,
                     );
                     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-                    run_cli(provider.command(cfg), &publisher, &env, &argv).await?
+                    run_cli(provider, cfg, &publisher, &env, &argv).await?
                 }
             };
             let number = change_number(&url);
@@ -657,7 +657,7 @@ async fn forge_api(
         args.push(format!("{key}={value}"));
     }
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = run_cli(provider.command(cfg), dir, env, &argv).await?;
+    let out = run_cli(provider, cfg, dir, env, &argv).await?;
     serde_json::from_str(&out).map_err(|error| PublishError::Refused {
         cli: provider.command(cfg),
         stderr: format!("{method} {path} answered something that is not JSON ({error})"),
@@ -991,7 +991,7 @@ async fn existing_change(
         ],
     };
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    let listed = run_cli(provider.command(cfg), publisher, env, &argv)
+    let listed = run_cli(provider, cfg, publisher, env, &argv)
         .await
         .map_err(|error| {
             PublishError::Unknown(format!(
@@ -1198,12 +1198,17 @@ async fn publisher_git_with_credential<'a>(
     output(git, command).await
 }
 
+/// Bounded by `[publish] forge_timeout_secs`. A call that runs out of time
+/// may still have done what it was asked on the forge, so it is `Unknown`
+/// rather than a refusal.
 async fn run_cli(
-    cli: String,
+    provider: Provider,
+    cfg: &Config,
     dir: &Path,
     env: &BTreeMap<String, String>,
     args: &[&str],
 ) -> Result<String, PublishError> {
+    let cli = provider.command(cfg);
     let mut command = Command::new(&cli);
     command
         .args(args)
@@ -1211,8 +1216,18 @@ async fn run_cli(
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", git_remote::home(PUBLISH_HOME))
-        .envs(env);
-    output(&cli, command).await
+        .envs(env)
+        .kill_on_drop(true);
+    let limit = std::time::Duration::from_secs(cfg.publish.forge_timeout_secs);
+    tokio::time::timeout(limit, output(&cli, command))
+        .await
+        .unwrap_or_else(|_| {
+            Err(PublishError::Unknown(format!(
+                "{cli} {} did not answer within {}s",
+                args.first().copied().unwrap_or_default(),
+                limit.as_secs()
+            )))
+        })
 }
 
 async fn output(cli: &str, mut command: Command) -> Result<String, PublishError> {

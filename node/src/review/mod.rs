@@ -404,6 +404,12 @@ impl Drop for CandidateSnapshot {
     }
 }
 
+/// A candidate's tree as read out of Git, before anything is written to disk.
+pub struct CandidateTree {
+    pub tree_sha: String,
+    pub files: Vec<crate::store::CandidateFile>,
+}
+
 /// Copy exactly the Git tree named by `head_sha`, not the mutable worktree.
 /// Tree traversal and blob reads address hashes after disabling replacement,
 /// graft, attribute, hook, and executable configuration paths. `head_sha` is
@@ -414,6 +420,24 @@ pub async fn snapshot_candidate(
     head_sha: &str,
     max_bytes: u64,
 ) -> Result<CandidateSnapshot, ReviewError> {
+    let tree = read_candidate(worktree, head_sha, max_bytes).await?;
+    let root = std::env::temp_dir()
+        .join("tracon-candidates")
+        .join(uuid::Uuid::now_v7().to_string());
+    tokio::task::spawn_blocking(move || {
+        CandidateSnapshot::materialize(root, tree.tree_sha, tree.files)
+    })
+    .await
+    .map_err(|error| std::io::Error::other(error.to_string()))?
+}
+
+/// The files `snapshot_candidate` copies, read the same way but held in
+/// memory rather than written to disk.
+pub async fn read_candidate(
+    worktree: &str,
+    head_sha: &str,
+    max_bytes: u64,
+) -> Result<CandidateTree, ReviewError> {
     let tree = format!("{head_sha}^{{tree}}");
     let tree_sha = git(worktree, "rev-parse tree", &["rev-parse", &tree]).await?;
     let listing = git_bytes(
@@ -422,12 +446,7 @@ pub async fn snapshot_candidate(
         &["ls-tree", "-rz", "-r", "--full-tree", head_sha],
     )
     .await?;
-    let root = std::env::temp_dir()
-        .join("tracon-candidates")
-        .join(uuid::Uuid::now_v7().to_string());
-    std::fs::create_dir_all(&root)?;
-    let mut snapshot = CandidateSnapshot {
-        root,
+    let mut snapshot = CandidateTree {
         tree_sha,
         files: Vec::new(),
     };
@@ -520,7 +539,6 @@ pub async fn snapshot_candidate(
         });
         rest = &body[len + 1..];
     }
-    materialize_candidate_files(&snapshot.root, &snapshot.files)?;
     Ok(snapshot)
 }
 
@@ -680,13 +698,22 @@ async fn pinned_context(worktree: &str, head_sha: &str, diff: &str) -> Vec<CodeC
         }
     }
     requested.truncate(80);
+    let mut objects: Vec<String> = requested
+        .iter()
+        .map(|(path, _, _)| format!("{head_sha}:{path}"))
+        .collect();
+    objects.sort();
+    objects.dedup();
+    let blobs = match cat_file(worktree, "cat-file --batch", "--batch", &objects).await {
+        Ok(batch) => parse_batch(&objects, &batch),
+        Err(_) => return Vec::new(),
+    };
     let mut contexts = Vec::new();
     for (path, start, count) in requested {
-        let object = format!("{head_sha}:{path}");
-        let Ok(bytes) = git_bytes(worktree, "show context", &["show", &object]).await else {
+        let Some(Some(bytes)) = blobs.get(&format!("{head_sha}:{path}")) else {
             continue;
         };
-        let Ok(text) = String::from_utf8(bytes) else {
+        let Ok(text) = std::str::from_utf8(bytes) else {
             continue;
         };
         let lines: Vec<&str> = text.lines().collect();
@@ -713,6 +740,44 @@ async fn pinned_context(worktree: &str, head_sha: &str, diff: &str) -> Vec<CodeC
         });
     }
     contexts
+}
+
+/// Split `git cat-file --batch` output back into each requested object, by
+/// the size in its header rather than by line. An object that is missing or
+/// is not a blob maps to `None`.
+fn parse_batch(
+    objects: &[String],
+    batch: &[u8],
+) -> std::collections::HashMap<String, Option<Vec<u8>>> {
+    let mut found = std::collections::HashMap::new();
+    let mut rest = batch;
+    for object in objects {
+        let Some((header, body)) = split_once_byte(rest, b'\n') else {
+            break;
+        };
+        let header = String::from_utf8_lossy(header);
+        if header.ends_with(" missing") || header.ends_with(" ambiguous") {
+            found.insert(object.clone(), None);
+            rest = body;
+            continue;
+        }
+        let mut fields = header.rsplitn(3, ' ');
+        let (Some(size), Some(kind)) = (
+            fields.next().and_then(|size| size.parse::<usize>().ok()),
+            fields.next(),
+        ) else {
+            break;
+        };
+        if body.get(size) != Some(&b'\n') {
+            break;
+        }
+        found.insert(
+            object.clone(),
+            (kind == "blob").then(|| body[..size].to_vec()),
+        );
+        rest = &body[size + 1..];
+    }
+    found
 }
 
 fn changed_hunk(line: &str) -> Option<(usize, usize)> {
@@ -848,6 +913,101 @@ mod tests {
             default_base(wt.to_str().unwrap()).await.unwrap(),
             "release/2026.1"
         );
+    }
+
+    /// How the context was read before it was batched: one `git show` per
+    /// hunk.
+    async fn context_one_hunk_at_a_time(
+        worktree: &str,
+        head_sha: &str,
+        diff: &str,
+    ) -> Vec<CodeContext> {
+        let mut current = None::<String>;
+        let mut requested = Vec::new();
+        for line in diff.lines() {
+            if line == "+++ /dev/null" {
+                current = None;
+            } else if let Some(path) = line.strip_prefix("+++ b/") {
+                current = Some(path.to_string());
+            } else if let (Some(path), Some((start, count))) = (&current, changed_hunk(line)) {
+                requested.push((path.clone(), start, count));
+            }
+        }
+        requested.truncate(80);
+        let mut contexts = Vec::new();
+        for (path, start, count) in requested {
+            let object = format!("{head_sha}:{path}");
+            let Ok(bytes) = git_bytes(worktree, "show context", &["show", &object]).await else {
+                continue;
+            };
+            let Ok(text) = String::from_utf8(bytes) else {
+                continue;
+            };
+            let lines: Vec<&str> = text.lines().collect();
+            if lines.is_empty() {
+                continue;
+            }
+            let first = start.saturating_sub(3).max(1);
+            let last = start
+                .saturating_add(count.max(1))
+                .saturating_add(2)
+                .min(lines.len());
+            if first > last {
+                continue;
+            }
+            let mut excerpt = lines[first - 1..last].join("\n");
+            if last == lines.len() && text.ends_with('\n') {
+                excerpt.push('\n');
+            }
+            contexts.push(CodeContext {
+                path,
+                start_line: first,
+                end_line: last,
+                text: excerpt,
+            });
+        }
+        contexts
+    }
+
+    #[tokio::test]
+    async fn batched_context_matches_one_read_per_hunk() {
+        const FN: &str = "batched_context_matches_one_read_per_hunk";
+        let dir = repo(FN).await;
+        sh(
+            &dir,
+            "git checkout -q main && seq 1 60 > long.txt && printf 'x\\ny' > tail.txt \
+             && echo gone > gone.txt && printf 'a\\nb\\n' > 'with space.txt' \
+             && git add -A && git commit -qm more && git checkout -q feat/x && git rebase -q main \
+             && sed -i.bak -e '5s/$/ edited/' -e '50s/$/ edited/' long.txt && rm long.txt.bak \
+             && printf 'x\\ny\\nz' > tail.txt && git rm -q gone.txt \
+             && printf 'a\\nb\\nc\\n' > 'with space.txt' && printf '\\377\\376\\n' > bin.dat \
+             && git add -A && git commit -qm edits",
+        )
+        .await;
+        let worktree = dir.to_str().unwrap();
+        let head = git(worktree, "rev-parse", &["rev-parse", "HEAD"])
+            .await
+            .unwrap();
+        let diff = git(
+            worktree,
+            "diff",
+            &["diff", "--no-ext-diff", "--no-textconv", "main...HEAD"],
+        )
+        .await
+        .unwrap();
+        let batched = pinned_context(worktree, &head, &diff).await;
+        let reference = context_one_hunk_at_a_time(worktree, &head, &diff).await;
+        assert_eq!(
+            serde_json::to_value(&batched).unwrap(),
+            serde_json::to_value(&reference).unwrap()
+        );
+        let paths: Vec<&str> = batched.iter().map(|c| c.path.as_str()).collect();
+        assert!(
+            paths.iter().filter(|p| **p == "long.txt").count() >= 2,
+            "{paths:?}"
+        );
+        assert!(paths.contains(&"tail.txt"), "{paths:?}");
+        assert!(!paths.contains(&"bin.dat"), "{paths:?}");
     }
 
     #[tokio::test]
