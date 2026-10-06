@@ -560,7 +560,7 @@ async fn an_edit_is_held_to_the_same_refusals_as_the_call() {
         &id,
         json!({
             "option_id": "allow_once",
-            "arguments": { "slug": "plan-y", "body": "then git push origin main" }
+            "arguments": { "slug": "plan-y/.claude/settings", "body": "a draft" }
         }),
     )
     .await;

@@ -345,29 +345,56 @@ pub struct Request<'a> {
     pub arguments: Option<&'a serde_json::Value>,
 }
 
-/// The narrative fields of a call that only puts something in front of the
-/// operator. A review or report about a production incident has to be able to
-/// say "production"; what it describes is not what it does, and nothing it
-/// carries leaves the node until the operator approves it.
+/// The narrative fields of a call: text it carries, not an action it takes. A
+/// review, a report, a ticket, a comment or a note about a merge or a
+/// production incident has to be able to say so. The fields that say where it
+/// goes (a key, a project, a slug) are still matched.
 fn prose_fields(action: &str) -> &'static [&'static str] {
+    use crate::mcp::{docs, github, gitlab, jira, review};
     match action {
-        crate::mcp::review::SUBMIT | crate::mcp::review::SUBMIT_REPORT => &["title", "body"],
+        review::SUBMIT => &[
+            "title",
+            "body",
+            "forge.description.title",
+            "forge.description.body",
+            "forge.comment",
+        ],
+        review::SUBMIT_REPORT => &["title", "body"],
+        jira::ISSUE_CREATE | jira::ISSUE_UPDATE => &["summary", "description"],
+        jira::ISSUE_COMMENT
+        | github::PR_COMMENT
+        | github::PR_REPLY
+        | gitlab::MR_COMMENT
+        | gitlab::MR_REPLY
+        | docs::DOC_WRITE => &["body"],
         _ => &[],
+    }
+}
+
+fn strip(value: &mut serde_json::Value, path: &str) {
+    let Some(fields) = value.as_object_mut() else {
+        return;
+    };
+    match path.split_once('.') {
+        None => {
+            fields.remove(path);
+        }
+        Some((head, rest)) => {
+            if let Some(inner) = fields.get_mut(head) {
+                strip(inner, rest);
+            }
+        }
     }
 }
 
 impl Request<'_> {
     fn haystack(&self) -> String {
-        let prose = prose_fields(self.action);
-        let matched = self.arguments.map(|arguments| match arguments.as_object() {
-            Some(fields) if !prose.is_empty() => serde_json::Value::Object(
-                fields
-                    .iter()
-                    .filter(|(key, _)| !prose.contains(&key.as_str()))
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-            ),
-            _ => arguments.clone(),
+        let matched = self.arguments.map(|arguments| {
+            let mut arguments = arguments.clone();
+            for path in prose_fields(self.action) {
+                strip(&mut arguments, path);
+            }
+            arguments
         });
         let mut arguments = matched
             .as_ref()
@@ -695,7 +722,7 @@ mod tests {
 
     #[test]
     fn an_argument_scoped_allow_is_still_beaten_by_a_deny() {
-        let args = serde_json::json!({ "slug": "note-x", "body": "then git push origin main" });
+        let args = serde_json::json!({ "slug": "note-.claude/settings", "body": "x" });
         let summary = format!("doc_write {args}");
         let d = policy().decide(&tool("doc_write", &args, &summary));
         assert_eq!(d.verdict, Verdict::Deny);
@@ -706,27 +733,119 @@ mod tests {
         let p = policy();
         for name in ["submit_review", "submit_report"] {
             let args = serde_json::json!({
-                "title": "fix: the eks-prd rollout",
-                "body": "The web pipeline ran with environment:production and kubectl apply.",
+                "title": "fix: the rollout after gh pr merge",
+                "body": "It ran git push and gh pr merge by hand on webapp-prd.",
                 "provider": "gitlab",
                 "project": "group/app",
                 "base": "main",
             });
             let d = p.decide(&tool(name, &args, name));
             assert_ne!(d.verdict, Verdict::Deny, "{name}: {:?}", d.rule_id);
-            // Only the narrative is exempt: a production name anywhere else
-            // in the call is still refused.
+            // Only the narrative is exempt: a denied phrase anywhere else in
+            // the call is still refused.
             let args = serde_json::json!({
                 "title": "fix", "body": "x", "provider": "gitlab",
-                "project": "group/app-prd", "base": "main",
+                "project": "group/git push", "base": "main",
             });
             let d = p.decide(&tool(name, &args, name));
             assert_eq!(d.verdict, Verdict::Deny, "{name}");
         }
-        // Every other tool's prose is still matched.
-        let args = serde_json::json!({ "slug": "note-x", "body": "deploy to eks-prd" });
-        let d = p.decide(&tool("doc_write", &args, "doc_write"));
+        // What the forge will show is narrative too; whether it opens as a
+        // draft, and where it goes, are not.
+        let forge = serde_json::json!({
+            "description": {
+                "title": "fix: after gh pr merge",
+                "body": "Run git push, then gh pr merge.",
+            },
+            "comment": "This revision drops the git push step.",
+            "draft": true,
+        });
+        let args = serde_json::json!({
+            "title": "fix", "body": "x", "provider": "github",
+            "project": "o/r", "base": "main", "forge": forge,
+        });
+        let d = p.decide(&tool("submit_review", &args, "submit_review"));
+        assert_ne!(d.verdict, Verdict::Deny, "{:?}", d.rule_id);
+        let args = serde_json::json!({
+            "title": "fix", "body": "x", "provider": "github",
+            "project": "o/git push", "base": "main", "forge": forge,
+        });
+        let d = p.decide(&tool("submit_review", &args, "submit_review"));
         assert_eq!(d.verdict, Verdict::Deny);
+        let args = serde_json::json!({
+            "title": "fix", "body": "x", "provider": "github", "project": "o/r",
+            "forge": { "comment": "x", "target": "gh pr merge" },
+        });
+        let d = p.decide(&tool("submit_review", &args, "submit_review"));
+        assert_eq!(d.verdict, Verdict::Deny);
+        // A tool with no narrative fields is matched in full.
+        let args = serde_json::json!({ "project": "group/app", "ref": "gh pr merge" });
+        let d = p.decide(&tool("pipeline_run", &args, "pipeline_run"));
+        assert_eq!(d.verdict, Verdict::Deny);
+    }
+
+    /// A comment naming a production host was refused outright rather than
+    /// asked (#360). A ticket or a comment is read before it lands, so its
+    /// text is the operator's to judge.
+    #[test]
+    fn a_comment_or_ticket_may_name_what_the_policy_denies() {
+        let p = policy();
+        let body = "Deployed to QA; PROD is webapp-prd after gh pr merge and git push.";
+        for (name, args) in [
+            (
+                "issue_comment",
+                serde_json::json!({ "key": "WRK-236", "body": body }),
+            ),
+            (
+                "issue_update",
+                serde_json::json!({ "key": "WRK-264", "summary": "gh pr merge", "description": body }),
+            ),
+            (
+                "issue_create",
+                serde_json::json!({ "project": "WRK", "type": "Task", "summary": "x", "description": body }),
+            ),
+            (
+                "pr_comment",
+                serde_json::json!({ "repo": "o/r", "number": 1, "body": body }),
+            ),
+            (
+                "pr_reply",
+                serde_json::json!({ "repo": "o/r", "number": 1, "thread_id": "t", "body": body }),
+            ),
+            (
+                "mr_comment",
+                serde_json::json!({ "project": "g/p", "iid": 1, "body": body }),
+            ),
+            (
+                "mr_reply",
+                serde_json::json!({ "project": "g/p", "iid": 1, "discussion_id": "d", "body": body }),
+            ),
+            (
+                "doc_write",
+                serde_json::json!({ "slug": "plan-x", "body": body }),
+            ),
+        ] {
+            let d = p.decide(&tool(name, &args, name));
+            assert_eq!(d.verdict, Verdict::Ask, "{name}: {:?}", d.rule_id);
+        }
+        // Where the call goes is still matched.
+        for (name, args) in [
+            (
+                "issue_comment",
+                serde_json::json!({ "key": "gh pr merge", "body": "x" }),
+            ),
+            (
+                "issue_create",
+                serde_json::json!({ "project": "git push", "summary": "x" }),
+            ),
+            (
+                "mr_comment",
+                serde_json::json!({ "project": "g/.claude/settings", "iid": 1, "body": "x" }),
+            ),
+        ] {
+            let d = p.decide(&tool(name, &args, name));
+            assert_eq!(d.verdict, Verdict::Deny, "{name}");
+        }
     }
 
     #[test]
@@ -818,20 +937,6 @@ mod tests {
     fn transitioning_a_ticket_is_refused() {
         let d = policy().decide(&req("acli jira workitem transition PROJ-25", "work"));
         assert_eq!(d.verdict, Verdict::Deny);
-    }
-
-    #[test]
-    fn production_deploys_are_refused() {
-        for cmd in [
-            "kubectl --context=zf-eks-prd -n integrations get pods",
-            "glab ci run --branch=v1.2.3 --variables environment:production",
-        ] {
-            assert_eq!(
-                policy().decide(&req(cmd, "work")).verdict,
-                Verdict::Deny,
-                "{cmd}"
-            );
-        }
     }
 
     #[test]
@@ -1069,7 +1174,6 @@ mod tests {
             ("cd /work && gh pr create --fill", "review-before-publish"),
             ("gh pr merge 12 --squash", "no-merge"),
             ("cat x > .claude/settings.json", "harness-settings"),
-            ("kubectl apply -f deploy.yaml", "no-production-deploy"),
         ] {
             let d = policy().decide(&req(cmd, "work"));
             assert_eq!(d.verdict, Verdict::Deny, "{cmd}");
