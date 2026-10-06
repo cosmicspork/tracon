@@ -49,7 +49,8 @@ pub struct NewSession {
     #[serde(default)]
     pub budget_tokens: Option<i64>,
     /// The first unstructured prompt, queued only after the harness reaches
-    /// `running`. Structured work-item sessions leave this absent.
+    /// `running`. Structured work-item and review sessions leave this absent
+    /// and are sent the node's kickoff instead.
     #[serde(default)]
     pub initial_prompt: Option<String>,
     /// The node to run on. Absent or this node: here. Another node: forwarded
@@ -142,6 +143,58 @@ fn handoff_note(old: &SessionRow, harness: &str) -> String {
         ));
     }
     note
+}
+
+/// The first prompt of a session the node starts on structured work: what to
+/// do, in a sentence, with the details left to the orientation the harness was
+/// already given. `None` for a plain session, which has nothing to start on
+/// until the operator says what.
+fn kickoff(
+    phase: Phase,
+    item: Option<&tracon_sync::work::WorkItem>,
+    review_id: Option<&str>,
+) -> Option<String> {
+    let named = |item: &tracon_sync::work::WorkItem| {
+        format!(
+            "**{}** (`{}…`)",
+            item.title,
+            &item.id[..8.min(item.id.len())]
+        )
+    };
+    match phase {
+        Phase::Plan => {
+            let item = item?;
+            Some(format!(
+                "Plan work item {}. It is described in your orientation. Read what you need, \
+                 then write the plan as document `{}` with `doc_write`.",
+                named(item),
+                crate::corpus::work::plan_slug(&item.id),
+            ))
+        }
+        Phase::Execute => {
+            let item = item?;
+            let plan = match item.phase_plan_slug.as_deref() {
+                Some(slug) => format!(
+                    "Follow its plan, document `{slug}`: your orientation carries it, and \
+                     `doc_read` returns it whole."
+                ),
+                None => "It is described in your orientation.".to_string(),
+            };
+            Some(format!(
+                "Carry out work item {}. {plan} Commit the work in the worktree and call \
+                 `submit_review` when it is ready.",
+                named(item),
+            ))
+        }
+        Phase::Review => {
+            let review = review_id?;
+            Some(format!(
+                "Review the change under review `{review}`. The requirements and the diff are \
+                 in your orientation and the change is checked out in the worktree. Give your \
+                 verdict with `review_verdict`."
+            ))
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -999,6 +1052,7 @@ impl Manager {
         // Work items and phase artifacts are an opt-in workflow. Plain
         // workspace sessions use the execute harness mode without claiming an
         // item, plan, or review lifecycle.
+        let mut held_item = None;
         if let Some(item_id) = spec
             .work_item_id
             .as_deref()
@@ -1053,9 +1107,20 @@ impl Manager {
                     return Err(SessionError::PlanRequired(item_id.to_string()));
                 }
             }
+            held_item = Some(view.item);
         } else if spec.phase == Phase::Plan {
             return Err(SessionError::WorkItemRequired);
         }
+        // Starting work is one action. A session the node starts on an item
+        // or a review is sent its kickoff as the first prompt, rather than
+        // sitting `running` until the operator thinks to type something. A
+        // caller's own first prompt (a plain session, a reopen's handoff)
+        // wins; the kickoff is not kept as a draft, because it is the node's
+        // words and not the operator's.
+        let kickoff = match spec.initial_prompt.as_deref() {
+            Some(prompt) if !prompt.trim().is_empty() => None,
+            _ => kickoff(spec.phase, held_item.as_ref(), spec.review_id.as_deref()),
+        };
         // Bank identity: the channel and the repository's remote, resolved on
         // this side of the boundary and recorded on the row for memory to key
         // on; never a checkout path.
@@ -1145,6 +1210,9 @@ impl Manager {
             .filter(|prompt| !prompt.trim().is_empty())
         {
             self.store.set_draft(&id, Some(prompt))?;
+        }
+        if kickoff.is_some() {
+            spec.initial_prompt = kickoff;
         }
         let row = self.store.get_session(&id)?.ok_or(SessionError::NotFound)?;
         self.bus.publish(Frame::Session(Box::new(row.clone())));
@@ -2906,4 +2974,48 @@ fn write_external_stop(
             .map_err(|error| SessionError::Rejected(error.to_string()))?,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(plan: Option<&str>) -> tracon_sync::work::WorkItem {
+        tracon_sync::work::WorkItem {
+            id: "0123456789abcdef".into(),
+            channel: "personal".into(),
+            project_id: None,
+            title: "Add the ledger".into(),
+            body: String::new(),
+            state: "open".into(),
+            priority: 0,
+            deps: vec![],
+            discovered_from: None,
+            discovered_by_session: None,
+            phase_plan_slug: plan.map(str::to_string),
+            brief_slug: None,
+            closed_by_session: None,
+            created_ms: 0,
+            updated_ms: 0,
+        }
+    }
+
+    #[test]
+    fn a_plain_session_has_no_kickoff() {
+        assert_eq!(kickoff(Phase::Execute, None, None), None);
+    }
+
+    #[test]
+    fn an_execute_session_without_a_plan_starts_on_the_item_alone() {
+        let text = kickoff(Phase::Execute, Some(&item(None)), None).unwrap();
+        assert!(text.contains("**Add the ledger** (`01234567…`)"), "{text}");
+        assert!(!text.contains("plan"), "{text}");
+    }
+
+    #[test]
+    fn a_review_session_is_told_which_review_and_how_to_answer() {
+        let text = kickoff(Phase::Review, None, Some("r-1")).unwrap();
+        assert!(text.contains("`r-1`"), "{text}");
+        assert!(text.contains("`review_verdict`"), "{text}");
+    }
 }

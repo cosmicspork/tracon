@@ -51,12 +51,6 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 Every item here was found on the 2026-09-20, 2026-09-28, 2026-09-30 or 2026-10-03 live
 runs, or in the daily desktop use since.
 
-- [ ] **A work item's session starts working on its own.** A session composed from a
-      prompt, or started on an existing item, is sent no first prompt — only a plain
-      prompt session carries `initial_prompt` — so it sits `running` and silent until the
-      operator types something; plan session `01a0f49f` (2026-09-30) waited for a nudge.
-      Send the item, or for execute a kickoff naming the plan document, as the first
-      prompt, so starting work is one action.
 - [ ] **Give a node restart its own end reason.** Sessions running when the node restarts
       are ended as `killed_user`, which tells the operator they stopped something they did
       not; record `node_restart` and offer the resume a restart interrupted.
