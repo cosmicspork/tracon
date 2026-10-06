@@ -10,16 +10,16 @@
 # them for work that could not leave the container, and taught them to approve
 # without reading. So reads, writes and shell commands run unattended, and
 # this bundle is about what crosses the boundary or speaks in the operator's
-# name: publishing, merging, moving a ticket, a production deploy, the
-# harness's own configuration, and every brokered tool that writes somewhere
-# others will read.
+# name: publishing, merging, moving a ticket, the harness's own
+# configuration, and every brokered tool that writes somewhere others will
+# read.
 #
 # Denials are deliberate and explained: the agent reads the reason and stops,
 # instead of meeting a confusing auth error and looking for another way round.
 # A denial wins over any allow, whatever the order. An action no rule names —
 # a brokered write, a tool whose kind the node does not know — is asked.
 
-version = 12
+version = 13
 
 # --- 1. The harness and Git's internals stay the node's ---------------------
 # The harness's own configuration is the node's to write, not the session's.
@@ -78,21 +78,6 @@ id = "no-transition"
 verdict = "deny"
 reason = "Moving a ticket's status desyncs what the operator is actually working on. Comment instead."
 matches = ["jira workitem transition", "acli jira workitem transition"]
-
-# --- 5. No production deploy -------------------------------------------------
-
-[[rule]]
-id = "no-production-deploy"
-verdict = "deny"
-reason = "Production pipelines are run by hand. A signed policy change is required before a local grant can authorize one."
-matches = [
-    "environment:production",
-    "environment=production",
-    "-prd",
-    "eks-prd",
-    "--context=prd",
-    "kubectl apply",
-]
 
 # --- Inside the boundary -----------------------------------------------------
 # Reading, editing and running commands in the session's own container. What a

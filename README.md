@@ -917,15 +917,19 @@ The shipped bundle lets the boundary do the containing. Inside a session's
 container, reading, editing and running shell commands go unasked: the container
 has no route out but the egress it is granted and no credentials, and nothing it
 makes reaches anyone until you approve the diff. What the bundle guards is what
-crosses that boundary or speaks in your name. It refuses publishing, merging,
-moving a ticket and production deploys anywhere in a line. It also refuses an edit
+crosses that boundary or speaks in your name. It refuses publishing, merging and
+moving a ticket anywhere in a line. It also refuses an edit
 to the harness's settings (`.claude/settings…`), which would configure the harness of
 whoever checks the branch out, and an edit tool's write into Git's internals
 (`.git/`). It runs the brokered reads unattended — queries, lookups, searches,
 pipeline and check status, job logs, documents, memory, the ledger, an item's brief —
 and asks before every brokered write that others see: a comment, an edited or new
 ticket, a pipeline run, a document other than working notes, a line added to a brief.
-A tool whose kind the node does not know is asked.
+A tool whose kind the node does not know is asked. The narrative a call carries (a
+review's or report's title and body, a ticket's summary and description, a comment,
+a reply, a document's body) is text, not an action, so it is left out of deny
+matching: a comment can say "production" or quote `gh pr merge`. The fields that say
+where it goes are still matched.
 
 A bundle of your own can be narrower. An allow can name commands by their leading
 words (`git status`, `cat`), and then a line that chains commands with `|`, `&&`,
@@ -954,9 +958,8 @@ longer apply, rather than carrying it forward. A publish grant also binds what t
 forge will show: an update's target names the change (`…:change:<n>:prose:<hash>`),
 and the hash covers any separate description or comment. A publish that rewrites
 a change's history is never granted around: it always asks. A signed policy deny always wins
-over a local grant, however narrow it is scoped — production deploys, for
-instance, stay refused until the signed bundle itself changes, never by granting
-around it. Revoking a grant, or letting it expire, takes effect on the next
+over a local grant, however narrow it is scoped: what it refuses stays refused
+until the signed bundle itself changes, never by granting around it. Revoking a grant, or letting it expire, takes effect on the next
 action the node reads it for, not one already dispatched.
 
 ### Where things live
