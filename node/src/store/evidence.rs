@@ -450,6 +450,20 @@ impl Store {
         Ok(())
     }
 
+    /// Say that a candidate's files are now all retained, once they are.
+    pub fn record_candidate_materialized(&self, candidate_id: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        conn.execute(
+            "UPDATE candidate SET capture_json=json_set(capture_json, '$.materialized', json('true'))
+             WHERE id=?1 AND json_extract(capture_json, '$.materialized') = 0",
+            [candidate_id],
+        )?;
+        Ok(())
+    }
+
     pub fn candidate(&self, id: &str) -> Result<Option<CandidateRow>> {
         let conn = self
             .conn

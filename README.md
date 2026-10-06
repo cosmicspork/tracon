@@ -823,6 +823,7 @@ timeout_secs = 60
 gh = "gh"
 glab = "glab"
 git = "git"
+forge_timeout_secs = 15             # how long one gh or glab call may run
 
 [mesh]
 # hub_url = "https://hub.example.com"   # set by tracon mesh init / enroll

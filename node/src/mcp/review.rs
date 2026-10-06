@@ -281,6 +281,27 @@ async fn submit(
         }
         None => None,
     };
+    // A client that gave up waiting may retry a submission that is still
+    // running or already recorded. Same-commit submits from one worktree run
+    // one at a time, and a fresh one finds the review the other made.
+    let head_sha = review::resolve(&worktree, "HEAD")
+        .await
+        .map_err(|e| e.to_string())?;
+    let _in_flight = in_flight(&format!(
+        "{}\n{}\n{head_sha}",
+        ctx.channel,
+        ctx.session_id().unwrap_or(&worktree)
+    ))
+    .await;
+    let resubmission = match resubmission {
+        Some(existing) => Some(existing),
+        None => match pending_duplicate(store, ctx, &worktree, &head_sha)? {
+            Some(existing) if existing.title == title && existing.body == body => {
+                return Ok(already_submitted(&existing));
+            }
+            other => other,
+        },
+    };
     // The base defaults to what the worktree was branched from — read from the
     // worktree's `origin/HEAD`, not assumed to be `main`.
     let base = match args.get("base").and_then(Value::as_str) {
@@ -369,45 +390,30 @@ async fn submit(
     )
     .await?;
     let intent_json = Some(serde_json::to_string(&intent).map_err(|e| e.to_string())?);
+    let max_snapshot_bytes = manager.cfg().supervision.max_snapshot_bytes;
     // Capture the committed candidate before any check can execute. The
-    // snapshot is a hardened Git tree import, not this mutable worktree.
-    let snapshot = review::snapshot_candidate(
+    // snapshot is a hardened Git tree import, not this mutable worktree. No
+    // check runs here for an external harness, so its submission waits only
+    // for the tree hash publication is held to; `retain_candidate_files`
+    // keeps its files once the review exists.
+    let mut snapshot = if external {
+        None
+    } else {
+        Some(
+            review::snapshot_candidate(&worktree, &capture.head_sha, max_snapshot_bytes)
+                .await
+                .map_err(|error| error.to_string())?,
+        )
+    };
+    let candidate = record_candidate(
+        store,
+        ctx,
         &worktree,
         &capture.head_sha,
-        manager.cfg().supervision.max_snapshot_bytes,
+        snapshot.as_mut(),
+        max_snapshot_bytes,
     )
-    .await
-    .map_err(|error| error.to_string())?;
-    let candidate = CandidateRow {
-        id: candidate_id(&capture.head_sha, &ctx.channel),
-        head_sha: capture.head_sha.clone(),
-        tree_sha: Some(snapshot.tree_sha.clone()),
-        channel: ctx.channel.clone(),
-        owner_session_id: ctx.session_id().map(str::to_string),
-        source_kind: "git".into(),
-        captured_ms: now_ms(),
-        capture_json: json!({
-            "method": "hardened_git_tree",
-            "materialized": true,
-            "max_snapshot_bytes": manager.cfg().supervision.max_snapshot_bytes,
-        })
-        .to_string(),
-    };
-    let created = store
-        .insert_candidate(&candidate)
-        .map_err(|error| error.to_string())?;
-    if !created {
-        store
-            .record_candidate_snapshot(&candidate.id, &snapshot.tree_sha, &candidate.capture_json)
-            .map_err(|error| error.to_string())?;
-    }
-    store
-        .insert_candidate_files(&candidate.id, &snapshot.files)
-        .map_err(|error| error.to_string())?;
-    let candidate = store
-        .candidate(&candidate.id)
-        .map_err(|error| error.to_string())?
-        .ok_or("candidate disappeared while it was captured")?;
+    .await?;
     // The operator's own toolchain is where an external harness's checks
     // run, never this node's container: nothing here can execute a command
     // in a worktree the node does not own.
@@ -426,7 +432,8 @@ async fn submit(
             prepared: None,
         }
     } else {
-        run_checks(
+        let snapshot = snapshot.take().ok_or("checks run on a snapshot")?;
+        let report = run_checks(
             store,
             manager,
             ctx.session_id().ok_or("checks run for a session")?,
@@ -436,7 +443,9 @@ async fn submit(
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         )
-        .await?
+        .await;
+        tokio::task::spawn_blocking(move || drop(snapshot));
+        report?
     };
     let checks_json =
         (!external).then(|| serde_json::to_string(&checks.results).unwrap_or_else(|_| "[]".into()));
@@ -491,6 +500,7 @@ async fn submit(
                  to wait for the verdict"
             ));
         }
+        retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
         manager.publish_queue().await;
         let reviewer = spawn_review_session(store, manager, ctx, id, session.as_ref()).await;
         return Ok(json!({
@@ -564,6 +574,7 @@ async fn submit(
     store
         .insert_review_with_revision(&row, &revision)
         .map_err(|error| error.to_string())?;
+    retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
     manager.publish_queue().await;
     let reviewer = spawn_review_session(store, manager, ctx, &id, session.as_ref()).await;
 
@@ -580,6 +591,188 @@ async fn submit(
         "candidate_id": candidate.id,
         "checks_reused": checks.reused,
     }))
+}
+
+/// Holds the submission slot for `key` until dropped.
+struct InFlight {
+    key: String,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+type Slots = std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+
+fn slots() -> &'static Slots {
+    static SLOTS: std::sync::OnceLock<Slots> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(Default::default)
+}
+
+async fn in_flight(key: &str) -> InFlight {
+    let slot = slots()
+        .lock()
+        .unwrap()
+        .entry(key.to_string())
+        .or_default()
+        .clone();
+    InFlight {
+        key: key.to_string(),
+        _guard: slot.lock_owned().await,
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        let mut slots = slots().lock().unwrap();
+        // Two references: the map's and this guard's. Anything more is a
+        // submission still waiting for the slot.
+        if slots
+            .get(&self.key)
+            .is_some_and(|slot| Arc::strong_count(slot) <= 2)
+        {
+            slots.remove(&self.key);
+        }
+    }
+}
+
+/// An undecided review this caller already made of `head_sha` from this
+/// worktree. A fresh submission with the same title and body is answered
+/// with it; one with different words revises it, as if it named it.
+fn pending_duplicate(
+    store: &Store,
+    ctx: &CallContext,
+    worktree: &str,
+    head_sha: &str,
+) -> Result<Option<ReviewRow>, String> {
+    let external = ctx.session_id().is_none();
+    Ok(store
+        .undecided_reviews_at(&ctx.channel, &ctx.node_id, head_sha)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|review| {
+            owns(store, ctx, review)
+                && (!external
+                    || serde_json::from_str::<Target>(&review.target)
+                        .ok()
+                        .and_then(|target| target.worktree)
+                        .as_deref()
+                        == Some(worktree))
+        }))
+}
+
+fn already_submitted(existing: &ReviewRow) -> Value {
+    let files = serde_json::from_str::<Vec<Value>>(&existing.files)
+        .map(|files| files.len())
+        .unwrap_or_default();
+    json!({
+        "review_id": existing.id,
+        "state": existing.state,
+        "message": "This commit is already submitted with these words and waiting for a verdict. \
+                    Call review_status to wait for it.",
+        "files": files,
+        "added": existing.added,
+        "removed": existing.removed,
+        "already_submitted": true,
+    })
+}
+
+/// Record the candidate for `head_sha`, with the files of `snapshot` when
+/// there is one. Without one only the tree hash is recorded, and the
+/// candidate says it is not yet materialized.
+async fn record_candidate(
+    store: &Arc<Store>,
+    ctx: &CallContext,
+    worktree: &str,
+    head_sha: &str,
+    snapshot: Option<&mut review::CandidateSnapshot>,
+    max_snapshot_bytes: u64,
+) -> Result<CandidateRow, String> {
+    let tree_sha = match &snapshot {
+        Some(snapshot) => snapshot.tree_sha.clone(),
+        None => review::resolve(worktree, &format!("{head_sha}^{{tree}}"))
+            .await
+            .map_err(|error| error.to_string())?,
+    };
+    let row = CandidateRow {
+        id: candidate_id(head_sha, &ctx.channel),
+        head_sha: head_sha.to_string(),
+        tree_sha: Some(tree_sha),
+        channel: ctx.channel.clone(),
+        owner_session_id: ctx.session_id().map(str::to_string),
+        source_kind: "git".into(),
+        captured_ms: now_ms(),
+        capture_json: json!({
+            "method": "hardened_git_tree",
+            "materialized": snapshot.is_some(),
+            "max_snapshot_bytes": max_snapshot_bytes,
+        })
+        .to_string(),
+    };
+    let files = snapshot.map(|snapshot| std::mem::take(&mut snapshot.files));
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || {
+        let created = store
+            .insert_candidate(&row)
+            .map_err(|error| error.to_string())?;
+        if !created {
+            let tree_sha = row.tree_sha.as_deref().unwrap_or_default();
+            store
+                .record_candidate_snapshot(&row.id, tree_sha, &row.capture_json)
+                .map_err(|error| error.to_string())?;
+        }
+        if let Some(files) = files {
+            store
+                .insert_candidate_files(&row.id, &files)
+                .map_err(|error| error.to_string())?;
+            store
+                .record_candidate_materialized(&row.id)
+                .map_err(|error| error.to_string())?;
+        }
+        store
+            .candidate(&row.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "candidate disappeared while it was captured".to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Read and keep a candidate's files after its review is recorded, so a
+/// transfer can carry them without the submitting client waiting on a
+/// whole-tree read and its insert. A candidate that already has them is left
+/// alone; one that cannot be read stays unmaterialized, which a transfer
+/// refuses.
+fn retain_candidate_files(
+    store: &Arc<Store>,
+    worktree: &str,
+    candidate: &CandidateRow,
+    max_snapshot_bytes: u64,
+) {
+    let materialized = serde_json::from_str::<Value>(&candidate.capture_json)
+        .ok()
+        .and_then(|capture| capture["materialized"].as_bool())
+        .unwrap_or(false);
+    if materialized {
+        return;
+    }
+    let store = store.clone();
+    let worktree = worktree.to_string();
+    let id = candidate.id.clone();
+    let head_sha = candidate.head_sha.clone();
+    tokio::spawn(async move {
+        let retained = match review::read_candidate(&worktree, &head_sha, max_snapshot_bytes).await
+        {
+            Ok(tree) => tokio::task::spawn_blocking(move || {
+                store.insert_candidate_files(&id, &tree.files)?;
+                store.record_candidate_materialized(&id)
+            })
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|stored| stored.map_err(|error| error.to_string())),
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(error) = retained {
+            tracing::warn!(%error, head_sha, "could not keep a candidate's files");
+        }
+    });
 }
 
 fn forge_arg(args: &Value) -> Result<Outputs, String> {

@@ -847,6 +847,9 @@ pub struct Publish {
     pub gh: String,
     pub glab: String,
     pub git: String,
+    /// How long one `gh` or `glab` call may run. Git itself is not bounded:
+    /// a large push may take as long as it takes.
+    pub forge_timeout_secs: u64,
 }
 
 /// How the node runs the consulta sidecar. It stays a Python process because
@@ -1283,6 +1286,7 @@ impl Default for Config {
                 gh: "gh".into(),
                 glab: "glab".into(),
                 git: "git".into(),
+                forge_timeout_secs: 15,
             },
             session: SessionDefaults {
                 budget_tokens: 0,

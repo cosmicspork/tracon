@@ -2894,6 +2894,30 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Code reviews of `head_sha` on this channel and node that nobody has
+    /// decided or started revising, newest first.
+    pub fn undecided_reviews_at(
+        &self,
+        channel: &str,
+        node_id: &str,
+        head_sha: &str,
+    ) -> Result<Vec<ReviewRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM review
+             WHERE channel=?1 AND node_id=?2 AND head_sha=?3 AND kind<>?4
+               AND state IN ('new','claimed')
+             ORDER BY created_ms DESC",
+        )?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![channel, node_id, head_sha, reports::KIND],
+                ReviewRow::from_row,
+            )?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// Reviews still waiting on the operator, oldest first. Ordered after
     /// permission requests in the queue: requests expire, reviews do not.
     pub fn open_reviews(&self) -> Result<Vec<ReviewRow>> {
