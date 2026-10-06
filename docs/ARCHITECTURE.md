@@ -591,6 +591,19 @@ images — is the agent's or the operator's account, linked and hashed, never ex
 and flagged stale once it changes. It exists to help the operator judge a change, not to
 settle it, and it stays with the review rather than going to the forge.
 
+`show_work` is how an agent gives that account itself. Its files are read from the
+workspace snapshot the node exports, never a host path the agent names: a path that
+leaves the root, names `.git` or passes through a symbolic link is refused. They are
+stored as an immutable HTML bundle (`shown-<id>`, a slug `doc_write` refuses), so a
+page is served only from the preview origin under its content security policy; plain
+files get a listing the node writes, and the Markdown account is rendered with its
+images named rather than fetched. The `shown_work` row records the commit the
+workspace was at; a review reads it against its latest revision and marks it stale
+once they differ, beside the required checks the node ran on that commit. It is
+node-local like those checks, attaches to the review the agent names or else to every
+review of its session, and is dispatched before the policy is consulted, like the
+operator interventions: it reaches the operator and nothing else.
+
 **Narrative reports are not publication candidates.** `submit_report` creates an
 owner/channel/session-bound report without Git or a repository. Acknowledgement
 and requests for changes compare the inspected content hash atomically; mirrors

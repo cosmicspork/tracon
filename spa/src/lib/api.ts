@@ -41,6 +41,7 @@ import type {
   Session,
   SessionUsage,
   ReviewDetails,
+  ShownWork,
   ReviewOutputs,
   TransferImport,
   TransferInboxItem,
@@ -204,6 +205,8 @@ export const api = {
       usage: SessionUsage
       ceiling: Ceiling
       toolchain: ToolchainStatus | null
+      /** Absent from a node that predates `show_work`. */
+      shown_work?: ShownWork[]
     }>('GET', `/api/sessions/${id}`),
   /** What this session may do, and what it would still have to ask about.
       Read-only: the node answers it by running its own policy and grants. */

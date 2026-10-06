@@ -469,6 +469,18 @@ it was submitted. A curated demonstration (a document with commands, output,
 and images) can be attached beside the authoritative record; it is linked and
 hashed, never executed, and flagged stale if the document changed since.
 
+A diff alone often does not say whether the work is done: a changed screen, a
+before and after, a short account of what was tried. An agent shows you that
+with **`show_work`**: a Markdown account, an HTML page with the images it loads,
+or plain files from its workspace, read from the node's own snapshot of it. The
+review shows it beside the diff, and the session keeps it; a page renders only on
+the isolated preview origin, sandboxed, with no network, and the account's images
+are named rather than fetched. It is the agent's account, not verification: the
+node vouches only for the commit it was shown at, marks it stale once the
+candidate moves past that commit, and lists the required checks it ran there.
+None of it goes to the forge; the pull request gets prose only. A harness you run
+yourself shows work on a review it submitted, from that review's worktree.
+
 **Work → Evidence** browses captured candidates without requiring an ID. Reviews,
 sessions, and work items link to the corresponding owner and channel; a peer's
 candidates are read from that owner. A missing local candidate is not evidence

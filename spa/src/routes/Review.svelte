@@ -1,6 +1,7 @@
 <script lang="ts">
   import ReportReview from '../components/ReportReview.svelte'
   import Diff from '../components/Diff.svelte'
+  import ShownWork from '../components/ShownWork.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
@@ -20,6 +21,7 @@
     type ReviewIntent,
     type ReviewOutputs,
     type ReviewRevisionRef,
+    type ShownWork as ShownWorkItem,
     type Verdict,
   } from '../lib/types'
   import { baseFromDiff, buildPatch, fileSection } from '../lib/patch'
@@ -36,6 +38,7 @@
   /** The node that owns a review mirrored here; null when this node does. */
   let remoteOwner = $state<string | null>(null)
   let evidence = $state<CandidateEvidence | null>(null)
+  let shownWork = $state<ShownWorkItem[]>([])
   let requirements = $state<PinnedRequirements | null>(null)
   /** The pinned item's criteria against this revision's candidate, if any. */
   let criteria = $state<Criteria | null>(null)
@@ -74,6 +77,7 @@
         stale = d.stale
         remoteOwner = d.remote_owner ?? null
         evidence = d.evidence
+        shownWork = d.shown_work ?? []
         requirements = d.requirements
         criteria = d.criteria
         surroundingCode = d.surrounding_code
@@ -452,6 +456,8 @@
       {/if}
     </section>
   {/if}
+
+  <ShownWork items={shownWork} onReview />
 
   {#if criteria}
     <section class="criteria-block">

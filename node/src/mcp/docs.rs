@@ -27,6 +27,7 @@ pub const KINDS: &[&str] = &[
     "guide",
     "ref",
     "architecture",
+    "shown",
 ];
 
 /// `<kind>-<slug>` → kind, else `other`.
@@ -55,15 +56,27 @@ pub fn title_of(slug: &str, body: &str) -> String {
 /// would be choosing its own context — the substitution the selection exists
 /// to prevent — so `doc_write` refuses the slug outright, before the policy
 /// gate would put it to the operator as an ordinary document edit.
+///
+/// Shown work is reserved too: only `show_work` writes it, bound to the
+/// commit it was shown at, and an edit through `doc_write` would be an account
+/// nobody showed at any commit.
 pub fn reserved_for_operator(args: &Value) -> Option<String> {
     let slug = args["slug"].as_str().unwrap_or("").trim();
-    (kind_of(slug) == corpus::context::KIND).then(|| {
-        format!(
+    match kind_of(slug) {
+        kind if kind == corpus::context::KIND => Some(format!(
             "`{slug}` is a work item's selected context, which only the operator changes. \
              Say which document belongs in it, and why, with `ask_operator`."
-        )
-    })
+        )),
+        SHOWN => Some(format!(
+            "`{slug}` is work shown to the operator, which only `show_work` writes. Show the \
+             work again with `show_work`."
+        )),
+        _ => None,
+    }
 }
+
+/// The kind of the documents `show_work` stores its pages and files in.
+pub const SHOWN: &str = "shown";
 
 pub fn valid_slug(slug: &str) -> bool {
     !slug.is_empty()

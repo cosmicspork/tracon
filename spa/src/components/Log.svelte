@@ -125,6 +125,8 @@
         <div class="mark crit">submission refused · {e.payload.reason}</div>
       {:else if e.kind === 'plan_artifact'}
         <div class="mark ok">plan written · <a href="/docs/{e.payload.channel ?? ''}/{e.payload.slug}">{e.payload.slug}</a> · ends the phase</div>
+      {:else if e.kind === 'work_shown'}
+        <div class="mark ok">work shown · {e.payload.title} · at {String(e.payload.head_sha ?? '').slice(0, 12)}{e.payload.files ? ` · ${e.payload.files} ${e.payload.files === 1 ? 'file' : 'files'}` : ''} · in tracon only</div>
       {:else if e.kind === 'work_closed'}
         <div class="mark">work closed{e.payload.summary ? ` · ${e.payload.summary}` : ''}</div>
       {:else if e.kind === 'review_verdict'}

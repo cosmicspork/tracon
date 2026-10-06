@@ -499,6 +499,36 @@ export interface ReviewDetails {
   surrounding_code: ReviewContext[]
   evidence: CandidateEvidence | null
   legacy_check_events: CandidateCheckRun[]
+  /** What the agent showed of its work. Absent from a node that predates it. */
+  shown_work?: ShownWork[]
+}
+
+/**
+ * Work an agent showed the operator with `show_work`: its own account, not
+ * verification. The node vouches only for `head_sha`, `stale` and `checks`.
+ */
+export interface ShownWork {
+  id: string
+  channel: string
+  session_id: string | null
+  lane: string | null
+  review_id: string | null
+  /** The commit the workspace was at when the work was shown. */
+  head_sha: string
+  title: string
+  /** An account only, the agent's own page, or plain files under a listing. */
+  format: 'markdown' | 'html' | 'files'
+  markdown: string
+  document_id: string | null
+  document_slug: string | null
+  document_hash: string | null
+  files: { path: string; size_bytes: number }[]
+  created_ms: number
+  /** On a review: the candidate moved past `head_sha`, or the stored files changed. */
+  stale: boolean
+  stale_reason: string | null
+  /** The required checks the node ran on `head_sha`. */
+  checks: { command: string | null; outcome: string; source_outcome: string | null }[]
 }
 
 /** What an approval shows on the forge. The review's title and body are the
