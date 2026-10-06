@@ -1,5 +1,5 @@
 <script lang="ts">
-  import Approval from './routes/Approval.svelte'
+  import Review from './routes/Review.svelte'
   import Doc from './routes/Doc.svelte'
   import DocPreview from './routes/DocPreview.svelte'
   import Docs from './routes/Docs.svelte'
@@ -210,7 +210,7 @@
       <div class="banner ok">Hub reconnected <b>· {store.reconnected} queued update{store.reconnected === 1 ? '' : 's'} handed to the hub</b></div>
     {/if}
     {#if reviewId}
-      <Approval id={reviewId} />
+      <Review id={reviewId} />
     {:else if promotionId}
       <Promotion id={promotionId} />
     {:else if sessionId}
