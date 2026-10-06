@@ -205,11 +205,16 @@ async fn submit(
     ctx: &CallContext,
     args: &Value,
 ) -> Result<Value, String> {
-    let mut session = store
-        .get_session(ctx.row())
-        .map_err(|e| e.to_string())?
-        .ok_or("this session is gone")?;
-    let external = ctx.is_external();
+    let session = match ctx.session_id() {
+        Some(id) => Some(
+            store
+                .get_session(id)
+                .map_err(|e| e.to_string())?
+                .ok_or("this session is gone")?,
+        ),
+        None => None,
+    };
+    let external = session.is_none();
     let named = args.get("worktree").and_then(Value::as_str);
     let (worktree, branch) = match (external, named) {
         (true, Some(path)) => {
@@ -223,9 +228,6 @@ async fn submit(
             let at = review::locate_worktree(path, &roots)
                 .await
                 .map_err(|e| e.to_string())?;
-            // A review session reads the diff in its own worktree of the same
-            // repository.
-            session.repo_path = at.repo;
             (at.worktree, at.branch)
         }
         (true, None) => {
@@ -239,15 +241,20 @@ async fn submit(
                 "worktree is for a harness you run yourself; this session reviews its own".into(),
             )
         }
-        (false, None) => (
-            manager
-                .snapshot_workspace(ctx.row())
-                .await
-                .map_err(|e| e.to_string())?
-                .to_string_lossy()
-                .into_owned(),
-            session.branch.clone(),
-        ),
+        (false, None) => {
+            let session = session
+                .as_ref()
+                .expect("a caller that is not external has a session");
+            (
+                manager
+                    .snapshot_workspace(&session.id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .into_owned(),
+                session.branch.clone(),
+            )
+        }
     };
 
     let title = str_arg(args, "title")?;
@@ -327,9 +334,10 @@ async fn submit(
             limits.max_diff_lines,
             limits.max_files
         );
-        manager.record_event(
-            ctx.row(),
+        manager.record_for(
+            ctx,
             ek::REVIEW_REJECTED,
+            None,
             json!({ "reason": reason, "lines": lines, "files": capture.files.len() }),
         );
         return Err(review::ReviewError::Rejected(reason).to_string());
@@ -391,7 +399,7 @@ async fn submit(
         head_sha: capture.head_sha.clone(),
         tree_sha: Some(snapshot.tree_sha.clone()),
         channel: ctx.channel.clone(),
-        owner_session_id: Some(ctx.row().to_string()),
+        owner_session_id: ctx.session_id().map(str::to_string),
         source_kind: "git".into(),
         captured_ms: now_ms(),
         capture_json: json!({
@@ -437,7 +445,7 @@ async fn submit(
         run_checks(
             store,
             manager,
-            ctx,
+            ctx.session_id().ok_or("checks run for a session")?,
             &candidate,
             &snapshot.root,
             args.get("rerun_checks")
@@ -453,8 +461,8 @@ async fn submit(
     // actually checked against, read once here and pinned to the revision —
     // never the (mutable) work item re-read at display time.
     let requirements = session
-        .work_item_id
         .as_ref()
+        .and_then(|s| s.work_item_id.as_ref())
         .and_then(|work_item_id| store.work_get(work_item_id).ok().flatten());
     let requirements_title = requirements.as_ref().map(|w| w.title.clone());
     let requirements_body = requirements.as_ref().map(|w| w.body.clone());
@@ -475,7 +483,7 @@ async fn submit(
             files: files.clone(),
             head_sha: capture.head_sha.clone(),
             context_json: serde_json::to_string(&capture.contexts).unwrap_or_else(|_| "[]".into()),
-            requirements_work_item_id: session.work_item_id.clone(),
+            requirements_work_item_id: session.as_ref().and_then(|s| s.work_item_id.clone()),
             requirements_title,
             requirements_body,
             requirements_hash,
@@ -500,7 +508,7 @@ async fn submit(
             ));
         }
         manager.publish_queue().await;
-        let reviewer = spawn_review_session(store, manager, ctx, id, &session).await;
+        let reviewer = spawn_review_session(store, manager, ctx, id, session.as_ref()).await;
         return Ok(json!({
             "review_id": id,
             "state": "new",
@@ -518,8 +526,8 @@ async fn submit(
     let id = uuid::Uuid::now_v7().to_string();
     let row = ReviewRow {
         id: id.clone(),
-        session_id: Some(ctx.row().to_string()),
-        node_id: session.node_id.clone(),
+        session_id: ctx.session_id().map(str::to_string),
+        node_id: ctx.node_id.clone(),
         channel: ctx.channel.clone(),
         kind: if provider == "gitlab" {
             "mr".into()
@@ -562,7 +570,7 @@ async fn submit(
         files: row.files.clone(),
         head_sha: row.head_sha.clone(),
         context_json: serde_json::to_string(&capture.contexts).unwrap_or_else(|_| "[]".into()),
-        requirements_work_item_id: session.work_item_id.clone(),
+        requirements_work_item_id: session.as_ref().and_then(|s| s.work_item_id.clone()),
         requirements_title,
         requirements_body,
         requirements_hash,
@@ -573,7 +581,7 @@ async fn submit(
         .insert_review_with_revision(&row, &revision)
         .map_err(|error| error.to_string())?;
     manager.publish_queue().await;
-    let reviewer = spawn_review_session(store, manager, ctx, &id, &session).await;
+    let reviewer = spawn_review_session(store, manager, ctx, &id, session.as_ref()).await;
 
     Ok(json!({
         "review_id": id,
@@ -703,8 +711,8 @@ async fn forge_intent(
 }
 
 /// Submit a standalone report without touching a worktree, Git, a provider, or
-/// a candidate. The calling session and its channel are checked again here so a
-/// detached external attachment cannot name another session's report scope.
+/// a candidate. A calling session and its channel are checked again here so it
+/// cannot name another session's report scope.
 async fn submit_report(
     store: &Arc<Store>,
     manager: &Manager,
@@ -763,7 +771,7 @@ async fn submit_report(
     let now = now_ms();
     let report = ReviewRow {
         id: id.clone(),
-        session_id: Some(ctx.row().to_string()),
+        session_id: ctx.session_id().map(str::to_string),
         node_id: ctx.node_id.clone(),
         channel: ctx.channel.clone(),
         kind: crate::store::reports::KIND.into(),
@@ -772,7 +780,8 @@ async fn submit_report(
         edited_title: None,
         edited_body: None,
         provider: "none".into(),
-        target: json!({ "kind": "narrative_report", "session_id": ctx.row() }).to_string(),
+        target: json!({ "kind": "narrative_report", "session_id": ctx.session_id(), "lane": ctx.lane() })
+            .to_string(),
         diff: String::new(),
         files: "[]".into(),
         head_sha: content_hash,
@@ -803,12 +812,13 @@ async fn submit_report(
         "message": "Submitted for operator acknowledgement. This standalone report has no Git, code-review, or forge-publication path.",
     }))
 }
-/// Whose review this is. An attachment ends when it goes idle and the next
-/// call attaches a new one, so a review a harness the operator runs submitted
-/// belongs to the channel's attachments rather than to one of them.
+/// Whose review this is. A session owns what it submitted. A harness the
+/// operator runs themselves has no session, so what such a harness submitted
+/// belongs to the channel's external callers: no session, or one of the
+/// sessions those harnesses attached as before calls went session-less.
 fn owns(store: &Store, ctx: &CallContext, r: &ReviewRow) -> bool {
-    if r.session_id.as_deref() == Some(ctx.row()) {
-        return true;
+    if let Some(id) = ctx.session_id() {
+        return r.session_id.as_deref() == Some(id);
     }
     let external = |id: &str| {
         store
@@ -817,7 +827,7 @@ fn owns(store: &Store, ctx: &CallContext, r: &ReviewRow) -> bool {
             .flatten()
             .is_some_and(|s| s.harness_id == crate::session::external::HARNESS_ID)
     };
-    r.channel == ctx.channel && ctx.is_external() && r.session_id.as_deref().is_none_or(external)
+    r.channel == ctx.channel && r.session_id.as_deref().is_none_or(external)
 }
 
 /// The session that asked for these checks, as the authority on whether they
@@ -852,15 +862,15 @@ impl review::checks::Cancel for SessionStillWants {
 async fn run_checks(
     store: &Arc<Store>,
     manager: &Manager,
-    ctx: &CallContext,
+    session_id: &str,
     candidate: &CandidateRow,
     snapshot: &std::path::Path,
     force_rerun: bool,
 ) -> Result<review::checks::CheckReport, String> {
     let commands = review::checks::candidate_environment(store, manager.cfg(), candidate)?.checks;
-    manager.set_checking(ctx.row(), true);
+    manager.set_checking(session_id, true);
     manager.record_event(
-        ctx.row(),
+        session_id,
         ek::CHECK_STARTED,
         json!({
             "candidate_id": candidate.id,
@@ -878,22 +888,22 @@ async fn run_checks(
         force_rerun,
         &SessionStillWants {
             store: store.clone(),
-            session_id: ctx.row().to_string(),
+            session_id: session_id.to_string(),
         },
     )
     .await;
-    manager.set_checking(ctx.row(), false);
+    manager.set_checking(session_id, false);
     let report = report?;
     if let Some(prepared) = &report.prepared {
         manager.record_event(
-            ctx.row(),
+            session_id,
             ek::CHECK_PREPARED,
             json!({ "candidate_id": candidate.id, "ok": prepared.ok, "ms": prepared.ms }),
         );
     }
     for result in &report.results {
         manager.record_event(
-            ctx.row(),
+            session_id,
             ek::CHECK_RESULT,
             json!({
                 "candidate_id": candidate.id,
@@ -913,7 +923,7 @@ async fn run_checks(
     // than opening a review on evidence that was never finished.
     if let Some(reason) = &report.cancelled {
         manager.record_event(
-            ctx.row(),
+            session_id,
             ek::CHECK_CANCELLED,
             json!({
                 "candidate_id": candidate.id,
@@ -952,7 +962,7 @@ async fn run_checks(
     if !unrunnable.is_empty() {
         for result in &unrunnable {
             manager.record_event(
-                ctx.row(),
+                session_id,
                 ek::CHECK_NOT_RUNNABLE,
                 json!({
                     "candidate_id": candidate.id,
@@ -986,7 +996,7 @@ async fn run_checks(
             failed.tail
         );
         manager.record_event(
-            ctx.row(),
+            session_id,
             ek::REVIEW_REJECTED,
             json!({
                 "candidate_id": candidate.id,
@@ -1034,8 +1044,11 @@ async fn spawn_review_session(
     manager: &Manager,
     ctx: &CallContext,
     review_id: &str,
-    implementing: &crate::store::SessionRow,
+    implementing: Option<&crate::store::SessionRow>,
 ) -> Value {
+    let Some(implementing) = implementing else {
+        return json!({ "state": "none", "reason": "a review session reads the submitting session's workspace; a harness you run yourself has none" });
+    };
     let bindings = manager.bindings(&ctx.channel);
     let Some(model) = bindings["phases"]["review"]["model"]
         .as_str()
@@ -1093,8 +1106,11 @@ async fn verdict(
     ctx: &CallContext,
     args: &Value,
 ) -> Result<Value, String> {
+    let session_id = ctx
+        .session_id()
+        .ok_or("a verdict is given by a review session")?;
     let session = store
-        .get_session(ctx.row())
+        .get_session(session_id)
         .map_err(|e| e.to_string())?
         .ok_or("this session is gone")?;
     if session.phase != "review" {
@@ -1115,7 +1131,7 @@ async fn verdict(
     let findings = args.get("findings").cloned().unwrap_or_else(|| json!([]));
     let v = json!({
         "verdict": verdict, "summary": summary, "findings": findings,
-        "model": session.model, "session_id": ctx.row(), "at_ms": now_ms(),
+        "model": session.model, "session_id": session_id, "at_ms": now_ms(),
     });
     if !store
         .set_ai_verdict(&review_id, &v.to_string())
@@ -1126,7 +1142,7 @@ async fn verdict(
             .map_err(|e| e.to_string())?
             .map(|review| review.state);
         manager.record_event(
-            ctx.row(),
+            session_id,
             ek::LATE_REFUSED,
             json!({
                 "what": "review_verdict",
@@ -1135,7 +1151,7 @@ async fn verdict(
                 "verdict": verdict,
             }),
         );
-        manager.phase_done(ctx.row()).await;
+        manager.phase_done(session_id).await;
         return Err(match state {
             Some(state) => format!(
                 "this review was already decided ({state}); a verdict now would be about a \
@@ -1145,12 +1161,12 @@ async fn verdict(
         });
     }
     manager.record_event(
-        ctx.row(),
+        session_id,
         ek::REVIEW_VERDICT,
         json!({ "review_id": review_id, "verdict": verdict, "summary": summary }),
     );
     manager.publish_queue().await;
-    manager.phase_done(ctx.row()).await;
+    manager.phase_done(session_id).await;
     Ok(json!({ "review_id": review_id, "recorded": true }))
 }
 

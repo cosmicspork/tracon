@@ -1,8 +1,8 @@
-//! A harness the operator runs themselves, through the operator door: it
-//! attaches one session per client on a channel, is offered the channel's tools minus the
-//! ones needing a worktree, and a call the policy does not name waits on the
-//! same queue as any other — which is the thing that could not happen before
-//! this mode existed.
+//! A harness the operator runs themselves, through the operator door: every
+//! call stands alone, with no session, is offered the channel's tools minus a
+//! review session's verdict, is logged to the channel's external log under
+//! the lane it gives, and a call the policy does not name becomes an approval
+//! on the same queue as any other.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -18,9 +18,7 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 use tracon::config::Config;
-use tracon::session::Manager;
-use tracon::store::Store;
-use tracon::stream::{Bus, Frame};
+use tracon::stream::Frame;
 
 fn enabled() -> Config {
     let mut cfg = Config::default();
@@ -74,35 +72,46 @@ fn ping() -> Value {
     json!({"jsonrpc":"2.0","id":1,"method":"ping"})
 }
 
-/// Every external session on this node, oldest first.
-fn external_rows(h: &Harness) -> Vec<tracon::store::SessionRow> {
-    let mut rows: Vec<_> = h
+/// No call leaves a session behind.
+fn assert_no_sessions(h: &Harness) {
+    let rows: Vec<_> = h
         .store
         .list_sessions(None)
         .unwrap()
         .into_iter()
         .filter(|s| s.harness_id == "external")
         .collect();
-    rows.sort_by_key(|s| s.created_ms);
-    rows
+    assert!(rows.is_empty(), "{rows:?}");
 }
 
-fn row_for(h: &Harness, client: &str) -> tracon::store::SessionRow {
-    external_rows(h)
-        .into_iter()
-        .rev()
-        .find(|s| s.harness_session_id.as_deref() == Some(client))
-        .unwrap_or_else(|| panic!("no session for {client}"))
+/// A call labelled with `lane`, as Claude Code's `headersHelper` sends it.
+async fn mcp_labelled(app: &axum::Router, channel: &str, lane: &str, body: Value) -> Value {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/mcp/external/{channel}"))
+        .header("host", "127.0.0.1:7420")
+        .header("content-type", "application/json")
+        .header("x-tracon-agent", lane)
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
 }
 
-async fn wait_for_state(h: &Harness, id: &str, state: &str) {
-    for _ in 0..100 {
-        if h.store.get_session(id).unwrap().unwrap().state == state {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("{id} never reached {state}");
+/// The channel's external log, oldest first.
+async fn log(h: &Harness, channel: &str) -> Vec<Value> {
+    let (_, v) = call(
+        &h.operator,
+        "GET",
+        &format!("/api/external/{channel}/events"),
+        None,
+    )
+    .await;
+    v["events"].as_array().cloned().unwrap_or_default()
 }
 
 async fn list(app: &axum::Router, channel: &str) -> Vec<String> {
@@ -125,37 +134,6 @@ fn tool_call(name: &str, args: Value) -> Value {
     json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":name,"arguments":args}})
 }
 
-/// The one external session on this node, whatever state it is in.
-fn attached(h: &Harness) -> Option<tracon::store::SessionRow> {
-    h.store
-        .list_sessions(None)
-        .unwrap()
-        .into_iter()
-        .find(|s| s.harness_id == "external")
-}
-
-/// A fresh `Manager` over an existing store, sharing nothing else: what a
-/// restarted node's own startup builds, minus the process it never had.
-async fn manager_over(store: &Arc<Store>) -> Manager {
-    let cfg = Arc::new(enabled());
-    let tools = Arc::new(tracon::mcp::Tools {
-        broker: tracon::broker::Broker::default().shared(),
-        cfg: cfg.clone(),
-        policy: tracon::policy::Policy::shipped_shared(),
-        http: reqwest::Client::new(),
-        session: Default::default(),
-    });
-    Manager::new(
-        store.clone(),
-        Bus::new(),
-        cfg,
-        "n1".into(),
-        tools,
-        Default::default(),
-        Arc::new(tracon::runner::local::LocalBackend),
-    )
-}
-
 #[tokio::test]
 async fn a_node_that_does_not_answer_external_harnesses_says_which_key_turns_it_on() {
     state::isolate();
@@ -169,7 +147,7 @@ async fn a_node_that_does_not_answer_external_harnesses_says_which_key_turns_it_
     assert_eq!(status, StatusCode::FORBIDDEN);
     let message = v["error"]["message"].as_str().unwrap_or_default();
     assert!(message.contains("[external]"), "{message}");
-    assert!(attached(&h).is_none());
+    assert_no_sessions(&h);
 }
 
 #[tokio::test]
@@ -187,38 +165,36 @@ async fn a_channel_this_node_does_not_hold_is_refused_in_words() {
     assert!(message.contains("create or enroll"), "{message}");
 }
 
+/// Connecting and calling leave no session and hand out no id: every request
+/// stands alone.
 #[tokio::test]
-async fn a_channel_gets_one_attachment_however_many_calls_arrive() {
+async fn calls_leave_no_session_and_hand_out_no_id() {
     state::isolate();
     let h = harness_with(enabled()).await;
+    let (status, _, echoed) = mcp_as(
+        &h.operator,
+        "work",
+        None,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(echoed, None);
     for _ in 0..3 {
-        let (status, _) = mcp(
-            &h.operator,
-            "work",
-            json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
-        )
-        .await;
+        let (status, _, echoed) = mcp_as(&h.operator, "work", None, ping()).await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(echoed, None);
     }
-    let rows: Vec<_> = h
-        .store
-        .list_sessions(None)
-        .unwrap()
-        .into_iter()
-        .filter(|s| s.harness_id == "external")
-        .collect();
-    assert_eq!(rows.len(), 1, "{rows:?}");
-    let row = &rows[0];
-    assert_eq!(row.state, "running");
-    assert_eq!(row.channel, "work");
-    // Nothing was started, so nothing is running anywhere but the operator's
-    // own terminal.
-    assert!(row.container_name.is_none());
-    assert!(row.worktree_path.is_none());
+    mcp(
+        &h.operator,
+        "work",
+        tool_call("recall", json!({ "query": "x" })),
+    )
+    .await;
+    assert_no_sessions(&h);
 
     let (_, queue) = call(&h.operator, "GET", "/api/queue", None).await;
-    let running = queue["running"].as_array().unwrap();
-    assert!(running.iter().any(|s| s["id"] == json!(row.id)), "{queue}");
+    assert!(queue["running"].as_array().unwrap().is_empty(), "{queue}");
 
     // It ran against no repository; the picker must not offer an empty path.
     let (_, repos) = call(&h.operator, "GET", "/api/repos/recent", None).await;
@@ -231,7 +207,6 @@ async fn a_channel_gets_one_attachment_however_many_calls_arrive() {
         "{repos}"
     );
 }
-
 #[tokio::test]
 async fn an_attachment_is_offered_the_channels_tools_but_not_a_review_sessions_verdict() {
     state::isolate();
@@ -362,6 +337,7 @@ async fn an_external_harness_puts_its_own_worktree_up_for_review() {
     assert_eq!(target["worktree"], json!(canonical.to_string_lossy()));
     // The operator's toolchain is where its checks run, not a container.
     assert!(r.checks_json.is_none());
+    assert_eq!(r.session_id, None);
 }
 
 #[tokio::test]
@@ -384,38 +360,32 @@ async fn a_worktree_whose_repository_is_outside_the_roots_is_refused() {
     assert!(queue["reviews"].as_array().unwrap().is_empty(), "{queue}");
 }
 
+/// What one external harness submitted belongs to the channel's external
+/// callers: whatever lane asks after it is answered, and its card names the
+/// lane that submitted it.
 #[tokio::test]
-async fn a_review_outlives_the_attachment_that_submitted_it() {
+async fn a_review_belongs_to_the_channels_external_callers() {
     state::isolate();
-    let (root, wt) = repo_with_worktree("outlives");
+    let (root, wt) = repo_with_worktree("owned");
     let h = harness_with(with_roots(&root)).await;
-    let (_, v) = mcp(
+    let v = mcp_labelled(
         &h.operator,
         "work",
+        "repo:feat/x",
         tool_call("submit_review", submit_args(&wt)),
     )
     .await;
-    let (_, out) = outcome(&v);
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
     let review = out["review_id"].as_str().unwrap().to_string();
+    let row = h.store.get_review(&review).unwrap().unwrap();
+    assert_eq!(row.lane.as_deref(), Some("repo:feat/x"));
+    assert_eq!(row.session_id, None);
 
-    let first = attached(&h).unwrap().id;
-    let (_, _) = call(
-        &h.operator,
-        "POST",
-        &format!("/api/sessions/{first}/kill"),
-        None,
-    )
-    .await;
-    for _ in 0..100 {
-        if h.store.get_session(&first).unwrap().unwrap().state == "closed" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
-    let (_, v) = mcp(
+    let v = mcp_labelled(
         &h.operator,
         "work",
+        "repo:other",
         tool_call(
             "review_status",
             json!({ "review_id": review, "wait_secs": 0 }),
@@ -425,11 +395,9 @@ async fn a_review_outlives_the_attachment_that_submitted_it() {
     let (err, out) = outcome(&v);
     assert!(!err, "{out}");
     assert_eq!(out["state"], "new");
-    assert_ne!(attached(&h).unwrap().id, first, "a new attachment asked");
 }
-
 #[tokio::test]
-async fn an_attachment_closes_an_item_by_id_and_stays_attached() {
+async fn an_external_caller_closes_an_item_by_id() {
     state::isolate();
     let h = harness_with(enabled()).await;
     let (status, _) = call(
@@ -456,9 +424,14 @@ async fn an_attachment_closes_an_item_by_id_and_stays_attached() {
     let (err, out) = outcome(&v);
     assert!(!err, "{out}");
     assert_eq!(out["state"], "closed");
-    assert_eq!(attached(&h).unwrap().state, "running");
+    assert!(
+        log(&h, "work")
+            .await
+            .iter()
+            .any(|e| e["kind"] == "work_closed"),
+        "the close is on the channel's external log"
+    );
 }
-
 /// Ask for something the operator decides: the call answers at once with an
 /// approval and runs nothing.
 async fn ask(h: &Harness, name: &str, args: Value) -> String {
@@ -526,8 +499,7 @@ async fn a_call_the_operator_decides_returns_at_once_and_runs_once_allowed() {
     assert_eq!(card.kind.as_deref(), Some("tool"));
     assert!(card.title.starts_with("doc_write"), "{}", card.title);
     assert_eq!(approval(&h, &id, 0).await["state"], "still_waiting");
-    // The attachment goes on working: nothing is waiting on the operator.
-    assert_eq!(attached(&h).unwrap().state, "running");
+    assert_eq!(h.store.get_approval(&id).unwrap().unwrap().session_id, None);
 
     let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
     assert_eq!(status, StatusCode::OK);
@@ -712,10 +684,10 @@ async fn one_wait_covers_a_list_and_returns_when_any_is_decided() {
     );
 }
 
-/// An approval is not a card some connection waits on. A caller that has gone
-/// away loses nothing: the operator can still allow it, and it runs.
+/// An approval runs long after it was asked, so the channel's Stop is checked
+/// again when it runs: allowing it on a stopped channel runs nothing.
 #[tokio::test]
-async fn an_approval_outlives_the_attachment_that_asked() {
+async fn an_approval_does_not_run_on_a_stopped_channel() {
     state::isolate();
     let h = harness_with(enabled()).await;
     let id = ask(
@@ -724,22 +696,24 @@ async fn an_approval_outlives_the_attachment_that_asked() {
         json!({ "slug": "plan-x", "body": "hello" }),
     )
     .await;
-    let session = attached(&h).unwrap().id;
-    let (status, _) = call(
-        &h.operator,
-        "POST",
-        &format!("/api/sessions/{session}/kill"),
-        None,
-    )
-    .await;
+    let (status, _) = call(&h.operator, "POST", "/api/external/work/stop", None).await;
     assert!(status.is_success(), "{status}");
-    wait_for_state(&h, &session, "closed").await;
     let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(settled(&h, &id).await["state"], "succeeded");
-    assert!(h.store.doc_get("work", "plan-x").unwrap().is_some());
+    for _ in 0..100 {
+        let row = h.store.get_approval(&id).unwrap().unwrap();
+        if row.state != "running" && row.state != "pending" {
+            assert_eq!(row.state, "failed", "{row:?}");
+            assert!(
+                row.reason.as_deref().is_some_and(|r| r.contains("stopped")),
+                "{row:?}"
+            );
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(h.store.doc_get("work", "plan-x").unwrap().is_none());
 }
-
 /// A GitHub-shaped forge for one pull request whose head the test can move.
 async fn fake_github(head: Arc<std::sync::Mutex<String>>) -> std::net::SocketAddr {
     let pulls = head.clone();
@@ -851,18 +825,6 @@ async fn an_approved_merge_checks_the_head_again_when_it_runs() {
     assert_eq!(out["result"]["merged"], true, "{out}");
 }
 
-/// The kinds and payloads of an attachment's log.
-async fn log(h: &Harness, id: &str) -> Vec<Value> {
-    let (_, v) = call(
-        &h.operator,
-        "GET",
-        &format!("/api/sessions/{id}/events"),
-        None,
-    )
-    .await;
-    v.as_array().cloned().unwrap_or_default()
-}
-
 /// A call that finishes is not also logged as abandoned.
 #[tokio::test]
 async fn a_finished_call_is_not_logged_as_abandoned() {
@@ -874,8 +836,7 @@ async fn a_finished_call_is_not_logged_as_abandoned() {
         tool_call("recall", json!({ "query": "x" })),
     )
     .await;
-    let session = attached(&h).unwrap().id;
-    let statuses: Vec<Value> = log(&h, &session)
+    let statuses: Vec<Value> = log(&h, "work")
         .await
         .into_iter()
         .filter(|e| e["kind"] == "tool_result")
@@ -884,185 +845,62 @@ async fn a_finished_call_is_not_logged_as_abandoned() {
     assert_eq!(statuses, [json!("ok")]);
 }
 
+/// A channel-wide pause an older node left behind fences exactly like a Stop,
+/// and Start lifts it.
 #[tokio::test]
-async fn killing_an_attachment_ends_it_and_the_next_call_attaches_again() {
+async fn a_legacy_channel_pause_fences_like_a_stop_until_start() {
     state::isolate();
     let h = harness_with(enabled()).await;
-    mcp(
-        &h.operator,
-        "work",
-        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
-    )
-    .await;
-    let first = attached(&h).unwrap().id;
-
-    let (status, _) = call(
-        &h.operator,
-        "POST",
-        &format!("/api/sessions/{first}/kill"),
-        None,
-    )
-    .await;
-    assert!(status.is_success(), "{status}");
-    for _ in 0..100 {
-        let row = h.store.get_session(&first).unwrap().unwrap();
-        if row.state == "closed" {
-            assert_eq!(row.end_reason.as_deref(), Some("killed_user"));
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
-    mcp(
-        &h.operator,
-        "work",
-        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
-    )
-    .await;
-    let rows: Vec<_> = h
-        .store
-        .list_sessions(None)
-        .unwrap()
-        .into_iter()
-        .filter(|s| s.harness_id == "external")
-        .collect();
-    assert_eq!(rows.len(), 2, "a killed attachment is replaced, not reused");
-}
-
-/// A restart drops every in-memory attachment, but not the pause fence
-/// `Loop::pause` wrote to the channel's own bindings: the next call must not
-/// silently resume broker work, and only an explicit operator Resume lifts
-/// the fence and lets a fresh attachment through.
-#[tokio::test]
-async fn a_pause_fence_survives_a_restart_and_only_resume_clears_it() {
-    state::isolate();
-    let h = harness_with(enabled()).await;
-    mcp(
-        &h.operator,
-        "work",
-        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
-    )
-    .await;
-    let id = attached(&h).unwrap().id;
-
-    let (status, _) = call(
-        &h.operator,
-        "POST",
-        &format!("/api/sessions/{id}/pause"),
-        Some(json!({ "reason": "operator review" })),
-    )
-    .await;
-    assert!(status.is_success(), "{status}");
-    wait_for_state(&h, &id, "paused").await;
-    // The fence is the paused row, not a flag that would pause the channel's
-    // other clients too.
-    assert_ne!(h.manager.bindings("work")["external_paused"], true);
-
-    // A fresh process over the same store: no live attachment, no live
-    // supervisor, only what the pause left durable.
-    let restarted = manager_over(&h.store).await;
-    let err = restarted.attach_external("work", None).await.unwrap_err();
-    assert!(format!("{err}").contains("paused"), "{err}");
-    // Another client on the channel was never paused.
-    restarted
-        .attach_external("work", Some("other"))
-        .await
+    h.store
+        .channel_put("work", &[], r#"{"external_paused":true}"#)
         .unwrap();
+    h.store.node_channel_add("n1", "work").unwrap();
+    let (status, _) = mcp(&h.operator, "work", ping()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (_, view) = call(&h.operator, "GET", "/api/external", None).await;
+    assert!(
+        view["stopped"].as_array().unwrap().contains(&json!("work")),
+        "{view}"
+    );
 
-    // The operator resumes; the fence lifts, the stale row closes honestly,
-    // and the next call attaches fresh.
-    restarted.resume(&id, "operator back".into()).await.unwrap();
-    let stale = h.store.get_session(&id).unwrap().unwrap();
-    assert_eq!(stale.state, "closed");
-
-    let new_id = restarted.attach_external("work", None).await.unwrap();
-    assert_ne!(new_id, id);
-    let new_row = h.store.get_session(&new_id).unwrap().unwrap();
-    assert_eq!(new_row.state, "running");
+    let (status, _) = call(&h.operator, "POST", "/api/external/work/start", None).await;
+    assert!(status.is_success(), "{status}");
+    assert!(h.manager.bindings("work")["external_paused"].is_null());
+    let (status, _) = mcp(&h.operator, "work", ping()).await;
+    assert_eq!(status, StatusCode::OK);
 }
-
-/// Stop is reachable without a live attachment, ends one that is there, and
-/// only the operator's explicit clear lets the next call through again.
+/// Stop refuses every call on the channel, whatever lane, until Start.
 #[tokio::test]
-async fn a_channel_stop_needs_no_attachment_and_only_clear_lifts_it() {
+async fn a_channel_stop_refuses_every_call_until_start() {
     state::isolate();
     let h = harness_with(enabled()).await;
-
-    // Nothing attached yet: the stop still lands, and the next call is refused.
     let (status, _) = call(&h.operator, "POST", "/api/external/work/stop", None).await;
     assert!(status.is_success(), "{status}");
-    let (status, v) = mcp(
-        &h.operator,
-        "work",
-        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
-    )
-    .await;
+    let (status, v) = mcp(&h.operator, "work", ping()).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let message = v["error"]["message"].as_str().unwrap_or_default();
-    assert!(message.contains("tracon external clear"), "{message}");
-    assert!(attached(&h).is_none());
+    assert!(message.contains("tracon external start"), "{message}");
     let (_, view) = call(&h.operator, "GET", "/api/external", None).await;
     assert_eq!(view["stopped"], json!(["work"]), "{view}");
+    // Another channel is untouched.
+    let (status, _) = mcp(&h.operator, "personal", ping()).await;
+    assert_eq!(status, StatusCode::OK);
 
-    // Cleared: the next call attaches.
-    let (status, _) = call(&h.operator, "DELETE", "/api/external/work/stop", None).await;
+    let (status, _) = call(&h.operator, "POST", "/api/external/work/start", None).await;
     assert!(status.is_success(), "{status}");
     assert!(h.manager.bindings("work")["external_stopped"].is_null());
-    let (status, _) = mcp(
-        &h.operator,
-        "work",
-        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
-    )
-    .await;
+    let (status, _) = mcp(&h.operator, "work", ping()).await;
     assert!(status.is_success(), "{status}");
-    let live = attached(&h).unwrap().id;
     let (_, view) = call(&h.operator, "GET", "/api/external", None).await;
     assert_eq!(view["stopped"], json!([]), "{view}");
 
-    // Stopped while attached: the attachment ends as the operator's doing.
-    let (status, _) = call(&h.operator, "POST", "/api/external/work/stop", None).await;
-    assert!(status.is_success(), "{status}");
-    let row = h.store.get_session(&live).unwrap().unwrap();
-    assert_eq!(row.state, "closed");
-    assert_eq!(row.end_reason.as_deref(), Some("killed_user"));
-    let (status, _) = mcp(
-        &h.operator,
-        "work",
-        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-}
-
-/// The session page's Stop sets the same fence the channel's clear lifts.
-#[tokio::test]
-async fn a_session_stop_is_cleared_from_the_channel() {
-    state::isolate();
-    let h = harness_with(enabled()).await;
-    mcp(
-        &h.operator,
-        "work",
-        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
-    )
-    .await;
-    let id = attached(&h).unwrap().id;
-    let (status, _) = call(
-        &h.operator,
-        "POST",
-        &format!("/api/sessions/{id}/stop"),
-        None,
-    )
-    .await;
-    assert!(status.is_success(), "{status}");
-    assert_eq!(h.manager.bindings("work")["external_stopped"], true);
-    assert!(h.manager.attach_external("work", None).await.is_err());
-
+    // The older route still starts it.
+    call(&h.operator, "POST", "/api/external/work/stop", None).await;
     let (status, _) = call(&h.operator, "DELETE", "/api/external/work/stop", None).await;
     assert!(status.is_success(), "{status}");
-    let next = h.manager.attach_external("work", None).await.unwrap();
-    assert_ne!(next, id);
+    let (status, _) = mcp(&h.operator, "work", ping()).await;
+    assert!(status.is_success(), "{status}");
 }
-
 #[tokio::test]
 async fn stopping_a_channel_this_node_does_not_hold_is_refused() {
     state::isolate();
@@ -1072,52 +910,7 @@ async fn stopping_a_channel_this_node_does_not_hold_is_refused() {
 }
 
 #[tokio::test]
-async fn an_attachment_that_goes_quiet_detaches() {
-    state::isolate();
-    let mut cfg = enabled();
-    // Clamped to a minute inside; the point is that the row closes with a
-    // reason that reads as nothing having gone wrong.
-    cfg.external.idle_timeout_secs = 1;
-    let h = harness_with(cfg).await;
-    mcp(
-        &h.operator,
-        "work",
-        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
-    )
-    .await;
-    let row = attached(&h).unwrap();
-    assert_eq!(row.state, "running");
-    assert_eq!(
-        tracon::session::state::EndReason::Detached.as_str(),
-        "detached"
-    );
-}
-
-#[tokio::test]
-async fn a_prompt_to_an_attachment_is_refused_in_words() {
-    state::isolate();
-    let h = harness_with(enabled()).await;
-    mcp(
-        &h.operator,
-        "work",
-        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
-    )
-    .await;
-    let id = attached(&h).unwrap().id;
-    let (status, v) = call(
-        &h.operator,
-        "POST",
-        &format!("/api/sessions/{id}/prompt"),
-        Some(json!({ "text": "do the thing" })),
-    )
-    .await;
-    assert!(!status.is_success(), "{status}");
-    let message = v["error"]["message"].as_str().unwrap_or_default();
-    assert!(message.contains("terminal"), "{message}");
-}
-
-#[tokio::test]
-async fn what_the_node_was_asked_to_do_lands_in_the_session_log() {
+async fn what_the_node_was_asked_to_do_lands_in_the_channels_log() {
     state::isolate();
     let h = harness_with(enabled()).await;
     mcp(
@@ -1126,65 +919,34 @@ async fn what_the_node_was_asked_to_do_lands_in_the_session_log() {
         tool_call("recall", json!({ "query": "x" })),
     )
     .await;
-    let id = attached(&h).unwrap().id;
-    let (_, v) = call(
-        &h.operator,
-        "GET",
-        &format!("/api/sessions/{id}/events"),
-        None,
-    )
-    .await;
-    let empty = vec![];
-    let kinds: Vec<&str> = v
-        .as_array()
-        .unwrap_or(&empty)
-        .iter()
-        .filter_map(|e| e["kind"].as_str())
-        .collect();
-    assert!(kinds.contains(&"tool_call"), "{kinds:?}");
-    assert!(kinds.contains(&"tool_result"), "{kinds:?}");
+    let events = log(&h, "work").await;
+    let kinds: Vec<&str> = events.iter().filter_map(|e| e["kind"].as_str()).collect();
+    assert_eq!(kinds, ["tool_call", "tool_result"], "{events:?}");
+    assert!(log(&h, "personal").await.is_empty());
 }
-
-/// A harness that labels its calls is shown by its label: on its session, in
-/// the attachment list, and on each call it makes.
+/// A harness that labels its calls is shown by its label: on each call it
+/// makes, and as a lane in the external view.
 #[tokio::test]
 async fn a_labelled_harness_is_shown_by_its_lane() {
     state::isolate();
     let h = harness_with(enabled()).await;
-    let req = Request::builder()
-        .method("POST")
-        .uri("/mcp/external/work")
-        .header("host", "127.0.0.1:7420")
-        .header("content-type", "application/json")
-        .header("mcp-session-id", "agent-a")
-        .header("x-tracon-agent", "  tracon:feat/x#4242  ")
-        .body(Body::from(
-            tool_call("recall", json!({ "query": "x" })).to_string(),
-        ))
-        .unwrap();
-    let res = h.operator.clone().oneshot(req).await.unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-
-    let row = row_for(&h, "agent-a");
-    assert_eq!(row.harness_agent.as_deref(), Some("tracon:feat/x#4242"));
-    let (_, external) = call(&h.operator, "GET", "/api/external", None).await;
-    assert_eq!(
-        external["attachments"][0]["lane"], "tracon:feat/x#4242",
-        "{external}"
-    );
-    let (_, events) = call(
+    mcp_labelled(
         &h.operator,
-        "GET",
-        &format!("/api/sessions/{}/events", row.id),
-        None,
+        "work",
+        "  tracon:feat/x  ",
+        tool_call("recall", json!({ "query": "x" })),
     )
     .await;
+    let events = log(&h, "work").await;
     assert!(
-        events.to_string().contains("tracon:feat/x#4242"),
-        "{events}"
+        events.iter().all(|e| e["lane"] == "tracon:feat/x"),
+        "{events:?}"
     );
+    let (_, external) = call(&h.operator, "GET", "/api/external", None).await;
+    assert_eq!(external["lanes"][0]["lane"], "tracon:feat/x", "{external}");
+    assert_eq!(external["lanes"][0]["channel"], "work", "{external}");
+    assert_eq!(external["lanes"][0]["calls"], 1, "{external}");
 }
-
 /// The card a labelled harness raises says which lane asked for it.
 #[tokio::test]
 async fn an_approval_carries_the_lane_that_asked() {
@@ -1225,30 +987,36 @@ async fn the_door_answers_one_post_per_message_and_opens_no_stream() {
     assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
+/// Lanes begin at a tool call: connecting and listing tools leave no trace.
 #[tokio::test]
-async fn the_external_view_says_what_is_on_and_what_is_attached() {
+async fn the_external_view_lists_only_lanes_that_called_a_tool() {
     state::isolate();
     let h = harness_with(enabled()).await;
     let (_, before) = call(&h.operator, "GET", "/api/external", None).await;
     assert_eq!(before["enabled"], json!(true));
-    assert!(before["attachments"].as_array().unwrap().is_empty());
+    assert!(before["lanes"].as_array().unwrap().is_empty());
     assert!(before["channels"]
         .as_array()
         .unwrap()
         .contains(&json!("work")));
 
+    mcp(&h.operator, "work", ping()).await;
+    list(&h.operator, "work").await;
+    let (_, idle) = call(&h.operator, "GET", "/api/external", None).await;
+    assert!(idle["lanes"].as_array().unwrap().is_empty(), "{idle}");
+
     mcp(
         &h.operator,
         "work",
-        json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
+        tool_call("recall", json!({ "query": "x" })),
     )
     .await;
     let (_, after) = call(&h.operator, "GET", "/api/external", None).await;
-    let attachments = after["attachments"].as_array().unwrap();
-    assert_eq!(attachments.len(), 1, "{after}");
-    assert_eq!(attachments[0]["channel"], json!("work"));
+    let lanes = after["lanes"].as_array().unwrap();
+    assert_eq!(lanes.len(), 1, "{after}");
+    assert_eq!(lanes[0]["channel"], json!("work"));
+    assert_eq!(lanes[0]["lane"], Value::Null, "an unlabelled caller");
 }
-
 /// Belt and braces on the surface the mode adds: an attachment is offered the
 /// forge and tracker verbs only when the channel has the credential for them.
 #[tokio::test]
@@ -1287,19 +1055,17 @@ async fn a_card_reaches_an_interface_that_is_already_open() {
     });
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let mut saw_session = false;
     let queued = loop {
         let frame = tokio::time::timeout_at(deadline, frames.recv())
             .await
             .expect("the queue frame never arrived")
             .expect("the bus closed");
-        match frame {
-            Frame::Session(_) => saw_session = true,
-            Frame::Queue { waiting } if !waiting.is_empty() => break waiting,
-            _ => {}
+        if let Frame::Queue { waiting } = frame {
+            if !waiting.is_empty() {
+                break waiting;
+            }
         }
     };
-    assert!(saw_session, "the session frame is published too");
     assert!(
         queued[0].title.starts_with("doc_write"),
         "{}",
@@ -1307,82 +1073,16 @@ async fn a_card_reaches_an_interface_that_is_already_open() {
     );
 }
 
-/// `initialize` names the client; each client that echoes its name is its own
-/// session, and a client that echoes none shares the channel's one.
+/// A client that still sends a session id from an older node is answered as
+/// any other: the id names nothing here.
 #[tokio::test]
-async fn each_client_that_echoes_its_id_gets_its_own_session() {
+async fn a_session_id_a_client_still_sends_is_ignored() {
     state::isolate();
     let h = harness_with(enabled()).await;
-    let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize"});
-    let (status, _, a) = mcp_as(&h.operator, "work", None, init.clone()).await;
+    let (status, _, echoed) = mcp_as(&h.operator, "work", Some("has space"), ping()).await;
     assert_eq!(status, StatusCode::OK);
-    let (_, _, b) = mcp_as(&h.operator, "work", None, init).await;
-    let (a, b) = (a.expect("initialize names the client"), b.unwrap());
-    assert_ne!(a, b);
-
-    for _ in 0..3 {
-        let (_, _, echoed) = mcp_as(&h.operator, "work", Some(&a), ping()).await;
-        assert_eq!(echoed.as_deref(), Some(a.as_str()));
-        mcp_as(&h.operator, "work", Some(&b), ping()).await;
-    }
-    assert_eq!(external_rows(&h).len(), 2);
-    assert_ne!(row_for(&h, &a).id, row_for(&h, &b).id);
-
-    // Header-less calls keep today's behaviour: one shared attachment.
-    mcp(&h.operator, "work", ping()).await;
-    mcp(&h.operator, "work", ping()).await;
-    assert_eq!(external_rows(&h).len(), 3);
-
-    let (_, v) = call(&h.operator, "GET", "/api/external", None).await;
-    let clients: Vec<Value> = v["attachments"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|a| a["client"].clone())
-        .collect();
-    assert_eq!(clients.len(), 3, "{v}");
-    assert!(
-        clients.contains(&json!(a))
-            && clients.contains(&json!(b))
-            && clients.contains(&Value::Null),
-        "{v}"
-    );
-}
-
-#[tokio::test]
-async fn a_malformed_session_id_is_refused() {
-    state::isolate();
-    let h = harness_with(enabled()).await;
-    let (status, _, _) = mcp_as(&h.operator, "work", Some("has space"), ping()).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(external_rows(&h).is_empty());
-}
-
-/// Pausing one agent fences only that one; the other keeps working, and a
-/// DELETE from one ends only its own session.
-#[tokio::test]
-async fn one_clients_pause_and_exit_leave_the_other_alone() {
-    state::isolate();
-    let h = harness_with(enabled()).await;
-    mcp_as(&h.operator, "work", Some("agent-a"), ping()).await;
-    mcp_as(&h.operator, "work", Some("agent-b"), ping()).await;
-    let a = row_for(&h, "agent-a").id;
-    let b = row_for(&h, "agent-b").id;
-
-    let (status, _) = call(
-        &h.operator,
-        "POST",
-        &format!("/api/sessions/{a}/pause"),
-        Some(json!({ "reason": "look at a" })),
-    )
-    .await;
-    assert!(status.is_success(), "{status}");
-    wait_for_state(&h, &a, "paused").await;
-    let (status, _, _) = mcp_as(&h.operator, "work", Some("agent-a"), ping()).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    let (status, _, _) = mcp_as(&h.operator, "work", Some("agent-b"), ping()).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(h.store.get_session(&b).unwrap().unwrap().state, "running");
+    assert_eq!(echoed, None);
+    assert_no_sessions(&h);
 
     let req = Request::builder()
         .method("DELETE")
@@ -1393,42 +1093,7 @@ async fn one_clients_pause_and_exit_leave_the_other_alone() {
         .unwrap();
     let res = h.operator.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
-    wait_for_state(&h, &b, "closed").await;
-    assert_eq!(h.store.get_session(&a).unwrap().unwrap().state, "paused");
 }
-
-/// The channel's Stop is still the kill switch for every client on it.
-#[tokio::test]
-async fn a_channel_stop_ends_every_client() {
-    state::isolate();
-    let h = harness_with(enabled()).await;
-    mcp_as(&h.operator, "work", Some("agent-a"), ping()).await;
-    mcp_as(&h.operator, "work", Some("agent-b"), ping()).await;
-    let (status, _) = call(&h.operator, "POST", "/api/external/work/stop", None).await;
-    assert!(status.is_success(), "{status}");
-    for row in external_rows(&h) {
-        wait_for_state(&h, &row.id, "closed").await;
-    }
-    let (status, _, _) = mcp_as(&h.operator, "work", Some("agent-c"), ping()).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-}
-
-/// An id the node no longer holds is not an error: the client attaches again
-/// under it, so a restart or idle detach needs nothing from the client.
-#[tokio::test]
-async fn an_unknown_id_attaches_again_under_the_same_name() {
-    state::isolate();
-    let h = harness_with(enabled()).await;
-    mcp_as(&h.operator, "work", Some("agent-a"), ping()).await;
-    let first = row_for(&h, "agent-a").id;
-    h.manager.kill(&first).await.unwrap();
-    wait_for_state(&h, &first, "closed").await;
-    let (status, _, _) = mcp_as(&h.operator, "work", Some("agent-a"), ping()).await;
-    assert_eq!(status, StatusCode::OK);
-    let second = row_for(&h, "agent-a").id;
-    assert_ne!(first, second);
-}
-
 /// The probe a newer client sends before `initialize` is refused as an
 /// unknown method, so the client falls back, and it attaches nothing: no
 /// session row, and no id handed out.
@@ -1446,36 +1111,25 @@ async fn a_discovery_probe_attaches_nothing() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["error"]["code"], -32601, "{body}");
     assert_eq!(echoed, None);
-    assert!(external_rows(&h).is_empty());
+    assert_no_sessions(&h);
 }
 
-/// A named client's pause outlives the node: after a restart its id finds the
-/// paused row, and nothing else on the channel is held back.
+/// A harness with no session has no session scope to remember into; it says
+/// which scope it has.
 #[tokio::test]
-async fn a_named_clients_pause_survives_a_restart() {
+async fn an_external_caller_cannot_retain_into_a_session_scope() {
     state::isolate();
     let h = harness_with(enabled()).await;
-    mcp_as(&h.operator, "work", Some("agent-a"), ping()).await;
-    let a = row_for(&h, "agent-a").id;
-    let (status, _) = call(
+    let (_, v) = mcp(
         &h.operator,
-        "POST",
-        &format!("/api/sessions/{a}/pause"),
-        Some(json!({ "reason": "hold" })),
+        "work",
+        tool_call(
+            "retain",
+            json!({ "kind": "fact", "body": "x", "scope": "session" }),
+        ),
     )
     .await;
-    assert!(status.is_success(), "{status}");
-    wait_for_state(&h, &a, "paused").await;
-
-    let restarted = manager_over(&h.store).await;
-    let err = restarted
-        .attach_external("work", Some("agent-a"))
-        .await
-        .unwrap_err();
-    assert!(format!("{err}").contains("paused"), "{err}");
-    restarted.attach_external("work", None).await.unwrap();
-    restarted
-        .attach_external("work", Some("agent-b"))
-        .await
-        .unwrap();
+    let (err, out) = outcome(&v);
+    assert!(err, "{out}");
+    assert!(out.to_string().contains("global"), "{out}");
 }

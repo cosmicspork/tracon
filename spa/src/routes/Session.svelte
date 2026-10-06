@@ -198,7 +198,7 @@
     controlling = true
     error = null
     try {
-      await api.externalClear(session.channel)
+      await api.externalStart(session.channel)
       await store.refetch()
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)
@@ -389,8 +389,8 @@
 
   {#if session.harness_id === 'external' && isTerminal(session.state) && channelStopped}
     <div class="banner dim">
-      broker access stopped on {session.channel} <b>· every external agent on it is refused until allowed again</b>
-      <button class="lnk" onclick={allowExternal} disabled={controlling}>Allow broker access again</button>
+      broker access stopped on {session.channel} <b>· every external agent on it is refused until started again</b>
+      <button class="lnk" onclick={allowExternal} disabled={controlling}>Start broker access</button>
     </div>
   {/if}
   {#if session.harness_id === 'external' && session.state !== 'paused' && !isTerminal(session.state)}

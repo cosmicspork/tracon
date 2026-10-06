@@ -1256,7 +1256,7 @@ export interface NodeConfig {
   gateway: { allow_hosts: string[] }
   publish: { gh: string; glab: string; git: string }
   boundary: { podman: string }
-  external: { enabled: boolean; idle_timeout_secs: number }
+  external: { enabled: boolean }
   launch: { plugins: string[] }
   providers: Record<string, ProviderConfig>
   readonly: { hub_url: string | null; runtime: string; config_path: string }

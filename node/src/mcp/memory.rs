@@ -92,7 +92,7 @@ pub async fn call(
                     &ctx.channel,
                     query,
                     project_id.as_deref(),
-                    Some(ctx.row()),
+                    ctx.session_id(),
                     kinds.as_deref(),
                     limit,
                     &near.hits,
@@ -118,6 +118,12 @@ pub async fn call(
             let scope_ref = match scope {
                 "project" => match &project_id {
                     Some(p) => Some(p.clone()),
+                    None if ctx.is_external() => {
+                        return Err(
+                            "a harness you run yourself has no project identity; use scope global"
+                                .into(),
+                        )
+                    }
                     None => {
                         return Err(
                             "this session has no project identity; use scope session or global"
@@ -125,7 +131,15 @@ pub async fn call(
                         )
                     }
                 },
-                "session" => Some(ctx.row().to_string()),
+                "session" => match ctx.session_id() {
+                    Some(id) => Some(id.to_string()),
+                    None => {
+                        return Err(
+                            "a harness you run yourself has no session scope; use global (this channel) or project"
+                                .into(),
+                        )
+                    }
+                },
                 "global" => None,
                 other => return Err(format!("unknown scope {other:?}")),
             };
@@ -150,7 +164,7 @@ pub async fn call(
                 &id,
                 json!({
                     "channel": ctx.channel, "scope": scope, "scope_ref": scope_ref, "kind": kind, "body": body,
-                    "source_session": ctx.row(), "source_node": node_id, "confidence": confidence,
+                    "source_session": ctx.session_id(), "source_node": node_id, "confidence": confidence,
                     "state": state, "created_ms": now, "updated_ms": now,
                 }),
             )

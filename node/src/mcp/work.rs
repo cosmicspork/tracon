@@ -243,7 +243,7 @@ pub async fn call(
                     deps,
                     priority: args["priority"].as_i64().unwrap_or(0),
                     discovered_from: item_id,
-                    discovered_by_session: Some(ctx.row().to_string()),
+                    discovered_by_session: ctx.session_id().map(str::to_string),
                 },
             )
             .map_err(|e| e.to_string())?;
@@ -276,18 +276,19 @@ pub async fn call(
                 access.manager.bus(),
                 &ctx.node_id,
                 id,
-                Some(ctx.row()),
+                ctx.session_id(),
             )
             .map_err(|e| e.to_string())?;
-            access.manager.record_event(
-                ctx.row(),
+            access.manager.record_for(
+                ctx,
                 crate::session::state::event_kind::WORK_CLOSED,
+                None,
                 json!({ "item": item.id, "summary": args["summary"].as_str().unwrap_or("") }),
             );
             Ok(json!({ "id": item.id, "state": item.state }))
         }
         WORK_CLOSE => {
-            let Some(id) = item_id else {
+            let (Some(session_id), Some(id)) = (ctx.session_id(), item_id) else {
                 return Err("this session holds no work item".into());
             };
             let item = corpus::work::close(
@@ -295,12 +296,12 @@ pub async fn call(
                 access.manager.bus(),
                 &ctx.node_id,
                 &id,
-                Some(ctx.row()),
+                Some(session_id),
             )
             .map_err(|e| e.to_string())?;
             access
                 .manager
-                .item_closed(ctx.row(), args["summary"].as_str().unwrap_or(""))
+                .item_closed(session_id, args["summary"].as_str().unwrap_or(""))
                 .await;
             Ok(json!({ "id": item.id, "state": item.state }))
         }
@@ -321,7 +322,7 @@ pub async fn call(
             }
         }
         BRIEF_NOTE => {
-            let Some(id) = item_id else {
+            let (Some(session_id), Some(id)) = (ctx.session_id(), item_id) else {
                 return Err("this session holds no work item, so it has no brief".into());
             };
             let field = args["field"].as_str().unwrap_or("").trim().to_string();
@@ -348,7 +349,7 @@ pub async fn call(
                         links: vec![],
                     }]),
                 }],
-                &corpus::brief::Author::Session(ctx.row().to_string()),
+                &corpus::brief::Author::Session(session_id.to_string()),
             )
             .map_err(|e| e.to_string())?;
             Ok(json!({ "slug": view.slug, "summary": corpus::brief::summary(&view) }))
@@ -392,7 +393,7 @@ pub async fn call(
             }
         }
         CRITERIA_LINK => {
-            let Some(id) = item_id else {
+            let (Some(session_id), Some(id)) = (ctx.session_id(), item_id) else {
                 return Err("this session holds no work item, so it has no criteria".into());
             };
             let criterion = args["criterion"].as_str().unwrap_or("").trim();
@@ -415,7 +416,7 @@ pub async fn call(
                     refs,
                 },
                 None,
-                &corpus::brief::Author::Session(ctx.row().to_string()),
+                &corpus::brief::Author::Session(session_id.to_string()),
             )
             .map_err(|e| e.to_string())?;
             let candidate = corpus::criteria::newest_candidate(&access.store, &id)

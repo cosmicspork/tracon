@@ -496,19 +496,13 @@ No registered devices means no device delivery can be demonstrated.
 For a session the node itself launched, pause waits for the turn in flight to
 finish, then blocks new prompts and permission replies until you resume it —
 stop tears the container down outright, and both survive a node restart because
-the fence is durable state, not an in-memory flag. For a session attached from
-your own harness over `tracon external`, the node never held the process: pause
-and stop only fence its brokered tool access, so the interface labels the control
-"Stop broker access" rather than "Stop", and a stopped attachment reads "Broker
-access stopped" rather than "Killed" — your own client keeps running until you
-end it. Each agent attached to a channel is its own session — the node hands
-it an `Mcp-Session-Id` at `initialize` — so pausing one agent leaves the others
-on the channel working, and a pause survives a node restart. A client that
-echoes no id shares one session per channel. Stop broker access fences the
-whole channel, not just the one attachment: every external agent on it is refused until you allow it again from
-**Settings → Your own harness** or with `tracon external clear <channel>`. The
-same card, or `tracon external stop <channel>`, stops a channel with nothing
-attached. A watchdog pauses a session on its own after repeated harness-turn
+the fence is durable state, not an in-memory flag. A harness you run yourself
+over `tracon external` has no session here: the node never held its process, so
+the only control is the channel's **Stop broker access**, which refuses every
+external agent's calls on that channel until you start it again from
+**Settings → Your own harness** or with `tracon external start <channel>`
+(`tracon external stop <channel>` stops it). Your own client keeps running until
+you end it. A watchdog pauses a session on its own after repeated harness-turn
 failures, with the reason on the record, rather than restarting the same loop
 indefinitely.
 
@@ -829,7 +823,6 @@ max_files = 200
 
 [external]                          # a harness you run yourself, using this node's tools; off unless enabled
 enabled = false
-idle_timeout_secs = 3600            # an attachment with no call for this long is closed (at least 60)
 repo_roots = ["~/src"]              # a worktree put up for review must belong to a repository under one of these
 
 [docs]

@@ -35,7 +35,40 @@ impl ExternalEventRow {
     }
 }
 
+/// One label's activity on a channel, most recent first.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalLane {
+    pub channel: String,
+    pub lane: Option<String>,
+    pub last_ms: i64,
+    pub calls: i64,
+}
+
 impl Store {
+    /// Every lane that called since `since_ms`, newest first. Only tool calls
+    /// count: the log's other entries are outcomes of those calls.
+    pub fn external_lanes(&self, since_ms: i64) -> Result<Vec<ExternalLane>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT channel, lane, MAX(at_ms) AS last_ms, COUNT(*) AS calls
+               FROM external_event
+              WHERE kind = 'tool_call' AND at_ms >= ?1
+              GROUP BY channel, lane
+              ORDER BY last_ms DESC",
+        )?;
+        let rows = stmt
+            .query_map([since_ms], |r| {
+                Ok(ExternalLane {
+                    channel: r.get("channel")?,
+                    lane: r.get("lane")?,
+                    last_ms: r.get("last_ms")?,
+                    calls: r.get("calls")?,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// Append to a channel's external log; the row as stored, with its seq.
     #[allow(clippy::too_many_arguments)]
     pub fn append_external_event(
@@ -137,5 +170,12 @@ mod tests {
             .external_events_after("work", work[1].seq, 10)
             .unwrap()
             .is_empty());
+
+        let lanes = store.external_lanes(0).unwrap();
+        assert_eq!(lanes.len(), 2, "{lanes:?}");
+        assert_eq!(lanes[0].channel, "personal");
+        assert_eq!(lanes[1].lane.as_deref(), Some("tracon:main"));
+        assert_eq!(lanes[1].calls, 1);
+        assert!(store.external_lanes(3).unwrap().is_empty());
     }
 }

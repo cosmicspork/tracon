@@ -551,20 +551,18 @@ enum ChannelCommand {
 
 #[derive(Subcommand)]
 enum ExternalCommand {
-    /// How to point your own harness at this node, and what is attached now.
+    /// How to point your own harness at this node, and the lanes that
+    /// called in the last day.
     Show,
     /// Print the header that labels a harness's calls, for Claude Code's
     /// `headersHelper`: the repository and branch it was started in, and the
     /// process that started it. Needs no running node.
     Lane,
-    /// End every attachment on a channel. The next call from each harness
-    /// attaches a new one.
-    Detach { channel: String },
-    /// Refuse every external harness on a channel and end any attached now,
-    /// until `clear`.
+    /// Refuse every external harness on a channel, until `start`.
     Stop { channel: String },
     /// Allow external harnesses on a channel again after `stop`.
-    Clear { channel: String },
+    #[command(alias = "clear")]
+    Start { channel: String },
 }
 
 #[derive(Subcommand)]
@@ -1671,13 +1669,6 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
     }
 }
 
-/// The tail of a client id, which is what differs between two minted ones:
-/// a v7 UUID's leading digits are its timestamp and repeat for clients that
-/// attached in the same minute.
-fn short_client(id: &str) -> &str {
-    id.get(id.len().saturating_sub(8)..).unwrap_or(id)
-}
-
 /// The label `tracon external lane` prints: `<repository>:<branch>#<pid>`.
 /// The repository is named by its main checkout, so a linked worktree is
 /// still its repository; the pid is the harness process that ran this, which
@@ -1771,59 +1762,30 @@ async fn external_command(cmd: ExternalCommand) -> Result<()> {
             }
             let stopped = v["stopped"].as_array().cloned().unwrap_or_default();
             if !stopped.is_empty() {
-                println!("\nStopped (tracon external clear <channel> to allow again):");
+                println!("\nStopped (tracon external start <channel> to allow again):");
                 for c in stopped {
                     println!("  {}", c.as_str().unwrap_or(""));
                 }
             }
-            let attached = v["attachments"].as_array().cloned().unwrap_or_default();
-            if attached.is_empty() {
-                println!("\nNothing attached.");
+            let lanes = v["lanes"].as_array().cloned().unwrap_or_default();
+            if lanes.is_empty() {
+                println!("\nNo calls in the last day.");
             } else {
-                println!("\nAttached now:");
-                for a in attached {
-                    let client = a["lane"]
-                        .as_str()
-                        .map(|lane| format!(" · {lane}"))
-                        .or_else(|| {
-                            a["client"]
-                                .as_str()
-                                .map(|c| format!(" · client {}", short_client(c)))
-                        })
-                        .unwrap_or_default();
+                println!("\nCalled in the last day:");
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or_default();
+                for l in lanes {
+                    let ago = (now - l["last_ms"].as_i64().unwrap_or(now)).max(0) / 60_000;
                     println!(
-                        "  {}{client} · session {}",
-                        a["channel"].as_str().unwrap_or(""),
-                        a["session_id"].as_str().unwrap_or("")
+                        "  {} · {} · {} calls · last {ago}m ago",
+                        l["channel"].as_str().unwrap_or(""),
+                        l["lane"].as_str().unwrap_or("unlabelled"),
+                        l["calls"].as_i64().unwrap_or(0),
                     );
                 }
             }
-            Ok(())
-        }
-        ExternalCommand::Detach { channel } => {
-            let ids: Vec<String> = v["attachments"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter(|a| a["channel"] == serde_json::json!(channel))
-                        .filter_map(|a| a["session_id"].as_str())
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
-            if ids.is_empty() {
-                anyhow::bail!("nothing is attached to {channel}");
-            }
-            for id in &ids {
-                node_call(
-                    Method::POST,
-                    &format!("/api/sessions/{id}/kill"),
-                    None,
-                    None,
-                )
-                .await?;
-            }
-            println!("detached {} from {channel}", ids.len());
             Ok(())
         }
         ExternalCommand::Stop { channel } => {
@@ -1837,10 +1799,10 @@ async fn external_command(cmd: ExternalCommand) -> Result<()> {
             println!("stopped broker access on {channel}");
             Ok(())
         }
-        ExternalCommand::Clear { channel } => {
+        ExternalCommand::Start { channel } => {
             node_call(
-                Method::DELETE,
-                &format!("/api/external/{channel}/stop"),
+                Method::POST,
+                &format!("/api/external/{channel}/start"),
                 None,
                 None,
             )
