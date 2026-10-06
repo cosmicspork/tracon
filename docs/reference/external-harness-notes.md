@@ -132,6 +132,15 @@ only over the lease, and never published unattended by a grant. A new submit
 for a branch that already has an open change is refused with its number rather
 than failing at publication.
 
+**A resubmission can retarget its base until the change opens.** A stacked
+review whose base branch was squash-merged and deleted pushed its branch, then
+failed to open, and the resubmission against main kept the stale base and
+refused `rewrite` for lack of a change. Without a change, a resubmission's
+`base` now replaces the stored one, and `rewrite: true` leases on what the
+forge's branch holds (this review's last confirmed push when the forge cannot
+be asked); a branch the forge does not have is an ordinary first push. With a
+change, a different `base` is refused, since the forge owns that change's base.
+
 **One session per client, not per channel.** The first cut keyed the
 attachment on the channel alone, so two terminals on one channel shared a
 session: one card queue, one pause, one idle clock, one log. `initialize` now

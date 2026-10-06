@@ -3627,7 +3627,17 @@ mod tests {
             ..revision_a.clone()
         };
         let revised = store
-            .revise_review_with_revision("rv1", "t2", "b2", 2, 0, None, &revision_b)
+            .revise_review_with_revision(
+                "rv1",
+                "t2",
+                "b2",
+                &review.target,
+                &review.base_ref,
+                2,
+                0,
+                None,
+                &revision_b,
+            )
             .unwrap();
         assert!(
             !revised,
