@@ -4,14 +4,14 @@
 
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use serde_json::{json, Value};
 
 use super::api::AppState;
-use crate::mcp::{CallContext, Caller};
+use crate::mcp::CallContext;
 
 /// `POST /mcp/{session_id}`, with `Authorization: Bearer <session token>`.
 pub async fn handle(
@@ -38,7 +38,7 @@ pub async fn handle(
     };
 
     let ctx = CallContext::session(session_id, channel, s.node_id.clone());
-    if let Err(error) = s.manager.ensure_active(ctx.row()) {
+    if let Err(error) = s.manager.caller_active(&ctx) {
         return rpc_error(StatusCode::CONFLICT, &error.to_string());
     }
     match s.tools.handle(&ctx, &msg).await {
@@ -59,12 +59,11 @@ pub async fn handle(
 /// exactly the trust an external harness runs under, being a process of the
 /// operator's on the operator's own machine.
 ///
-/// Each client is its own session. `initialize` hands out an `Mcp-Session-Id`
-/// and a client that echoes it is told apart from every other on the channel;
-/// one that does not shares the channel's single header-less attachment, as
-/// every client did before. An id the node no longer holds (a restart, an idle
-/// detach, a kill) is not refused: the client simply attaches again under it,
-/// so no client has to know to re-initialize.
+/// Every request stands alone. No `Mcp-Session-Id` is handed out and none is
+/// read: clients we use treat it as disposable, so it named nothing durable.
+/// What a call did goes to the channel's external log under the lane the
+/// harness labels itself with, and only a tool call is logged, so connecting
+/// leaves no trace.
 pub async fn handle_external(
     State(s): State<AppState>,
     Path(channel): Path<String>,
@@ -79,8 +78,7 @@ pub async fn handle_external(
         .into_response();
     }
     // A newer client probes with `server/discover` before it initializes, and
-    // falls back to `initialize` when the method is unknown. The probe is not
-    // a client of this channel yet, so it is answered without attaching one.
+    // falls back to `initialize` when the method is unknown.
     if msg.get("method").and_then(Value::as_str) == Some("server/discover") {
         let id = msg.get("id").cloned().unwrap_or(Value::Null);
         return (
@@ -93,26 +91,9 @@ pub async fn handle_external(
         )
             .into_response();
     }
-    let client = match client_id(&headers) {
-        Ok(Some(id)) => Some(id),
-        Ok(None) if msg.get("method").and_then(Value::as_str) == Some("initialize") => {
-            Some(uuid::Uuid::now_v7().to_string())
-        }
-        Ok(None) => None,
-        Err(e) => return rpc_error(StatusCode::BAD_REQUEST, e).into_response(),
-    };
-    let lane = lane_label(&headers);
-    let mut response = answer_external(&s, channel, client.as_deref(), lane.as_deref(), &msg)
-        .await
-        .into_response();
-    if let Some(value) = client.and_then(|id| HeaderValue::from_str(&id).ok()) {
-        response.headers_mut().insert(SESSION_HEADER, value);
-    }
-    response
+    let ctx = CallContext::external(lane_label(&headers), channel, s.node_id.clone());
+    answer_external(&s, &ctx, &msg).await.into_response()
 }
-
-/// The header MCP's streamable HTTP transport names a session with.
-const SESSION_HEADER: &str = "mcp-session-id";
 
 /// The header a harness labels its calls with, so the operator can tell its
 /// agents apart. A label only: nothing is authorized, owned or routed by it.
@@ -125,63 +106,14 @@ fn lane_label(headers: &HeaderMap) -> Option<String> {
     (!label.is_empty()).then(|| label.chars().take(200).collect())
 }
 
-/// The id a client echoes, if any. The transport allows visible ASCII; the
-/// length bound keeps a stored column from being whatever a caller sends.
-fn client_id(headers: &HeaderMap) -> Result<Option<String>, &'static str> {
-    let Some(value) = headers.get(SESSION_HEADER) else {
-        return Ok(None);
-    };
-    let id = value
-        .to_str()
-        .ok()
-        .filter(|id| {
-            !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| (0x21..=0x7e).contains(&b))
-        })
-        .ok_or("Mcp-Session-Id must be 1 to 128 visible ASCII characters")?;
-    Ok(Some(id.to_string()))
-}
-
 async fn answer_external(
     s: &AppState,
-    channel: String,
-    client: Option<&str>,
-    lane: Option<&str>,
+    ctx: &CallContext,
     msg: &Value,
 ) -> (StatusCode, Json<Value>) {
-    let session_id = match s.manager.attach_external(&channel, client).await {
-        Ok(id) => id,
-        Err(e) => return rpc_error(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
-    };
-    let row = s.manager.store().get_session(&session_id).ok().flatten();
-    if let Some(lane) = lane {
-        if row
-            .as_ref()
-            .is_some_and(|r| r.harness_agent.as_deref() != Some(lane))
-        {
-            let _ = s.manager.store().update_session(
-                &session_id,
-                crate::store::SessionPatch {
-                    harness_agent: Some(lane.to_string()),
-                    ..Default::default()
-                },
-            );
-        }
+    if let Err(e) = s.manager.caller_active(ctx) {
+        return rpc_error(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string());
     }
-    if row.is_some_and(|row| row.state == crate::session::state::SessionState::Paused.as_str()) {
-        return rpc_error(
-            StatusCode::CONFLICT,
-            "this external harness is still running; Tracon paused only its broker access and cannot control the host process",
-        );
-    }
-    let ctx = CallContext {
-        caller: Caller::External {
-            lane: lane.map(str::to_string),
-            attachment: session_id.clone(),
-        },
-        channel,
-        node_id: s.node_id.clone(),
-    };
-
     // A boundaried session's calls arrive as harness events and land in its
     // log on the way past. Nothing reports these, so the door records them:
     // what the node was asked to do on the operator's behalf is the half of
@@ -197,23 +129,21 @@ async fn answer_external(
         crate::mcp::summarize(&name, &args)
     });
     if let Some(title) = &call {
-        s.manager.record_event(
-            &session_id,
+        s.manager.record_for(
+            ctx,
             crate::session::state::event_kind::TOOL_CALL,
-            json!({ "title": title, "kind": crate::mcp::TOOL_KIND, "lane": lane }),
+            None,
+            json!({ "title": title, "kind": crate::mcp::TOOL_KIND }),
         );
-    }
-    if let Err(error) = s.manager.ensure_active(&session_id) {
-        return rpc_error(StatusCode::CONFLICT, &error.to_string());
     }
 
     let mut unfinished = call.as_ref().map(|title| Abandoned {
         manager: s.manager.clone(),
-        session_id: session_id.clone(),
+        ctx: ctx.clone(),
         title: title.clone(),
         finished: false,
     });
-    let answered = s.tools.handle(&ctx, msg).await;
+    let answered = s.tools.handle(ctx, msg).await;
     if let Some(guard) = unfinished.as_mut() {
         guard.finished = true;
     }
@@ -221,9 +151,10 @@ async fn answer_external(
         Some(response) => {
             if let Some(title) = &call {
                 let failed = response["result"]["isError"] == true;
-                s.manager.record_event(
-                    &session_id,
+                s.manager.record_for(
+                    ctx,
                     crate::session::state::event_kind::TOOL_RESULT,
+                    None,
                     json!({ "title": title, "status": if failed { "error" } else { "ok" } }),
                 );
             }
@@ -238,7 +169,7 @@ async fn answer_external(
 /// and nothing says whether it ran.
 struct Abandoned {
     manager: crate::session::Manager,
-    session_id: String,
+    ctx: CallContext,
     title: String,
     finished: bool,
 }
@@ -248,9 +179,10 @@ impl Drop for Abandoned {
         if self.finished {
             return;
         }
-        self.manager.record_event(
-            &self.session_id,
+        self.manager.record_for(
+            &self.ctx,
             crate::session::state::event_kind::TOOL_RESULT,
+            None,
             json!({ "title": self.title, "status": "abandoned" }),
         );
     }
@@ -266,18 +198,8 @@ pub async fn external_get() -> (StatusCode, Json<Value>) {
     )
 }
 
-/// Some clients close a session on exit. Honour it: that client's attachment
-/// ends and the home stops showing it as connected. Any other client on the
-/// channel is untouched.
-pub async fn external_delete(
-    State(s): State<AppState>,
-    Path(channel): Path<String>,
-    headers: HeaderMap,
-) -> StatusCode {
-    let Ok(client) = client_id(&headers) else {
-        return StatusCode::BAD_REQUEST;
-    };
-    let _ = s.manager.detach_external(&channel, client.as_deref()).await;
+/// A client may close its session on exit. There is none to close.
+pub async fn external_delete() -> StatusCode {
     StatusCode::NO_CONTENT
 }
 

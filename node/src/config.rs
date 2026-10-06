@@ -292,9 +292,8 @@ impl Docs {
 #[serde(default)]
 pub struct External {
     pub enabled: bool,
-    /// An attached session with no call for this long is closed. Reattaching
-    /// is one call away, so short is fine; it keeps the home honest about
-    /// what is actually connected.
+    /// Ignored. External harnesses no longer attach as sessions, so nothing
+    /// times out; accepted so a node.toml that sets it still loads.
     pub idle_timeout_secs: u64,
     /// Where a worktree submitted for review may come from: its repository
     /// must live under one of these. A leading `~/` is the operator's home.

@@ -191,7 +191,8 @@ pub async fn call(
     argv.push("json".into());
     argv.push("--quiet".into());
 
-    run_sidecar(cfg, env, argv, ctx.row()).await
+    let caller = ctx.session_id().or(ctx.lane()).unwrap_or("external");
+    run_sidecar(cfg, env, argv, caller).await
 }
 
 /// The sidecar runs on the node's side of the boundary with the credential in
@@ -200,7 +201,7 @@ async fn run_sidecar(
     cfg: &Arc<Config>,
     env: std::collections::BTreeMap<String, String>,
     argv: Vec<String>,
-    session_id: &str,
+    caller: &str,
 ) -> Result<Value, String> {
     let mut cmd = tokio::process::Command::new(&cfg.consulta.command);
     cmd.args(&cfg.consulta.args)
@@ -224,7 +225,7 @@ async fn run_sidecar(
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
-        tracing::warn!(session = %session_id, "brokered query refused or failed");
+        tracing::warn!(caller = %caller, "brokered query refused or failed");
         // consulta reports refusals and errors on stderr with exit 2. Pass the
         // reason back so the agent can correct itself, not a bare failure.
         let reason = stderr

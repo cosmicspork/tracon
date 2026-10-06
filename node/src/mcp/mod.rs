@@ -3,7 +3,7 @@
 //! The transport is the gateway's forward: the harness can reach the node and
 //! nothing else, and it carries a token minted per session. With `[external]`
 //! set, a harness the operator runs themselves reaches the same tools through
-//! the operator door instead, on a session it attaches to a channel. Either
+//! the operator door instead, with no session, on a channel. Either
 //! way a tool is the only shape a credential ever reaches the harness in — as
 //! something it may ask the node to do, never as something it holds.
 
@@ -92,9 +92,6 @@ pub enum Caller {
     External {
         /// What the harness labels itself, for display. Never authority.
         lane: Option<String>,
-        /// The session row the call is still recorded against while external
-        /// harnesses attach as sessions.
-        attachment: String,
     },
 }
 
@@ -130,11 +127,15 @@ impl CallContext {
         }
     }
 
-    /// The row the call is recorded and authorized against.
-    pub fn row(&self) -> &str {
-        match &self.caller {
-            Caller::Session(id) => id,
-            Caller::External { attachment, .. } => attachment,
+    pub fn external(
+        lane: Option<String>,
+        channel: impl Into<String>,
+        node_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            caller: Caller::External { lane },
+            channel: channel.into(),
+            node_id: node_id.into(),
         }
     }
 }
@@ -164,7 +165,7 @@ impl Tools {
         review::VERDICT,
     ];
 
-    /// What an attached external harness is not offered: a verdict is what a
+    /// What an external harness is not offered: a verdict is what a
     /// review session the node started gives on someone else's change.
     pub const NOT_EXTERNAL: &'static [&'static str] = &[review::VERDICT];
 
@@ -284,7 +285,7 @@ impl Tools {
         if let Some(access) = self.session.get() {
             access
                 .manager
-                .ensure_active(ctx.row())
+                .caller_active(ctx)
                 .map_err(|error| error.to_string())?;
         }
         self.dispatch(ctx, name, args, false).await
@@ -339,7 +340,7 @@ impl Tools {
                 &policy,
                 &crate::authority::AuthorityQuery {
                     channel: &ctx.channel,
-                    session_id: Some(ctx.row()),
+                    session_id: ctx.session_id(),
                     action,
                     target: &target,
                     revision: revision.as_deref(),
@@ -547,7 +548,7 @@ impl Tools {
             &self.policy.read(),
             &crate::authority::AuthorityQuery {
                 channel: &ctx.channel,
-                session_id: Some(ctx.row()),
+                session_id: ctx.session_id(),
                 action: crate::authority::PUBLISH,
                 target: authority_args["target"].as_str().expect("canonical target"),
                 revision: authority_args["revision"].as_str(),
@@ -625,7 +626,7 @@ impl Tools {
                 action: crate::authority::PUBLISH,
                 target: &canonical,
                 channel: &ctx.channel,
-                session_id: Some(ctx.row()),
+                session_id: ctx.session_id(),
                 revision: Some(&review.head_sha),
                 operation_id: Some(&operation_id),
                 evidence: &evidence,
@@ -665,7 +666,7 @@ impl Tools {
                 &self.policy.read(),
                 &crate::authority::AuthorityQuery {
                     channel: &ctx.channel,
-                    session_id: Some(ctx.row()),
+                    session_id: ctx.session_id(),
                     action: crate::authority::PUBLISH,
                     target: &canonical,
                     revision: Some(&review.head_sha),
@@ -767,7 +768,7 @@ impl Tools {
     }
 
     /// The definitions this caller is offered: the channel's tools, less what
-    /// an attachment cannot use.
+    /// an external caller cannot use.
     pub fn list_offered(&self, ctx: &CallContext) -> Vec<Value> {
         let all = self.list(&ctx.channel, &ctx.node_id);
         if !ctx.is_external() {
@@ -839,7 +840,7 @@ impl Tools {
                 let row = ApprovalRow {
                     id: uuid::Uuid::now_v7().to_string(),
                     channel: ctx.channel.clone(),
-                    session_id: Some(ctx.row().to_string()),
+                    session_id: ctx.session_id().map(str::to_string),
                     node_id: ctx.node_id.clone(),
                     lane: ctx.lane().map(str::to_string),
                     tool: name.to_string(),
@@ -913,22 +914,21 @@ impl Tools {
         }
         let original: Value =
             serde_json::from_str(&approval.arguments).map_err(|e| e.to_string())?;
-        let Some(session_id) = approval.session_id.clone() else {
-            return Err("this approval names no session to run as".into());
-        };
-        let external = access
-            .store
-            .get_session(&session_id)
-            .ok()
-            .flatten()
-            .is_some_and(|s| s.harness_id == crate::session::external::HARNESS_ID);
-        let caller = if external {
-            Caller::External {
+        // An approval an attached external session asked for before calls
+        // went session-less runs as the channel's external caller now.
+        let session = approval.session_id.clone().filter(|id| {
+            !access
+                .store
+                .get_session(id)
+                .ok()
+                .flatten()
+                .is_some_and(|s| s.harness_id == crate::session::external::HARNESS_ID)
+        });
+        let caller = match session {
+            Some(session_id) => Caller::Session(session_id),
+            None => Caller::External {
                 lane: approval.lane.clone(),
-                attachment: session_id,
-            }
-        } else {
-            Caller::Session(session_id)
+            },
         };
         let ctx = CallContext {
             caller,
@@ -1022,7 +1022,7 @@ impl Tools {
                 &self.policy.read(),
                 &crate::authority::AuthorityQuery {
                     channel: &ctx.channel,
-                    session_id: Some(ctx.row()),
+                    session_id: ctx.session_id(),
                     action,
                     target: &target,
                     revision: revision.as_deref(),
@@ -1081,7 +1081,7 @@ impl Tools {
             &self.policy.read(),
             &crate::authority::AuthorityQuery {
                 channel: &ctx.channel,
-                session_id: Some(ctx.row()),
+                session_id: ctx.session_id(),
                 action,
                 target: &target,
                 revision: revision.as_deref(),
@@ -1115,7 +1115,7 @@ impl Tools {
             &self.policy.read(),
             &crate::authority::AuthorityQuery {
                 channel: &ctx.channel,
-                session_id: Some(ctx.row()),
+                session_id: ctx.session_id(),
                 action,
                 target: &target,
                 revision: revision.as_deref(),
@@ -1166,7 +1166,7 @@ impl Tools {
                 action,
                 target: &target,
                 channel: &ctx.channel,
-                session_id: Some(ctx.row()),
+                session_id: ctx.session_id(),
                 revision: revision.as_deref(),
                 operation_id: Some(operation_id),
                 evidence: &evidence,

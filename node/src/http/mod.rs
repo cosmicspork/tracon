@@ -82,8 +82,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/external", get(api::external))
         .route(
             "/api/external/{channel}/stop",
-            post(api::external_stop).delete(api::external_clear),
+            post(api::external_stop).delete(api::external_start),
         )
+        .route("/api/external/{channel}/start", post(api::external_start))
+        .route("/api/external/{channel}/events", get(api::external_events))
         .route("/api/health", get(api::health))
         .route("/api/node", get(api::get_node))
         .route("/api/node/refresh-models", post(api::refresh_models))

@@ -1574,10 +1574,11 @@ async fn stopping_a_stale_paused_row_reports_success_not_conflict() {
 
 /// A managed session has no process to hand its pause back to after a
 /// restart, so it closes honestly instead of offering an impossible Resume.
-/// An external attachment's pause is only a channel fence; the fence
-/// survives a restart, so the row stays paused rather than dropping it.
+/// An external attachment an older node left paused closes too, since
+/// external harnesses no longer attach, and its fence becomes the channel's
+/// Stop so broker access stays refused until the operator starts it.
 #[tokio::test]
-async fn reconcile_after_restart_closes_a_managed_pause_but_keeps_an_external_one_fenced() {
+async fn reconcile_after_restart_closes_paused_sessions_and_keeps_an_external_fence() {
     state::isolate();
     let store = Arc::new(Store::open_in_memory().unwrap());
     store
@@ -1662,7 +1663,7 @@ async fn reconcile_after_restart_closes_a_managed_pause_but_keeps_an_external_on
     )
     .await;
     assert!(cleaned.contains(&managed_id), "{cleaned:?}");
-    assert!(!cleaned.contains(&external_id), "{cleaned:?}");
+    assert!(cleaned.contains(&external_id), "{cleaned:?}");
 
     let managed_row = store.get_session(&managed_id).unwrap().unwrap();
     assert_eq!(
@@ -1672,10 +1673,14 @@ async fn reconcile_after_restart_closes_a_managed_pause_but_keeps_an_external_on
     assert_eq!(managed_row.end_reason.as_deref(), Some("harness_exit"));
 
     let external_row = store.get_session(&external_id).unwrap().unwrap();
-    assert_eq!(
-        external_row.state, "paused",
-        "external broker access stays fenced until the operator resumes it"
-    );
+    assert_eq!(external_row.state, "closed");
+    assert_eq!(external_row.end_reason.as_deref(), Some("detached"));
+    let work = store
+        .channel_get("work")
+        .unwrap()
+        .expect("the fence materializes the channel");
+    let bindings: serde_json::Value = serde_json::from_str(&work.bindings_json).unwrap();
+    assert_eq!(bindings["external_stopped"], true, "{bindings}");
 }
 
 #[tokio::test]

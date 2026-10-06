@@ -88,12 +88,16 @@
     store.channels.filter((c) => !c.archived).map((c) => c.name),
   )
   const externalStopped = $derived(
-    new Set(store.channels.filter((c) => c.bindings?.external_stopped === true).map((c) => c.name)),
+    new Set(
+      store.channels
+        .filter((c) => c.bindings?.external_stopped === true || c.bindings?.external_paused === true)
+        .map((c) => c.name),
+    ),
   )
   let stoppingExternal = $state('')
   function setExternalStopped(channel: string, stopped: boolean) {
     return act('external-stop', async () => {
-      await (stopped ? api.externalStop(channel) : api.externalClear(channel))
+      await (stopped ? api.externalStop(channel) : api.externalStart(channel))
       stoppingExternal = ''
       await store.refetch()
     })
@@ -1115,9 +1119,9 @@
             <div class="acts">
               {#if externalStopped.has(name)}
                 <span class="chip bad">broker access stopped</span>
-                <button class="lnk" onclick={() => setExternalStopped(name, false)} disabled={busy !== ''}>Allow broker access again</button>
+                <button class="lnk" onclick={() => setExternalStopped(name, false)} disabled={busy !== ''}>Start broker access</button>
               {:else if stoppingExternal === name}
-                <small>End every agent attached to {name} and refuse new ones until allowed again?</small>
+                <small>Refuse every external agent's calls on {name} until started again?</small>
                 <button class="btn d" onclick={() => setExternalStopped(name, true)} disabled={busy !== ''}>Stop broker access</button>
                 <button class="lnk" onclick={() => (stoppingExternal = '')} disabled={busy !== ''}>Cancel</button>
               {:else}

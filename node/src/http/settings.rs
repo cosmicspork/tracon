@@ -36,7 +36,6 @@ pub fn config_view(cfg: &Config) -> Value {
         "boundary": { "podman": cfg.boundary.podman },
         "external": {
             "enabled": cfg.external.enabled,
-            "idle_timeout_secs": cfg.external.idle_timeout_secs,
         },
         // What a session's harness may load, beyond what the node decides.
         // The per-channel half — skills, instructions, agents — lives in the
@@ -249,12 +248,9 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
                             "external.enabled",
                             &mut changed,
                         )?,
-                        "idle_timeout_secs" => set_u64(
-                            &mut cfg.external.idle_timeout_secs,
-                            v,
-                            "external.idle_timeout_secs",
-                            &mut changed,
-                        )?,
+                        // External harnesses no longer attach, so nothing
+                        // times out; an older interface may still send it.
+                        "idle_timeout_secs" => {}
                         other => return Err(unknown(&format!("external.{other}"))),
                     }
                 }

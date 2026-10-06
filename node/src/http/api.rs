@@ -2604,19 +2604,24 @@ async fn decide_report_local(
     Ok(json!({ "state": state }))
 }
 
+/// How far back `GET /api/external` looks for lanes.
+const LANE_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// Whether this node answers harnesses outside the boundary, which channels
-/// one could attach to, and what is attached now. The CLI prints the line to
-/// register with; the interface shows the same.
+/// one could register with, which are stopped, and the lanes that called in
+/// the last day. The CLI prints the line to register with; the interface
+/// shows the same.
 pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let rows = s.store().channel_list()?;
     // Listed on their own rather than folded into `channels`, which callers
     // read as names: a stopped channel is still one a harness registers with.
+    // A pause an older node left fences the same way.
     let stopped: Vec<String> = rows
         .iter()
         .filter(|c| !c.name.starts_with('@'))
         .filter(|c| {
             serde_json::from_str::<serde_json::Value>(&c.bindings_json)
-                .is_ok_and(|b| b["external_stopped"] == true)
+                .is_ok_and(|b| b["external_stopped"] == true || b["external_paused"] == true)
         })
         .map(|c| c.name.clone())
         .collect();
@@ -2633,31 +2638,36 @@ pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::V
             .map(|c| c.name)
             .collect()
     };
-    let attached: Vec<serde_json::Value> = s
-        .manager
-        .external_attachments()
-        .await
-        .into_iter()
-        .map(|(channel, client, session_id)| {
-            let lane = s
-                .store()
-                .get_session(&session_id)
-                .ok()
-                .flatten()
-                .and_then(|row| row.harness_agent);
-            json!({ "channel": channel, "client": client, "session_id": session_id, "lane": lane })
-        })
-        .collect();
+    let lanes = s
+        .store()
+        .external_lanes(crate::store::now_ms() - LANE_WINDOW_MS)?;
     Ok(Json(json!({
         "enabled": s.cfg.external.enabled,
         "channels": channels,
-        "attachments": attached,
+        "lanes": lanes,
         "stopped": stopped,
     })))
 }
 
+#[derive(Deserialize)]
+pub struct ExternalEventsQuery {
+    #[serde(default)]
+    pub after: i64,
+}
+
+/// `GET /api/external/{channel}/events?after=<seq>`: the channel's external
+/// log, oldest first, a page at a time.
+pub async fn external_events(
+    State(s): State<AppState>,
+    Path(channel): Path<String>,
+    Query(q): Query<ExternalEventsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let events = s.store().external_events_after(&channel, q.after, 500)?;
+    Ok(Json(json!({ "events": events })))
+}
+
 /// `POST /api/external/{channel}/stop`: refuse every external harness on the
-/// channel and end any attached now. Needs no live attachment.
+/// channel.
 pub async fn external_stop(
     State(s): State<AppState>,
     Path(channel): Path<String>,
@@ -2666,9 +2676,9 @@ pub async fn external_stop(
     Ok(Json(json!({ "channel": channel, "stopped": true })))
 }
 
-/// `DELETE /api/external/{channel}/stop`: allow external harnesses on the
-/// channel again. Their next call attaches fresh.
-pub async fn external_clear(
+/// `POST /api/external/{channel}/start` (and, as before, `DELETE .../stop`):
+/// allow external harnesses on the channel again.
+pub async fn external_start(
     State(s): State<AppState>,
     Path(channel): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {

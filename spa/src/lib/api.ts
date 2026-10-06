@@ -273,11 +273,11 @@ export const api = {
   resume: (id: string, reason?: string) => call<void>('POST', `/api/sessions/${id}/resume`, { reason }),
   stop: (id: string) => call<void>('POST', `/api/sessions/${id}/stop`),
   kill: (id: string) => call<void>('POST', `/api/sessions/${id}/kill`),
-  /** Refuse every external harness on a channel, attached or not, until cleared. */
+  /** Refuse every external harness on a channel until started again. */
   externalStop: (channel: string) =>
     call<void>('POST', `/api/external/${encodeURIComponent(channel)}/stop`),
-  externalClear: (channel: string) =>
-    call<void>('DELETE', `/api/external/${encodeURIComponent(channel)}/stop`),
+  externalStart: (channel: string) =>
+    call<void>('POST', `/api/external/${encodeURIComponent(channel)}/start`),
   saveDraft: (id: string, text: string) => call<void>('PUT', `/api/sessions/${id}/draft`, { text }),
   /** The unsent prompt the node is holding for this session. */
   draft: (id: string) =>
