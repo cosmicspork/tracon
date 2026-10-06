@@ -3367,3 +3367,78 @@ async fn a_resubmission_cannot_move_an_opened_changes_base() {
     let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
     assert_eq!(target.base, "main");
 }
+
+/// A fresh submission of a commit already waiting for a verdict, with the
+/// same words but another base, revises that review onto the new base while
+/// no change is open for it.
+#[tokio::test]
+async fn a_retry_naming_another_base_retargets_the_waiting_review() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    sh(
+        std::path::Path::new(&f.worktree),
+        &format!(
+            "git push -q {} main:refs/heads/release \
+             && git update-ref refs/remotes/origin/release main",
+            f.dir.join("origin.git").display()
+        ),
+    );
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+
+    let mut args = f.submit_args();
+    args["base"] = json!("release");
+    let retargeted = f.tool("s1", "submit_review", args).await;
+    assert_eq!(review_id(&retargeted), id);
+    assert_eq!(retargeted.get("already_submitted"), None, "{retargeted}");
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(review.state, "new");
+    assert_eq!(review.base_ref, "release");
+    let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
+    assert_eq!(target.base, "release");
+    assert_eq!(f.store.review_revisions(&id).unwrap().len(), 2);
+    assert_eq!(f.store.open_reviews().unwrap().len(), 1);
+}
+
+/// The same retry for a review that updates an opened change is refused like
+/// a resubmission naming it would be, and leaves the change's base alone.
+#[tokio::test]
+async fn a_retry_naming_another_base_cannot_move_an_opened_change() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let base = f.base_sha();
+    f.forge_holds(&base);
+    gh_forge(&f, pull_seven(&base));
+    let id = review_id(&f.submit_update(json!({})).await);
+
+    let refused = f.submit_update(json!({ "base": "release" })).await;
+    assert!(
+        refused["error"]
+            .to_string()
+            .contains("pull request 7, which merges into main"),
+        "{refused}"
+    );
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
+    assert_eq!(target.base, "main");
+    assert_eq!(f.store.review_revisions(&id).unwrap().len(), 1);
+}
+
+/// A retry naming the base the review already has, or none, is still the
+/// same submission.
+#[tokio::test]
+async fn a_retry_with_the_same_or_no_base_is_already_submitted() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+
+    let same = f.tool("s1", "submit_review", f.submit_args()).await;
+    assert_eq!(review_id(&same), id);
+    assert_eq!(same["already_submitted"], json!(true), "{same}");
+
+    let mut args = f.submit_args();
+    args.as_object_mut().unwrap().remove("base");
+    let absent = f.tool("s1", "submit_review", args).await;
+    assert_eq!(review_id(&absent), id);
+    assert_eq!(absent["already_submitted"], json!(true), "{absent}");
+    assert_eq!(f.store.review_revisions(&id).unwrap().len(), 1);
+}

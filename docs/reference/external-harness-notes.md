@@ -140,6 +140,10 @@ refused `rewrite` for lack of a change. Without a change, a resubmission's
 forge's branch holds (this review's last confirmed push when the forge cannot
 be asked); a branch the forge does not have is an ordinary first push. With a
 change, a different `base` is refused, since the forge owns that change's base.
+A fresh submit of a commit already waiting for a verdict, with the same title
+and body, is a retry answered with that review (`already_submitted`) only when
+its `base` matches or is left out. Naming another base revises the review
+under the same rule, rather than handing back the old target.
 
 **One session per client, not per channel.** The first cut keyed the
 attachment on the channel alone, so two terminals on one channel shared a

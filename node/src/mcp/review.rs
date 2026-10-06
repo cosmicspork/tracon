@@ -59,7 +59,7 @@ pub fn definitions() -> Vec<Value> {
                     "body": { "type": "string", "description": "What is not obvious from the diff: intent, trade-offs, follow-ups." },
                     "provider": { "type": "string", "enum": ["github", "gitlab"] },
                     "project": { "type": "string", "description": "owner/name on GitHub, the project path on GitLab." },
-                    "base": { "type": "string", "description": "Branch to merge into. Defaults to the branch the worktree was created from, and on a resubmission to the base it was last submitted with. A resubmission may name another base until its change is opened; after that the base is moved on the forge." },
+                    "base": { "type": "string", "description": "Branch to merge into. Defaults to the branch the worktree was created from, and on a resubmission to the base it was last submitted with. A resubmission may name another base until its change is opened; after that the base is moved on the forge. Resubmitting a commit still waiting for a verdict with another base is such a resubmission, not a retry." },
                     "review_id": { "type": "string", "description": "Set to resubmit an existing review after changes were requested." },
                     "rerun_checks": { "type": "boolean", "description": "Run configured required checks again even when exact immutable evidence exists. This cannot alter which checks are required." },
                     "change": { "type": "integer", "description": "The open pull request number or merge request iid this branch already has (pr_for_branch or mr_for_branch finds it). Approval updates it instead of opening a new one. Fixed by the first submit of a review." },
@@ -293,10 +293,18 @@ async fn submit(
         ctx.session_id().unwrap_or(&worktree)
     ))
     .await;
+    let asked_base = args.get("base").and_then(Value::as_str);
     let resubmission = match resubmission {
         Some(existing) => Some(existing),
         None => match pending_duplicate(store, ctx, &worktree, &head_sha)? {
-            Some(existing) if existing.title == title && existing.body == body => {
+            Some(existing)
+                if existing.title == title
+                    && existing.body == body
+                    && asked_base.is_none_or(|asked| {
+                        serde_json::from_str::<Target>(&existing.target)
+                            .is_ok_and(|target| target.base == asked)
+                    }) =>
+            {
                 return Ok(already_submitted(&existing));
             }
             other => other,
@@ -312,7 +320,7 @@ async fn submit(
     // The base defaults to what the worktree was branched from — read from the
     // worktree's `origin/HEAD`, not assumed to be `main` — and for a
     // resubmission to the base it was last submitted with.
-    let base = match (args.get("base").and_then(Value::as_str), &stored) {
+    let base = match (asked_base, &stored) {
         (
             Some(asked),
             Some(Target {
@@ -673,8 +681,9 @@ impl Drop for InFlight {
 }
 
 /// An undecided review this caller already made of `head_sha` from this
-/// worktree. A fresh submission with the same title and body is answered
-/// with it; one with different words revises it, as if it named it.
+/// worktree. A fresh submission with the same title, body and base is
+/// answered with it; one with different words or another base revises it,
+/// as if it named it.
 fn pending_duplicate(
     store: &Store,
     ctx: &CallContext,
