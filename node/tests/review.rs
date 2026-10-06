@@ -2809,7 +2809,8 @@ async fn stopping_a_session_mid_check_cancels_the_run_and_kills_its_process_grou
 /// A `gh` that answers the REST calls publication makes for an existing
 /// change. The pull request is `pr.json`, the open changes for a branch are
 /// `open.json`, and its comments are `comments.json`, all files the test
-/// writes: the test decides what the forge holds.
+/// writes: the test decides what the forge holds. Branches are read from, and
+/// a new change's base must exist in, the fixture's bare `origin.git`.
 fn gh_forge(f: &Fixture, pull: Value) {
     std::fs::write(f.dir.join("pr.json"), pull.to_string()).unwrap();
     std::fs::write(
@@ -2822,9 +2823,19 @@ fn gh_forge(f: &Fixture, pull: Value) {
          'GET repos/owner/name/pulls?'*) cat \"$d/open.json\" 2>/dev/null || echo '[]' ;;\n\
          'GET repos/owner/name/pulls/'*) cat \"$d/pr.json\" ;;\n\
          'GET repos/owner/name/issues/'*) cat \"$d/comments.json\" 2>/dev/null || echo '[]' ;;\n\
+         'GET repos/owner/name/git/ref/heads/'*)\n\
+         b=\"${4#repos/owner/name/git/ref/heads/}\"\n\
+         if s=\"$(git --git-dir=\"$d/origin.git\" rev-parse --verify -q \"refs/heads/$b\")\"; then\n\
+         printf '{\"object\":{\"sha\":\"%s\"}}\\n' \"$s\"\n\
+         else echo 'gh: Not Found (HTTP 404)' >&2; exit 1; fi ;;\n\
          *) echo '{}' ;;\n\
          esac\n\
          exit 0\n\
+         fi\n\
+         base=; prev=\n\
+         for a in \"$@\"; do [ \"$prev\" = --base ] && base=\"$a\"; prev=\"$a\"; done\n\
+         if [ -n \"$base\" ] && ! git --git-dir=\"$d/origin.git\" rev-parse --verify -q \"refs/heads/$base\" >/dev/null; then\n\
+         echo 'pull request create failed: GraphQL: Base ref must be a branch' >&2; exit 1\n\
          fi\n\
          echo https://github.test/pull/1\n",
     )
@@ -3219,4 +3230,140 @@ async fn an_update_whose_lease_was_lost_is_refused() {
     assert!(!f.git_log().contains("push origin"), "{}", f.git_log());
     assert_eq!(f.forge_branch(), theirs, "their work is still there");
     assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "claimed");
+}
+
+/// What a revision's intent says it may replace on the forge.
+fn intent(f: &Fixture, id: &str) -> tracon::review::publish::Intent {
+    let revision = f.store.latest_review_revision(id).unwrap().unwrap();
+    serde_json::from_str(revision.intent_json.as_deref().unwrap()).unwrap()
+}
+
+/// A stacked review whose base was merged and deleted pushes its branch and
+/// then fails to open. Rebased onto main, the same review is resubmitted
+/// against main and replaces the branch it pushed, leased on exactly that.
+#[tokio::test]
+async fn a_stacked_review_whose_base_is_gone_is_retargeted_and_rewritten() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    gh_forge(&f, pull_seven(&f.base_sha()));
+    let wt = std::path::Path::new(&f.worktree);
+    sh(
+        wt,
+        &format!(
+            "git checkout -qb stack main && echo stacked > s.txt && git add -A \
+             && git commit -qm stacked && git push -q {} stack:refs/heads/stack \
+             && git update-ref refs/remotes/origin/stack stack \
+             && git checkout -q feat/x && git rebase -q stack",
+            f.dir.join("origin.git").display()
+        ),
+    );
+    let mut args = f.submit_args();
+    args["base"] = json!("stack");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    sh(
+        &f.dir,
+        "git --git-dir=origin.git update-ref -d refs/heads/stack",
+    );
+
+    let (status, body) = f.approve(&id).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    let stale = f.forge_branch();
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(
+        stale, review.head_sha,
+        "the push landed before the open failed"
+    );
+    assert_eq!(review.state, "claimed");
+
+    sh(wt, "git rebase -q --onto origin/main stack feat/x");
+    let mut args = f.submit_args();
+    args["review_id"] = json!(id);
+    args["rewrite"] = json!(true);
+    let resubmitted = f.tool("s1", "submit_review", args).await;
+    assert_eq!(review_id(&resubmitted), id);
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(review.base_ref, "main");
+    let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
+    assert_eq!(target.base, "main");
+    let intent = intent(&f, &id);
+    assert!(intent.rewrite);
+    assert_eq!(intent.lease.as_deref(), Some(stale.as_str()));
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        f.git_log()
+            .contains(&format!("--force-with-lease=refs/heads/feat/x:{stale}")),
+        "{}",
+        f.git_log()
+    );
+    assert!(f.gh_log().contains("--base main"), "{}", f.gh_log());
+    assert_eq!(f.forge_branch(), review.head_sha);
+}
+
+/// A rewrite of a branch no change was opened for is still leased: somebody
+/// pushing to it after submit makes publication refuse rather than force.
+#[tokio::test]
+async fn a_rewrite_without_a_change_is_refused_once_its_lease_is_lost() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    gh_forge(&f, pull_seven(&f.base_sha()));
+    let host = f.dir.join("wt");
+    sh(
+        &host,
+        "git checkout -qb elsewhere main && echo other > b.txt && git add -A \
+         && git commit -qm other && git push -qf origin elsewhere:refs/heads/feat/x",
+    );
+    let lease = sh_out(&host, "git rev-parse elsewhere");
+    let mut args = f.submit_args();
+    args["rewrite"] = json!(true);
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    let intent = intent(&f, &id);
+    assert!(intent.rewrite);
+    assert_eq!(intent.lease.as_deref(), Some(lease.as_str()));
+    sh(
+        &host,
+        "git checkout -qb theirs main && echo theirs > c.txt && git add -A \
+         && git commit -qm theirs && git push -qf origin theirs:refs/heads/feat/x",
+    );
+    let theirs = sh_out(&host, "git rev-parse theirs");
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("somebody else pushed"),
+        "{body}"
+    );
+    assert!(!f.git_log().contains("push origin"), "{}", f.git_log());
+    assert_eq!(f.forge_branch(), theirs, "their work is still there");
+}
+
+/// Once a review updates an opened change, the change's base is the forge's
+/// to move: a resubmission naming another is refused and says why.
+#[tokio::test]
+async fn a_resubmission_cannot_move_an_opened_changes_base() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let base = f.base_sha();
+    f.forge_holds(&base);
+    gh_forge(&f, pull_seven(&base));
+    let id = review_id(&f.submit_update(json!({})).await);
+
+    let refused = f
+        .submit_update(json!({ "review_id": id, "base": "release" }))
+        .await;
+    assert!(
+        refused["error"]
+            .to_string()
+            .contains("pull request 7, which merges into main"),
+        "{refused}"
+    );
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
+    assert_eq!(target.base, "main");
 }

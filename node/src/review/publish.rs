@@ -91,7 +91,9 @@ pub struct Target {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
     /// The change on the forge this review updates. `None` opens a new one.
-    /// Fixed at first submit: a resubmission cannot retarget a review.
+    /// Fixed at first submit. Once there is a change its `base` is fixed too,
+    /// because moving an opened change is the forge's business; until then a
+    /// resubmission may name another base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change: Option<ChangeRef>,
 }
@@ -150,8 +152,9 @@ impl Outputs {
 pub struct Intent {
     #[serde(default)]
     pub forge: Outputs,
-    /// What the existing change's branch held when this revision was
-    /// submitted. A push may replace exactly this and nothing else.
+    /// What the branch held on the forge when this revision was submitted,
+    /// for an existing change or a declared rewrite. A push may replace
+    /// exactly this and nothing else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease: Option<String>,
     /// The branch's history was rewritten, so the push is not a fast-forward
@@ -310,8 +313,9 @@ pub struct Publication<'a> {
     pub reviewed_tree: &'a str,
     /// Resolved (`Outputs::resolve`): a new change always has a description.
     pub outputs: &'a Outputs,
-    /// For an existing change: what its branch held at submit, and whether
-    /// the push replaces that history rather than fast-forwarding it.
+    /// For an existing change or a declared rewrite: what the branch held at
+    /// submit, and whether the push replaces that history rather than
+    /// fast-forwarding it.
     pub lease: Option<&'a str>,
     pub rewrite: bool,
     /// A previous attempt for this same publication reached, or may have
@@ -502,9 +506,10 @@ async fn attempt(
     };
 
     // Look before acting: a resumed attempt asks what the forge holds rather
-    // than repeating a push whose outcome it never learned. An update always
-    // looks, because what it may replace is exactly what it was reviewed on.
-    let observed = if p.resume || p.target.change.is_some() {
+    // than repeating a push whose outcome it never learned. An update or a
+    // leased push always looks, because what it may replace is exactly what
+    // it was reviewed on.
+    let observed = if p.resume || p.target.change.is_some() || p.lease.is_some() {
         Some(remote_sha(cfg, &publisher, &credential, &refname).await?)
     } else {
         None
@@ -739,6 +744,42 @@ pub async fn change_state(
             head_sha: text("/sha"),
         },
     })
+}
+
+/// What `target.branch` holds on the forge, or `None` when there is no such
+/// branch.
+pub async fn branch_head(
+    provider: Provider,
+    cfg: &Config,
+    dir: &Path,
+    env: &BTreeMap<String, String>,
+    target: &Target,
+) -> Result<Option<String>, PublishError> {
+    let (path, pointer) = match provider {
+        Provider::Github => (
+            format!("repos/{}/git/ref/heads/{}", target.project, target.branch),
+            "/object/sha",
+        ),
+        Provider::Gitlab => (
+            format!(
+                "projects/{}/repository/branches/{}",
+                gitlab_project(&target.project),
+                target.branch.replace('/', "%2F")
+            ),
+            "/commit/id",
+        ),
+    };
+    match forge_api(provider, cfg, dir, env, "GET", &path, &[]).await {
+        Ok(v) => match v.pointer(pointer).and_then(Value::as_str) {
+            Some(sha) if !sha.is_empty() => Ok(Some(sha.to_string())),
+            _ => Err(PublishError::Refused {
+                cli: provider.command(cfg),
+                stderr: format!("GET {path} named no commit"),
+            }),
+        },
+        Err(PublishError::Refused { stderr, .. }) if stderr.contains("404") => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// The open change for `target.branch`, if the forge has one: `(number, url)`.

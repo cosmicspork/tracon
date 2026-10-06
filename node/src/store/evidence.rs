@@ -930,10 +930,10 @@ impl Store {
         Ok(())
     }
 
-    /// Replace the mutable card projection and append its immutable revision
-    /// atomically after a candidate has passed its checks. Returns `false`,
-    /// changing nothing, when the review is not in a state a resubmission may
-    /// touch — in particular while it is `publishing`, so a resubmission
+    /// Replace the mutable card projection, including where it publishes, and
+    /// append its immutable revision atomically after a candidate has passed its
+    /// checks. Returns `false`, changing nothing, when the review is not in a
+    /// state a resubmission may touch — in particular while it is `publishing`, so a resubmission
     /// racing an approval can never swap the revision an in-flight publish is
     /// about to record as approved.
     #[allow(clippy::too_many_arguments)]
@@ -942,6 +942,8 @@ impl Store {
         review_id: &str,
         title: &str,
         body: &str,
+        target: &str,
+        base_ref: &str,
         added: i64,
         removed: i64,
         checks_json: Option<&str>,
@@ -955,7 +957,7 @@ impl Store {
         let changed = tx.execute(
             "UPDATE review SET title=?2, body=?3, diff=?4, files=?5, head_sha=?6, added=?7,
                 removed=?8, checks_json=?9, state='new', verdict_reason=NULL, revision_patch=NULL,
-                claimed_ms=NULL, resolved_mono_ms=NULL, updated_ms=?10
+                claimed_ms=NULL, resolved_mono_ms=NULL, updated_ms=?10, target=?11, base_ref=?12
              WHERE id=?1 AND state IN ('new','claimed','revising')",
             params![
                 review_id,
@@ -968,6 +970,8 @@ impl Store {
                 removed,
                 checks_json,
                 now_ms(),
+                target,
+                base_ref,
             ],
         )?;
         if changed != 1 {

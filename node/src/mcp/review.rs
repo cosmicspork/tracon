@@ -59,7 +59,7 @@ pub fn definitions() -> Vec<Value> {
                     "body": { "type": "string", "description": "What is not obvious from the diff: intent, trade-offs, follow-ups." },
                     "provider": { "type": "string", "enum": ["github", "gitlab"] },
                     "project": { "type": "string", "description": "owner/name on GitHub, the project path on GitLab." },
-                    "base": { "type": "string", "description": "Branch to merge into. Defaults to the branch the worktree was created from." },
+                    "base": { "type": "string", "description": "Branch to merge into. Defaults to the branch the worktree was created from, and on a resubmission to the base it was last submitted with. A resubmission may name another base until its change is opened; after that the base is moved on the forge." },
                     "review_id": { "type": "string", "description": "Set to resubmit an existing review after changes were requested." },
                     "rerun_checks": { "type": "boolean", "description": "Run configured required checks again even when exact immutable evidence exists. This cannot alter which checks are required." },
                     "change": { "type": "integer", "description": "The open pull request number or merge request iid this branch already has (pr_for_branch or mr_for_branch finds it). Approval updates it instead of opening a new one. Fixed by the first submit of a review." },
@@ -80,7 +80,7 @@ pub fn definitions() -> Vec<Value> {
                             "draft": { "type": "boolean", "description": "Open the new change as a draft. Not for an existing change." },
                         },
                     },
-                    "rewrite": { "type": "boolean", "description": "The branch's history was rewritten (rebase, amend), so the push replaces what the change holds. Forced only over what it held at submit, and always approved by the operator." },
+                    "rewrite": { "type": "boolean", "description": "The branch's history was rewritten (rebase, amend), so the push replaces what the forge's branch holds: the change's head, or for a branch pushed before its change opened, whatever the branch holds now. Forced only over what it held at submit, and always approved by the operator." },
                 },
                 "required": ["title", "body", "provider", "project"],
             },
@@ -302,11 +302,37 @@ async fn submit(
             other => other,
         },
     };
+    let stored = match &resubmission {
+        Some(existing) => Some(
+            serde_json::from_str::<Target>(&existing.target)
+                .map_err(|e| format!("this review's target is unreadable: {e}"))?,
+        ),
+        None => None,
+    };
     // The base defaults to what the worktree was branched from — read from the
-    // worktree's `origin/HEAD`, not assumed to be `main`.
-    let base = match args.get("base").and_then(Value::as_str) {
-        Some(b) => b.to_string(),
-        None => review::default_base(&worktree)
+    // worktree's `origin/HEAD`, not assumed to be `main` — and for a
+    // resubmission to the base it was last submitted with.
+    let base = match (args.get("base").and_then(Value::as_str), &stored) {
+        (
+            Some(asked),
+            Some(Target {
+                base: was,
+                change: Some(change),
+                provider,
+                ..
+            }),
+        ) if asked != was => {
+            let noun = Provider::parse(provider).map_or("change", |p| p.noun());
+            return Err(format!(
+                "this review updates {noun} {}, which merges into {was}; an opened change's base \
+                 is moved on the forge, not by resubmitting. Resubmit with base {was}, or submit \
+                 a new review.",
+                change.number
+            ));
+        }
+        (Some(asked), _) => asked.to_string(),
+        (None, Some(target)) => target.base.clone(),
+        (None, None) => review::default_base(&worktree)
             .await
             .map_err(|e| e.to_string())?,
     };
@@ -348,11 +374,10 @@ async fn submit(
         return Err(review::ReviewError::Rejected(reason).to_string());
     }
     // Where this review publishes. A resubmission keeps the target it was
-    // first submitted with, including the change it updates.
-    let mut target = match &resubmission {
-        Some(existing) => {
-            let target: Target = serde_json::from_str(&existing.target)
-                .map_err(|e| format!("this review's target is unreadable: {e}"))?;
+    // first submitted with, including the change it updates; only the base
+    // of a change not yet opened may move.
+    let mut target = match stored {
+        Some(target) => {
             if asked_change.is_some() && asked_change != target.change.as_ref().map(|c| c.number) {
                 return Err(
                     "a review updates the change it was first submitted for; submit a new review \
@@ -360,7 +385,10 @@ async fn submit(
                         .into(),
                 );
             }
-            target
+            Target {
+                base: base.clone(),
+                ..target
+            }
         }
         None => Target {
             provider: provider.clone(),
@@ -379,6 +407,14 @@ async fn submit(
         .get("rewrite")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let last_pushed = match &resubmission {
+        Some(existing) if rewrite => store
+            .publications_for_review(&existing.id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find_map(|publication| publication.pushed_sha),
+        _ => None,
+    };
     let intent = forge_intent(
         manager,
         ctx,
@@ -387,6 +423,7 @@ async fn submit(
         &worktree,
         forge,
         rewrite,
+        last_pushed,
     )
     .await?;
     let intent_json = Some(serde_json::to_string(&intent).map_err(|e| e.to_string())?);
@@ -488,6 +525,8 @@ async fn submit(
                 id,
                 &title,
                 &body,
+                &serde_json::to_string(&target).map_err(|e| e.to_string())?,
+                &base,
                 capture.added,
                 capture.removed,
                 checks_json.as_deref(),
@@ -797,7 +836,10 @@ fn forge_arg(args: &Value) -> Result<Outputs, String> {
 /// than finding out after the operator approved. An existing change must be
 /// open and be this branch of this repository into this base; what its branch
 /// holds now is the only thing the push may replace. A new change must not
-/// collide with one already open for the branch.
+/// collide with one already open for the branch, and a declared rewrite of a
+/// branch pushed without one may replace only what the branch holds now
+/// (`last_pushed` when the forge cannot say).
+#[allow(clippy::too_many_arguments)]
 async fn forge_intent(
     manager: &Manager,
     ctx: &CallContext,
@@ -806,6 +848,7 @@ async fn forge_intent(
     worktree: &str,
     forge: Outputs,
     rewrite: bool,
+    last_pushed: Option<String>,
 ) -> Result<Intent, String> {
     let provider = Provider::parse(&target.provider).ok_or_else(|| {
         format!(
@@ -823,15 +866,10 @@ async fn forge_intent(
     let dir = review::publish::inspection_dir().map_err(|e| e.to_string())?;
     let cfg = manager.cfg();
     let Some(change) = target.change.clone() else {
-        if rewrite {
-            return Err(
-                "rewrite replaces an existing change's history; pass change as well".into(),
-            );
-        }
         // Opening a second change for a branch fails at publication, after
         // the operator approved it. Where the forge can be asked, say so now.
-        if let Ok(env) = env {
-            match review::publish::open_change_for_branch(provider, cfg, &dir, &env, target).await {
+        if let Ok(env) = &env {
+            match review::publish::open_change_for_branch(provider, cfg, &dir, env, target).await {
                 Ok(Some((number, url))) => {
                     return Err(format!(
                         "{noun} {number} ({url}) is already open for {}; pass change: {number} to \
@@ -846,10 +884,46 @@ async fn forge_intent(
                 ),
             }
         }
+        if !rewrite {
+            return Ok(Intent {
+                forge,
+                lease: None,
+                rewrite: false,
+            });
+        }
+        // A branch can be on the forge without a change ever opening (the
+        // open failed after the push), and a rebase must replace it.
+        let asked = match &env {
+            Ok(env) => review::publish::branch_head(provider, cfg, &dir, env, target)
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        let lease = match (asked, last_pushed) {
+            (Ok(held), _) => held,
+            (Err(_), Some(pushed)) => Some(pushed),
+            (Err(error), None) => {
+                return Err(format!(
+                    "could not read what {} holds on the forge, so a rewrite has nothing to \
+                     lease on: {error}",
+                    target.branch
+                ))
+            }
+        };
+        let Some(lease) = lease else {
+            // Nothing there yet: an ordinary first push replaces nothing.
+            return Ok(Intent {
+                forge,
+                lease: None,
+                rewrite: false,
+            });
+        };
+        let builds_on =
+            lease == head_sha || review::descends_from(worktree, head_sha, &lease).await;
         return Ok(Intent {
             forge,
-            lease: None,
-            rewrite: false,
+            lease: Some(lease),
+            rewrite: !builds_on,
         });
     };
     let number = change.number;

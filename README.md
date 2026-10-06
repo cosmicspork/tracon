@@ -441,7 +441,11 @@ the forge first: a branch with an open change must name it, and an update must b
 an open change of that branch into that base. An update pushes only over the
 commit the change held at submit; a rewritten history (rebase, amend) must be
 declared, is forced with that commit as its lease, and always comes to you even
-under a publish grant.
+under a publish grant. Until a change is opened, a resubmission may name another
+`base` (a stacked base that was merged and deleted, say), and a declared rewrite
+leases on whatever the branch holds on the forge, so a publication that pushed
+and then failed to open can be rebased and retried. Once a change is open, its
+base is moved on the forge, and a resubmission naming another is refused.
 
 Feedback left on the forge comes back the same way: an agent reads a change's
 review threads (file, line, resolved or outdated) and conversation with
@@ -975,9 +979,10 @@ the one commit it covers; the branch moving to a later sha makes the grant no
 longer apply, rather than carrying it forward. A publish grant also binds what the
 forge will show: an update's target names the change (`…:change:<n>:prose:<hash>`),
 and the hash covers any separate description or comment. A publish that rewrites
-a change's history is never granted around: it always asks. A signed policy deny always wins
-over a local grant, however narrow it is scoped: what it refuses stays refused
-until the signed bundle itself changes, never by granting around it. Revoking a grant, or letting it expire, takes effect on the next
+a branch's history, whether or not a change is open for it, is never granted
+around: it always asks. A signed policy deny always wins over a local grant,
+however narrow it is scoped: what it refuses stays refused until the signed
+bundle itself changes, never by granting around it. Revoking a grant, or letting it expire, takes effect on the next
 action the node reads it for, not one already dispatched.
 
 ### Where things live
