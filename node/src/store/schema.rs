@@ -1249,6 +1249,31 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE approval ADD COLUMN operator_note TEXT;
     ALTER TABLE approval ADD COLUMN claimed_ms INTEGER;
     "#,
+    // 54: what an agent shows the operator of its work (`show_work`). The
+    // account is the agent's; the node records only what it knows itself —
+    // the commit the work was shown at and the bundle's hash — so the review
+    // can mark it stale once the candidate moves. Node-local, like checks: a
+    // peer mirroring the review never saw the workspace it was read from.
+    r#"
+    CREATE TABLE shown_work (
+        id            TEXT PRIMARY KEY,
+        channel       TEXT NOT NULL,
+        session_id    TEXT,
+        lane          TEXT,
+        review_id     TEXT,
+        head_sha      TEXT NOT NULL,
+        title         TEXT NOT NULL,
+        format        TEXT NOT NULL CHECK(format IN ('markdown','html','files')),
+        markdown      TEXT NOT NULL,
+        document_id   TEXT,
+        document_slug TEXT,
+        document_hash TEXT,
+        files_json    TEXT NOT NULL,
+        created_ms    INTEGER NOT NULL
+    );
+    CREATE INDEX shown_work_session ON shown_work(session_id, created_ms);
+    CREATE INDEX shown_work_review ON shown_work(review_id, created_ms);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

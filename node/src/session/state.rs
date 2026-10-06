@@ -142,6 +142,9 @@ pub mod event_kind {
     pub const WORK_CLOSED: &str = "work_closed";
     /// A plan session wrote its plan document; the item now carries its slug.
     pub const PLAN_ARTIFACT: &str = "plan_artifact";
+    /// The agent showed the operator its work (`id`, `title`, `format`,
+    /// `head_sha`, `review_id`, `channel`, `slug`, `files`).
+    pub const WORK_SHOWN: &str = "work_shown";
     /// Deterministic checks began at submit (`commands`).
     pub const CHECK_STARTED: &str = "check_started";
     /// One check finished (`command`, `ok`, `exit`, `tail`, `ms`).

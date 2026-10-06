@@ -17,6 +17,7 @@ pub mod memory;
 pub mod operator;
 pub mod review;
 pub mod schema;
+pub mod show;
 pub mod wait;
 pub mod work;
 
@@ -225,6 +226,9 @@ impl Tools {
             // These are intervention-only: asking, pinging, and drafting a
             // report do not touch a credential or widen a tool policy.
             out.extend(operator::definitions());
+            // Showing work reaches the operator and nothing else: it is read
+            // from the node's own snapshot and never leaves tracon.
+            out.extend(show::definitions());
             out.extend(work::definitions());
             out.extend(approvals::definitions());
         }
@@ -264,6 +268,17 @@ impl Tools {
                 .ok_or("operator interventions are not available on this node")?;
             return operator::call(&access.store, &access.manager, &self.cfg, ctx, name, args)
                 .await;
+        }
+        if name == show::SHOW {
+            let access = self
+                .session
+                .get()
+                .ok_or("showing work is not available on this node")?;
+            access
+                .manager
+                .caller_active(ctx)
+                .map_err(|error| error.to_string())?;
+            return show::call(access, ctx, args).await;
         }
         if name == approvals::STATUS {
             let access = self

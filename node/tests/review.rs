@@ -3367,3 +3367,247 @@ async fn a_resubmission_cannot_move_an_opened_changes_base() {
     let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
     assert_eq!(target.base, "main");
 }
+
+/// Work shown with `show_work` reaches the review its session submits, read
+/// from the node's own snapshot and stored as an HTML bundle, and is marked
+/// stale once the candidate moves past the commit it was shown at.
+#[tokio::test]
+async fn shown_work_is_on_the_review_until_the_candidate_moves() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let worktree = std::path::Path::new(&f.worktree);
+    sh(
+        worktree,
+        "mkdir -p show/img && printf '<title>After</title><img src=img/a.png>' > show/index.html \
+         && printf 'png' > show/img/a.png",
+    );
+
+    let shown = f
+        .tool(
+            "s1",
+            "show_work",
+            json!({
+                "title": "The new screen",
+                "markdown": "Before it said nothing; ![after](https://example.test/x.png) now it does.",
+                "paths": ["show"],
+                "entry": "show/index.html",
+            }),
+        )
+        .await;
+    assert_eq!(shown["format"], "html", "{shown}");
+    assert_eq!(shown["files"], 2, "{shown}");
+    let head = sh_out(worktree, "git rev-parse HEAD");
+    assert_eq!(shown["head_sha"], head.as_str());
+    assert!(f.event_kinds("s1").contains(&"work_shown".to_string()));
+
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let (status, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body["shown_work"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{body}");
+    assert_eq!(items[0]["stale"], false, "{body}");
+    assert_eq!(items[0]["title"], "The new screen");
+    let slug = items[0]["document_slug"].as_str().unwrap().to_string();
+    assert!(slug.starts_with("shown-"), "{slug}");
+
+    // The page is an ordinary HTML bundle: served only through the isolated
+    // preview origin, with every file it loads beside it.
+    let (status, doc) = f.call("GET", &format!("/api/docs/work/{slug}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{doc}");
+    assert_eq!(doc["format"], "html");
+    assert_eq!(doc["entry_path"], "show/index.html");
+    let mut paths: Vec<_> = doc["bundle_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap().to_string())
+        .collect();
+    paths.sort();
+    assert_eq!(paths, ["show/img/a.png", "show/index.html"]);
+
+    // An agent cannot rewrite what it showed after the fact.
+    let refused = f
+        .tool(
+            "s1",
+            "doc_write",
+            json!({ "slug": slug, "body": "# edited" }),
+        )
+        .await;
+    assert!(
+        refused["error"].to_string().contains("show_work"),
+        "{refused}"
+    );
+
+    // The session carries it too, read against nothing.
+    let (_, session) = f.call("GET", "/api/sessions/s1", None).await;
+    assert_eq!(session["shown_work"].as_array().unwrap().len(), 1);
+
+    // The agent keeps working and resubmits: what it showed is now about a
+    // commit that is no longer the candidate.
+    sh(
+        worktree,
+        "echo more >> a.txt && git add a.txt && git commit -qm later",
+    );
+    let mut resubmit = f.submit_args();
+    resubmit["review_id"] = json!(id);
+    let again = f.tool("s1", "submit_review", resubmit).await;
+    assert_eq!(again["state"], "new", "{again}");
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let items = body["shown_work"].as_array().unwrap();
+    assert_eq!(items[0]["stale"], true, "{body}");
+    assert!(
+        items[0]["stale_reason"]
+            .as_str()
+            .unwrap()
+            .contains(&head[..12]),
+        "{body}"
+    );
+
+    // Shown again at the new commit, it is current, beside the stale one.
+    let fresh = f
+        .tool(
+            "s1",
+            "show_work",
+            json!({ "title": "Again", "markdown": "still works", "review_id": id }),
+        )
+        .await;
+    assert_eq!(fresh["format"], "markdown", "{fresh}");
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let stale: Vec<_> = body["shown_work"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["stale"].as_bool().unwrap())
+        .collect();
+    assert_eq!(stale, [true, false], "{body}");
+}
+
+/// Plain files come back under a listing the node writes; nothing is read
+/// from outside the workspace or from Git's own directory. (A workspace
+/// holding a symbolic link is refused at export, before any of this; the
+/// unit tests cover a link met here anyway.)
+#[tokio::test]
+async fn shown_files_are_listed_and_never_read_from_outside_the_workspace() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let worktree = std::path::Path::new(&f.worktree);
+    sh(worktree, "mkdir -p out && echo report > out/report.txt");
+
+    let shown = f
+        .tool(
+            "s1",
+            "show_work",
+            json!({ "title": "The report", "paths": ["out"] }),
+        )
+        .await;
+    assert_eq!(shown["format"], "files", "{shown}");
+    assert_eq!(shown["files"], 1, "{shown}");
+    let (_, session) = f.call("GET", "/api/sessions/s1", None).await;
+    let slug = session["shown_work"][0]["document_slug"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (_, doc) = f.call("GET", &format!("/api/docs/work/{slug}"), None).await;
+    assert_eq!(doc["entry_path"], "tracon-shown.html", "{doc}");
+
+    for (args, says) in [
+        (json!({ "title": "x", "paths": ["../etc"] }), "relative"),
+        (json!({ "title": "x", "paths": [".git/config"] }), "Git"),
+        (json!({ "title": "x" }), "nothing to show"),
+        (
+            json!({ "title": "x", "paths": ["out"], "entry": "out/report.txt.html" }),
+            "not one of the files",
+        ),
+    ] {
+        let refused = f.tool("s1", "show_work", args.clone()).await;
+        assert!(
+            refused["error"].to_string().contains(says),
+            "{args}: {refused}"
+        );
+    }
+}
+
+/// A review is shown work by whoever submitted it, and by no one else.
+#[tokio::test]
+async fn work_cannot_be_shown_on_another_sessions_review() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    f.store
+        .insert_session(&{
+            let mut r = support::rows::session_row("s2", "n1", "work");
+            r.repo_path = format!("workspace://s1-{}", test_name!());
+            r.branch = "feat/x".into();
+            r.harness_id = "omp".into();
+            r.harness_version = "18.0.4".into();
+            r.started_mono_ms = Some(0);
+            r
+        })
+        .unwrap();
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let refused = f
+        .tool(
+            "s2",
+            "show_work",
+            json!({ "title": "x", "markdown": "y", "review_id": id }),
+        )
+        .await;
+    assert!(
+        refused["error"].to_string().contains("another session"),
+        "{refused}"
+    );
+}
+
+/// A harness the operator runs has no session snapshot: it shows work on a
+/// review it submitted, read from that review's worktree, and nowhere else.
+#[tokio::test]
+async fn an_external_harness_shows_work_on_its_review_from_its_worktree() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    f.store
+        .insert_session(&{
+            let mut r = support::rows::session_row("ext", "n1", "work");
+            r.harness_id = "external".into();
+            r.repo_path = String::new();
+            r.worktree_path = None;
+            r.branch = String::new();
+            r.started_mono_ms = Some(0);
+            r
+        })
+        .unwrap();
+    let id = f
+        .submit_as(
+            "ext",
+            json!({
+                "provider": "github", "project": "owner/name",
+                "base": "main", "branch": "feat/x", "worktree": f.worktree
+            }),
+        )
+        .await;
+    sh(std::path::Path::new(&f.worktree), "echo notes > notes.txt");
+    let access = tracon::mcp::SessionAccess {
+        store: f.store.clone(),
+        manager: f.manager.clone(),
+    };
+    let ctx = tracon::mcp::CallContext::external(Some("laptop".into()), "work", "n1");
+
+    let refused = tracon::mcp::show::call(&access, &ctx, &json!({ "title": "x", "markdown": "y" }))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("review_id"), "{refused}");
+
+    let shown = tracon::mcp::show::call(
+        &access,
+        &ctx,
+        &json!({ "title": "Notes", "paths": ["notes.txt"], "review_id": id }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(shown["format"], "files", "{shown}");
+
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let items = body["shown_work"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{body}");
+    assert_eq!(items[0]["lane"], "laptop");
+    assert_eq!(items[0]["stale"], false, "{body}");
+    assert_eq!(items[0]["files"][0]["path"], "notes.txt");
+}
