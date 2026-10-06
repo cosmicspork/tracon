@@ -32,6 +32,41 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.28.0](https://github.com/cosmicspork/tracon/compare/v0.27.0...v0.28.0) (2026-10-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* **external:** answer external harnesses with no session ([#358](https://github.com/cosmicspork/tracon/issues/358))
+* **store:** let reviews, approvals and questions name no session ([#357](https://github.com/cosmicspork/tracon/issues/357))
+
+### Features
+
+* **approvals:** reasons, changes_requested, schema-checked edits, approval API ([#361](https://github.com/cosmicspork/tracon/issues/361)) ([#367](https://github.com/cosmicspork/tracon/issues/367)) ([b6f46e7](https://github.com/cosmicspork/tracon/commit/b6f46e752f955b725dcb11ad37b14107f2dc3438))
+* **egress:** ask the operator before a session's egress, rather than refusing it ([#372](https://github.com/cosmicspork/tracon/issues/372)) ([5eea44d](https://github.com/cosmicspork/tracon/commit/5eea44d1221219f8032224d8fe3a6814fe7c6a32))
+* **external:** answer external harnesses with no session ([#358](https://github.com/cosmicspork/tracon/issues/358)) ([f3b0707](https://github.com/cosmicspork/tracon/commit/f3b07076cf569b477a519412cbf6d7d99790d2c3))
+* **external:** show your own agents by lane on the home ([#359](https://github.com/cosmicspork/tracon/issues/359)) ([dae698d](https://github.com/cosmicspork/tracon/commit/dae698d63df4c3abd86aa0429642a212d8efd618))
+* operator Jira search route for local clients ([#353](https://github.com/cosmicspork/tracon/issues/353)) ([070cc31](https://github.com/cosmicspork/tracon/commit/070cc31a7fbebd0a2cc4dc9b98d5502947087831))
+* **review:** show_work, the agent's account of its work beside the diff ([#371](https://github.com/cosmicspork/tracon/issues/371)) ([9d3ad3a](https://github.com/cosmicspork/tracon/commit/9d3ad3a918f92a8a435a30d9fab05a55c7a6dac1))
+* **session:** a work item's session starts working on its own ([#373](https://github.com/cosmicspork/tracon/issues/373)) ([05ffda7](https://github.com/cosmicspork/tracon/commit/05ffda74962f5823a09abe9bfdf5bfbe6e65bcaf))
+* **spa:** full-page approval view for prose writes ([#361](https://github.com/cosmicspork/tracon/issues/361)) ([#370](https://github.com/cosmicspork/tracon/issues/370)) ([c4edb7e](https://github.com/cosmicspork/tracon/commit/c4edb7e8cc6baa051825e91b991205919eae4b48))
+* **spa:** Jira wiki renderer, schema form model, and text diff ([#361](https://github.com/cosmicspork/tracon/issues/361)) ([#363](https://github.com/cosmicspork/tracon/issues/363)) ([affe722](https://github.com/cosmicspork/tracon/commit/affe722932db53e71c8d1537420d02f3e6b80782))
+* **store:** let reviews, approvals and questions name no session ([#357](https://github.com/cosmicspork/tracon/issues/357)) ([8827c34](https://github.com/cosmicspork/tracon/commit/8827c34628f36957c679de169ebdf7a8a1cd84a7))
+* track report_issue drafts with issue_report_status ([#362](https://github.com/cosmicspork/tracon/issues/362)) ([#366](https://github.com/cosmicspork/tracon/issues/366)) ([4c9679f](https://github.com/cosmicspork/tracon/commit/4c9679f71351cd74bc856a6304b92aa232dfb04c))
+
+
+### Bug Fixes
+
+* **policy:** drop no-production-deploy and keep prose out of deny matching ([#360](https://github.com/cosmicspork/tracon/issues/360)) ([#364](https://github.com/cosmicspork/tracon/issues/364)) ([2bdb2fd](https://github.com/cosmicspork/tracon/commit/2bdb2fd762343696d5bb34f68f0c9d7e25fbecf4))
+* **review:** a same-commit retry that names another base retargets ([#356](https://github.com/cosmicspork/tracon/issues/356)) ([#369](https://github.com/cosmicspork/tracon/issues/369)) ([2ac5edd](https://github.com/cosmicspork/tracon/commit/2ac5eddb183b2f670e5dd553f0600cf1717ef351))
+* **review:** let a resubmission retarget its base and rewrite an unopened branch ([#356](https://github.com/cosmicspork/tracon/issues/356)) ([#365](https://github.com/cosmicspork/tracon/issues/365)) ([185a5ab](https://github.com/cosmicspork/tracon/commit/185a5abee400198586eea717c30fae8f1b182712))
+* **spa:** stop the review card styles leaking onto the decision bar ([#352](https://github.com/cosmicspork/tracon/issues/352)) ([cc995cf](https://github.com/cosmicspork/tracon/commit/cc995cf8e5f5dc914f63c7b60b3f38470af0b311))
+
+
+### Performance Improvements
+
+* **review:** bound submit_review latency for external harnesses ([#355](https://github.com/cosmicspork/tracon/issues/355)) ([#368](https://github.com/cosmicspork/tracon/issues/368)) ([5bfec2e](https://github.com/cosmicspork/tracon/commit/5bfec2e90f054dd7ae7b618ba9f0384de8506332))
+
 ## [0.27.0](https://github.com/cosmicspork/tracon/compare/v0.26.1...v0.27.0) (2026-10-05)
 
 
