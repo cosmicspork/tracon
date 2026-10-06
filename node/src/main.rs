@@ -554,9 +554,10 @@ enum ExternalCommand {
     /// How to point your own harness at this node, and the lanes that
     /// called in the last day.
     Show,
-    /// Print the header that labels a harness's calls, for Claude Code's
+    /// Print the headers that label a harness's calls, for Claude Code's
     /// `headersHelper`: the repository and branch it was started in, and the
-    /// process that started it. Needs no running node.
+    /// harness process, so the interface can say it is still running. Needs
+    /// no running node.
     Lane,
     /// Refuse every external harness on a channel, until `start`.
     Stop { channel: String },
@@ -1669,11 +1670,9 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
     }
 }
 
-/// The label `tracon external lane` prints: `<repository>:<branch>#<pid>`.
-/// The repository is named by its main checkout, so a linked worktree is
-/// still its repository; the pid is the harness process that ran this, which
-/// stays the same across its reconnects and tells apart two agents started in
-/// one checkout.
+/// The label `tracon external lane` prints: `<repository>:<branch>`. The
+/// repository is named by its main checkout, so a linked worktree is still
+/// its repository, and the lane survives the harness restarting or resuming.
 fn external_lane() -> String {
     let git = |args: &[&str]| {
         std::process::Command::new("git")
@@ -1701,20 +1700,24 @@ fn external_lane() -> String {
         .unwrap_or_else(|| "unknown".into());
     let branch =
         git(&["branch", "--show-current"]).or_else(|| git(&["rev-parse", "--short", "HEAD"]));
-    let place = match branch {
+    match branch {
         Some(branch) => format!("{repo}:{branch}"),
         None => repo,
-    };
-    format!("{place}#{}", std::os::unix::process::parent_id())
+    }
 }
 
 async fn external_command(cmd: ExternalCommand) -> Result<()> {
     use reqwest::Method;
     // The helper runs on every connection a harness makes, node or no node.
     if let ExternalCommand::Lane = cmd {
+        // The harness runs the helper as its own child, so the parent is the
+        // harness process: what the node checks to say a lane is running.
         println!(
             "{}",
-            serde_json::json!({ "X-Tracon-Agent": external_lane() })
+            serde_json::json!({
+                "X-Tracon-Agent": external_lane(),
+                "X-Tracon-Agent-Pid": std::os::unix::process::parent_id().to_string(),
+            })
         );
         return Ok(());
     }

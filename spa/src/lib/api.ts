@@ -2,6 +2,8 @@
 // interface can say what the node said, not "request failed".
 
 import type {
+  ExternalEvent,
+  ExternalView,
   AuthorityGrant,
   PolicyRule,
   BoundaryResult,
@@ -278,6 +280,12 @@ export const api = {
     call<void>('POST', `/api/external/${encodeURIComponent(channel)}/stop`),
   externalStart: (channel: string) =>
     call<void>('POST', `/api/external/${encodeURIComponent(channel)}/start`),
+  external: () => call<ExternalView>('GET', '/api/external'),
+  externalEvents: (channel: string, after = 0) =>
+    call<{ events: ExternalEvent[] }>(
+      'GET',
+      `/api/external/${encodeURIComponent(channel)}/events?after=${after}`,
+    ),
   saveDraft: (id: string, text: string) => call<void>('PUT', `/api/sessions/${id}/draft`, { text }),
   /** The unsent prompt the node is holding for this session. */
   draft: (id: string) =>

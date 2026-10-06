@@ -91,7 +91,14 @@ pub async fn handle_external(
         )
             .into_response();
     }
-    let ctx = CallContext::external(lane_label(&headers), channel, s.node_id.clone());
+    let (lane, pid) = caller_labels(&headers);
+    let ctx = CallContext::external(lane, channel, s.node_id.clone());
+    if let Some(pid) = pid {
+        s.manager
+            .liveness()
+            .note(&ctx.channel, ctx.lane(), pid)
+            .await;
+    }
     answer_external(&s, &ctx, &msg).await.into_response()
 }
 
@@ -99,11 +106,30 @@ pub async fn handle_external(
 /// agents apart. A label only: nothing is authorized, owned or routed by it.
 const LANE_HEADER: &str = "x-tracon-agent";
 
+/// The harness process behind the call, for saying whether a lane runs.
+const PID_HEADER: &str = "x-tracon-agent-pid";
+
 /// The label a harness sent, trimmed and bounded so a stored column is not
-/// whatever a caller sends. Absent, empty or not text is no label.
-fn lane_label(headers: &HeaderMap) -> Option<String> {
-    let label = headers.get(LANE_HEADER)?.to_str().ok()?.trim();
-    (!label.is_empty()).then(|| label.chars().take(200).collect())
+/// whatever a caller sends, and its process. Absent, empty or not text is no
+/// label. A helper from before the pid had a header of its own appended it as
+/// `#<pid>`; that is split off, so its lane stays the same across restarts.
+fn caller_labels(headers: &HeaderMap) -> (Option<String>, Option<u32>) {
+    let header = |name| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+    };
+    let mut pid = header(PID_HEADER).and_then(|p| p.parse().ok());
+    let mut label = header(LANE_HEADER).unwrap_or("");
+    if let Some((lane, suffix)) = label.rsplit_once('#') {
+        if let Ok(old) = suffix.parse::<u32>() {
+            pid = pid.or(Some(old));
+            label = lane.trim_end();
+        }
+    }
+    let lane = (!label.is_empty()).then(|| label.chars().take(200).collect());
+    (lane, pid)
 }
 
 async fn answer_external(

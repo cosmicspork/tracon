@@ -213,6 +213,8 @@ pub struct Manager {
     /// when its supervisor ends, so the gateway can answer for exactly the
     /// sessions that are live and for no other endpoint.
     native: Arc<Mutex<HashMap<String, crate::adapter::NativeApi>>>,
+    /// Which harness processes called under each external lane.
+    liveness: Arc<external::Liveness>,
     /// Session id → the live channel the node synthesises for that session's
     /// native UI (`gateway::native_events`). Created on demand — ingestion and
     /// the gateway each ask for it and neither is reliably first — and dropped
@@ -273,6 +275,7 @@ impl Manager {
             live: Arc::new(Mutex::new(HashMap::new())),
             tokens: Arc::new(Mutex::new(HashMap::new())),
             native: Arc::new(Mutex::new(HashMap::new())),
+            liveness: Arc::default(),
             native_events: Arc::new(std::sync::Mutex::new(HashMap::new())),
             probe_token: mint_token(),
             mesh: Arc::new(std::sync::OnceLock::new()),
@@ -2202,6 +2205,11 @@ impl Manager {
             }),
             None => self.record_external(&ctx.channel, ctx.lane(), kind, ref_id, payload),
         }
+    }
+
+    /// The harness processes that call under external lanes.
+    pub fn liveness(&self) -> &external::Liveness {
+        &self.liveness
     }
 
     /// Log what a session-less caller did on its channel.

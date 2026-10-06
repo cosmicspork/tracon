@@ -26,7 +26,7 @@ So the claim shrinks, deliberately, from
 to
 
 > the harness never needs the credential, and every call it asks the node to
-> make is decided by policy and written to a session log.
+> make is decided by policy and logged on its channel.
 
 That is worth having. It removes the reason to go looking, it puts a card in
 front of the operator for anything the bundle does not name, and it leaves a
@@ -68,6 +68,9 @@ same refusals) and keep the result, and the caller reads that result with
 `approval_status`, for one id or a list. Every harness asks this way, the
 boundary harness included; only a harness's own permission prompt (OpenCode
 asking to run a command) still waits, because the harness itself does.
+
+The next four shapes describe the attached session external harnesses had
+until they stopped getting one; see "No session at all" below.
 
 **A `Supervisor` was the wrong thing to reuse.** It owns a harness handle, a
 runner, a container, a budget and a turn model, and stubbing all five to get a
@@ -130,6 +133,43 @@ it — the paused row is the fence, found again by id after a restart — while
 Stop stayed the channel's kill switch, and reviews, reports and `ask_operator`
 keys stayed channel-shared so a reattached agent picks up where it left off.
 
+**No session at all.** Per-client sessions keyed on `Mcp-Session-Id` did not
+survive contact with the clients. Claude Code 2.1.289 starts a new MCP session on
+every resume and restart, re-initializes on a 404 (one 404 made three), never
+sends `DELETE`, and opens with a `server/discover` probe carrying no id; omp
+holds the id only in memory. Every launch added a row per channel that read
+"Attached" for an hour after the process was gone. So the door hands out no id
+and reads none, and an external call runs as `Caller::External { lane }` with no
+session row (`proposal-external-stateless`).
+
+What the row used to carry moved to where it already belonged:
+- The log is the channel's `external_event` table, labelled by lane. Only a
+  `tools/call` writes to it, so connecting leaves no trace.
+- Reviews, reports, approvals, questions and authority actions record no
+  session (the columns became nullable by editing the stored schema, because
+  `review` and `candidate` are referenced and a rebuild would have needed
+  foreign keys off), and reviews and approvals record the lane.
+- Ownership is the channel's external callers. Session-scoped grants never
+  match, and `retain` refuses `scope: session` rather than widening it.
+- The one fence is the channel's Stop, renamed from Clear to Start for lifting
+  it. Per-agent pause went with the session; a channel-wide pause from an older
+  node fences like a Stop, and a paused row an older node left becomes one at
+  startup.
+
+The lane is what the operator reads instead of a card per session.
+`tracon external lane`, run by Claude Code's `headersHelper` in the agent's
+working directory, prints `<repository>:<branch>` (the repository named by its
+main checkout, so a linked worktree keeps its name) and, in a header of its own,
+the agent's pid. The pid is display only: the node notes it with the process's
+start time and says a lane is running while one such process is alive, which is
+only meaningful because the door is on the operator's own machine. A label is
+never authority; any caller can send any label. Two agents in one worktree
+share a lane and read as two running processes.
+
+Mesh contract 4 came with it, because a contract 3 peer cannot read a null
+`session_id`. A peer does not mirror a session-less approval card: it has no
+session to hang the card on, so the card is answered on the node that holds it.
+
 ## The policy change that came with it
 
 Comments stopped being allowed unattended in the same bundle (version 5). The
@@ -141,7 +181,9 @@ explain than a split between kinds of write. Reads stay free.
 
 ## Left for later
 
-- Metrics count an attachment as a session with zero tokens, so a channel's
-  session count includes them. Nothing reads that number for a decision yet.
-- A peer's interface renders the row with the wording it has; an older peer
-  shows a blank branch and model until it updates.
+- External review decisions and question answers are logged on the channel's
+  external log, which the event-based metrics do not read, so an external
+  agent's interventions and wait times are missing from them.
+- `external_event` grows without a retention policy, and it is not mirrored, so
+  a peer's interface does not show another node's lanes.
+- A session-less approval card is answered only on the node that holds it.
