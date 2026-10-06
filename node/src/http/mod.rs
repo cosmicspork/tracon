@@ -302,6 +302,7 @@ pub fn router(state: AppState) -> Router {
             get(api::download_workspace),
         )
         .route("/api/forge/repos", get(api::forge_repos))
+        .route("/api/jira/search", get(api::jira_search))
         .route(
             "/api/sessions",
             get(api::list_sessions).post(api::create_session),

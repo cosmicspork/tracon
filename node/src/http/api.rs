@@ -996,6 +996,44 @@ pub async fn forge_repos(
 }
 
 #[derive(Deserialize)]
+pub struct JiraSearchQuery {
+    channel: String,
+    jql: String,
+    cursor: Option<String>,
+}
+
+/// One page of a JQL search with the channel's Jira credential, for a local
+/// app that reads the tracker through the node rather than holding the token.
+pub async fn jira_search(
+    State(s): State<AppState>,
+    Query(q): Query<JiraSearchQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let jql = q.jql.trim();
+    if jql.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "jql is required",
+        ));
+    }
+    crate::mcp::jira::search_page(
+        &s.tools.broker,
+        &s.tools.http,
+        &q.channel,
+        &s.node_id,
+        jql,
+        q.cursor.as_deref().filter(|c| !c.is_empty()),
+    )
+    .await
+    .map(Json)
+    .map_err(|e| match e {
+        crate::mcp::jira::SearchError::Request(m) => {
+            ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, m)
+        }
+        crate::mcp::jira::SearchError::Upstream(m) => ApiError::new(StatusCode::BAD_GATEWAY, m),
+    })
+}
+
+#[derive(Deserialize)]
 pub struct CloneBody {
     channel: String,
     forge: String,

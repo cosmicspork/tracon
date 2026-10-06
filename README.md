@@ -548,6 +548,11 @@ report ID to revise it. Decisions are tied to the inspected content, so stale
 acknowledgements cannot approve a newer report. Acknowledgement is a human action,
 independent of whether a push service accepted its notification.
 
+A local app that is not a harness can read the tracker the same way:
+`GET /api/jira/search?channel=work&jql=…&cursor=…` on the loopback operator API
+returns one page of matching issues (100 at a time, with `next_cursor`) using the
+channel's Jira credential, and never the token.
+
 What it does not get is the boundary. That harness runs as you, on your
 machine: the promise here is that it never needs the credential and that every
 call it makes is decided by policy and written to a session log, not that it
