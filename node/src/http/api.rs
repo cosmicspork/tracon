@@ -1881,7 +1881,7 @@ pub async fn get_approval(
         "lane": a.lane,
         // Someone already had it open, unless that was this same client.
         "claimed_before_ms": before.claimed_ms,
-        "options": serde_json::from_str::<Value>(crate::store::approvals::CARD_OPTIONS)
+        "options": serde_json::from_str::<Value>(crate::store::approvals::card_options(&a.tool))
             .unwrap_or_default(),
     })))
 }

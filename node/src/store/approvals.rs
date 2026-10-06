@@ -32,6 +32,30 @@ pub const OPTION_REQUEST_CHANGES: &str = "request_changes";
 /// a request for changes, which a client that does not know its kind skips.
 pub const CARD_OPTIONS: &str = r#"[{"option_id":"allow_once","name":"Allow once","kind":"allow_once"},{"option_id":"reject_once","name":"Reject","kind":"reject_once"},{"option_id":"request_changes","name":"Request changes","kind":"request_changes"}]"#;
 
+/// The approval a session's refused connection, or its `request_egress`,
+/// puts to the operator. Its arguments name the host; allowing it opens that
+/// host to the session's own grant rather than running a call.
+pub const EGRESS_TOOL: &str = "request_egress";
+
+/// Open the host for the rest of the session. ("Allow once" opens it for
+/// the retry the refusal asked for, and no longer.)
+pub const OPTION_ALLOW_SESSION: &str = "allow_session";
+/// Open it for the rest of the session and add it to the repository's
+/// `egress`, so the next session starts with it.
+pub const OPTION_ALLOW_REPO: &str = "allow_repo";
+
+/// What an egress card offers: how long the host stays open, or no.
+pub const EGRESS_CARD_OPTIONS: &str = r#"[{"option_id":"allow_once","name":"Allow once","kind":"allow_once"},{"option_id":"allow_session","name":"For this session","kind":"allow_session"},{"option_id":"allow_repo","name":"Save to the repository's egress","kind":"allow_repo"},{"option_id":"reject_once","name":"Reject","kind":"reject_once"}]"#;
+
+/// The answers a card for `tool` offers.
+pub fn card_options(tool: &str) -> &'static str {
+    if tool == EGRESS_TOOL {
+        EGRESS_CARD_OPTIONS
+    } else {
+        CARD_OPTIONS
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalRow {
     pub id: String,
@@ -206,6 +230,20 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// The newest approval for this request on this channel, in any state:
+    /// whether it was already asked, and what became of it.
+    pub fn latest_approval(&self, channel: &str, request_key: &str) -> Result<Option<ApprovalRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM approval WHERE channel=?1 AND request_key=?2
+             ORDER BY created_ms DESC LIMIT 1",
+            rusqlite::params![channel, request_key],
+            ApprovalRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// Move a pending approval to `state` with the operator's answer. False
     /// when it was no longer pending: answered twice, or expired first.
     pub fn decide_approval(&self, id: &str, decision: &Decision<'_>) -> Result<bool> {
@@ -307,6 +345,8 @@ impl Store {
 
     /// Pending approvals as the cards the operator's queue shows, each with
     /// the intent of the session that asked.
+    /// `options` is what a card offers unless its tool has its own
+    /// ([`card_options`]).
     pub fn open_approval_cards(&self, options: &str) -> Result<Vec<PermissionView>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -331,6 +371,10 @@ impl Store {
                     work_item_id: r.get("intent_work_item_id")?,
                     work_item_title: r.get("intent_work_item_title")?,
                     session_state: r.get("intent_session_state")?,
+                };
+                let options = match approval.tool.as_str() {
+                    EGRESS_TOOL => EGRESS_CARD_OPTIONS,
+                    _ => options,
                 };
                 Ok(approval.as_card(options, intent))
             })?

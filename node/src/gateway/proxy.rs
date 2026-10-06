@@ -183,17 +183,39 @@ pub struct Grant {
     patterns: Allowlist,
     plain_http: bool,
     refusal: String,
+    /// Hosts the operator opened to this grant after it was issued: until it
+    /// is revoked (`None`), or until a moment (`Some`).
+    widened: parking_lot::RwLock<HashMap<String, Option<std::time::Instant>>>,
 }
 
 impl Grant {
-    fn allows(&self, host: &str) -> bool {
-        self.hosts.iter().any(|granted| granted == host) || self.patterns.allows(host)
+    /// Whether this grant reaches `host`, as issued or as widened since.
+    pub fn allows(&self, host: &str) -> bool {
+        if self.hosts.iter().any(|granted| granted == host) || self.patterns.allows(host) {
+            return true;
+        }
+        match self.widened.read().get(host) {
+            Some(None) => true,
+            Some(Some(until)) => std::time::Instant::now() < *until,
+            None => false,
+        }
+    }
+
+    fn widen(&self, host: &str, until: Option<std::time::Instant>) {
+        let mut widened = self.widened.write();
+        // A wider answer is never narrowed by a later, shorter one.
+        if widened.get(host).is_some_and(Option::is_none) {
+            return;
+        }
+        widened.insert(host.to_string(), until);
     }
 }
 
 /// Called with each host a grant refused. Not the proxy's business what
 /// happens next; a session's are recorded where its operator will see them.
-pub type OnRefusal = Arc<dyn Fn(&Grant, &str) + Send + Sync>;
+/// What it returns, when anything, replaces the grant's refusal sentence for
+/// this one answer: the place to say that the operator has been asked.
+pub type OnRefusal = Arc<dyn Fn(&Grant, &str) -> Option<String> + Send + Sync>;
 
 /// Every live grant, by its token. Shared by whoever issues them and the
 /// listener that honours them; a token that is not here opens nothing.
@@ -223,6 +245,7 @@ impl Grants {
             patterns: Allowlist::new(&spec.patterns)?,
             plain_http: spec.plain_http,
             refusal: spec.refusal,
+            widened: Default::default(),
         };
         self.live.write().insert(token.clone(), Arc::new(grant));
         Ok(token)
@@ -240,11 +263,48 @@ impl Grants {
         self.live.read().get(token).cloned()
     }
 
-    fn refused(&self, grant: &Grant, host: &str) {
+    fn refused(&self, grant: &Grant, host: &str) -> Option<String> {
         let observer = self.on_refusal.read().clone();
-        if let Some(observer) = observer {
-            observer(grant, host);
+        observer.and_then(|observer| observer(grant, host))
+    }
+
+    /// The live grants a session holds. Ordinarily one; none once it ended,
+    /// or when its harness keeps the shared proxy and was never issued one.
+    fn of_session(&self, session_id: &str) -> Vec<Arc<Grant>> {
+        self.live
+            .read()
+            .values()
+            .filter(|grant| grant.session_id.as_deref() == Some(session_id))
+            .cloned()
+            .collect()
+    }
+
+    /// Whether a session holds a grant of its own to widen.
+    pub fn holds_session(&self, session_id: &str) -> bool {
+        !self.of_session(session_id).is_empty()
+    }
+
+    /// Whether the session's grant already reaches `host`.
+    pub fn session_allows(&self, session_id: &str, host: &str) -> bool {
+        self.of_session(session_id)
+            .iter()
+            .any(|grant| grant.allows(&host.to_ascii_lowercase()))
+    }
+
+    /// Open `host` to a session's live grant, until it is revoked or until
+    /// `until`. False when the session holds none: an answer that arrives
+    /// after it ended opens nothing.
+    pub fn widen_session(
+        &self,
+        session_id: &str,
+        host: &str,
+        until: Option<std::time::Instant>,
+    ) -> bool {
+        let grants = self.of_session(session_id);
+        for grant in &grants {
+            grant.widen(&host.to_ascii_lowercase(), until);
         }
+        !grants.is_empty()
     }
 }
 
@@ -405,8 +465,11 @@ async fn handle_granted(
         .to_ascii_lowercase();
     if !grant.allows(&host) {
         tracing::info!(client = %grant.client, %host, "granted proxy refused");
-        granted.grants.refused(&grant, &host);
-        return Ok(answer(StatusCode::FORBIDDEN, &grant.refusal));
+        let said = granted.grants.refused(&grant, &host);
+        return Ok(answer(
+            StatusCode::FORBIDDEN,
+            said.as_deref().unwrap_or(&grant.refusal),
+        ));
     }
     // Resolved here and dialled by address: the name is checked once, and
     // what it resolved to is what gets the connection.

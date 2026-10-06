@@ -400,13 +400,25 @@ A session reaches no registry unless you say so. `session_egress = true` on the
 repository's entry opens its `egress` list to that repository's sessions, through proxy
 credentials that are the session's own, so "add this dependency and run the tests" is an
 ordinary task: `cargo add`, `bun add`, `composer require` work, and a host the entry does
-not name is refused. The refusal reads *not reachable from a session; add it to this
-repository's egress* — in the proxy's answer, on the session's log (once per host, so you
-see what the agent wanted), and in the orientation the session starts with, which tells
-it this is the boundary and not something to work around. It is opt-in because a session
-is long-lived and runs what a model decides: a host that accepts uploads accepts them from
-it, and the `github` and `packagist` presets both carry `api.github.com`. OpenCode sessions
-keep the harness proxy and reach no registry either way.
+not name is refused. It is opt-in because a session is long-lived and runs what a model
+decides: a host that accepts uploads accepts them from it, and the `github` and
+`packagist` presets both carry `api.github.com`. OpenCode sessions keep the harness proxy
+and reach no registry either way.
+
+A refused host is put to you rather than left to fail quietly. The refusal raises a card
+naming the session and the host, once however often a package manager retries, and its
+reason line — the line `pip` or `npm` prints — tells the agent the operator has been
+asked and to retry once you answer: a connection cannot be held open while you decide.
+**Allow once** opens the host for the next ten minutes, **For this session** until the
+session ends, and **Save to the repository's egress** also writes it into that
+repository's `[[repo]]` entry in `node.toml` (making one if there is none), so later
+sessions start with it; an entry whose egress is open to its preparation only is not
+flipped open for sessions by an answer about one host. Whatever you choose opens that
+session's own grant and no other. An agent that knows what it needs asks first with
+**`request_egress`**, which waits up to 45 seconds for your answer; once you decline, a
+retried connection is told so and does not ask again. The session's log shows each
+refusal, and the orientation it starts with says all of this before its first command.
+Podman only, as the grants are.
 
 A check has no network. A repository whose checks need its dependencies names `prepare`
 commands (`bun install --frozen-lockfile`, `composer install`, `cargo fetch --locked`)

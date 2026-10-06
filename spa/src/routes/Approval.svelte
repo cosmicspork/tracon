@@ -119,7 +119,7 @@
     }
   }
 
-  async function answer(optionId: 'allow_once' | 'reject_once' | 'request_changes') {
+  async function answer(optionId: 'allow_once' | 'allow_session' | 'allow_repo' | 'reject_once' | 'request_changes') {
     if (!details || !open) return
     busy = true
     error = null
@@ -318,8 +318,15 @@
     <div class="decide">
       {#if can.has('allow_once')}
         <button class="btn p" disabled={busy || blocked} onclick={() => answer('allow_once')}>
-          {changes.length ? 'Allow with edits' : 'Allow'}
+          {can.has('allow_repo') ? 'Allow once' : changes.length ? 'Allow with edits' : 'Allow'}
         </button>
+      {/if}
+      <!-- A host a session asked to reach: how long it stays open. -->
+      {#if can.has('allow_session')}
+        <button class="btn" disabled={busy} onclick={() => answer('allow_session')}>For this session</button>
+      {/if}
+      {#if can.has('allow_repo')}
+        <button class="btn" disabled={busy} onclick={() => answer('allow_repo')}>Save to the repository's egress</button>
       {/if}
       <input
         bind:value={said}

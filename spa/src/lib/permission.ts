@@ -14,6 +14,20 @@ export function isApproval(p: Pick<Permission, 'raw_input'>): boolean {
   }
 }
 
+/**
+ * A session's ask to reach a host. Allowing it opens the host to that
+ * session's own grant, for as long as the chosen answer says; it runs nothing,
+ * and its arguments are not the operator's to edit.
+ */
+export function isEgress(p: Pick<Permission, 'raw_input'>): boolean {
+  if (!p.raw_input) return false
+  try {
+    return JSON.parse(p.raw_input)?.tool === 'request_egress'
+  } catch {
+    return false
+  }
+}
+
 export interface EditableField {
   key: string
   value: string

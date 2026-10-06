@@ -51,16 +51,6 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 Every item here was found on the 2026-09-20, 2026-09-28, 2026-09-30 or 2026-10-03 live
 runs, or in the daily desktop use since.
 
-- [ ] **Ask before egress, rather than refuse it.** Inside the boundary writes and
-      commands run unasked (policy v12); what leaves is the operator's to decide, and today
-      it cannot be decided mid-task: a host outside the repository's `egress` list is
-      refused, recorded as `egress_refused`, and the session fails quietly — PyPI in session
-      `01a10447` (2026-10-03). A refused CONNECT raises a card naming the session and host
-      (allow once, for this session, or save to the repository's `egress`), and the
-      refusal's reason line tells the agent an ask is pending and to retry after it is
-      answered, since a CONNECT cannot be held open while the operator decides. A blocking
-      `request_egress` tool covers what the agent knows it needs before it tries. Podman
-      only, as grants are.
 - [ ] **A work item's session starts working on its own.** A session composed from a
       prompt, or started on an existing item, is sent no first prompt — only a plain
       prompt session carries `initial_prompt` — so it sits `running` and silent until the
@@ -203,8 +193,8 @@ hit on a real task.
       and records the sha, so a session can rebase onto a `main` that moved since launch.
       Inside the boundary `git fetch` has neither a credential nor a route.
 - [ ] Refusals the agent can read: what the boundary refuses and which brokered tool to
-      use instead, stated in the orientation. A refused egress is the egress ask's (under
-      **Now**); this covers the rest.
+      use instead, stated in the orientation. A refused egress already asks the operator
+      (`request_egress`); this covers the rest.
 - [ ] **Lend application credentials through the gateway**, as model credentials are lent
       today. A broker entry names an upstream, how its key is attached, and the channel or
       repository it is bound to; the session gets the upstream as a base URL on the gateway
