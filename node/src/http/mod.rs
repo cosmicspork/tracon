@@ -359,6 +359,8 @@ pub fn router(state: AppState) -> Router {
         // operator credential is valid at all (`http::ui`).
         .route("/api/sessions/{id}/opencode-boot", post(ui::open))
         .route("/api/permissions/{id}/answer", post(api::answer_permission))
+        .route("/api/approvals/{id}", get(api::get_approval))
+        .route("/api/approvals/{id}/release", post(api::release_approval))
         .route("/api/operator/questions", get(api::operator_questions))
         .route(
             "/api/operator/questions/{id}/answer",
@@ -868,6 +870,12 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                     .unwrap_or_default();
                 for id in &stale {
                     let _ = store.release_review(id);
+                }
+                let stale = store
+                    .stale_approval_claims(grace.as_millis() as i64)
+                    .unwrap_or_default();
+                for id in &stale {
+                    let _ = store.release_approval(id);
                 }
                 let orphaned = store.orphaned_permissions(&node_id).unwrap_or_default();
                 for p in &orphaned {

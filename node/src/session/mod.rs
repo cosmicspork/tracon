@@ -179,6 +179,10 @@ pub enum SessionError {
     NoMesh,
     #[error("{0}")]
     Rejected(String),
+    /// An operator's answer the node cannot act on as sent, field by field.
+    /// Nothing was decided; the operator can fix it and answer again.
+    #[error("{}", .0.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))]
+    Unfit(Vec<crate::mcp::schema::FieldError>),
     /// Asked to launch, resume, or otherwise run a session whose harness this
     /// build has no adapter for. Carries what to do instead.
     #[error(
@@ -189,6 +193,29 @@ pub enum SessionError {
     Legacy { id: String, harness: String },
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
+}
+
+/// The operator's answer to a card. A harness's permission request reads only
+/// the option and arguments; an approval also keeps the reason and notes,
+/// which go back to the caller through `approval_status`.
+#[derive(Debug, Clone, Default)]
+pub struct OperatorAnswer {
+    pub option_id: String,
+    pub arguments: Option<serde_json::Value>,
+    pub reason: Option<String>,
+    pub notes: Option<String>,
+}
+
+impl OperatorAnswer {
+    fn into_frame(self, id: &str) -> proto::frame::Command {
+        proto::frame::Command::Answer {
+            permission_id: id.to_string(),
+            option_id: self.option_id,
+            arguments: self.arguments,
+            reason: self.reason,
+            notes: self.notes,
+        }
+    }
 }
 
 /// Running sessions, by id. A session that has ended leaves the map; its rows
@@ -1910,22 +1937,17 @@ impl Manager {
         }
     }
 
-    pub async fn answer(
-        &self,
-        id: &str,
-        option_id: String,
-        arguments: Option<serde_json::Value>,
-    ) -> Result<(), SessionError> {
+    pub async fn answer(&self, id: &str, answer: OperatorAnswer) -> Result<(), SessionError> {
         // An approval this node holds is answered here, not by a session:
         // nothing is waiting on it, and the node runs the call itself.
         if let Some(approval) = self.store.get_approval(id)? {
             if approval.node_id == self.node_id {
-                return self
-                    .tools
-                    .answer_approval(id, &option_id, arguments)
-                    .await
-                    .map_err(SessionError::Rejected);
+                return self.tools.answer_approval(id, answer).await;
             }
+            return self
+                .forward(&approval.node_id, answer.into_frame(id), false)
+                .await
+                .map(|_| ());
         }
         let perm = self
             .store
@@ -1938,8 +1960,8 @@ impl Manager {
                 &session_id,
                 Command::Answer {
                     permission_id: id.to_string(),
-                    option_id: option_id.clone(),
-                    arguments: arguments.clone(),
+                    option_id: answer.option_id.clone(),
+                    arguments: answer.arguments.clone(),
                     ack,
                 },
             )
@@ -1950,15 +1972,7 @@ impl Manager {
                 .map_err(|_| SessionError::Rejected("session stopped".into()))?
                 .map_err(SessionError::Rejected),
             Err(SessionError::Remote(node, _)) => self
-                .forward(
-                    &node,
-                    proto::frame::Command::Answer {
-                        permission_id: id.to_string(),
-                        option_id,
-                        arguments,
-                    },
-                    false,
-                )
+                .forward(&node, answer.into_frame(id), false)
                 .await
                 .map(|_| ()),
             Err(e) => Err(e),
@@ -2017,7 +2031,7 @@ impl Manager {
     ) {
         use crate::store::approvals as a;
         let kind = match state {
-            a::RUNNING | a::REJECTED => ek::PERMISSION_ANSWER,
+            a::RUNNING | a::REJECTED | a::CHANGES_REQUESTED => ek::PERMISSION_ANSWER,
             a::EXPIRED => ek::PERMISSION_EXPIRED,
             _ => ek::APPROVAL_SETTLED,
         };
@@ -2027,7 +2041,7 @@ impl Manager {
             json!({
                 "approval_id": approval.id, "permission_id": approval.id,
                 "tool": approval.tool, "state": state, "reason": approval.reason,
-                "option_id": approval.answer_option_id,
+                "option_id": approval.answer_option_id, "notes": approval.operator_note,
             }),
         );
         self.publish_queue().await;

@@ -342,6 +342,42 @@ async fn a_re_ask_pages_again() {
     assert_eq!(svc.wait(2, 2_000).await.len(), 2);
 }
 
+/// A held call opens on its own page, where it can be read and edited.
+#[tokio::test]
+async fn an_approval_card_links_to_its_own_page() {
+    state::isolate();
+    let (svc, store, bus) = rig("{}", StatusCode::CREATED).await;
+    let approval = tracon::store::approvals::ApprovalRow {
+        id: "a1".into(),
+        channel: "work".into(),
+        session_id: Some("s1".into()),
+        node_id: "n1".into(),
+        lane: None,
+        tool: "issue_comment".into(),
+        arguments: r#"{"key":"WRK-1","body":"hello"}"#.into(),
+        request_key: "k".into(),
+        title: "issue_comment WRK-1: hello".into(),
+        state: tracon::store::approvals::PENDING.into(),
+        answer_option_id: None,
+        edited_arguments: None,
+        result: None,
+        reason: None,
+        operator_note: None,
+        claimed_ms: None,
+        created_ms: now_ms(),
+        decided_ms: None,
+        finished_ms: None,
+        expires_ms: now_ms() + 60_000,
+    };
+    store.insert_approval(&approval).unwrap();
+    bus.publish(Frame::Queue {
+        waiting: store.open_permission_views().unwrap(),
+    });
+    let sent = svc.wait(1, 2_000).await;
+    assert_eq!(sent[0].payload["path"], "/approvals/a1");
+    assert_eq!(sent[0].payload["body"], "issue_comment WRK-1: hello");
+}
+
 /// Opening a review and walking away returns it to `new`. That is not a new
 /// review, and paging for it would train the operator to ignore pages.
 #[tokio::test]

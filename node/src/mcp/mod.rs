@@ -16,6 +16,7 @@ pub mod jira;
 pub mod memory;
 pub mod operator;
 pub mod review;
+pub mod schema;
 pub mod wait;
 pub mod work;
 
@@ -856,6 +857,8 @@ impl Tools {
                     edited_arguments: None,
                     result: None,
                     reason: None,
+                    operator_note: None,
+                    claimed_ms: None,
                     created_ms: now,
                     decided_ms: None,
                     finished_ms: None,
@@ -884,40 +887,82 @@ impl Tools {
 
     /// The operator's answer to an approval. Allowing it runs the call, with
     /// their edit when they made one, held to every refusal the call itself
-    /// would meet. The answer returns once the decision is recorded; the run
-    /// and its result belong to the approval, not to whoever answered.
+    /// would meet. Refusing it, or asking for changes, settles it with what
+    /// they said, for the caller to read. The answer returns once the
+    /// decision is recorded; the run and its result belong to the approval,
+    /// not to whoever answered.
     pub async fn answer_approval(
         self: &Arc<Self>,
         id: &str,
-        option_id: &str,
-        arguments: Option<Value>,
-    ) -> Result<(), String> {
-        use crate::store::approvals::{REJECTED, RUNNING};
-        let access = self.session.get().ok_or("approvals are not available")?;
+        answer: crate::session::OperatorAnswer,
+    ) -> Result<(), crate::session::SessionError> {
+        use crate::session::SessionError;
+        use crate::store::approvals::{
+            Decision, CHANGES_REQUESTED, OPTION_REQUEST_CHANGES, PENDING, REJECTED, RUNNING,
+        };
+        let rejected = |m: &str| SessionError::Rejected(m.to_string());
+        let access = self
+            .session
+            .get()
+            .ok_or_else(|| rejected("approvals are not available"))?;
         let approval = access
             .store
-            .get_approval(id)
-            .map_err(|e| e.to_string())?
-            .ok_or("no such approval")?;
+            .get_approval(id)?
+            .ok_or_else(|| rejected("no such approval"))?;
+        let no_longer_waiting = || rejected("this approval is no longer waiting");
+        if approval.state != PENDING {
+            return Err(no_longer_waiting());
+        }
+        let said = |text: &Option<String>| {
+            text.as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+        };
+        let (reason, notes) = (said(&answer.reason), said(&answer.notes));
+        let option_id = answer.option_id.as_str();
         if option_id != OPTION_ALLOW_ONCE {
-            if !access
-                .store
-                .decide_approval(
-                    id,
-                    REJECTED,
-                    option_id,
-                    None,
-                    Some("the operator did not allow this call"),
+            let (state, reason, note) = if option_id == OPTION_REQUEST_CHANGES {
+                let Some(notes) = notes.or(reason) else {
+                    return Err(SessionError::Unfit(vec![schema::FieldError {
+                        field: "notes".into(),
+                        message: "say what should change".into(),
+                    }]));
+                };
+                (
+                    CHANGES_REQUESTED,
+                    "the operator asked for changes".to_string(),
+                    Some(notes),
                 )
-                .map_err(|e| e.to_string())?
-            {
-                return Err("this approval is no longer waiting".into());
+            } else {
+                (
+                    REJECTED,
+                    reason.unwrap_or_else(|| "the operator did not allow this call".into()),
+                    notes,
+                )
+            };
+            let decision = Decision {
+                state,
+                option_id,
+                reason: Some(&reason),
+                note: note.as_deref(),
+                ..Default::default()
+            };
+            if !access.store.decide_approval(id, &decision)? {
+                return Err(no_longer_waiting());
             }
-            access.manager.approval_decided(&approval, REJECTED).await;
+            let decided = access.store.get_approval(id)?.unwrap_or(approval);
+            access.manager.approval_decided(&decided, state).await;
             return Ok(());
         }
-        let original: Value =
-            serde_json::from_str(&approval.arguments).map_err(|e| e.to_string())?;
+        let original: Value = serde_json::from_str(&approval.arguments)
+            .map_err(|e| SessionError::Rejected(e.to_string()))?;
+        if let Some(edited) = &answer.arguments {
+            let errors = schema::check_edit(&approval.tool, &original, edited);
+            if !errors.is_empty() {
+                return Err(SessionError::Unfit(errors));
+            }
+        }
         // An approval an attached external session asked for before calls
         // went session-less runs as the channel's external caller now.
         let session = approval.session_id.clone().filter(|id| {
@@ -941,14 +986,17 @@ impl Tools {
         };
         // What runs is the operator's rewrite, and a refusal is final whoever
         // wrote the words.
-        let run_args = arguments.clone().unwrap_or(original);
-        let edited = arguments.as_ref().map(Value::to_string);
-        if !access
-            .store
-            .decide_approval(id, RUNNING, option_id, edited.as_deref(), None)
-            .map_err(|e| e.to_string())?
-        {
-            return Err("this approval is no longer waiting".into());
+        let edited = answer.arguments.as_ref().map(Value::to_string);
+        let run_args = answer.arguments.unwrap_or(original);
+        let decision = Decision {
+            state: RUNNING,
+            option_id,
+            edited_arguments: edited.as_deref(),
+            note: notes.as_deref(),
+            ..Default::default()
+        };
+        if !access.store.decide_approval(id, &decision)? {
+            return Err(no_longer_waiting());
         }
         access.manager.approval_decided(&approval, RUNNING).await;
         let tools = Arc::clone(self);
@@ -1411,11 +1459,16 @@ fn refusal(decision: Decision) -> String {
 /// `name` plus its arguments on one line, bounded, for the policy haystack
 /// and the queue card. Secrets never appear here: arguments are the
 /// harness's own words. A profile is spelled out as `profile=<name>` ahead of
-/// the JSON, so a deny rule can name one.
+/// the JSON, so a deny rule can name one. A call that carries prose reads as
+/// its target and first line instead.
 pub fn summarize(name: &str, args: &Value) -> String {
-    let mut s = match args.get("profile").and_then(Value::as_str) {
-        Some(p) => format!("{name} profile={p} {args}"),
-        None => format!("{name} {args}"),
+    let mut s = match (
+        prose_title(name, args),
+        args.get("profile").and_then(Value::as_str),
+    ) {
+        (Some(title), _) => title,
+        (None, Some(p)) => format!("{name} profile={p} {args}"),
+        (None, None) => format!("{name} {args}"),
     };
     if s.len() > 400 {
         let mut cut = 400;
@@ -1426,6 +1479,60 @@ pub fn summarize(name: &str, args: &Value) -> String {
         s.push('…');
     }
     s
+}
+
+/// A title a person reads for a call that carries prose: what it acts on and
+/// the first line of what it says, rather than its arguments as JSON.
+fn prose_title(name: &str, args: &Value) -> Option<String> {
+    let text = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+    };
+    let id = |key: &str| match args.get(key) {
+        Some(Value::String(s)) => s.trim().to_string(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => "?".into(),
+    };
+    let first_line =
+        |key: &str| text(key).and_then(|t| t.lines().map(str::trim).find(|l| !l.is_empty()));
+    let with = |head: String, said: Option<&str>| match said {
+        Some(said) => format!("{head}: {said}"),
+        None => head,
+    };
+    Some(match name {
+        jira::ISSUE_CREATE => with(
+            format!("{name} {} {}", id("project"), id("type")),
+            text("summary"),
+        ),
+        jira::ISSUE_UPDATE => {
+            let fields: Vec<&str> = ["summary", "description", "priority", "labels", "parent"]
+                .into_iter()
+                .filter(|f| args.get(*f).is_some())
+                .collect();
+            let head = format!("{name} {} ({})", id("key"), fields.join(", "));
+            with(head, text("summary"))
+        }
+        jira::ISSUE_COMMENT => with(format!("{name} {}", id("key")), first_line("body")),
+        github::PR_COMMENT | github::PR_REPLY => with(
+            format!("{name} {}#{}", id("repo"), id("number")),
+            first_line("body"),
+        ),
+        gitlab::MR_COMMENT | gitlab::MR_REPLY => with(
+            format!("{name} {}!{}", id("project"), id("iid")),
+            first_line("body"),
+        ),
+        docs::DOC_WRITE => format!("{name} {}", id("slug")),
+        memory::RETAIN => with(format!("{name} {}", id("kind")), first_line("body")),
+        work::BRIEF_NOTE => with(format!("{name} {}", id("field")), first_line("text")),
+        work::CRITERIA_LINK => with(
+            format!("{name} {} {}", id("criterion"), id("kind")),
+            first_line("value"),
+        ),
+        review::SUBMIT_REPORT => with(name.to_string(), text("title")),
+        _ => return None,
+    })
 }
 
 fn tool_result(value: &Value, is_error: bool) -> Value {
@@ -1439,6 +1546,39 @@ fn tool_result(value: &Value, is_error: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_prose_call_is_titled_by_its_target_and_first_line() {
+        let create = json!({ "project": "WRK", "type": "Task", "summary": "Rotate keys", "description": "h1. Why" });
+        assert_eq!(
+            summarize(jira::ISSUE_CREATE, &create),
+            "issue_create WRK Task: Rotate keys"
+        );
+        let update = json!({ "key": "WRK-2", "description": "d", "labels": ["a"] });
+        assert_eq!(
+            summarize(jira::ISSUE_UPDATE, &update),
+            "issue_update WRK-2 (description, labels)"
+        );
+        let comment = json!({ "repo": "o/n", "number": 4, "body": "\n  Looks good.\nMore." });
+        assert_eq!(
+            summarize(github::PR_COMMENT, &comment),
+            "pr_comment o/n#4: Looks good."
+        );
+        let note = json!({ "project": "g/p", "iid": 9, "body": "Thanks" });
+        assert_eq!(
+            summarize(gitlab::MR_COMMENT, &note),
+            "mr_comment g/p!9: Thanks"
+        );
+        let fact = json!({ "kind": "fact", "body": "The importer retries twice.\nThen gives up." });
+        assert_eq!(
+            summarize(memory::RETAIN, &fact),
+            "retain fact: The importer retries twice."
+        );
+        let doc = json!({ "slug": "plan-foo", "body": "# Plan" });
+        assert_eq!(summarize(docs::DOC_WRITE, &doc), "doc_write plan-foo");
+        let query = json!({ "profile": "qa", "sql": "select 1" });
+        assert!(summarize("query", &query).starts_with("query profile=qa {"));
+    }
 
     #[test]
     fn a_merge_default_is_written_into_the_arguments_that_are_approved() {

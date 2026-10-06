@@ -21,10 +21,16 @@ pub const FAILED: &str = "failed";
 /// Run, but the remote outcome could not be confirmed.
 pub const UNCERTAIN: &str = "uncertain";
 pub const REJECTED: &str = "rejected";
+/// Not run: the operator wants the caller to revise it and ask again.
+pub const CHANGES_REQUESTED: &str = "changes_requested";
 pub const EXPIRED: &str = "expired";
 
-/// The answers an approval card offers: the same two a tool card always has.
-pub const CARD_OPTIONS: &str = r#"[{"option_id":"allow_once","name":"Allow once","kind":"allow_once"},{"option_id":"reject_once","name":"Reject","kind":"reject_once"}]"#;
+/// The option an operator picks to send a call back for revision.
+pub const OPTION_REQUEST_CHANGES: &str = "request_changes";
+
+/// The answers an approval card offers: the two a tool card always has, and
+/// a request for changes, which a client that does not know its kind skips.
+pub const CARD_OPTIONS: &str = r#"[{"option_id":"allow_once","name":"Allow once","kind":"allow_once"},{"option_id":"reject_once","name":"Reject","kind":"reject_once"},{"option_id":"request_changes","name":"Request changes","kind":"request_changes"}]"#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalRow {
@@ -46,6 +52,11 @@ pub struct ApprovalRow {
     pub result: Option<String>,
     /// Why it was refused, expired, or failed.
     pub reason: Option<String>,
+    /// What the operator said back with their answer: the notes on a request
+    /// for changes, or a remark with an allow.
+    pub operator_note: Option<String>,
+    /// When an operator last opened it, while it waits.
+    pub claimed_ms: Option<i64>,
     pub created_ms: i64,
     pub decided_ms: Option<i64>,
     pub finished_ms: Option<i64>,
@@ -69,6 +80,8 @@ impl ApprovalRow {
             edited_arguments: r.get("edited_arguments")?,
             result: r.get("result")?,
             reason: r.get("reason")?,
+            operator_note: r.get("operator_note")?,
+            claimed_ms: r.get("claimed_ms")?,
             created_ms: r.get("created_ms")?,
             decided_ms: r.get("decided_ms")?,
             finished_ms: r.get("finished_ms")?,
@@ -80,7 +93,7 @@ impl ApprovalRow {
     pub fn is_settled(&self) -> bool {
         matches!(
             self.state.as_str(),
-            SUCCEEDED | FAILED | UNCERTAIN | REJECTED | EXPIRED
+            SUCCEEDED | FAILED | UNCERTAIN | REJECTED | CHANGES_REQUESTED | EXPIRED
         )
     }
 
@@ -121,14 +134,24 @@ impl ApprovalRow {
     }
 }
 
+/// The operator's answer to a pending approval, as it is recorded.
+#[derive(Debug, Default)]
+pub struct Decision<'a> {
+    pub state: &'a str,
+    pub option_id: &'a str,
+    pub edited_arguments: Option<&'a str>,
+    pub reason: Option<&'a str>,
+    pub note: Option<&'a str>,
+}
+
 impl Store {
     pub fn insert_approval(&self, a: &ApprovalRow) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO approval (id, channel, session_id, node_id, lane, tool, arguments,
                 request_key, title, state, answer_option_id, edited_arguments, result, reason,
-                created_ms, decided_ms, finished_ms, expires_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                operator_note, claimed_ms, created_ms, decided_ms, finished_ms, expires_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
             rusqlite::params![
                 a.id,
                 a.channel,
@@ -144,6 +167,8 @@ impl Store {
                 a.edited_arguments,
                 a.result,
                 a.reason,
+                a.operator_note,
+                a.claimed_ms,
                 a.created_ms,
                 a.decided_ms,
                 a.finished_ms,
@@ -183,23 +208,55 @@ impl Store {
 
     /// Move a pending approval to `state` with the operator's answer. False
     /// when it was no longer pending: answered twice, or expired first.
-    pub fn decide_approval(
-        &self,
-        id: &str,
-        state: &str,
-        option_id: &str,
-        edited_arguments: Option<&str>,
-        reason: Option<&str>,
-    ) -> Result<bool> {
+    pub fn decide_approval(&self, id: &str, decision: &Decision<'_>) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let now = now_ms();
         let n = conn.execute(
             "UPDATE approval SET state=?2, answer_option_id=?3, edited_arguments=?4, reason=?5,
-                decided_ms=?6, finished_ms=CASE WHEN ?2 IN ('rejected') THEN ?6 ELSE NULL END
-             WHERE id=?1 AND state='pending' AND expires_ms > ?6",
-            rusqlite::params![id, state, option_id, edited_arguments, reason, now],
+                operator_note=?6, claimed_ms=NULL, decided_ms=?7,
+                finished_ms=CASE WHEN ?2 IN ('rejected','changes_requested') THEN ?7 ELSE NULL END
+             WHERE id=?1 AND state='pending' AND expires_ms > ?7",
+            rusqlite::params![
+                id,
+                decision.state,
+                decision.option_id,
+                decision.edited_arguments,
+                decision.reason,
+                decision.note,
+                now
+            ],
         )?;
         Ok(n == 1)
+    }
+
+    /// Mark a waiting approval as open in front of an operator. Each open
+    /// refreshes it, so the sweeper lapses only one nobody is looking at.
+    pub fn claim_approval(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE approval SET claimed_ms=?2 WHERE id=?1 AND state='pending'",
+            rusqlite::params![id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn release_approval(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE approval SET claimed_ms=NULL WHERE id=?1 AND claimed_ms IS NOT NULL",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    /// Claims older than the grace period, for the sweeper.
+    pub fn stale_approval_claims(&self, older_than_ms: i64) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id FROM approval WHERE claimed_ms < ?1")?;
+        let rows = stmt
+            .query_map([now_ms() - older_than_ms], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
     }
 
     /// Record what running an approved call produced.
@@ -302,10 +359,20 @@ mod tests {
             edited_arguments: None,
             result: None,
             reason: None,
+            operator_note: None,
+            claimed_ms: None,
             created_ms: now_ms(),
             decided_ms: None,
             finished_ms: None,
             expires_ms,
+        }
+    }
+
+    fn allow() -> Decision<'static> {
+        Decision {
+            state: RUNNING,
+            option_id: "allow_once",
+            ..Default::default()
         }
     }
 
@@ -320,11 +387,16 @@ mod tests {
             "a1"
         );
         assert!(store.pending_approval("personal", "k").unwrap().is_none());
-        assert!(store
-            .decide_approval("a1", RUNNING, "allow_once", None, None)
-            .unwrap());
+        assert!(store.decide_approval("a1", &allow()).unwrap());
         assert!(!store
-            .decide_approval("a1", REJECTED, "reject_once", None, None)
+            .decide_approval(
+                "a1",
+                &Decision {
+                    state: REJECTED,
+                    option_id: "reject_once",
+                    ..Default::default()
+                }
+            )
             .unwrap());
         assert!(store.pending_approval("work", "k").unwrap().is_none());
         store
@@ -343,8 +415,66 @@ mod tests {
         let expired = store.expire_due_approvals().unwrap();
         assert_eq!(expired.len(), 1);
         assert_eq!(store.get_approval("a1").unwrap().unwrap().state, EXPIRED);
-        assert!(!store
-            .decide_approval("a1", RUNNING, "allow_once", None, None)
+        assert!(!store.decide_approval("a1", &allow()).unwrap());
+    }
+
+    #[test]
+    fn a_request_for_changes_settles_it_and_keeps_the_notes_past_a_run() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_approval(&row("a1", "k", now_ms() + 60_000))
+            .unwrap();
+        assert!(store
+            .decide_approval(
+                "a1",
+                &Decision {
+                    state: CHANGES_REQUESTED,
+                    option_id: OPTION_REQUEST_CHANGES,
+                    note: Some("split the second section"),
+                    ..Default::default()
+                }
+            )
             .unwrap());
+        let a = store.get_approval("a1").unwrap().unwrap();
+        assert!(a.is_settled());
+        assert!(a.finished_ms.is_some());
+        assert_eq!(a.operator_note.as_deref(), Some("split the second section"));
+        assert!(store.pending_approval("work", "k").unwrap().is_none());
+
+        store
+            .insert_approval(&row("a2", "k2", now_ms() + 60_000))
+            .unwrap();
+        let allowed = Decision {
+            note: Some("ship it"),
+            ..allow()
+        };
+        assert!(store.decide_approval("a2", &allowed).unwrap());
+        store
+            .finish_approval("a2", FAILED, None, Some("jira said no"))
+            .unwrap();
+        let a = store.get_approval("a2").unwrap().unwrap();
+        assert_eq!(a.reason.as_deref(), Some("jira said no"));
+        assert_eq!(a.operator_note.as_deref(), Some("ship it"));
+    }
+
+    #[test]
+    fn a_claim_lapses_when_nobody_refreshes_it_and_ends_with_the_decision() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_approval(&row("a1", "k", now_ms() + 60_000))
+            .unwrap();
+        store.claim_approval("a1").unwrap();
+        let claimed = |store: &Store| store.get_approval("a1").unwrap().unwrap().claimed_ms;
+        assert!(claimed(&store).is_some());
+        assert!(store.stale_approval_claims(60_000).unwrap().is_empty());
+        assert_eq!(store.stale_approval_claims(-1).unwrap(), vec!["a1"]);
+        store.release_approval("a1").unwrap();
+        assert!(claimed(&store).is_none());
+
+        store.claim_approval("a1").unwrap();
+        assert!(store.decide_approval("a1", &allow()).unwrap());
+        assert!(claimed(&store).is_none());
+        store.claim_approval("a1").unwrap();
+        assert!(claimed(&store).is_none());
     }
 }

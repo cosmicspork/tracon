@@ -10,7 +10,7 @@ use super::{
     wait::{wait_secs, MAX_WAIT_SECS},
     CallContext, SessionAccess,
 };
-use crate::store::approvals::{ApprovalRow, PENDING, RUNNING};
+use crate::store::approvals::{ApprovalRow, CHANGES_REQUESTED, PENDING, REJECTED, RUNNING};
 
 pub const STATUS: &str = "approval_status";
 
@@ -24,8 +24,10 @@ pub fn definitions() -> Vec<Value> {
              `approval_id`, or `approval_ids` to wait on several: the call returns as soon \
              as any of them is decided, or after up to {MAX_WAIT_SECS} seconds, with every \
              id's state — `still_waiting`, `running`, `succeeded` with the tool's result, \
-             `failed` or `uncertain` with the reason, `rejected`, or `expired`. Call again \
-             to keep waiting."
+             `failed` or `uncertain` with the reason, `rejected` with the operator's reason, \
+             `changes_requested` with their `notes`, or `expired`. A rejected or \
+             changes_requested call did not run: revise it as the operator said and call \
+             the tool again, which asks anew. Call again to keep waiting."
         ),
         "inputSchema": {
             "type": "object",
@@ -116,13 +118,31 @@ fn view(a: &ApprovalRow) -> Value {
         text.as_deref()
             .map(|t| serde_json::from_str(t).unwrap_or_else(|_| Value::from(t)))
     };
-    json!({
+    let mut out = json!({
         "approval_id": a.id,
         "tool": a.tool,
         "state": state,
         "result": parse(&a.result),
         "reason": a.reason,
+        "notes": a.operator_note,
         // What ran, when the operator rewrote the call before allowing it.
         "edited_arguments": parse(&a.edited_arguments),
-    })
+    });
+    let message = match a.state.as_str() {
+        CHANGES_REQUESTED => Some(format!(
+            "The operator requested changes and nothing ran. Revise the call as their notes \
+             say and call {} again; that asks the operator anew, with a new approval_id.",
+            a.tool
+        )),
+        REJECTED => Some(format!(
+            "The operator refused this call and nothing ran. Do not retry it as it was; if \
+             their reason leaves room, revise it and call {} again.",
+            a.tool
+        )),
+        _ => None,
+    };
+    if let Some(message) = message {
+        out["message"] = Value::from(message);
+    }
+    out
 }

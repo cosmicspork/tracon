@@ -369,6 +369,16 @@ impl Notifier {
                     (channel, title, "/".to_string())
                 }
             };
+            let path = match self.store.get_approval(&p.id) {
+                Ok(Some(a))
+                    if !crate::mcp::schema::presentation(&a.tool)
+                        .prose_fields
+                        .is_empty() =>
+                {
+                    format!("/approvals/{}", p.id)
+                }
+                _ => path,
+            };
             if self.gate.pushes(&channel) {
                 self.pending.push(Notification {
                     kind: Kind::Permission,

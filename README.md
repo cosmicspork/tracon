@@ -551,7 +551,17 @@ credential, exactly as for a session it started.
 `work_close` takes the item's id, and refuses one a running session holds. A
 verb the policy does not name returns at once with an `approval_id` and a card
 on your home; nothing has run. Allow it and the node runs the call itself;
-`approval_status` tells the agent what became of it.
+`approval_status` tells the agent what became of it. You can edit the
+arguments before allowing: the edit is checked against the tool's input schema
+first, and one that does not fit, or that changes what the call acts on (`key`,
+`project`, `repo`, `number` and `iid` for every tool, plus the tool's own, such
+as `doc_write`'s `slug` and `if_hash` or `retain`'s `kind`), is refused field by
+field while the card keeps waiting. Reject with a reason, or request changes with notes, and
+`approval_status` returns `rejected` with that reason or `changes_requested`
+with the notes. Neither runs anything; the agent revises and calls the tool
+again, which asks anew. `GET /api/approvals/{id}` returns one card with the
+tool's schema, which arguments are prose and how it is written (`jira_wiki` or
+`markdown`), and which are locked, and claims it while it is open; `POST /api/approvals/{id}/release` lets it go.
 
 For an investigation or handoff with no code to publish, use **`submit_report`**.
 It puts a narrative report in the operator queue and requests a notification,

@@ -1242,6 +1242,13 @@ const MIGRATIONS: &[&str] = &[
        AND rtrim(published_url, '0123456789') LIKE '%/issues/'
        AND length(rtrim(published_url, '0123456789')) < length(published_url);
     "#,
+    // 53: what the operator said back to the caller, kept apart from
+    // `reason` so running the call does not overwrite it, and when an
+    // approval was last opened, so two tabs can see each other.
+    r#"
+    ALTER TABLE approval ADD COLUMN operator_note TEXT;
+    ALTER TABLE approval ADD COLUMN claimed_ms INTEGER;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

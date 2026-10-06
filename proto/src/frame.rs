@@ -287,6 +287,12 @@ pub enum Command {
         /// Additive and optional, so a peer that predates it answers as before.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         arguments: Option<Value>,
+        /// Why the operator refused, and what they asked to change. Additive
+        /// like `arguments`: an older peer drops them and answers as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notes: Option<String>,
     },
     Kill {
         session_id: String,
@@ -705,6 +711,32 @@ mod tests {
             node: serde_json::json!({"name": "laptop"}),
             contract: crate::CONTRACT_VERSION,
         }
+    }
+
+    #[test]
+    fn an_answer_without_a_reason_is_the_frame_an_older_peer_sends() {
+        let old = serde_json::json!({ "op": "answer", "permission_id": "p", "option_id": "o" });
+        let Command::Answer { reason, notes, .. } = serde_json::from_value(old.clone()).unwrap()
+        else {
+            panic!("not an answer");
+        };
+        assert_eq!((reason, notes), (None, None));
+        let plain = Command::Answer {
+            permission_id: "p".into(),
+            option_id: "o".into(),
+            arguments: None,
+            reason: None,
+            notes: None,
+        };
+        assert_eq!(serde_json::to_value(&plain).unwrap(), old);
+        let said = Command::Answer {
+            permission_id: "p".into(),
+            option_id: "request_changes".into(),
+            arguments: None,
+            reason: None,
+            notes: Some("shorter".into()),
+        };
+        assert_eq!(serde_json::to_value(&said).unwrap()["notes"], "shorter");
     }
 
     #[test]
