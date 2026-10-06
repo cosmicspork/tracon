@@ -164,11 +164,7 @@ fn allowing(names: &str) -> Arc<parking_lot::RwLock<tracon::policy::Policy>> {
 }
 
 fn ctx(channel: &str) -> CallContext {
-    CallContext {
-        session_id: "s".into(),
-        channel: channel.into(),
-        node_id: "n1".into(),
-    }
+    CallContext::session("s", channel, "n1")
 }
 
 async fn call(t: &Tools, c: &CallContext, name: &str, args: Value) -> (bool, Value) {

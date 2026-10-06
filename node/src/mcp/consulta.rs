@@ -191,7 +191,7 @@ pub async fn call(
     argv.push("json".into());
     argv.push("--quiet".into());
 
-    run_sidecar(cfg, env, argv, &ctx.session_id).await
+    run_sidecar(cfg, env, argv, ctx.row()).await
 }
 
 /// The sidecar runs on the node's side of the boundary with the credential in

@@ -79,9 +79,64 @@ pub struct SessionAccess {
 /// not in the tool: a tool cannot widen its own reach.
 #[derive(Debug, Clone)]
 pub struct CallContext {
-    pub session_id: String,
+    pub caller: Caller,
     pub channel: String,
     pub node_id: String,
+}
+
+/// Who is calling: a session this node runs, or a harness the operator runs
+/// themselves through the external door.
+#[derive(Debug, Clone)]
+pub enum Caller {
+    Session(String),
+    External {
+        /// What the harness labels itself, for display. Never authority.
+        lane: Option<String>,
+        /// The session row the call is still recorded against while external
+        /// harnesses attach as sessions.
+        attachment: String,
+    },
+}
+
+impl CallContext {
+    pub fn session(
+        session_id: impl Into<String>,
+        channel: impl Into<String>,
+        node_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            caller: Caller::Session(session_id.into()),
+            channel: channel.into(),
+            node_id: node_id.into(),
+        }
+    }
+
+    /// The session this node runs for the call, if the caller is one.
+    pub fn session_id(&self) -> Option<&str> {
+        match &self.caller {
+            Caller::Session(id) => Some(id),
+            Caller::External { .. } => None,
+        }
+    }
+
+    pub fn is_external(&self) -> bool {
+        matches!(self.caller, Caller::External { .. })
+    }
+
+    pub fn lane(&self) -> Option<&str> {
+        match &self.caller {
+            Caller::External { lane, .. } => lane.as_deref(),
+            Caller::Session(_) => None,
+        }
+    }
+
+    /// The row the call is recorded and authorized against.
+    pub fn row(&self) -> &str {
+        match &self.caller {
+            Caller::Session(id) => id,
+            Caller::External { attachment, .. } => attachment,
+        }
+    }
 }
 
 struct GatedCall {
@@ -190,7 +245,7 @@ impl Tools {
                 return Err(refusal);
             }
         }
-        if Self::NOT_EXTERNAL.contains(&name) && self.is_external_session(ctx) {
+        if Self::NOT_EXTERNAL.contains(&name) && ctx.is_external() {
             return Err(format!(
                 "{name} is for a review session the node starts; put your own change up with {}",
                 review::SUBMIT
@@ -229,7 +284,7 @@ impl Tools {
         if let Some(access) = self.session.get() {
             access
                 .manager
-                .ensure_active(&ctx.session_id)
+                .ensure_active(ctx.row())
                 .map_err(|error| error.to_string())?;
         }
         self.dispatch(ctx, name, args, false).await
@@ -284,7 +339,7 @@ impl Tools {
                 &policy,
                 &crate::authority::AuthorityQuery {
                     channel: &ctx.channel,
-                    session_id: &ctx.session_id,
+                    session_id: Some(ctx.row()),
                     action,
                     target: &target,
                     revision: revision.as_deref(),
@@ -492,7 +547,7 @@ impl Tools {
             &self.policy.read(),
             &crate::authority::AuthorityQuery {
                 channel: &ctx.channel,
-                session_id: &ctx.session_id,
+                session_id: Some(ctx.row()),
                 action: crate::authority::PUBLISH,
                 target: authority_args["target"].as_str().expect("canonical target"),
                 revision: authority_args["revision"].as_str(),
@@ -570,7 +625,7 @@ impl Tools {
                 action: crate::authority::PUBLISH,
                 target: &canonical,
                 channel: &ctx.channel,
-                session_id: &ctx.session_id,
+                session_id: ctx.row(),
                 revision: Some(&review.head_sha),
                 operation_id: Some(&operation_id),
                 evidence: &evidence,
@@ -610,7 +665,7 @@ impl Tools {
                 &self.policy.read(),
                 &crate::authority::AuthorityQuery {
                     channel: &ctx.channel,
-                    session_id: &ctx.session_id,
+                    session_id: Some(ctx.row()),
                     action: crate::authority::PUBLISH,
                     target: &canonical,
                     revision: Some(&review.head_sha),
@@ -715,7 +770,7 @@ impl Tools {
     /// an attachment cannot use.
     pub fn list_offered(&self, ctx: &CallContext) -> Vec<Value> {
         let all = self.list(&ctx.channel, &ctx.node_id);
-        if !self.is_external_session(ctx) {
+        if !ctx.is_external() {
             return all;
         }
         all.into_iter()
@@ -727,25 +782,21 @@ impl Tools {
             .collect()
     }
 
-    fn is_external_session(&self, ctx: &CallContext) -> bool {
-        self.session
-            .get()
-            .and_then(|a| a.store.get_session(&ctx.session_id).ok().flatten())
-            .is_some_and(|s| s.harness_id == crate::session::external::HARNESS_ID)
-    }
-
     fn is_review_session(&self, ctx: &CallContext) -> bool {
+        let Some(id) = ctx.session_id() else {
+            return false;
+        };
         self.session
             .get()
-            .and_then(|a| a.store.get_session(&ctx.session_id).ok().flatten())
+            .and_then(|a| a.store.get_session(id).ok().flatten())
             .is_some_and(|s| s.phase == "review")
     }
 
     fn is_plan_artifact(&self, ctx: &CallContext, args: &Value) -> bool {
-        let Some(access) = self.session.get() else {
+        let (Some(access), Some(id)) = (self.session.get(), ctx.session_id()) else {
             return false;
         };
-        let Ok(Some(session)) = access.store.get_session(&ctx.session_id) else {
+        let Ok(Some(session)) = access.store.get_session(id) else {
             return false;
         };
         session.phase == "plan"
@@ -788,9 +839,9 @@ impl Tools {
                 let row = ApprovalRow {
                     id: uuid::Uuid::now_v7().to_string(),
                     channel: ctx.channel.clone(),
-                    session_id: ctx.session_id.clone(),
+                    session_id: ctx.row().to_string(),
                     node_id: ctx.node_id.clone(),
-                    lane: None,
+                    lane: ctx.lane().map(str::to_string),
                     tool: name.to_string(),
                     arguments: args.to_string(),
                     request_key,
@@ -862,8 +913,22 @@ impl Tools {
         }
         let original: Value =
             serde_json::from_str(&approval.arguments).map_err(|e| e.to_string())?;
+        let external = access
+            .store
+            .get_session(&approval.session_id)
+            .ok()
+            .flatten()
+            .is_some_and(|s| s.harness_id == crate::session::external::HARNESS_ID);
+        let caller = if external {
+            Caller::External {
+                lane: approval.lane.clone(),
+                attachment: approval.session_id.clone(),
+            }
+        } else {
+            Caller::Session(approval.session_id.clone())
+        };
         let ctx = CallContext {
-            session_id: approval.session_id.clone(),
+            caller,
             channel: approval.channel.clone(),
             node_id: approval.node_id.clone(),
         };
@@ -902,7 +967,7 @@ impl Tools {
         let access = self.session.get().ok_or("approvals are not available")?;
         access
             .manager
-            .approval_runnable(&ctx.session_id, &ctx.channel)
+            .approval_runnable(ctx)
             .map_err(|e| e.to_string())?;
         self.dispatch(ctx, name, args, true).await
     }
@@ -954,7 +1019,7 @@ impl Tools {
                 &self.policy.read(),
                 &crate::authority::AuthorityQuery {
                     channel: &ctx.channel,
-                    session_id: &ctx.session_id,
+                    session_id: Some(ctx.row()),
                     action,
                     target: &target,
                     revision: revision.as_deref(),
@@ -1013,7 +1078,7 @@ impl Tools {
             &self.policy.read(),
             &crate::authority::AuthorityQuery {
                 channel: &ctx.channel,
-                session_id: &ctx.session_id,
+                session_id: Some(ctx.row()),
                 action,
                 target: &target,
                 revision: revision.as_deref(),
@@ -1047,7 +1112,7 @@ impl Tools {
             &self.policy.read(),
             &crate::authority::AuthorityQuery {
                 channel: &ctx.channel,
-                session_id: &ctx.session_id,
+                session_id: Some(ctx.row()),
                 action,
                 target: &target,
                 revision: revision.as_deref(),
@@ -1098,7 +1163,7 @@ impl Tools {
                 action,
                 target: &target,
                 channel: &ctx.channel,
-                session_id: &ctx.session_id,
+                session_id: ctx.row(),
                 revision: revision.as_deref(),
                 operation_id: Some(operation_id),
                 evidence: &evidence,
@@ -1403,11 +1468,7 @@ mod tests {
     }
 
     fn ctx(channel: &str) -> CallContext {
-        CallContext {
-            session_id: "s".into(),
-            channel: channel.into(),
-            node_id: "n1".into(),
-        }
+        CallContext::session("s", channel, "n1")
     }
 
     const STORE: &str = r#"

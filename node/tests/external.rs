@@ -1185,6 +1185,32 @@ async fn a_labelled_harness_is_shown_by_its_lane() {
     );
 }
 
+/// The card a labelled harness raises says which lane asked for it.
+#[tokio::test]
+async fn an_approval_carries_the_lane_that_asked() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/mcp/external/work")
+        .header("host", "127.0.0.1:7420")
+        .header("content-type", "application/json")
+        .header("x-tracon-agent", "tracon:feat/x")
+        .body(Body::from(
+            tool_call("doc_write", json!({ "slug": "plan-x", "body": "hi" })).to_string(),
+        ))
+        .unwrap();
+    let res = h.operator.clone().oneshot(req).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let (err, out) = outcome(&serde_json::from_slice(&bytes).unwrap());
+    assert!(!err, "{out}");
+    let id = out["approval_id"].as_str().unwrap();
+    let row = h.store.get_approval(id).unwrap().unwrap();
+    assert_eq!(row.lane.as_deref(), Some("tracon:feat/x"));
+}
+
 #[tokio::test]
 async fn the_door_answers_one_post_per_message_and_opens_no_stream() {
     state::isolate();

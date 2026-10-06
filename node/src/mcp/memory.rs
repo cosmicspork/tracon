@@ -60,11 +60,9 @@ pub async fn call(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    let project_id = access
-        .store
-        .get_session(&ctx.session_id)
-        .ok()
-        .flatten()
+    let project_id = ctx
+        .session_id()
+        .and_then(|id| access.store.get_session(id).ok().flatten())
         .and_then(|s| s.project_id);
     match name {
         RECALL => {
@@ -94,7 +92,7 @@ pub async fn call(
                     &ctx.channel,
                     query,
                     project_id.as_deref(),
-                    Some(&ctx.session_id),
+                    Some(ctx.row()),
                     kinds.as_deref(),
                     limit,
                     &near.hits,
@@ -127,7 +125,7 @@ pub async fn call(
                         )
                     }
                 },
-                "session" => Some(ctx.session_id.clone()),
+                "session" => Some(ctx.row().to_string()),
                 "global" => None,
                 other => return Err(format!("unknown scope {other:?}")),
             };
@@ -152,7 +150,7 @@ pub async fn call(
                 &id,
                 json!({
                     "channel": ctx.channel, "scope": scope, "scope_ref": scope_ref, "kind": kind, "body": body,
-                    "source_session": ctx.session_id, "source_node": node_id, "confidence": confidence,
+                    "source_session": ctx.row(), "source_node": node_id, "confidence": confidence,
                     "state": state, "created_ms": now, "updated_ms": now,
                 }),
             )

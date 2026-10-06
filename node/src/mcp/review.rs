@@ -206,10 +206,10 @@ async fn submit(
     args: &Value,
 ) -> Result<Value, String> {
     let mut session = store
-        .get_session(&ctx.session_id)
+        .get_session(ctx.row())
         .map_err(|e| e.to_string())?
         .ok_or("this session is gone")?;
-    let external = session.harness_id == crate::session::external::HARNESS_ID;
+    let external = ctx.is_external();
     let named = args.get("worktree").and_then(Value::as_str);
     let (worktree, branch) = match (external, named) {
         (true, Some(path)) => {
@@ -241,7 +241,7 @@ async fn submit(
         }
         (false, None) => (
             manager
-                .snapshot_workspace(&ctx.session_id)
+                .snapshot_workspace(ctx.row())
                 .await
                 .map_err(|e| e.to_string())?
                 .to_string_lossy()
@@ -328,7 +328,7 @@ async fn submit(
             limits.max_files
         );
         manager.record_event(
-            &ctx.session_id,
+            ctx.row(),
             ek::REVIEW_REJECTED,
             json!({ "reason": reason, "lines": lines, "files": capture.files.len() }),
         );
@@ -391,7 +391,7 @@ async fn submit(
         head_sha: capture.head_sha.clone(),
         tree_sha: Some(snapshot.tree_sha.clone()),
         channel: ctx.channel.clone(),
-        owner_session_id: ctx.session_id.clone(),
+        owner_session_id: ctx.row().to_string(),
         source_kind: "git".into(),
         captured_ms: now_ms(),
         capture_json: json!({
@@ -518,7 +518,7 @@ async fn submit(
     let id = uuid::Uuid::now_v7().to_string();
     let row = ReviewRow {
         id: id.clone(),
-        session_id: ctx.session_id.clone(),
+        session_id: ctx.row().to_string(),
         node_id: session.node_id.clone(),
         channel: ctx.channel.clone(),
         kind: if provider == "gitlab" {
@@ -710,12 +710,16 @@ async fn submit_report(
     ctx: &CallContext,
     args: &Value,
 ) -> Result<Value, String> {
-    let session = store
-        .get_session(&ctx.session_id)
-        .map_err(|e| e.to_string())?
-        .ok_or("this session is gone")?;
-    if session.channel != ctx.channel || session.node_id != ctx.node_id {
-        return Err("this session is not attached to the requested channel on this node".into());
+    if let Some(id) = ctx.session_id() {
+        let session = store
+            .get_session(id)
+            .map_err(|e| e.to_string())?
+            .ok_or("this session is gone")?;
+        if session.channel != ctx.channel || session.node_id != ctx.node_id {
+            return Err(
+                "this session is not attached to the requested channel on this node".into(),
+            );
+        }
     }
     let title = str_arg(args, "title")?.trim().to_string();
     let body = str_arg(args, "body")?.trim().to_string();
@@ -758,8 +762,8 @@ async fn submit_report(
     let now = now_ms();
     let report = ReviewRow {
         id: id.clone(),
-        session_id: ctx.session_id.clone(),
-        node_id: session.node_id,
+        session_id: ctx.row().to_string(),
+        node_id: ctx.node_id.clone(),
         channel: ctx.channel.clone(),
         kind: crate::store::reports::KIND.into(),
         title,
@@ -767,7 +771,7 @@ async fn submit_report(
         edited_title: None,
         edited_body: None,
         provider: "none".into(),
-        target: json!({ "kind": "narrative_report", "session_id": ctx.session_id }).to_string(),
+        target: json!({ "kind": "narrative_report", "session_id": ctx.row() }).to_string(),
         diff: String::new(),
         files: "[]".into(),
         head_sha: content_hash,
@@ -801,7 +805,7 @@ async fn submit_report(
 /// call attaches a new one, so a review a harness the operator runs submitted
 /// belongs to the channel's attachments rather than to one of them.
 fn owns(store: &Store, ctx: &CallContext, r: &ReviewRow) -> bool {
-    if r.session_id == ctx.session_id {
+    if r.session_id == ctx.row() {
         return true;
     }
     let external = |id: &str| {
@@ -811,7 +815,7 @@ fn owns(store: &Store, ctx: &CallContext, r: &ReviewRow) -> bool {
             .flatten()
             .is_some_and(|s| s.harness_id == crate::session::external::HARNESS_ID)
     };
-    r.channel == ctx.channel && external(&ctx.session_id) && external(&r.session_id)
+    r.channel == ctx.channel && ctx.is_external() && external(&r.session_id)
 }
 
 /// The session that asked for these checks, as the authority on whether they
@@ -852,9 +856,9 @@ async fn run_checks(
     force_rerun: bool,
 ) -> Result<review::checks::CheckReport, String> {
     let commands = review::checks::candidate_environment(store, manager.cfg(), candidate)?.checks;
-    manager.set_checking(&ctx.session_id, true);
+    manager.set_checking(ctx.row(), true);
     manager.record_event(
-        &ctx.session_id,
+        ctx.row(),
         ek::CHECK_STARTED,
         json!({
             "candidate_id": candidate.id,
@@ -872,22 +876,22 @@ async fn run_checks(
         force_rerun,
         &SessionStillWants {
             store: store.clone(),
-            session_id: ctx.session_id.clone(),
+            session_id: ctx.row().to_string(),
         },
     )
     .await;
-    manager.set_checking(&ctx.session_id, false);
+    manager.set_checking(ctx.row(), false);
     let report = report?;
     if let Some(prepared) = &report.prepared {
         manager.record_event(
-            &ctx.session_id,
+            ctx.row(),
             ek::CHECK_PREPARED,
             json!({ "candidate_id": candidate.id, "ok": prepared.ok, "ms": prepared.ms }),
         );
     }
     for result in &report.results {
         manager.record_event(
-            &ctx.session_id,
+            ctx.row(),
             ek::CHECK_RESULT,
             json!({
                 "candidate_id": candidate.id,
@@ -907,7 +911,7 @@ async fn run_checks(
     // than opening a review on evidence that was never finished.
     if let Some(reason) = &report.cancelled {
         manager.record_event(
-            &ctx.session_id,
+            ctx.row(),
             ek::CHECK_CANCELLED,
             json!({
                 "candidate_id": candidate.id,
@@ -944,7 +948,7 @@ async fn run_checks(
     if !unrunnable.is_empty() {
         for result in &unrunnable {
             manager.record_event(
-                &ctx.session_id,
+                ctx.row(),
                 ek::CHECK_NOT_RUNNABLE,
                 json!({
                     "candidate_id": candidate.id,
@@ -978,7 +982,7 @@ async fn run_checks(
             failed.tail
         );
         manager.record_event(
-            &ctx.session_id,
+            ctx.row(),
             ek::REVIEW_REJECTED,
             json!({
                 "candidate_id": candidate.id,
@@ -1086,7 +1090,7 @@ async fn verdict(
     args: &Value,
 ) -> Result<Value, String> {
     let session = store
-        .get_session(&ctx.session_id)
+        .get_session(ctx.row())
         .map_err(|e| e.to_string())?
         .ok_or("this session is gone")?;
     if session.phase != "review" {
@@ -1107,7 +1111,7 @@ async fn verdict(
     let findings = args.get("findings").cloned().unwrap_or_else(|| json!([]));
     let v = json!({
         "verdict": verdict, "summary": summary, "findings": findings,
-        "model": session.model, "session_id": ctx.session_id, "at_ms": now_ms(),
+        "model": session.model, "session_id": ctx.row(), "at_ms": now_ms(),
     });
     if !store
         .set_ai_verdict(&review_id, &v.to_string())
@@ -1118,7 +1122,7 @@ async fn verdict(
             .map_err(|e| e.to_string())?
             .map(|review| review.state);
         manager.record_event(
-            &ctx.session_id,
+            ctx.row(),
             ek::LATE_REFUSED,
             json!({
                 "what": "review_verdict",
@@ -1127,7 +1131,7 @@ async fn verdict(
                 "verdict": verdict,
             }),
         );
-        manager.phase_done(&ctx.session_id).await;
+        manager.phase_done(ctx.row()).await;
         return Err(match state {
             Some(state) => format!(
                 "this review was already decided ({state}); a verdict now would be about a \
@@ -1137,12 +1141,12 @@ async fn verdict(
         });
     }
     manager.record_event(
-        &ctx.session_id,
+        ctx.row(),
         ek::REVIEW_VERDICT,
         json!({ "review_id": review_id, "verdict": verdict, "summary": summary }),
     );
     manager.publish_queue().await;
-    manager.phase_done(&ctx.session_id).await;
+    manager.phase_done(ctx.row()).await;
     Ok(json!({ "review_id": review_id, "recorded": true }))
 }
 

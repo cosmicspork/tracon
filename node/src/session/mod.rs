@@ -2201,18 +2201,16 @@ impl Manager {
     /// Whether an approved call may still run for this session. A session
     /// that has ended does not stop it: the approval belongs to the channel.
     /// A paused session, or a channel the operator stopped, does.
-    pub fn approval_runnable(&self, session_id: &str, channel: &str) -> Result<(), SessionError> {
-        self.channel_usable(channel)?;
-        if let Some(row) = self.store.get_session(session_id)? {
+    pub fn approval_runnable(&self, ctx: &crate::mcp::CallContext) -> Result<(), SessionError> {
+        self.channel_usable(&ctx.channel)?;
+        if ctx.is_external() && self.bindings(&ctx.channel)["external_stopped"] == true {
+            return Err(SessionError::Rejected(
+                "external broker access was stopped by the operator".into(),
+            ));
+        }
+        if let Some(row) = self.store.get_session(ctx.row())? {
             if row.state == SessionState::Paused.as_str() {
                 return Err(SessionError::Rejected("session is paused".into()));
-            }
-            if row.harness_id == external::HARNESS_ID
-                && self.bindings(channel)["external_stopped"] == true
-            {
-                return Err(SessionError::Rejected(
-                    "external broker access was stopped by the operator".into(),
-                ));
             }
         }
         Ok(())
