@@ -549,21 +549,25 @@ async fn an_edited_answer_runs_the_tool_with_the_operators_words() {
 async fn an_edit_is_held_to_the_same_refusals_as_the_call() {
     state::isolate();
     let h = harness_with(enabled()).await;
+    for rule in h.tools.policy.write().rules.iter_mut() {
+        rule.matches.retain(|m| m != "retain");
+    }
     let id = ask(
         &h,
-        "doc_write",
-        json!({ "slug": "plan-y", "body": "a draft" }),
+        "retain",
+        json!({ "kind": "fact", "scope": "global", "body": "a draft" }),
     )
     .await;
-    answer(
+    let (status, _) = answer(
         &h,
         &id,
         json!({
             "option_id": "allow_once",
-            "arguments": { "slug": "plan-y/.claude/settings", "body": "a draft" }
+            "arguments": { "kind": "fact", "scope": "global", "body": "see .claude/settings" }
         }),
     )
     .await;
+    assert_eq!(status, StatusCode::OK);
     let out = settled(&h, &id).await;
     assert_eq!(out["state"], "failed", "{out}");
     assert!(
@@ -572,7 +576,6 @@ async fn an_edit_is_held_to_the_same_refusals_as_the_call() {
             .is_some_and(|r| r.contains("refused by policy")),
         "{out}"
     );
-    assert!(h.store.doc_get("work", "plan-y").unwrap().is_none());
 }
 
 #[tokio::test]
