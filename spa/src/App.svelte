@@ -1,5 +1,6 @@
 <script lang="ts">
   import Review from './routes/Review.svelte'
+  import Approval from './routes/Approval.svelte'
   import Doc from './routes/Doc.svelte'
   import DocPreview from './routes/DocPreview.svelte'
   import Docs from './routes/Docs.svelte'
@@ -79,6 +80,7 @@
       screen, and this app contributes one slim bar. */
   const opencodeId = $derived(shellSessionId(router.path))
   const reviewId = $derived(router.path.match(/^\/reviews\/([^/]+)/)?.[1] ?? null)
+  const approvalId = $derived(router.path.match(/^\/approvals\/([^/]+)/)?.[1] ?? null)
   const promotionId = $derived(router.path.match(/^\/promotions\/([^/]+)/)?.[1] ?? null)
   const enroll = $derived(router.path === '/nodes/enroll')
   const settings = $derived(router.path === '/settings')
@@ -211,6 +213,8 @@
     {/if}
     {#if reviewId}
       <Review id={reviewId} />
+    {:else if approvalId}
+      <Approval id={approvalId} />
     {:else if promotionId}
       <Promotion id={promotionId} />
     {:else if sessionId}

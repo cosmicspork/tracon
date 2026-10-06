@@ -99,6 +99,9 @@
     {/if}
   </span>
   <span class="act">
+    {#if approval}
+      <a class="lnk" href="/approvals/{permission.id}" title="Read, edit, and decide it on its own page">Open</a>
+    {/if}
     {#if held !== null}
       <span class="why">{held} · cannot be decided until it returns</span>
     {:else if lapsed}

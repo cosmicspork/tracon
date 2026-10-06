@@ -64,6 +64,7 @@ import type {
 } from './types'
 
 import type { HtmlBundleSelection } from './html-bundle'
+import type { AnswerProblem, ApprovalDetails } from './approval'
 
 /** A document edit that lost to another: the current state comes back. */
 export class DocConflict extends Error {
@@ -82,6 +83,8 @@ export class ApiError extends Error {
     /** A compose that wrote the item but could not start the session names it
         here, so the interface can say where the operator's words went. */
     public workItemId?: string,
+    /** A 422 that names what to fix, field by field. */
+    public fields?: AnswerProblem[],
   ) {
     super(message)
   }
@@ -95,7 +98,7 @@ export async function call<T>(method: string, path: string, body?: unknown): Pro
   })
   const text = await res.text()
   // Not every failure body is JSON: axum's extractors reject with plain text.
-  let json: { error?: { message?: string }; work_item_id?: string } | null = null
+  let json: { error?: { message?: string; fields?: AnswerProblem[] }; work_item_id?: string } | null = null
   try {
     json = text ? JSON.parse(text) : null
   } catch {
@@ -103,7 +106,8 @@ export async function call<T>(method: string, path: string, body?: unknown): Pro
   }
   if (!res.ok) {
     const message = json?.error?.message ?? (text || `${res.status} ${res.statusText}`)
-    throw new ApiError(res.status, message, json?.work_item_id)
+    const fields = Array.isArray(json?.error?.fields) ? json.error.fields : undefined
+    throw new ApiError(res.status, message, json?.work_item_id, fields)
   }
   return json as T
 }
@@ -318,8 +322,22 @@ export const api = {
     },
   ) => call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/verdict`, verdict),
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),
-  answer: (permissionId: string, optionId: string, args?: Record<string, unknown>) =>
-    call<void>('POST', `/api/permissions/${permissionId}/answer`, { option_id: optionId, arguments: args }),
+  /** `reason` goes back with a rejection, `notes` with a request for changes. */
+  answer: (
+    permissionId: string,
+    optionId: string,
+    args?: Record<string, unknown>,
+    said: { reason?: string; notes?: string } = {},
+  ) =>
+    call<void>('POST', `/api/permissions/${permissionId}/answer`, {
+      option_id: optionId,
+      arguments: args,
+      reason: said.reason,
+      notes: said.notes,
+    }),
+  /** Reading an approval claims it, as opening a review does. */
+  approval: (id: string) => call<ApprovalDetails>('GET', `/api/approvals/${id}`),
+  releaseApproval: (id: string) => call<void>('POST', `/api/approvals/${id}/release`),
   // Documents: read by slug, search by content, edit with the hash last read.
   docs: (channel?: string, kind?: string, archived = false) => {
     const q = new URLSearchParams()
