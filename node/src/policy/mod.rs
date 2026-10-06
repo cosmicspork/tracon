@@ -352,7 +352,14 @@ pub struct Request<'a> {
 fn prose_fields(action: &str) -> &'static [&'static str] {
     use crate::mcp::{docs, github, gitlab, jira, review};
     match action {
-        review::SUBMIT | review::SUBMIT_REPORT => &["title", "body"],
+        review::SUBMIT => &[
+            "title",
+            "body",
+            "forge.description.title",
+            "forge.description.body",
+            "forge.comment",
+        ],
+        review::SUBMIT_REPORT => &["title", "body"],
         jira::ISSUE_CREATE | jira::ISSUE_UPDATE => &["summary", "description"],
         jira::ISSUE_COMMENT
         | github::PR_COMMENT
@@ -364,18 +371,30 @@ fn prose_fields(action: &str) -> &'static [&'static str] {
     }
 }
 
+fn strip(value: &mut serde_json::Value, path: &str) {
+    let Some(fields) = value.as_object_mut() else {
+        return;
+    };
+    match path.split_once('.') {
+        None => {
+            fields.remove(path);
+        }
+        Some((head, rest)) => {
+            if let Some(inner) = fields.get_mut(head) {
+                strip(inner, rest);
+            }
+        }
+    }
+}
+
 impl Request<'_> {
     fn haystack(&self) -> String {
-        let prose = prose_fields(self.action);
-        let matched = self.arguments.map(|arguments| match arguments.as_object() {
-            Some(fields) if !prose.is_empty() => serde_json::Value::Object(
-                fields
-                    .iter()
-                    .filter(|(key, _)| !prose.contains(&key.as_str()))
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-            ),
-            _ => arguments.clone(),
+        let matched = self.arguments.map(|arguments| {
+            let mut arguments = arguments.clone();
+            for path in prose_fields(self.action) {
+                strip(&mut arguments, path);
+            }
+            arguments
         });
         let mut arguments = matched
             .as_ref()
@@ -731,6 +750,34 @@ mod tests {
             let d = p.decide(&tool(name, &args, name));
             assert_eq!(d.verdict, Verdict::Deny, "{name}");
         }
+        // What the forge will show is narrative too; whether it opens as a
+        // draft, and where it goes, are not.
+        let forge = serde_json::json!({
+            "description": {
+                "title": "fix: after gh pr merge",
+                "body": "Run git push, then gh pr merge.",
+            },
+            "comment": "This revision drops the git push step.",
+            "draft": true,
+        });
+        let args = serde_json::json!({
+            "title": "fix", "body": "x", "provider": "github",
+            "project": "o/r", "base": "main", "forge": forge,
+        });
+        let d = p.decide(&tool("submit_review", &args, "submit_review"));
+        assert_ne!(d.verdict, Verdict::Deny, "{:?}", d.rule_id);
+        let args = serde_json::json!({
+            "title": "fix", "body": "x", "provider": "github",
+            "project": "o/git push", "base": "main", "forge": forge,
+        });
+        let d = p.decide(&tool("submit_review", &args, "submit_review"));
+        assert_eq!(d.verdict, Verdict::Deny);
+        let args = serde_json::json!({
+            "title": "fix", "body": "x", "provider": "github", "project": "o/r",
+            "forge": { "comment": "x", "target": "gh pr merge" },
+        });
+        let d = p.decide(&tool("submit_review", &args, "submit_review"));
+        assert_eq!(d.verdict, Verdict::Deny);
         // A tool with no narrative fields is matched in full.
         let args = serde_json::json!({ "project": "group/app", "ref": "gh pr merge" });
         let d = p.decide(&tool("pipeline_run", &args, "pipeline_run"));

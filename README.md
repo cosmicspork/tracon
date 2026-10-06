@@ -926,7 +926,7 @@ pipeline and check status, job logs, documents, memory, the ledger, an item's br
 and asks before every brokered write that others see: a comment, an edited or new
 ticket, a pipeline run, a document other than working notes, a line added to a brief.
 A tool whose kind the node does not know is asked. The narrative a call carries (a
-review's or report's title and body, a ticket's summary and description, a comment,
+review's or report's title and body, a review's forge description and comment, a ticket's summary and description, a comment,
 a reply, a document's body) is text, not an action, so it is left out of deny
 matching: a comment can say "production" or quote `gh pr merge`. The fields that say
 where it goes are still matched.
