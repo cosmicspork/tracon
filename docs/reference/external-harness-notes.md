@@ -69,6 +69,12 @@ same refusals) and keep the result, and the caller reads that result with
 boundary harness included; only a harness's own permission prompt (OpenCode
 asking to run a command) still waits, because the harness itself does.
 
+A `report_issue` draft had the same gap: nothing took its `issue_id` back, so
+an agent learned its draft was published only by searching the repository's
+issues (#362). `issue_report_status` closes it on the same wait contract,
+returning the published number, URL and title, or the operator's discard
+reason.
+
 The next four shapes describe the attached session external harnesses had
 until they stopped getting one; see "No session at all" below.
 

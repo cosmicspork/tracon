@@ -6,7 +6,11 @@ use tokio::time::{sleep, Duration};
 
 use crate::{
     config::Config,
-    mcp::CallContext,
+    mcp::{
+        review::caller_owns,
+        wait::{wait_secs, MAX_WAIT_SECS},
+        CallContext,
+    },
     notify,
     store::{now_ms, IssueDraftRow, OperatorQuestionRow, Store},
 };
@@ -14,6 +18,7 @@ use crate::{
 pub const ASK: &str = "ask_operator";
 pub const NOTIFY: &str = "notify_operator";
 pub const REPORT: &str = "report_issue";
+pub const REPORT_STATUS: &str = "issue_report_status";
 const MAX_TEXT: usize = 8 * 1024;
 const MAX_ATTACHMENT_BYTES: usize = 8 * 1024;
 const MAX_ATTACHMENTS: usize = 3;
@@ -23,6 +28,32 @@ pub fn definitions() -> Vec<Value> {
         json!({"name": ASK, "description":"Ask the operator a free-text question, optionally choosing from explicit choices. Supply a stable request_id to recover an unanswered or answered question after reconnect/restart; it never grants access.", "inputSchema":{"type":"object","properties":{"request_id":{"type":"string","maxLength":128},"question":{"type":"string"},"choices":{"type":"array","items":{"type":"string"},"maxItems":20}},"required":["request_id","question"]}}),
         json!({"name": NOTIFY, "description":"Intentionally send an OS/PWA notification to configured operator devices. A push-service attempt is not evidence a human read it.", "inputSchema":{"type":"object","properties":{"title":{"type":"string"},"message":{"type":"string"},"path":{"type":"string"},"device_ids":{"type":"array","items":{"type":"string"}},"node_ids":{"type":"array","items":{"type":"string"}}},"required":["title","message"]}}),
         json!({"name": REPORT, "description":"Draft a report about tracon, its environments, tools, or harness integration. It never pauses execution or uploads repository files/transcripts. The operator inspects and authorizes publication separately.", "inputSchema":{"type":"object","properties":{"title":{"type":"string"},"expected":{"type":"string"},"actual":{"type":"string"},"reproduction":{"type":"string"},"versions":{"type":"string"},"errors":{"type":"string"},"recovery":{"type":"string"},"diagnosis":{"type":"string"},"attachments":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"content":{"type":"string"}},"required":["name","content"]},"maxItems":3}},"required":["title","expected","actual"]}}),
+        json!({
+            "name": REPORT_STATUS,
+            "description": format!(
+                "What became of issues you drafted with {REPORT}. Pass `issue_id`, or \
+                 `issue_ids` to wait on several: the call returns as soon as any of them is \
+                 decided, or after up to {MAX_WAIT_SECS} seconds, with every id's state — \
+                 `draft` or `publishing` while the operator has not decided, `published` with \
+                 the GitHub issue `number`, `url` and `title`, `discarded` with the operator's \
+                 `reason`, or `uncertain` when publication may or may not have reached GitHub. \
+                 `still_waiting` is true when nothing was decided; call again to keep waiting."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_id": { "type": "string" },
+                    "issue_ids": { "type": "array", "items": { "type": "string" } },
+                    "wait_secs": {
+                        "type": "integer",
+                        "description": format!(
+                            "How long to block, up to {MAX_WAIT_SECS}; larger values are capped. \
+                             Defaults to {MAX_WAIT_SECS}. 0 returns the current state."
+                        ),
+                    },
+                },
+            },
+        }),
     ]
 }
 
@@ -38,6 +69,7 @@ pub async fn call(
         ASK => ask(store, ctx, args).await,
         NOTIFY => notify_operator(store, manager, cfg, ctx, args).await,
         REPORT => report(store, ctx, args),
+        REPORT_STATUS => report_status(store, ctx, args).await,
         _ => Err(format!("no operator tool named {name}")),
     }
 }
@@ -310,11 +342,105 @@ fn report(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, 
             publish_error: None,
             created_ms: now_ms(),
             approved_ms: None,
+            published_number: None,
+            decided_ms: None,
+            discard_reason: None,
+            node_id: Some(ctx.node_id.clone()),
         })
         .map_err(|e| e.to_string())?;
-    Ok(
-        json!({"issue_id": id, "state":"draft", "next":"The operator can inspect and explicitly authorize this draft. Reporting does not pause execution."}),
-    )
+    Ok(json!({
+        "issue_id": id,
+        "state": "draft",
+        "next": format!(
+            "The operator can inspect and explicitly authorize this draft. Reporting does not \
+             pause execution. Call {REPORT_STATUS} with this issue_id to learn whether it was \
+             published, and as which GitHub issue, or discarded."
+        ),
+    }))
+}
+
+async fn report_status(
+    store: &Arc<Store>,
+    ctx: &CallContext,
+    args: &Value,
+) -> Result<Value, String> {
+    let ids = issue_ids(args)?;
+    let wait = wait_secs(args);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
+    loop {
+        let mut rows = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let row = store
+                .issue_draft(id)
+                .map_err(|e| e.to_string())?
+                .filter(|row| {
+                    caller_owns(store, ctx, &row.channel, row.session_id.as_deref())
+                        && row.node_id.as_deref().is_none_or(|n| n == ctx.node_id)
+                })
+                .ok_or_else(|| format!("no issue draft {id} of yours on this channel"))?;
+            rows.push(row);
+        }
+        let decided = rows
+            .iter()
+            .any(|row| !matches!(row.state.as_str(), "draft" | "publishing"));
+        if decided || tokio::time::Instant::now() >= deadline {
+            let views: Vec<Value> = rows.iter().map(issue_view).collect();
+            return Ok(if args.get("issue_ids").is_some() {
+                json!({ "issues": views, "still_waiting": !decided })
+            } else {
+                let mut view = views.into_iter().next().unwrap_or(Value::Null);
+                view["still_waiting"] = json!(!decided);
+                view
+            });
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn issue_ids(args: &Value) -> Result<Vec<String>, String> {
+    if let Some(list) = args.get("issue_ids") {
+        let ids: Vec<String> = list
+            .as_array()
+            .ok_or("issue_ids is a list of issue ids")?
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        if ids.is_empty() {
+            return Err("issue_ids names no issue".into());
+        }
+        return Ok(ids);
+    }
+    args.get("issue_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| vec![s.to_string()])
+        .ok_or_else(|| "issue_id or issue_ids is required".into())
+}
+
+fn issue_view(row: &IssueDraftRow) -> Value {
+    match row.state.as_str() {
+        "published" => json!({
+            "issue_id": row.id,
+            "state": "published",
+            "number": row.published_number,
+            "url": row.published_url,
+            "title": row.title,
+        }),
+        "discarded" => json!({
+            "issue_id": row.id,
+            "state": "discarded",
+            "reason": row.discard_reason,
+        }),
+        state => json!({
+            "issue_id": row.id,
+            "state": state,
+            "error": row.publish_error,
+        }),
+    }
 }
 
 fn text(args: &Value, key: &str, required: bool) -> Result<String, String> {

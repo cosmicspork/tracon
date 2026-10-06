@@ -1131,7 +1131,7 @@
           </div>
         {/each}
       </div>
-      <small>Use <code>submit_report</code> for an operator report and notification without Git or publication; <code>report_status</code> reads feedback.{#if !local} From another machine, add <code>--header "Authorization: Bearer &lt;operator token&gt;"</code>.{/if}</small>
+      <small>Use <code>submit_report</code> for an operator report and notification without Git or publication; <code>report_status</code> reads feedback. A <code>report_issue</code> draft against tracon is followed with <code>issue_report_status</code>.{#if !local} From another machine, add <code>--header "Authorization: Bearer &lt;operator token&gt;"</code>.{/if}</small>
     {/if}
   </Card>
 

@@ -335,11 +335,15 @@ export interface OperatorIssue {
   title: string
   body: string
   attachments_json: string
-  state: 'draft' | 'publishing' | 'published' | 'uncertain'
+  state: 'draft' | 'publishing' | 'published' | 'uncertain' | 'discarded'
   published_url: string | null
+  published_number?: number | null
   publish_error: string | null
   created_ms: number
   approved_ms: number | null
+  decided_ms?: number | null
+  discard_reason?: string | null
+  node_id?: string | null
 }
 
 export interface Review {

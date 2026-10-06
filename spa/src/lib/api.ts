@@ -534,6 +534,12 @@ export const api = {
   operatorIssue: (id: string) => call<{ issue: OperatorIssue }>('GET', `/api/operator/issues/${id}`),
   publishOperatorIssue: (id: string) =>
     call<{ published: boolean; url: string }>('POST', `/api/operator/issues/${id}/publish`),
+  discardOperatorIssue: (id: string, reason?: string) =>
+    call<{ discarded: boolean; state: string; reason: string | null }>(
+      'POST',
+      `/api/operator/issues/${id}/discard`,
+      { reason: reason?.trim() || null },
+    ),
   operatorNotification: (id: string) =>
     call<{ notification_id: string; attempts: unknown[]; receipt: string }>(
       'GET',

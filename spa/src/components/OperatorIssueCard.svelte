@@ -13,6 +13,15 @@
     catch (e) { error = e instanceof Error ? e.message : String(e) }
     finally { busy = false }
   }
+  let discarding = $state(false)
+  let discardReason = $state('')
+  async function discard() {
+    if (busy || (issue.state !== 'draft' && issue.state !== 'uncertain')) return
+    busy = true; error = null
+    try { await api.discardOperatorIssue(issue.id, discardReason); discarding = false; done?.() }
+    catch (e) { error = e instanceof Error ? e.message : String(e) }
+    finally { busy = false }
+  }
   async function reconcile() {
     if (busy || issue.state !== 'uncertain') return
     busy = true; error = null
@@ -27,7 +36,11 @@
   <details><summary>Exact outgoing issue body</summary><pre>{outgoingBody}</pre></details>
   <pre>{issue.body}</pre>
   {#if attachments.length}<details><summary>{attachments.length} inspectable attachment{attachments.length === 1 ? '' : 's'}</summary>{#each attachments as attachment}<h4>{attachment.name}</h4><pre>{attachment.content}</pre>{/each}</details>{/if}
-  {#if issue.published_url}<a href={issue.published_url} target="_blank" rel="noreferrer">Published issue</a>{:else if issue.state === 'draft'}<button onclick={publish} disabled={busy}>Authorize publication to cosmicspork/tracon</button>{:else if issue.state === 'uncertain'}<button onclick={reconcile} disabled={busy}>I confirmed the draft marker is absent; retry</button>{/if}
+  {#if issue.published_url}<a href={issue.published_url} target="_blank" rel="noreferrer">Published issue{#if issue.published_number} #{issue.published_number}{/if}</a>{:else if issue.state === 'draft'}<button onclick={publish} disabled={busy}>Authorize publication to cosmicspork/tracon</button>{:else if issue.state === 'uncertain'}<button onclick={reconcile} disabled={busy}>I confirmed the draft marker is absent; retry</button>{/if}
+  {#if issue.state === 'discarded'}<div class="label">Discarded{#if issue.discard_reason}: {issue.discard_reason}{/if}</div>{:else if issue.state === 'draft' || issue.state === 'uncertain'}
+    {#if discarding}<form class="discard" onsubmit={(e) => { e.preventDefault(); discard() }}><input bind:value={discardReason} placeholder="Reason for the agent (optional)" aria-label="Discard reason" maxlength="2000" /><button type="submit" disabled={busy}>Discard draft</button><button type="button" onclick={() => (discarding = false)} disabled={busy}>Keep</button></form>
+    {:else}<button class="secondary" onclick={() => (discarding = true)} disabled={busy}>Discard…</button>{/if}
+  {/if}
   {#if issue.publish_error}<div class="error">Last publication failed: {issue.publish_error}</div>{/if}
   {#if error}<div class="error">{error}</div>{/if}
 </article>
@@ -35,4 +48,6 @@
   .card { border:1px solid var(--line); padding:.8rem; border-radius:.4rem; } .label { color:var(--dim); font-size:.85rem; }
   h3 { margin:.35rem 0; } pre { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--surface); padding:.55rem; }
   .error { color:var(--red); margin-top:.4rem; }
+  .discard { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:.4rem; } .discard input { flex:1 1 12rem; min-width:0; }
+  .secondary { margin-top:.4rem; }
 </style>

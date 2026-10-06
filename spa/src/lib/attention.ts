@@ -125,7 +125,7 @@ export function reviewVerdict(r: Review, held: string | null): Verdict {
 
 /** An issue draft. Returns null when it is done and belongs in no lane. */
 export function issueVerdict(i: OperatorIssue): Verdict | null {
-  if (i.state === 'published') return null
+  if (i.state === 'published' || i.state === 'discarded') return null
   if (i.state === 'publishing') return { lane: 'external', reason: 'publication in flight' }
   if (i.state === 'uncertain') {
     return { lane: 'external', reason: 'publication outcome uncertain · reconcile before retrying' }

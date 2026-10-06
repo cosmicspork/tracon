@@ -2863,6 +2863,44 @@ pub async fn reconcile_operator_issue(
     Ok(Json(json!({ "reconciled": true, "state": "draft" })))
 }
 
+#[derive(Deserialize)]
+pub struct DiscardIssueBody {
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+pub async fn discard_operator_issue(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<DiscardIssueBody>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let reason = body
+        .and_then(|Json(b)| b.reason)
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty());
+    if reason.as_ref().is_some_and(|r| r.chars().count() > 2000) {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the reason is limited to 2000 characters".into(),
+        ));
+    }
+    if s.store().issue_draft(&id)?.is_none() {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "no such issue draft".into(),
+        ));
+    }
+    if !s.store().discard_issue_draft(&id, reason.as_deref())? {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "only an unpublished draft can be discarded".into(),
+        ));
+    }
+    Ok(Json(
+        json!({ "discarded": true, "state": "discarded", "reason": reason }),
+    ))
+}
+
 pub async fn publish_operator_issue(
     State(s): State<AppState>,
     Path(id): Path<String>,

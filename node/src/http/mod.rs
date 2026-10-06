@@ -386,6 +386,10 @@ pub fn router(state: AppState) -> Router {
             "/api/operator/issues/{id}/publish",
             post(api::publish_operator_issue),
         )
+        .route(
+            "/api/operator/issues/{id}/discard",
+            post(api::discard_operator_issue),
+        )
         .route("/api/reviews/{id}", get(api::get_review))
         .route("/api/reviews/{id}/file", get(api::review_file))
         .route("/api/reviews/{id}/verdict", post(api::decide_review))

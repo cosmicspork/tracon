@@ -6,13 +6,13 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::{CallContext, SessionAccess};
+use super::{
+    wait::{wait_secs, MAX_WAIT_SECS},
+    CallContext, SessionAccess,
+};
 use crate::store::approvals::{ApprovalRow, PENDING, RUNNING};
 
 pub const STATUS: &str = "approval_status";
-
-/// The longest one call blocks: under any MCP client's own timeout.
-const MAX_WAIT_SECS: u64 = 45;
 
 pub fn definitions() -> Vec<Value> {
     vec![json!({
@@ -51,11 +51,7 @@ pub async fn status(
 ) -> Result<Value, String> {
     let store = &access.store;
     let ids = ids(args)?;
-    let wait = args
-        .get("wait_secs")
-        .and_then(Value::as_u64)
-        .unwrap_or(MAX_WAIT_SECS)
-        .min(MAX_WAIT_SECS);
+    let wait = wait_secs(args);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
     loop {
         // Expiry is applied here too, not only on the sweeper's tick, so a

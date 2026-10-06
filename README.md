@@ -483,7 +483,10 @@ deduplicated, and reports only what the push service said, never that you saw
 it. `report_issue` drafts a bug report against tracon itself, with expected and
 actual behaviour, reproduction, versions, and attachments, secrets scrubbed; the
 draft sits in the queue for you to read before you authorize opening it on
-GitHub through the broker. None of the three pauses the session.
+GitHub through the broker, or discard it with an optional reason. The agent
+follows its draft with `issue_report_status`, which waits up to 45 seconds and
+returns the published issue's number, URL and title, or that you discarded it
+and why. None of the three pauses the session.
 
 **Devices & notifications** manages this browser's subscription and device tests.
 Shared channel notification rules live under **Channels** and have an explicit
@@ -557,6 +560,10 @@ it or request changes; **`report_status`** returns that feedback. Resubmit the s
 report ID to revise it. Decisions are tied to the inspected content, so stale
 acknowledgements cannot approve a newer report. Acknowledgement is a human action,
 independent of whether a push service accepted its notification.
+
+A defect in tracon itself goes to **`report_issue`** instead, and
+**`issue_report_status`** says whether the operator published it, as which
+GitHub issue, or discarded it.
 
 A local app that is not a harness can read the tracker the same way:
 `GET /api/jira/search?channel=work&jql=…&cursor=…` on the loopback operator API

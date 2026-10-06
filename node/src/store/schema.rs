@@ -1227,6 +1227,21 @@ const MIGRATIONS: &[&str] = &[
     // 51: the rows such a caller writes have no session to name. The columns
     // that named one become nullable; see `relax_session_columns`.
     "",
+    // 52: a drafted issue reports back. `issue_report_status` tells the agent
+    // the number it was published as, or that the operator discarded it and
+    // why; `node_id` is whose agent drafted it. Rows published before this
+    // keep their URL, so the number is read back off its last path segment.
+    r#"
+    ALTER TABLE operator_issue ADD COLUMN published_number INTEGER;
+    ALTER TABLE operator_issue ADD COLUMN decided_ms INTEGER;
+    ALTER TABLE operator_issue ADD COLUMN discard_reason TEXT;
+    ALTER TABLE operator_issue ADD COLUMN node_id TEXT;
+    UPDATE operator_issue
+       SET published_number = CAST(substr(published_url, length(rtrim(published_url, '0123456789')) + 1) AS INTEGER)
+     WHERE state = 'published'
+       AND rtrim(published_url, '0123456789') LIKE '%/issues/'
+       AND length(rtrim(published_url, '0123456789')) < length(published_url);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered
