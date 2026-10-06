@@ -1,5 +1,12 @@
 import { expect, test } from 'bun:test'
-import { leaveAfterVerdict, onReview, verdictDestination, type Nav } from './verdict-nav'
+import {
+  leaveAfterVerdict,
+  onReview,
+  onScreen,
+  screenPath,
+  verdictDestination,
+  type Nav,
+} from './verdict-nav'
 
 /** The router as this sees it: a path that only its own `go` changes. */
 function fakeNav(path: string) {
@@ -86,4 +93,27 @@ test('the review screen is its own path and whatever hangs off it', () => {
   expect(onReview('/reviews/r10', 'r1')).toBe(false)
   expect(onReview('/sessions/r1', 'r1')).toBe(false)
   expect(onReview('/', 'r1')).toBe(false)
+})
+
+test('any screen under a prefix leaves the same way a review does', async () => {
+  const v = { prefix: '/approvals', id: 'a1', from: '/sessions/s1', fallback: '/' }
+  expect(verdictDestination('/approvals/a1', v)).toBe('/sessions/s1')
+  expect(verdictDestination('/approvals/a1', { ...v, from: '/approvals/a1?x=1' })).toBe('/')
+  // A review with the same id is a different screen.
+  expect(verdictDestination('/reviews/a1', v)).toBeNull()
+  expect(verdictDestination('/approvals/a10', v)).toBeNull()
+
+  const nav = fakeNav('/approvals/a1')
+  const decision = delayedDecision(nav, v)
+  nav.go('/work')
+  decision.publish()
+  expect(await decision.done).toBeNull()
+  expect(nav.path).toBe('/work')
+})
+
+test('a screen is its own path under its prefix and whatever hangs off it', () => {
+  expect(screenPath('/approvals', 'a1')).toBe('/approvals/a1')
+  expect(onScreen('/approvals/a1/raw', '/approvals', 'a1')).toBe(true)
+  expect(onScreen('/approvals/a10', '/approvals', 'a1')).toBe(false)
+  expect(onScreen('/reviews/a1', '/approvals', 'a1')).toBe(false)
 })

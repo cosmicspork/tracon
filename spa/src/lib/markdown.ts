@@ -4,7 +4,7 @@ import { marked, type Tokens } from 'marked'
 
 marked.setOptions({ gfm: true, breaks: false })
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (c) => ({
     '&': '&amp;',
     '<': '&lt;',
@@ -14,7 +14,7 @@ function escapeHtml(value: string): string {
   })[c] as string)
 }
 
-function safeUrl(value: string, image = false): string | null {
+export function safeUrl(value: string, image = false): string | null {
   const href = value.trim()
   // Browsers ignore ASCII whitespace/control characters around schemes. Use a
   // compact copy for the decision while retaining the original safe URL.
