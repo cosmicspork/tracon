@@ -326,7 +326,10 @@ registries that entry's `egress` names and nothing else.
 
 Before its first prompt every session is handed one orientation, assembled by the
 node and mounted read-only. Nothing about it is a file in the worktree, and nothing
-in it can be edited from inside the session.
+in it can be edited from inside the session. A session started on a work item or a
+review is then sent a one-line kickoff as that first prompt (plan this item into its
+plan document, carry it out following its plan, or review this change), so starting
+work is one action; a plain session waits for the prompt you give it.
 
 It has two parts, and the split is the point. The **system orientation** is
 tracon's own account of the installation: this node and its harness, the work item

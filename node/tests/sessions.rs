@@ -2658,6 +2658,138 @@ async fn orientation_setup(
     }
 }
 
+/// The first prompt of a session, once it reaches the harness.
+async fn first_prompt(store: &Store, session_id: &str) -> String {
+    for _ in 0..300 {
+        if let Some(e) = store
+            .events_after(session_id, 0, 500)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == "user_prompt")
+        {
+            return e.payload["text"].as_str().unwrap().to_string();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let s = store.get_session(session_id).unwrap().unwrap();
+    let kinds: Vec<String> = store
+        .events_after(session_id, 0, 500)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    panic!(
+        "no first prompt; state={} end={:?} error={:?} events={kinds:?}",
+        s.state, s.end_reason, s.last_error
+    )
+}
+
+/// Starting work on an item is one action: a plan session is sent its item as
+/// the first prompt and starts on it, rather than sitting silent until the
+/// operator types. The kickoff is the node's, so it never lands in the
+/// operator's composer as a draft.
+#[tokio::test]
+async fn a_plan_session_starts_on_its_item_without_a_nudge() {
+    // Held for the test: dropping the fake's sender reads as the harness exiting.
+    let Orientation {
+        store,
+        item,
+        row,
+        adapter: _adapter,
+        ..
+    } = orientation("kickoff-plan").await;
+    let text = first_prompt(&store, &row.id).await;
+    assert!(
+        text.starts_with("Plan work item **Add the ledger**"),
+        "{text}"
+    );
+    let slug = tracon::corpus::work::plan_slug(&item.id);
+    assert!(
+        text.contains(&format!("`{slug}`")),
+        "the plan document is named: {text}"
+    );
+    assert!(text.contains("`doc_write`"), "{text}");
+    assert!(store.get_session(&row.id).unwrap().unwrap().draft.is_none());
+    tracon::session::materialize::remove(&row.id);
+}
+
+/// An execute session's kickoff names the plan document it follows.
+#[tokio::test]
+async fn an_execute_session_starts_on_its_plan_without_a_nudge() {
+    let Orientation {
+        repo,
+        store,
+        manager,
+        adapter,
+        row: planning,
+        ..
+    } = orientation("kickoff-execute").await;
+    let bus = Bus::new();
+    let item = tracon::corpus::work::create(
+        &store,
+        &bus,
+        "n1",
+        tracon::corpus::work::NewWork {
+            channel: "personal".into(),
+            project_id: None,
+            title: "Ship the ledger".into(),
+            body: String::new(),
+            deps: vec![],
+            priority: 0,
+            discovered_from: None,
+            discovered_by_session: None,
+        },
+    )
+    .unwrap();
+    let slug = tracon::corpus::work::plan_slug(&item.id);
+    tracon::corpus::write(
+        &store,
+        &bus,
+        "n1",
+        "personal",
+        "document",
+        tracon_sync::ChangeOp::Upsert,
+        &slug,
+        json!({"channel": "personal", "slug": slug, "kind": "plan",
+               "title": "Plan", "body": "Add the table, then the view.",
+               "pinned": false, "hash": "p", "created_ms": now_ms(), "updated_ms": now_ms()}),
+    )
+    .unwrap();
+    tracon::corpus::work::set_plan(&store, &bus, "n1", &item.id, &slug).unwrap();
+    let row = manager
+        .create_with(
+            tracon::session::NewSession {
+                channel: "personal".into(),
+                repo_path: repo.to_string_lossy().into_owned(),
+                branch: None,
+                work_item_id: Some(item.id.clone()),
+                model: "m/a".into(),
+                budget_tokens: Some(1000),
+                initial_prompt: None,
+                node_id: None,
+                phase: tracon::session::Phase::Execute,
+                review_id: None,
+                base_sha: None,
+                workspace_id: None,
+                parent_session: None,
+                continued_from: None,
+                harness: None,
+            },
+            adapter.clone(),
+        )
+        .await
+        .unwrap();
+    let text = first_prompt(&store, &row.id).await;
+    assert!(
+        text.starts_with("Carry out work item **Ship the ledger**"),
+        "{text}"
+    );
+    assert!(text.contains(&format!("document `{slug}`")), "{text}");
+    assert!(text.contains("`submit_review`"), "{text}");
+    tracon::session::materialize::remove(&planning.id);
+    tracon::session::materialize::remove(&row.id);
+}
+
 /// A session is told where it is before its first prompt: the orientation
 /// is assembled on the node, recorded as an event, and handed to the harness
 /// as a system-prompt file rather than anything in the worktree.
