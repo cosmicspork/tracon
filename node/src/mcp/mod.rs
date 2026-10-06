@@ -625,7 +625,7 @@ impl Tools {
                 action: crate::authority::PUBLISH,
                 target: &canonical,
                 channel: &ctx.channel,
-                session_id: ctx.row(),
+                session_id: Some(ctx.row()),
                 revision: Some(&review.head_sha),
                 operation_id: Some(&operation_id),
                 evidence: &evidence,
@@ -839,7 +839,7 @@ impl Tools {
                 let row = ApprovalRow {
                     id: uuid::Uuid::now_v7().to_string(),
                     channel: ctx.channel.clone(),
-                    session_id: ctx.row().to_string(),
+                    session_id: Some(ctx.row().to_string()),
                     node_id: ctx.node_id.clone(),
                     lane: ctx.lane().map(str::to_string),
                     tool: name.to_string(),
@@ -913,19 +913,22 @@ impl Tools {
         }
         let original: Value =
             serde_json::from_str(&approval.arguments).map_err(|e| e.to_string())?;
+        let Some(session_id) = approval.session_id.clone() else {
+            return Err("this approval names no session to run as".into());
+        };
         let external = access
             .store
-            .get_session(&approval.session_id)
+            .get_session(&session_id)
             .ok()
             .flatten()
             .is_some_and(|s| s.harness_id == crate::session::external::HARNESS_ID);
         let caller = if external {
             Caller::External {
                 lane: approval.lane.clone(),
-                attachment: approval.session_id.clone(),
+                attachment: session_id,
             }
         } else {
-            Caller::Session(approval.session_id.clone())
+            Caller::Session(session_id)
         };
         let ctx = CallContext {
             caller,
@@ -1163,7 +1166,7 @@ impl Tools {
                 action,
                 target: &target,
                 channel: &ctx.channel,
-                session_id: ctx.row(),
+                session_id: Some(ctx.row()),
                 revision: revision.as_deref(),
                 operation_id: Some(operation_id),
                 evidence: &evidence,

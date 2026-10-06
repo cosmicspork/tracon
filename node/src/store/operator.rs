@@ -6,7 +6,7 @@ use super::{now_ms, Result, Store};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorQuestionRow {
     pub id: String,
-    pub session_id: String,
+    pub session_id: Option<String>,
     pub channel: String,
     pub node_id: String,
     pub request_key: Option<String>,
@@ -39,7 +39,7 @@ impl OperatorQuestionRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueDraftRow {
     pub id: String,
-    pub session_id: String,
+    pub session_id: Option<String>,
     pub channel: String,
     pub title: String,
     pub body: String,
@@ -97,8 +97,9 @@ impl Store {
             params![row.id,row.session_id,row.channel,row.node_id,row.request_key,row.prompt,row.choices_json,row.created_ms],
         )?;
         let stored = tx.query_row(
-            "SELECT * FROM operator_question WHERE session_id=?1 AND request_key=?2",
-            params![row.session_id, row.request_key],
+            "SELECT * FROM operator_question
+             WHERE session_id IS ?1 AND channel=?2 AND request_key=?3",
+            params![row.session_id, row.channel, row.request_key],
             OperatorQuestionRow::from_row,
         )?;
         tx.commit()?;
@@ -137,7 +138,10 @@ impl Store {
     ) -> Result<Option<OperatorQuestionRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT q.* FROM operator_question q JOIN session s ON s.id=q.session_id WHERE q.channel=?1 AND q.request_key=?2 AND s.harness_id='external' ORDER BY q.created_ms DESC LIMIT 1",
+            "SELECT q.* FROM operator_question q LEFT JOIN session s ON s.id=q.session_id
+             WHERE q.channel=?1 AND q.request_key=?2
+               AND (q.session_id IS NULL OR s.harness_id='external')
+             ORDER BY q.created_ms DESC LIMIT 1",
             params![channel, request_key],
             OperatorQuestionRow::from_row,
         )
@@ -168,18 +172,28 @@ impl Store {
         &self,
         id: &str,
         answer_json: &str,
-    ) -> Result<Option<(String, i64)>> {
+    ) -> Result<Option<(Option<String>, i64)>> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        let row = tx.query_row(
-            "SELECT q.session_id, q.created_ms FROM operator_question q
-             JOIN session s ON s.id=q.session_id
+        let row = tx
+            .query_row(
+                "SELECT q.session_id, q.created_ms, q.channel, q.node_id FROM operator_question q
+             LEFT JOIN session s ON s.id=q.session_id
              WHERE q.id=?1 AND q.state='unanswered'
-               AND (s.harness_id='external' OR s.state NOT IN ('closed', 'killed_budget', 'failed'))",
-            [id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
-        ).optional()?;
-        let Some((session_id, created_ms)) = row else {
+               AND (q.session_id IS NULL OR s.harness_id='external'
+                    OR s.state NOT IN ('closed', 'killed_budget', 'failed'))",
+                [id],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((session_id, created_ms, channel, node_id)) = row else {
             return Ok(None);
         };
         let now = now_ms();
@@ -187,11 +201,21 @@ impl Store {
             "UPDATE operator_question SET state='answered', answer_json=?2, answered_ms=?3 WHERE id=?1",
             params![id, answer_json, now],
         )?;
-        tx.execute(
-            "INSERT INTO event (session_id, work_item_id, kind, ref_id, payload, at_ms, mono_ms, node_id)
-             VALUES (?1, (SELECT work_item_id FROM session WHERE id=?1), 'operator_question_answered', ?2, ?3, ?4, 0, (SELECT node_id FROM session WHERE id=?1))",
-            params![session_id, id, serde_json::json!({"question_id": id, "waiting_ms": (now - created_ms).max(0)}).to_string(), now],
-        )?;
+        let payload =
+            serde_json::json!({"question_id": id, "waiting_ms": (now - created_ms).max(0)})
+                .to_string();
+        match &session_id {
+            Some(session_id) => tx.execute(
+                "INSERT INTO event (session_id, work_item_id, kind, ref_id, payload, at_ms, mono_ms, node_id)
+                 VALUES (?1, (SELECT work_item_id FROM session WHERE id=?1), 'operator_question_answered', ?2, ?3, ?4, 0, (SELECT node_id FROM session WHERE id=?1))",
+                params![session_id, id, payload, now],
+            )?,
+            None => tx.execute(
+                "INSERT INTO external_event (channel, node_id, lane, kind, ref_id, payload, at_ms)
+                 VALUES (?1, ?2, NULL, 'operator_question_answered', ?3, ?4, ?5)",
+                params![channel, node_id, id, payload, now],
+            )?,
+        };
         tx.commit()?;
         Ok(Some((session_id, created_ms)))
     }

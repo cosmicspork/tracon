@@ -347,16 +347,34 @@ impl Notifier {
             // The channel lives on the session, and a peer's session is
             // mirrored here. Until it lands there is nothing to route by, so
             // leave the id unseen and let the next frame carry it.
-            let Ok(Some(session)) = self.store.get_session(&p.session_id) else {
-                present.remove(&p.id);
-                continue;
+            // A session-less caller's approval carries its channel itself.
+            let (channel, title, path) = match p.session_id.as_deref() {
+                Some(session_id) => {
+                    let Ok(Some(session)) = self.store.get_session(session_id) else {
+                        present.remove(&p.id);
+                        continue;
+                    };
+                    (
+                        session.channel,
+                        format!("Approval — {}", session.branch),
+                        format!("/sessions/{session_id}"),
+                    )
+                }
+                None => {
+                    let Some(channel) = p.intent.channel.clone() else {
+                        present.remove(&p.id);
+                        continue;
+                    };
+                    let title = format!("Approval — external on {channel}");
+                    (channel, title, "/".to_string())
+                }
             };
-            if self.gate.pushes(&session.channel) {
+            if self.gate.pushes(&channel) {
                 self.pending.push(Notification {
                     kind: Kind::Permission,
-                    title: format!("Approval — {}", session.branch),
+                    title,
                     body: p.title.clone(),
-                    path: format!("/sessions/{}", p.session_id),
+                    path,
                     tag: format!("tracon-perm-{}", p.id),
                 });
             }

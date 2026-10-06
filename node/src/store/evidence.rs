@@ -22,7 +22,7 @@ pub struct CandidateRow {
     pub head_sha: String,
     pub tree_sha: Option<String>,
     pub channel: String,
-    pub owner_session_id: String,
+    pub owner_session_id: Option<String>,
     pub source_kind: String,
     pub captured_ms: i64,
     /// How the source was captured. It may state that old provenance was not
@@ -62,7 +62,7 @@ pub struct CandidateFile {
 pub struct CheckRunRow {
     pub id: String,
     pub candidate_id: Option<String>,
-    pub session_id: String,
+    pub session_id: Option<String>,
     /// The exact operator-configured command this run executed — the same
     /// string the definition hash, and so the reuse key, is built from. Null
     /// only for a row written before it was recorded on its own.
@@ -302,7 +302,7 @@ pub struct CandidateSummary {
     pub id: String,
     pub head_sha: String,
     pub channel: String,
-    pub owner_session_id: String,
+    pub owner_session_id: Option<String>,
     /// The node that answered this browse page. Filled at the HTTP boundary,
     /// never inferred from a candidate id shared across independent nodes.
     pub owner_node_id: Option<String>,
@@ -898,16 +898,17 @@ impl Store {
             "INSERT INTO review (id, session_id, node_id, channel, kind, title, body, edited_title,
                 edited_body, provider, target, diff, files, head_sha, base_ref, added, removed,
                 state, verdict_reason, publish_result, claimed_ms, created_ms, created_mono_ms,
-                resolved_mono_ms, updated_ms, checks_json, review_session_id, ai_verdict_json, revision_patch)
+                resolved_mono_ms, updated_ms, checks_json, review_session_id, ai_verdict_json, revision_patch,
+                lane)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,
-                ?22,?23,?24,?25,?26,?27,?28,?29)",
+                ?22,?23,?24,?25,?26,?27,?28,?29,?30)",
             params![
                 review.id, review.session_id, review.node_id, review.channel, review.kind,
                 review.title, review.body, review.edited_title, review.edited_body, review.provider,
                 review.target, review.diff, review.files, review.head_sha, review.base_ref, review.added,
                 review.removed, review.state, review.verdict_reason, review.publish_result, review.claimed_ms,
                 review.created_ms, review.created_mono_ms, review.resolved_mono_ms, review.updated_ms,
-                review.checks_json, review.review_session_id, review.ai_verdict_json, review.revision_patch,
+                review.checks_json, review.review_session_id, review.ai_verdict_json, review.revision_patch, review.lane,
             ],
         )?;
         Self::write_review_revision(&tx, revision)?;

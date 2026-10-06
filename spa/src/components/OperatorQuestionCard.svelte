@@ -26,7 +26,7 @@
 </script>
 
 <article class="card">
-  <div class="label">Operator question <a href="/sessions/{question.session_id}">session</a></div>
+  <div class="label">Operator question{#if question.session_id} <a href="/sessions/{question.session_id}">session</a>{/if}</div>
   <p>{question.prompt}</p>
   {#if choices.length}
     <div class="choices">{#each choices as choice}<button onclick={() => submit(choice)} disabled={busy}>{choice}</button>{/each}</div>

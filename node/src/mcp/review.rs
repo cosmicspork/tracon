@@ -391,7 +391,7 @@ async fn submit(
         head_sha: capture.head_sha.clone(),
         tree_sha: Some(snapshot.tree_sha.clone()),
         channel: ctx.channel.clone(),
-        owner_session_id: ctx.row().to_string(),
+        owner_session_id: Some(ctx.row().to_string()),
         source_kind: "git".into(),
         captured_ms: now_ms(),
         capture_json: json!({
@@ -518,7 +518,7 @@ async fn submit(
     let id = uuid::Uuid::now_v7().to_string();
     let row = ReviewRow {
         id: id.clone(),
-        session_id: ctx.row().to_string(),
+        session_id: Some(ctx.row().to_string()),
         node_id: session.node_id.clone(),
         channel: ctx.channel.clone(),
         kind: if provider == "gitlab" {
@@ -550,6 +550,7 @@ async fn submit(
         review_session_id: None,
         ai_verdict_json: None,
         revision_patch: None,
+        lane: ctx.lane().map(str::to_string),
     };
     let revision = ReviewRevisionRow {
         id: uuid::Uuid::now_v7().to_string(),
@@ -762,7 +763,7 @@ async fn submit_report(
     let now = now_ms();
     let report = ReviewRow {
         id: id.clone(),
-        session_id: ctx.row().to_string(),
+        session_id: Some(ctx.row().to_string()),
         node_id: ctx.node_id.clone(),
         channel: ctx.channel.clone(),
         kind: crate::store::reports::KIND.into(),
@@ -790,6 +791,7 @@ async fn submit_report(
         review_session_id: None,
         ai_verdict_json: None,
         revision_patch: None,
+        lane: ctx.lane().map(str::to_string),
     };
     store
         .insert_review(&report)
@@ -805,7 +807,7 @@ async fn submit_report(
 /// call attaches a new one, so a review a harness the operator runs submitted
 /// belongs to the channel's attachments rather than to one of them.
 fn owns(store: &Store, ctx: &CallContext, r: &ReviewRow) -> bool {
-    if r.session_id == ctx.row() {
+    if r.session_id.as_deref() == Some(ctx.row()) {
         return true;
     }
     let external = |id: &str| {
@@ -815,7 +817,7 @@ fn owns(store: &Store, ctx: &CallContext, r: &ReviewRow) -> bool {
             .flatten()
             .is_some_and(|s| s.harness_id == crate::session::external::HARNESS_ID)
     };
-    r.channel == ctx.channel && ctx.is_external() && external(&r.session_id)
+    r.channel == ctx.channel && ctx.is_external() && r.session_id.as_deref().is_none_or(external)
 }
 
 /// The session that asked for these checks, as the authority on whether they
@@ -924,15 +926,17 @@ async fn run_checks(
         ));
     }
     if report.all_required_passed {
-        manager.record_event(
-            &candidate.owner_session_id,
-            ek::CANDIDATE_VERIFIED,
-            json!({
-                "candidate_id": candidate.id,
-                "head_sha": candidate.head_sha,
-                "reused": report.reused,
-            }),
-        );
+        if let Some(owner) = candidate.owner_session_id.as_deref() {
+            manager.record_event(
+                owner,
+                ek::CANDIDATE_VERIFIED,
+                json!({
+                    "candidate_id": candidate.id,
+                    "head_sha": candidate.head_sha,
+                    "reused": report.reused,
+                }),
+            );
+        }
     }
     // A check the image has no tool for establishes nothing about the
     // candidate. It is reported as the environment's failing, with the image

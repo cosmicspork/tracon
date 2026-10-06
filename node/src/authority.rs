@@ -343,14 +343,14 @@ pub async fn publish_review(
             ));
         }
     }
-    if let Ok(Some(session)) = ctx.store.get_session(&review.session_id) {
+    let submitter = review
+        .session_id
+        .as_deref()
+        .and_then(|id| ctx.store.get_session(id).ok().flatten());
+    if let Some(session) = &submitter {
         if session.node_id == ctx.node_id
             && session.harness_id != crate::session::external::HARNESS_ID
-            && ctx
-                .manager
-                .snapshot_workspace(&review.session_id)
-                .await
-                .is_err()
+            && ctx.manager.snapshot_workspace(&session.id).await.is_err()
         {
             return Err(PublishError::Conflict(
                 "the runtime workspace could not be safely snapshotted".into(),
@@ -361,10 +361,11 @@ pub async fn publish_review(
         .ok()
         .and_then(|target| target.worktree)
         .or_else(|| {
-            ctx.store
-                .get_session(&review.session_id)
-                .ok()
-                .flatten()
+            // Read again: taking the snapshot above records the worktree.
+            review
+                .session_id
+                .as_deref()
+                .and_then(|id| ctx.store.get_session(id).ok().flatten())
                 .and_then(|session| session.worktree_path)
         })
         .ok_or_else(|| PublishError::Conflict("the worktree is gone".into()))?;
@@ -529,23 +530,27 @@ pub async fn publish_review(
                 ));
             }
             ctx.manager.publish_queue().await;
-            if let Some(item) = ctx
-                .store
-                .get_session(&review.session_id)
-                .map_err(|e| PublishError::External(e.to_string()))?
-                .and_then(|session| session.work_item_id)
+            let submitter = match review.session_id.as_deref() {
+                Some(id) => ctx
+                    .store
+                    .get_session(id)
+                    .map_err(|e| PublishError::External(e.to_string()))?,
+                None => None,
+            };
+            if let Some((session_id, item)) =
+                submitter.and_then(|s| s.work_item_id.map(|item| (s.id, item)))
             {
                 if crate::corpus::work::close(
                     ctx.store,
                     ctx.manager.bus(),
                     ctx.node_id,
                     &item,
-                    Some(&review.session_id),
+                    Some(&session_id),
                 )
                 .is_ok()
                 {
                     ctx.manager
-                        .item_closed(&review.session_id, &format!("published: {published}"))
+                        .item_closed(&session_id, &format!("published: {published}"))
                         .await;
                 }
             }

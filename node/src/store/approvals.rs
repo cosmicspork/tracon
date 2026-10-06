@@ -30,7 +30,7 @@ pub const CARD_OPTIONS: &str = r#"[{"option_id":"allow_once","name":"Allow once"
 pub struct ApprovalRow {
     pub id: String,
     pub channel: String,
-    pub session_id: String,
+    pub session_id: Option<String>,
     pub node_id: String,
     pub lane: Option<String>,
     pub tool: String,
@@ -290,7 +290,7 @@ mod tests {
         ApprovalRow {
             id: id.into(),
             channel: "work".into(),
-            session_id: "s1".into(),
+            session_id: Some("s1".into()),
             node_id: "n1".into(),
             lane: None,
             tool: "doc_write".into(),

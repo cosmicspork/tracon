@@ -338,7 +338,12 @@ pub fn channel_metrics(
     }
     let behind_accepted: std::collections::HashSet<&str> = accepted
         .iter()
-        .flat_map(|r| std::iter::once(r.session_id.as_str()).chain(r.review_session_id.as_deref()))
+        .flat_map(|r| {
+            r.session_id
+                .as_deref()
+                .into_iter()
+                .chain(r.review_session_id.as_deref())
+        })
         .collect();
     let accepted_tokens: i64 = usage
         .iter()
@@ -382,7 +387,10 @@ pub fn provenance(store: &Store, sha: &str) -> Result<Option<Value>, crate::stor
     let Some(review) = store.review_by_sha(sha)? else {
         return Ok(None);
     };
-    let session = store.get_session(&review.session_id)?;
+    let session = match review.session_id.as_deref() {
+        Some(id) => store.get_session(id)?,
+        None => None,
+    };
     let review_session = review
         .review_session_id
         .as_deref()
@@ -391,7 +399,10 @@ pub fn provenance(store: &Store, sha: &str) -> Result<Option<Value>, crate::stor
         .as_ref()
         .and_then(|s| s.work_item_id.as_deref())
         .and_then(|id| store.work_get(id).ok().flatten());
-    let events = store.events_after(&review.session_id, 0, 5000)?;
+    let events = match review.session_id.as_deref() {
+        Some(id) => store.events_after(id, 0, 5000)?,
+        None => Vec::new(),
+    };
     let prompts: Vec<Value> = events
         .iter()
         .filter(|e| e.kind == "user_prompt")

@@ -195,7 +195,7 @@ fn session(store: &Store, id: &str) {
 fn permission(id: &str) -> PermissionView {
     PermissionRow {
         id: id.into(),
-        session_id: "s1".into(),
+        session_id: Some("s1".into()),
         node_id: "n1".into(),
         rpc_id: 1,
         tool_call_id: None,
@@ -216,7 +216,7 @@ fn permission(id: &str) -> PermissionView {
 fn review(id: &str, state: &str) -> ReviewRow {
     ReviewRow {
         id: id.into(),
-        session_id: "s1".into(),
+        session_id: Some("s1".into()),
         node_id: "n1".into(),
         channel: "personal".into(),
         kind: "pr".into(),
@@ -244,6 +244,7 @@ fn review(id: &str, state: &str) -> ReviewRow {
         review_session_id: None,
         ai_verdict_json: None,
         revision_patch: None,
+        lane: None,
     }
 }
 

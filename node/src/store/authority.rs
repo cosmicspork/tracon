@@ -193,7 +193,7 @@ pub struct ActionBegin<'a> {
     pub action: &'a str,
     pub target: &'a str,
     pub channel: &'a str,
-    pub session_id: &'a str,
+    pub session_id: Option<&'a str>,
     pub revision: Option<&'a str>,
     pub operation_id: Option<&'a str>,
     pub evidence: &'a str,

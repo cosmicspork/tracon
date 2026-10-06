@@ -1191,7 +1191,7 @@ pub async fn prepare_workspace(
     // validates is what its required checks will run in. `id` is a session or
     // the workspace a session imported, which carries that session's id, so
     // either is traced back to the repository it came from.
-    let repo = crate::environment::origin_repo(s.store(), &id)
+    let repo = crate::environment::origin_repo(s.store(), Some(&id))
         .ok()
         .flatten();
     let environment = crate::repo_image::environment(
@@ -1423,7 +1423,7 @@ pub async fn get_session(
         .store()
         .open_permission_views()?
         .into_iter()
-        .filter(|p| p.request.session_id == id)
+        .filter(|p| p.request.session_id.as_deref() == Some(id.as_str()))
         .collect();
     let questions = s.store().session_operator_questions(&id)?;
     // Both usage sources and the verdict between them. The session row's
@@ -1963,7 +1963,10 @@ pub async fn get_review(
     } else {
         None
     };
-    let legacy_check_events = s.store().legacy_check_runs_for_session(&r.session_id)?;
+    let legacy_check_events = match r.session_id.as_deref() {
+        Some(id) => s.store().legacy_check_runs_for_session(id)?,
+        None => Vec::new(),
+    };
     // What publication has already done outside this node. An interrupted
     // attempt is visible here — including the `uncertain` one an operator has
     // to verify on the forge — rather than only in the log.
@@ -2013,10 +2016,9 @@ fn worktree_of(s: &AppState, r: &crate::store::ReviewRow) -> Option<String> {
         .ok()
         .and_then(|t| t.worktree)
         .or_else(|| {
-            s.store()
-                .get_session(&r.session_id)
-                .ok()
-                .flatten()
+            r.session_id
+                .as_deref()
+                .and_then(|id| s.store().get_session(id).ok().flatten())
                 .and_then(|session| session.worktree_path)
         })
 }
@@ -2024,10 +2026,14 @@ fn worktree_of(s: &AppState, r: &crate::store::ReviewRow) -> Option<String> {
 /// What changed in the worktree since submit. An empty list means the diff
 /// still describes the branch.
 async fn staleness_of(s: &AppState, r: &crate::store::ReviewRow) -> Vec<String> {
-    if let Ok(Some(session)) = s.store().get_session(&r.session_id) {
+    let submitter = r
+        .session_id
+        .as_deref()
+        .and_then(|id| s.store().get_session(id).ok().flatten());
+    if let Some(session) = submitter {
         if session.node_id == s.node_id
             && session.harness_id != crate::session::external::HARNESS_ID
-            && s.manager.snapshot_workspace(&r.session_id).await.is_err()
+            && s.manager.snapshot_workspace(&session.id).await.is_err()
         {
             return vec!["the runtime workspace could not be safely snapshotted".into()];
         }
@@ -2119,12 +2125,12 @@ fn record_evidence_decision(
 
 fn record_operator_decision_event(
     s: &AppState,
-    session_id: &str,
+    session_id: Option<&str>,
     review_id: &str,
     decision: &str,
     waiting_ms: Option<i64>,
 ) {
-    if let Some(waiting_ms) = waiting_ms {
+    if let (Some(session_id), Some(waiting_ms)) = (session_id, waiting_ms) {
         s.manager.record_event(
             session_id,
             crate::session::state::event_kind::REVIEW_DECISION,
@@ -2373,7 +2379,7 @@ pub(crate) async fn decide_local(
                 patch,
                 None,
             )?;
-            record_operator_decision_event(&s, &r.session_id, &id, "revise", waiting_ms);
+            record_operator_decision_event(&s, r.session_id.as_deref(), &id, "revise", waiting_ms);
             s.manager.publish_queue().await;
             Ok(json!({ "state": "revising" }))
         }
@@ -2415,7 +2421,13 @@ pub(crate) async fn decide_local(
                 None,
                 None,
             )?;
-            record_operator_decision_event(&s, &r.session_id, &id, "rejected", waiting_ms);
+            record_operator_decision_event(
+                &s,
+                r.session_id.as_deref(),
+                &id,
+                "rejected",
+                waiting_ms,
+            );
             s.manager.publish_queue().await;
             Ok(json!({ "state": "rejected" }))
         }
@@ -2460,7 +2472,13 @@ pub(crate) async fn decide_local(
                         None,
                         Some(&outputs),
                     )?;
-                    record_operator_decision_event(&s, &r.session_id, &id, "approved", waiting_ms);
+                    record_operator_decision_event(
+                        &s,
+                        r.session_id.as_deref(),
+                        &id,
+                        "approved",
+                        waiting_ms,
+                    );
                     Ok(json!({ "state": "approved", "published": published }))
                 }
                 Err(crate::authority::PublishError::Conflict(message)) => {
@@ -2693,20 +2711,21 @@ pub async fn answer_operator_question(
         StatusCode::NOT_FOUND,
         "no such operator question".into(),
     ))?;
-    let origin = s
-        .store()
-        .get_session(&question.session_id)?
-        .ok_or(ApiError(
+    // A session-less caller asked on its channel, which has no end.
+    if let Some(session_id) = question.session_id.as_deref() {
+        let origin = s.store().get_session(session_id)?.ok_or(ApiError(
             StatusCode::CONFLICT,
             "question origin session is unavailable".into(),
         ))?;
-    if origin.harness_id != crate::session::external::HARNESS_ID
-        && matches!(origin.state.as_str(), "closed" | "killed_budget" | "failed")
-    {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "this question's session ended; it remains inspectable but cannot be answered".into(),
-        ));
+        if origin.harness_id != crate::session::external::HARNESS_ID
+            && matches!(origin.state.as_str(), "closed" | "killed_budget" | "failed")
+        {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "this question's session ended; it remains inspectable but cannot be answered"
+                    .into(),
+            ));
+        }
     }
     let answer = b.answer.trim();
     if answer.is_empty() || answer.len() > 8 * 1024 {

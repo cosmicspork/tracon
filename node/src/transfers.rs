@@ -670,7 +670,7 @@ mod tests {
                 head_sha: HEAD_SHA.into(),
                 tree_sha: Some(TREE_SHA.into()),
                 channel: "personal".into(),
-                owner_session_id: "s1".into(),
+                owner_session_id: Some("s1".into()),
                 source_kind: "git".into(),
                 captured_ms: 1,
                 capture_json: r#"{"materialized":true}"#.into(),

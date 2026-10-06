@@ -267,7 +267,7 @@ async fn queue_frames_expire_answered_requests_and_snapshots_close_lost_sessions
     a.client.on_frame(&Frame::Session(Box::new(row.clone())));
     let perm = tracon::store::PermissionRow {
         id: "p1".into(),
-        session_id: "s1".into(),
+        session_id: Some("s1".into()),
         node_id: a.id.node_id(),
         rpc_id: 1,
         tool_call_id: None,

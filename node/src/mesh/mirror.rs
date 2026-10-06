@@ -244,6 +244,9 @@ impl Mirror {
         let mut keep = Vec::new();
         for v in rows {
             match serde_json::from_value::<PermissionRow>(v.clone()) {
+                // A session-less caller's approval is answered on the node
+                // that holds it; there is no mirrored session to hang it on.
+                Ok(p) if p.node_id == sender && p.session_id.is_none() => {}
                 Ok(p) if p.node_id == sender => {
                     keep.push(p.id.clone());
                     let _ = self.store.upsert_permission_mirror(&p);
@@ -345,7 +348,7 @@ mod tests {
     fn acknowledged_report() -> ReviewRow {
         ReviewRow {
             id: "report".into(),
-            session_id: "report-session".into(),
+            session_id: Some("report-session".into()),
             node_id: "owner".into(),
             channel: "personal".into(),
             kind: crate::store::reports::KIND.into(),
@@ -373,6 +376,7 @@ mod tests {
             review_session_id: None,
             ai_verdict_json: None,
             revision_patch: None,
+            lane: None,
         }
     }
 

@@ -146,7 +146,7 @@ pub async fn run_required(
     // The one place a check run may build: the image for the default branch's
     // Dockerfile as it is now, so a check never runs in an image a merged
     // change has since replaced.
-    let repo = origin_repo(store, &candidate.owner_session_id)?;
+    let repo = origin_repo(store, candidate.owner_session_id.as_deref())?;
     let environment = crate::repo_image::environment(backend, cfg, store, repo.as_deref()).await;
     let commands = environment.checks.clone();
     let raw_image = environment.image.clone();
@@ -792,7 +792,7 @@ pub fn candidate_environment(
     cfg: &Config,
     candidate: &CandidateRow,
 ) -> Result<RepoEnvironment, String> {
-    let repo = origin_repo(store, &candidate.owner_session_id)?;
+    let repo = origin_repo(store, candidate.owner_session_id.as_deref())?;
     Ok(environment_for(cfg, store, repo.as_deref()))
 }
 
@@ -1087,7 +1087,7 @@ mod tests {
             .insert_session(&session_row("loop", "workspace://loop"))
             .unwrap();
         store.insert_session(&session_row("external", "")).unwrap();
-        let origin = |id: &str| origin_repo(&store, id).unwrap();
+        let origin = |id: &str| origin_repo(&store, Some(id)).unwrap();
         assert_eq!(origin("first"), Some("/src/app".into()));
         assert_eq!(origin("resumed"), Some("/src/app".into()));
         assert_eq!(origin("again"), Some("/src/app".into()));
@@ -1109,7 +1109,7 @@ mod tests {
             head_sha: "sha3".into(),
             tree_sha: Some("tree3".into()),
             channel: "ch".into(),
-            owner_session_id: "s1".into(),
+            owner_session_id: Some("s1".into()),
             source_kind: "git".into(),
             captured_ms: now_ms(),
             capture_json: "{}".into(),
@@ -1284,7 +1284,7 @@ mod tests {
             head_sha: "sha1".into(),
             tree_sha: Some("tree1".into()),
             channel: "ch".into(),
-            owner_session_id: "s1".into(),
+            owner_session_id: Some("s1".into()),
             source_kind: "git".into(),
             captured_ms: now_ms(),
             capture_json: "{}".into(),
@@ -1369,7 +1369,7 @@ mod tests {
             head_sha: "sha2".into(),
             tree_sha: Some("tree2".into()),
             channel: "ch".into(),
-            owner_session_id: "s1".into(),
+            owner_session_id: Some("s1".into()),
             source_kind: "git".into(),
             captured_ms: now_ms(),
             capture_json: "{}".into(),
@@ -1585,7 +1585,7 @@ mod tests {
             head_sha: format!("sha-{id}"),
             tree_sha: Some(format!("tree-{id}")),
             channel: "ch".into(),
-            owner_session_id: "s-app".into(),
+            owner_session_id: Some("s-app".into()),
             source_kind: "git".into(),
             captured_ms: now_ms(),
             capture_json: "{}".into(),

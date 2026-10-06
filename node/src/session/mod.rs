@@ -1575,7 +1575,7 @@ impl Manager {
         // session has the tools its checks will run with. Resolved from the
         // repository the work came from, which a resumed session's
         // `workspace://` path only leads back to.
-        let image = match crate::environment::origin_repo(&self.store, id)
+        let image = match crate::environment::origin_repo(&self.store, Some(id))
             .ok()
             .flatten()
         {
@@ -2117,10 +2117,11 @@ impl Manager {
             .store
             .get_permission(id)?
             .ok_or(SessionError::NotFound)?;
+        let session_id = perm.session_id.ok_or(SessionError::NotFound)?;
         let (ack, wait) = oneshot::channel();
         match self
             .send(
-                &perm.session_id,
+                &session_id,
                 Command::Answer {
                     permission_id: id.to_string(),
                     option_id: option_id.clone(),
@@ -2150,23 +2151,47 @@ impl Manager {
         }
     }
 
+    /// An approval's history goes to the log of whoever asked: the session,
+    /// or the channel's external log.
+    fn record_approval(
+        &self,
+        approval: &crate::store::approvals::ApprovalRow,
+        kind: &str,
+        payload: serde_json::Value,
+    ) {
+        match &approval.session_id {
+            Some(session_id) => self.record(NewEvent {
+                session_id: session_id.clone(),
+                work_item_id: None,
+                kind: kind.into(),
+                ref_id: Some(approval.id.clone()),
+                payload,
+                at_ms: now_ms(),
+                mono_ms: 0,
+            }),
+            None => self.record_external(
+                &approval.channel,
+                approval.lane.as_deref(),
+                kind,
+                Some(&approval.id),
+                payload,
+            ),
+        }
+    }
+
     /// A call was held for the operator: put it in the waiting bay and say so
     /// in the asking session's log. The session itself goes on working.
     pub async fn approval_requested(&self, approval: &crate::store::approvals::ApprovalRow) {
-        self.record(NewEvent {
-            session_id: approval.session_id.clone(),
-            work_item_id: None,
-            kind: ek::PERMISSION_REQUEST.into(),
-            ref_id: Some(approval.id.clone()),
-            payload: json!({
+        self.record_approval(
+            approval,
+            ek::PERMISSION_REQUEST,
+            json!({
                 "approval_id": approval.id, "permission_id": approval.id,
                 "title": approval.title, "kind": "tool", "tool": approval.tool,
                 "raw_input": { "tool": approval.tool, "arguments": serde_json::from_str::<serde_json::Value>(&approval.arguments).unwrap_or_default() },
                 "expires_ms": approval.expires_ms,
             }),
-            at_ms: now_ms(),
-            mono_ms: 0,
-        });
+        );
         self.publish_queue().await;
     }
 
@@ -2182,19 +2207,15 @@ impl Manager {
             a::EXPIRED => ek::PERMISSION_EXPIRED,
             _ => ek::APPROVAL_SETTLED,
         };
-        self.record(NewEvent {
-            session_id: approval.session_id.clone(),
-            work_item_id: None,
-            kind: kind.into(),
-            ref_id: Some(approval.id.clone()),
-            payload: json!({
+        self.record_approval(
+            approval,
+            kind,
+            json!({
                 "approval_id": approval.id, "permission_id": approval.id,
                 "tool": approval.tool, "state": state, "reason": approval.reason,
                 "option_id": approval.answer_option_id,
             }),
-            at_ms: now_ms(),
-            mono_ms: 0,
-        });
+        );
         self.publish_queue().await;
     }
 
@@ -2325,6 +2346,29 @@ impl Manager {
     }
 
     /// Record an event on a session from outside the supervisor.
+    /// Log what a session-less caller did on its channel.
+    pub fn record_external(
+        &self,
+        channel: &str,
+        lane: Option<&str>,
+        kind: &str,
+        ref_id: Option<&str>,
+        payload: serde_json::Value,
+    ) {
+        match self.store.append_external_event(
+            channel,
+            &self.node_id,
+            lane,
+            kind,
+            ref_id,
+            &payload,
+            now_ms(),
+        ) {
+            Ok(row) => self.bus.publish(Frame::ExternalEvent(Box::new(row))),
+            Err(err) => tracing::error!(error = %err, "failed to persist external event"),
+        }
+    }
+
     pub fn record_event(&self, session_id: &str, kind: &str, payload: serde_json::Value) {
         self.record(NewEvent {
             session_id: session_id.to_string(),
@@ -2948,7 +2992,7 @@ pub async fn reconcile_after_restart(
             continue;
         }
         for p in store.open_permissions().unwrap_or_default() {
-            if p.session_id == s.id {
+            if p.session_id.as_deref() == Some(s.id.as_str()) {
                 // Monotonic clocks do not survive a restart, so no meaningful
                 // duration exists here. Resolve at the created reading (duration
                 // 0 = not measured) rather than 0, which would go negative

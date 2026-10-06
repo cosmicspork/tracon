@@ -13,7 +13,7 @@ vendored, not depended on, so this contract moves on its own cadence.
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `CONTRACT_VERSION` | 3 | Wire version, reported at `GET /v0/info`. Additive; moving it rotates nothing. Every node and the hub move together: a frame or enrollment of another version is refused. |
+| `CONTRACT_VERSION` | 4 | Wire version, reported at `GET /v0/info`. Additive; moving it rotates nothing. Every node and the hub move together: a frame or enrollment of another version is refused. |
 | `CONTRACT_MAJOR` | 0 | Cryptographic era, embedded in every label below. Bumps only on a key-rotating break. |
 
 Labels are `tracon/v{MAJOR}/{operation}`.
@@ -123,6 +123,11 @@ revision is held to the commit alone as before, and the contract version is unmo
 row (absent on older builds); a new command op fails whole-payload deserialization on
 an older node, which drops the frame — the sender times out rather than erring, hence
 the version bump.
+Version 4 lets a review row and a queued card name no session: a harness the operator
+runs themselves calls with none. `session_id` on a `reviews` row and on a `queue` card
+may be `null`, a review row gains an optional `lane` (the caller's display label), and
+a session-less card is grouped by its `intent.channel`. A version 3 node fails to
+deserialize the null, so the two cannot share a mesh.
 
 ## Owner streams (`stream.rs`)
 
