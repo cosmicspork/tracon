@@ -118,21 +118,8 @@ pub async fn call(
     args: &Value,
     before_mutation: Option<&(dyn Fn() -> Result<(), String> + Send + Sync)>,
 ) -> Result<Value, String> {
-    let env = broker
-        .read()
-        .unwrap()
-        .env_for(CREDENTIAL, &ctx.channel, &ctx.node_id)
-        .map_err(|e| e.to_string())?;
-    let url = env
-        .get("JIRA_URL")
-        .map(|u| u.trim_end_matches('/').to_string())
-        .ok_or("credential jira has no JIRA_URL")?;
-    let email = env
-        .get("JIRA_EMAIL")
-        .ok_or("credential jira has no JIRA_EMAIL")?;
-    let token = env
-        .get("JIRA_TOKEN")
-        .ok_or("credential jira has no JIRA_TOKEN")?;
+    let (url, email, token) = credential(broker, &ctx.channel, &ctx.node_id)?;
+    let (email, token) = (&email, &token);
     match name {
         ISSUE_SEARCH => {
             let jql = args
@@ -433,6 +420,141 @@ fn fields_from(
         }
     }
     Ok(fields)
+}
+
+/// JIRA_URL without a trailing slash, JIRA_EMAIL, JIRA_TOKEN.
+fn credential(
+    broker: &SharedBroker,
+    channel: &str,
+    node_id: &str,
+) -> Result<(String, String, String), String> {
+    let env = broker
+        .read()
+        .unwrap()
+        .env_for(CREDENTIAL, channel, node_id)
+        .map_err(|e| e.to_string())?;
+    let get = |key: &str| {
+        env.get(key)
+            .cloned()
+            .ok_or_else(|| format!("credential jira has no {key}"))
+    };
+    let url = get("JIRA_URL")?.trim_end_matches('/').to_string();
+    Ok((url, get("JIRA_EMAIL")?, get("JIRA_TOKEN")?))
+}
+
+/// Why a page of search results could not be had.
+#[derive(Debug)]
+pub enum SearchError {
+    /// The channel has no usable credential, or Jira rejected the query.
+    Request(String),
+    /// Jira could not be reached, or refused for any other reason.
+    Upstream(String),
+}
+
+/// One page of a JQL search for a local client of the operator API: every
+/// matching issue's board fields, 100 at a time, behind an opaque cursor.
+pub async fn search_page(
+    broker: &SharedBroker,
+    http: &reqwest::Client,
+    channel: &str,
+    node_id: &str,
+    jql: &str,
+    cursor: Option<&str>,
+) -> Result<Value, SearchError> {
+    const FIELDS: &str = "summary,status,priority,issuetype,labels,parent";
+    let (url, email, token) = credential(broker, channel, node_id).map_err(SearchError::Request)?;
+    let site = reqwest::Url::parse(&url)
+        .map(|u| u.origin().ascii_serialization())
+        .map_err(|e| SearchError::Request(format!("credential jira has a bad JIRA_URL: {e}")))?;
+    let transport = |e: reqwest::Error| SearchError::Upstream(format!("jira: {e}"));
+
+    let mut v3 = vec![("jql", jql), ("fields", FIELDS), ("maxResults", "100")];
+    if let Some(c) = cursor {
+        v3.push(("nextPageToken", c));
+    }
+    let mut res = http
+        .get(format!("{url}/rest/api/3/search/jql"))
+        .query(&v3)
+        .basic_auth(&email, Some(&token))
+        .send()
+        .await
+        .map_err(transport)?;
+    // Data Center has only the older endpoint, which pages by offset.
+    let mut start_at = None;
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        let start: u64 = match cursor {
+            Some(c) => c
+                .parse()
+                .map_err(|_| SearchError::Request(format!("bad cursor: {c}")))?,
+            None => 0,
+        };
+        let start_str = start.to_string();
+        res = http
+            .get(format!("{url}/rest/api/2/search"))
+            .query(&[
+                ("jql", jql),
+                ("fields", FIELDS),
+                ("maxResults", "100"),
+                ("startAt", start_str.as_str()),
+            ])
+            .basic_auth(&email, Some(&token))
+            .send()
+            .await
+            .map_err(transport)?;
+        start_at = Some(start);
+    }
+    let status = res.status();
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        let message = refusal("jira refused the search", status, &v);
+        return Err(if status == reqwest::StatusCode::BAD_REQUEST {
+            SearchError::Request(message)
+        } else {
+            SearchError::Upstream(message)
+        });
+    }
+    let rows = v["issues"].as_array().cloned().unwrap_or_default();
+    let next_cursor = match start_at {
+        None if v["isLast"].as_bool() == Some(true) => None,
+        None => v["nextPageToken"].as_str().map(str::to_string),
+        Some(start) => {
+            let next = start + rows.len() as u64;
+            (!rows.is_empty() && v["total"].as_u64().is_some_and(|t| next < t))
+                .then(|| next.to_string())
+        }
+    };
+    let issues: Vec<Value> = rows
+        .iter()
+        .map(|i| {
+            let f = &i["fields"];
+            let p = &f["parent"];
+            json!({
+                "id": i["id"],
+                "key": i["key"],
+                "summary": f["summary"],
+                "status": f["status"]["name"],
+                "status_category": f["status"]["statusCategory"]["key"],
+                "priority": f["priority"]["name"],
+                "issue_type": f["issuetype"]["name"],
+                "labels": f["labels"].as_array().cloned().unwrap_or_default(),
+                "parent": if p.is_object() {
+                    json!({
+                        "key": p["key"],
+                        "summary": p["fields"]["summary"],
+                        "issue_type": p["fields"]["issuetype"]["name"],
+                    })
+                } else {
+                    Value::Null
+                },
+            })
+        })
+        .collect();
+    Ok(json!({
+        "site": site,
+        "account_email": email,
+        "issues": issues,
+        "next_cursor": next_cursor,
+    }))
 }
 
 /// What Jira said, including the per-field messages: `errorMessages` carries
