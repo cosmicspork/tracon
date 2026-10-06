@@ -64,11 +64,7 @@ fn rig() -> Rig {
     Rig {
         store,
         tools,
-        ctx: CallContext {
-            session_id: "s1".into(),
-            channel: "personal".into(),
-            node_id: "n1".into(),
-        },
+        ctx: CallContext::session("s1", "personal", "n1"),
     }
 }
 

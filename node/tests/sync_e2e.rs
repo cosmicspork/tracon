@@ -737,7 +737,7 @@ async fn a_hub_outage_preserves_local_work_and_widens_no_authority() {
                 &policy,
                 &AuthorityQuery {
                     channel: "personal",
-                    session_id: "s1",
+                    session_id: Some("s1"),
                     action: MERGE,
                     target,
                     revision: Some("abc1234"),

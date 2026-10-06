@@ -190,17 +190,15 @@ pub async fn call(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    let session = access
-        .store
-        .get_session(&ctx.session_id)
-        .map_err(|e| e.to_string())?;
+    let session = match ctx.session_id() {
+        Some(id) => access.store.get_session(id).map_err(|e| e.to_string())?,
+        None => None,
+    };
     let (project_id, item_id) = session
         .as_ref()
         .map(|s| (s.project_id.clone(), s.work_item_id.clone()))
         .unwrap_or((None, None));
-    let external = session
-        .as_ref()
-        .is_some_and(|s| s.harness_id == crate::session::external::HARNESS_ID);
+    let external = ctx.is_external();
     match name {
         WORK_READY => {
             let limit = args["limit"].as_u64().unwrap_or(10).clamp(1, 50) as usize;
@@ -245,7 +243,7 @@ pub async fn call(
                     deps,
                     priority: args["priority"].as_i64().unwrap_or(0),
                     discovered_from: item_id,
-                    discovered_by_session: Some(ctx.session_id.clone()),
+                    discovered_by_session: Some(ctx.row().to_string()),
                 },
             )
             .map_err(|e| e.to_string())?;
@@ -278,11 +276,11 @@ pub async fn call(
                 access.manager.bus(),
                 &ctx.node_id,
                 id,
-                Some(&ctx.session_id),
+                Some(ctx.row()),
             )
             .map_err(|e| e.to_string())?;
             access.manager.record_event(
-                &ctx.session_id,
+                ctx.row(),
                 crate::session::state::event_kind::WORK_CLOSED,
                 json!({ "item": item.id, "summary": args["summary"].as_str().unwrap_or("") }),
             );
@@ -297,12 +295,12 @@ pub async fn call(
                 access.manager.bus(),
                 &ctx.node_id,
                 &id,
-                Some(&ctx.session_id),
+                Some(ctx.row()),
             )
             .map_err(|e| e.to_string())?;
             access
                 .manager
-                .item_closed(&ctx.session_id, args["summary"].as_str().unwrap_or(""))
+                .item_closed(ctx.row(), args["summary"].as_str().unwrap_or(""))
                 .await;
             Ok(json!({ "id": item.id, "state": item.state }))
         }
@@ -350,7 +348,7 @@ pub async fn call(
                         links: vec![],
                     }]),
                 }],
-                &corpus::brief::Author::Session(ctx.session_id.clone()),
+                &corpus::brief::Author::Session(ctx.row().to_string()),
             )
             .map_err(|e| e.to_string())?;
             Ok(json!({ "slug": view.slug, "summary": corpus::brief::summary(&view) }))
@@ -417,7 +415,7 @@ pub async fn call(
                     refs,
                 },
                 None,
-                &corpus::brief::Author::Session(ctx.session_id.clone()),
+                &corpus::brief::Author::Session(ctx.row().to_string()),
             )
             .map_err(|e| e.to_string())?;
             let candidate = corpus::criteria::newest_candidate(&access.store, &id)

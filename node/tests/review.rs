@@ -317,11 +317,7 @@ impl Fixture {
 
     /// The same tool, asked to block: what an agent gets when it waits.
     async fn status_tool_waiting(&self, review_id: &str, wait_secs: u64) -> Value {
-        let ctx = tracon::mcp::CallContext {
-            session_id: "s1".into(),
-            channel: "work".into(),
-            node_id: "n1".into(),
-        };
+        let ctx = tracon::mcp::CallContext::session("s1", "work", "n1");
         tracon::mcp::review::call(
             &self.store,
             &self.manager,

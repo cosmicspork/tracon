@@ -80,7 +80,7 @@ pub fn policy_decision(
 /// cannot silently swap two of them.
 pub struct AuthorityQuery<'a> {
     pub channel: &'a str,
-    pub session_id: &'a str,
+    pub session_id: Option<&'a str>,
     pub action: &'a str,
     pub target: &'a str,
     pub revision: Option<&'a str>,
@@ -614,7 +614,7 @@ mod tests {
             &Policy::shipped(),
             &AuthorityQuery {
                 channel: "personal",
-                session_id: "session",
+                session_id: Some("session"),
                 action: MERGE,
                 target: "github:me/project:pr:7",
                 revision: Some("abc1234"),
@@ -637,7 +637,7 @@ mod tests {
             &Policy::default(),
             &AuthorityQuery {
                 channel: "personal",
-                session_id: "session",
+                session_id: Some("session"),
                 action: MERGE,
                 target: "github:me/project:pr:7",
                 revision: Some("abc1234"),

@@ -170,7 +170,7 @@ pub(super) fn decide(s: &AppState, session_id: &str, channel: &str, api: &Native
             &policy,
             &authority::AuthorityQuery {
                 channel,
-                session_id,
+                session_id: Some(session_id),
                 action: TERMINAL,
                 target: &target,
                 revision: None,

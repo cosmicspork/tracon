@@ -73,7 +73,7 @@ impl Store {
     pub fn authority_grants_for(
         &self,
         channel: &str,
-        session_id: &str,
+        session_id: Option<&str>,
         action: &str,
         target: &str,
         revision: Option<&str>,

@@ -57,14 +57,10 @@ async fn ask(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Valu
     let prompt = text(args, "question", true)?;
     let choices = string_array(args, "choices", 20, MAX_TEXT)?;
     let choices_json = serde_json::to_string(&choices).unwrap();
-    let external = store
-        .get_session(&ctx.session_id)
-        .map_err(|e| e.to_string())?
-        .is_some_and(|session| session.harness_id == crate::session::external::HARNESS_ID);
-    let existing = if external {
+    let existing = if ctx.is_external() {
         store.operator_question_for_channel_request(&ctx.channel, &request_key)
     } else {
-        store.operator_question_for_request(&ctx.session_id, &request_key)
+        store.operator_question_for_request(ctx.row(), &request_key)
     }
     .map_err(|e| e.to_string())?;
     let row = match existing {
@@ -81,7 +77,7 @@ async fn ask(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Valu
         None => {
             let row = OperatorQuestionRow {
                 id: uuid::Uuid::now_v7().to_string(),
-                session_id: ctx.session_id.clone(),
+                session_id: ctx.row().to_string(),
                 channel: ctx.channel.clone(),
                 node_id: ctx.node_id.clone(),
                 request_key: Some(request_key),
@@ -138,7 +134,7 @@ async fn notify_operator(
 ) -> Result<Value, String> {
     let title = text(args, "title", true)?;
     let message = text(args, "message", true)?;
-    let default_path = format!("/sessions/{}", ctx.session_id);
+    let default_path = format!("/sessions/{}", ctx.row());
     let path = match args.get("path") {
         None => default_path.as_str(),
         Some(Value::String(path)) => path.trim(),
@@ -302,7 +298,7 @@ fn report(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, 
     store
         .insert_issue_draft(&IssueDraftRow {
             id: id.clone(),
-            session_id: ctx.session_id.clone(),
+            session_id: ctx.row().to_string(),
             channel: ctx.channel.clone(),
             title,
             body,

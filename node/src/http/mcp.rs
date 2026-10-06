@@ -11,7 +11,7 @@ use axum::{
 use serde_json::{json, Value};
 
 use super::api::AppState;
-use crate::mcp::CallContext;
+use crate::mcp::{CallContext, Caller};
 
 /// `POST /mcp/{session_id}`, with `Authorization: Bearer <session token>`.
 pub async fn handle(
@@ -37,12 +37,8 @@ pub async fn handle(
         );
     };
 
-    let ctx = CallContext {
-        session_id,
-        channel,
-        node_id: s.node_id.clone(),
-    };
-    if let Err(error) = s.manager.ensure_active(&ctx.session_id) {
+    let ctx = CallContext::session(session_id, channel, s.node_id.clone());
+    if let Err(error) = s.manager.ensure_active(ctx.row()) {
         return rpc_error(StatusCode::CONFLICT, &error.to_string());
     }
     match s.tools.handle(&ctx, &msg).await {
@@ -178,7 +174,10 @@ async fn answer_external(
         );
     }
     let ctx = CallContext {
-        session_id: session_id.clone(),
+        caller: Caller::External {
+            lane: lane.map(str::to_string),
+            attachment: session_id.clone(),
+        },
         channel,
         node_id: s.node_id.clone(),
     };
