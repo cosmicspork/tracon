@@ -1115,7 +1115,7 @@
       <div class="mcp">
         {#each externalChannels as name (name)}
           <div class="ext">
-            <code>claude mcp add --transport http tracon-{name} {origin}/mcp/external/{name}</code>
+            <code>claude mcp add-json --scope user tracon-{name} '{JSON.stringify({ type: 'http', url: `${origin}/mcp/external/${name}`, headersHelper: 'tracon external lane' })}'</code>
             <div class="acts">
               {#if externalStopped.has(name)}
                 <span class="chip bad">broker access stopped</span>

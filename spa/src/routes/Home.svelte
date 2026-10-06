@@ -5,6 +5,7 @@
   // here showed two empty boxes above a wall of ended sessions — true, and no
   // use. Starting something is the first thing on the page instead.
   import Composer from '../components/Composer.svelte'
+  import ExternalAgents from '../components/ExternalAgents.svelte'
   import FirstTaskGuide from '../components/FirstTaskGuide.svelte'
   import OperatorIssueCard from '../components/OperatorIssueCard.svelte'
   import OperatorQuestionCard from '../components/OperatorQuestionCard.svelte'
@@ -206,6 +207,8 @@
     {/each}
   </div>
 {/if}
+
+<ExternalAgents />
 
 {#if landed.length}
   <div class="h4">

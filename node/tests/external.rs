@@ -987,6 +987,51 @@ async fn the_door_answers_one_post_per_message_and_opens_no_stream() {
     assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
+/// A lane whose harness process is still alive reads as running. The pid
+/// comes in its own header, or, from an older helper, on the end of the label,
+/// which is split off so the lane is the same either way.
+#[tokio::test]
+async fn a_lane_whose_process_is_alive_reads_as_running() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let pid = std::process::id().to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/mcp/external/work")
+        .header("host", "127.0.0.1:7420")
+        .header("content-type", "application/json")
+        .header("x-tracon-agent", "repo:feat/x")
+        .header("x-tracon-agent-pid", pid.as_str())
+        .body(Body::from(
+            tool_call("recall", json!({ "query": "x" })).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        h.operator.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::OK
+    );
+    mcp_labelled(
+        &h.operator,
+        "work",
+        &format!("repo:feat/y#{pid}"),
+        tool_call("recall", json!({ "query": "y" })),
+    )
+    .await;
+    mcp(
+        &h.operator,
+        "work",
+        tool_call("recall", json!({ "query": "z" })),
+    )
+    .await;
+
+    let (_, view) = call(&h.operator, "GET", "/api/external", None).await;
+    let lanes = view["lanes"].as_array().unwrap();
+    let by = |lane: Value| lanes.iter().find(|l| l["lane"] == lane).cloned().unwrap();
+    assert_eq!(by(json!("repo:feat/x"))["running"], 1, "{view}");
+    assert_eq!(by(json!("repo:feat/y"))["running"], 1, "{view}");
+    assert_eq!(by(Value::Null)["running"], Value::Null, "{view}");
+}
+
 /// Lanes begin at a tool call: connecting and listing tools leave no trace.
 #[tokio::test]
 async fn the_external_view_lists_only_lanes_that_called_a_tool() {

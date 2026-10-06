@@ -518,9 +518,24 @@ enabled = true
 ```
 
 ```sh
-tracon external show     # prints the line below, for each channel
-claude mcp add --transport http tracon-work http://127.0.0.1:7420/mcp/external/work
+tracon external show     # prints the lines below, for each channel
+claude mcp add-json --scope user tracon-work \
+  '{"type":"http","url":"http://127.0.0.1:7420/mcp/external/work","headersHelper":"tracon external lane"}'
 ```
+
+The `headersHelper` labels every call with the repository and branch the agent
+was started in (`tracon:feat/lanes`), and with the agent's process. The home's
+**Your own agents** groups calls by that label, one row per lane, with the last
+call, how many there were, what is still waiting on you, and whether the agent's
+process is still running. Each row expands into its recent calls; a lane drops
+off after a day without a call unless something of it is still open, and
+**dismiss** hides one until it calls again. The label is for display only:
+nothing is authorized or routed by it. A plain `claude mcp add --transport http
+… /mcp/external/work` works too; its calls show as one unlabelled lane.
+
+There is no session behind an external agent. Every call stands alone, so
+connecting, resuming or restarting the agent changes nothing on the node, and
+nothing times out.
 
 It gets the channel's tools: the database, the forge and the tracker, the
 node's documents and memory, the ledger, and review. `submit_review` takes the
@@ -531,8 +546,9 @@ ran them where your toolchain is), and on approval pushes that branch and opens
 the change — or updates the one named by `change` — with the brokered
 credential, exactly as for a session it started.
 `work_close` takes the item's id, and refuses one a running session holds. A
-verb the policy does not name reaches your home as a card, exactly as it would
-from inside the boundary, and the call waits for you.
+verb the policy does not name returns at once with an `approval_id` and a card
+on your home; nothing has run. Allow it and the node runs the call itself;
+`approval_status` tells the agent what became of it.
 
 For an investigation or handoff with no code to publish, use **`submit_report`**.
 It puts a narrative report in the operator queue and requests a notification,
@@ -549,8 +565,9 @@ channel's Jira credential, and never the token.
 
 What it does not get is the boundary. That harness runs as you, on your
 machine: the promise here is that it never needs the credential and that every
-call it makes is decided by policy and written to a session log, not that it
-could not have read the credential by other means. `docs/reference/external-harness-notes.md`
+call it makes is decided by policy and logged, not that it
+could not have read the credential by other means. Every call is written to the
+channel's external log under its lane. `docs/reference/external-harness-notes.md`
 says what that changes; a node holding production credentials should leave
 `[external]` off.
 

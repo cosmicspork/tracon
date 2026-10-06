@@ -1372,3 +1372,33 @@ export interface StorageItem {
   removed?: boolean
   error?: string
 }
+
+/** A label an external harness called under on a channel, and what is known of it. */
+export interface ExternalLane {
+  channel: string
+  lane: string | null
+  last_ms: number
+  calls: number
+  /** Approvals it asked for and reviews it submitted that are still open. */
+  pending: number
+  /** Its harness processes still alive; null when none named its process. */
+  running: number | null
+}
+
+export interface ExternalView {
+  enabled: boolean
+  channels: string[]
+  lanes: ExternalLane[]
+  stopped: string[]
+}
+
+export interface ExternalEvent {
+  seq: number
+  channel: string
+  node_id: string
+  lane: string | null
+  kind: string
+  ref_id: string | null
+  payload: Record<string, unknown>
+  at_ms: number
+}

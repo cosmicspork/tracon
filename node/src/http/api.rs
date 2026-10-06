@@ -2638,9 +2638,20 @@ pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::V
             .map(|c| c.name)
             .collect()
     };
-    let lanes = s
+    let mut lanes = Vec::new();
+    for lane in s
         .store()
-        .external_lanes(crate::store::now_ms() - LANE_WINDOW_MS)?;
+        .external_lanes(crate::store::now_ms() - LANE_WINDOW_MS)?
+    {
+        let running = s
+            .manager
+            .liveness()
+            .running(&lane.channel, lane.lane.as_deref())
+            .await;
+        let mut row = json!(lane);
+        row["running"] = json!(running);
+        lanes.push(row);
+    }
     Ok(Json(json!({
         "enabled": s.cfg.external.enabled,
         "channels": channels,
