@@ -238,16 +238,21 @@ fn push_node(out: &mut String, facts: &Facts) {
     match facts.egress {
         Some([]) => out.push_str(
             "- Network: no registry or other host is reachable from this session, so a \
-             package manager answers 403. It is not reachable from a session; the operator \
-             can add it to this repository's egress. Say what you needed and why. Do not \
-             look for another way to fetch it.\n",
+             package manager answers 403. It is not reachable from a session until the \
+             operator opens it: the refusal itself asks them, and says so. Retry once they \
+             have answered; `request_egress` waits for the answer, and asks first for a host \
+             you know you need, with what it is for. The operator can open it for once, for \
+             this session, or add it to this repository's egress. Do not look for another \
+             way to fetch it.\n",
         ),
         Some(opened) => out.push_str(&format!(
             "- Network: this repository opens {} to its sessions, through the proxy already \
              in your environment, so installing from there works. Any other host answers \
-             403: it is not reachable from a session, and the operator can add it to this \
-             repository's egress. Say what you needed and why. Do not look for another way \
-             to fetch it.\n",
+             403: it is not reachable from a session until the operator opens it, and the \
+             refusal itself asks them. Retry once they have answered; `request_egress` waits \
+             for the answer, and asks first for a host you know you need, with what it is \
+             for. The operator can open it for once, for this session, or add it to this \
+             repository's egress. Do not look for another way to fetch it.\n",
             opened
                 .iter()
                 .map(|entry| format!("`{entry}`"))
@@ -790,6 +795,7 @@ mod tests {
             assert!(told.contains(said), "{told}");
             assert!(told.contains("not reachable from a session"));
             assert!(told.contains("add it to this repository's egress"));
+            assert!(told.contains("`request_egress` waits"));
         }
         assert!(i("## Pinned documents") < i("Conventional commits"));
         assert!(!text.contains("not pinned"));

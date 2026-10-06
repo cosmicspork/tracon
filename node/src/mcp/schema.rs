@@ -64,6 +64,7 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
     (work::BRIEF_NOTE, "markdown", &["text"], &[]),
     (work::CRITERIA_LINK, "markdown", &["value"], &["criterion"]),
     (review::SUBMIT_REPORT, "markdown", &["body"], &["report_id"]),
+    (super::egress::REQUEST, "markdown", &[], &["host"]),
 ];
 
 pub fn presentation(tool: &str) -> Presentation {
@@ -91,6 +92,7 @@ pub fn input_schema(tool: &str) -> Option<&'static Value> {
                 docs::definitions(),
                 memory::definitions(),
                 super::operator::definitions(),
+                super::egress::definitions(),
                 work::definitions(),
                 review::definitions(),
             ]

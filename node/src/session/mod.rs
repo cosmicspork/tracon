@@ -267,6 +267,9 @@ pub struct Manager {
     /// harness's, once startup has probed it.
     default_adapter: Arc<std::sync::OnceLock<Arc<dyn HarnessAdapter>>>,
     previews: Arc<crate::http::preview::PreviewTokens>,
+    /// The grants whose refusals this node turns into asks, and which an
+    /// operator's answer widens. The backend's own, once startup watches it.
+    egress: Arc<parking_lot::RwLock<Option<crate::gateway::proxy::Grants>>>,
 }
 
 impl Manager {
@@ -310,6 +313,7 @@ impl Manager {
             adapters: Arc::new(std::sync::Mutex::new(HashMap::new())),
             default_adapter: Arc::new(std::sync::OnceLock::new()),
             previews: Arc::new(crate::http::preview::PreviewTokens::default()),
+            egress: Arc::default(),
         }
     }
 
@@ -2165,36 +2169,73 @@ impl Manager {
         self.record_event(id, ek::LATE_REFUSED, detail);
     }
 
-    /// Record each host a session's own grant refused, once per session and
-    /// host: a package manager retries, and the operator needs to hear it
-    /// once. The proxy knows which grant asked, so the refusal lands on the
-    /// session that met it, in the words that say what to change.
+    /// Watch the backend's grants: each host a session's own grant refuses
+    /// is put to the operator, and recorded on the session once.
     pub fn record_egress_refusals(&self) {
         if let Some(grants) = self.backend.egress_grants() {
-            grants.on_refusal(self.egress_refusal_observer());
+            self.watch_egress(grants);
         }
     }
 
-    /// What `record_egress_refusals` installs.
+    /// Turn the refusals under `grants` into asks, and widen these grants
+    /// when the operator allows one.
+    pub fn watch_egress(&self, grants: &crate::gateway::proxy::Grants) {
+        *self.egress.write() = Some(grants.clone());
+        grants.on_refusal(self.egress_refusal_observer());
+    }
+
+    /// The grants an egress answer widens, once they are watched.
+    pub fn egress_grants(&self) -> Option<crate::gateway::proxy::Grants> {
+        self.egress.read().clone()
+    }
+
+    /// What `watch_egress` installs. A session's refusal raises the
+    /// operator's ask, or finds the one already waiting, and the refusal's
+    /// reason says so; the event is recorded once per session and host, as a
+    /// package manager retries and the operator needs to hear it once. A
+    /// grant that is no session's (a preparation's) is refused as it was.
     pub fn egress_refusal_observer(&self) -> crate::gateway::proxy::OnRefusal {
         let manager = self.clone();
         let seen = std::sync::Mutex::new(std::collections::HashSet::new());
         Arc::new(move |grant, host| {
-            let Some(session) = &grant.session_id else {
-                return;
+            let session = grant.session_id.as_ref()?;
+            let asked = match crate::mcp::egress::normalize_host(host) {
+                Ok(host) => crate::mcp::egress::ask(&manager, session, &host, None, false)
+                    .map_err(|error| {
+                        tracing::warn!(%session, %host, %error, "could not ask about egress");
+                    })
+                    .ok(),
+                Err(_) => None,
             };
-            {
+            let first = {
                 let mut seen = seen.lock().unwrap();
                 // Bounded: a node that runs for months forgets, and at worst
                 // says a refusal twice.
                 if seen.len() > 10_000 {
                     seen.clear();
                 }
-                if !seen.insert((session.clone(), host.to_string())) {
-                    return;
+                seen.insert((session.clone(), host.to_string()))
+            };
+            let approval_id = match &asked {
+                Some(crate::mcp::egress::Asked::Pending(row, created)) => {
+                    if *created {
+                        let manager = manager.clone();
+                        let row = row.clone();
+                        tokio::spawn(async move { manager.approval_requested(&row).await });
+                    }
+                    Some(row.id.clone())
                 }
+                Some(crate::mcp::egress::Asked::Declined(row)) => Some(row.id.clone()),
+                None => None,
+            };
+            if first {
+                manager.record_event(
+                    session,
+                    ek::EGRESS_REFUSED,
+                    json!({ "host": host, "approval_id": approval_id }),
+                );
             }
-            manager.record_event(session, ek::EGRESS_REFUSED, json!({ "host": host }));
+            asked.map(|asked| crate::mcp::egress::refusal(host, &asked))
         })
     }
 

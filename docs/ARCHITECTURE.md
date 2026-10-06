@@ -563,9 +563,13 @@ another, and a refusal is known to be that client's. Because that proxy dials fr
 node's process, a granted name that resolves to the machine itself or to its link-local
 range is refused whatever the grant says. A Claude Code session holds a grant for its
 whole life: the hosts every harness may reach, plus its repository's `egress` where the
-entry sets `session_egress`. What it is refused is recorded on the session once per host,
-with the sentence that says what would change the answer, and the orientation says the
-same before the first tool call. OpenCode keeps the gateway's static proxy: it installs
+entry sets `session_egress`. A refusal under it is an ask, not an end: the node raises
+an approval (`request_egress`, one per session and host) and answers the CONNECT with a
+reason naming it, since a connection cannot be held open while the operator decides; the
+refusal is recorded on the session once per host, and the orientation says the same
+before the first tool call. The operator's answer widens that session's live grant — for
+ten minutes, for its life, or for its life and the repository's `[[repo]]` entry — and
+runs nothing; a declined host is not asked again by a retried connection. OpenCode keeps the gateway's static proxy: it installs
 plugins on its own, and what its image baked is the rule for those. A check's evidence is keyed on source
 revision, check definition, execution image, dependency inputs, and the preparation and
 egress it was given, and is reused rather than rerun only when every one of those is

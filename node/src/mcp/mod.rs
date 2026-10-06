@@ -10,6 +10,7 @@
 pub mod approvals;
 pub mod consulta;
 pub mod docs;
+pub mod egress;
 pub mod github;
 pub mod gitlab;
 pub mod jira;
@@ -225,6 +226,9 @@ impl Tools {
             // These are intervention-only: asking, pinging, and drafting a
             // report do not touch a credential or widen a tool policy.
             out.extend(operator::definitions());
+            // Asking for a host only asks: the operator's answer is what
+            // opens anything, and it opens only this session's own grant.
+            out.extend(egress::definitions());
             out.extend(work::definitions());
             out.extend(approvals::definitions());
         }
@@ -264,6 +268,17 @@ impl Tools {
                 .ok_or("operator interventions are not available on this node")?;
             return operator::call(&access.store, &access.manager, &self.cfg, ctx, name, args)
                 .await;
+        }
+        if name == egress::REQUEST {
+            let access = self
+                .session
+                .get()
+                .ok_or("egress requests are not available on this node")?;
+            access
+                .manager
+                .caller_active(ctx)
+                .map_err(|error| error.to_string())?;
+            return egress::call(access, ctx, args).await;
         }
         if name == approvals::STATUS {
             let access = self
@@ -921,6 +936,11 @@ impl Tools {
         };
         let (reason, notes) = (said(&answer.reason), said(&answer.notes));
         let option_id = answer.option_id.as_str();
+        if approval.tool == egress::REQUEST {
+            if let Some(opened) = egress::scope_of(option_id) {
+                return self.allow_egress(&approval, option_id, opened, notes).await;
+            }
+        }
         if option_id != OPTION_ALLOW_ONCE {
             let (state, reason, note) = if option_id == OPTION_REQUEST_CHANGES {
                 let Some(notes) = notes.or(reason) else {
@@ -1006,6 +1026,81 @@ impl Tools {
             let outcome = tools.run_approved(&ctx, &name, &run_args).await;
             tools.settle_approval(&id, outcome).await;
         });
+        Ok(())
+    }
+
+    /// Allow an egress ask: open its host to the asking session's own grant,
+    /// for as long as the operator said, and record what was opened. Saving
+    /// it to the repository is checked before anything is decided, so an
+    /// entry that cannot take it leaves the card waiting with the reason.
+    async fn allow_egress(
+        &self,
+        approval: &crate::store::approvals::ApprovalRow,
+        option_id: &str,
+        opened: egress::Opened,
+        notes: Option<String>,
+    ) -> Result<(), crate::session::SessionError> {
+        use crate::session::SessionError;
+        use crate::store::approvals::{Decision, FAILED, RUNNING, SUCCEEDED};
+        let access = self
+            .session
+            .get()
+            .ok_or_else(|| SessionError::Rejected("approvals are not available".into()))?;
+        let host = egress::host_of(approval).map_err(SessionError::Rejected)?;
+        let session_id = approval
+            .session_id
+            .clone()
+            .ok_or_else(|| SessionError::Rejected("this ask names no session".into()))?;
+        let saved = if opened.scope == "repository" {
+            Some(
+                crate::environment::save_session_host(&self.cfg, &access.store, &session_id, &host)
+                    .map_err(SessionError::Rejected)?,
+            )
+        } else {
+            None
+        };
+        let decision = Decision {
+            state: RUNNING,
+            option_id,
+            note: notes.as_deref(),
+            ..Default::default()
+        };
+        if !access.store.decide_approval(&approval.id, &decision)? {
+            return Err(SessionError::Rejected(
+                "this approval is no longer waiting".into(),
+            ));
+        }
+        access.manager.approval_decided(approval, RUNNING).await;
+        let widened = access
+            .manager
+            .egress_grants()
+            .is_some_and(|grants| grants.widen_session(&session_id, &host, opened.until));
+        let (state, result, reason) = if widened {
+            let result = json!({
+                "host": host,
+                "scope": opened.scope,
+                "for_secs": opened.until.map(|_| egress::ONCE.as_secs()),
+                "repository": saved,
+            });
+            (SUCCEEDED, Some(result.to_string()), None)
+        } else {
+            (
+                FAILED,
+                None,
+                Some(match &saved {
+                    Some(repo) => format!(
+                        "the session holds no grant any more, so nothing was opened now;                          {host} was saved to {repo}'s egress for its next session"
+                    ),
+                    None => "the session holds no grant any more; nothing was opened".into(),
+                }),
+            )
+        };
+        access
+            .store
+            .finish_approval(&approval.id, state, result.as_deref(), reason.as_deref())?;
+        if let Some(settled) = access.store.get_approval(&approval.id)? {
+            access.manager.approval_decided(&settled, state).await;
+        }
         Ok(())
     }
 

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { editableFields, editedArguments } from './permission'
+import { editableFields, editedArguments, isEgress } from './permission'
 
 const card = (args: unknown, kind: string | null = 'tool') => ({
   kind,
@@ -22,4 +22,11 @@ test('only a change is sent, merged over the original arguments', () => {
   expect(editedArguments(c, {})).toBeUndefined()
   expect(editedArguments(c, { body: 'x'.repeat(50) })).toBeUndefined()
   expect(editedArguments(c, { body: 'rewritten' })).toEqual({ key: 'WRK-1', body: 'rewritten' })
+})
+
+test('an egress ask is told apart from a held call', () => {
+  const ask = { raw_input: JSON.stringify({ tool: 'request_egress', arguments: { host: 'pypi.org' }, approval_id: 'a1' }) }
+  expect(isEgress(ask)).toBe(true)
+  expect(isEgress(card({ body: 'x' }))).toBe(false)
+  expect(isEgress({ raw_input: null })).toBe(false)
 })

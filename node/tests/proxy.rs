@@ -114,6 +114,7 @@ async fn a_grant_opens_its_own_hosts_and_nobody_elses() {
         seen.lock()
             .unwrap()
             .push((grant.session_id.clone(), host.to_string()));
+        None
     }));
     let prepare = grants
         .issue(GrantSpec {

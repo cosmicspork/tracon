@@ -4,7 +4,7 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
-  import { editableFields, editedArguments, isApproval } from '../lib/permission'
+  import { editableFields, editedArguments, isApproval, isEgress } from '../lib/permission'
   import { permissionOptions, type Permission } from '../lib/types'
   import { store } from '../lib/store.svelte'
 
@@ -15,7 +15,10 @@
   let drafts = $state<Record<string, string>>({})
 
   const options = $derived(permissionOptions(permission))
-  const fields = $derived(editableFields(permission))
+  // A host a session asked to reach: its answers say how long it stays open,
+  // and there is nothing in it to edit.
+  const egress = $derived(isEgress(permission))
+  const fields = $derived(egress ? [] : editableFields(permission))
   const owner = $derived(nodeById(store.nodes, permission.node_id))
   const held = $derived(unreachableReason(store.nodes, store.mesh, permission.node_id))
   // What the session was started to do. Answering "may I run this" without it
@@ -49,7 +52,7 @@
     busy = true
     error = null
     try {
-      const edited = optionId === 'allow_once' ? editedArguments(permission, drafts) : undefined
+      const edited = optionId === 'allow_once' && !egress ? editedArguments(permission, drafts) : undefined
       await api.answer(permission.id, optionId, edited)
       await store.refetch()
     } catch (e) {
@@ -63,6 +66,7 @@
     // A harness's own "always" is never offered: it would widen the harness's
     // standing rules, which are the node's. The node's session grant is
     // offered instead, and its name says exactly how wide it is.
+    if (egress) return name
     return { allow_once: 'Allow', reject_once: 'Deny' }[kind] ?? name
   }
 </script>
@@ -80,9 +84,11 @@
         ? approval
           ? 'expired · nothing ran'
           : 'expired · denied by default'
-        : formatExpiry(permission.expires_ms, clock.now)}{approval && !lapsed
-        ? ' · nothing is waiting; allowing it runs the call'
-        : ''}{command &&
+        : formatExpiry(permission.expires_ms, clock.now)}{egress && !lapsed
+        ? ' · the session was refused and retries once you answer'
+        : approval && !lapsed
+          ? ' · nothing is waiting; allowing it runs the call'
+          : ''}{command &&
       command !== permission.title
         ? ` · ${command}`
         : ''}{error ? ` · ${error}` : ''}</small
@@ -114,8 +120,13 @@
           >{label(o.kind, o.name)}</button
         >
       {/each}
+      {#each options.filter((o) => o.kind === 'allow_repo') as o (o.option_id)}
+        <button class="lnk" disabled={busy} title="Opens it for this session and adds it to the repository's egress in node.toml, so later sessions start with it" onclick={() => answer(o.option_id)}
+          >{label(o.kind, o.name)}</button
+        >
+      {/each}
       {#each options.filter((o) => o.kind === 'allow_session') as o (o.option_id)}
-        <button class="lnk" disabled={busy} title="Recorded on the session; a signed denial still wins" onclick={() => answer(o.option_id)}
+        <button class="lnk" disabled={busy} title={egress ? 'Opens the host until this session ends' : 'Recorded on the session; a signed denial still wins'} onclick={() => answer(o.option_id)}
           >{label(o.kind, o.name)}</button
         >
       {/each}
