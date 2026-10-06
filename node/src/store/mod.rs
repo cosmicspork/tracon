@@ -3882,6 +3882,30 @@ mod migration_tests {
         assert_eq!(issue_number(""), None);
     }
 
+    /// An approval waiting when the node upgrades is still waiting after,
+    /// with nothing said back and nobody looking at it yet.
+    #[test]
+    fn an_approval_from_before_operator_notes_reads_as_unclaimed() {
+        let conn = Connection::open_in_memory().unwrap();
+        schema::migrate_to(&conn, 51).unwrap();
+        conn.execute(
+            "INSERT INTO approval (id, channel, session_id, node_id, tool, arguments, request_key,
+                title, state, created_ms, expires_ms)
+             VALUES ('a1', 'work', NULL, 'u1', 't', '{}', 'k', 't', 'pending', 0, 0)",
+            [],
+        )
+        .unwrap();
+        schema::migrate(&conn).unwrap();
+        let (note, claimed): (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT operator_note, claimed_ms FROM approval WHERE id='a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((note, claimed), (None, None));
+    }
+
     #[test]
     fn append_event_derives_node_id_from_session() {
         let store = Store::open_in_memory().unwrap();

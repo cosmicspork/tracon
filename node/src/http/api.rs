@@ -73,7 +73,8 @@ impl From<SessionError> for ApiError {
             | SessionError::WorkItemRequired
             | SessionError::NotReady(_)
             | SessionError::InSession(_)
-            | SessionError::PlanRequired(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            | SessionError::PlanRequired(_)
+            | SessionError::Unfit(_) => StatusCode::UNPROCESSABLE_ENTITY,
             SessionError::Ceiling(_) => StatusCode::TOO_MANY_REQUESTS,
             SessionError::ChannelArchived(_) => StatusCode::CONFLICT,
             SessionError::NotFound => StatusCode::NOT_FOUND,
@@ -1816,15 +1817,80 @@ pub struct AnswerBody {
     option_id: String,
     #[serde(default)]
     arguments: Option<serde_json::Value>,
+    /// Why the operator refused. Kept for the caller in place of the
+    /// generic refusal.
+    #[serde(default)]
+    reason: Option<String>,
+    /// What the operator wants changed, with `request_changes`, or a remark
+    /// with any other answer.
+    #[serde(default)]
+    notes: Option<String>,
 }
 
+/// An answer the node cannot act on as sent is a 422 that names each field,
+/// so the operator can fix their edit and answer again; nothing was decided.
 pub async fn answer_permission(
     State(s): State<AppState>,
     Path(id): Path<String>,
     Json(b): Json<AnswerBody>,
+) -> Response {
+    let answer = crate::session::OperatorAnswer {
+        option_id: b.option_id,
+        arguments: b.arguments,
+        reason: b.reason,
+        notes: b.notes,
+    };
+    match s.manager.answer(&id, answer).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(SessionError::Unfit(fields)) => {
+            let code = StatusCode::UNPROCESSABLE_ENTITY;
+            let message = SessionError::Unfit(fields.clone()).to_string();
+            let error = json!({ "code": code.as_u16(), "message": message, "fields": fields });
+            (code, Json(json!({ "error": error }))).into_response()
+        }
+        Err(e) => ApiError::from(e).into_response(),
+    }
+}
+
+/// One approval as the operator decides it: the row, the tool's input
+/// schema, how it is laid out (its prose fields, how they are written, and
+/// what may not be edited), and the lane that asked. Opening it
+/// claims it, so another tab can see it is in front of someone.
+pub async fn get_approval(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let missing = || ApiError(StatusCode::NOT_FOUND, "no such approval".into());
+    let before = s.store().get_approval(&id)?.ok_or_else(missing)?;
+    s.store().claim_approval(&id)?;
+    let a = s.store().get_approval(&id)?.ok_or_else(missing)?;
+    let shown = crate::mcp::schema::presentation(&a.tool);
+    let parse = |text: Option<&str>| {
+        text.map(|t| serde_json::from_str::<Value>(t).unwrap_or_else(|_| Value::from(t)))
+    };
+    Ok(Json(json!({
+        "approval": a,
+        "arguments": parse(Some(&a.arguments)),
+        "edited_arguments": parse(a.edited_arguments.as_deref()),
+        "result": parse(a.result.as_deref()),
+        "input_schema": crate::mcp::schema::input_schema(&a.tool),
+        "format": shown.format,
+        "prose_fields": shown.prose_fields,
+        "locked_fields": shown.locked_fields,
+        "lane": a.lane,
+        // Someone already had it open, unless that was this same client.
+        "claimed_before_ms": before.claimed_ms,
+        "options": serde_json::from_str::<Value>(crate::store::approvals::CARD_OPTIONS)
+            .unwrap_or_default(),
+    })))
+}
+
+pub async fn release_approval(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    s.manager.answer(&id, b.option_id, b.arguments).await?;
-    Ok(StatusCode::OK)
+    s.store().release_approval(&id)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize, Clone)]
@@ -5023,9 +5089,19 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 permission_id,
                 option_id,
                 arguments,
+                reason,
+                notes,
             } => self
                 .manager
-                .answer(&permission_id, option_id, arguments)
+                .answer(
+                    &permission_id,
+                    crate::session::OperatorAnswer {
+                        option_id,
+                        arguments,
+                        reason,
+                        notes,
+                    },
+                )
                 .await
                 .map(|_| json!({ "answered": true }))
                 .map_err(Into::into),

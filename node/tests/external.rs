@@ -680,21 +680,25 @@ async fn an_edited_answer_runs_the_tool_with_the_operators_words() {
 async fn an_edit_is_held_to_the_same_refusals_as_the_call() {
     state::isolate();
     let h = harness_with(enabled()).await;
+    for rule in h.tools.policy.write().rules.iter_mut() {
+        rule.matches.retain(|m| m != "retain");
+    }
     let id = ask(
         &h,
-        "doc_write",
-        json!({ "slug": "plan-y", "body": "a draft" }),
+        "retain",
+        json!({ "kind": "fact", "scope": "global", "body": "a draft" }),
     )
     .await;
-    answer(
+    let (status, _) = answer(
         &h,
         &id,
         json!({
             "option_id": "allow_once",
-            "arguments": { "slug": "plan-y/.claude/settings", "body": "a draft" }
+            "arguments": { "kind": "fact", "scope": "global", "body": "see .claude/settings" }
         }),
     )
     .await;
+    assert_eq!(status, StatusCode::OK);
     let out = settled(&h, &id).await;
     assert_eq!(out["state"], "failed", "{out}");
     assert!(
@@ -703,7 +707,6 @@ async fn an_edit_is_held_to_the_same_refusals_as_the_call() {
             .is_some_and(|r| r.contains("refused by policy")),
         "{out}"
     );
-    assert!(h.store.doc_get("work", "plan-y").unwrap().is_none());
 }
 
 #[tokio::test]
@@ -730,6 +733,290 @@ async fn a_refused_call_says_the_operator_refused_it() {
     let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
     assert_ne!(status, StatusCode::OK);
     assert!(h.store.doc_get("work", "plan-x").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_refusal_carries_the_operators_reason() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let id = ask(&h, "doc_write", json!({ "slug": "plan-x", "body": "hi" })).await;
+    let (status, _) = answer(
+        &h,
+        &id,
+        json!({ "option_id": "reject_once", "reason": "  this belongs in plan-y  " }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let out = approval(&h, &id, 0).await;
+    assert_eq!(out["state"], "rejected", "{out}");
+    assert_eq!(out["reason"], "this belongs in plan-y", "{out}");
+    assert!(
+        out["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("nothing ran")),
+        "{out}"
+    );
+}
+
+/// Asking for changes settles the call with the operator's notes; revising
+/// it and calling again is a new approval.
+#[tokio::test]
+async fn a_request_for_changes_returns_notes_and_a_revised_call_asks_anew() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let args = json!({ "slug": "plan-x", "body": "draft one" });
+    let id = ask(&h, "doc_write", args.clone()).await;
+    let (status, v) = answer(&h, &id, json!({ "option_id": "request_changes" })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert_eq!(v["error"]["fields"][0]["field"], "notes", "{v}");
+    assert_eq!(approval(&h, &id, 0).await["state"], "still_waiting");
+
+    let (status, _) = answer(
+        &h,
+        &id,
+        json!({ "option_id": "request_changes", "notes": "add a rollout section" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let out = approval(&h, &id, 0).await;
+    assert_eq!(out["state"], "changes_requested", "{out}");
+    assert_eq!(out["notes"], "add a rollout section", "{out}");
+    assert!(
+        out["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("call doc_write again")),
+        "{out}"
+    );
+    assert!(h.store.doc_get("work", "plan-x").unwrap().is_none());
+    assert!(h
+        .store
+        .open_permission_views()
+        .unwrap()
+        .iter()
+        .all(|p| p.id != id));
+
+    let again = ask(&h, "doc_write", args).await;
+    assert_ne!(again, id, "a settled approval is not asked again");
+    let revised = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-x", "body": "draft two\n\n## Rollout" }),
+    )
+    .await;
+    assert_ne!(revised, id);
+}
+
+#[tokio::test]
+async fn an_edit_that_does_not_fit_the_tool_is_refused_and_still_waits() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-x", "body": "draft" }),
+    )
+    .await;
+    let (status, v) = answer(
+        &h,
+        &id,
+        json!({ "option_id": "allow_once", "arguments": { "slug": "plan-x", "body": 5 } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    let fields = v["error"]["fields"].as_array().unwrap();
+    assert_eq!(fields.len(), 1, "{v}");
+    assert_eq!(fields[0]["field"], "body", "{v}");
+    assert_eq!(approval(&h, &id, 0).await["state"], "still_waiting");
+    assert!(h.store.doc_get("work", "plan-x").unwrap().is_none());
+
+    let (status, _) = answer(
+        &h,
+        &id,
+        json!({ "option_id": "allow_once", "arguments": { "slug": "plan-x", "body": "fixed" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(settled(&h, &id).await["state"], "succeeded");
+}
+
+#[tokio::test]
+async fn an_edit_may_not_change_what_the_call_acts_on() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let id = ask(
+        &h,
+        "issue_comment",
+        json!({ "key": "WRK-1", "body": "a comment" }),
+    )
+    .await;
+    let (status, v) = answer(
+        &h,
+        &id,
+        json!({
+            "option_id": "allow_once",
+            "arguments": { "key": "WRK-2", "body": "a comment" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert_eq!(v["error"]["fields"][0]["field"], "key", "{v}");
+    assert_eq!(approval(&h, &id, 0).await["state"], "still_waiting");
+}
+
+/// The page an approval opens on: everything the operator needs to decide
+/// it, claimed while it is open and freed when they leave.
+#[tokio::test]
+async fn opening_an_approval_claims_it_and_leaving_releases_it() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let id = ask(
+        &h,
+        "issue_create",
+        json!({ "project": "WRK", "type": "Task", "summary": "Rotate the keys", "description": "h1. Why" }),
+    )
+    .await;
+    let card = h
+        .store
+        .open_permission_views()
+        .unwrap()
+        .into_iter()
+        .find(|p| p.id == id)
+        .unwrap();
+    assert_eq!(card.title, "issue_create WRK Task: Rotate the keys");
+
+    let (status, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["approval"]["id"], id.as_str());
+    assert_eq!(v["arguments"]["summary"], "Rotate the keys");
+    assert_eq!(v["format"], "jira_wiki");
+    assert_eq!(v["prose_fields"], json!(["description"]));
+    assert_eq!(
+        v["locked_fields"],
+        json!(["key", "project", "repo", "number", "iid"])
+    );
+    assert_eq!(v["input_schema"]["required"][0], "project");
+    assert!(v["approval"]["claimed_ms"].is_i64(), "{v}");
+    assert!(v["claimed_before_ms"].is_null(), "{v}");
+    assert!(v["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|o| o["option_id"] == "request_changes"));
+    let (_, again) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
+    assert!(again["claimed_before_ms"].is_i64(), "{again}");
+
+    let (status, _) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/approvals/{id}/release"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(h
+        .store
+        .get_approval(&id)
+        .unwrap()
+        .unwrap()
+        .claimed_ms
+        .is_none());
+
+    let (status, _) = call(&h.operator, "GET", "/api/approvals/nope", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// A document write opens with its body as the prose and its slug locked: the
+/// body may be rewritten, the document it lands in may not.
+#[tokio::test]
+async fn a_document_card_locks_its_slug_and_takes_an_edited_body() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-foo", "body": "# Draft" }),
+    )
+    .await;
+    let (_, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
+    assert_eq!(v["approval"]["title"], "doc_write plan-foo");
+    assert_eq!(v["format"], "markdown");
+    assert_eq!(v["prose_fields"], json!(["body"]));
+    let locked = v["locked_fields"].as_array().unwrap();
+    assert!(
+        locked.contains(&json!("slug")) && locked.contains(&json!("if_hash")),
+        "{v}"
+    );
+
+    let (status, v) = answer(
+        &h,
+        &id,
+        json!({ "option_id": "allow_once", "arguments": { "slug": "plan-bar", "body": "# Draft" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert_eq!(v["error"]["fields"][0]["field"], "slug", "{v}");
+    let (status, _) = answer(
+        &h,
+        &id,
+        json!({ "option_id": "allow_once", "arguments": { "slug": "plan-foo", "body": "# Final" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(settled(&h, &id).await["state"], "succeeded");
+    assert_eq!(
+        h.store.doc_get("work", "plan-foo").unwrap().unwrap().body,
+        "# Final"
+    );
+    assert!(h.store.doc_get("work", "plan-bar").unwrap().is_none());
+}
+
+/// `retain` runs unattended under the shipped agreements, but a node's policy
+/// can ask for it; then its kind is locked and its body is the prose.
+#[tokio::test]
+async fn a_memory_card_locks_its_kind_and_takes_an_edited_body() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    for rule in h.tools.policy.write().rules.iter_mut() {
+        rule.matches.retain(|m| m != "retain");
+    }
+    let id = ask(
+        &h,
+        "retain",
+        json!({ "kind": "fact", "scope": "global", "body": "The importer retries twice." }),
+    )
+    .await;
+    let (_, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
+    assert_eq!(
+        v["approval"]["title"],
+        "retain fact: The importer retries twice."
+    );
+    assert_eq!(v["prose_fields"], json!(["body"]));
+    assert!(v["locked_fields"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("kind")));
+    assert_eq!(v["input_schema"]["required"], json!(["kind", "body"]));
+
+    let (status, v) = answer(
+        &h,
+        &id,
+        json!({ "option_id": "allow_once", "arguments": { "kind": "lesson", "body": "b" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert_eq!(v["error"]["fields"][0]["field"], "kind", "{v}");
+    let edit =
+        json!({ "kind": "fact", "scope": "global", "body": "The importer retries three times." });
+    let (status, _) = answer(
+        &h,
+        &id,
+        json!({ "option_id": "allow_once", "arguments": edit }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(out["edited_arguments"], edit);
 }
 
 /// A client that retries — or a reconnect that asks again — does not queue a

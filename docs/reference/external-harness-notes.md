@@ -65,7 +65,13 @@ nothing when allowed (#272). A brokered call the operator decides is now an
 `approval_id` at once, the operator's queue shows it beside permission
 requests, allowing it makes the node run the call (with any edit, held to the
 same refusals) and keep the result, and the caller reads that result with
-`approval_status`, for one id or a list. Every harness asks this way, the
+`approval_status`, for one id or a list. An edit is checked against the tool's
+`inputSchema` before anything is decided, from a registry that does not depend
+on which credentials the node holds, and may not change the arguments that
+name the target. A refusal carries the operator's reason, and "request
+changes" settles the approval as `changes_requested` with their notes rather
+than keeping it open the way a review revision does: the agent's revised call
+has new arguments, so it is a new `request_key` and a new approval anyway. Every harness asks this way, the
 boundary harness included; only a harness's own permission prompt (OpenCode
 asking to run a command) still waits, because the harness itself does.
 

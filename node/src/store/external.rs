@@ -234,6 +234,8 @@ mod tests {
                 edited_arguments: None,
                 result: None,
                 reason: None,
+                operator_note: None,
+                claimed_ms: None,
                 created_ms: 2,
                 decided_ms: None,
                 finished_ms: None,
