@@ -1175,6 +1175,33 @@ pub async fn export_workspace(
     Ok(Json(json!({ "workspace_id": id, "exported": true })))
 }
 
+#[derive(Deserialize)]
+pub struct PreparationQuery {
+    repo: String,
+}
+
+/// What preparing a checkout on this node would do, and what in it the node
+/// would not do, before a session is launched on it. Reads files; runs
+/// nothing, builds nothing.
+pub async fn preparation_preview(
+    State(s): State<AppState>,
+    Query(q): Query<PreparationQuery>,
+) -> ApiResult<Json<crate::preparation::PreparationPreview>> {
+    let repo = std::path::Path::new(q.repo.trim());
+    if !repo.is_absolute() || !repo.is_dir() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "repo must be an absolute path to a directory on this node",
+        ));
+    }
+    let environment = crate::environment::environment_for(&s.cfg, s.store(), Some(repo));
+    Ok(Json(crate::preparation::preview(
+        &s.cfg,
+        repo,
+        &environment,
+    )))
+}
+
 /// Prepare lockfile dependencies in a separate, credential-free runtime. The
 /// project can select only a pinned or explicitly approved image; it cannot
 /// supply a setup command.

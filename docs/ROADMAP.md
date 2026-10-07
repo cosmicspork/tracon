@@ -131,8 +131,6 @@ Needed for daily use, but not blocking it today.
       missing project checks or publication prerequisites before spending a session on
       that path; do not require forge credentials or a product brief for an
       investigation.
-- [ ] Preview preparation and explain incompatibility before launch, without turning
-      unsupported scripts or devcontainer features into silent host execution.
 - [ ] **Service sidecars, the browser first.** A `[[service]]` catalogue in `node.toml` —
       a digest-pinned image, its port, a readiness probe — from which a session asks for a
       service by name (`service_start`, which blocks until the probe passes or a bounded

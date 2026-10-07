@@ -25,6 +25,7 @@ pub mod models_catalogue;
 pub mod notify;
 pub mod oauth;
 pub mod policy;
+pub mod preparation;
 pub mod process;
 pub mod providers;
 pub mod repo_image;

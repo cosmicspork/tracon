@@ -1436,3 +1436,27 @@ export interface ExternalEvent {
   payload: Record<string, unknown>
   at_ms: number
 }
+
+/** Something a repository asks of preparation that the node does not do, and
+    where the same work belongs. */
+export interface PreparationIncompatibility {
+  source: string
+  item: string
+  reason: string
+  instead: string | null
+  blocking: boolean
+}
+
+/** What preparing a checkout would do, read before launch. */
+export interface PreparationPreview {
+  repo: string
+  image: string
+  image_source: string
+  devcontainer_image: string | null
+  lockfiles: string[]
+  install: string | null
+  prepare: string[]
+  egress: string[]
+  incompatible: PreparationIncompatibility[]
+  ready: boolean
+}
