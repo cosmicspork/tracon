@@ -32,6 +32,42 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.29.0](https://github.com/cosmicspork/tracon/compare/v0.28.0...v0.29.0) (2026-10-07)
+
+
+### Features
+
+* **boundary:** run the Podman gateway as its own user service, and start it when found stopped ([#377](https://github.com/cosmicspork/tracon/issues/377)) ([1d39a26](https://github.com/cosmicspork/tracon/commit/1d39a2682ef08c2d0926751213efee0bcad5c66c))
+* draft, try and propose a repository's entry from a session ([#391](https://github.com/cosmicspork/tracon/issues/391)) ([b32a9e6](https://github.com/cosmicspork/tracon/commit/b32a9e6cba51bbf853f85ad4dac8d2f9bbfb79e9))
+* follow a published request on its forge until it closes ([#393](https://github.com/cosmicspork/tracon/issues/393)) ([ab7d644](https://github.com/cosmicspork/tracon/commit/ab7d6444fccb7b27b763c46a52a40f13b9a25c56))
+* give GitHub the CI tools GitLab has ([#399](https://github.com/cosmicspork/tracon/issues/399)) ([18b207a](https://github.com/cosmicspork/tracon/commit/18b207a11ae3eaae339d71125bd1112a62ef32c6))
+* **jira:** list an issue's available transitions ([#401](https://github.com/cosmicspork/tracon/issues/401)) ([987dbee](https://github.com/cosmicspork/tracon/commit/987dbee4ace8ee3013e15e2bbc81f9309a4fff34))
+* keep a review's unsent feedback and prose on the node ([#395](https://github.com/cosmicspork/tracon/issues/395)) ([7450eab](https://github.com/cosmicspork/tracon/commit/7450eab311ff47177ffe538cda503522d8c80949))
+* keep a session's build output in a per-repository cache ([#390](https://github.com/cosmicspork/tracon/issues/390)) ([88fd338](https://github.com/cosmicspork/tracon/commit/88fd338bf887ea3ed8373ae7fd97325a1ea39adb))
+* keep the verdict bar in reach and say why an action is unavailable ([#397](https://github.com/cosmicspork/tracon/issues/397)) ([8d265f8](https://github.com/cosmicspork/tracon/commit/8d265f8e848c6f916b6ce2f1ccf1f5ef00e16a78))
+* **node:** keep the machine awake while a session works, and count only awake time against a card ([#379](https://github.com/cosmicspork/tracon/issues/379)) ([49fd41f](https://github.com/cosmicspork/tracon/commit/49fd41f7c479a5d7537de1e7b408d61da612dfd7))
+* outcome record derived from recorded state ([#386](https://github.com/cosmicspork/tracon/issues/386)) ([003ca98](https://github.com/cosmicspork/tracon/commit/003ca986e8ff236bdfcf9706934bb96c6cb386ed))
+* preview preparation and explain what a repository asks that the node will not do ([#388](https://github.com/cosmicspork/tracon/issues/388)) ([fba6477](https://github.com/cosmicspork/tracon/commit/fba647767f98f27c8c74bb0778e5a66cdc3f665c))
+* publish as the operator's forge account, not as tracon ([#382](https://github.com/cosmicspork/tracon/issues/382)) ([c9cc82f](https://github.com/cosmicspork/tracon/commit/c9cc82f4946c4a87086158efdd047d8d717593ff))
+* read a mirrored review's detail from the node that holds it ([#392](https://github.com/cosmicspork/tracon/issues/392)) ([0383ee5](https://github.com/cosmicspork/tracon/commit/0383ee527fb187804bdf6cb6d6d57d3c51736a5b))
+* **review:** show publication readiness and recover a failed publish ([#381](https://github.com/cosmicspork/tracon/issues/381)) ([f61e53b](https://github.com/cosmicspork/tracon/commit/f61e53bf2be4c56a4eb0b73c663e5180ab1e9915))
+* say what investigating, verifying and publishing would lack ([#387](https://github.com/cosmicspork/tracon/issues/387)) ([d45d666](https://github.com/cosmicspork/tracon/commit/d45d666e7ecc27532d36ca1923e7ca6c74e4ae07))
+* service sidecars, started by name from a node catalogue ([#389](https://github.com/cosmicspork/tracon/issues/389)) ([7ce2ceb](https://github.com/cosmicspork/tracon/commit/7ce2ceb52c3e0844d4c3333b6c4f8fa6497c0ea2))
+* **session:** a node restart ends a session as node_restart, and offers to continue it ([#375](https://github.com/cosmicspork/tracon/issues/375)) ([f46e8e7](https://github.com/cosmicspork/tracon/commit/f46e8e7122fd4890045ab2d74dee39ce61ed2307))
+* **session:** choose what happens when a provider is exhausted ([#384](https://github.com/cosmicspork/tracon/issues/384)) ([bb8d36d](https://github.com/cosmicspork/tracon/commit/bb8d36dfb9229186d2636e667fdfda0a77207d7b))
+* **session:** record a policy decision for every Claude Code tool call ([#383](https://github.com/cosmicspork/tracon/issues/383)) ([7fe0ea3](https://github.com/cosmicspork/tracon/commit/7fe0ea377d3c31e173592ef0f45a30376fd96557))
+* **session:** record a publication on its session, and suspend a published session that goes idle ([#380](https://github.com/cosmicspork/tracon/issues/380)) ([4481a23](https://github.com/cosmicspork/tracon/commit/4481a23e57d9ae6b013ef4b3d7c2fb080568da26))
+* **settings:** show what the node holds, kind by kind ([#402](https://github.com/cosmicspork/tracon/issues/402)) ([03a9b92](https://github.com/cosmicspork/tracon/commit/03a9b9270eb589c392bcdaf1df2b87ee85e5380d))
+* ship one commit of the reviewed tree with the approved message and branch ([#394](https://github.com/cosmicspork/tracon/issues/394)) ([7b55a4d](https://github.com/cosmicspork/tracon/commit/7b55a4d29cf344d6f1e5175bc0a4289b721ed2ad))
+* show what changed since the last verdict beside the full diff ([#396](https://github.com/cosmicspork/tracon/issues/396)) ([ad7a9c7](https://github.com/cosmicspork/tracon/commit/ad7a9c7f1bdc92f76e646f025aab02d643cb20d4))
+* **work:** a continuation view for any piece of work, with continue, change approach and abandon ([#385](https://github.com/cosmicspork/tracon/issues/385)) ([8c2709c](https://github.com/cosmicspork/tracon/commit/8c2709ceebabc7a98851f8bb1060ee2976424269))
+
+
+### Bug Fixes
+
+* **desktop:** open external links with the host's launcher and the host's environment ([#378](https://github.com/cosmicspork/tracon/issues/378)) ([98605f9](https://github.com/cosmicspork/tracon/commit/98605f9d6f31d09a3f49e9f059409e67a2c1a436))
+* **spa:** say where push enrollment failed ([#403](https://github.com/cosmicspork/tracon/issues/403)) ([6d4c208](https://github.com/cosmicspork/tracon/commit/6d4c20850ec2e200948501395a0bb7d91a6a1c67))
+
 ## [0.28.0](https://github.com/cosmicspork/tracon/compare/v0.27.0...v0.28.0) (2026-10-06)
 
 
