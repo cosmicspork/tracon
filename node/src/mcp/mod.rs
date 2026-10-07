@@ -18,6 +18,7 @@ pub mod memory;
 pub mod operator;
 pub mod review;
 pub mod schema;
+pub mod services;
 pub mod setup;
 pub mod show;
 pub mod wait;
@@ -239,6 +240,11 @@ impl Tools {
             out.extend(setup::definitions());
             out.extend(work::definitions());
             out.extend(approvals::definitions());
+            // Only what the operator's catalogue holds, and only by name:
+            // the policy bundle decides each service on its own.
+            if !self.cfg.service.is_empty() {
+                out.extend(services::definitions(&self.cfg));
+            }
         }
         out
     }
@@ -527,6 +533,13 @@ impl Tools {
                     Some(&before_mutation),
                 )
                 .await
+            }
+            services::START | services::STATUS => {
+                let access = self
+                    .session
+                    .get()
+                    .ok_or("services are not available on this node")?;
+                services::call(access, ctx, name, args).await
             }
             other => Err(format!("no tool named {other}")),
         };

@@ -564,7 +564,20 @@ starts; every check then runs on its own copy of the prepared tree with the cach
 read-only. That cache is the run's own, copied from the repository's base cache and
 removed with the run. The base is written by one thing only — a preparation of the
 default branch, made when the repository's image is built — so a candidate's install,
-which may run the candidate's own scripts, can reach its own evidence and nobody else's. What a repository asks of
+which may run the candidate's own scripts, can reach its own evidence and nobody else's. A session that needs
+something running beside it (a browser to drive, a database to test against) asks for
+it by name from the operator's `[[service]]` catalogue with `service_start`, which
+waits, within a tool call's budget, for the entry's readiness probe; `service_status`
+keeps waiting. It never names an image or a command. The service joins the session
+container's network namespace, so it is reached on the session's loopback and reaches
+the gateway and nothing of its own, and the policy bundle decides each service by its
+name: the shipped bundle runs a headless browser unattended and asks about anything
+else. The service's `service` events on the session are how every path that removes
+the session's container (its end, a kill, a restart's reconciliation) finds and removes
+its services first. A session's pause stops neither the harness container nor its
+services today; both run until the session ends. A runtime that cannot share a
+namespace (the local and Kubernetes runners) reports that it cannot run one rather than
+starting it somewhere the session cannot reach. What a repository asks of
 preparation and does not get is said before launch: `GET /api/preparation` (shown under
 the repository in the composer) reads the checkout and names the install it would run,
 the entry's `prepare` commands and the image, then every devcontainer field the node
