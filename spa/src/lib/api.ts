@@ -3,6 +3,7 @@
 
 import type {
   Continuation,
+  SessionExhaustion,
   ExternalEvent,
   ExternalView,
   AuthorityGrant,
@@ -208,6 +209,8 @@ export const api = {
       usage: SessionUsage
       ceiling: Ceiling
       toolchain: ToolchainStatus | null
+      /** Absent from a node that predates exhaustion policies. */
+      exhaustion?: SessionExhaustion | null
       /** Absent from a node that predates `show_work`. */
       shown_work?: ShownWork[]
       /** What this session's reviews put on the forge. Absent from older nodes. */

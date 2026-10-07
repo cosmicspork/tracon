@@ -814,6 +814,7 @@ pub async fn import_transfer(
         parent_session: None,
         continued_from: None,
         harness: None,
+        on_exhaustion: None,
     };
     if let Err(error) = s.manager.preflight(&preflight_spec) {
         let detail = error.to_string();
@@ -882,6 +883,7 @@ pub async fn import_transfer(
         parent_session: None,
         continued_from: None,
         harness: None,
+        on_exhaustion: None,
     };
     let session = match s.manager.create(spec).await {
         Ok(session) => session,
@@ -1375,6 +1377,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         parent_session: None,
         continued_from: None,
         harness: c.harness,
+        on_exhaustion: None,
         branch: c.branch,
         work_item_id: Some(item.id.clone()),
         model: c.model,
@@ -1440,6 +1443,9 @@ pub async fn get_session(
         .first_event_payload(&id, crate::session::state::event_kind::SESSION_STARTED)?
         .and_then(|payload| payload.get("toolchain").cloned())
         .filter(|toolchain| !toolchain.is_null());
+    // The policy this session runs under on exhaustion, and its latest one:
+    // what it waits for, when, or what carried it on.
+    let exhaustion = s.store().exhaustion(&id)?;
     Ok(Json(json!({
         "session": row,
         "waiting": waiting,
@@ -1450,6 +1456,7 @@ pub async fn get_session(
             .collect::<Vec<_>>(),
         "usage": usage,
         "ceiling": ceiling,
+        "exhaustion": exhaustion,
         "toolchain": toolchain,
         "shown_work": s.store().shown_work_for_session(&id)?,
     })))
@@ -2173,6 +2180,24 @@ pub async fn get_review(
         )
         .unwrap_or_default()),
     };
+    // Who the commits are by, against the account approval would publish as,
+    // so a commit the forge would not attribute to it is named before anyone
+    // approves. Node-local: the worktree is here.
+    let authorship = match (remote_owner.as_ref(), worktree_of(&s, &r)) {
+        (None, Some(worktree)) => {
+            crate::review::authorship(
+                &s.tools.broker,
+                &r.provider,
+                &r.channel,
+                &s.node_id,
+                &worktree,
+                &format!("origin/{}", r.base_ref),
+                &r.head_sha,
+            )
+            .await
+        }
+        _ => None,
+    };
     Ok(Json(json!({
         "review": r,
         "remote_owner": remote_owner,
@@ -2187,6 +2212,7 @@ pub async fn get_review(
         "publications": publications,
         "publication": publication,
         "shown_work": shown_work,
+        "authorship": authorship,
     })))
 }
 
@@ -2900,7 +2926,19 @@ const LANE_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 /// one could register with, which are stopped, and the lanes that called in
 /// the last day. The CLI prints the line to register with; the interface
 /// shows the same.
-pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+#[derive(Deserialize, Default)]
+pub struct ExternalQuery {
+    /// Also resolve each channel's forge identity. Asked for by `tracon
+    /// external show`, not by the interface's polling, since it may ask the
+    /// forge.
+    #[serde(default)]
+    pub identities: bool,
+}
+
+pub async fn external(
+    State(s): State<AppState>,
+    Query(q): Query<ExternalQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
     let rows = s.store().channel_list()?;
     // Listed on their own rather than folded into `channels`, which callers
     // read as names: a stopped channel is still one a harness registers with.
@@ -2941,11 +2979,28 @@ pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::V
         row["running"] = json!(running);
         lanes.push(row);
     }
+    // What a harness the operator runs should commit as on each channel, so
+    // its work reads as theirs on the forge. The node launches nothing for
+    // it, so this is offered, to apply as repository-local config.
+    let mut identities = serde_json::Map::new();
+    for channel in channels.iter().filter(|_| q.identities) {
+        if let Some(identity) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::forge::identity_for(&s.tools.broker, channel, &s.node_id, None),
+        )
+        .await
+        .ok()
+        .flatten()
+        {
+            identities.insert(channel.clone(), json!(identity));
+        }
+    }
     Ok(Json(json!({
         "enabled": s.cfg.external.enabled,
         "channels": channels,
         "lanes": lanes,
         "stopped": stopped,
+        "identities": identities,
     })))
 }
 

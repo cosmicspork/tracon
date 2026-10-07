@@ -360,6 +360,18 @@ async fn submit(
         ),
     };
     let files = serde_json::to_string(&capture.files).unwrap_or_else(|_| "[]".into());
+    // Who the commits are by, against the account the review publishes as.
+    // Named, never rewritten: re-authoring is the agent's or operator's step.
+    let authorship = review::authorship(
+        manager.broker(),
+        &provider,
+        &ctx.channel,
+        &ctx.node_id,
+        &worktree,
+        &range_base,
+        &capture.head_sha,
+    )
+    .await;
 
     // The cap, before anything else: complexity accretes because nothing says
     // no at submission time. A resubmission is capped the same way.
@@ -561,6 +573,7 @@ async fn submit(
             "review_session": reviewer,
             "candidate_id": candidate.id,
             "checks_reused": checks.reused,
+            "authorship": authorship,
         }));
     }
 
@@ -637,6 +650,7 @@ async fn submit(
         "review_session": reviewer,
         "candidate_id": candidate.id,
         "checks_reused": checks.reused,
+        "authorship": authorship,
     }))
 }
 
@@ -1350,6 +1364,7 @@ async fn spawn_review_session(
         parent_session: None,
         continued_from: None,
         harness: None,
+        on_exhaustion: None,
         model,
         budget_tokens: bindings["phases"]["review"]["budget_tokens"].as_i64(),
         initial_prompt: None,

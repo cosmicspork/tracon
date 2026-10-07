@@ -742,6 +742,8 @@ pub async fn carry_on(
         parent_session: Some(old.id.clone()),
         continued_from: Some(old.id.clone()),
         harness,
+        // The policy the old attempt ran under carries over with the work.
+        on_exhaustion: store.exhaustion(&old.id)?.map(|row| row.choice()),
     };
     manager.create(spec).await
 }
@@ -752,6 +754,7 @@ pub async fn carry_on(
 fn handoff(old: &SessionRow, approach: Option<&str>) -> String {
     let ended = match old.end_reason.as_deref() {
         Some("node_restart") => "was cut off when its node restarted".to_string(),
+        Some("provider_exhausted") => "stopped when its provider was exhausted".to_string(),
         Some("phase_done") => "finished its phase".to_string(),
         Some("budget") => "spent its budget".to_string(),
         Some("killed_user") => "was stopped by the operator".to_string(),

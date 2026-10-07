@@ -51,26 +51,6 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 Every item here was found on the 2026-09-20, 2026-09-28, 2026-09-30 or 2026-10-03 live
 runs, or in the daily desktop use since.
 
-- [ ] **Make tracon invisible in what it publishes.** A commit, branch, pull request or
-      forge request should read as the operator's own work through their harness, with
-      nothing naming tracon. Authorship comes from the bound forge credential, not the
-      host or a placeholder: inside the boundary every commit is `tracon <tracon@localhost>`
-      today (hard-coded in the harness home's gitconfig and the sanitized workspace
-      config), and outside it commits carry the host's Git config, which can be a work
-      address on a personal repository. Resolve the identity once per bound credential
-      from the forge (GitHub `/user`: name and `<id>+<login>@users.noreply.github.com`;
-      GitLab `/user`: name and commit or noreply email), cache it with the binding, and
-      write it as author and committer wherever the node writes Git config. Attribution
-      is see-through: the harness's own default trailers (Claude Code's `Co-Authored-By`,
-      whatever OpenCode does) pass through untouched, and tracon adds none of its own;
-      its provenance stays in the node's ledger. Forge API calls stop sending
-      `user-agent: tracon`. For an external harness the node launches nothing, so it
-      offers the identity (in `external show` and as a tool result the harness applies as
-      repo-local config) and checks authorship at `submit_review` and publish: a commit
-      whose author is not an identity of the target forge account is named in the review,
-      and rewriting it is an operator-approved step, never silent. Still true on
-      2026-10-03: #333, published from session `01a10447`, carries a
-      `tracon@localhost` commit.
 
 ## Next — the working loop, made comfortable
 
@@ -78,16 +58,6 @@ Needed for daily use, but not blocking it today.
 
 **Sessions and accounting**
 
-- [ ] Record a policy decision for every Claude Code tool call. Calls Claude Code allows
-      by its own rules (reads, searches) never reach `can_use_tool`, so they leave no
-      `policy_allowed` event, while the same calls under OpenCode do; the ledger should
-      not depend on which harness ran.
-- [ ] Choose a provider-exhaustion policy, per channel with a per-run override: pause and
-      resume after reset, fall back to a named provider, or fall back then wait,
-      defaulting to pause. Distinguish exhaustion from throttling, auth failure and
-      outage; never invent a reset timer; record policy, reason, model and next wake;
-      recheck grants, caps and compatibility before resuming, and continue only from a
-      recorded safe boundary.
 - [ ] A concise outcome record derived from recorded state: what changed, what was
       verified, what needs a decision, what is uncertain, and cost. Narrative summary
       cannot turn a claim into verification.

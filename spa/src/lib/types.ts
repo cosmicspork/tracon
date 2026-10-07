@@ -513,11 +513,31 @@ export interface ReviewDetails {
   /** What the agent showed of its work. Absent from a node that predates it. */
   shown_work?: ShownWork[]
   /**
+   * Who the commits are by, against the forge account approval publishes as.
+   * Null when that account's identity could not be resolved, or for a
+   * mirrored review; absent from a node that predates it.
+   */
+  authorship?: ReviewAuthorship | null
+  /**
    * Whether this node could publish it and how the latest attempt ended.
    * Null for a mirrored review (only the owner holds the credential and the
    * journal); absent from a node that predates it.
    */
   publication?: ReviewPublication | null
+}
+
+export interface ForgeIdentity {
+  name: string
+  email: string
+  login: string
+  forge: string
+}
+
+export interface ReviewAuthorship {
+  identity: ForgeIdentity
+  /** Commits not authored and committed as `identity`. Never rewritten for you. */
+  misattributed: { sha: string; author: string; author_email: string; committer_email: string }[]
+  note: string
 }
 
 export interface ReviewPublication {
@@ -1068,9 +1088,35 @@ export interface PhaseBinding {
 }
 
 /** Free-form on the wire; these are the keys the node and the interface read. */
+export type ExhaustionPolicy = 'pause' | 'fallback' | 'fallback_then_wait'
+
+/** What a session does when its provider is exhausted. */
+export interface ExhaustionChoice {
+  policy: ExhaustionPolicy
+  /** `provider/model`; required by the two fallback policies. */
+  fallback?: string
+}
+
+/** A session's exhaustion policy and its latest exhaustion, as the node keeps it. */
+export interface SessionExhaustion {
+  policy: ExhaustionPolicy
+  fallback: string | null
+  provider: string | null
+  model: string | null
+  reason: string | null
+  reset_ms: number | null
+  next_wake_ms: number | null
+  boundary_seq: number | null
+  /** waiting · falling_back · held, then resumed · continued · operator · abandoned. */
+  outcome: string | null
+  note: string | null
+  continued_by: string | null
+}
+
 export interface ChannelBindings {
   phases?: Record<string, PhaseBinding>
   ceiling_tokens_per_day?: number
+  exhaustion?: ExhaustionChoice
   [key: string]: unknown
 }
 
