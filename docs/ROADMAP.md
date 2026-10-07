@@ -79,9 +79,6 @@ runs, or in the daily desktop use since.
       and rewriting it is an operator-approved step, never silent. Still true on
       2026-10-03: #333, published from session `01a10447`, carries a
       `tracon@localhost` commit.
-- [ ] **Open external links through a clean Linux host launcher**: the AppImage's bundled
-      `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
-      host environment for the child only and keep the URL and origin restrictions.
 
 ## Next — the working loop, made comfortable
 
