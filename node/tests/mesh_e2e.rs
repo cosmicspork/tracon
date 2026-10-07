@@ -576,3 +576,98 @@ async fn a_subscription_signed_in_once_is_shared_and_renewed_by_one_holder_at_a_
     .await;
     assert_eq!(version(&a), version(&b));
 }
+
+fn held_review(id: &str, owner: &str) -> tracon::store::ReviewRow {
+    let now = tracon::store::now_ms();
+    tracon::store::ReviewRow {
+        id: id.into(),
+        session_id: None,
+        node_id: owner.into(),
+        channel: "personal".into(),
+        kind: "pr".into(),
+        title: "feat: the thing".into(),
+        body: String::new(),
+        edited_title: None,
+        edited_body: None,
+        provider: "github".into(),
+        target: "{}".into(),
+        diff: "+x".into(),
+        files: "[]".into(),
+        head_sha: "abc".into(),
+        base_ref: "main".into(),
+        added: 1,
+        removed: 0,
+        state: "pending".into(),
+        verdict_reason: None,
+        publish_result: None,
+        claimed_ms: None,
+        created_ms: now,
+        created_mono_ms: 0,
+        resolved_mono_ms: None,
+        updated_ms: now,
+        checks_json: None,
+        review_session_id: None,
+        ai_verdict_json: None,
+        revision_patch: None,
+        lane: None,
+    }
+}
+
+/// A review mirrored from its owner is read from the owner, so a phone
+/// served by another node decides with what the owner holds; an owner that
+/// cannot be reached is said to be, not shown as an empty review.
+#[tokio::test]
+async fn a_mirrored_review_is_read_from_the_node_that_holds_it() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let (ai, bi) = (a.id.node_id(), b.id.node_id());
+    let id = uuid::Uuid::now_v7().to_string();
+    a.store.insert_review(&held_review(&id, &bi)).unwrap();
+    b.store.insert_review(&held_review(&id, &bi)).unwrap();
+
+    let (st, v) = call(&a.app, "GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["remote_owner"], bi.as_str());
+    assert_eq!(v["owner_detail"]["state"], "fetched", "{v}");
+    assert!(v["intent"].is_object(), "the owner's intent: {v}");
+
+    // B answers only for what it owns: not a review it does not hold, and
+    // not as a relay for a third node's claim.
+    let refused = a
+        .client
+        .command(
+            &bi,
+            Command::ReviewDetail {
+                request: json!({ "review_id": id, "channel": "personal", "owner": ai }),
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(matches!(
+        refused,
+        Err(CommandError::Refused(message)) if message.contains("owner does not match")
+    ));
+    let other = uuid::Uuid::now_v7().to_string();
+    a.store.insert_review(&held_review(&other, &ai)).unwrap();
+    let missing = a
+        .client
+        .command(
+            &bi,
+            Command::ReviewDetail {
+                request: json!({ "review_id": other, "channel": "personal", "owner": bi }),
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(
+        matches!(missing, Err(CommandError::Refused(_))),
+        "{missing:?}"
+    );
+
+    // Unreachable, it says so.
+    a.store.set_reachable(&bi, false).unwrap();
+    let (st, v) = call(&a.app, "GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["owner_detail"]["state"], "unreachable", "{v}");
+    assert!(v["evidence"].is_null());
+}

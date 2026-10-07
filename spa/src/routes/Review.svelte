@@ -15,11 +15,14 @@
     reviewVerdict,
     type CandidateEvidence,
     type Criteria,
+    type OwnerDetail,
     type PinnedRequirements,
     type Review,
+    type ReviewAuthorship,
     type ReviewContext,
     type ReviewIntent,
     type ReviewOutputs,
+    type ReviewPublication,
     type ReviewRevisionRef,
     type ShownWork as ShownWorkItem,
     type Verdict,
@@ -37,8 +40,11 @@
   let stale = $state<string[]>([])
   /** The node that owns a review mirrored here; null when this node does. */
   let remoteOwner = $state<string | null>(null)
+  let ownerDetail = $state<OwnerDetail | null>(null)
   let evidence = $state<CandidateEvidence | null>(null)
   let shownWork = $state<ShownWorkItem[]>([])
+  let authorship = $state<ReviewAuthorship | null>(null)
+  let publication = $state<ReviewPublication | null>(null)
   let requirements = $state<PinnedRequirements | null>(null)
   /** The pinned item's criteria against this revision's candidate, if any. */
   let criteria = $state<Criteria | null>(null)
@@ -76,8 +82,11 @@
         revision = d.revision
         stale = d.stale
         remoteOwner = d.remote_owner ?? null
+        ownerDetail = d.owner_detail ?? null
         evidence = d.evidence
         shownWork = d.shown_work ?? []
+        authorship = d.authorship ?? null
+        publication = d.publication ?? null
         requirements = d.requirements
         criteria = d.criteria
         surroundingCode = d.surrounding_code
@@ -325,10 +334,63 @@
       })
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
+      // A refused approval may have left a publication record; show how it
+      // ended and what can be done, not only the error.
+      if (verdict === 'approve') await reread()
     } finally {
       busy = false
     }
   }
+
+  /** The review and its publication record, as they stand now. */
+  async function reread() {
+    try {
+      const d = await api.review(id)
+      review = d.review
+      publication = d.publication ?? null
+    } catch {
+      /* the error already shown is the one that matters */
+    }
+  }
+
+  /** Retry the latest publication exactly as it was approved. Not a second
+   * approval: nothing on this screen is sent, the node reads what was
+   * approved back from its journal. */
+  async function retry() {
+    const latest = publication?.latest
+    if (!review || !latest) return
+    busy = true
+    error = null
+    try {
+      decided = true
+      const res = await api.recoverPublication(id, latest.id)
+      await store.refetch()
+      leaveAfterVerdict(router, {
+        reviewId: id,
+        from: openedFrom,
+        fallback: res.published && review.session_id ? `/sessions/${review.session_id}` : '/',
+      })
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e)
+      await reread()
+    } finally {
+      busy = false
+    }
+  }
+
+  const OUTCOME: Record<string, string> = {
+    not_attempted: 'publication not attempted',
+    failed: 'publication failed',
+    uncertain: 'publication outcome unknown',
+  }
+  const settled = $derived(
+    publication?.latest && review && ['new', 'claimed', 'publishing'].includes(review.state)
+      ? OUTCOME[publication.latest.outcome]
+        ? publication.latest
+        : null
+      : null,
+  )
+  const readiness = $derived(remoteOwner ? null : (publication?.readiness ?? null))
 </script>
 
 {#if !loaded}
@@ -378,11 +440,19 @@
       <dd class="m">{review.lane ?? 'an external agent'}</dd>
     {/if}
   </dl>
-  {#if remoteOwner}
+  {#if remoteOwner && ownerDetail?.state === 'fetched'}
     <div class="banner">
       held by {nodeLabel(store.nodes, remoteOwner)}
-      <b>· its checks and evidence stay on that node, and it checks the branch for changes again when you decide</b>
+      <b>· read from it just now; it checks the branch for changes again when you decide</b>
     </div>
+  {:else if remoteOwner}
+    <div class="banner crit">
+      held by {nodeLabel(store.nodes, remoteOwner)}
+      <b>· {ownerDetail?.reason ?? 'its checks and evidence stay on that node'}; decide there, or reload once it can be read</b>
+    </div>
+  {/if}
+  {#if remoteOwner && !evidence}
+    <!-- what the owner holds could not be read; the banner above says why -->
   {:else if !evidence}
     <div class="banner crit">
       verification evidence missing <b>· this review predates immutable candidate capture</b>
@@ -502,6 +572,8 @@
               {/if}
               {#if c.duplicate}
                 <button class="lnk" disabled>Judge it</button>
+              {:else if remoteOwner}
+                <small>Judge it on {nodeLabel(store.nodes, remoteOwner)}, which holds this attempt.</small>
               {:else if judging === c.key}
                 <div class="judge">
                   <select bind:value={criterionVerdict} aria-label="your verdict">
@@ -567,9 +639,32 @@
       changes requested <b>· waiting on the agent to resubmit · {review.verdict_reason}</b>
     </div>
   {/if}
-  {#if publishing}
+  {#if settled}
+    <div class="banner crit">
+      {OUTCOME[settled.outcome]}
+      <b>· {settled.note ?? `${settled.provider} ${settled.project} · ${settled.branch}`}</b>
+    </div>
+    <div class="recover">
+      {#if settled.recoverable}
+        <span class="note">{settled.remedy}</span>
+        <button class="btn p" disabled={busy} onclick={retry}>Retry publication</button>
+      {:else if settled.refusal}
+        <span class="note">{settled.refusal}</span>
+      {/if}
+    </div>
+  {:else if publishing}
     <div class="banner crit">
       publication outcome requires reconciliation <b>· this review may have reached the forge; do not approve, revise, or reject it again</b>
+    </div>
+  {/if}
+
+  {#if authorship && authorship.misattributed.length > 0}
+    <div class="banner">
+      not authored as {authorship.identity.login}
+      <b
+        >· {authorship.misattributed.map((c) => `${c.sha.slice(0, 8)} by ${c.author_email}`).join(', ')} · ask the agent
+        to re-author them; nothing is rewritten for you</b
+      >
     </div>
   {/if}
 
@@ -690,8 +785,21 @@
     <div class="banner crit">refused <b>· {error}</b></div>
   {/if}
 
+  {#if readiness && !readiness.ready}
+    <div class="note">
+      Cannot publish from here yet: {readiness.problem}.
+      <a class="lnk" href={readiness.settings}>Bind a token in Settings</a>
+    </div>
+  {:else if readiness?.note}
+    <div class="note dim">{readiness.note}</div>
+  {/if}
+
   <div class="decide">
-    <button class="btn p" disabled={busy || publishing || stale.length > 0} onclick={() => decide('approve')}>
+    <button
+      class="btn p"
+      disabled={busy || publishing || stale.length > 0 || readiness?.ready === false}
+      onclick={() => decide('approve')}
+    >
       Approve and publish
     </button>
     <input
@@ -709,6 +817,13 @@
 {/if}
 
 <style>
+  .recover {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin: 6px 0 12px;
+  }
   .head {
     display: grid;
     grid-template-columns: 3px 72px minmax(0, 1fr);

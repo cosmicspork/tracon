@@ -334,6 +334,21 @@ pub fn forwarded_candidate_evidence(
     Ok(value)
 }
 
+/// Refuse a reply larger than the mesh carries safely, without building a
+/// second copy of it to measure.
+pub(crate) fn within_mesh_limit(value: &Value, what: &str) -> ApiResult<()> {
+    serde_json::to_writer(EvidenceLimit(REMOTE_EVIDENCE_MAX_BYTES), value).map_err(|error| {
+        if error.is_io() {
+            ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("{what} exceeds the safe mesh response limit"),
+            )
+        } else {
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        }
+    })
+}
+
 async fn remote_candidate_evidence(
     state: &AppState,
     request: RemoteCandidateEvidenceRequest,

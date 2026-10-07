@@ -10,9 +10,12 @@
 //! Ownership is read from the name. `tracon-scratch-<session>` belongs to a
 //! session; `tracon-workspace-<id>` to every open session using that
 //! workspace; `tracon-cache-w-<id>` to that same workspace, whose sessions
-//! install into it; `tracon-check-<run>` to a check run, as `tracon-prep-…` and
-//! `tracon-warm-…` are to the run that made them; `tracon-cache-<hash>` to
-//! nobody (it is rebuilt on demand, so it goes only when asked for). The
+//! installed into it before session caches were kept per repository;
+//! `tracon-check-<run>` to a check run, as `tracon-prep-…`, `tracon-warm-…`
+//! and a setup trial's `tracon-try-…` are to the run that made them;
+//! `tracon-cache-<hash>` — a repository's base cache, or as
+//! `tracon-cache-r-<hash>` its sessions' build cache — to nobody (it is
+//! rebuilt on demand, so it goes only when asked for). The
 //! node-wide volumes are never candidates, and neither is a name this node
 //! does not recognize.
 
@@ -158,7 +161,7 @@ pub fn classify_volume(name: &str, created_ms: Option<i64>, owners: &Owners) -> 
     // What one check run or one cache warm-up made for itself, and removes
     // itself when it ends. One still here a day later was left by a run that
     // did not finish.
-    if ["tracon-prep-", "tracon-warm-"]
+    if ["tracon-prep-", "tracon-warm-", "tracon-try-"]
         .iter()
         .any(|prefix| name.starts_with(prefix))
     {
@@ -175,6 +178,16 @@ pub fn classify_volume(name: &str, created_ms: Option<i64>, owners: &Owners) -> 
     // repositories' shared ones below go only when caches are asked for.
     if let Some(key) = name.strip_prefix("tracon-cache-w-") {
         return workspace_verdict(key, created_ms, owners);
+    }
+    if name.starts_with("tracon-cache-r-") {
+        return if owners.caches {
+            verdict(true, "session build cache; the next session rebuilds it")
+        } else {
+            verdict(
+                false,
+                "session build cache; included only when caches are asked for",
+            )
+        };
     }
     if name.starts_with("tracon-cache-") {
         return if owners.caches {
@@ -358,6 +371,7 @@ mod tests {
             "tracon-prep-0199",
             "tracon-prep-cache-0199",
             "tracon-warm-0199",
+            "tracon-try-0199",
         ] {
             assert!(classify_volume(left, old, &o).0, "{left}");
             assert!(
@@ -382,8 +396,12 @@ mod tests {
             assert!(!classify_volume(name, None, &o).0, "{name}");
         }
         assert!(!classify_volume("tracon-cache-abc", None, &o).0);
+        // A repository's session build cache outlives every session, so
+        // only asking for caches takes it.
+        assert!(!classify_volume("tracon-cache-r-abc", None, &o).0);
         o.caches = true;
         assert!(classify_volume("tracon-cache-abc", None, &o).0);
+        assert!(classify_volume("tracon-cache-r-abc", None, &o).0);
         assert!(classify_volume("tracon-provider-anthropic", None, &o).0);
     }
 
