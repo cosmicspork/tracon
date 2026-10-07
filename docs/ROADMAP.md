@@ -276,12 +276,6 @@ hit on a real task.
 
 **Node data**
 
-- [ ] **Data management in Settings.** Retention is decided: the node keeps everything
-      and the operator deletes by hand. Give that a pane — what the node holds per kind
-      (sessions, events, candidates and evidence, documents, memories, workspaces, harness
-      state), how much it weighs, and delete for the kinds that have a real delete, with
-      the propagation each one does or does not have stated. A storage figure belongs on
-      the Nodes screen too. Tombstones stay undecided until replication makes them matter.
 - [ ] Explain browser push enrollment failures by stage: unavailable API, denied
       permission, service-worker failure, push-service registration failure, node storage
       error; never report a device as registered after a failed enrollment.

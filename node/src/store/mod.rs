@@ -26,6 +26,7 @@ pub mod corpus;
 pub mod criteria;
 pub mod evidence;
 pub mod external;
+pub mod holdings;
 pub mod manifest;
 pub mod metrics;
 pub mod opencode;
