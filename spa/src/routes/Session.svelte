@@ -1,6 +1,7 @@
 <script lang="ts">
   import Log from '../components/Log.svelte'
   import OperatorQuestionCard from '../components/OperatorQuestionCard.svelte'
+  import OutcomePanel from '../components/OutcomePanel.svelte'
   import PermissionCard from '../components/PermissionCard.svelte'
   import SessionAuthorityPanel from '../components/SessionAuthorityPanel.svelte'
   import ShownWork from '../components/ShownWork.svelte'
@@ -521,6 +522,9 @@
   {/if}
 
   <Log events={store.events} openChunks={store.openChunks} toolProgress={store.toolProgress} />
+  <!-- Open by default once the session has ended: that is when what it came
+       to is the question. -->
+  <OutcomePanel {id} open={isTerminal(session.state) || router.hash === '#outcome'} />
   <ShownWork items={shownWork} />
   <TransferExport channel={session.channel} />
 
