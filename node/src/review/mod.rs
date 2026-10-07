@@ -8,6 +8,7 @@
 //! instruction the agent may forget by hour two.
 
 pub mod checks;
+pub mod prose;
 pub mod publish;
 pub mod report;
 
@@ -368,6 +369,40 @@ async fn cat_file(
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         })
     }
+}
+
+/// The commits `HEAD` has beyond `base_ref`, oldest first.
+pub async fn commits(
+    worktree: &str,
+    base_ref: &str,
+) -> Result<Vec<prose::CommitLine>, ReviewError> {
+    let listed = git(
+        worktree,
+        "log",
+        &[
+            "log",
+            "--reverse",
+            "--no-decorate",
+            "--format=%H%x1f%s",
+            &format!("{base_ref}..HEAD"),
+        ],
+    )
+    .await?;
+    Ok(listed
+        .lines()
+        .filter_map(|line| {
+            let (sha, subject) = line.split_once('\u{1f}')?;
+            Some(prose::CommitLine {
+                sha: sha.to_string(),
+                subject: subject.to_string(),
+            })
+        })
+        .collect())
+}
+
+/// Where `head` leaves `base_ref`: the commit a squash of it sits on.
+pub async fn merge_base(worktree: &str, base_ref: &str, head: &str) -> Result<String, ReviewError> {
+    git(worktree, "merge-base", &["merge-base", base_ref, head]).await
 }
 
 /// The default branch the worktree was cut from, read from `origin/HEAD`. The

@@ -110,20 +110,10 @@ hit on a real task.
       through the brokered token first; webhooks only where the node is reachable. A
       subscription ends when the request closes, and it never merges, approves or retries
       anything on its own.
-- [ ] What ships under the operator's name is reviewed: the branch name and the commits.
-      Today the candidate is the tree, the review shows the diff and the forge prose, and
-      the commits and branch are pushed as the agent wrote them (the default branch even
-      names tracon). Three steps: list the commits and the branch beside the diff;
-      treat commit message and branch name as publication prose like the forge
-      description — proposed by the agent, edited by the operator, bound by hash under the
-      publish grant — with the node squashing the candidate into one commit carrying the
-      approved message on the approved branch by default (`publish.commits = squash |
-      keep` per channel or repository; `keep` edits each message), which leaves the tree
-      and therefore the candidate, its evidence and the verdict unchanged; and a
-      deterministic subject-and-branch check (conventional type, imperative subject,
-      kebab branch, no ticket keys) whose rules come from the channel or the repository's
-      own guidelines, so a bad message fails before the card reaches the operator. Record
-      the "reviewed tree, not reviewed bytes" reframing in ARCHITECTURE and DESIGN.
+- [ ] Edit each commit's message under `publish.commits = keep`. Squash (the default)
+      already ships one commit of the reviewed tree with the approved message and
+      branch; `keep` lists the agent's commits and checks their subjects but pushes
+      them as written.
 - [ ] Durable review drafts: unsent feedback and publication prose survive navigation,
       reconnect and device changes with explicit saved/conflict state. Desktop diff drafts
       remain revision-keyed. The acceptance test is the reconnect: leave feedback, switch

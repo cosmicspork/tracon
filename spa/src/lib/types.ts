@@ -620,6 +620,16 @@ export interface ReviewOutputs {
   description?: { title: string; body: string }
   comment?: string
   draft?: boolean
+  /** The message the squashed commit carries. */
+  commit?: string
+  /** The operator's rename of a new change's branch. */
+  branch?: string
+}
+
+/** One commit the agent made, listed beside the diff. */
+export interface ReviewCommit {
+  sha: string
+  subject: string
 }
 
 export interface ReviewIntent {
@@ -628,6 +638,13 @@ export interface ReviewIntent {
   lease?: string
   /** The push replaces `lease` rather than fast-forwarding it. */
   rewrite?: boolean
+  /**
+   * The commit the reviewed tree is squashed onto. Absent: the agent's
+   * commits are pushed as written.
+   */
+  squash_onto?: string
+  /** The agent's commits beyond the base, oldest first. */
+  commits?: ReviewCommit[]
 }
 
 export interface ReviewRevisionRef {

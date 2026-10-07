@@ -677,9 +677,28 @@ memberships, verify the candidate's actual channel and owner, refuse third-node
 relays, and bound responses. Peer UI detail is read-only; it never turns a remote
 ID into a local action.
 
+**What is reviewed is the tree; the commits and the branch are prose.** The
+candidate is a tree hash recorded at capture, and every check, verdict and grant
+is about that tree. How it reaches the forge is publication prose, like the
+description: the agent proposes a commit message and a branch (`message`,
+`branch` on submit; a session on the node's placeholder branch gets one named
+from its title), the review lists the agent's own commits beside the diff, and
+the operator edits either before approving. Under `commits = "squash"`, the
+default, the publisher makes one commit holding exactly the reviewed tree, on
+the commit pinned at submit — where the branch leaves its base for a new
+branch, or what the change's branch holds for an update, including an earlier
+squash the agent never had — with the candidate head's author and dates, so a
+resumed attempt makes the identical commit. `keep` pushes the agent's commits
+as written. The message and branch are bound by the publish grant's prose hash
+and target like the description, and a deterministic check (conventional type,
+imperative subject, length, kebab branch, no tracker keys — each off unless the
+repository's entry, the channel's `publish.style` binding or `[publish] style`
+turns it on) refuses a submission that breaks it before the card reaches the
+operator, and an approval whose edits do.
+
 **Publication is two side effects the node cannot take back, so it writes down
 what it is about to do before it does it.** Approval imports the candidate into a
-fresh publisher repository, pushes the reviewed commit, reads the ref back from
+fresh publisher repository, pushes the reviewed commit (or its squash), reads the ref back from
 the forge to confirm it is actually there, and then opens the change with
 exactly the approved title and description — nothing is appended that the
 operator did not see. Each step is recorded before it is attempted, keyed on the
