@@ -25,6 +25,7 @@ pub fn label(ev: &HarnessEvent) -> Option<String> {
         HarnessEvent::Models(m) => format!("models:{}", m.len()),
         HarnessEvent::Exited { .. } => "exited".into(),
         HarnessEvent::Permission { .. } => "permission".into(),
+        HarnessEvent::Decided(r) => format!("decided:{}", r.action),
         _ => return None,
     })
 }

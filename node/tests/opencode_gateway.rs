@@ -723,6 +723,7 @@ impl Live {
                     parent_session: None,
                     continued_from: None,
                     harness: None,
+                    on_exhaustion: None,
                 },
                 adapter,
             )

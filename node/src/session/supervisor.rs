@@ -78,6 +78,11 @@ pub enum Command {
     /// End the session now for a reason that is not the operator's: the node
     /// is shutting down underneath it.
     End(EndReason),
+    /// Put an idle, published session away: harness stopped, container
+    /// removed, its egress grant revoked with the supervisor, workspace kept.
+    Suspend {
+        idle_ms: i64,
+    },
     /// End the session once the running turn finishes (now, if none is):
     /// the work item closed, or the phase's artifact landed.
     EndAfterTurn(EndReason),
@@ -97,6 +102,12 @@ pub enum Command {
         payload: serde_json::Value,
         tokens: i64,
     },
+    /// The gateway saw the provider refuse this session's call as exhausted,
+    /// and the manager decided what happens under the session's policy.
+    Exhausted {
+        seen: crate::store::exhaustion::Exhausted,
+        decision: crate::session::exhaustion::Decision,
+    },
 }
 
 /// Why a pause occurred. The state transition is authoritative; this is
@@ -105,6 +116,10 @@ pub enum Command {
 pub enum PauseSource {
     Operator,
     Watchdog,
+    /// The provider was exhausted.
+    Exhausted,
+    /// The node woke a session its provider's reset had come round for.
+    Wake,
 }
 
 impl PauseSource {
@@ -112,6 +127,8 @@ impl PauseSource {
         match self {
             Self::Operator => "operator",
             Self::Watchdog => "watchdog",
+            Self::Exhausted => "exhausted",
+            Self::Wake => "wake",
         }
     }
 }
@@ -382,6 +399,12 @@ impl Supervisor {
                         Some(Command::Resume { source, reason, ack }) => {
                             let _ = ack.send(self.resume(source, &reason).await);
                         }
+                        Some(Command::Exhausted { seen, decision }) => {
+                            if self.on_exhausted(seen, decision).await {
+                                killed_by_us = true;
+                                break;
+                            }
+                        }
                         Some(Command::PauseQuiesceTimeout { turn_id }) => {
                             if self.paused_turn == Some(turn_id) && self.is_paused() {
                                 killed_by_us = true;
@@ -410,6 +433,10 @@ impl Supervisor {
                                     let _ = self.on_harness_event(event).await;
                                 }
                                 self.paused_turn = None;
+                                if self.reach_boundary().await {
+                                    killed_by_us = true;
+                                    break;
+                                }
                                 continue;
                             }
                             if turn_timeout {
@@ -463,6 +490,19 @@ impl Supervisor {
                             killed_by_us = true;
                             self.shutdown(reason).await;
                             break;
+                        }
+                        Some(Command::Suspend { idle_ms }) => {
+                            // Only an idle session is put away: a turn that
+                            // started since the manager looked keeps it.
+                            let idle = self.active_turn.is_none()
+                                && self.open.lock().await.is_empty()
+                                && self.store.get_session(&self.session_id).ok().flatten()
+                                    .is_some_and(|s| s.state == SessionState::Running.as_str() && s.turn_active == 0);
+                            if idle {
+                                killed_by_us = true;
+                                self.suspend(idle_ms).await;
+                                break;
+                            }
                         }
                         None => break,
                     },
@@ -556,7 +596,7 @@ impl Supervisor {
             None,
             json!({ "source": source.as_str(), "reason": reason }),
         );
-        if source == PauseSource::Watchdog {
+        if matches!(source, PauseSource::Watchdog | PauseSource::Exhausted) {
             let _ = self.store.update_session(
                 &self.session_id,
                 SessionPatch {
@@ -598,6 +638,26 @@ impl Supervisor {
             return Err("waiting for the paused turn to finish".into());
         }
         self.consecutive_failures = 0;
+        // The operator resuming an exhausted session takes it over: the node
+        // will not wake it again, or carry it on, behind their back.
+        if source == PauseSource::Operator
+            && self
+                .store
+                .exhaustion_settle(
+                    &self.session_id,
+                    crate::session::exhaustion::OPERATOR,
+                    None,
+                    None,
+                )
+                .unwrap_or(false)
+        {
+            self.record(
+                ek::EXHAUSTION_WAKE,
+                None,
+                json!({ "outcome": crate::session::exhaustion::OPERATOR,
+                        "note": "Resumed by the operator before the node acted." }),
+            );
+        }
         self.set_state(SessionState::Running, None);
         self.record(
             ek::SESSION_RESUMED,
@@ -605,6 +665,86 @@ impl Supervisor {
             json!({ "source": source.as_str(), "reason": reason }),
         );
         Ok(())
+    }
+
+    /// The provider is exhausted. Record the decision, then fence the session
+    /// like any pause; once nothing of the fenced turn is still in flight,
+    /// that is the safe boundary the work resumes or continues from. A second
+    /// refused call arriving after the fence changes nothing. `true` when the
+    /// session ended here to be carried on elsewhere.
+    async fn on_exhausted(
+        &mut self,
+        seen: crate::store::exhaustion::Exhausted,
+        decision: crate::session::exhaustion::Decision,
+    ) -> bool {
+        let state = self
+            .store
+            .get_session(&self.session_id)
+            .ok()
+            .flatten()
+            .map(|row| SessionState::from_stored(&row.state));
+        if !matches!(
+            state,
+            Some(SessionState::Running) | Some(SessionState::WaitingOnYou)
+        ) {
+            return false;
+        }
+        if let Err(e) = self
+            .store
+            .exhaustion_decided(&self.session_id, &seen, &decision)
+        {
+            tracing::error!(session = %self.session_id, error = %e, "could not record an exhaustion");
+            return false;
+        }
+        self.record(
+            ek::PROVIDER_EXHAUSTED,
+            None,
+            json!({
+                "policy": decision.policy.as_str(),
+                "outcome": decision.outcome,
+                "provider": seen.provider,
+                "model": seen.model,
+                "status": seen.status,
+                "reason": seen.reason,
+                "reset_ms": seen.reset_ms,
+                "next_wake_ms": decision.next_wake_ms,
+                "fallback": decision.fallback,
+                "note": decision.note,
+            }),
+        );
+        let reason = exhausted_reason(&seen, &decision);
+        if self.pause(PauseSource::Exhausted, &reason).await.is_err() {
+            return self.is_terminal();
+        }
+        if self.paused_turn.is_none() {
+            return self.reach_boundary().await;
+        }
+        false
+    }
+
+    /// Write the safe boundary of a pending exhaustion once its fenced turn
+    /// has settled, and end the session if it is to be carried on to its
+    /// fallback. `true` when it ended.
+    async fn reach_boundary(&mut self) -> bool {
+        let Ok(Some(row)) = self.store.exhaustion(&self.session_id) else {
+            return false;
+        };
+        if !row.pending() || row.boundary_seq.is_some() {
+            return false;
+        }
+        let Ok(seq) = self.store.exhaustion_boundary(&self.session_id) else {
+            return false;
+        };
+        self.record(
+            ek::EXHAUSTION_BOUNDARY,
+            None,
+            json!({ "boundary_seq": seq, "outcome": row.outcome }),
+        );
+        if row.outcome.as_deref() == Some(crate::session::exhaustion::FALLING_BACK) {
+            self.shutdown(EndReason::ProviderExhausted).await;
+            return true;
+        }
+        false
     }
 
     async fn watchdog_pause_if_needed(&mut self) -> bool {
@@ -802,6 +942,10 @@ impl Supervisor {
                     );
                 }
             }
+            HarnessEvent::Decided(request) => {
+                self.flush_chunks();
+                self.on_decided(request);
+            }
             HarnessEvent::Models(_) => {}
             HarnessEvent::Exited { code } => {
                 self.record(ek::ERROR, None, json!({ "harness_exit_code": code }));
@@ -818,6 +962,110 @@ impl Supervisor {
         for (kind, id, text) in pending {
             self.record(kind, id, json!({ "text": text }));
         }
+    }
+
+    /// What the node answers for a harness's request without the operator:
+    /// its policy, then the operator's required checks and the grants made
+    /// earlier in this session, which only ever turn an ask into an allow.
+    fn decide(
+        &self,
+        request: &PermissionRequest,
+    ) -> (crate::policy::Decision, Option<crate::policy::SessionGrant>) {
+        let subject = crate::policy::Request {
+            channel: &self.channel,
+            action: &request.action,
+            kind: request.kind.as_deref(),
+            resource: request.resource.as_deref(),
+            command: request.command.as_deref(),
+            arguments: None,
+        };
+        let mut decision = self.policy.read().decide(&subject);
+        let grant = crate::policy::session_grant(&subject);
+        if decision.verdict == crate::policy::Verdict::Ask {
+            let check = request.kind.as_deref() == Some("execute")
+                && request
+                    .command
+                    .as_deref()
+                    .is_some_and(|c| self.checks.iter().any(|k| k == c.trim()));
+            if check {
+                decision = crate::policy::Decision {
+                    verdict: crate::policy::Verdict::Allow,
+                    rule_id: Some("operator-checks".into()),
+                    reason: Some(
+                        "One of the operator's required checks, exactly as configured.".into(),
+                    ),
+                };
+            } else if grant.as_ref().is_some_and(|g| self.grants.contains(&g.key)) {
+                decision = crate::policy::Decision {
+                    verdict: crate::policy::Verdict::Allow,
+                    rule_id: Some("session-grant".into()),
+                    reason: Some("The operator allowed this for the rest of the session.".into()),
+                };
+            }
+        }
+        (decision, grant)
+    }
+
+    /// A tool call the harness ran on its own permission rules, never asking
+    /// the node: Claude Code lets reads and searches through without a
+    /// `can_use_tool`, where OpenCode asks for every one. The ledger records
+    /// the decision the node's policy makes for it all the same, so what a
+    /// session's log says was allowed does not depend on which harness ran.
+    /// The call has already run; when the policy would not have allowed it,
+    /// the record says so rather than pretending it did.
+    fn on_decided(&mut self, request: PermissionRequest) {
+        let (verdict, rule, reason) = if node_tool(&request.action) {
+            (
+                crate::policy::Verdict::Allow,
+                Some("node-tool".to_string()),
+                Some(
+                    "The node's own tool; it is decided when the call reaches the node."
+                        .to_string(),
+                ),
+            )
+        } else {
+            let (decision, _) = self.decide(&request);
+            (decision.verdict, decision.rule_id, decision.reason)
+        };
+        let policy = match verdict {
+            crate::policy::Verdict::Allow => "allow",
+            crate::policy::Verdict::Deny => "deny",
+            crate::policy::Verdict::Ask => "ask",
+        };
+        let (rule, reason) = match verdict {
+            crate::policy::Verdict::Allow => (rule, reason),
+            _ => {
+                tracing::warn!(
+                    session = %self.session_id,
+                    action = %request.action,
+                    policy,
+                    "the harness ran a tool call the node's policy would not have allowed"
+                );
+                (
+                    Some("harness".to_string()),
+                    Some(format!(
+                        "The harness ran this by its own rules without asking; the node's policy would have {}.",
+                        if policy == "deny" { "denied it" } else { "asked" }
+                    )),
+                )
+            }
+        };
+        self.record(
+            ek::POLICY_ALLOWED,
+            None,
+            json!({
+                "title": request.title,
+                "action": request.action,
+                "kind": request.kind,
+                "resource": request.resource,
+                "command": request.command,
+                "rule": rule,
+                "reason": reason,
+                "tool_call_id": request.tool_call_id,
+                "decided_by": "harness",
+                "policy": policy,
+            }),
+        );
     }
 
     async fn on_permission(
@@ -857,38 +1105,7 @@ impl Supervisor {
             );
             return;
         }
-        let subject = crate::policy::Request {
-            channel: &self.channel,
-            action: &request.action,
-            kind: request.kind.as_deref(),
-            resource: request.resource.as_deref(),
-            command: request.command.as_deref(),
-            arguments: None,
-        };
-        let mut decision = self.policy.read().decide(&subject);
-        let grant = crate::policy::session_grant(&subject);
-        if decision.verdict == crate::policy::Verdict::Ask {
-            let check = request.kind.as_deref() == Some("execute")
-                && request
-                    .command
-                    .as_deref()
-                    .is_some_and(|c| self.checks.iter().any(|k| k == c.trim()));
-            if check {
-                decision = crate::policy::Decision {
-                    verdict: crate::policy::Verdict::Allow,
-                    rule_id: Some("operator-checks".into()),
-                    reason: Some(
-                        "One of the operator's required checks, exactly as configured.".into(),
-                    ),
-                };
-            } else if grant.as_ref().is_some_and(|g| self.grants.contains(&g.key)) {
-                decision = crate::policy::Decision {
-                    verdict: crate::policy::Verdict::Allow,
-                    rule_id: Some("session-grant".into()),
-                    reason: Some("The operator allowed this for the rest of the session.".into()),
-                };
-            }
-        }
+        let (decision, grant) = self.decide(&request);
         match decision.verdict {
             crate::policy::Verdict::Allow | crate::policy::Verdict::Deny => {
                 let allow = decision.verdict == crate::policy::Verdict::Allow;
@@ -1017,13 +1234,19 @@ impl Supervisor {
 
     /// Deny-by-default: an unanswered request is rejected once, and the log
     /// says so at the point the harness asked.
+    /// Deny what nobody answered in time. Time is this supervisor's monotonic
+    /// clock, which does not run while the host sleeps: a card's deadline
+    /// counts only time the node was awake, so a host that wakes from a long
+    /// suspend does not wake to every waiting card already denied.
     async fn expire_permissions(&mut self) {
-        let now = now_ms();
+        let now = self.mono_ms();
+        let timeout = self.permission_timeout.as_millis() as i64;
         let due: Vec<String> = match self.store.open_permissions() {
             Ok(rows) => rows
                 .into_iter()
                 .filter(|r| {
-                    r.session_id.as_deref() == Some(self.session_id.as_str()) && r.expires_ms <= now
+                    r.session_id.as_deref() == Some(self.session_id.as_str())
+                        && now - r.created_mono_ms >= timeout
                 })
                 .map(|r| r.id)
                 .collect(),
@@ -1337,6 +1560,31 @@ impl Supervisor {
         self.reject_open_permissions().await;
     }
 
+    /// Not an end: the row stays non-terminal and says `suspended`, and what
+    /// it held (the harness, its container, its egress grant, its token) goes
+    /// with this supervisor. The workspace is the runtime's and stays.
+    async fn suspend(&mut self, idle_ms: i64) {
+        let _ = self.store.update_session_unless(
+            &self.session_id,
+            SessionState::TERMINAL,
+            SessionPatch {
+                state: Some(SessionState::Suspended.as_str().into()),
+                turn_active: Some(false),
+                ..Default::default()
+            },
+        );
+        self.record(ek::SESSION_SUSPENDED, None, json!({ "idle_ms": idle_ms }));
+        self.record(
+            ek::STATE,
+            None,
+            json!({ "state": SessionState::Suspended.as_str(), "end_reason": null }),
+        );
+        self.publish_session();
+        let _ = tokio::time::timeout(CANCEL_TIMEOUT, self.handle.close()).await;
+        self.remove_container().await;
+        self.reject_open_permissions().await;
+    }
+
     async fn finish_unexpected(&mut self) {
         let Ok(Some(s)) = self.store.get_session(&self.session_id) else {
             return;
@@ -1387,6 +1635,7 @@ impl SessionState {
             "paused" => Self::Paused,
             "waiting_on_you" => Self::WaitingOnYou,
             "waiting_on_check" => Self::WaitingOnCheck,
+            "suspended" => Self::Suspended,
             "killed_budget" => Self::KilledBudget,
             "failed" => Self::Failed,
             _ => Self::Closed,
@@ -1428,6 +1677,31 @@ async fn until_silent<F: std::future::Future>(
         if let Ok(done) = tokio::time::timeout(wait, &mut turn).await {
             return Ok(done);
         }
+    }
+}
+
+/// The pause reason an exhausted session shows: what refused, and what
+/// happens next.
+fn exhausted_reason(
+    seen: &crate::store::exhaustion::Exhausted,
+    decision: &crate::session::exhaustion::Decision,
+) -> String {
+    use crate::session::exhaustion as x;
+    let what = format!("{} is exhausted ({})", seen.provider, seen.reason);
+    let next = match decision.outcome {
+        x::WAITING => format!(
+            "it resumes when the provider's limit resets at {}",
+            decision.next_wake_ms.map(x::utc).unwrap_or_default()
+        ),
+        x::FALLING_BACK => format!(
+            "it continues on {}",
+            decision.fallback.as_deref().unwrap_or("the fallback")
+        ),
+        _ => "it waits for you".into(),
+    };
+    match &decision.note {
+        Some(note) => format!("{what}; {next}. {note}"),
+        None => format!("{what}; {next}."),
     }
 }
 

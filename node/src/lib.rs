@@ -3,9 +3,11 @@
 
 pub mod adapter;
 pub mod authority;
+pub mod awake;
 pub mod boundary;
 pub mod broker;
 pub mod config;
+pub mod continuation;
 pub mod corpus;
 pub mod embed;
 pub mod environment;

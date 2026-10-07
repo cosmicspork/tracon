@@ -260,6 +260,21 @@ impl Backend for PodmanBackend {
         setup::setup(cfg, rebuild).await
     }
 
+    async fn recover(&self, cfg: &Config) {
+        match setup::recover_gateway(cfg).await {
+            Ok(setup::Recovery::Running) => {}
+            Ok(setup::Recovery::Started) => tracing::info!(
+                container = %cfg.boundary.gateway_container,
+                "the gateway was stopped; started it again"
+            ),
+            Ok(setup::Recovery::Missing) => tracing::warn!(
+                container = %cfg.boundary.gateway_container,
+                "there is no gateway; `tracon setup` makes one"
+            ),
+            Err(error) => tracing::warn!(%error, "could not start the stopped gateway"),
+        }
+    }
+
     async fn check_all(&self, cfg: &Config, deep: bool) -> BoundaryReport {
         checks::check_all(cfg, self.selinux, deep).await
     }

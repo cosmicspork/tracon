@@ -30,12 +30,17 @@ use support::fake::FakeAdapter;
 /// `(method, uri, headers, body)` as the stub saw it.
 type SeenRequest = (String, String, Vec<(String, String)>, String);
 
+/// A provider's whole answer: status, headers and body.
+type Answer = (u16, Vec<(&'static str, String)>, &'static str);
+
 #[derive(Clone, Default)]
 struct Seen {
     requests: Arc<Mutex<Vec<SeenRequest>>>,
     /// When set, the stub answers this status with a provider-shaped error
     /// body instead of the usual stream — a live provider's 429.
     refuse: Arc<Mutex<Option<u16>>>,
+    /// When set, the stub answers exactly this: status, headers and body.
+    answer: Arc<Mutex<Option<Answer>>>,
     /// When set, the stub streams an answer carrying no `usage` at all — a
     /// self-hosted server that reports nothing.
     no_usage: Arc<Mutex<bool>>,
@@ -61,6 +66,18 @@ async fn start_upstream(seen: Seen) -> u16 {
                     headers,
                     String::from_utf8_lossy(&body).into_owned(),
                 ));
+                if let Some((code, headers, body)) = seen.answer.lock().unwrap().clone() {
+                    let mut res = (
+                        StatusCode::from_u16(code).unwrap(),
+                        [("content-type", "application/json")],
+                        body,
+                    )
+                        .into_response();
+                    for (k, v) in headers {
+                        res.headers_mut().insert(k, v.parse().unwrap());
+                    }
+                    return res;
+                }
                 if let Some(code) = *seen.refuse.lock().unwrap() {
                     return (
                         StatusCode::from_u16(code).unwrap(),
@@ -592,6 +609,10 @@ async fn a_provider_that_refuses_a_turn_is_reported_on_the_session_as_it_retries
     assert_eq!(errors[0].payload["provider"], "stub");
     assert_eq!(errors[0].payload["status"], 429);
     assert_eq!(errors[0].payload["message"], "Error");
+    assert_eq!(
+        errors[0].payload["cause"], "throttled",
+        "a bare rate_limit_error is throttling, not a spent window"
+    );
     assert_eq!(errors[0].payload["attempt"], 1);
     assert_eq!(errors[1].payload["attempt"], 2);
     // Informational: the harness has not given up, so neither has the session.
@@ -624,6 +645,73 @@ async fn a_provider_that_refuses_a_turn_is_reported_on_the_session_as_it_retries
             .count(),
         2
     );
+}
+
+/// Each refusal says what kind it is, and an exhausted window carries the
+/// reset the provider sent, and only that: a refusal without one has none.
+#[tokio::test]
+async fn a_refusal_is_classified_and_an_exhaustion_keeps_the_providers_reset() {
+    state::isolate();
+    let h = harness(STORE, LOOPBACK).await;
+    let sid = "s-exhausted";
+    running_session(&h.store, sid);
+    let token = h.manager.register_tool_token_for_test(sid, "work").await;
+    let cases: Vec<Answer> = vec![
+        (
+            429,
+            vec![
+                ("anthropic-ratelimit-unified-status", "rejected".into()),
+                ("anthropic-ratelimit-unified-reset", "1791374400".into()),
+            ],
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"Error"}}"#,
+        ),
+        (
+            429,
+            vec![],
+            r#"{"error":{"message":"You exceeded your current quota","type":"insufficient_quota"}}"#,
+        ),
+        (
+            401,
+            vec![],
+            r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#,
+        ),
+        (
+            529,
+            vec![],
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        ),
+    ];
+    for answer in cases {
+        *h.seen.answer.lock().unwrap() = Some(answer);
+        call(
+            &h.app,
+            "POST",
+            "/model/stub/v1/messages",
+            &token,
+            json!({"model": "claude-x", "messages": []}),
+        )
+        .await;
+    }
+    let errors: Vec<_> = h
+        .store
+        .events_after(sid, 0, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "provider_error")
+        .map(|e| e.payload)
+        .collect();
+    let causes: Vec<_> = errors.iter().map(|p| p["cause"].clone()).collect();
+    assert_eq!(
+        causes,
+        vec![
+            json!("exhausted"),
+            json!("exhausted"),
+            json!("auth"),
+            json!("outage")
+        ]
+    );
+    assert_eq!(errors[0]["reset_ms"], 1_791_374_400_000i64);
+    assert!(errors[1]["reset_ms"].is_null(), "no reset is invented");
 }
 
 #[tokio::test]
