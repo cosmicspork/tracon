@@ -246,15 +246,23 @@ pub fn anchor(host: &str) -> String {
     s
 }
 
-async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
-    let _ = podman(&["rm", "-f", "-i", &cfg.boundary.gateway_container]).await;
+/// The gateway's own user service, on a Linux host whose systemd user manager
+/// is running. Its own unit, so its own cgroup: restarting or stopping the
+/// node's service, which ends everything in the node's cgroup, leaves the
+/// boundary's gateway running, and systemd starts a gateway that stopped
+/// rather than the operator rerunning setup.
+pub const GATEWAY_UNIT: &str = "tracon-gateway.service";
+
+/// The `podman run` arguments that make the gateway, without the verb and
+/// without how it is supervised.
+fn gateway_args(cfg: &Config, selinux: bool) -> Result<Vec<String>, BoundaryError> {
     let allow = Config::allow_file();
     let net_int = format!("{}:ip={}", cfg.boundary.network, cfg.boundary.gateway_ip);
     // Two forwards. On a Podman machine the node is outside the VM and gvproxy
     // reaches the host's loopback, so TCP via `host.containers.internal` works.
     // On a Linux host that name is a pasta interface address, not loopback, so
     // the node listens on a Unix socket and the gateway mounts its directory.
-    let selinux = super::selinux_enabled().await;
+    //
     // Under SELinux a plain bind mount is unreadable from the container (the
     // gateway died on "allow.txt missing" on an SELinux host); `:z` relabels the node's
     // own files, which is fine for state tracon owns.
@@ -293,26 +301,20 @@ async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
             )
         }
     };
-    let upstream_env = format!("TRACON_UPSTREAM={upstream}");
-    let listen_env = format!("TRACON_LISTEN_IP={}", cfg.boundary.gateway_ip);
-    let egress_env = format!("TRACON_EGRESS_UPSTREAM={egress}");
-    let egress_port_env = format!("TRACON_EGRESS_PORT={}", cfg.gateway.qa_proxy_port);
-    let mut args: Vec<&str> = vec![
-        "run",
-        "-d",
-        "--name",
-        &cfg.boundary.gateway_container,
+    let mut args: Vec<String> = vec![
+        "--name".into(),
+        cfg.boundary.gateway_container.clone(),
         // The default network gives the gateway its own egress; the internal
         // one is how the harness reaches it.
-        "--network",
-        "podman",
-        "--network",
-        &net_int,
-        "-v",
-        &mount,
+        "--network".into(),
+        "podman".into(),
+        "--network".into(),
+        net_int,
+        "-v".into(),
+        mount,
     ];
-    if let Some(m) = &socket_mount {
-        args.push("-v");
+    if let Some(m) = socket_mount {
+        args.push("-v".into());
         args.push(m);
         // SELinux forbids a confined container process from connecting to a
         // socket whose listener is unconfined (`connectto`), whatever the file
@@ -320,29 +322,271 @@ async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
         // so the harness never touches the socket — so it runs unconfined; the
         // harness keeps its label.
         if selinux {
-            args.push("--security-opt");
-            args.push("label=disable");
+            args.push("--security-opt".into());
+            args.push("label=disable".into());
         }
     }
-    args.extend([
-        "-e",
-        &upstream_env,
-        "-e",
-        &listen_env,
-        "-e",
-        &egress_env,
-        "-e",
-        &egress_port_env,
-        &cfg.boundary.gateway_image,
-    ]);
-    podman(&args).await?;
+    for env in [
+        format!("TRACON_UPSTREAM={upstream}"),
+        format!("TRACON_LISTEN_IP={}", cfg.boundary.gateway_ip),
+        format!("TRACON_EGRESS_UPSTREAM={egress}"),
+        format!("TRACON_EGRESS_PORT={}", cfg.gateway.qa_proxy_port),
+    ] {
+        args.push("-e".into());
+        args.push(env);
+    }
+    args.push(cfg.boundary.gateway_image.clone());
+    Ok(args)
+}
+
+/// Make the gateway, under its own user service where there is a user manager
+/// to run one, and as a plain container where there is not (a Podman
+/// machine, whose containers live in its VM and outside the node's cgroup
+/// anyway). Either way the result replaces whatever gateway was there.
+async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
+    let args = gateway_args(cfg, super::selinux_enabled().await)?;
+    if let Some(unit) = gateway_unit_path().filter(|_| !cfg!(target_os = "macos")) {
+        if user_manager_running().await {
+            let podman_bin = super::resolve_podman_env(cfg);
+            let text = gateway_unit_text(&podman_bin, &args, &service_path());
+            write_unit(&unit, &text)?;
+            systemctl(&["daemon-reload"]).await?;
+            systemctl(&["enable", GATEWAY_UNIT]).await?;
+            // A restart, not a start: setup is also how a changed gateway
+            // definition is applied.
+            systemctl(&["restart", GATEWAY_UNIT]).await?;
+            tracing::info!(unit = GATEWAY_UNIT, container = %cfg.boundary.gateway_container, "gateway started under its own user service");
+            return Ok(());
+        }
+    }
+    let _ = podman(&["rm", "-f", "-i", &cfg.boundary.gateway_container]).await;
+    let mut run: Vec<&str> = vec!["run", "-d"];
+    run.extend(args.iter().map(String::as_str));
+    podman(&run).await?;
     tracing::info!(container = %cfg.boundary.gateway_container, "gateway started");
     Ok(())
+}
+
+/// What `recover_gateway` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recovery {
+    /// The gateway was running; nothing was touched.
+    Running,
+    /// It was stopped and was started again: under its own user service, put
+    /// there now if setup had not already, or as the container it was.
+    Started,
+    /// There is no gateway to start. Setup makes one; recovery never does,
+    /// because it has no image or network it can be sure of.
+    Missing,
+}
+
+/// Bring back a gateway that stopped, without rerunning setup: at startup,
+/// after a node-service restart took an older gateway down with it, or from a
+/// re-check in the interface. A running gateway is never touched, so this is
+/// safe while sessions are using it. The boundary checks that follow still
+/// decide whether the node runs harnesses; this only gives them a gateway to
+/// find.
+pub async fn recover_gateway(cfg: &Config) -> Result<Recovery, BoundaryError> {
+    let name = &cfg.boundary.gateway_container;
+    let state = podman(&["inspect", name, "--format", "{{.State.Running}}"]).await;
+    if matches!(&state, Ok(running) if running.trim() == "true") {
+        return Ok(Recovery::Running);
+    }
+    let image_present = podman(&["image", "exists", &cfg.boundary.gateway_image])
+        .await
+        .is_ok();
+    let network_present = podman(&["network", "exists", &cfg.boundary.network])
+        .await
+        .is_ok();
+    if let Some(unit) = gateway_unit_path().filter(|_| !cfg!(target_os = "macos")) {
+        if image_present && network_present && user_manager_running().await {
+            // Written again whatever is there: an older setup left none (its
+            // gateway was a container in the node's own cgroup, which is how
+            // it came to be stopped), and a newer binary may describe it
+            // differently. Both converge on the same unit.
+            let args = gateway_args(cfg, super::selinux_enabled().await)?;
+            let podman_bin = super::resolve_podman_env(cfg);
+            let text = gateway_unit_text(&podman_bin, &args, &service_path());
+            write_unit(&unit, &text)?;
+            systemctl(&["daemon-reload"]).await?;
+            systemctl(&["enable", GATEWAY_UNIT]).await?;
+            systemctl(&["start", GATEWAY_UNIT]).await?;
+            return Ok(Recovery::Started);
+        }
+    }
+    if state.is_ok() {
+        // A container exists and is stopped: start it as it was made.
+        podman(&["start", name]).await?;
+        return Ok(Recovery::Started);
+    }
+    Ok(Recovery::Missing)
+}
+
+/// Where the gateway's unit goes: beside the node's own.
+fn gateway_unit_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|home| {
+        std::path::PathBuf::from(home)
+            .join(".config/systemd/user")
+            .join(GATEWAY_UNIT)
+    })
+}
+
+/// Whether there is a systemd user manager to hand the gateway to. A host
+/// without one (a container, a session with no user bus) keeps the plain
+/// container.
+async fn user_manager_running() -> bool {
+    tokio::process::Command::new("systemctl")
+        .args(["--user", "show-environment"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|s| s.success())
+}
+
+async fn systemctl(args: &[&str]) -> Result<(), BoundaryError> {
+    let out = tokio::process::Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .output()
+        .await?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(BoundaryError::Other(format!(
+            "systemctl --user {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )))
+    }
+}
+
+fn write_unit(path: &std::path::Path, text: &str) -> Result<(), BoundaryError> {
+    if std::fs::read_to_string(path).ok().as_deref() == Some(text) {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, text)?;
+    Ok(())
+}
+
+/// The PATH the unit runs podman with: the node's own, which found podman and
+/// its helpers (conmon, netavark, pasta) already.
+fn service_path() -> String {
+    std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into())
+}
+
+/// The gateway's unit, as Podman's own Quadlet generator would write it for a
+/// container: `--cgroups=split` keeps conmon and the container in this unit's
+/// cgroup rather than the caller's, `--sdnotify=conmon` makes it ready once the
+/// container runs, and the cidfile is how stop finds it. `--replace` takes
+/// over a gateway an older setup left as a bare container.
+pub fn gateway_unit_text(podman_bin: &str, args: &[String], path: &str) -> String {
+    let podman_bin = systemd_quote(podman_bin);
+    let run = args
+        .iter()
+        .map(|a| systemd_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "# Written by `tracon setup` (and by the node, when it finds the gateway stopped).\n\
+         # The gateway runs as its own user service so that restarting or stopping the\n\
+         # node's service, which ends everything in that service's cgroup, leaves the\n\
+         # boundary's gateway running, and so a gateway that stops is started again.\n\
+         [Unit]\n\
+         Description=tracon gateway\n\
+         Documentation=https://github.com/cosmicspork/tracon\n\
+         After=network-online.target\n\
+         Wants=network-online.target\n\
+         \n\
+         [Service]\n\
+         Type=notify\n\
+         NotifyAccess=all\n\
+         Delegate=yes\n\
+         KillMode=mixed\n\
+         Environment={path}\n\
+         ExecStart={podman_bin} run --cidfile=%t/%N.cid --replace --rm --cgroups=split --sdnotify=conmon -d {run}\n\
+         ExecStop={podman_bin} rm -v -f -i --cidfile=%t/%N.cid\n\
+         ExecStopPost=-{podman_bin} rm -v -f -i --cidfile=%t/%N.cid\n\
+         Restart=always\n\
+         RestartSec=5\n\
+         TimeoutStopSec=30\n\
+         \n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        path = env_quote(&format!("PATH={path}")),
+    )
+}
+
+/// An `Environment=` assignment, quoted: systemd expands specifiers there but
+/// not variables, so only `%` is doubled.
+fn env_quote(assignment: &str) -> String {
+    let escaped = assignment
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
+    format!("\"{escaped}\"")
+}
+
+/// One word of a unit's command line, quoted so systemd reads it back as
+/// exactly that word: double quotes, with backslash and quote escaped, and
+/// `%` and `$` doubled so neither specifier nor variable expansion touches it.
+fn systemd_quote(word: &str) -> String {
+    let mut out = String::with_capacity(word.len() + 2);
+    out.push('"');
+    for c in word.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '%' => out.push_str("%%"),
+            '$' => out.push_str("$$"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_gateway_unit_runs_it_in_its_own_cgroup_and_restarts_it() {
+        let args: Vec<String> = ["--name", "tracon-gw", "-e", "A=b c", "img:1"]
+            .map(String::from)
+            .to_vec();
+        let text = gateway_unit_text("/usr/bin/podman", &args, "/usr/bin:/bin");
+        assert!(text.contains("--cgroups=split"), "{text}");
+        assert!(text.contains("Restart=always"), "{text}");
+        assert!(text.contains("Type=notify"), "{text}");
+        assert!(text.contains("WantedBy=default.target"), "{text}");
+        assert!(
+            text.contains("Environment=\"PATH=/usr/bin:/bin\""),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "ExecStart=\"/usr/bin/podman\" run --cidfile=%t/%N.cid --replace --rm \
+                 --cgroups=split --sdnotify=conmon -d \"--name\" \"tracon-gw\" \"-e\" \"A=b c\" \"img:1\""
+            ),
+            "{text}"
+        );
+        assert!(text.contains("ExecStop=\"/usr/bin/podman\" rm"), "{text}");
+    }
+
+    #[test]
+    fn a_unit_word_reads_back_as_exactly_that_word() {
+        assert_eq!(systemd_quote("plain"), "\"plain\"");
+        assert_eq!(systemd_quote("a b"), "\"a b\"");
+        assert_eq!(systemd_quote("50%"), "\"50%%\"");
+        assert_eq!(systemd_quote("$HOME"), "\"$$HOME\"");
+        assert_eq!(systemd_quote("say \"hi\""), "\"say \\\"hi\\\"\"");
+        assert_eq!(systemd_quote("a\\b"), "\"a\\\\b\"");
+        assert_eq!(env_quote("PATH=/a%b:$c"), "\"PATH=/a%%b:$c\"");
+    }
 
     #[test]
     fn each_image_has_its_own_definitions_digest() {
