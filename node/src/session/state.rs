@@ -14,6 +14,11 @@ pub enum SessionState {
     /// Defined here because the schema and the interface both name it; nothing
     /// in this slice runs deterministic checks between turns yet.
     WaitingOnCheck,
+    /// Its work is published and it went idle, so it was put away: container
+    /// stopped, egress grant revoked, workspace kept. Not ended — ending it is
+    /// the operator's — and carried on as a new session on that workspace
+    /// when a CI failure or a review comment needs it.
+    Suspended,
     Closed,
     KilledBudget,
     Failed,
@@ -27,6 +32,7 @@ impl SessionState {
             Self::Paused => "paused",
             Self::WaitingOnYou => "waiting_on_you",
             Self::WaitingOnCheck => "waiting_on_check",
+            Self::Suspended => "suspended",
             Self::Closed => "closed",
             Self::KilledBudget => "killed_budget",
             Self::Failed => "failed",
@@ -69,6 +75,9 @@ pub enum EndReason {
     /// about this session, and every session on this node will end the same
     /// way until the image or the pin changes.
     Incompatible,
+    /// The operator carried a suspended session's work on in a new session,
+    /// which `continued_from` names.
+    Continued,
     /// The node stopped or restarted while the session was live: a graceful
     /// shutdown ended it, or the next start found its row still open. Not the
     /// operator's stop and not the harness's failure, and the work it was
@@ -87,6 +96,7 @@ impl EndReason {
             Self::PhaseDone => "phase_done",
             Self::Detached => "detached",
             Self::Incompatible => "incompatible",
+            Self::Continued => "continued",
             Self::NodeRestart => "node_restart",
             Self::Error => "error",
         }
@@ -112,6 +122,11 @@ pub mod event_kind {
     /// start another turn. `source` is telemetry only; the state is decisive.
     pub const SESSION_PAUSED: &str = "session_paused";
     pub const SESSION_RESUMED: &str = "session_resumed";
+    /// The session's work was published (`url`, `review_id`): the change on
+    /// the forge it is now answerable for.
+    pub const PUBLISHED: &str = "published";
+    /// A published session went idle and was put away (`idle_ms`).
+    pub const SESSION_SUSPENDED: &str = "session_suspended";
     /// The host slept while this session was live (`asleep_ms`,
     /// `inhibitor_held`). An interruption, not a gap: the session's waiting
     /// cards had their deadlines moved on by the same time.

@@ -79,17 +79,6 @@ runs, or in the daily desktop use since.
       and rewriting it is an operator-approved step, never silent. Still true on
       2026-10-03: #333, published from session `01a10447`, carries a
       `tracon@localhost` commit.
-- [ ] **Close the loop on a published session.** Once its review is approved and
-      published, session `01a10447` (2026-10-03, #333) went on sitting `running` in its
-      container, holding its egress grant, with nothing on the session naming the pull
-      request: the URL is only on the review, and the agent had ended its turn rather
-      than wait on `review_status`. Record the publication on the session (`published`,
-      with the URL) and show it there, then suspend a published session after an idle
-      period — container stopped, grant revoked, workspace kept — so a CI failure or a
-      review comment can resume it. Ending it stays the operator's.
-- [ ] **Open external links through a clean Linux host launcher**: the AppImage's bundled
-      `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
-      host environment for the child only and keep the URL and origin restrictions.
 
 ## Next — the working loop, made comfortable
 

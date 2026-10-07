@@ -209,6 +209,8 @@ export const api = {
       toolchain: ToolchainStatus | null
       /** Absent from a node that predates `show_work`. */
       shown_work?: ShownWork[]
+      /** What this session's reviews put on the forge. Absent from older nodes. */
+      publications?: { review_id: string; url: string }[]
     }>('GET', `/api/sessions/${id}`),
   /** What this session may do, and what it would still have to ask about.
       Read-only: the node answers it by running its own policy and grants. */

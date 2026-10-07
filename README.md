@@ -807,6 +807,7 @@ permission_timeout_secs = 900       # a harness's own unanswered ask is a deny
 approval_expiry_secs = 86400        # a brokered call held for the operator expires unanswered
 # default_channel = "work"          # the channel the composer starts on; empty is no preference
 claim_grace_secs = 60               # a review claim lapses this long after the client vanishes
+suspend_published_after_secs = 1800 # a published session idle this long is suspended; 0 never
 # worktree_root = "/private/tmp"    # on macOS; the system temp directory elsewhere
 
 [runtime]

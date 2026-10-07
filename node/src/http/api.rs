@@ -1444,6 +1444,10 @@ pub async fn get_session(
         "session": row,
         "waiting": waiting,
         "questions": questions,
+        "publications": s.store().session_publications(&id).unwrap_or_default()
+            .into_iter()
+            .map(|(review_id, url)| json!({ "review_id": review_id, "url": url }))
+            .collect::<Vec<_>>(),
         "usage": usage,
         "ceiling": ceiling,
         "toolchain": toolchain,
