@@ -65,17 +65,11 @@ Needed for daily use, but not blocking it today.
       keep starting from the trusted base cache: a directory the agent wrote must not be
       able to make the review gate pass. A node-built cache of the default branch for
       checks is the follow-on.
-- [ ] **Help set up a repository once.** Node tools that draft a `[[repo]]` entry (image,
-      checks, egress) from what the repository already holds — its devcontainer,
-      `package.json` scripts, a `just` recipe — try it in a fresh container and report
-      what failed, and propose it on a card; the node writes the entry once the operator
-      approves, never the agent. Egress asks approved while trying become suggested
-      `egress` entries. A built-in setup skill ships through channel manifests for managed
-      harnesses, and the tool descriptions carry enough for an external one. How to run an
-      application and give it data stays the agent's job on each task, with optional
-      free-text notes in the operator notes, so a recipe is set up once rather than kept
-      in step with the code. The agent proposes checks and setup; it cannot waive checks
-      or authorize its own environment.
+- [ ] **Help set up a repository once: the skill.** The draft, trial and proposal
+      tools exist (`repo_setup_*`). What remains: a built-in setup skill shipped through
+      channel manifests for managed harnesses, and optional free-text notes on how to run
+      the application and give it data, kept in the operator notes, so a recipe is set up
+      once rather than kept in step with the code.
 
 **What the boundary defeats, and what replaces it.** The harnesses offer tools the
 isolation silently breaks — the proxy answers 403, the agent sees a network error and
