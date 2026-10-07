@@ -312,6 +312,7 @@ pub fn router(state: AppState) -> Router {
         )
         // One prompt: the item and the session that starts on it.
         .route("/api/compose", post(api::compose))
+        .route("/api/readiness", get(api::readiness))
         .route("/api/sessions/archive-ended", post(api::archive_ended))
         .route("/api/sessions/archive-legacy", post(api::archive_legacy))
         .route("/api/sessions/{id}/reopen", post(api::reopen_session))

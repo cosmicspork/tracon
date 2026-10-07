@@ -41,6 +41,7 @@ import type {
   RecallHit,
   RecentRepo,
   SessionAuthority,
+  RepoReadiness,
   SessionOutcome,
   Session,
   SessionUsage,
@@ -221,6 +222,14 @@ export const api = {
       Read-only: the node answers it by running its own policy and grants. */
   sessionAuthority: (id: string) =>
     call<SessionAuthority>('GET', `/api/sessions/${id}/authority`),
+  /** What investigating, verifying and publishing from `repo` would lack. */
+  readiness: (channel: string, repo: string, workItem?: string | null) =>
+    call<RepoReadiness>(
+      'GET',
+      `/api/readiness?channel=${encodeURIComponent(channel)}&repo=${encodeURIComponent(repo)}${
+        workItem ? `&work_item=${encodeURIComponent(workItem)}` : ''
+      }`,
+    ),
   /** What the session came to: changed, verified, pending, uncertain, cost. */
   sessionOutcome: (id: string) => call<SessionOutcome>('GET', `/api/sessions/${id}/outcome`),
   /** Mint a single-use capability for this session's OpenCode view. The URL
