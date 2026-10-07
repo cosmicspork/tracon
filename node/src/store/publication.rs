@@ -19,6 +19,13 @@
 //! - `uncertain` — the outcome is genuinely unknown: the node restarted
 //!   mid-attempt, or the forge could not be reached to establish what is
 //!   there. Never presented as success or failure.
+//!
+//! Beside the state, a row keeps what the publication was authorized to say
+//! (`title`, `body`, `outputs_json`) and whether any attempt got as far as
+//! speaking to the forge (`forge_contacted`). The first is what a recovery
+//! retries — never new prose, which would need a fresh approval — and the
+//! second is what tells "refused before anything was attempted" from "the
+//! forge refused it" when the operator is deciding what to do next.
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -46,6 +53,29 @@ pub struct PublicationRow {
     pub instance: String,
     pub created_ms: i64,
     pub updated_ms: i64,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub outputs_json: Option<String>,
+    pub forge_contacted: bool,
+}
+
+/// What a publication record means to the operator, settled from its state
+/// and its evidence. Exactly one of these is ever shown; none of them is a
+/// guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationOutcome {
+    /// Refused before any attempt spoke to the forge: nothing can exist there
+    /// because of it.
+    NotAttempted,
+    /// This process is attempting it now.
+    InProgress,
+    /// It stopped, or the forge refused it, and nothing it did is unaccounted
+    /// for.
+    Failed,
+    /// What the forge holds is unknown. Recovery looks before it acts.
+    Uncertain,
+    Published,
 }
 
 impl PublicationRow {
@@ -70,7 +100,27 @@ impl PublicationRow {
             instance: r.get("instance")?,
             created_ms: r.get("created_ms")?,
             updated_ms: r.get("updated_ms")?,
+            title: r.get("title")?,
+            body: r.get("body")?,
+            outputs_json: r.get("outputs_json")?,
+            forge_contacted: r.get("forge_contacted")?,
         })
+    }
+
+    /// The outcome as `instance` (the process asking) sees it. An attempt
+    /// still marked in flight under another process was interrupted, which is
+    /// uncertain whatever step it had reached.
+    pub fn outcome(&self, instance: &str) -> PublicationOutcome {
+        match self.state.as_str() {
+            "opened" => PublicationOutcome::Published,
+            "uncertain" => PublicationOutcome::Uncertain,
+            "failed" if !self.forge_contacted && self.pushed_sha.is_none() => {
+                PublicationOutcome::NotAttempted
+            }
+            "failed" => PublicationOutcome::Failed,
+            _ if self.instance == instance => PublicationOutcome::InProgress,
+            _ => PublicationOutcome::Uncertain,
+        }
     }
 
     /// Whether anything may already exist on the forge because of this row.
@@ -107,8 +157,9 @@ impl Store {
             conn.execute(
                 "INSERT INTO publication
                     (id, review_id, revision_id, candidate_id, channel, node_id, provider, project,
-                     base, branch, head_sha, state, attempts, instance, created_ms, updated_ms)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'pending',1,?12,?13,?13)
+                     base, branch, head_sha, state, attempts, instance, created_ms, updated_ms,
+                     forge_contacted)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'pending',1,?12,?13,?13,0)
                  ON CONFLICT(id) DO UPDATE SET
                     state=CASE WHEN publication.state='opened' THEN 'opened' ELSE 'pending' END,
                     attempts=publication.attempts + 1,
@@ -156,6 +207,36 @@ impl Store {
             .query_map([review_id], PublicationRow::from_row)?
             .collect::<std::result::Result<_, _>>()?;
         Ok(rows)
+    }
+
+    /// What this publication was authorized to send, written with each
+    /// attempt. A recovery reads it back rather than taking prose from the
+    /// caller, so retrying can never publish words nobody approved.
+    pub fn publication_authorized(
+        &self,
+        id: &str,
+        title: &str,
+        body: &str,
+        outputs_json: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE publication SET title=?2, body=?3, outputs_json=?4 WHERE id=?1",
+            params![id, title, body, outputs_json],
+        )?;
+        Ok(())
+    }
+
+    /// About to speak to the forge for the first time in this attempt. Once
+    /// set it stays set: a later attempt refused early does not make an
+    /// earlier one's effects disappear.
+    pub fn publication_contacting(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE publication SET forge_contacted=1, updated_ms=?2 WHERE id=?1",
+            params![id, now_ms()],
+        )?;
+        Ok(())
     }
 
     /// The branch was pushed and the remote was then observed to hold it.
@@ -292,6 +373,34 @@ mod tests {
         assert!(interrupted.note.unwrap().contains("restarted"));
         // A row that reached a settled state is left exactly as it was.
         assert_eq!(store.publication("p2").unwrap().unwrap().state, "pushed");
+    }
+
+    #[test]
+    fn the_outcome_tells_not_attempted_from_failed_and_live_from_interrupted() {
+        let store = Store::open_in_memory().unwrap();
+        let row = store.publication_begin(&begin("p1", "one")).unwrap();
+        assert_eq!(row.outcome("one"), PublicationOutcome::InProgress);
+        assert_eq!(row.outcome("two"), PublicationOutcome::Uncertain);
+
+        store.publication_failed("p1", "no credential").unwrap();
+        let row = store.publication("p1").unwrap().unwrap();
+        assert_eq!(row.outcome("one"), PublicationOutcome::NotAttempted);
+
+        // Once an attempt spoke to the forge, a later early refusal does not
+        // make that disappear.
+        store.publication_begin(&begin("p1", "one")).unwrap();
+        store.publication_contacting("p1").unwrap();
+        store.publication_failed("p1", "refused").unwrap();
+        store.publication_begin(&begin("p1", "one")).unwrap();
+        store.publication_failed("p1", "no credential").unwrap();
+        let row = store.publication("p1").unwrap().unwrap();
+        assert_eq!(row.outcome("one"), PublicationOutcome::Failed);
+
+        store
+            .publication_opened("p1", "https://forge/pull/1")
+            .unwrap();
+        let row = store.publication("p1").unwrap().unwrap();
+        assert_eq!(row.outcome("one"), PublicationOutcome::Published);
     }
 
     #[test]
