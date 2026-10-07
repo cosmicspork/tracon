@@ -245,6 +245,15 @@ run commands. So a workspace carrying one is refused at launch, as one carrying
 `.claude/settings…` path or into `.git/` mid-session. Ignored files never reach a
 workspace, so a checkout's own gitignored settings are unaffected.
 
+**The ledger records a decision for every tool call, whichever harness asked.**
+OpenCode asks the node before each call; Claude Code lets reads and searches through
+on its own rules and never sends a `can_use_tool` for them. The Claude adapter notices
+a call whose result arrives without an ask and reports it, normalized exactly as an
+ask would have been, and the supervisor records the `policy_allowed` the node's policy
+gives it, marked `decided_by: harness`. The call has already run, so nothing is asked;
+if the policy would have asked or denied, the record says the harness let it through
+and what the policy would have done, rather than naming a rule that did not apply.
+
 ### Model auth
 
 **Model credentials are brokered like every other credential.** The harness holds
@@ -998,6 +1007,26 @@ the interface rather than papered over. Channels carry daily ceilings enforced a
 two points: session start is refused, and the gateway refuses the model calls of
 sessions already running, so a running session stops spending and the operator
 decides.
+
+**An exhausted provider is a policy, not a failure.** The gateway reads every refused
+model call and says what kind it was on the session's `provider_error`: throttling
+and outages clear on their own and the harness retries them, an auth failure does
+not clear by waiting, and exhaustion (a spent quota, a subscription's usage window,
+an empty balance) is the one a channel chooses for, with a per-run override:
+`pause` (the default), `fallback` to a named model, or `fallback_then_wait`. The
+decision is recorded (`provider_exhausted`: policy, reason, model, next wake) and
+the session is fenced like any pause. Its safe boundary is the fenced turn settling,
+and nothing resumes or continues before that boundary is recorded. A waiting
+session is woken by the node's periodic tick once the provider's own reset time has
+passed. The reset is only ever one the provider sent, so a provider that sent none
+leaves the session for the operator, because a guessed timer either wakes it into
+the same refusal or sleeps past the lift. Before it goes back to work, everything that
+would refuse it starting is checked again: the channel, the node, the harness pin,
+the model's binding and credential, the ceiling and the budget. If any check fails,
+the session is held with the reason. A fallback is a continuation from the boundary,
+on the fallback model, with the policy carried over, because a running harness
+cannot change model. A continuation already on its fallback has nowhere further to
+go.
 
 **A cache read is recorded, never charged.** Each step of a long session resends its
 whole context, most of it from the provider's cache; charged as input, a planning

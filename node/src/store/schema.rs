@@ -1287,7 +1287,32 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE publication ADD COLUMN outputs_json TEXT;
     ALTER TABLE publication ADD COLUMN forge_contacted INTEGER NOT NULL DEFAULT 1;
     "#,
-    // 56: what the operator has written on a review and not yet sent — the
+    // 56: what a session does when its provider is exhausted, and what it
+    // did. The policy is chosen once, when the session is made; the rest is
+    // the latest exhaustion, written when it is decided and again at the
+    // safe boundary, the wake and the outcome. Node-local: the node that runs
+    // the session is the one that wakes it.
+    r#"
+    CREATE TABLE exhaustion (
+        session_id    TEXT PRIMARY KEY,
+        policy        TEXT NOT NULL,
+        fallback      TEXT,
+        provider      TEXT,
+        model         TEXT,
+        status        INTEGER,
+        reason        TEXT,
+        reset_ms      INTEGER,
+        next_wake_ms  INTEGER,
+        decided_ms    INTEGER,
+        boundary_seq  INTEGER,
+        outcome       TEXT,
+        note          TEXT,
+        continued_by  TEXT,
+        updated_ms    INTEGER NOT NULL
+    );
+    CREATE INDEX exhaustion_outcome ON exhaustion(outcome);
+    "#,
+    // 57: what the operator has written on a review and not yet sent — the
     // reason, the edited prose — held by the node so it survives a reload, a
     // reconnect and a change of device. `version` is the compare-and-set two
     // devices write against; `revision_id` is what it was written against.
