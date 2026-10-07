@@ -112,9 +112,11 @@ pub struct Description {
     pub body: String,
 }
 
-/// What a revision asks the forge to show besides its commits. The review's
-/// own title and body are the operator's summary; they reach the forge only
-/// as a new change's description when no other description is given.
+/// What a revision ships under the operator's name besides its tree: what
+/// the forge shows, and the message and branch the tree is pushed with. The
+/// review's own title and body are the operator's summary; they reach the
+/// forge only as a new change's description when no other description is
+/// given, and as the squashed commit's message when no message is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Outputs {
     /// A new change opens with it; an existing change's title and
@@ -127,6 +129,14 @@ pub struct Outputs {
     /// Open the new change as a draft. Meaningless for an existing one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub draft: bool,
+    /// The message the squashed commit carries. Meaningless when the
+    /// revision's commits are pushed as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// The operator's rename of the branch a new change is pushed to. An
+    /// existing change's branch is the change's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 impl Outputs {
@@ -142,6 +152,7 @@ impl Outputs {
         }
         if target.change.is_some() {
             self.draft = false;
+            self.branch = None;
         }
         self
     }
@@ -161,6 +172,15 @@ pub struct Intent {
     /// of `lease` and is forced — but only over `lease`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rewrite: bool,
+    /// The commit the reviewed tree is squashed onto: `lease` when the push
+    /// adds to what the branch holds, else where the branch leaves its base.
+    /// Absent pushes the agent's commits as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub squash_onto: Option<String>,
+    /// The agent's commits beyond the base, oldest first, as listed beside
+    /// the diff.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commits: Vec<super::prose::CommitLine>,
 }
 
 /// What the forge says about an existing change.
@@ -244,6 +264,11 @@ pub enum PublishError {
         lease: String,
         found: String,
     },
+    #[error(
+        "{onto:.8}, which this revision is squashed onto, is not on the forge's {branch} any \
+         more; resubmit on top of what it holds now"
+    )]
+    SquashBaseGone { branch: String, onto: String },
     #[error("{0}")]
     Unknown(String),
     #[error("invalid publication target: {0}")]
@@ -318,6 +343,8 @@ pub struct Publication<'a> {
     /// fast-forwarding it.
     pub lease: Option<&'a str>,
     pub rewrite: bool,
+    /// Push one commit holding the reviewed tree instead of `head_sha`.
+    pub squash: Option<Squash<'a>>,
     /// A previous attempt for this same publication reached, or may have
     /// reached, the forge. Its side effects are observed rather than repeated.
     pub resume: bool,
@@ -325,6 +352,16 @@ pub struct Publication<'a> {
     pub pushed: bool,
     pub before_push: Option<&'a (dyn Fn() -> Result<(), String> + Send + Sync)>,
     pub journal: &'a dyn Journal,
+}
+
+/// One commit carrying exactly the reviewed tree, made in the publisher
+/// repository. Its parent, message, author and committer are all fixed before
+/// it is made — the author and dates are the candidate head's own — so a
+/// resumed attempt makes the identical commit and recognises it on the forge.
+#[derive(Debug, Clone, Copy)]
+pub struct Squash<'a> {
+    pub onto: &'a str,
+    pub message: &'a str,
 }
 
 /// Publish an immutable candidate. Git reads it with an empty credential
@@ -491,6 +528,13 @@ async fn attempt(
     let credential = git_remote::brokered(provider.forge().git_user(), token);
     let refname = format!("refs/heads/{}", p.target.branch);
 
+    // What is pushed: the reviewed commit, or one commit holding its tree.
+    let pushing = match &p.squash {
+        None => p.head_sha.to_string(),
+        Some(squash) => squash_commit(cfg, &publisher, &credential, p, squash, &refname).await?,
+    };
+    let pushing = pushing.as_str();
+
     // An existing change is only ever updated in place: still open, still
     // this branch of this repository into this base.
     let verified = match &p.target.change {
@@ -515,7 +559,7 @@ async fn attempt(
         None
     };
     if let (Some(Some(found)), Some(lease)) = (&observed, p.lease) {
-        if found != p.head_sha && found != lease {
+        if found != pushing && found != lease {
             return Err(PublishError::LeaseLost {
                 branch: p.target.branch.clone(),
                 lease: lease.to_string(),
@@ -524,7 +568,7 @@ async fn attempt(
         }
     }
     match observed {
-        Some(Some(ref sha)) if sha == p.head_sha => {
+        Some(Some(ref sha)) if sha == pushing => {
             // The interrupted attempt's push did land. Nothing to repeat.
             p.journal.pushed(sha).map_err(PublishError::Broker)?;
         }
@@ -534,12 +578,12 @@ async fn attempt(
             // quietly push over whatever is there now.
             return Err(PublishError::RefMismatch {
                 branch: p.target.branch.clone(),
-                expected: p.head_sha.to_string(),
+                expected: pushing.to_string(),
                 found: found.unwrap_or_else(|| "nothing".into()),
             });
         }
         _ => {
-            let refspec = format!("{}:refs/heads/{}", p.head_sha, p.target.branch);
+            let refspec = format!("{}:refs/heads/{}", pushing, p.target.branch);
             // A rewrite is forced only over the commit it was reviewed
             // against; anything else there makes the forge refuse it.
             let lease = match (p.rewrite, p.lease) {
@@ -554,13 +598,13 @@ async fn attempt(
             // a ref-update hook can reject it after the fact, and a proxy can
             // answer for a repository that is not the one named.
             match remote_sha(cfg, &publisher, &credential, &refname).await? {
-                Some(sha) if sha == p.head_sha => {
+                Some(sha) if sha == pushing => {
                     p.journal.pushed(&sha).map_err(PublishError::Broker)?
                 }
                 found => {
                     return Err(PublishError::RefMismatch {
                         branch: p.target.branch.clone(),
-                        expected: p.head_sha.to_string(),
+                        expected: pushing.to_string(),
                         found: found.unwrap_or_else(|| "nothing".into()),
                     })
                 }
@@ -596,7 +640,7 @@ async fn attempt(
             // attempt already opened the change, record that one rather than
             // opening another.
             let found = if p.resume {
-                existing_change(provider, cfg, &publisher, &env, p).await?
+                existing_change(provider, cfg, &publisher, &env, p, pushing).await?
             } else {
                 None
             };
@@ -962,6 +1006,97 @@ fn same_text(found: &str, sent: &str) -> bool {
 /// What the forge's branch points at, or `None` when the branch is absent. An
 /// unreachable forge is `Unknown`: the push may or may not have landed, and
 /// only the forge can settle that.
+/// Make the squashed commit in the publisher repository and return it. The
+/// commit it sits on is in the candidate's history for a new branch; for one
+/// that adds to what the forge's branch holds it may be an earlier squash the
+/// agent never had, so it is fetched from the branch.
+async fn squash_commit(
+    cfg: &Config,
+    publisher: &Path,
+    credential: &Credential<'_>,
+    p: &Publication<'_>,
+    squash: &Squash<'_>,
+    refname: &str,
+) -> Result<String, PublishError> {
+    let git = &cfg.publish.git;
+    let commit = format!("{}^{{commit}}", squash.onto);
+    let held = |dir: &Path| {
+        let commit = commit.clone();
+        let dir = dir.to_path_buf();
+        async move {
+            publisher_git(git, &dir, ["cat-file", "-e", commit.as_str()])
+                .await
+                .is_ok()
+        }
+    };
+    if !held(publisher).await {
+        let fetched = publisher_git_with_credential(
+            git,
+            publisher,
+            credential,
+            [
+                "fetch",
+                "--no-tags",
+                "origin",
+                &format!("+{refname}:refs/tracon/forge"),
+            ],
+        )
+        .await;
+        if fetched.is_err() || !held(publisher).await {
+            return Err(PublishError::SquashBaseGone {
+                branch: p.target.branch.clone(),
+                onto: squash.onto.to_string(),
+            });
+        }
+    }
+    // A revision that changes nothing the branch holds pushes nothing: an
+    // empty commit is not a revision.
+    let onto_tree = publisher_git(
+        git,
+        publisher,
+        ["rev-parse", &format!("{}^{{tree}}", squash.onto)],
+    )
+    .await?;
+    if onto_tree == p.reviewed_tree {
+        return Ok(squash.onto.to_string());
+    }
+    let who = publisher_git(
+        git,
+        publisher,
+        [
+            "log",
+            "-1",
+            "--date=raw",
+            "--format=%an%x00%ae%x00%ad%x00%cn%x00%ce%x00%cd",
+            "refs/heads/candidate",
+        ],
+    )
+    .await?;
+    let who: Vec<&str> = who.split('\0').collect();
+    let [author, author_email, author_date, committer, committer_email, committer_date] = who[..]
+    else {
+        return Err(PublishError::IdentityChanged);
+    };
+    let mut command = git_remote::git_bare(git, publisher, PUBLISH_HOME, &Credential::Anonymous);
+    command
+        .env("GIT_AUTHOR_NAME", author)
+        .env("GIT_AUTHOR_EMAIL", author_email)
+        .env("GIT_AUTHOR_DATE", author_date)
+        .env("GIT_COMMITTER_NAME", committer)
+        .env("GIT_COMMITTER_EMAIL", committer_email)
+        .env("GIT_COMMITTER_DATE", committer_date)
+        .args(["commit-tree", p.reviewed_tree, "-p", squash.onto, "-m"])
+        .arg(squash.message);
+    let made = output(git, command).await?;
+    // The tree is the reviewed one by construction; read it back anyway, the
+    // way every other identity on this path is.
+    let tree = publisher_git(git, publisher, ["rev-parse", &format!("{made}^{{tree}}")]).await?;
+    if tree != p.reviewed_tree {
+        return Err(PublishError::IdentityChanged);
+    }
+    Ok(made)
+}
+
 async fn remote_sha(
     cfg: &Config,
     publisher: &Path,
@@ -1003,6 +1138,7 @@ async fn existing_change(
     publisher: &Path,
     env: &BTreeMap<String, String>,
     p: &Publication<'_>,
+    pushed: &str,
 ) -> Result<Option<String>, PublishError> {
     let args: Vec<String> = match provider {
         Provider::Github => vec![
@@ -1054,7 +1190,7 @@ async fn existing_change(
         .flatten()
         .map(|change| Listed::read(provider, change))
         .collect();
-    match recognise(&changes, p) {
+    match recognise(&changes, p, pushed) {
         Recognised::Ours(url) => Ok(Some(url)),
         Recognised::None => Ok(None),
         Recognised::Ambiguous(why) => Err(PublishError::Unknown(format!(
@@ -1116,14 +1252,14 @@ enum Recognised {
     Ambiguous(String),
 }
 
-fn recognise(changes: &[Listed], p: &Publication<'_>) -> Recognised {
+fn recognise(changes: &[Listed], p: &Publication<'_>, pushed: &str) -> Recognised {
     let marker = legacy_marker(p.id);
     if let Some(change) = changes.iter().find(|c| c.body.contains(&marker)) {
         return Recognised::Ours(change.url.clone());
     }
     let at_head: Vec<&Listed> = changes
         .iter()
-        .filter(|c| !c.cross_repository && c.base == p.target.base && c.head_sha == p.head_sha)
+        .filter(|c| !c.cross_repository && c.base == p.target.base && c.head_sha == pushed)
         .collect();
     if at_head.is_empty() {
         return Recognised::None;
@@ -1314,6 +1450,7 @@ mod tests {
             outputs,
             lease: None,
             rewrite: false,
+            squash: None,
             resume: false,
             pushed: false,
             before_push: None,
@@ -1362,7 +1499,10 @@ mod tests {
             // The forge hands the body back with its own line endings.
             listed("u/2", "feat: x", "why\r\nand how\n", "deadbeef"),
         ];
-        assert_eq!(recognise(&changes, &p), Recognised::Ours("u/2".into()));
+        assert_eq!(
+            recognise(&changes, &p, p.head_sha),
+            Recognised::Ours("u/2".into())
+        );
     }
 
     #[test]
@@ -1379,7 +1519,7 @@ mod tests {
             elsewhere,
             fork,
         ];
-        assert_eq!(recognise(&changes, &p), Recognised::None);
+        assert_eq!(recognise(&changes, &p, p.head_sha), Recognised::None);
     }
 
     #[test]
@@ -1389,14 +1529,17 @@ mod tests {
         let p = publication(&target, &outputs, &journal);
         let edited = [listed("u/1", "feat: x", "someone edited this", "deadbeef")];
         assert!(matches!(
-            recognise(&edited, &p),
+            recognise(&edited, &p, p.head_sha),
             Recognised::Ambiguous(why) if why.contains("u/1")
         ));
         let twice = [
             listed("u/1", "feat: x", "why\nand how", "deadbeef"),
             listed("u/2", "feat: x", "why\nand how", "deadbeef"),
         ];
-        assert!(matches!(recognise(&twice, &p), Recognised::Ambiguous(_)));
+        assert!(matches!(
+            recognise(&twice, &p, p.head_sha),
+            Recognised::Ambiguous(_)
+        ));
     }
 
     #[test]
@@ -1406,7 +1549,10 @@ mod tests {
         let p = publication(&target, &outputs, &journal);
         let body = format!("why\nand how\n\n{}", legacy_marker("pub1"));
         let changes = [listed("u/9", "feat: x", &body, "deadbeef")];
-        assert_eq!(recognise(&changes, &p), Recognised::Ours("u/9".into()));
+        assert_eq!(
+            recognise(&changes, &p, p.head_sha),
+            Recognised::Ours("u/9".into())
+        );
     }
 
     #[test]

@@ -158,6 +158,25 @@ impl Store {
         Ok(rows)
     }
 
+    /// The commits this node pushed as `sha` to `project` on `channel`,
+    /// whichever review pushed them: what a squash was made from.
+    pub fn publications_that_pushed(
+        &self,
+        channel: &str,
+        project: &str,
+        sha: &str,
+    ) -> Result<Vec<PublicationRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM publication WHERE channel=?1 AND project=?2 AND pushed_sha=?3 \
+             ORDER BY created_ms DESC",
+        )?;
+        let rows = stmt
+            .query_map([channel, project, sha], PublicationRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// The branch was pushed and the remote was then observed to hold it.
     pub fn publication_pushed(&self, id: &str, sha: &str) -> Result<()> {
         self.publication_set(id, "pushed", Some(sha), None, None)

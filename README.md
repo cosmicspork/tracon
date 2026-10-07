@@ -443,9 +443,15 @@ own grant, are refused each other's hosts, and never wait for one
 another. And the image's default user has to be able to write `/work` and `/cache`, which
 under rootless Podman means it runs as root.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
-a request for changes. Approval publishes exactly the reviewed bytes with the brokered
+a request for changes. Approval publishes exactly the reviewed tree with the brokered
 credential; if the branch moved since submit, approval is refused and the changed files
-are named.
+are named. The tree is what was reviewed; the commit message and branch it ships with are
+prose you edit beside the diff, where the agent's own commits are listed. By default the
+node pushes one commit holding the reviewed tree with the approved message on the
+approved branch; `commits = "keep"` (in `[publish]`, a repository's entry, or the
+channel's `publish.commits` binding) pushes the agent's commits as written instead.
+Subject and branch rules (`style`) are off unless configured, and a submission that
+breaks them is refused before it reaches you.
 
 A review either opens a new pull or merge request or updates one the branch
 already has (`change`, named at first submit). The review's title and body are the
@@ -866,6 +872,13 @@ gh = "gh"
 glab = "glab"
 git = "git"
 forge_timeout_secs = 15             # how long one gh or glab call may run
+commits = "squash"                  # one commit of the reviewed tree; "keep" pushes the agent's commits
+# [publish.style]                   # every rule off unless set; a repository entry may carry its own
+# conventional = true               # type(scope): subject, types from `types` or the usual set
+# imperative = true                 # "add", not "added" or "adds"
+# max_subject = 72
+# kebab_branch = true               # feat/lowercase-words
+# no_ticket_keys = true             # no PROJ-123 in the subject or branch
 
 [mesh]
 # hub_url = "https://hub.example.com"   # set by tracon mesh init / enroll

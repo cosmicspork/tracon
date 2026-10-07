@@ -404,7 +404,7 @@ pub async fn publish_review(
             .map_err(|e| PublishError::External(e.to_string()))?
             .map(|revision| revision.id),
     };
-    let target: crate::review::publish::Target =
+    let mut target: crate::review::publish::Target =
         serde_json::from_str(&review.target).map_err(|e| PublishError::External(e.to_string()))?;
     let intent =
         revision_intent(ctx.store, revision_id.as_deref()).map_err(PublishError::Conflict)?;
@@ -412,6 +412,40 @@ pub async fn publish_review(
         .cloned()
         .unwrap_or_else(|| intent.forge.clone())
         .resolve(&target, title, body);
+    // The branch and the squashed commit's message are prose like the
+    // description: what the operator approved is what ships, held to the
+    // same rules the submission was.
+    let (_, style) = crate::review::prose::rules(
+        ctx.cfg,
+        ctx.store,
+        &review.channel,
+        submitter
+            .as_ref()
+            .map(|session| std::path::Path::new(&session.repo_path)),
+    );
+    let mut broken = Vec::new();
+    if let Some(branch) = outputs.branch.as_deref().filter(|b| *b != target.branch) {
+        if !crate::review::prose::ref_name(branch) {
+            return Err(PublishError::Conflict(format!(
+                "{branch} is not a branch name git accepts"
+            )));
+        }
+        broken.extend(style.check_branch(branch));
+        target.branch = branch.to_string();
+    }
+    let message = intent
+        .squash_onto
+        .as_ref()
+        .map(|_| crate::review::prose::message_for(&outputs, title, body));
+    if let Some(message) = &message {
+        broken.extend(style.check_message(message));
+    }
+    if !broken.is_empty() {
+        return Err(PublishError::Conflict(format!(
+            "what would ship breaks this repository's commit rules: {}",
+            broken.join("; ")
+        )));
+    }
     // The tree the node hashed out of the candidate when it captured this
     // review. Publication compares the bytes it is about to push against it,
     // so the reviewed tree is asserted from node-held evidence rather than
@@ -511,6 +545,11 @@ pub async fn publish_review(
             outputs: &outputs,
             lease: intent.lease.as_deref(),
             rewrite: intent.rewrite,
+            squash: intent
+                .squash_onto
+                .as_deref()
+                .zip(message.as_deref())
+                .map(|(onto, message)| crate::review::publish::Squash { onto, message }),
             resume,
             pushed: record.pushed_sha.is_some(),
             before_push: recheck_authority,
@@ -578,6 +617,7 @@ pub async fn publish_review(
                 | crate::review::publish::PublishError::TreeChanged { .. }
                 | crate::review::publish::PublishError::NoReviewedTree
                 | crate::review::publish::PublishError::LeaseLost { .. }
+                | crate::review::publish::PublishError::SquashBaseGone { .. }
                 | crate::review::publish::PublishError::Target(_) => {
                     PublishError::Conflict(error.to_string())
                 }

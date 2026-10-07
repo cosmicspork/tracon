@@ -562,6 +562,14 @@ pub struct Repo {
     /// them from it for as long as it runs.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub session_egress: bool,
+    /// How this repository's commits reach the forge, in place of the
+    /// channel's and `[publish] commits`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commits: Option<Commits>,
+    /// This repository's commit-subject and branch rules, in place of the
+    /// channel's and `[publish] style`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<crate::review::prose::Style>,
 }
 
 /// The hosts each egress preset stands for. A preset is the registry and the
@@ -850,6 +858,25 @@ pub struct Publish {
     /// How long one `gh` or `glab` call may run. Git itself is not bounded:
     /// a large push may take as long as it takes.
     pub forge_timeout_secs: u64,
+    /// How a candidate's commits reach the forge, unless the channel's
+    /// `publish.commits` binding or the repository's entry says otherwise.
+    pub commits: Commits,
+    /// The commit-subject and branch rules a submission is held to, unless
+    /// the channel's `publish.style` binding or the repository's entry says
+    /// otherwise. Every rule is off by default.
+    pub style: crate::review::prose::Style,
+}
+
+/// How a candidate's commits reach the forge.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Commits {
+    /// One commit holding exactly the reviewed tree, carrying the approved
+    /// message. The tree is the candidate, so nothing reviewed changes.
+    #[default]
+    Squash,
+    /// The agent's commits as it wrote them.
+    Keep,
 }
 
 /// How the node runs the consulta sidecar. It stays a Python process because
@@ -1287,6 +1314,8 @@ impl Default for Config {
                 glab: "glab".into(),
                 git: "git".into(),
                 forge_timeout_secs: 15,
+                commits: Commits::Squash,
+                style: Default::default(),
             },
             session: SessionDefaults {
                 budget_tokens: 0,
