@@ -14,6 +14,11 @@ pub enum SessionState {
     /// Defined here because the schema and the interface both name it; nothing
     /// in this slice runs deterministic checks between turns yet.
     WaitingOnCheck,
+    /// Its work is published and it went idle, so it was put away: container
+    /// stopped, egress grant revoked, workspace kept. Not ended — ending it is
+    /// the operator's — and carried on as a new session on that workspace
+    /// when a CI failure or a review comment needs it.
+    Suspended,
     Closed,
     KilledBudget,
     Failed,
@@ -27,6 +32,7 @@ impl SessionState {
             Self::Paused => "paused",
             Self::WaitingOnYou => "waiting_on_you",
             Self::WaitingOnCheck => "waiting_on_check",
+            Self::Suspended => "suspended",
             Self::Closed => "closed",
             Self::KilledBudget => "killed_budget",
             Self::Failed => "failed",
@@ -69,11 +75,18 @@ pub enum EndReason {
     /// about this session, and every session on this node will end the same
     /// way until the image or the pin changes.
     Incompatible,
+    /// The operator carried a suspended session's work on in a new session,
+    /// which `continued_from` names.
+    Continued,
     /// The node stopped or restarted while the session was live: a graceful
     /// shutdown ended it, or the next start found its row still open. Not the
     /// operator's stop and not the harness's failure, and the work it was
     /// doing can be carried forward from its workspace.
     NodeRestart,
+    /// The provider was exhausted and the channel's policy carries the work
+    /// on to a fallback model: a continuation picks it up from the safe
+    /// boundary this session reached.
+    ProviderExhausted,
     Error,
 }
 
@@ -87,7 +100,9 @@ impl EndReason {
             Self::PhaseDone => "phase_done",
             Self::Detached => "detached",
             Self::Incompatible => "incompatible",
+            Self::Continued => "continued",
             Self::NodeRestart => "node_restart",
+            Self::ProviderExhausted => "provider_exhausted",
             Self::Error => "error",
         }
     }
@@ -112,6 +127,15 @@ pub mod event_kind {
     /// start another turn. `source` is telemetry only; the state is decisive.
     pub const SESSION_PAUSED: &str = "session_paused";
     pub const SESSION_RESUMED: &str = "session_resumed";
+    /// The session's work was published (`url`, `review_id`): the change on
+    /// the forge it is now answerable for.
+    pub const PUBLISHED: &str = "published";
+    /// A published session went idle and was put away (`idle_ms`).
+    pub const SESSION_SUSPENDED: &str = "session_suspended";
+    /// The host slept while this session was live (`asleep_ms`,
+    /// `inhibitor_held`). An interruption, not a gap: the session's waiting
+    /// cards had their deadlines moved on by the same time.
+    pub const HOST_SUSPENDED: &str = "host_suspended";
     pub const USER_PROMPT: &str = "user_prompt";
     pub const MESSAGE: &str = "message";
     pub const THOUGHT: &str = "thought";
@@ -175,6 +199,19 @@ pub mod event_kind {
     /// given up. Recorded by the gateway, which sees the upstream answer, and
     /// by the supervisor when the harness says so itself.
     pub const PROVIDER_ERROR: &str = "provider_error";
+    /// The provider is exhausted — a spent quota, usage window or balance,
+    /// told apart from throttling, auth and outage in `cause` on
+    /// `provider_error` — and the node decided what happens (`policy`,
+    /// `outcome`, `provider`, `model`, `status`, `reason`, `reset_ms`,
+    /// `next_wake_ms`, `fallback`, `note`). The session is fenced; its safe
+    /// boundary follows as `exhaustion_boundary`.
+    pub const PROVIDER_EXHAUSTED: &str = "provider_exhausted";
+    /// The exhausted session's fenced turn has settled (`boundary_seq`):
+    /// what it resumes or is continued from.
+    pub const EXHAUSTION_BOUNDARY: &str = "exhaustion_boundary";
+    /// The node acted on an exhaustion once it was due (`outcome`: resumed,
+    /// continued, held, abandoned; `note`; `continued_by`).
+    pub const EXHAUSTION_WAKE: &str = "exhaustion_wake";
     /// The harness issued the same tool call, unchanged, several times in a
     /// row within one turn (`what`, `count`, `title`, `kind`). Recorded and
     /// surfaced, never acted on: repeating a command is also what a great
@@ -243,6 +280,9 @@ pub mod event_kind {
     /// `bytes_out`, `duration_ms`, `reason`, and `output` only when output
     /// capture was deliberately turned on).
     pub const PTY_CLOSED: &str = "pty_closed";
+    /// The operator abandoned the work this session was the latest attempt
+    /// at (`reason`, `summary`): its item closed, or its lineage put away.
+    pub const ABANDONED: &str = "abandoned";
 }
 
 #[cfg(test)]

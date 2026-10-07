@@ -5,6 +5,7 @@
   import PermissionCard from '../components/PermissionCard.svelte'
   import SessionAuthorityPanel from '../components/SessionAuthorityPanel.svelte'
   import ShownWork from '../components/ShownWork.svelte'
+  import ContinuationPanel from '../components/ContinuationPanel.svelte'
   import TransferExport from '../components/TransferExport.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
@@ -12,6 +13,7 @@
   import { opencodeShellPath } from '../lib/opencode'
   import { draftBox } from '../lib/draft'
   import { humanizeError } from '../lib/errors'
+  import { exhaustionNote } from '../lib/exhaustion'
   import { externalAgent, formatAge, formatBudget, formatTokens } from '../lib/format'
   import { repetitionHint } from '../lib/log'
   import { router } from '../lib/router.svelte'
@@ -20,6 +22,7 @@
     isTerminal,
     type CeilingInfo,
     type OperatorQuestion,
+    type SessionExhaustion,
     type SessionUsage,
     type ShownWork as ShownWorkItem,
     type ToolchainStatus,
@@ -37,6 +40,8 @@
   let usage = $state<SessionUsage | null>(null)
   let ceiling = $state<CeilingInfo | null>(null)
   let toolchain = $state<ToolchainStatus | null>(null)
+  let exhaustion = $state<SessionExhaustion | null>(null)
+  const exhausted = $derived(exhaustionNote(exhaustion))
   // The box's timing rules live in lib/draft; the component only holds the text.
   const box = draftBox((text) => api.saveDraft(id, text).catch(() => {}))
 
@@ -50,13 +55,16 @@
   const repeating = $derived(repetitionHint(store.events))
   let questions = $state<OperatorQuestion[]>([])
   let shownWork = $state<ShownWorkItem[]>([])
+  let publications = $state<{ review_id: string; url: string }[]>([])
   async function refreshQuestions() {
     const result = await api.session(id)
     questions = result.questions
     usage = result.usage
     ceiling = result.ceiling
     toolchain = result.toolchain
+    exhaustion = result.exhaustion ?? null
     shownWork = result.shown_work ?? []
+    publications = result.publications ?? []
   }
 
   /** What the header says about the baked language toolchain. Nothing at all
@@ -252,6 +260,7 @@
     if (session.harness_id === 'external') return 'a harness you run yourself'
     if (isTerminal(session.state)) return `session ${session.state.replace('_', ' ')}`
     if (session.state === 'paused') return 'paused'
+    if (session.state === 'suspended') return 'suspended; continue it to carry on'
     if (session.state === 'starting') return 'starting'
     if (session.state === 'waiting_on_check') return `running ${checkCommand ?? 'the checks'}`
     if (busy) return 'a turn is running'
@@ -404,6 +413,12 @@
       >
     </div>
   {/if}
+  {#each publications as p (p.review_id)}
+    <div class="banner ok">
+      published <a class="lnk" href={p.url} target="_blank" rel="noreferrer">{p.url}</a>
+      <b>· from review <a class="lnk" href="/reviews/{p.review_id}">{p.review_id.slice(0, 8)}</a></b>
+    </div>
+  {/each}
   {#if session.continued_from}
     <div class="banner dim">
       continues <a class="lnk" href="/sessions/{session.continued_from}"
@@ -434,14 +449,45 @@
     <div class="banner crit">failed <b>· {humanizeError(session.last_error) ?? 'the harness stopped without saying why'}</b></div>
   {:else if session.state === 'waiting_on_check'}
     <div class="banner dim">running <code>{checkCommand ?? 'checks'}</code> <b>· {checkElapsed} · input disabled until it finishes</b></div>
+  {:else if session.state === 'paused' && exhausted}
+    <div class="banner dim">paused · {exhausted.title} <b>· {exhausted.detail}</b></div>
   {:else if session.state === 'paused'}
     <div class="banner dim">
       {session.harness_id === 'external' ? 'broker access paused' : 'paused'}
       <b>· {session.harness_id === 'external' ? 'the external host process continues; Tracon cannot control it' : 'new prompts, tools, and model requests are fenced until resume or stop'}</b>
     </div>
+  {:else if session.state === 'suspended'}
+    <div class="banner dim">
+      suspended <b>· its work is published and it went idle; container stopped, egress revoked, workspace kept</b>
+      {#if continuedAs}
+        <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
+      {:else}
+        <button class="lnk" onclick={() => void carryOn()} disabled={continuing || unreachable !== null}
+          >Continue</button
+        >
+      {/if}
+    </div>
+  {:else if session.end_reason === 'continued' && continuedAs}
+    <div class="banner dim">
+      continued <b>· its work carries on in</b>
+      <a class="lnk" href="/sessions/{continuedAs.id}">{continuedAs.id.slice(0, 8)}</a>
+    </div>
   {:else if session.end_reason === 'node_restart'}
     <div class="banner dim">
       ended by a node restart <b>· you did not stop it; its workspace is kept</b>
+      {#if continuedAs}
+        <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
+      {:else if session.phase !== 'review'}
+        <button class="lnk" onclick={() => void carryOn()} disabled={continuing || unreachable !== null}
+          >Continue</button
+        >
+      {/if}
+    </div>
+  {:else if session.end_reason === 'provider_exhausted'}
+    <div class="banner dim">
+      ended when {exhaustion?.provider ?? 'its provider'} was exhausted <b
+        >· {exhaustion?.fallback ? `to carry on with ${exhaustion.fallback}` : 'its workspace is kept'}</b
+      >
       {#if continuedAs}
         <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
       {:else if session.phase !== 'review'}
@@ -493,6 +539,12 @@
   <!-- Opened by the "why is this asked" link on a permission card, so the
        answer is one tap from the request rather than a screen away. -->
   <SessionAuthorityPanel {id} open={router.hash === '#authority'} />
+
+  <!-- Once an attempt has ended, what matters is the work it was part of:
+       how it stands across every attempt, and what to do next. -->
+  {#if isTerminal(session.state)}
+    <ContinuationPanel sessionId={id} />
+  {/if}
 
   {#if error}
     <div class="banner crit">refused <b>· {error}</b></div>

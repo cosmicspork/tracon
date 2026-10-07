@@ -245,6 +245,15 @@ run commands. So a workspace carrying one is refused at launch, as one carrying
 `.claude/settings…` path or into `.git/` mid-session. Ignored files never reach a
 workspace, so a checkout's own gitignored settings are unaffected.
 
+**The ledger records a decision for every tool call, whichever harness asked.**
+OpenCode asks the node before each call; Claude Code lets reads and searches through
+on its own rules and never sends a `can_use_tool` for them. The Claude adapter notices
+a call whose result arrives without an ask and reports it, normalized exactly as an
+ask would have been, and the supervisor records the `policy_allowed` the node's policy
+gives it, marked `decided_by: harness`. The call has already run, so nothing is asked;
+if the policy would have asked or denied, the record says the harness let it through
+and what the policy would have done, rather than naming a rule that did not apply.
+
 ### Model auth
 
 **Model credentials are brokered like every other credential.** The harness holds
@@ -645,11 +654,33 @@ change at that commit whose text differs, or more than one that matches, is not
 guessed between. A comment is recognised the same way, by its approved text.
 A forge that cannot be reached, or an answer that does not settle which change
 is this publication's, is recorded as `uncertain` rather than reported as
-either success or failure. Every Git
+either success or failure. The review screen shows the latest record as one of
+not attempted (refused before anything spoke to the forge), in progress,
+failed, uncertain or published, with its remedy, and says before approval
+whether a forge token is bound to the channel on this node — a binding, never
+a claim that the token may push. The remedy is **Retry publication**, not a
+second approval: it re-sends the title, body and outputs the record holds for
+that revision, commit and target, and an uncertain attempt looks at the forge
+before repeating anything. A newer revision, a moved branch, another target
+or new prose needs a fresh approval, and binding a credential never retries
+on its own. Every Git
 command that can reach a forge — clone, fetch, ls-remote, push — is built in one
 place with a brokered credential or none: an ambient host helper, an askpass
 program, or an `ssh-agent` identity can never answer for the node, and there is
 no setting that would let one.
+
+What is published reads as the operator's own work. A session's commits are
+authored and committed as the account behind the channel's bound forge token,
+resolved once per token from the forge's `/user` (GitHub: the profile name and
+`<id>+<login>@users.noreply.github.com`; GitLab: the name and the commit
+address) and written into the harness's gitconfig; the workspace's own Git
+config carries no identity. With no forge token bound, the host's global Git
+identity is used, never a name for tracon. Forge API calls name only the HTTP
+library as their user agent, and the node adds no trailers of its own, so a
+harness's own (Claude Code's `Co-Authored-By`) pass through untouched. A
+harness the operator runs is offered the identity by `tracon external show`,
+and `submit_review` and the review screen name any commit not authored and
+committed as that account. Rewriting one is never done silently.
 
 ## Workspaces
 
@@ -836,6 +867,21 @@ binding can waive that), and closing the item ends the session that held it.
 Context rot is mitigated by mechanism where the workflow opts in, not by a line
 in a markdown file a plain session never claimed to follow.
 
+**Coming back to work is one view, item or not.** An item's attempts are the
+sessions that held it. A plain session's attempts are its lineage, meaning what it
+continued and what continued it, so it gets the same view without being made into
+an item. The view (`/api/work/{id}/continuation`, `/api/sessions/{id}/continuation`)
+gathers what the work was for (the item, or the first prompt), each attempt and how
+it ended, what the operator decided (answered permissions and questions, and the plan
+and brief), what is in the way, the workspace the latest attempt left, and the
+reviews and shown work. It also gives the one next action. Every part of that is
+read from recorded state, and the next action follows fixed rules over those records,
+so it cannot claim more than they say. It offers three verbs. Continue carries the
+work on from the last ended attempt's workspace. Change approach does the same and
+hands the operator's new direction, in their own words, to the next attempt.
+Abandon closes the item, or stops a plain lineage and puts it away, and records the
+reason. Abandon deletes nothing.
+
 ### The product brief
 
 An item may point at one document that says what the work is for: intended user,
@@ -976,6 +1022,26 @@ the interface rather than papered over. Channels carry daily ceilings enforced a
 two points: session start is refused, and the gateway refuses the model calls of
 sessions already running, so a running session stops spending and the operator
 decides.
+
+**An exhausted provider is a policy, not a failure.** The gateway reads every refused
+model call and says what kind it was on the session's `provider_error`: throttling
+and outages clear on their own and the harness retries them, an auth failure does
+not clear by waiting, and exhaustion (a spent quota, a subscription's usage window,
+an empty balance) is the one a channel chooses for, with a per-run override:
+`pause` (the default), `fallback` to a named model, or `fallback_then_wait`. The
+decision is recorded (`provider_exhausted`: policy, reason, model, next wake) and
+the session is fenced like any pause. Its safe boundary is the fenced turn settling,
+and nothing resumes or continues before that boundary is recorded. A waiting
+session is woken by the node's periodic tick once the provider's own reset time has
+passed. The reset is only ever one the provider sent, so a provider that sent none
+leaves the session for the operator, because a guessed timer either wakes it into
+the same refusal or sleeps past the lift. Before it goes back to work, everything that
+would refuse it starting is checked again: the channel, the node, the harness pin,
+the model's binding and credential, the ceiling and the budget. If any check fails,
+the session is held with the reason. A fallback is a continuation from the boundary,
+on the fallback model, with the policy carried over, because a running harness
+cannot change model. A continuation already on its fallback has nowhere further to
+go.
 
 **A cache read is recorded, never charged.** Each step of a long session resends its
 whole context, most of it from the provider's cache; charged as input, a planning
