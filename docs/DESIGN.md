@@ -214,3 +214,12 @@ operator's information, not the model's.
     `CLAUDE.md` under a worktree are read by the harness, and that is accepted rather
     than fought: instruction content grants no permission, so such a file can ask for
     something and never approve it. No screen implies those files were filtered out.
+13. **The reviewed thing is the tree, not the bytes the agent committed.** The
+    candidate, its evidence and the verdict are about a tree. The commits an agent
+    made on the way there, and the branch it happened to be on, are prose that ships
+    under the operator's name, so they sit beside the diff and are edited like the
+    description: by default the node pushes one commit holding exactly the reviewed
+    tree, carrying the approved message, on the approved branch. A repository that
+    keeps its history pushes the agent's commits as written, listed for the operator
+    to read. A message or branch that breaks the repository's configured rules is
+    refused at submit, so a bad one never reaches the card.

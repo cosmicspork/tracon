@@ -101,20 +101,10 @@ hit on a real task.
 
 **Review and publication**
 
-- [ ] What ships under the operator's name is reviewed: the branch name and the commits.
-      Today the candidate is the tree, the review shows the diff and the forge prose, and
-      the commits and branch are pushed as the agent wrote them (the default branch even
-      names tracon). Three steps: list the commits and the branch beside the diff;
-      treat commit message and branch name as publication prose like the forge
-      description — proposed by the agent, edited by the operator, bound by hash under the
-      publish grant — with the node squashing the candidate into one commit carrying the
-      approved message on the approved branch by default (`publish.commits = squash |
-      keep` per channel or repository; `keep` edits each message), which leaves the tree
-      and therefore the candidate, its evidence and the verdict unchanged; and a
-      deterministic subject-and-branch check (conventional type, imperative subject,
-      kebab branch, no ticket keys) whose rules come from the channel or the repository's
-      own guidelines, so a bad message fails before the card reaches the operator. Record
-      the "reviewed tree, not reviewed bytes" reframing in ARCHITECTURE and DESIGN.
+- [ ] Edit each commit's message under `publish.commits = keep`. Squash (the default)
+      already ships one commit of the reviewed tree with the approved message and
+      branch; `keep` lists the agent's commits and checks their subjects but pushes
+      them as written.
 - [ ] Durable review drafts: unsent feedback and publication prose survive navigation,
       reconnect and device changes with explicit saved/conflict state. Desktop diff drafts
       remain revision-keyed. The acceptance test is the reconnect: leave feedback, switch
@@ -125,17 +115,9 @@ hit on a real task.
 - [ ] Keep verdicts reachable in long reviews, open a labelled reason composer for Request
       changes and Reject rather than disabling a button, and explain unavailable actions
       inline.
-- [ ] Trim criteria binding to what is produced. #290 lets a criterion point at a
-      `scenario` or an `observation`; neither is produced by anything now that versioned
-      scenarios and trial capture are dropped. Remove those link kinds, keep `check` and
-      the operator's judgement, and say so in the brief format.
 
 **Forge and tracker**
 
-- [ ] Give GitHub the CI tools GitLab has: a run's job log tail (`run_logs`, the
-      `job_trace` limits), rerunning a run's failed jobs (`run_rerun`, asked), and the
-      runs at an exact commit. An agent on a GitHub project should diagnose and retry CI
-      the way it can on GitLab, without the operator's token or a host CLI.
 - [ ] Follow a pipeline the agent started. On 2026-10-06 an external session ran a
       staging pipeline on a work repository's default branch after its merge request
       merged (`pipeline_run`, approved), then had no brokered way to see it through:
@@ -156,12 +138,6 @@ hit on a real task.
 
 **Node data**
 
-- [ ] **Data management in Settings.** Retention is decided: the node keeps everything
-      and the operator deletes by hand. Give that a pane — what the node holds per kind
-      (sessions, events, candidates and evidence, documents, memories, workspaces, harness
-      state), how much it weighs, and delete for the kinds that have a real delete, with
-      the propagation each one does or does not have stated. A storage figure belongs on
-      the Nodes screen too. Tombstones stay undecided until replication makes them matter.
 - [ ] Explain browser push enrollment failures by stage: unavailable API, denied
       permission, service-worker failure, push-service registration failure, node storage
       error; never report a device as registered after a failed enrollment.

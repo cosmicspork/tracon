@@ -8,7 +8,7 @@
 
 import type { Coverage, Criteria, CriterionLink, LinkKind, Standard, Verdict } from './types'
 
-export const LINK_KINDS: LinkKind[] = ['check', 'scenario', 'observation']
+export const LINK_KINDS: LinkKind[] = ['check']
 
 export const VERDICTS: Verdict[] = ['met', 'not_met', 'unclear']
 
@@ -32,7 +32,7 @@ export const COVERAGE: Record<Coverage, { label: string; title: string }> = {
     title: 'something agreed points at it, but nothing that can produce a result on its own',
   },
   only_proposed: { label: 'only proposed', title: "links exist, and none of them is the operator's" },
-  nothing_points_at_it: { label: 'nothing points at it', title: 'no check, scenario or observation is named' },
+  nothing_points_at_it: { label: 'nothing points at it', title: 'no check is named' },
 }
 
 /** Whether a person has spoken. Green is not agreement. */
@@ -53,7 +53,6 @@ export function linkSays(link: CriterionLink): string {
   const parts: string[] = [link.kind]
   if (link.unresolved) parts.push(link.unresolved)
   else if (link.outcome) parts.push(link.outcome)
-  else if (link.kind === 'observation') parts.push('context for a person, not a result')
   else parts.push('no run against this candidate')
   return parts.join(' · ')
 }
