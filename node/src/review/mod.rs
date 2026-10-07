@@ -202,6 +202,113 @@ pub(crate) async fn blob(dir: &str, object: &str) -> Result<Vec<u8>, ReviewError
     git_bytes(dir, "cat-file", &["cat-file", "blob", object]).await
 }
 
+/// Who wrote and who committed one commit of a review, as Git recorded it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CommitAuthor {
+    pub sha: String,
+    pub author: String,
+    pub author_email: String,
+    pub committer_email: String,
+}
+
+/// Every commit `head` adds over `base`, with its author and committer. Read
+/// with the same hardened Git as the capture, so a `.mailmap` or a format
+/// configured in the repository cannot change what is reported.
+pub async fn authors(
+    worktree: &str,
+    base: &str,
+    head: &str,
+) -> Result<Vec<CommitAuthor>, ReviewError> {
+    let range = format!("{base}..{head}");
+    let out = git(
+        worktree,
+        "log",
+        &[
+            "log",
+            "--no-show-signature",
+            "--no-mailmap",
+            "--format=%H%x1f%an%x1f%ae%x1f%ce",
+            &range,
+        ],
+    )
+    .await?;
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let mut cols = line.split('\x1f');
+            Some(CommitAuthor {
+                sha: cols.next()?.to_string(),
+                author: cols.next()?.to_string(),
+                author_email: cols.next()?.to_string(),
+                committer_email: cols.next()?.to_string(),
+            })
+        })
+        .collect())
+}
+
+/// The commits that would not read as `identity`'s on its forge: authored or
+/// committed under another address. Rewriting them is the operator's call,
+/// never something publication does on its own.
+pub fn misattributed(
+    commits: &[CommitAuthor],
+    identity: &crate::forge::Identity,
+) -> Vec<CommitAuthor> {
+    commits
+        .iter()
+        .filter(|c| !identity.owns(&c.author_email) || !identity.owns(&c.committer_email))
+        .cloned()
+        .collect()
+}
+
+/// What a review says about who its commits are by: the identity of the
+/// target forge account, and each commit that is not authored and committed
+/// as it. `None` when that identity cannot be resolved (no credential bound,
+/// or the forge did not answer), which is said rather than guessed at.
+pub async fn authorship(
+    broker: &crate::broker::SharedBroker,
+    provider: &str,
+    channel: &str,
+    node_id: &str,
+    worktree: &str,
+    base: &str,
+    head: &str,
+) -> Option<serde_json::Value> {
+    let forge = crate::forge::Forge::parse(&provider.to_ascii_lowercase())?;
+    let identity = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::forge::identity_on(broker, forge, channel, node_id),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let commits = authors(worktree, base, head).await.ok()?;
+    let wrong = misattributed(&commits, &identity);
+    let note = if wrong.is_empty() {
+        format!(
+            "Every commit is authored and committed as {}.",
+            identity.email
+        )
+    } else {
+        format!(
+            "{} of {} commits are not authored and committed as {} <{}>, so the forge will not \
+             attribute them to {}. Set the identity in this repository (`git config user.name` \
+             and `git config user.email`), then re-author them, for example with \
+             `git rebase --exec 'git commit --amend --no-edit --reset-author' {base}`. Nothing \
+             is rewritten for you.",
+            wrong.len(),
+            commits.len(),
+            identity.name,
+            identity.email,
+            identity.login,
+        )
+    };
+    Some(serde_json::json!({
+        "identity": identity,
+        "misattributed": wrong,
+        "note": note,
+    }))
+}
+
 /// Whether `head` descends from `ancestor`, a commit this worktree holds. A
 /// commit it does not hold is not an ancestor it can vouch for.
 pub async fn descends_from(worktree: &str, head: &str, ancestor: &str) -> bool {
@@ -870,6 +977,32 @@ mod tests {
             "{script}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// A commit made under another address is named; one made as the
+    /// forge identity is not, and the base's own commits are not the
+    /// review's to answer for.
+    #[tokio::test]
+    async fn a_commit_not_authored_as_the_forge_identity_is_named() {
+        let dir = repo("authorship").await;
+        sh(
+            &dir,
+            "git -c user.email=1+ada@users.noreply.github.com -c user.name=Ada \
+             commit -q --allow-empty -m mine",
+        )
+        .await;
+        let identity = crate::forge::Identity {
+            name: "Ada".into(),
+            email: "1+ada@users.noreply.github.com".into(),
+            login: "ada".into(),
+            forge: "github",
+        };
+        let dir = dir.to_string_lossy().into_owned();
+        let commits = authors(&dir, "main", "HEAD").await.unwrap();
+        assert_eq!(commits.len(), 2, "{commits:?}");
+        let wrong = misattributed(&commits, &identity);
+        assert_eq!(wrong.len(), 1, "{wrong:?}");
+        assert_eq!(wrong[0].author_email, "t@e");
     }
 
     /// Per test: these run in parallel, so a shared directory means one test
