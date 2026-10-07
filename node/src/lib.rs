@@ -13,6 +13,7 @@ pub mod data;
 pub mod embed;
 pub mod environment;
 pub mod explain;
+pub mod follow;
 pub mod forge;
 pub mod gateway;
 pub mod gc;

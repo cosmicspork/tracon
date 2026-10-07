@@ -101,15 +101,6 @@ hit on a real task.
 
 **Review and publication**
 
-- [ ] Follow a published pull or merge request after it opens: subscribe to its CI runs,
-      draft/ready and open/merged/closed transitions, review verdicts and new comments or
-      threads, and record each as an event on the review and its work item. Notify through
-      the existing push channel with the change named ("CI failed on `node`", "marked
-      ready", "2 new comments"), and let a session that is still attached pick the change
-      up through the forge tools (#297, #298) rather than the operator relaying it. Polling
-      through the brokered token first; webhooks only where the node is reachable. A
-      subscription ends when the request closes, and it never merges, approves or retries
-      anything on its own.
 - [ ] Edit each commit's message under `publish.commits = keep`. Squash (the default)
       already ships one commit of the reviewed tree with the approved message and
       branch; `keep` lists the agent's commits and checks their subjects but pushes
@@ -124,19 +115,9 @@ hit on a real task.
 
 **Forge and tracker**
 
-- [ ] Follow a pipeline the agent started. On 2026-10-06 an external session ran a
-      staging pipeline on a work repository's default branch after its merge request
-      merged (`pipeline_run`, approved), then had no brokered way to see it through:
-      `pipeline_status` is a snapshot, so the choices were calling it in a loop or
-      polling with a host `glab` outside the broker's log. Add `pipeline_wait`, a read
-      that holds up to 45 s like `review_status` and returns as soon as a job or the
-      pipeline changes state, with the job list, so a failed job leads straight to
-      `job_trace`. Let `pipeline_run`, `job_play` and `deploy` subscribe the session to
-      the pipeline they start: record each job result as an event on the session and its
-      work item, and notify through the push channel when the pipeline finishes, fails
-      or stops at a manual job. Share the polling with following a merge request, so a
-      pipeline outlives the request that triggered it. Following never retries, cancels
-      or plays a job on its own; GitHub runs follow once the item above lands.
+- [ ] Follow a GitHub run the agent reran (`run_rerun`) the way a GitLab pipeline the
+      agent started is followed, once the item above lands: a `run_wait` read, the
+      job results recorded on the session, and a push when the run finishes or fails.
 - [ ] Discover Jira transitions: `issue_transitions` lists an issue's currently available
       transitions (id, name, destination status) through the brokered token, so an
       authorized `issue_transition` never rests on an out-of-band `acli` lookup or an id

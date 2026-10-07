@@ -1562,6 +1562,12 @@ impl Manager {
         Ok(row)
     }
 
+    /// [`Self::record`], for what the node learns about a session from
+    /// outside it: a published request moving on its forge.
+    pub fn record_new_event(&self, e: NewEvent) {
+        self.record(e)
+    }
+
     /// Persist a lifecycle event and publish it on the stream, so a client
     /// watching live sees the same log a reload rebuilds.
     fn record(&self, e: NewEvent) {
