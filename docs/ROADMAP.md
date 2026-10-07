@@ -147,13 +147,6 @@ Needed for daily use, but not blocking it today.
       are what `show_work` displays. Local databases, caches and mail catchers
       follow as entries, which is also how an application that needs services runs in a
       session without tracon reading its compose files.
-- [ ] **Keep a session's build output.** Every run builds a compiled project from nothing —
-      `just check` took 4m47s in session `01a10447` (2026-10-03), most of it compiling.
-      Give sessions a persistent per-repository build cache (Cargo's `target/`, a bundler's
-      cache, the dependencies a session added) that survives the session. Required checks
-      keep starting from the trusted base cache: a directory the agent wrote must not be
-      able to make the review gate pass. A node-built cache of the default branch for
-      checks is the follow-on.
 - [ ] **Help set up a repository once.** Node tools that draft a `[[repo]]` entry (image,
       checks, egress) from what the repository already holds — its devcontainer,
       `package.json` scripts, a `just` recipe — try it in a fresh container and report
@@ -462,9 +455,11 @@ servers reaching the v2 session runner.
 - A run's dependency cache and each check's tree are copies. Where the runtime's storage
   has no reflinks they are full copies, made once per run and once per check. The base
   cache they start from is filled when the node builds a repository's image; an entry
-  that names a hand-pinned `image` has none, so its runs prepare from empty. A run keeps
-  no build output: every run of a compiled project's checks builds from nothing (three
-  minutes for tracon's own test build, 2026-10-01).
+  that names a hand-pinned `image` has none, so its runs prepare from empty. A check run
+  keeps no build output: every run of a compiled project's checks builds from nothing
+  (three minutes for tracon's own test build, 2026-10-01). Sessions keep theirs, but only
+  Cargo's is moved out of the tree; a bundler's cache inside `node_modules` lives and goes
+  with the workspace.
 - Per-client egress — a session's, a preparation's — is the Podman
   backend's. The Kubernetes backend issues no grants, so a `[[repo]]` entry that names
   `egress` cannot prepare there. A grant filters by host, not by method: a registry that
