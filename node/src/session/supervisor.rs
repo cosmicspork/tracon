@@ -1491,6 +1491,17 @@ impl Supervisor {
         false
     }
     async fn remove_container(&self) {
+        // The session's services first: they live in its network namespace,
+        // and nothing would remove them once the session's row is closed.
+        if tokio::time::timeout(
+            CANCEL_TIMEOUT,
+            crate::sidecars::stop_all(self.runner.as_ref(), &self.store, &self.session_id),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(container = %self.container, "timed out removing a session's services");
+        }
         match tokio::time::timeout(CANCEL_TIMEOUT, self.runner.kill(&self.container)).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {

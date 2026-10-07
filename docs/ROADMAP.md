@@ -58,20 +58,6 @@ Needed for daily use, but not blocking it today.
 
 **Sessions and accounting**
 
-- [ ] **Service sidecars, the browser first.** A `[[service]]` catalogue in `node.toml` —
-      a digest-pinned image, its port, a readiness probe — from which a session asks for a
-      service by name (`service_start`, which blocks until the probe passes or a bounded
-      timeout, then `service_status`), never naming an image or a command. Each service is
-      its own authority under the policy bundle, so a browser can be allowed while a
-      database is asked. A sidecar shares the session's network namespace, so it reaches
-      exactly what the session's grants open and nothing of its own, and it stops and
-      suspends with the session. The first entry is a headless browser exposing CDP on the
-      session's loopback, which any harness can drive (Playwright `connectOverCDP`, a
-      browser MCP, a small screenshot helper in the harness layer) without a browser in
-      every repository's image or a node-run scenario language; the screenshots it takes
-      are what `show_work` displays. Local databases, caches and mail catchers
-      follow as entries, which is also how an application that needs services runs in a
-      session without tracon reading its compose files.
 - [ ] **Help set up a repository once: the skill.** The draft, trial and proposal
       tools exist (`repo_setup_*`). What remains: a built-in setup skill shipped through
       channel manifests for managed harnesses, and optional free-text notes on how to run

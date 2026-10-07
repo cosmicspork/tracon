@@ -39,6 +39,7 @@ pub mod publication;
 pub mod repo_image;
 pub mod reports;
 pub mod rollups;
+pub mod services;
 pub mod shown;
 pub mod transfers;
 pub mod ui;
