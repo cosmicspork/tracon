@@ -148,6 +148,12 @@ pub trait Backend: Send + Sync {
     fn kind(&self) -> &'static str;
     /// `tracon setup`: make what the boundary needs exist. Idempotent.
     async fn setup(&self, cfg: &Config, rebuild: bool) -> Result<(), BoundaryError>;
+    /// Bring back what the boundary needs and finds stopped, without
+    /// rerunning setup, before the checks look for it: at startup and on a
+    /// re-check. Never creates what setup has not, and never touches what is
+    /// running. A failure is logged, not returned: the checks that follow say
+    /// what is still wrong.
+    async fn recover(&self, _cfg: &Config) {}
     /// The startup verification, against the same specification a session
     /// runs. `deep` adds the active egress probe from inside the boundary.
     async fn check_all(&self, cfg: &Config, deep: bool) -> BoundaryReport;

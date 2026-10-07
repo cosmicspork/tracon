@@ -43,6 +43,27 @@ async fn fake_forge() -> std::net::SocketAddr {
             }),
         )
         .route(
+            "/user",
+            axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                // Only the bound token is answered: the identity is the
+                // account's, read with its own credential.
+                let authorized = headers.get("authorization").and_then(|v| v.to_str().ok())
+                    == Some("Bearer fake-token-for-tests");
+                let agent = headers
+                    .get("user-agent")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                if !authorized || agent.contains("tracon") {
+                    return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+                }
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(json!({ "login": "ada", "id": 42, "name": "Ada Lovelace" })),
+                )
+            }),
+        )
+        .route(
             "/api/v4/projects",
             axum::routing::get(|| async {
                 axum::Json(json!([
@@ -457,4 +478,47 @@ async fn a_rejected_token_says_to_replace_it() {
     let error = body["forges"][0]["error"].as_str().unwrap();
     assert!(error.contains("401"), "{error}");
     assert!(error.contains("Settings"), "{error}");
+}
+
+/// The identity a channel's work is authored as comes from the account behind
+/// its bound forge token, never a name for tracon, and is offered to a harness
+/// the operator runs only when asked for.
+#[tokio::test]
+async fn a_channel_commits_as_the_account_behind_its_forge_token() {
+    let addr = fake_forge().await;
+    let broker = Broker::default().shared();
+    broker.write().unwrap().put(
+        "gh",
+        cred(
+            &[
+                ("GH_TOKEN", "fake-token-for-tests"),
+                ("GITHUB_API", &format!("http://{addr}")),
+            ],
+            &["personal"],
+        ),
+    );
+    let identity = tracon::forge::identity_for(&broker, "personal", "n1", None)
+        .await
+        .expect("the bound account's identity");
+    assert_eq!(identity.name, "Ada Lovelace");
+    assert_eq!(identity.email, "42+ada@users.noreply.github.com");
+    assert!(
+        tracon::forge::identity_for(&broker, "work", "n1", None)
+            .await
+            .is_none(),
+        "a channel with no forge token bound has no identity, not a placeholder"
+    );
+
+    let app = node_with(broker);
+    let (status, body) = call(&app, "GET", "/api/external", None).await;
+    assert_eq!(status, 200);
+    assert!(
+        body["identities"].as_object().unwrap().is_empty(),
+        "the interface's polling does not ask the forge: {body}"
+    );
+    let (_, body) = call(&app, "GET", "/api/external?identities=true", None).await;
+    assert_eq!(
+        body["identities"]["personal"]["email"], "42+ada@users.noreply.github.com",
+        "{body}"
+    );
 }
