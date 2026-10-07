@@ -1593,6 +1593,23 @@ export interface CandidateDetail {
 }
 
 /** One runtime volume or state directory, and what a storage sweep makes of it. */
+/** One kind of data a node holds (`GET /api/maintenance/data`). */
+export interface Holding {
+  kind: string
+  label: string
+  unit: string
+  count: number
+  bytes: number
+  delete: { path: string; label: string } | null
+  propagation: string
+}
+
+export interface DataInventory {
+  database_bytes: number
+  total_bytes: number
+  holdings: Holding[]
+}
+
 export interface StorageItem {
   kind: 'volume' | 'directory'
   name: string

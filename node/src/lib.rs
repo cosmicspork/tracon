@@ -9,6 +9,7 @@ pub mod broker;
 pub mod config;
 pub mod continuation;
 pub mod corpus;
+pub mod data;
 pub mod embed;
 pub mod environment;
 pub mod explain;

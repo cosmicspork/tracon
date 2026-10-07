@@ -20,6 +20,7 @@
   import TransferInbox from '../components/TransferInbox.svelte'
   import AdminAccess from '../components/settings/AdminAccess.svelte'
   import Maintenance from '../components/settings/Maintenance.svelte'
+  import DataHeld from '../components/settings/DataHeld.svelte'
   import Repositories from '../components/settings/Repositories.svelte'
   import MeshAdministration from '../components/settings/MeshAdministration.svelte'
   import PolicyManagement from '../components/settings/PolicyManagement.svelte'
@@ -66,6 +67,7 @@
     ['devices', 'Devices & notifications'],
     ['mesh', 'Mesh'],
     ['policies', 'Permissions & policies'],
+    ['data', 'Data'],
     ['maintenance', 'Maintenance'],
   ] as const
   const activeSection = $derived(
@@ -1088,6 +1090,10 @@
 
 {#if activeSection === 'repositories'}
   <Repositories />
+{/if}
+
+{#if activeSection === 'data'}
+  <DataHeld />
 {/if}
 
 {#if activeSection === 'maintenance'}

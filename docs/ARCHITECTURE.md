@@ -1286,8 +1286,13 @@ Three surfaces, three answers, and the differences are the point.
 Encrypted snapshots of the hub's volume to object storage, with a restore path that
 has been exercised — hub failure without a tested restore costs years of context.
 Retention is decided (2026-09-29): the node keeps everything, and the operator deletes
-by hand; a data-management pane that shows what is held per kind and offers those
-deletes is on the roadmap. Tombstone semantics wait until replication makes a
+by hand. Settings → Data shows what the node holds per kind (rows counted from the
+store, directories measured on disk), where each kind that has a real delete is
+deleted, and what that delete does beyond the node; the Nodes screen carries the
+serving node's total. Documents, memories and work items delete one at a time and
+replicate the delete as a tombstone; workspaces and harness state go through Runtime
+storage once their session is archived; sessions, their logs and evidence have no
+delete. Tombstone semantics wait until replication makes a
 propagated delete matter, and that decision is due before it does. Plain-text export for every kind: no format readable
 only by this binary. Documents export as plain Markdown and import back by filename
 alone; a session package is JSON that `tracon session show` renders with nothing
