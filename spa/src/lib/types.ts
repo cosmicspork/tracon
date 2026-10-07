@@ -1540,3 +1540,61 @@ export interface ExternalEvent {
   payload: Record<string, unknown>
   at_ms: number
 }
+
+/** One attempt at a piece of work: a session that held the item, or one in a plain session's lineage. */
+export interface ContinuationAttempt {
+  id: string
+  phase: string
+  model: string
+  harness: string
+  state: string
+  end_reason: string | null
+  last_error: string | null
+  tokens_used: number
+  created_ms: number
+  continued_from: string | null
+  parent_session: string | null
+  archived: boolean
+}
+
+export type NextActionKind =
+  | 'done'
+  | 'start'
+  | 'watch'
+  | 'answer'
+  | 'resume'
+  | 'unblock'
+  | 'execute'
+  | 'continue'
+  | 'change_approach'
+
+/** The work-level continuation view, as the node derives it from recorded state. */
+export interface Continuation {
+  kind: 'item' | 'session'
+  id: string
+  channel: string
+  intent: { title: string; body: string; source: 'item' | 'prompt' | 'none' }
+  attempts: ContinuationAttempt[]
+  blockers: string[]
+  next: { kind: NextActionKind; text: string; session_id: string | null }
+  workspace: { id: string; branch: string; session_id: string } | null
+  decisions: {
+    plan: string | null
+    brief: string | null
+    answered: { session_id: string; kind: 'permission' | 'question'; asked: string; answer: string; at_ms: number }[]
+  }
+  evidence: {
+    reviews: {
+      id: string
+      session_id: string | null
+      title: string
+      state: string
+      verdict_reason: string | null
+      publish_result: string | null
+      head_sha: string
+      created_ms: number
+    }[]
+    shown: { id: string; session_id: string | null; title: string; head_sha: string; stale: boolean; created_ms: number }[]
+  }
+  actions: { continue_from: string | null; abandon: boolean }
+}
