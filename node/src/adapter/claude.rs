@@ -392,6 +392,12 @@ impl Pump {
             fault,
         } = self;
         let mut lines = BufReader::new(stdout).lines();
+        // Tool calls the harness has started and not asked about. Claude Code
+        // decides reads and searches by its own rules and never sends a
+        // `can_use_tool` for them, and the `tool_use` block always precedes
+        // the ask, so a call is known to have been let through unasked only
+        // when its result arrives while it is still here.
+        let mut unasked: HashMap<String, (String, Value)> = HashMap::new();
         while let Ok(Some(line)) = lines.next_line().await {
             let line = line.trim();
             if line.is_empty() {
@@ -438,6 +444,22 @@ impl Pump {
                                     .await;
                             }
                             "tool_use" | "mcp_tool_use" | "server_tool_use" => {
+                                // A server tool runs at the provider and its
+                                // result never comes back as a `tool_result`.
+                                if block["type"] != "server_tool_use" {
+                                    if let Some(id) = block["id"].as_str() {
+                                        unasked.insert(
+                                            id.to_string(),
+                                            (
+                                                block["name"]
+                                                    .as_str()
+                                                    .unwrap_or_default()
+                                                    .to_string(),
+                                                block["input"].clone(),
+                                            ),
+                                        );
+                                    }
+                                }
                                 let _ = tx
                                     .send(HarnessEvent::ToolCall(ToolCall {
                                         tool_call_id: block["id"]
@@ -464,6 +486,12 @@ impl Pump {
                 "user" => {
                     for block in v["message"]["content"].as_array().into_iter().flatten() {
                         if block["type"] == "tool_result" {
+                            let id = block["tool_use_id"].as_str().unwrap_or_default();
+                            if let Some((tool, input)) = unasked.remove(id) {
+                                let _ = tx
+                                    .send(HarnessEvent::Decided(decided(id, &tool, input)))
+                                    .await;
+                            }
                             let _ = tx
                                 .send(HarnessEvent::ToolCallUpdate(tool_result_update(block)))
                                 .await;
@@ -480,6 +508,9 @@ impl Pump {
                         .unwrap_or("a tool")
                         .to_string();
                     let input = v["request"]["input"].clone();
+                    if let Some(id) = v["request"]["tool_use_id"].as_str() {
+                        unasked.remove(id);
+                    }
                     let (reply_tx, reply_rx) = oneshot::channel();
                     open.lock().unwrap().insert(id.clone(), ());
                     let _ = tx
@@ -510,6 +541,9 @@ impl Pump {
                     });
                 }
                 "result" => {
+                    // A turn's calls have all answered by its end; one that
+                    // never did (an interrupt) has nothing left to record.
+                    unasked.clear();
                     let usage = usage_of(&v);
                     let _ = tx
                         .send(HarnessEvent::Usage {
@@ -622,6 +656,22 @@ fn tool_result_update(block: &Value) -> ToolCallUpdate {
         content: vec![block["content"].clone()],
         raw_output: Some(Value::String(output)),
     }
+}
+
+/// The request a call the harness ran unasked would have made, normalized
+/// exactly as a `can_use_tool` for it is, so the policy reads one subject
+/// whether the harness asked or not.
+fn decided(id: &str, tool: &str, input: Value) -> PermissionRequest {
+    let (resource, command) = permission_target(tool, &input);
+    PermissionRequest::managed(
+        Some(id.to_string()),
+        summarize(tool, &input),
+        tool,
+        resource,
+        command,
+        Some(input),
+        Vec::new(),
+    )
 }
 
 /// What the operator reads in the queue. The tool's own name plus the one
