@@ -22,6 +22,7 @@ pub mod approvals;
 pub mod authority;
 pub use authority::*;
 pub mod context;
+pub mod continuation;
 pub mod corpus;
 pub mod criteria;
 pub mod evidence;

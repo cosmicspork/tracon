@@ -2,6 +2,7 @@
 // interface can say what the node said, not "request failed".
 
 import type {
+  Continuation,
   SessionExhaustion,
   ExternalEvent,
   ExternalView,
@@ -260,6 +261,14 @@ export const api = {
   }) => call<Session>('POST', '/api/sessions', spec),
   /** Carry on a session a node restart cut off, as a new session on its workspace. */
   continueSession: (id: string) => call<Session>('POST', `/api/sessions/${id}/continue`),
+  /** One piece of work in one view: an item's attempts, or a plain session's lineage. */
+  workContinuation: (id: string) => call<Continuation>('GET', `/api/work/${id}/continuation`),
+  sessionContinuation: (id: string) => call<Continuation>('GET', `/api/sessions/${id}/continuation`),
+  /** Carry the work on from an ended attempt; an `approach` changes how. */
+  carryOn: (body: { session_id: string; approach?: string; model?: string; harness?: string }) =>
+    call<Session>('POST', '/api/continuation/continue', body),
+  abandonWork: (body: { item_id?: string; session_id?: string; reason: string }) =>
+    call<{ abandoned: boolean }>('POST', '/api/continuation/abandon', body),
   /** One prompt: the work item and the session that starts on it. */
   compose: (c: {
     channel: string

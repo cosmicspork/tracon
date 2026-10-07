@@ -316,6 +316,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/archive-legacy", post(api::archive_legacy))
         .route("/api/sessions/{id}/reopen", post(api::reopen_session))
         .route("/api/sessions/{id}/continue", post(api::continue_session))
+        .route(
+            "/api/sessions/{id}/continuation",
+            get(api::session_continuation),
+        )
+        .route("/api/work/{id}/continuation", get(api::work_continuation))
+        .route("/api/continuation/continue", post(api::carry_on))
+        .route("/api/continuation/abandon", post(api::abandon_work))
         .route("/api/sessions/{id}/archive", post(api::archive_session))
         .route("/api/sessions/{id}/unarchive", post(api::unarchive_session))
         .route("/api/sessions/{id}", get(api::get_session))

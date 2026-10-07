@@ -58,9 +58,6 @@ Needed for daily use, but not blocking it today.
 
 **Sessions and accounting**
 
-- [ ] A work-level continuation view carrying intent, decisions, attempts, blockers, next
-      action, workspace, lineage and evidence, with continue / change approach / abandon.
-      Plain sessions gain it without being forced into a work item.
 - [ ] A concise outcome record derived from recorded state: what changed, what was
       verified, what needs a decision, what is uncertain, and cost. Narrative summary
       cannot turn a claim into verification.
