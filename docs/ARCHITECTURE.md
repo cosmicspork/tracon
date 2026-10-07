@@ -1083,6 +1083,21 @@ in a container with no credentials. Model supervision is reserved for judgment w
 no test: a cheap model watching an expensive one mostly pays twice to learn what
 the test suite would have reported.
 
+**What a session came to is read, not written.** Its outcome record
+(`GET /api/sessions/{id}/outcome`, the Outcome panel on the session) answers five
+questions from rows other paths recorded: what changed (its reviews, their files
+and line counts, how often the workspace moved), what the node verified (every
+check it ran for the session, marked current only on the commit the latest review
+stands at), what needs a decision (open permissions, unanswered questions,
+undecided reviews and reports), what is uncertain (an unsettled dispatch, unmetered
+or mismatched turns, a check still running or only run on an earlier commit, stale
+shown work, a publication that may or may not have reached the forge), and the cost
+from the turn ledger. The agent's own words appear only as claims, each beside what
+backs it, and the only thing that backs one is a passing check the node ran on the
+commit the claim was made at. A report has no commit, so nothing backs it; a review
+that describes a new commit as green is unbacked until a check runs there. However
+well the summary reads, prose never becomes verification.
+
 ## Metrics
 
 Event log, append-only, replicated. Human time is claim/release on approval items —

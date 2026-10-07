@@ -1495,6 +1495,19 @@ pub async fn get_session(
     })))
 }
 
+/// What the session came to, read from what was recorded: what changed, what
+/// the node verified, what needs a decision, what is uncertain, and the cost.
+pub async fn session_outcome(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::outcome::Outcome>> {
+    let session = s
+        .store()
+        .get_session(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such session".into()))?;
+    Ok(Json(crate::outcome::outcome(s.store(), session)?))
+}
+
 /// What this session may do, and what it would still have to ask about.
 ///
 /// Read-only, and deliberately so: every verdict in it is produced by calling
