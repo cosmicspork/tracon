@@ -636,6 +636,16 @@ pub async fn storage(
     Ok(Json(json!({ "applied": body.apply, "items": items })))
 }
 
+/// `GET /api/maintenance/data`: what this node holds, kind by kind, how
+/// much it weighs, and where each kind that can be deleted is deleted.
+pub async fn data(State(s): State<AppState>) -> ApiResult<Json<crate::data::Inventory>> {
+    let store = s.store().clone();
+    let inventory = tokio::task::spawn_blocking(move || crate::data::inventory(&store))
+        .await
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    Ok(Json(inventory))
+}
+
 /// `POST /api/admin/maintenance/boundary-check`: rerun the fixed boundary
 /// checks for this serving node. It accepts no executable, command, or path.
 pub async fn boundary_check(

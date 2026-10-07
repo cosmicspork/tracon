@@ -130,6 +130,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/admin/maintenance/restart", post(admin::restart))
         .route("/api/maintenance/storage", post(admin::storage))
+        .route("/api/maintenance/data", get(admin::data))
         .route("/api/admin/maintenance/install", post(admin::install))
         .route("/api/admin/maintenance/uninstall", post(admin::uninstall))
         .route("/api/admin/policy", get(policy_admin::status))
@@ -300,6 +301,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/workspaces/{id}/export", post(api::export_workspace))
         .route("/api/workspaces/{id}/prepare", post(api::prepare_workspace))
+        .route("/api/preparation", get(api::preparation_preview))
         .route(
             "/api/workspaces/{id}/download",
             get(api::download_workspace),
@@ -312,15 +314,24 @@ pub fn router(state: AppState) -> Router {
         )
         // One prompt: the item and the session that starts on it.
         .route("/api/compose", post(api::compose))
+        .route("/api/readiness", get(api::readiness))
         .route("/api/sessions/archive-ended", post(api::archive_ended))
         .route("/api/sessions/archive-legacy", post(api::archive_legacy))
         .route("/api/sessions/{id}/reopen", post(api::reopen_session))
         .route("/api/sessions/{id}/continue", post(api::continue_session))
+        .route(
+            "/api/sessions/{id}/continuation",
+            get(api::session_continuation),
+        )
+        .route("/api/work/{id}/continuation", get(api::work_continuation))
+        .route("/api/continuation/continue", post(api::carry_on))
+        .route("/api/continuation/abandon", post(api::abandon_work))
         .route("/api/sessions/{id}/archive", post(api::archive_session))
         .route("/api/sessions/{id}/unarchive", post(api::unarchive_session))
         .route("/api/sessions/{id}", get(api::get_session))
         .route("/api/sessions/{id}/events", get(api::session_events))
         .route("/api/sessions/{id}/authority", get(api::session_authority))
+        .route("/api/sessions/{id}/outcome", get(api::session_outcome))
         .route("/api/sessions/{id}/prompt", post(api::prompt))
         .route("/api/sessions/{id}/kill", post(api::kill))
         .route("/api/sessions/{id}/pause", post(api::pause))
@@ -878,6 +889,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                 // An approval waits for the operator until it expires; the
                 // caller is not blocked on it, so nothing else would end it.
                 manager.expire_approvals().await;
+                // A session waiting out its provider's limit is woken here,
+                // and one bound for its fallback is carried on.
+                manager.wake_exhausted().await;
                 let stale = store
                     .stale_claims(grace.as_millis() as i64)
                     .unwrap_or_default();

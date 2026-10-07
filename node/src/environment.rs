@@ -120,6 +120,17 @@ pub fn environment_for(cfg: &Config, store: &Store, repo: Option<&Path>) -> Repo
     // entry can claim that, so every one of them is skipped.
     let repos = cfg.repos();
     let entry = repo.and_then(|repo| repos.iter().find(|entry| entry.matches(repo)));
+    environment_with(cfg, store, repo, entry)
+}
+
+/// The environment `entry` would give `repo`, whether or not the table holds
+/// it: what a drafted entry is tried in before the operator is asked for it.
+pub fn environment_with(
+    cfg: &Config,
+    store: &Store,
+    repo: Option<&Path>,
+    entry: Option<&Repo>,
+) -> RepoEnvironment {
     let checks = match entry.and_then(|entry| entry.checks.as_ref()) {
         Some(checks) => checks,
         None => &cfg.supervision.checks,
@@ -229,10 +240,28 @@ pub fn harness_image(cfg: &Config) -> String {
     }
 }
 
-/// A workspace's own dependency cache, mounted writable into its sessions.
-/// What an agent installs lands here and nowhere a check reads.
-pub fn session_cache_volume(workspace_id: &str) -> String {
-    crate::workspace::volume_name(workspace_id).replacen("tracon-workspace-", "tracon-cache-w-", 1)
+/// A repository's session build cache, one per channel, mounted writable
+/// into every session that channel runs on it: the dependencies a session
+/// fetched and the build output it compiled, kept for the next session. What
+/// an agent writes lands here and nowhere a check reads; checks start from
+/// the base cache (`RepoEnvironment::cache_volume`) every time.
+///
+/// Keyed on the base cache's name, which already names the repository, and
+/// on the channel, so what one channel's agent left is not built on by
+/// another's.
+pub fn session_cache_volume(base_cache: &str, channel: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(base_cache.as_bytes());
+    hash.update([0]);
+    hash.update(channel.as_bytes());
+    format!("tracon-cache-r-{}", &hex::encode(hash.finalize())[..24])
+}
+
+/// Where a session keeps its build output, under the cache mount, so it
+/// outlives the session. Only a session gets these: a check's cache is
+/// read-only and its build starts from nothing it did not prepare.
+pub fn session_build_env() -> Vec<(String, String)> {
+    vec![("CARGO_TARGET_DIR".to_string(), "/cache/target".to_string())]
 }
 
 /// Where each package manager keeps what it fetched, under the cache mount.
@@ -375,6 +404,51 @@ pub fn scoped_egress(backend: &dyn Backend, hosts: &[String]) -> Result<ScopedEg
     })
 }
 
+/// The lockfiles preparation recognises, in the order it prefers them, and the
+/// command each is installed with. Every one runs with the package manager's
+/// own scripts turned off: an install hook is repository code.
+pub(crate) const LOCKFILES: &[(&str, &str)] = &[
+    ("Cargo.lock", "cargo fetch --locked"),
+    ("package-lock.json", "npm ci --ignore-scripts"),
+    ("npm-shrinkwrap.json", "npm ci --ignore-scripts"),
+    ("bun.lock", "bun install --frozen-lockfile --ignore-scripts"),
+    (
+        "bun.lockb",
+        "bun install --frozen-lockfile --ignore-scripts",
+    ),
+    (
+        "pnpm-lock.yaml",
+        "pnpm install --frozen-lockfile --ignore-scripts",
+    ),
+    (
+        "yarn.lock",
+        "yarn install --frozen-lockfile --ignore-scripts",
+    ),
+    (
+        "composer.lock",
+        "composer install --no-interaction --no-scripts --prefer-dist",
+    ),
+];
+
+/// The `devcontainer.json` fields that would run repository code, grant the
+/// container something of the host's, or install into it. None is honoured,
+/// and none is partially honoured.
+pub(crate) const UNSAFE_DEVCONTAINER_KEYS: &[&str] = &[
+    "privileged",
+    "capAdd",
+    "mounts",
+    "workspaceMount",
+    "runArgs",
+    "initializeCommand",
+    "onCreateCommand",
+    "updateContentCommand",
+    "postCreateCommand",
+    "postStartCommand",
+    "features",
+    "containerEnv",
+    "remoteEnv",
+];
+
 /// Inspect normal project conventions without executing repository-controlled
 /// commands. `devcontainer.json` supplies an image only when it is a plain,
 /// pinned image configuration; setup hooks, mounts, sockets, privilege, and
@@ -393,28 +467,7 @@ pub fn inspect(
     };
     let mut inputs = Vec::new();
     let mut command = None;
-    for (file, prepare) in [
-        ("Cargo.lock", "cargo fetch --locked"),
-        ("package-lock.json", "npm ci --ignore-scripts"),
-        ("npm-shrinkwrap.json", "npm ci --ignore-scripts"),
-        ("bun.lock", "bun install --frozen-lockfile --ignore-scripts"),
-        (
-            "bun.lockb",
-            "bun install --frozen-lockfile --ignore-scripts",
-        ),
-        (
-            "pnpm-lock.yaml",
-            "pnpm install --frozen-lockfile --ignore-scripts",
-        ),
-        (
-            "yarn.lock",
-            "yarn install --frozen-lockfile --ignore-scripts",
-        ),
-        (
-            "composer.lock",
-            "composer install --no-interaction --no-scripts --prefer-dist",
-        ),
-    ] {
+    for &(file, prepare) in LOCKFILES {
         let path = workspace.join(file);
         if path.is_file() {
             inputs.push(DependencyInput {
@@ -544,21 +597,7 @@ fn inspect_devcontainer(workspace: &Path) -> Result<Option<String>, EnvironmentE
     let object = value
         .as_object()
         .ok_or_else(|| EnvironmentError::Devcontainer("top level must be an object".into()))?;
-    for unsafe_key in [
-        "privileged",
-        "capAdd",
-        "mounts",
-        "workspaceMount",
-        "runArgs",
-        "initializeCommand",
-        "onCreateCommand",
-        "updateContentCommand",
-        "postCreateCommand",
-        "postStartCommand",
-        "features",
-        "containerEnv",
-        "remoteEnv",
-    ] {
+    for &unsafe_key in UNSAFE_DEVCONTAINER_KEYS {
         if object.get(unsafe_key).is_some_and(non_empty) {
             return Err(EnvironmentError::UnsafeDevcontainer(unsafe_key));
         }
@@ -574,7 +613,7 @@ fn inspect_devcontainer(workspace: &Path) -> Result<Option<String>, EnvironmentE
     }
 }
 
-fn non_empty(value: &Value) -> bool {
+pub(crate) fn non_empty(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(false) => false,
@@ -585,7 +624,7 @@ fn non_empty(value: &Value) -> bool {
     }
 }
 
-fn approved_image(
+pub(crate) fn approved_image(
     environment: &RepoEnvironment,
     cfg: &Config,
     selected: Option<&str>,
@@ -741,5 +780,29 @@ mod tests {
             app.cache_volume,
             environment_for(&cfg, &store, Some(Path::new("/src/app"))).cache_volume
         );
+    }
+
+    #[test]
+    fn a_session_build_cache_is_the_repositorys_and_the_channels() {
+        let mine = session_cache_volume("tracon-cache-base-app", "personal");
+        // The next session on the same repository and channel finds it.
+        assert_eq!(
+            mine,
+            session_cache_volume("tracon-cache-base-app", "personal")
+        );
+        assert!(mine.starts_with("tracon-cache-r-"));
+        // Another repository, or another channel's agent, starts its own.
+        assert_ne!(
+            mine,
+            session_cache_volume("tracon-cache-base-notes", "personal")
+        );
+        assert_ne!(mine, session_cache_volume("tracon-cache-base-app", "work"));
+        // Build output goes under the cache, and only a session is told so:
+        // a check's cache is read-only and shared names would point its
+        // build at it.
+        assert!(session_build_env()
+            .iter()
+            .all(|(name, value)| value.starts_with("/cache/")
+                && !cache_env().iter().any(|(shared, _)| shared == name)));
     }
 }

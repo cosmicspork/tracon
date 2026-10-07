@@ -245,6 +245,15 @@ run commands. So a workspace carrying one is refused at launch, as one carrying
 `.claude/settings…` path or into `.git/` mid-session. Ignored files never reach a
 workspace, so a checkout's own gitignored settings are unaffected.
 
+**The ledger records a decision for every tool call, whichever harness asked.**
+OpenCode asks the node before each call; Claude Code lets reads and searches through
+on its own rules and never sends a `can_use_tool` for them. The Claude adapter notices
+a call whose result arrives without an ask and reports it, normalized exactly as an
+ask would have been, and the supervisor records the `policy_allowed` the node's policy
+gives it, marked `decided_by: harness`. The call has already run, so nothing is asked;
+if the policy would have asked or denied, the record says the harness let it through
+and what the policy would have done, rather than naming a rule that did not apply.
+
 ### Model auth
 
 **Model credentials are brokered like every other credential.** The harness holds
@@ -555,7 +564,32 @@ starts; every check then runs on its own copy of the prepared tree with the cach
 read-only. That cache is the run's own, copied from the repository's base cache and
 removed with the run. The base is written by one thing only — a preparation of the
 default branch, made when the repository's image is built — so a candidate's install,
-which may run the candidate's own scripts, can reach its own evidence and nobody else's. A grant is one client's: the node serves its own
+which may run the candidate's own scripts, can reach its own evidence and nobody else's.
+Sessions get a cache of their own, one per repository and channel, that outlives each
+session: it starts as a copy of the base, and what an agent fetches or compiles into it
+(Cargo's output goes there through `CARGO_TARGET_DIR`) is there for the channel's next
+session on the repository. No check mounts it, so nothing an agent wrote can make the
+review gate pass; a check still prepares from the base. A session that needs
+something running beside it (a browser to drive, a database to test against) asks for
+it by name from the operator's `[[service]]` catalogue with `service_start`, which
+waits, within a tool call's budget, for the entry's readiness probe; `service_status`
+keeps waiting. It never names an image or a command. The service joins the session
+container's network namespace, so it is reached on the session's loopback and reaches
+the gateway and nothing of its own, and the policy bundle decides each service by its
+name: the shipped bundle runs a headless browser unattended and asks about anything
+else. The service's `service` events on the session are how every path that removes
+the session's container (its end, a kill, a restart's reconciliation) finds and removes
+its services first. A session's pause stops neither the harness container nor its
+services today; both run until the session ends. A runtime that cannot share a
+namespace (the local and Kubernetes runners) reports that it cannot run one rather than
+starting it somewhere the session cannot reach. What a repository asks of
+preparation and does not get is said before launch: `GET /api/preparation` (shown under
+the repository in the composer) reads the checkout and names the install it would run,
+the entry's `prepare` commands and the image, then every devcontainer field the node
+will not honour (hooks, `initializeCommand` on the host, features, mounts, privileges,
+environment, a `build`) and every install script a scripts-off install skips, each with
+where that work belongs instead. Those that would stop preparation are told apart from
+those it passes over, and none of them is ever run to find out: the preview reads files. A grant is one client's: the node serves its own
 CONNECT proxy behind a second forward in the gateway, each preparation and session
 presents the token it was issued as proxy credentials, and each is filtered
 by its own host set — so nothing one may reach is reachable by another, none waits for
@@ -587,6 +621,18 @@ revision, because a resubmission may carry the same `head_sha` with different
 requirements or prose; a verdict from a tab that read the revision it replaced
 is refused and the review waits for a fresh reading. Unchanged code may reuse
 its checks, never an unseen human decision.
+
+**An agent may draft a repository's entry; only the operator makes it one.** The
+`repo_setup_*` tools read the default branch's commit, never a session's workspace, so
+nothing a session wrote shapes the draft. A trial prepares that commit with a volume and
+a cache of its own, reaching only the hosts the asking session can already reach, then
+runs each check on a copy with the cache read-only and no network, the shape of a
+required check. A host the draft names that the session cannot reach is reported as not
+tried; asking for it with `request_egress` is how it becomes reachable, and hosts opened
+that way are suggested in the next draft. A proposal is an approval whatever the policy
+says, checked before the card is raised. The node writes it, as the operator left it, in
+place of the repository's entry. It never changes whether that entry opens its egress to
+sessions. Trials are held in memory: a restart drops a report, not a decision.
 
 **The node vouches for the revision and the checks; what an agent shows is its own
 account.** The candidate's tree, the required checks run against it and every decision
@@ -631,9 +677,28 @@ memberships, verify the candidate's actual channel and owner, refuse third-node
 relays, and bound responses. Peer UI detail is read-only; it never turns a remote
 ID into a local action.
 
+**What is reviewed is the tree; the commits and the branch are prose.** The
+candidate is a tree hash recorded at capture, and every check, verdict and grant
+is about that tree. How it reaches the forge is publication prose, like the
+description: the agent proposes a commit message and a branch (`message`,
+`branch` on submit; a session on the node's placeholder branch gets one named
+from its title), the review lists the agent's own commits beside the diff, and
+the operator edits either before approving. Under `commits = "squash"`, the
+default, the publisher makes one commit holding exactly the reviewed tree, on
+the commit pinned at submit — where the branch leaves its base for a new
+branch, or what the change's branch holds for an update, including an earlier
+squash the agent never had — with the candidate head's author and dates, so a
+resumed attempt makes the identical commit. `keep` pushes the agent's commits
+as written. The message and branch are bound by the publish grant's prose hash
+and target like the description, and a deterministic check (conventional type,
+imperative subject, length, kebab branch, no tracker keys — each off unless the
+repository's entry, the channel's `publish.style` binding or `[publish] style`
+turns it on) refuses a submission that breaks it before the card reaches the
+operator, and an approval whose edits do.
+
 **Publication is two side effects the node cannot take back, so it writes down
 what it is about to do before it does it.** Approval imports the candidate into a
-fresh publisher repository, pushes the reviewed commit, reads the ref back from
+fresh publisher repository, pushes the reviewed commit (or its squash), reads the ref back from
 the forge to confirm it is actually there, and then opens the change with
 exactly the approved title and description — nothing is appended that the
 operator did not see. Each step is recorded before it is attempted, keyed on the
@@ -858,6 +923,21 @@ binding can waive that), and closing the item ends the session that held it.
 Context rot is mitigated by mechanism where the workflow opts in, not by a line
 in a markdown file a plain session never claimed to follow.
 
+**Coming back to work is one view, item or not.** An item's attempts are the
+sessions that held it. A plain session's attempts are its lineage, meaning what it
+continued and what continued it, so it gets the same view without being made into
+an item. The view (`/api/work/{id}/continuation`, `/api/sessions/{id}/continuation`)
+gathers what the work was for (the item, or the first prompt), each attempt and how
+it ended, what the operator decided (answered permissions and questions, and the plan
+and brief), what is in the way, the workspace the latest attempt left, and the
+reviews and shown work. It also gives the one next action. Every part of that is
+read from recorded state, and the next action follows fixed rules over those records,
+so it cannot claim more than they say. It offers three verbs. Continue carries the
+work on from the last ended attempt's workspace. Change approach does the same and
+hands the operator's new direction, in their own words, to the next attempt.
+Abandon closes the item, or stops a plain lineage and puts it away, and records the
+reason. Abandon deletes nothing.
+
 ### The product brief
 
 An item may point at one document that says what the work is for: intended user,
@@ -897,8 +977,13 @@ heard from the customer should look like one rather than like a tidy form.
 
 A success criterion is not a new record: it is a line in the brief's success
 criteria section, and what points at it is an indented line under it naming a
-`check`, a `scenario` or an `observation`. The document stays the record, so
-links travel with the channel, round-trip, and are editable by hand.
+`check`. The document stays the record, so links travel with the channel,
+round-trip, and are editable by hand. A check is the one link kind anything
+produces a result for; whatever a check cannot settle is the operator's
+judgement, recorded as a verdict rather than a link. The `scenario` and
+`observation` kinds an older brief may hold are retired: they are still read,
+so the file round-trips and they are not mistaken for criteria of their own,
+shown as retired, counted for nothing, and refused for anything new.
 
 **A criterion is named by its own text.** `sc-` and twelve hex characters of
 the SHA-256 hash of the line with only outer whitespace trimmed. Case,
@@ -916,8 +1001,7 @@ rule, so a session's link is `inferred` and a `decided` one is refused. Coverage
 follows: a criterion whose only links are somebody's proposal reads as
 `only_proposed`, not as covered, however green that proposal would go. A `check`
 resolves only against the commands the operator configured — any other is
-recorded and reported as never running — and a `scenario` says plainly that this
-node holds no such record yet.
+recorded and reported as never running.
 
 **Passing one's own checks is not the customer agreeing.** A check result raises
 a criterion as far as `checks_pass`, shown as "checks pass · unjudged".
@@ -991,6 +1075,18 @@ as the session's `model_source`, so a silent default is never undocumented.
 Only an explicit model unusable for the channel's bound provider is a validation
 failure at spawn; an empty one never is.
 
+**What a session needs depends on what it is for.** Investigating, verifying and
+publishing ask different things of a repository, and `GET /api/readiness` (the line
+under the composer) says what each lacks before a session is spent finding out. An
+investigation needs a node that would start it and a checkout to start it in, and
+nothing else: no checks, no forge credential, no brief. Verifying adds required
+checks and an image they can run in, since without them nothing the node runs can
+vouch for the result. Publishing adds an `origin` on a forge the node publishes to
+and that forge's credential bound to the channel; a work item with no brief is noted
+there, since its review will have no requirements to judge against, but not held
+against it. The answer only reads: it builds no image, calls no forge and starts no
+session.
+
 Budgets are denominated in tokens (dollars are derived where a provider binding
 carries a price) and enforced by killing the session, checked at turn end because
 that is when harnesses report usage — a property of the protocol stated honestly in
@@ -998,6 +1094,26 @@ the interface rather than papered over. Channels carry daily ceilings enforced a
 two points: session start is refused, and the gateway refuses the model calls of
 sessions already running, so a running session stops spending and the operator
 decides.
+
+**An exhausted provider is a policy, not a failure.** The gateway reads every refused
+model call and says what kind it was on the session's `provider_error`: throttling
+and outages clear on their own and the harness retries them, an auth failure does
+not clear by waiting, and exhaustion (a spent quota, a subscription's usage window,
+an empty balance) is the one a channel chooses for, with a per-run override:
+`pause` (the default), `fallback` to a named model, or `fallback_then_wait`. The
+decision is recorded (`provider_exhausted`: policy, reason, model, next wake) and
+the session is fenced like any pause. Its safe boundary is the fenced turn settling,
+and nothing resumes or continues before that boundary is recorded. A waiting
+session is woken by the node's periodic tick once the provider's own reset time has
+passed. The reset is only ever one the provider sent, so a provider that sent none
+leaves the session for the operator, because a guessed timer either wakes it into
+the same refusal or sleeps past the lift. Before it goes back to work, everything that
+would refuse it starting is checked again: the channel, the node, the harness pin,
+the model's binding and credential, the ceiling and the budget. If any check fails,
+the session is held with the reason. A fallback is a continuation from the boundary,
+on the fallback model, with the policy carried over, because a running harness
+cannot change model. A continuation already on its fallback has nowhere further to
+go.
 
 **A cache read is recorded, never charged.** Each step of a long session resends its
 whole context, most of it from the provider's cache; charged as input, a planning
@@ -1026,6 +1142,21 @@ Anything checkable deterministically is checked deterministically, between phase
 in a container with no credentials. Model supervision is reserved for judgment with
 no test: a cheap model watching an expensive one mostly pays twice to learn what
 the test suite would have reported.
+
+**What a session came to is read, not written.** Its outcome record
+(`GET /api/sessions/{id}/outcome`, the Outcome panel on the session) answers five
+questions from rows other paths recorded: what changed (its reviews, their files
+and line counts, how often the workspace moved), what the node verified (every
+check it ran for the session, marked current only on the commit the latest review
+stands at), what needs a decision (open permissions, unanswered questions,
+undecided reviews and reports), what is uncertain (an unsettled dispatch, unmetered
+or mismatched turns, a check still running or only run on an earlier commit, stale
+shown work, a publication that may or may not have reached the forge), and the cost
+from the turn ledger. The agent's own words appear only as claims, each beside what
+backs it, and the only thing that backs one is a passing check the node ran on the
+commit the claim was made at. A report has no commit, so nothing backs it; a review
+that describes a new commit as green is unbacked until a check runs there. However
+well the summary reads, prose never becomes verification.
 
 ## Metrics
 
@@ -1096,7 +1227,11 @@ Every node serves the same embedded SPA; a client is a matter of shell.
   required a matching `Origin` on everything that writes.
 - The interface talks only to the node that served it; that node mirrors peers and
   forwards commands to owners. A verdict executes on the owner, because staleness
-  and publishing need the owner's worktree and broker.
+  and publishing need the owner's worktree and broker. A mirrored review's checks,
+  evidence, criteria, staleness and forge intent are read from the owner when it is
+  opened, bounded like candidate evidence. The owner answers only for a review it holds,
+  on a channel both nodes share. An owner that cannot be read, or that has moved on to
+  a revision not yet mirrored, is said to be, rather than shown as an empty review.
 - **The attention count is actionable human decisions, and nothing else.** Everything
   parked in the operator's bay is sorted into three lanes before it is counted: what a
   person can decide now; what the agent holds (a review being revised, a request that
@@ -1151,8 +1286,13 @@ Three surfaces, three answers, and the differences are the point.
 Encrypted snapshots of the hub's volume to object storage, with a restore path that
 has been exercised — hub failure without a tested restore costs years of context.
 Retention is decided (2026-09-29): the node keeps everything, and the operator deletes
-by hand; a data-management pane that shows what is held per kind and offers those
-deletes is on the roadmap. Tombstone semantics wait until replication makes a
+by hand. Settings → Data shows what the node holds per kind (rows counted from the
+store, directories measured on disk), where each kind that has a real delete is
+deleted, and what that delete does beyond the node; the Nodes screen carries the
+serving node's total. Documents, memories and work items delete one at a time and
+replicate the delete as a tombstone; workspaces and harness state go through Runtime
+storage once their session is archived; sessions, their logs and evidence have no
+delete. Tombstone semantics wait until replication makes a
 propagated delete matter, and that decision is due before it does. Plain-text export for every kind: no format readable
 only by this binary. Documents export as plain Markdown and import back by filename
 alone; a session package is JSON that `tracon session show` renders with nothing

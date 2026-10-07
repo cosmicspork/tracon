@@ -687,6 +687,25 @@ mod tests {
     }
 
     #[test]
+    fn the_browser_runs_unattended_and_any_other_service_is_asked() {
+        let p = Policy::shipped();
+        let browser = serde_json::json!({ "name": "browser" });
+        let database = serde_json::json!({ "name": "postgres" });
+        assert_eq!(
+            p.decide(&tool("service_start", &browser, "")).verdict,
+            Verdict::Allow
+        );
+        assert_eq!(
+            p.decide(&tool("service_start", &database, "")).verdict,
+            Verdict::Ask
+        );
+        assert_eq!(
+            p.decide(&tool("service_status", &database, "")).verdict,
+            Verdict::Allow
+        );
+    }
+
+    #[test]
     fn globs_match_only_what_they_say() {
         assert!(glob("note-*", "note-personal"));
         assert!(!glob("note-*", "notes-personal"));
@@ -857,6 +876,7 @@ mod tests {
             "job_trace",
             "pr_status",
             "run_status",
+            "run_logs",
             "pr_threads",
             "pr_for_branch",
             "mr_discussions",
@@ -867,6 +887,7 @@ mod tests {
         }
         for name in [
             "pipeline_run",
+            "run_rerun",
             "pr_comment",
             "mr_comment",
             "pr_reply",

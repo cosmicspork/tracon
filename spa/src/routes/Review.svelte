@@ -15,6 +15,7 @@
     reviewVerdict,
     type CandidateEvidence,
     type Criteria,
+    type OwnerDetail,
     type PinnedRequirements,
     type Review,
     type ReviewAuthorship,
@@ -40,6 +41,7 @@
   let stale = $state<string[]>([])
   /** The node that owns a review mirrored here; null when this node does. */
   let remoteOwner = $state<string | null>(null)
+  let ownerDetail = $state<OwnerDetail | null>(null)
   let evidence = $state<CandidateEvidence | null>(null)
   let shownWork = $state<ShownWorkItem[]>([])
   let authorship = $state<ReviewAuthorship | null>(null)
@@ -63,12 +65,27 @@
   let descBody = $state('')
   let commenting = $state(false)
   let comment = $state('')
+  /** The squashed commit's message, and what it was before you edited it. */
+  let message = $state('')
+  let proposedMessage = ''
+  /** The branch a new change is pushed to. */
+  let branchName = $state('')
   let busy = $state(false)
   let error = $state<string | null>(null)
   let loaded = $state(false)
   /** The route this review was opened from; a verdict goes back to it. */
   let openedFrom: string | null = null
   const report = $derived(review && isNarrativeReport(review) ? review : null)
+
+  /**
+   * The message a squash carries when nobody edits it, as the node derives
+   * it: the agent's, else the description's, else the review's own.
+   */
+  function proposedCommitMessage(intent: ReviewIntent, title: string, body: string): string {
+    if (intent.forge.commit !== undefined) return intent.forge.commit
+    const from = intent.forge.description ?? { title, body }
+    return from.body.trim() ? `${from.title.trim()}\n\n${from.body.trim()}` : from.title.trim()
+  }
 
   $effect(() => {
     void id
@@ -81,6 +98,7 @@
         revision = d.revision
         stale = d.stale
         remoteOwner = d.remote_owner ?? null
+        ownerDetail = d.owner_detail ?? null
         evidence = d.evidence
         shownWork = d.shown_work ?? []
         authorship = d.authorship ?? null
@@ -96,6 +114,13 @@
         descBody = intent.forge.description?.body ?? ''
         commenting = intent.forge.comment !== undefined
         comment = intent.forge.comment ?? ''
+        proposedMessage = proposedCommitMessage(intent, d.review.title, d.review.body)
+        message = proposedMessage
+        try {
+          branchName = JSON.parse(d.review.target)?.branch ?? ''
+        } catch {
+          branchName = ''
+        }
         loaded = true
       })
       .catch((e) => {
@@ -236,10 +261,17 @@
    * before a revision could say otherwise.
    */
   const summaryOnly = $derived(change !== null || describe)
+  /** Whether the reviewed tree ships as one commit rather than the agent's. */
+  const squashing = $derived(intent.squash_onto !== undefined)
   const outputs = $derived<ReviewOutputs>({
     description: describe ? { title: descTitle, body: descBody } : undefined,
     comment: commenting && comment.trim() ? comment : undefined,
     draft: change === null ? intent.forge.draft : undefined,
+    commit:
+      squashing && (intent.forge.commit !== undefined || message.trim() !== proposedMessage)
+        ? message.trim()
+        : undefined,
+    branch: change === null && branchName.trim() && branchName.trim() !== target?.branch ? branchName.trim() : undefined,
   })
   const files = $derived.by(() => {
     try {
@@ -261,6 +293,8 @@
             description: intent.forge.description,
             comment: intent.forge.comment,
             draft: change === null ? intent.forge.draft : undefined,
+            commit: squashing ? intent.forge.commit : undefined,
+            branch: undefined,
           })),
   )
   const authoritativeChecks = $derived(evidence?.checks ?? [])
@@ -432,7 +466,7 @@
       {:else}
         new {noun}{intent.forge.draft ? ' (draft)' : ''}
       {/if}
-      → {target?.project} · {target?.branch} into {target?.base}
+      → {target?.project} · {outputs.branch ?? target?.branch} into {target?.base}
       {#if intent.rewrite}
         <span
           class="chip warn"
@@ -450,11 +484,19 @@
       <dd class="m">{review.lane ?? 'an external agent'}</dd>
     {/if}
   </dl>
-  {#if remoteOwner}
+  {#if remoteOwner && ownerDetail?.state === 'fetched'}
     <div class="banner">
       held by {nodeLabel(store.nodes, remoteOwner)}
-      <b>· its checks and evidence stay on that node, and it checks the branch for changes again when you decide</b>
+      <b>· read from it just now; it checks the branch for changes again when you decide</b>
     </div>
+  {:else if remoteOwner}
+    <div class="banner crit">
+      held by {nodeLabel(store.nodes, remoteOwner)}
+      <b>· {ownerDetail?.reason ?? 'its checks and evidence stay on that node'}; decide there, or reload once it can be read</b>
+    </div>
+  {/if}
+  {#if remoteOwner && !evidence}
+    <!-- what the owner holds could not be read; the banner above says why -->
   {:else if !evidence}
     <div class="banner crit">
       verification evidence missing <b>· this review predates immutable candidate capture</b>
@@ -574,6 +616,8 @@
               {/if}
               {#if c.duplicate}
                 <button class="lnk" disabled>Judge it</button>
+              {:else if remoteOwner}
+                <small>Judge it on {nodeLabel(store.nodes, remoteOwner)}, which holds this attempt.</small>
               {:else if judging === c.key}
                 <div class="judge">
                   <select bind:value={criterionVerdict} aria-label="your verdict">
@@ -713,6 +757,35 @@
   {/if}
   {#if edited}
     <div class="note">Edited. Approving publishes what is written here, not what was submitted.</div>
+  {/if}
+
+  {#if intent.commits?.length || squashing}
+    <div class="h4">
+      Commits
+      <b>{squashing ? 'ships as one commit of the reviewed tree' : 'pushed as the agent wrote them'}</b>
+    </div>
+    {#if intent.commits?.length}
+      <ul class="commits">
+        {#each intent.commits as c (c.sha)}
+          <li class:squashed={squashing}><code>{c.sha.slice(0, 8)}</code> {c.subject}</li>
+        {/each}
+      </ul>
+    {/if}
+    {#if squashing && !remoteOwner}
+      <textarea
+        class="edit body mono"
+        aria-label="commit message"
+        bind:value={message}
+        use:autogrow={message}
+        disabled={busy || publishing || surface.phone}
+      ></textarea>
+    {/if}
+    {#if change === null && !remoteOwner}
+      <label class="branch">
+        Branch
+        <input class="edit mono" bind:value={branchName} disabled={busy || publishing || surface.phone} />
+      </label>
+    {/if}
   {/if}
 
   <div class="h4">Files <b>{files.length}</b></div>
@@ -1267,6 +1340,37 @@
   .filehead .chip.warn {
     background: var(--wash-wait);
     color: var(--wait);
+  }
+  .commits {
+    list-style: none;
+    margin: 0 0 8px;
+    padding: 0;
+    font: 12.5px var(--mono);
+  }
+  .commits li {
+    padding: 3px 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .commits li.squashed {
+    color: var(--dim);
+  }
+  .commits code {
+    color: var(--dim);
+    margin-right: 6px;
+  }
+  .branch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0 12px;
+    font-size: 12.5px;
+    color: var(--dim);
+  }
+  .branch input {
+    flex: 1;
+    margin: 0;
   }
   .files {
     background: var(--s1);

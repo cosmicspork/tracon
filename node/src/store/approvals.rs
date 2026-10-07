@@ -244,6 +244,23 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// The egress asks the operator allowed for `session_id`, oldest first:
+    /// what a repository set up from that session is suggested to reach.
+    pub fn allowed_egress_asks(&self, session_id: &str) -> Result<Vec<ApprovalRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM approval WHERE session_id=?1 AND tool=?2 AND state=?3
+             ORDER BY created_ms ASC",
+        )?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![session_id, EGRESS_TOOL, SUCCEEDED],
+                ApprovalRow::from_row,
+            )?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// Move a pending approval to `state` with the operator's answer. False
     /// when it was no longer pending: answered twice, or expired first.
     pub fn decide_approval(&self, id: &str, decision: &Decision<'_>) -> Result<bool> {

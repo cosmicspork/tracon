@@ -226,6 +226,9 @@ async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> 
     // Checks run through the local runner in the worktree itself; the
     // default `just check` is not what a test fixture has.
     cfg.supervision.checks = vec!["test -f a.txt".into()];
+    // These tests hold publication to the exact reviewed commit; squashing
+    // it into one commit of the same tree has tests of its own.
+    cfg.publish.commits = tracon::config::Commits::Keep;
     tweak(&mut cfg);
     let cfg = Arc::new(cfg);
     let tools = Arc::new(Tools {
@@ -565,6 +568,9 @@ async fn a_mirrored_review_is_not_judged_by_what_this_node_lacks() {
     assert!(body["stale"].as_array().unwrap().is_empty(), "{body}");
     assert!(body["evidence"].is_null());
     assert!(body["intent"].is_null());
+    // With no mesh to ask the owner on, it says so rather than leaving an
+    // empty review to read as the change's own.
+    assert_eq!(body["owner_detail"]["state"], "unreachable", "{body}");
 
     // The node's own review is still read as before.
     let (_, body) = f.call("GET", &format!("/api/reviews/{local}"), None).await;
@@ -973,6 +979,7 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
             outputs: &Default::default(),
             lease: None,
             rewrite: false,
+            squash: None,
             resume: false,
             pushed: false,
             before_push: None,
@@ -3922,4 +3929,151 @@ async fn a_retry_is_refused_once_a_newer_revision_arrives() {
             .contains("newer revision"),
         "{body}"
     );
+}
+
+// ---- what ships under the operator's name ----
+
+fn squashing(c: &mut Config) {
+    c.publish.commits = tracon::config::Commits::Squash;
+}
+
+/// By default the forge gets one commit holding exactly the reviewed tree,
+/// carrying the message and on the branch the operator approved; the
+/// agent's commits are listed beside the diff and go no further.
+#[tokio::test]
+async fn a_new_change_ships_one_commit_of_the_reviewed_tree_as_approved() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    let base = f.base_sha();
+    gh_forge(&f, pull_seven(&base));
+    let wt = std::path::Path::new(&f.worktree);
+    sh(
+        wt,
+        "echo more >> a.txt && git add -A && git commit -qm 'wip: more'",
+    );
+
+    let mut args = f.submit_args();
+    args["message"] = json!("feat: the thing\n\nsquashed from two commits");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let intent = tracon::authority::revision_intent(&f.store, Some(&revision.id)).unwrap();
+    let subjects: Vec<_> = intent.commits.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(subjects, ["work", "wip: more"]);
+    assert_eq!(intent.squash_onto.as_deref(), Some(base.as_str()));
+    assert_eq!(
+        intent.forge.commit.as_deref(),
+        Some("feat: the thing\n\nsquashed from two commits")
+    );
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "outputs": {
+                "commit": "feat: the operator's thing",
+                "branch": "feat/operator-thing",
+            }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let origin = f.dir.join("origin.git");
+    let shipped = sh_out(&origin, "git rev-parse refs/heads/feat/operator-thing");
+    assert_ne!(
+        shipped, review.head_sha,
+        "the agent's commits are not what ships"
+    );
+    assert_eq!(
+        sh_out(&origin, &format!("git rev-parse {shipped}^{{tree}}")),
+        sh_out(wt, &format!("git rev-parse {}^{{tree}}", review.head_sha)),
+        "the reviewed tree is what ships"
+    );
+    assert_eq!(
+        sh_out(&origin, &format!("git rev-parse {shipped}^")),
+        base,
+        "one commit, on the base"
+    );
+    assert_eq!(
+        sh_out(&origin, &format!("git log -1 --format=%B {shipped}")),
+        "feat: the operator's thing"
+    );
+    assert!(
+        sh_out(&origin, "git branch --list feat/x").is_empty(),
+        "nothing goes to the agent's branch"
+    );
+    assert!(
+        f.gh_log().contains("--head feat/operator-thing"),
+        "{}",
+        f.gh_log()
+    );
+    let record = &f.store.publications_for_review(&id).unwrap()[0];
+    assert_eq!(record.pushed_sha.as_deref(), Some(shipped.as_str()));
+}
+
+/// The next revision of a squashed change adds one more commit on top of
+/// the squash, though the agent never had that commit.
+#[tokio::test]
+async fn an_update_to_a_squashed_change_squashes_onto_it() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    let base = f.base_sha();
+    gh_forge(&f, pull_seven(&base));
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let first = f.forge_branch();
+
+    let wt = std::path::Path::new(&f.worktree);
+    sh(
+        wt,
+        "echo more >> a.txt && git add -A && git commit -qm second",
+    );
+    gh_forge(&f, pull_seven(&first));
+    let updated = f.submit_update(json!({})).await;
+    let id = review_id(&updated);
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let intent = tracon::authority::revision_intent(&f.store, Some(&revision.id)).unwrap();
+    assert!(!intent.rewrite, "adding to the squash replaces nothing");
+    assert_eq!(intent.squash_onto.as_deref(), Some(first.as_str()));
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let second = f.forge_branch();
+    let origin = f.dir.join("origin.git");
+    assert_eq!(sh_out(&origin, &format!("git rev-parse {second}^")), first);
+    assert_eq!(
+        sh_out(&origin, &format!("git rev-parse {second}^{{tree}}")),
+        sh_out(wt, "git rev-parse HEAD^{tree}")
+    );
+}
+
+/// A message or branch that breaks the configured rules is refused when it
+/// is submitted, and again when the operator edits it in.
+#[tokio::test]
+async fn a_message_that_breaks_the_rules_never_reaches_the_operator() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        squashing(c);
+        c.publish.style = tracon::review::prose::Style::conventional();
+    })
+    .await;
+    gh_forge(&f, pull_seven(&f.base_sha()));
+
+    let mut args = f.submit_args();
+    args["message"] = json!("Added PROJ-7 thing");
+    let refused = f.tool("s1", "submit_review", args).await.to_string();
+    assert!(refused.contains("commit rules"), "{refused}");
+    assert!(refused.contains("PROJ-7"), "{refused}");
+    assert!(f.store.open_reviews().unwrap().is_empty());
+
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "outputs": { "branch": "Feature_X" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.to_string().contains("not lowercase"), "{body}");
 }
