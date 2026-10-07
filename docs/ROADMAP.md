@@ -282,10 +282,6 @@ hit on a real task.
       state), how much it weighs, and delete for the kinds that have a real delete, with
       the propagation each one does or does not have stated. A storage figure belongs on
       the Nodes screen too. Tombstones stay undecided until replication makes them matter.
-- [ ] Explain browser push enrollment failures by stage: unavailable API, denied
-      permission, service-worker failure, push-service registration failure, node storage
-      error; never report a device as registered after a failed enrollment.
-
 **OpenCode, contingent on the spike above**
 
 - [ ] Show an OpenCode session's history in its native window. OpenCode keeps separate v1
