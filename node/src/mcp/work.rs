@@ -108,7 +108,7 @@ pub fn definitions() -> Vec<Value> {
             "name": CRITERIA_READ,
             "description": "The acceptance criteria of the item this session holds, read as coverage: \
                             per criterion, whether the standard is agreed or is still somebody's \
-                            proposal, what points at it (checks, scenarios, observations), what the \
+                            proposal, what points at it (checks), what the \
                             checks say about one candidate, and whether a person has judged it. It also \
                             says what is uncovered, what nobody has judged, which lines are assumptions, \
                             and which questions are still open. Checks passing is not the same as a \
@@ -126,10 +126,10 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": CRITERIA_LINK,
-            "description": "Say what you think would settle one acceptance criterion: a `check` (one of \
-                            the commands the operator configured — any other is recorded and reported as \
-                            never running), a `scenario` naming a customer task, or an `observation` of \
-                            what someone was seen to do. It is written under the criterion in the brief \
+            "description": "Say which check you think would settle one acceptance criterion: one of \
+                            the commands the operator configured (any other is recorded and reported as \
+                            never running). Anything a check cannot settle is the operator's judgement, \
+                            not a link. It is written under the criterion in the brief \
                             as your proposal, which is all it can be: only the operator decides what good \
                             means, and your proposal passing does not establish that the customer agreed.",
             "inputSchema": {
@@ -142,7 +142,7 @@ pub fn definitions() -> Vec<Value> {
                     "kind": { "type": "string", "enum": crate::corpus::brief::LINK_KINDS },
                     "value": {
                         "type": "string",
-                        "description": "The command, the scenario's name, or what was observed.",
+                        "description": "The command.",
                     },
                     "provenance": {
                         "type": "string",

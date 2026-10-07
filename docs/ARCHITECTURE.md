@@ -977,8 +977,13 @@ heard from the customer should look like one rather than like a tidy form.
 
 A success criterion is not a new record: it is a line in the brief's success
 criteria section, and what points at it is an indented line under it naming a
-`check`, a `scenario` or an `observation`. The document stays the record, so
-links travel with the channel, round-trip, and are editable by hand.
+`check`. The document stays the record, so links travel with the channel,
+round-trip, and are editable by hand. A check is the one link kind anything
+produces a result for; whatever a check cannot settle is the operator's
+judgement, recorded as a verdict rather than a link. The `scenario` and
+`observation` kinds an older brief may hold are retired: they are still read,
+so the file round-trips and they are not mistaken for criteria of their own,
+shown as retired, counted for nothing, and refused for anything new.
 
 **A criterion is named by its own text.** `sc-` and twelve hex characters of
 the SHA-256 hash of the line with only outer whitespace trimmed. Case,
@@ -996,8 +1001,7 @@ rule, so a session's link is `inferred` and a `decided` one is refused. Coverage
 follows: a criterion whose only links are somebody's proposal reads as
 `only_proposed`, not as covered, however green that proposal would go. A `check`
 resolves only against the commands the operator configured — any other is
-recorded and reported as never running — and a `scenario` says plainly that this
-node holds no such record yet.
+recorded and reported as never running.
 
 **Passing one's own checks is not the customer agreeing.** A check result raises
 a criterion as far as `checks_pass`, shown as "checks pass · unjudged".

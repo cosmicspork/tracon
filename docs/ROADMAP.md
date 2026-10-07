@@ -124,10 +124,6 @@ hit on a real task.
 - [ ] Keep verdicts reachable in long reviews, open a labelled reason composer for Request
       changes and Reject rather than disabling a button, and explain unavailable actions
       inline.
-- [ ] Trim criteria binding to what is produced. #290 lets a criterion point at a
-      `scenario` or an `observation`; neither is produced by anything now that versioned
-      scenarios and trial capture are dropped. Remove those link kinds, keep `check` and
-      the operator's judgement, and say so in the brief format.
 
 **Forge and tracker**
 
