@@ -564,7 +564,12 @@ starts; every check then runs on its own copy of the prepared tree with the cach
 read-only. That cache is the run's own, copied from the repository's base cache and
 removed with the run. The base is written by one thing only — a preparation of the
 default branch, made when the repository's image is built — so a candidate's install,
-which may run the candidate's own scripts, can reach its own evidence and nobody else's. A session that needs
+which may run the candidate's own scripts, can reach its own evidence and nobody else's.
+Sessions get a cache of their own, one per repository and channel, that outlives each
+session: it starts as a copy of the base, and what an agent fetches or compiles into it
+(Cargo's output goes there through `CARGO_TARGET_DIR`) is there for the channel's next
+session on the repository. No check mounts it, so nothing an agent wrote can make the
+review gate pass; a check still prepares from the base. A session that needs
 something running beside it (a browser to drive, a database to test against) asks for
 it by name from the operator's `[[service]]` catalogue with `service_start`, which
 waits, within a tool call's budget, for the entry's readiness probe; `service_status`
