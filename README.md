@@ -142,6 +142,10 @@ starts the podman machine itself when it finds it stopped; create one once with
 `podman machine init`. After an upgrade, `tracon setup` rebuilds any image whose
 definitions changed, and the boundary check refuses until it has.
 
+On Linux the gateway runs as its own user service, `tracon-gateway.service`, beside
+the node's: restarting the node leaves it running, systemd starts it again if it
+stops, and a node that finds it stopped starts it before checking the boundary.
+
 Open `http://127.0.0.1:7420`. **Settings** groups configuration into Connections,
 Channels, Devices & notifications, Mesh, Permissions & policies, and Maintenance.
 **Nodes** compares connectivity, isolation, runtime, models, and compatibility;

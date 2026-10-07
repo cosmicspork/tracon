@@ -51,9 +51,6 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 Every item here was found on the 2026-09-20, 2026-09-28, 2026-09-30 or 2026-10-03 live
 runs, or in the daily desktop use since.
 
-- [ ] **Give the Podman gateway its own user service or cgroup**, reconciled idempotently,
-      so a node-service restart leaves it running and a stopped gateway recovers without
-      rerunning setup or weakening `KillMode`. Fail-closed boundary checks stay.
 - [ ] **Publication recovery.** Show credential and binding readiness before offering
       publication and link missing forge access to the right settings, without implying
       remote permission from token presence. A failed publish needs a durable, visible
@@ -82,9 +79,6 @@ runs, or in the daily desktop use since.
       and rewriting it is an operator-approved step, never silent. Still true on
       2026-10-03: #333, published from session `01a10447`, carries a
       `tracon@localhost` commit.
-- [ ] **Open external links through a clean Linux host launcher**: the AppImage's bundled
-      `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
-      host environment for the child only and keep the URL and origin restrictions.
 - [ ] **Keep the machine awake while a session works.** The desktop host idle-suspended
       for 54 minutes in the middle of execute session `01a0f4b3`'s turn (2026-09-30,
       during the harness's context compaction) and the session simply stopped. Hold a
