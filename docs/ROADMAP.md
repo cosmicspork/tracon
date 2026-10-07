@@ -124,9 +124,6 @@ Needed for daily use, but not blocking it today.
 - [ ] A work-level continuation view carrying intent, decisions, attempts, blockers, next
       action, workspace, lineage and evidence, with continue / change approach / abandon.
       Plain sessions gain it without being forced into a work item.
-- [ ] A concise outcome record derived from recorded state: what changed, what was
-      verified, what needs a decision, what is uncertain, and cost. Narrative summary
-      cannot turn a claim into verification.
 - [ ] Distinguish ready-to-investigate, ready-to-verify and ready-to-publish. Surface
       missing project checks or publication prerequisites before spending a session on
       that path; do not require forge credentials or a product brief for an

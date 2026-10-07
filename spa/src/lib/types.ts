@@ -928,6 +928,68 @@ export interface SessionAuthority {
   grants: AuthorityGrant[]
 }
 
+/** What a session came to, read from what was recorded. The agent's words
+    are only ever `claims`; a claim is backed only by a check the node ran on
+    the commit it was made at. */
+export interface SessionOutcome {
+  session_id: string
+  channel: string
+  state: string
+  end_reason: string | null
+  head_sha: string | null
+  changed: {
+    reviews: {
+      id: string
+      kind: string
+      title: string
+      state: string
+      head_sha: string
+      added: number
+      removed: number
+      files: number
+    }[]
+    files: string[]
+    added: number
+    removed: number
+    workspace_changes: number
+  }
+  verified: OutcomeCheck[]
+  claims: OutcomeClaim[]
+  needs_decision: { kind: 'permission' | 'question' | 'review' | 'report'; id: string; title: string; since_ms: number }[]
+  uncertain: string[]
+  cost: {
+    tokens_used: number
+    budget_tokens: number
+    cost_usd: number | null
+    gateway_tokens: number
+    charged_tokens: number
+    unmetered_turns: number
+    mismatched_turns: number
+  }
+}
+
+export interface OutcomeCheck {
+  check_id: string
+  command: string | null
+  outcome: string
+  source_outcome: string | null
+  head_sha: string | null
+  passed: boolean
+  failed: boolean
+  current: boolean
+  finished_ms: number | null
+}
+
+export interface OutcomeClaim {
+  source: 'review' | 'report' | 'shown_work'
+  id: string
+  title: string
+  text: string
+  head_sha: string | null
+  backed_by: string[]
+  backed: boolean
+}
+
 export interface CeilingInfo {
   usage_today: number
   ceiling: number | null
