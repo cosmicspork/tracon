@@ -890,7 +890,14 @@ impl Rig {
         permission_timeout: Duration,
         handle: Arc<dyn HarnessHandle>,
     ) -> Self {
-        Self::start_full(budget, permission_timeout, handle, Vec::new()).await
+        Self::start_full(
+            budget,
+            permission_timeout,
+            handle,
+            Vec::new(),
+            Default::default(),
+        )
+        .await
     }
 
     /// A rig whose operator requires `checks` at review.
@@ -904,6 +911,23 @@ impl Rig {
                 killed: Arc::new(Mutex::new(false)),
             }),
             checks.iter().map(|c| c.to_string()).collect(),
+            Default::default(),
+        )
+        .await
+    }
+
+    /// A rig deciding against the policy the node ships.
+    async fn start_with_shipped_policy() -> Self {
+        Self::start_full(
+            10_000,
+            Duration::from_secs(60),
+            Arc::new(FakeHandle {
+                prompts: Arc::new(Mutex::new(Vec::new())),
+                tokens: Arc::new(Mutex::new(1500)),
+                killed: Arc::new(Mutex::new(false)),
+            }),
+            Vec::new(),
+            tracon::policy::Policy::shipped_shared(),
         )
         .await
     }
@@ -913,6 +937,7 @@ impl Rig {
         permission_timeout: Duration,
         handle: Arc<dyn HarnessHandle>,
         checks: Vec<String>,
+        policy: Arc<parking_lot::RwLock<tracon::policy::Policy>>,
     ) -> Self {
         let store = Arc::new(Store::open_in_memory().unwrap());
         store
@@ -966,7 +991,7 @@ impl Rig {
             cmd_tx.clone(),
             Arc::new(NoRunner),
             "tracon-h-test".into(),
-            Default::default(),
+            policy,
             "personal".into(),
         )
         .with_checks(checks);
@@ -1098,6 +1123,58 @@ async fn a_session_grant_answers_once_and_spares_the_next_ask_in_its_scope() {
     // Outside the grant's scope it is asked again.
     let _third = rig.request_command("cargo build").await;
     assert!(rig.await_state("waiting_on_you").await);
+}
+
+/// Claude Code runs reads and searches on its own rules and never asks, so
+/// the node records the decision its policy makes for each such call: the
+/// same `policy_allowed` an asking harness leaves, naming the same rule. A
+/// call the policy would not have allowed is still recorded, as the harness's
+/// doing, and the node's own tools are recorded as they are when asked.
+#[tokio::test]
+async fn a_tool_call_the_harness_ran_unasked_is_recorded_against_the_policy() {
+    state::isolate();
+    let rig = Rig::start_with_shipped_policy().await;
+    let unasked = |id: &str, action: &str, resource: Option<&str>, command: Option<&str>| {
+        HarnessEvent::Decided(tracon::adapter::PermissionRequest::managed(
+            Some(id.into()),
+            format!("{action}: …"),
+            action,
+            resource.map(str::to_string),
+            command.map(str::to_string),
+            None,
+            Vec::new(),
+        ))
+    };
+    for ev in [
+        unasked("t1", "Read", Some("/work/src/lib.rs"), None),
+        unasked("t2", "Bash", None, Some("git push origin main")),
+        unasked("t3", "mcp__tracon__work_get", None, None),
+    ] {
+        rig.events.send(ev).await.unwrap();
+    }
+    assert!(
+        rig.await_events("policy_allowed", 3).await,
+        "{:?}",
+        rig.kinds()
+    );
+    let events = rig.store.events_after(&rig.session_id, 0, 200).unwrap();
+    let allowed: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == "policy_allowed")
+        .map(|e| &e.payload)
+        .collect();
+    assert_eq!(allowed[0]["tool_call_id"], "t1");
+    assert_eq!(allowed[0]["kind"], "read");
+    assert_eq!(allowed[0]["rule"], "reads-and-thoughts");
+    assert_eq!(allowed[0]["policy"], "allow");
+    assert_eq!(allowed[0]["decided_by"], "harness");
+    assert_eq!(allowed[1]["policy"], "deny");
+    assert_eq!(allowed[1]["rule"], "harness");
+    assert_eq!(allowed[2]["rule"], "node-tool");
+    assert_eq!(allowed[2]["policy"], "allow");
+    // Nothing is asked: the calls have already run.
+    assert!(rig.store.open_permissions().unwrap().is_empty());
+    assert!(!rig.kinds().iter().any(|k| k == "policy_denied"));
 }
 
 /// The operator's own required checks run without asking when the session
