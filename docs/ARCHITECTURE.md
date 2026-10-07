@@ -1022,6 +1022,18 @@ as the session's `model_source`, so a silent default is never undocumented.
 Only an explicit model unusable for the channel's bound provider is a validation
 failure at spawn; an empty one never is.
 
+**What a session needs depends on what it is for.** Investigating, verifying and
+publishing ask different things of a repository, and `GET /api/readiness` (the line
+under the composer) says what each lacks before a session is spent finding out. An
+investigation needs a node that would start it and a checkout to start it in, and
+nothing else: no checks, no forge credential, no brief. Verifying adds required
+checks and an image they can run in, since without them nothing the node runs can
+vouch for the result. Publishing adds an `origin` on a forge the node publishes to
+and that forge's credential bound to the channel; a work item with no brief is noted
+there, since its review will have no requirements to judge against, but not held
+against it. The answer only reads: it builds no image, calls no forge and starts no
+session.
+
 Budgets are denominated in tokens (dollars are derived where a provider binding
 carries a price) and enforced by killing the session, checked at turn end because
 that is when harnesses report usage — a property of the protocol stated honestly in

@@ -3,6 +3,7 @@
   // harness starts. Creating durable work items and plans is explicit.
   import ModelPicker from './ModelPicker.svelte'
   import PreparationPreview from './PreparationPreview.svelte'
+  import ReadinessLine from './ReadinessLine.svelte'
   import RepoPicker from './RepoPicker.svelte'
   import { api, ApiError } from '../lib/api'
   import { modelLabel, phaseDefaults } from '../lib/bindings'
@@ -237,6 +238,12 @@
       {#if busy}Starting…{:else if atCeiling}{channel} is at its ceiling{:else if structured}Start {item ? phase : 'plan'}{:else}Start session{/if}
     </button>
   </div>
+
+  <!-- Readiness is this node's answer about its own checkout; a peer's path
+       is not readable from here. -->
+  {#if selectedNode?.is_self && channel && repo && !workspaceId}
+    <ReadinessLine {channel} {repo} workItem={item?.id ?? null} />
+  {/if}
 
   {#if open}
     <div class="adjust">

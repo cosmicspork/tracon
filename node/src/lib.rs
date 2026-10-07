@@ -31,6 +31,7 @@ pub mod policy;
 pub mod preparation;
 pub mod process;
 pub mod providers;
+pub mod readiness;
 pub mod repo_image;
 pub mod review;
 pub mod runner;

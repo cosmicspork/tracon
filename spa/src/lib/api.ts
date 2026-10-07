@@ -42,6 +42,7 @@ import type {
   RecentRepo,
   SessionAuthority,
   PreparationPreview,
+  RepoReadiness,
   SessionOutcome,
   Session,
   SessionUsage,
@@ -225,6 +226,14 @@ export const api = {
   /** What preparing `repo` would do and what in it the node would not do. */
   preparationPreview: (repo: string) =>
     call<PreparationPreview>('GET', `/api/preparation?repo=${encodeURIComponent(repo)}`),
+  /** What investigating, verifying and publishing from `repo` would lack. */
+  readiness: (channel: string, repo: string, workItem?: string | null) =>
+    call<RepoReadiness>(
+      'GET',
+      `/api/readiness?channel=${encodeURIComponent(channel)}&repo=${encodeURIComponent(repo)}${
+        workItem ? `&work_item=${encodeURIComponent(workItem)}` : ''
+      }`,
+    ),
   /** What the session came to: changed, verified, pending, uncertain, cost. */
   sessionOutcome: (id: string) => call<SessionOutcome>('GET', `/api/sessions/${id}/outcome`),
   /** Mint a single-use capability for this session's OpenCode view. The URL
