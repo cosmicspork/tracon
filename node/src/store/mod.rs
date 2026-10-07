@@ -771,6 +771,17 @@ impl Store {
 
     /// The waiting bay, ordered as DESIGN.md decided: permission requests before
     /// review approvals (reviews do not exist yet), then oldest first.
+    /// Move every open request's deadline on by `by_ms`, for the time this
+    /// node was asleep. This node's own requests only.
+    pub fn extend_open_permissions(&self, node_id: &str, by_ms: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE permission_request SET expires_ms = expires_ms + ?2
+             WHERE state='new' AND node_id=?1",
+            rusqlite::params![node_id, by_ms],
+        )?)
+    }
+
     pub fn open_permissions(&self) -> Result<Vec<PermissionRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -3050,6 +3061,33 @@ impl Store {
 
     /// Complete a publish: record the approved bytes and where they landed. Only
     /// a row this call moved into `publishing` is finished.
+    /// What a session's reviews put on the forge, oldest first: each
+    /// published review's id and where it landed.
+    pub fn session_publications(&self, session_id: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, publish_result FROM review
+             WHERE session_id=?1 AND state='approved' AND publish_result IS NOT NULL
+               AND publish_result != ''
+             ORDER BY updated_ms",
+        )?;
+        let rows = stmt
+            .query_map([session_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// When anything was last recorded on a session: what idleness is
+    /// measured from.
+    pub fn last_event_ms(&self, session_id: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row(
+            "SELECT MAX(at_ms) FROM event WHERE session_id=?1",
+            [session_id],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn finish_publish(
         &self,
         id: &str,

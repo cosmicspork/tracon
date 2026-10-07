@@ -1,5 +1,4 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
-import { openUrl } from '@tauri-apps/plugin-opener'
 
 export interface ReservedWindow {
   opener: unknown
@@ -31,7 +30,9 @@ export async function openExternal(value: string, reserved?: ReservedWindow | nu
   try {
     const url = validateExternalUrl(value)
     if (isTauri()) {
-      await openUrl(url)
+      // The desktop app makes no second window: it answers a new-window
+      // request by handing an https link to the host's own browser.
+      window.open(url, '_blank', 'noopener')
       return
     }
     const target = reserved ?? prepareExternalOpen()

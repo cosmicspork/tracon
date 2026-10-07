@@ -315,6 +315,17 @@ impl Store {
     }
 
     /// Expire every pending approval whose time is up, returning them.
+    /// Move every pending approval's deadline on by `by_ms`: the node was
+    /// asleep that long, and an approval's deadline counts only time it was
+    /// awake. This node's own; a peer's are its to judge.
+    pub fn extend_pending_approvals(&self, node_id: &str, by_ms: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE approval SET expires_ms = expires_ms + ?2 WHERE state='pending' AND node_id=?1",
+            rusqlite::params![node_id, by_ms],
+        )?)
+    }
+
     pub fn expire_due_approvals(&self) -> Result<Vec<ApprovalRow>> {
         let conn = self.conn.lock().unwrap();
         let now = now_ms();
