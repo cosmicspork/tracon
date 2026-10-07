@@ -144,10 +144,6 @@ hit on a real task.
 
 **Node data**
 
-- [ ] Explain browser push enrollment failures by stage: unavailable API, denied
-      permission, service-worker failure, push-service registration failure, node storage
-      error; never report a device as registered after a failed enrollment.
-
 **OpenCode, contingent on the spike above**
 
 - [ ] Show an OpenCode session's history in its native window. OpenCode keeps separate v1
