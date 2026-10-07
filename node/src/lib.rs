@@ -26,6 +26,7 @@ pub mod metrics;
 pub mod models_catalogue;
 pub mod notify;
 pub mod oauth;
+pub mod outcome;
 pub mod policy;
 pub mod preparation;
 pub mod process;
