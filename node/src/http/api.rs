@@ -999,6 +999,39 @@ pub async fn forge_repos(
 }
 
 #[derive(Deserialize)]
+pub struct ReadinessQuery {
+    channel: String,
+    repo: String,
+    work_item: Option<String>,
+}
+
+/// Whether a repository is ready to investigate, to verify and to publish
+/// from, with what each path lacks, before a session is spent finding out.
+pub async fn readiness(
+    State(s): State<AppState>,
+    Query(q): Query<ReadinessQuery>,
+) -> ApiResult<Json<crate::readiness::Readiness>> {
+    let repo = q.repo.trim();
+    if repo.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "repo is required",
+        ));
+    }
+    Ok(Json(
+        crate::readiness::readiness(
+            &s.manager,
+            &s.tools,
+            &s.node_id,
+            &q.channel,
+            repo,
+            q.work_item.as_deref().filter(|id| !id.is_empty()),
+        )
+        .await,
+    ))
+}
+
+#[derive(Deserialize)]
 pub struct JiraSearchQuery {
     channel: String,
     jql: String,
@@ -1175,6 +1208,33 @@ pub async fn export_workspace(
 ) -> ApiResult<Json<serde_json::Value>> {
     let _snapshot = s.manager.snapshot_workspace_or_session(&id).await?;
     Ok(Json(json!({ "workspace_id": id, "exported": true })))
+}
+
+#[derive(Deserialize)]
+pub struct PreparationQuery {
+    repo: String,
+}
+
+/// What preparing a checkout on this node would do, and what in it the node
+/// would not do, before a session is launched on it. Reads files; runs
+/// nothing, builds nothing.
+pub async fn preparation_preview(
+    State(s): State<AppState>,
+    Query(q): Query<PreparationQuery>,
+) -> ApiResult<Json<crate::preparation::PreparationPreview>> {
+    let repo = std::path::Path::new(q.repo.trim());
+    if !repo.is_absolute() || !repo.is_dir() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "repo must be an absolute path to a directory on this node",
+        ));
+    }
+    let environment = crate::environment::environment_for(&s.cfg, s.store(), Some(repo));
+    Ok(Json(crate::preparation::preview(
+        &s.cfg,
+        repo,
+        &environment,
+    )))
 }
 
 /// Prepare lockfile dependencies in a separate, credential-free runtime. The
@@ -1460,6 +1520,19 @@ pub async fn get_session(
         "toolchain": toolchain,
         "shown_work": s.store().shown_work_for_session(&id)?,
     })))
+}
+
+/// What the session came to, read from what was recorded: what changed, what
+/// the node verified, what needs a decision, what is uncertain, and the cost.
+pub async fn session_outcome(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::outcome::Outcome>> {
+    let session = s
+        .store()
+        .get_session(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such session".into()))?;
+    Ok(Json(crate::outcome::outcome(s.store(), session)?))
 }
 
 /// What this session may do, and what it would still have to ask about.
@@ -1787,6 +1860,74 @@ pub async fn continue_session(
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
     let row = s.manager.continue_interrupted(&id).await?;
     Ok((StatusCode::CREATED, Json(json!(row))))
+}
+
+/// One piece of work in one view: an item's attempts, or a plain session's
+/// lineage, with what it was for, what was decided, what is in the way, what
+/// to do next, where it lives and what it showed.
+pub async fn work_continuation(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    continuation(&s, crate::continuation::Subject::Item(id))
+}
+
+/// The same, reached from any session: the item it worked on, or else the
+/// lineage it belongs to.
+pub async fn session_continuation(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    continuation(&s, crate::continuation::Subject::Session(id))
+}
+
+fn continuation(
+    s: &AppState,
+    subject: crate::continuation::Subject,
+) -> ApiResult<Json<serde_json::Value>> {
+    let view = crate::continuation::view(s.store(), &subject)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such work".into()))?;
+    Ok(Json(json!(view)))
+}
+
+/// Carry the work on from an ended attempt, as it was or with a changed
+/// approach, model or harness.
+pub async fn carry_on(
+    State(s): State<AppState>,
+    Json(body): Json<crate::continuation::CarryOn>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let row = crate::continuation::carry_on(&s.manager, body).await?;
+    Ok((StatusCode::CREATED, Json(json!(row))))
+}
+
+#[derive(Deserialize)]
+pub struct AbandonBody {
+    #[serde(default)]
+    item_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    reason: String,
+}
+
+/// Abandon the work: the item closes, or a plain lineage is stopped and put
+/// away. Reversible: the item can be reopened, the sessions restored.
+pub async fn abandon_work(
+    State(s): State<AppState>,
+    Json(body): Json<AbandonBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let subject = match (body.item_id, body.session_id) {
+        (Some(id), None) => crate::continuation::Subject::Item(id),
+        (None, Some(id)) => crate::continuation::Subject::Session(id),
+        _ => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "name exactly one of item_id or session_id".into(),
+            ))
+        }
+    };
+    crate::continuation::abandon(&s.manager, &subject, &body.reason).await?;
+    Ok(Json(json!({ "abandoned": true })))
 }
 
 /// Whether this node is holding its machine awake, why, and the last

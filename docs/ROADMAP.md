@@ -58,32 +58,6 @@ Needed for daily use, but not blocking it today.
 
 **Sessions and accounting**
 
-- [ ] A work-level continuation view carrying intent, decisions, attempts, blockers, next
-      action, workspace, lineage and evidence, with continue / change approach / abandon.
-      Plain sessions gain it without being forced into a work item.
-- [ ] A concise outcome record derived from recorded state: what changed, what was
-      verified, what needs a decision, what is uncertain, and cost. Narrative summary
-      cannot turn a claim into verification.
-- [ ] Distinguish ready-to-investigate, ready-to-verify and ready-to-publish. Surface
-      missing project checks or publication prerequisites before spending a session on
-      that path; do not require forge credentials or a product brief for an
-      investigation.
-- [ ] Preview preparation and explain incompatibility before launch, without turning
-      unsupported scripts or devcontainer features into silent host execution.
-- [ ] **Service sidecars, the browser first.** A `[[service]]` catalogue in `node.toml` —
-      a digest-pinned image, its port, a readiness probe — from which a session asks for a
-      service by name (`service_start`, which blocks until the probe passes or a bounded
-      timeout, then `service_status`), never naming an image or a command. Each service is
-      its own authority under the policy bundle, so a browser can be allowed while a
-      database is asked. A sidecar shares the session's network namespace, so it reaches
-      exactly what the session's grants open and nothing of its own, and it stops and
-      suspends with the session. The first entry is a headless browser exposing CDP on the
-      session's loopback, which any harness can drive (Playwright `connectOverCDP`, a
-      browser MCP, a small screenshot helper in the harness layer) without a browser in
-      every repository's image or a node-run scenario language; the screenshots it takes
-      are what `show_work` displays. Local databases, caches and mail catchers
-      follow as entries, which is also how an application that needs services runs in a
-      session without tracon reading its compose files.
 - [ ] **Keep a session's build output.** Every run builds a compiled project from nothing —
       `just check` took 4m47s in session `01a10447` (2026-10-03), most of it compiling.
       Give sessions a persistent per-repository build cache (Cargo's `target/`, a bundler's
@@ -91,17 +65,11 @@ Needed for daily use, but not blocking it today.
       keep starting from the trusted base cache: a directory the agent wrote must not be
       able to make the review gate pass. A node-built cache of the default branch for
       checks is the follow-on.
-- [ ] **Help set up a repository once.** Node tools that draft a `[[repo]]` entry (image,
-      checks, egress) from what the repository already holds — its devcontainer,
-      `package.json` scripts, a `just` recipe — try it in a fresh container and report
-      what failed, and propose it on a card; the node writes the entry once the operator
-      approves, never the agent. Egress asks approved while trying become suggested
-      `egress` entries. A built-in setup skill ships through channel manifests for managed
-      harnesses, and the tool descriptions carry enough for an external one. How to run an
-      application and give it data stays the agent's job on each task, with optional
-      free-text notes in the operator notes, so a recipe is set up once rather than kept
-      in step with the code. The agent proposes checks and setup; it cannot waive checks
-      or authorize its own environment.
+- [ ] **Help set up a repository once: the skill.** The draft, trial and proposal
+      tools exist (`repo_setup_*`). What remains: a built-in setup skill shipped through
+      channel manifests for managed harnesses, and optional free-text notes on how to run
+      the application and give it data, kept in the operator notes, so a recipe is set up
+      once rather than kept in step with the code.
 
 **What the boundary defeats, and what replaces it.** The harnesses offer tools the
 isolation silently breaks — the proxy answers 403, the agent sees a network error and

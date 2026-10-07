@@ -3275,11 +3275,13 @@ impl Manager {
                     },
                 )?;
                 if let Some(container) = row.container_name {
+                    let runner = self.backend.runner(Vec::new());
                     let _ = tokio::time::timeout(
                         CLEANUP_TIMEOUT,
-                        self.backend.runner(Vec::new()).kill(&container),
+                        crate::sidecars::stop_all(runner.as_ref(), &self.store, id),
                     )
                     .await;
+                    let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container)).await;
                 }
                 self.record(NewEvent {
                     session_id: id.to_string(),
@@ -3402,7 +3404,10 @@ pub async fn reconcile_after_restart(
             continue;
         }
         if let Some(container) = &s.container_name {
-            backend.reconcile(std::slice::from_ref(container)).await;
+            // Its services first, by the names its events recorded.
+            let mut names = crate::sidecars::containers(store, &s.id);
+            names.push(container.clone());
+            backend.reconcile(&names).await;
         }
         let _ = store.update_session(
             &s.id,
