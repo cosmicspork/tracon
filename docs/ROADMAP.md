@@ -127,10 +127,6 @@ hit on a real task.
 
 **Forge and tracker**
 
-- [ ] Give GitHub the CI tools GitLab has: a run's job log tail (`run_logs`, the
-      `job_trace` limits), rerunning a run's failed jobs (`run_rerun`, asked), and the
-      runs at an exact commit. An agent on a GitHub project should diagnose and retry CI
-      the way it can on GitLab, without the operator's token or a host CLI.
 - [ ] Follow a pipeline the agent started. On 2026-10-06 an external session ran a
       staging pipeline on a work repository's default branch after its merge request
       merged (`pipeline_run`, approved), then had no brokered way to see it through:

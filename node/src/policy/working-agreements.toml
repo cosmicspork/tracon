@@ -19,7 +19,7 @@
 # A denial wins over any allow, whatever the order. An action no rule names —
 # a brokered write, a tool whose kind the node does not know — is asked.
 
-version = 14
+version = 15
 
 # --- 1. The harness and Git's internals stay the node's ---------------------
 # The harness's own configuration is the node's to write, not the session's.
@@ -133,6 +133,7 @@ matches = [
     "pr_threads",
     "pr_for_branch",
     "run_status",
+    "run_logs",
     "issue",
     "issue_search",
 ]
