@@ -35,6 +35,7 @@ pub mod policy_rollouts;
 pub mod publication;
 pub mod repo_image;
 pub mod reports;
+pub mod review_draft;
 pub mod rollups;
 pub mod shown;
 pub mod transfers;

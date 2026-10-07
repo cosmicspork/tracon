@@ -3686,3 +3686,73 @@ async fn a_retry_with_the_same_or_no_base_is_already_submitted() {
     assert_eq!(absent["already_submitted"], json!(true), "{absent}");
     assert_eq!(f.store.review_revisions(&id).unwrap().len(), 1);
 }
+
+// ---- the operator's unsent words ----
+
+/// Feedback left on one device is on the node, so a reconnect or another
+/// device finds it intact; a save from a device that did not see the latest
+/// one is refused with it; and a recorded verdict clears it.
+#[tokio::test]
+async fn a_review_draft_survives_a_reconnect_and_is_cleared_by_the_verdict() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap().id;
+    let draft_uri = format!("/api/reviews/{id}/draft");
+
+    let (status, empty) = f.call("GET", &draft_uri, None).await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert!(empty["draft"].is_null());
+
+    let (status, saved) = f
+        .call(
+            "PUT",
+            &draft_uri,
+            Some(json!({ "base_version": 0, "revision_id": revision,
+                         "draft": { "reason": "handle the empty case", "title": "edited" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["version"], 1);
+
+    // The other device, which loaded before that save, is told rather than
+    // overwriting it.
+    let (status, conflict) = f
+        .call(
+            "PUT",
+            &draft_uri,
+            Some(json!({ "base_version": 0, "draft": { "reason": "something else" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(
+        conflict["draft"]["draft"]["reason"],
+        "handle the empty case"
+    );
+
+    // A reconnect reads it back intact.
+    let (_, held) = f.call("GET", &draft_uri, None).await;
+    assert_eq!(held["draft"]["draft"]["reason"], "handle the empty case");
+    assert_eq!(held["draft"]["revision_id"], json!(revision));
+    assert_eq!(held["draft"]["version"], 1);
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "revise", "reason": "handle the empty case" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, after) = f.call("GET", &draft_uri, None).await;
+    assert!(after["draft"].is_null(), "{after}");
+
+    let (status, _) = f
+        .call(
+            "PUT",
+            "/api/reviews/nope/draft",
+            Some(json!({ "draft": {} })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

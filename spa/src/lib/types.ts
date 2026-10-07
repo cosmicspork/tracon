@@ -539,6 +539,27 @@ export interface ReviewOutputs {
   draft?: boolean
 }
 
+/** What the operator has written on a review and not sent yet. */
+export interface ReviewDraftFields {
+  reason?: string
+  title?: string
+  body?: string
+  describe?: boolean
+  descTitle?: string
+  descBody?: string
+  commenting?: boolean
+  comment?: string
+}
+
+/** A review draft as the node holds it. */
+export interface ReviewDraft {
+  review_id: string
+  revision_id: string | null
+  draft: ReviewDraftFields
+  version: number
+  updated_ms: number
+}
+
 export interface ReviewIntent {
   forge: ReviewOutputs
   /** For an existing change: what its branch held at submit. */

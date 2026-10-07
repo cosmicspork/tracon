@@ -1274,6 +1274,19 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX shown_work_session ON shown_work(session_id, created_ms);
     CREATE INDEX shown_work_review ON shown_work(review_id, created_ms);
     "#,
+    // 55: what the operator has written on a review and not yet sent — the
+    // reason, the edited prose — held by the node so it survives a reload, a
+    // reconnect and a change of device. `version` is the compare-and-set two
+    // devices write against; `revision_id` is what it was written against.
+    r#"
+    CREATE TABLE review_draft (
+        review_id   TEXT PRIMARY KEY,
+        revision_id TEXT,
+        body_json   TEXT NOT NULL,
+        version     INTEGER NOT NULL,
+        updated_ms  INTEGER NOT NULL
+    );
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

@@ -1023,8 +1023,13 @@ Every node serves the same embedded SPA; a client is a matter of shell.
   reconnect, never lost work. Unsent prompt drafts are held by the node per session:
   saved on a debounce, handed back to whichever screen next opens the session, cleared
   by dispatching the prompt and by nothing else, and never delivered to the harness on
-  their own. The one exception is an in-progress diff edit, confined to the desktop
-  browser's local storage — the surface least likely to be evicted.
+  their own. A review's unsent reason and edited prose are held the same way
+  (`/api/reviews/{id}/draft`), with the revision they were written against, until a
+  verdict is recorded; each save names the version it was made on, and a save on any
+  other is refused with what is there, so two devices are shown each other's draft
+  instead of one overwriting the other. The one exception is an in-progress diff edit,
+  confined to the desktop browser's local storage — the surface least likely to be
+  evicted.
 - **The phone is not a node.** No replica, no keys at rest. It reaches a node
   directly over HTTPS with a session cookie; the hub never talks to a browser. A
   backgrounded PWA cannot hold a socket, so notifications are Web Push — sealed to

@@ -235,10 +235,6 @@ hit on a real task.
       kebab branch, no ticket keys) whose rules come from the channel or the repository's
       own guidelines, so a bad message fails before the card reaches the operator. Record
       the "reviewed tree, not reviewed bytes" reframing in ARCHITECTURE and DESIGN.
-- [ ] Durable review drafts: unsent feedback and publication prose survive navigation,
-      reconnect and device changes with explicit saved/conflict state. Desktop diff drafts
-      remain revision-keyed. The acceptance test is the reconnect: leave feedback, switch
-      device or reconnect, find it intact.
 - [ ] Show changes since the last reviewed revision beside the full base diff, and what
       changed in response to each comment, so the operator does not reread the entire
       change to find the one concern that remains unresolved.
