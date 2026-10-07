@@ -251,6 +251,8 @@ export const api = {
     phase?: 'plan' | 'execute'
     harness?: string
   }) => call<Session>('POST', '/api/sessions', spec),
+  /** Carry on a session a node restart cut off, as a new session on its workspace. */
+  continueSession: (id: string) => call<Session>('POST', `/api/sessions/${id}/continue`),
   /** One prompt: the work item and the session that starts on it. */
   compose: (c: {
     channel: string

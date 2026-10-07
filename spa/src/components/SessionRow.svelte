@@ -45,6 +45,8 @@
             ? external
               ? 'Broker access stopped'
               : 'Killed'
+            : session.end_reason === 'node_restart'
+              ? 'Ended · node restarted'
             : session.end_reason === 'item_close'
               ? 'Ended · item closed'
               : session.end_reason === 'phase_done'

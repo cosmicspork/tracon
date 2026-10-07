@@ -51,9 +51,6 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 Every item here was found on the 2026-09-20, 2026-09-28, 2026-09-30 or 2026-10-03 live
 runs, or in the daily desktop use since.
 
-- [ ] **Give a node restart its own end reason.** Sessions running when the node restarts
-      are ended as `killed_user`, which tells the operator they stopped something they did
-      not; record `node_restart` and offer the resume a restart interrupted.
 - [ ] **Give the Podman gateway its own user service or cgroup**, reconciled idempotently,
       so a node-service restart leaves it running and a stopped gateway recovers without
       rerunning setup or weakening `KillMode`. Fail-closed boundary checks stay.

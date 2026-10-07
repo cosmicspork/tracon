@@ -734,6 +734,7 @@ and revoked the moment the hub loses that key.
 | `tracon session show <package> [--jsonl]` | read a session package offline, with no node running |
 | `tracon session state\|backup [--quiesce]\|upgrade-state --to\|restore` | a session's own harness state: what it is, verified copies of it, a migration on a clone, and putting one back |
 | `tracon session archive-legacy\|reopen --harness` | put sessions from a retired harness away read-only, and carry one forward onto a supported one |
+| `tracon session continue <id>` | carry on a session a node restart cut off, on its workspace and harness (also the session's **Continue** button) |
 | `tracon skill import <dir[#git-rev]>\|ls\|rm` | skill packages in a channel's launch manifest |
 | `tracon memory ls\|add\|rm\|recall\|batch` | memories, and the promotion batch on demand |
 | `tracon work add\|ls\|ready\|show\|close\|dep\|rm` | the ledger |

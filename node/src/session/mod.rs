@@ -125,17 +125,36 @@ fn reopen_phase(stored: &str) -> Phase {
 /// point — an agent handed a workspace with no account of how it got that way
 /// re-derives it, badly, and calls the result progress.
 fn handoff_note(old: &SessionRow, harness: &str) -> String {
-    let mut note = format!(
+    let why = format!(
         "This session continues session {} (`{}` {}), which ran a harness this node no \
          longer has and which is now archived read-only. You are {harness}, and you \
-         inherit none of its context: not its conversation, not its plan, not what it \
-         had already tried.\n\n\
+         inherit none of its context",
+        old.id, old.harness_id, old.harness_version,
+    );
+    handoff(old, &why)
+}
+
+/// What a session carrying on after a node restart is told. Same harness,
+/// same workspace, but none of the interrupted conversation: the harness
+/// process that held it is gone with the node.
+fn restart_note(old: &SessionRow) -> String {
+    let why = format!(
+        "This session continues session {}, which was cut off when the node it ran on \
+         stopped or restarted in the middle of its work. You inherit none of its context",
+        old.id,
+    );
+    handoff(old, &why)
+}
+
+fn handoff(old: &SessionRow, why: &str) -> String {
+    let mut note = format!(
+        "{why}: not its conversation, not its plan, not what it had already tried.\n\n\
          What you do have is its workspace, exactly as it left it, on branch `{}`.\n\n\
          Start by reading the workspace — the diff against the branch point, and any \
          notes left in it — and say what you find before changing anything. If the \
          earlier session's transcript matters, it is readable in the interface under \
          that id; ask for what you need from it rather than guessing.",
-        old.id, old.harness_id, old.harness_version, old.branch,
+        old.branch,
     );
     if let Some(item) = old.work_item_id.as_deref() {
         note.push_str(&format!(
@@ -427,6 +446,73 @@ impl Manager {
             parent_session: Some(old.id.clone()),
             continued_from: Some(old.id.clone()),
             harness: Some(harness.to_string()),
+        };
+        self.create(spec).await
+    }
+
+    /// Carry on the work a node restart interrupted.
+    ///
+    /// The harness process that held the conversation went with the node, so
+    /// this is a new session, like `reopen`: same channel, workspace, branch,
+    /// work item and harness, the lineage on the row, and a handoff note that
+    /// says what was lost. Offered once per interrupted session; a second
+    /// continuation of the same one is refused and names the first.
+    pub async fn continue_interrupted(&self, id: &str) -> Result<SessionRow, SessionError> {
+        let old = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        if old.end_reason.as_deref() != Some(state::EndReason::NodeRestart.as_str()) {
+            return Err(SessionError::Rejected(
+                "only a session a node restart ended can be continued this way".into(),
+            ));
+        }
+        if old.harness_id == external::HARNESS_ID {
+            return Err(SessionError::Rejected(
+                "an external agent's work runs outside this node; start it again where it runs"
+                    .into(),
+            ));
+        }
+        if old.phase == Phase::Review.as_str() {
+            return Err(SessionError::Rejected(
+                "a review session is started by its review, not continued; resubmit the review"
+                    .into(),
+            ));
+        }
+        if let Some(next) = self
+            .store
+            .list_sessions(None)?
+            .into_iter()
+            .find(|s| s.continued_from.as_deref() == Some(id))
+        {
+            return Err(SessionError::Rejected(format!(
+                "session {} already continues this one",
+                next.id
+            )));
+        }
+        // A session on a checkout keeps its workspace under its own id; one
+        // already on a retained workspace names it in its path.
+        let workspace_id = old
+            .repo_path
+            .strip_prefix("workspace://")
+            .unwrap_or(&old.id)
+            .to_string();
+        let harness = crate::adapter::KNOWN
+            .contains(&old.harness_id.as_str())
+            .then(|| old.harness_id.clone());
+        let spec = NewSession {
+            channel: old.channel.clone(),
+            repo_path: old.repo_path.clone(),
+            branch: Some(old.branch.clone()),
+            work_item_id: old.work_item_id.clone(),
+            model: old.model.clone(),
+            budget_tokens: Some(old.budget_tokens),
+            initial_prompt: Some(restart_note(&old)),
+            node_id: Some(old.node_id.clone()),
+            phase: reopen_phase(&old.phase),
+            review_id: None,
+            base_sha: None,
+            workspace_id: Some(workspace_id),
+            parent_session: Some(old.id.clone()),
+            continued_from: Some(old.id.clone()),
+            harness,
         };
         self.create(spec).await
     }
@@ -2799,11 +2885,15 @@ impl Manager {
     }
 
     /// Graceful shutdown: ask every live session to end and wait briefly.
-    /// Containers are removed by each supervisor's teardown.
+    /// Containers are removed by each supervisor's teardown. The sessions end
+    /// as `node_restart`, not `killed_user`: the operator stopped the node,
+    /// not the work, and the session says so and offers to carry it on.
     pub async fn shutdown_all(&self) {
         let ids: Vec<String> = self.live.lock().await.keys().cloned().collect();
         for id in &ids {
-            let _ = self.send(id, Command::Kill).await;
+            let _ = self
+                .send(id, Command::End(state::EndReason::NodeRestart))
+                .await;
         }
         for _ in 0..50 {
             if self.live.lock().await.is_empty() {
@@ -2899,8 +2989,7 @@ pub async fn reconcile_after_restart(
             &s.id,
             SessionPatch {
                 state: Some(state::SessionState::Closed.as_str().into()),
-                end_reason: Some(state::EndReason::HarnessExit.as_str().into()),
-                last_error: Some("node restarted while the session was active".into()),
+                end_reason: Some(state::EndReason::NodeRestart.as_str().into()),
                 turn_active: Some(false),
                 ..Default::default()
             },
@@ -2910,7 +2999,7 @@ pub async fn reconcile_after_restart(
             work_item_id: None,
             kind: ek::STATE.into(),
             ref_id: None,
-            payload: json!({ "state": "closed", "end_reason": "harness_exit", "reason": "node restarted" }),
+            payload: json!({ "state": "closed", "end_reason": "node_restart", "reason": "node restarted" }),
             at_ms: now_ms(),
             mono_ms: 0,
         });

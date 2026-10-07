@@ -1670,7 +1670,12 @@ async fn reconcile_after_restart_closes_paused_sessions_and_keeps_an_external_fe
         managed_row.state, "closed",
         "a managed session has no process to hand its pause back to"
     );
-    assert_eq!(managed_row.end_reason.as_deref(), Some("harness_exit"));
+    assert_eq!(
+        managed_row.end_reason.as_deref(),
+        Some("node_restart"),
+        "the restart ended it, not the operator and not the harness"
+    );
+    assert_eq!(managed_row.last_error, None);
 
     let external_row = store.get_session(&external_id).unwrap().unwrap();
     assert_eq!(external_row.state, "closed");
@@ -2142,6 +2147,94 @@ async fn killing_a_session_closes_it_and_expires_open_requests() {
     assert!(rig.store.open_permissions().unwrap().is_empty());
     let s = rig.store.get_session(&rig.session_id).unwrap().unwrap();
     assert_eq!(s.end_reason.as_deref(), Some("killed_user"));
+}
+
+/// A node shutting down ends its sessions for its own reason: the operator
+/// stopped the node, not the work, and `killed_user` would say otherwise.
+#[tokio::test]
+async fn a_node_shutdown_ends_a_session_as_node_restart_not_killed_user() {
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    let answer = rig.request_permission().await;
+    assert!(rig.await_state("waiting_on_you").await);
+
+    rig.commands
+        .send(Command::End(tracon::session::state::EndReason::NodeRestart))
+        .await
+        .unwrap();
+    assert!(rig.await_state("closed").await);
+    assert!(matches!(answer.await.unwrap(), PermissionReply::Cancelled));
+    let s = rig.store.get_session(&rig.session_id).unwrap().unwrap();
+    assert_eq!(s.end_reason.as_deref(), Some("node_restart"));
+}
+
+/// What a restart interrupted is offered back once: a new session on the
+/// same workspace and branch that says what it continues and what it lost.
+/// Anything else (an operator's stop, a second continuation) is refused.
+#[tokio::test]
+async fn a_session_a_restart_ended_can_be_continued_once() {
+    state::isolate();
+    let h = Harness::new(10_000).await;
+    let id = insert_running_session(&h.store, 10_000);
+    h.store
+        .update_session(
+            &id,
+            tracon::store::SessionPatch {
+                state: Some("closed".into()),
+                end_reason: Some("killed_user".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let (status, _) = h
+        .call("POST", &format!("/api/sessions/{id}/continue"), None)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "an operator's stop is not offered back"
+    );
+
+    h.store
+        .update_session(
+            &id,
+            tracon::store::SessionPatch {
+                end_reason: Some("node_restart".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let old = h.store.get_session(&id).unwrap().unwrap();
+    let (status, row) = h
+        .call("POST", &format!("/api/sessions/{id}/continue"), None)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    assert_ne!(row["id"], id.as_str());
+    assert_eq!(row["continued_from"], id.as_str());
+    assert_eq!(row["parent_session"], id.as_str());
+    assert_eq!(row["branch"], old.branch.as_str());
+    assert_eq!(
+        row["repo_path"],
+        format!("workspace://{id}"),
+        "the interrupted session's own workspace, not a fresh import"
+    );
+    let new_id = row["id"].as_str().unwrap();
+    let note = h
+        .store
+        .get_session(new_id)
+        .unwrap()
+        .unwrap()
+        .draft
+        .unwrap_or_default();
+    assert!(note.contains(&id), "{note}");
+    assert!(note.contains("restarted"), "{note}");
+    assert!(note.contains("inherit none of its context"), "{note}");
+
+    let (status, answer) = h
+        .call("POST", &format!("/api/sessions/{id}/continue"), None)
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    assert!(answer.to_string().contains(new_id), "{answer}");
 }
 
 #[tokio::test]
