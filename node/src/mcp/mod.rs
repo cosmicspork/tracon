@@ -18,6 +18,7 @@ pub mod memory;
 pub mod operator;
 pub mod review;
 pub mod schema;
+pub mod setup;
 pub mod show;
 pub mod wait;
 pub mod work;
@@ -233,6 +234,9 @@ impl Tools {
             // Showing work reaches the operator and nothing else: it is read
             // from the node's own snapshot and never leaves tracon.
             out.extend(show::definitions());
+            // Drafting and trying a repository's entry reach nothing this
+            // session cannot; proposing one is always the operator's call.
+            out.extend(setup::definitions());
             out.extend(work::definitions());
             out.extend(approvals::definitions());
         }
@@ -283,6 +287,23 @@ impl Tools {
                 .caller_active(ctx)
                 .map_err(|error| error.to_string())?;
             return egress::call(access, ctx, args).await;
+        }
+        if matches!(name, setup::DRAFT | setup::TRY | setup::PROPOSE) {
+            let access = self
+                .session
+                .get()
+                .ok_or("repository setup is not available on this node")?;
+            access
+                .manager
+                .caller_active(ctx)
+                .map_err(|error| error.to_string())?;
+            if name == setup::PROPOSE {
+                // Always the operator's, whatever the policy says: an agent
+                // does not write its own repository's environment.
+                let asked = setup::proposal(access, ctx, args)?;
+                return self.request_approval(ctx, name, &asked).await;
+            }
+            return setup::call(access, ctx, name, args).await;
         }
         if name == show::SHOW {
             let access = self
@@ -456,6 +477,18 @@ impl Tools {
                     .get()
                     .ok_or("memory is not available on this node")?;
                 memory::call(self, access, ctx, name, args).await
+            }
+            setup::PROPOSE => {
+                if !gated.one_shot {
+                    return Err(format!(
+                        "{name} is written only once the operator allows it"
+                    ));
+                }
+                let access = self
+                    .session
+                    .get()
+                    .ok_or("repository setup is not available on this node")?;
+                setup::write(access, ctx, args)
             }
             work::WORK_READY
             | work::WORK_DISCOVER
