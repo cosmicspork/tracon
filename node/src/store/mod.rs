@@ -25,6 +25,7 @@ pub mod context;
 pub mod corpus;
 pub mod criteria;
 pub mod evidence;
+pub mod exhaustion;
 pub mod external;
 pub mod manifest;
 pub mod metrics;
