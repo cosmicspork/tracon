@@ -12,6 +12,7 @@ import type {
   ChannelInfo,
   Event,
   Frame,
+  AwakeState,
   MeshState,
   NodeInfo,
   OperatorIssue,
@@ -36,6 +37,8 @@ class Store {
   nodes = $state<NodeInfo[]>([])
   /** The hub's reachability; null until the first fetch. */
   mesh = $state<MeshState | null>(null)
+  /** Whether this node is holding its machine awake for a session. */
+  awake = $state<AwakeState | null>(null)
   /** Channels this node can start sessions on, and who is bound to each. */
   channels = $state<ChannelInfo[]>([])
   /** Model providers on the serving node and whether each is connected. */
@@ -118,6 +121,7 @@ class Store {
       'providers',
       'promotions',
       'changes',
+      'awake',
     ] as const) {
       this.source.addEventListener(name, (m) => this.onFrame(JSON.parse((m as MessageEvent).data)))
     }
@@ -136,6 +140,11 @@ class Store {
       api.sessions(),
       api.providers(),
     ])
+    // Nothing else depends on it, and an older node has no such route.
+    void api
+      .awake()
+      .then((a) => (this.awake = a))
+      .catch(() => {})
     const [nodes, mesh, channels, queue, sessions, providers] = results
     this.nodes = kept(nodes, [] as NodeInfo[]).reduce(upsertNode, [] as NodeInfo[])
     this.mesh = kept(mesh, this.mesh)
@@ -306,6 +315,10 @@ class Store {
       }
       case 'promotions': {
         this.queue = { ...this.queue, promotions: frame.waiting }
+        break
+      }
+      case 'awake': {
+        this.awake = frame
         break
       }
       case 'changes': {

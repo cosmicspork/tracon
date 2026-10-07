@@ -142,6 +142,10 @@ starts the podman machine itself when it finds it stopped; create one once with
 `podman machine init`. After an upgrade, `tracon setup` rebuilds any image whose
 definitions changed, and the boundary check refuses until it has.
 
+On Linux the gateway runs as its own user service, `tracon-gateway.service`, beside
+the node's: restarting the node leaves it running, systemd starts it again if it
+stops, and a node that finds it stopped starts it before checking the boundary.
+
 Open `http://127.0.0.1:7420`. **Settings** groups configuration into Connections,
 Channels, Devices & notifications, Mesh, Permissions & policies, and Maintenance.
 **Nodes** compares connectivity, isolation, runtime, models, and compatibility;
@@ -385,6 +389,14 @@ The table is edited where you would look for it: **Settings → Repositories**, 
 a restart would end every session on the node to change one repository's environment. A
 session already running keeps the image and the egress it started with. Hand edits to
 `node.toml` are read at start, as before.
+
+Or let a session draft it. `repo_setup_draft` reads the default branch (its devcontainer,
+lockfiles, a `just check` recipe or `package.json` scripts) and drafts the entry with where
+each field came from. `repo_setup_try` runs a draft the way required checks run, in a fresh
+container. `repo_setup_propose` puts it to you on a card, which you may edit. The node
+writes the entry only when you allow it, and a proposal never opens the repository's
+egress to its sessions. Hosts you opened to the session while it tried are suggested in
+`egress`.
 
 A Claude Code session runs in that image too. The node copies the harness onto the
 repository's image as one more layer, proves it runs there, and launches the session in
@@ -803,6 +815,7 @@ permission_timeout_secs = 900       # a harness's own unanswered ask is a deny
 approval_expiry_secs = 86400        # a brokered call held for the operator expires unanswered
 # default_channel = "work"          # the channel the composer starts on; empty is no preference
 claim_grace_secs = 60               # a review claim lapses this long after the client vanishes
+suspend_published_after_secs = 1800 # a published session idle this long is suspended; 0 never
 # worktree_root = "/private/tmp"    # on macOS; the system temp directory elsewhere
 
 [runtime]
@@ -838,6 +851,21 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # session_egress = true             # open `egress` to this repository's sessions too, so an agent can
                                     # add a dependency. Off by default: a session that can reach a host
                                     # that accepts uploads can upload to it
+
+# [[service]]                       # something a session may start beside itself by name
+                                    # (`service_start`), never by image or command. It joins the
+                                    # session's network: reached on its 127.0.0.1, reaching only what
+                                    # the session does, removed with the session's container. The
+                                    # policy bundle decides each by `name`; the shipped one runs
+                                    # `browser` unattended and asks about any other
+# name = "browser"
+# image = "docker.io/chromedp/headless-shell@sha256:…"  # digest-pinned, as a repository image is
+# command = ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9222"]
+                                    # bind to loopback: the session's namespace is on the shared
+                                    # internal network, and loopback is the session's alone
+# port = 9222                       # where the session reaches it
+# ready = "/json/version"           # an HTTP path answering 2xx once ready; left out, a TCP connect
+# timeout_secs = 60                 # how long it may take to answer before it is reported failed
 
 [providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
 credential = "anthropic"

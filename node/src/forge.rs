@@ -238,7 +238,7 @@ async fn fetch_repos(
                 &endpoint,
                 &[
                     ("authorization", &format!("Bearer {token}")),
-                    ("user-agent", "tracon"),
+                    ("user-agent", USER_AGENT),
                     ("accept", "application/vnd.github+json"),
                     ("x-github-api-version", "2022-11-28"),
                 ],
@@ -428,6 +428,229 @@ async fn get(
     Ok((v, headers))
 }
 
+/// What the node sends as its user agent to a forge's API. GitHub refuses a
+/// request without one; the value names the HTTP library, not tracon, so
+/// nothing the operator publishes is labelled as coming from it.
+pub const USER_AGENT: &str = "reqwest";
+
+/// Who the operator is on a forge, as Git should record them: the name and
+/// address commits are authored and committed with, so the work reads as
+/// theirs and is attributed to their account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Identity {
+    pub name: String,
+    pub email: String,
+    /// The account's login, to say whose identity this is.
+    pub login: String,
+    pub forge: &'static str,
+}
+
+impl Identity {
+    /// A `[user]` section for a gitconfig. Values are quoted, with the two
+    /// characters a quoted gitconfig value treats specially escaped, so a
+    /// display name cannot add a key of its own.
+    pub fn gitconfig(&self) -> String {
+        format!(
+            "[user]\n\tname = {}\n\temail = {}\n",
+            gitconfig_quote(&self.name),
+            gitconfig_quote(&self.email)
+        )
+    }
+
+    /// Whether `email` is one this identity commits as. The forge account
+    /// may own other addresses; only this one is known without asking for
+    /// more access than the token was given.
+    pub fn owns(&self, email: &str) -> bool {
+        email.eq_ignore_ascii_case(&self.email)
+    }
+}
+
+fn gitconfig_quote(value: &str) -> String {
+    let clean: String = value.chars().filter(|c| !c.is_control()).collect();
+    format!("\"{}\"", clean.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Identities already resolved, keyed by forge and a hash of the token: the
+/// same binding answers from here, and a replaced token is resolved afresh
+/// because its hash differs.
+static IDENTITIES: LazyLock<std::sync::Mutex<BTreeMap<String, Identity>>> =
+    LazyLock::new(Default::default);
+
+fn identity_key(forge: Forge, token: &str) -> String {
+    format!("{}:{}", forge.name(), crate::corpus::hash_body(token))
+}
+
+/// The identity of the account a bound credential belongs to, from the
+/// forge's own `/user`, resolved once per token. GitHub: the profile name
+/// (the login when it has none) and the account's noreply address,
+/// `<id>+<login>@users.noreply.github.com`. GitLab: the name and the
+/// account's commit address, or its public one.
+pub async fn identity(forge: Forge, env: &BTreeMap<String, String>) -> Result<Identity, String> {
+    let token = forge.token(env).ok_or_else(|| {
+        format!(
+            "credential {} has no token the forge accepts",
+            forge.credential()
+        )
+    })?;
+    let key = identity_key(forge, token);
+    if let Some(known) = IDENTITIES.lock().unwrap().get(&key) {
+        return Ok(known.clone());
+    }
+    let http = forge_listing_http()?;
+    let (api, host) = forge.endpoints(env);
+    let resolved = match forge {
+        Forge::Github => {
+            let (v, _) = get(
+                http,
+                &format!("{api}/user"),
+                &[
+                    ("authorization", &format!("Bearer {token}")),
+                    ("user-agent", USER_AGENT),
+                    ("accept", "application/vnd.github+json"),
+                    ("x-github-api-version", "2022-11-28"),
+                ],
+            )
+            .await?;
+            github_identity(&v, &host)?
+        }
+        Forge::Gitlab => {
+            let (v, _) = get(
+                http,
+                &format!("{api}/user"),
+                &[("private-token", token.as_str())],
+            )
+            .await?;
+            gitlab_identity(&v, &host)?
+        }
+    };
+    IDENTITIES.lock().unwrap().insert(key, resolved.clone());
+    Ok(resolved)
+}
+
+fn github_identity(v: &Value, host: &str) -> Result<Identity, String> {
+    let login = v["login"]
+        .as_str()
+        .filter(|l| !l.is_empty())
+        .ok_or("GitHub's /user named no login")?;
+    let id = v["id"].as_u64().ok_or("GitHub's /user named no id")?;
+    let name = v["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(login);
+    // Enterprise Server hosts its noreply addresses under its own name.
+    let noreply = if host == "github.com" {
+        "users.noreply.github.com".to_string()
+    } else {
+        format!("users.noreply.{host}")
+    };
+    Ok(Identity {
+        name: name.to_string(),
+        email: format!("{id}+{login}@{noreply}"),
+        login: login.to_string(),
+        forge: "github",
+    })
+}
+
+fn gitlab_identity(v: &Value, host: &str) -> Result<Identity, String> {
+    let login = v["username"]
+        .as_str()
+        .filter(|l| !l.is_empty())
+        .ok_or("GitLab's /user named no username")?;
+    let name = v["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(login);
+    let email = ["commit_email", "public_email"]
+        .iter()
+        .filter_map(|k| v[*k].as_str())
+        .find(|e| e.contains('@'))
+        .map(str::to_string)
+        .or_else(|| {
+            v["id"]
+                .as_u64()
+                .map(|id| format!("{id}-{login}@users.noreply.{host}"))
+        })
+        .ok_or("GitLab's /user named no address to commit as")?;
+    Ok(Identity {
+        name: name.to_string(),
+        email,
+        login: login.to_string(),
+        forge: "gitlab",
+    })
+}
+
+/// The identity to author a channel's work as on this node: the forge the
+/// work is bound for when it is known, else the first forge with a bound
+/// credential. `None` when no forge credential is bound or none answers;
+/// the caller decides what that means, never a placeholder from here.
+pub async fn identity_for(
+    broker: &SharedBroker,
+    channel: &str,
+    node_id: &str,
+    prefer: Option<Forge>,
+) -> Option<Identity> {
+    let order = match prefer {
+        Some(Forge::Gitlab) => [Forge::Gitlab, Forge::Github],
+        _ => [Forge::Github, Forge::Gitlab],
+    };
+    for forge in order {
+        let env = broker
+            .read()
+            .unwrap()
+            .env_for(forge.credential(), channel, node_id)
+            .ok();
+        let Some(env) = env else { continue };
+        match identity(forge, &env).await {
+            Ok(identity) => return Some(identity),
+            Err(error) => {
+                tracing::warn!(forge = forge.name(), %error, "could not resolve the forge identity")
+            }
+        }
+    }
+    None
+}
+
+/// The identity behind the credential bound for exactly `forge` on this
+/// channel and node: the account a publication there pushes as.
+pub async fn identity_on(
+    broker: &SharedBroker,
+    forge: Forge,
+    channel: &str,
+    node_id: &str,
+) -> Result<Identity, String> {
+    let env = broker
+        .read()
+        .unwrap()
+        .env_for(forge.credential(), channel, node_id)
+        .map_err(|e| e.to_string())?;
+    identity(forge, &env).await
+}
+
+/// The host's own global Git identity, for when no forge identity is bound
+/// or reachable: the operator's, as every Git outside the boundary already
+/// commits with — never a name for tracon. `None` when the host has none.
+pub async fn host_identity(git: &str) -> Option<Identity> {
+    let read = |key: &'static str| async move {
+        let out = tokio::process::Command::new(git)
+            .args(["config", "--global", "--get", key])
+            .output()
+            .await
+            .ok()?;
+        let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (out.status.success() && !value.is_empty()).then_some(value)
+    };
+    let name = read("user.name").await?;
+    let email = read("user.email").await?;
+    Some(Identity {
+        login: name.clone(),
+        name,
+        email,
+        forge: "host",
+    })
+}
+
 /// Where managed clones live, under the node's own state.
 pub fn managed_root(state_dir: &Path) -> PathBuf {
     state_dir.join("repos")
@@ -613,6 +836,54 @@ fn walk_clones(dir: &Path, host: &str, segments: &mut Vec<String>, out: &mut Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_github_account_commits_as_its_noreply_address() {
+        let v = serde_json::json!({ "login": "ada", "id": 42, "name": "Ada Lovelace" });
+        let identity = github_identity(&v, "github.com").unwrap();
+        assert_eq!(identity.name, "Ada Lovelace");
+        assert_eq!(identity.email, "42+ada@users.noreply.github.com");
+        // No profile name: the login, never a placeholder.
+        let v = serde_json::json!({ "login": "ada", "id": 42, "name": null });
+        assert_eq!(github_identity(&v, "github.com").unwrap().name, "ada");
+        let v = serde_json::json!({ "login": "ada", "id": 42 });
+        assert_eq!(
+            github_identity(&v, "ghe.example").unwrap().email,
+            "42+ada@users.noreply.ghe.example"
+        );
+    }
+
+    #[test]
+    fn a_gitlab_account_commits_as_its_commit_address() {
+        let v = serde_json::json!({
+            "username": "ada", "id": 7, "name": "Ada",
+            "commit_email": "ada@example.com", "public_email": "other@example.com"
+        });
+        assert_eq!(
+            gitlab_identity(&v, "gitlab.com").unwrap().email,
+            "ada@example.com"
+        );
+        let v =
+            serde_json::json!({ "username": "ada", "id": 7, "name": "Ada", "public_email": "" });
+        assert_eq!(
+            gitlab_identity(&v, "gitlab.com").unwrap().email,
+            "7-ada@users.noreply.gitlab.com"
+        );
+    }
+
+    #[test]
+    fn a_display_name_cannot_add_a_gitconfig_key() {
+        let identity = Identity {
+            name: "Ada\n\temail = evil@example.com \"quoted\" \\".into(),
+            email: "a@b".into(),
+            login: "ada".into(),
+            forge: "github",
+        };
+        assert_eq!(
+            identity.gitconfig(),
+            "[user]\n\tname = \"Adaemail = evil@example.com \\\"quoted\\\" \\\\\"\n\temail = \"a@b\"\n"
+        );
+    }
 
     #[test]
     fn forge_names_and_credentials_pair_up() {

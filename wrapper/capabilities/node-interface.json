@@ -18,10 +18,6 @@
     "allow-desktop-restart-node",
     "allow-desktop-preferences",
     "allow-desktop-set-preferences",
-    "allow-desktop-open-opencode",
-    {
-      "identifier": "opener:allow-open-url",
-      "allow": [{ "url": "https://*" }]
-    }
+    "allow-desktop-open-opencode"
   ]
 }

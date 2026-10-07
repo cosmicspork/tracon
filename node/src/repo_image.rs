@@ -154,7 +154,7 @@ pub async fn recipe(repo: &Path, entry: &Repo) -> Result<Recipe, String> {
 /// `origin/HEAD`; an operator's own checkout made with `git init` may not, and
 /// what it has committed is then the only default there is. Never the working
 /// tree, in either case.
-async fn default_commit(repo: &Path) -> Result<(String, String), String> {
+pub(crate) async fn default_commit(repo: &Path) -> Result<(String, String), String> {
     let dir = repo.to_string_lossy();
     if let Ok(commit) = crate::review::resolve(&dir, "refs/remotes/origin/HEAD^{commit}").await {
         let name = match crate::review::default_base(&dir).await {

@@ -254,6 +254,7 @@ pub fn router(state: AppState) -> Router {
             post(api::disconnect_provider),
         )
         .route("/api/nodes", get(api::list_nodes))
+        .route("/api/awake", get(api::awake))
         .route(
             "/api/nodes/{id}/providers/{name}/connect",
             post(api::node_connect_provider),
@@ -299,6 +300,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/workspaces/{id}/export", post(api::export_workspace))
         .route("/api/workspaces/{id}/prepare", post(api::prepare_workspace))
+        .route("/api/preparation", get(api::preparation_preview))
         .route(
             "/api/workspaces/{id}/download",
             get(api::download_workspace),
@@ -311,15 +313,24 @@ pub fn router(state: AppState) -> Router {
         )
         // One prompt: the item and the session that starts on it.
         .route("/api/compose", post(api::compose))
+        .route("/api/readiness", get(api::readiness))
         .route("/api/sessions/archive-ended", post(api::archive_ended))
         .route("/api/sessions/archive-legacy", post(api::archive_legacy))
         .route("/api/sessions/{id}/reopen", post(api::reopen_session))
         .route("/api/sessions/{id}/continue", post(api::continue_session))
+        .route(
+            "/api/sessions/{id}/continuation",
+            get(api::session_continuation),
+        )
+        .route("/api/work/{id}/continuation", get(api::work_continuation))
+        .route("/api/continuation/continue", post(api::carry_on))
+        .route("/api/continuation/abandon", post(api::abandon_work))
         .route("/api/sessions/{id}/archive", post(api::archive_session))
         .route("/api/sessions/{id}/unarchive", post(api::unarchive_session))
         .route("/api/sessions/{id}", get(api::get_session))
         .route("/api/sessions/{id}/events", get(api::session_events))
         .route("/api/sessions/{id}/authority", get(api::session_authority))
+        .route("/api/sessions/{id}/outcome", get(api::session_outcome))
         .route("/api/sessions/{id}/prompt", post(api::prompt))
         .route("/api/sessions/{id}/kill", post(api::kill))
         .route("/api/sessions/{id}/pause", post(api::pause))
@@ -396,6 +407,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/reviews/{id}", get(api::get_review))
         .route("/api/reviews/{id}/file", get(api::review_file))
         .route("/api/reviews/{id}/verdict", post(api::decide_review))
+        .route(
+            "/api/reviews/{id}/publication/recover",
+            post(api::recover_publication),
+        )
         .route("/api/reviews/{id}/release", post(api::release_review))
         .route("/api/evidence/candidates", get(evidence::list_candidates))
         .route(
@@ -854,6 +869,11 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     // requests behind, and no answer can reach a harness that is gone. Left
     // alone they sit in the queue as decisions the operator cannot make, which
     // is exactly what the attention count must not contain.
+    // The machine stays awake while a session works, and a suspend that
+    // happens anyway is noticed and recorded.
+    let awake = crate::awake::Awake::new(state.manager.clone());
+    crate::awake::install(awake.clone());
+    tokio::spawn(awake.clone().run());
     {
         let store = store.clone();
         let manager = state.manager.clone();
@@ -863,9 +883,14 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
             loop {
                 tick.tick().await;
+                // A deadline is judged only after a suspend has moved it on.
+                awake.catch_up().await;
                 // An approval waits for the operator until it expires; the
                 // caller is not blocked on it, so nothing else would end it.
                 manager.expire_approvals().await;
+                // A session waiting out its provider's limit is woken here,
+                // and one bound for its fallback is carried on.
+                manager.wake_exhausted().await;
                 let stale = store
                     .stale_claims(grace.as_millis() as i64)
                     .unwrap_or_default();
@@ -905,6 +930,20 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                     continue;
                 }
                 manager.publish_queue().await;
+            }
+        });
+    }
+
+    // A session whose work is published and which has gone quiet is put
+    // away rather than left holding its container and its way out.
+    if cfg.session.suspend_published_after_secs > 0 {
+        let manager = state.manager.clone();
+        let idle = std::time::Duration::from_secs(cfg.session.suspend_published_after_secs);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                manager.suspend_idle_published(idle).await;
             }
         });
     }
@@ -1078,6 +1117,7 @@ pub(crate) async fn verify_node(
     id: &str,
     identity: Option<&proto::keys::Identity>,
 ) -> Result<NodeRow> {
+    backend.recover(cfg).await;
     let report = backend.check_all(cfg, false).await;
     let failed = report.first_failure().cloned();
     let ready = failed.is_none();
