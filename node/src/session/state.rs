@@ -83,6 +83,10 @@ pub enum EndReason {
     /// operator's stop and not the harness's failure, and the work it was
     /// doing can be carried forward from its workspace.
     NodeRestart,
+    /// The provider was exhausted and the channel's policy carries the work
+    /// on to a fallback model: a continuation picks it up from the safe
+    /// boundary this session reached.
+    ProviderExhausted,
     Error,
 }
 
@@ -98,6 +102,7 @@ impl EndReason {
             Self::Incompatible => "incompatible",
             Self::Continued => "continued",
             Self::NodeRestart => "node_restart",
+            Self::ProviderExhausted => "provider_exhausted",
             Self::Error => "error",
         }
     }
@@ -201,6 +206,19 @@ pub mod event_kind {
     /// given up. Recorded by the gateway, which sees the upstream answer, and
     /// by the supervisor when the harness says so itself.
     pub const PROVIDER_ERROR: &str = "provider_error";
+    /// The provider is exhausted — a spent quota, usage window or balance,
+    /// told apart from throttling, auth and outage in `cause` on
+    /// `provider_error` — and the node decided what happens (`policy`,
+    /// `outcome`, `provider`, `model`, `status`, `reason`, `reset_ms`,
+    /// `next_wake_ms`, `fallback`, `note`). The session is fenced; its safe
+    /// boundary follows as `exhaustion_boundary`.
+    pub const PROVIDER_EXHAUSTED: &str = "provider_exhausted";
+    /// The exhausted session's fenced turn has settled (`boundary_seq`):
+    /// what it resumes or is continued from.
+    pub const EXHAUSTION_BOUNDARY: &str = "exhaustion_boundary";
+    /// The node acted on an exhaustion once it was due (`outcome`: resumed,
+    /// continued, held, abandoned; `note`; `continued_by`).
+    pub const EXHAUSTION_WAKE: &str = "exhaustion_wake";
     /// The harness issued the same tool call, unchanged, several times in a
     /// row within one turn (`what`, `count`, `title`, `kind`). Recorded and
     /// surfaced, never acted on: repeating a command is also what a great
