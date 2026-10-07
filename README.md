@@ -386,6 +386,14 @@ a restart would end every session on the node to change one repository's environ
 session already running keeps the image and the egress it started with. Hand edits to
 `node.toml` are read at start, as before.
 
+Or let a session draft it. `repo_setup_draft` reads the default branch (its devcontainer,
+lockfiles, a `just check` recipe or `package.json` scripts) and drafts the entry with where
+each field came from. `repo_setup_try` runs a draft the way required checks run, in a fresh
+container. `repo_setup_propose` puts it to you on a card, which you may edit. The node
+writes the entry only when you allow it, and a proposal never opens the repository's
+egress to its sessions. Hosts you opened to the session while it tried are suggested in
+`egress`.
+
 A Claude Code session runs in that image too. The node copies the harness onto the
 repository's image as one more layer, proves it runs there, and launches the session in
 the result, so the agent has the compiler, the test runner and the formatter its checks

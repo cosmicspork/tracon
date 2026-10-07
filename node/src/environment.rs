@@ -120,6 +120,17 @@ pub fn environment_for(cfg: &Config, store: &Store, repo: Option<&Path>) -> Repo
     // entry can claim that, so every one of them is skipped.
     let repos = cfg.repos();
     let entry = repo.and_then(|repo| repos.iter().find(|entry| entry.matches(repo)));
+    environment_with(cfg, store, repo, entry)
+}
+
+/// The environment `entry` would give `repo`, whether or not the table holds
+/// it: what a drafted entry is tried in before the operator is asked for it.
+pub fn environment_with(
+    cfg: &Config,
+    store: &Store,
+    repo: Option<&Path>,
+    entry: Option<&Repo>,
+) -> RepoEnvironment {
     let checks = match entry.and_then(|entry| entry.checks.as_ref()) {
         Some(checks) => checks,
         None => &cfg.supervision.checks,

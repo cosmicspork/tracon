@@ -588,6 +588,18 @@ requirements or prose; a verdict from a tab that read the revision it replaced
 is refused and the review waits for a fresh reading. Unchanged code may reuse
 its checks, never an unseen human decision.
 
+**An agent may draft a repository's entry; only the operator makes it one.** The
+`repo_setup_*` tools read the default branch's commit, never a session's workspace, so
+nothing a session wrote shapes the draft. A trial prepares that commit with a volume and
+a cache of its own, reaching only the hosts the asking session can already reach, then
+runs each check on a copy with the cache read-only and no network, the shape of a
+required check. A host the draft names that the session cannot reach is reported as not
+tried; asking for it with `request_egress` is how it becomes reachable, and hosts opened
+that way are suggested in the next draft. A proposal is an approval whatever the policy
+says, checked before the card is raised. The node writes it, as the operator left it, in
+place of the repository's entry. It never changes whether that entry opens its egress to
+sessions. Trials are held in memory: a restart drops a report, not a decision.
+
 **The node vouches for the revision and the checks; what an agent shows is its own
 account.** The candidate's tree, the required checks run against it and every decision
 bound to it are records the node made. An attached demonstration — commands, output,
