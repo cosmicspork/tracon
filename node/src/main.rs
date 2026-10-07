@@ -1743,7 +1743,7 @@ async fn external_command(cmd: ExternalCommand) -> Result<()> {
         );
         return Ok(());
     }
-    let v = node_call(Method::GET, "/api/external", None, None).await?;
+    let v = node_call(Method::GET, "/api/external?identities=true", None, None).await?;
     match cmd {
         ExternalCommand::Lane => unreachable!("answered above, without asking the node"),
         ExternalCommand::Show => {
@@ -1784,6 +1784,22 @@ async fn external_command(cmd: ExternalCommand) -> Result<()> {
                     "  claude mcp add-json --scope user tracon-{name} \
                      '{{\"type\":\"http\",\"url\":\"{base}/mcp/external/{name}\",\"headersHelper\":\"{exe} external lane\"{auth}}}'"
                 );
+            }
+            // The node launches nothing for this harness, so the identity its
+            // commits should carry is offered here, to apply in the repository.
+            if let Some(identities) = v["identities"].as_object().filter(|m| !m.is_empty()) {
+                println!(
+                    "\nCommit as your forge account, in each repository you work on (per channel):\n"
+                );
+                for (channel, identity) in identities {
+                    let name = identity["name"].as_str().unwrap_or_default();
+                    let email = identity["email"].as_str().unwrap_or_default();
+                    println!(
+                        "  {channel}: git config user.name {} && git config user.email {}",
+                        shell_quote(name),
+                        shell_quote(email)
+                    );
+                }
             }
             let stopped = v["stopped"].as_array().cloned().unwrap_or_default();
             if !stopped.is_empty() {
@@ -2613,6 +2629,11 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// One shell word, single-quoted, for a line meant to be pasted.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 #[cfg(test)]

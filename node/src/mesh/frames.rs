@@ -107,7 +107,9 @@ pub fn to_payloads(frame: &Frame, store: &Store, self_id: &str) -> Vec<(String, 
         }
         // Live chunks and tool progress are not forwarded in this phase: the
         // remote view is message-granular. Mesh state is local by definition.
-        Frame::Chunk { .. } | Frame::ToolUpdate { .. } | Frame::Mesh(_) => Vec::new(),
+        Frame::Chunk { .. } | Frame::ToolUpdate { .. } | Frame::Mesh(_) | Frame::Awake(_) => {
+            Vec::new()
+        }
         _ => Vec::new(),
     }
 }

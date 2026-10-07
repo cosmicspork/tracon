@@ -2,6 +2,8 @@
 // interface can say what the node said, not "request failed".
 
 import type {
+  Continuation,
+  SessionExhaustion,
   ExternalEvent,
   ExternalView,
   AuthorityGrant,
@@ -20,6 +22,7 @@ import type {
   HubRollups,
   ManagedRepo,
   Memory,
+  AwakeState,
   MeshState,
   ModelOption,
   NodeConfig,
@@ -132,6 +135,7 @@ export const api = {
   node: () => call<NodeInfo>('GET', '/api/node'),
   nodes: () => call<NodeInfo[]>('GET', '/api/nodes'),
   mesh: () => call<MeshState>('GET', '/api/mesh'),
+  awake: () => call<AwakeState>('GET', '/api/awake'),
   channels: () => call<ChannelInfo[]>('GET', '/api/channels'),
   /** Optional hub aggregate; never substitutes for this node's local metrics. */
   hubRollups: (channel: string) =>
@@ -205,8 +209,12 @@ export const api = {
       usage: SessionUsage
       ceiling: Ceiling
       toolchain: ToolchainStatus | null
+      /** Absent from a node that predates exhaustion policies. */
+      exhaustion?: SessionExhaustion | null
       /** Absent from a node that predates `show_work`. */
       shown_work?: ShownWork[]
+      /** What this session's reviews put on the forge. Absent from older nodes. */
+      publications?: { review_id: string; url: string }[]
     }>('GET', `/api/sessions/${id}`),
   /** What this session may do, and what it would still have to ask about.
       Read-only: the node answers it by running its own policy and grants. */
@@ -253,6 +261,14 @@ export const api = {
   }) => call<Session>('POST', '/api/sessions', spec),
   /** Carry on a session a node restart cut off, as a new session on its workspace. */
   continueSession: (id: string) => call<Session>('POST', `/api/sessions/${id}/continue`),
+  /** One piece of work in one view: an item's attempts, or a plain session's lineage. */
+  workContinuation: (id: string) => call<Continuation>('GET', `/api/work/${id}/continuation`),
+  sessionContinuation: (id: string) => call<Continuation>('GET', `/api/sessions/${id}/continuation`),
+  /** Carry the work on from an ended attempt; an `approach` changes how. */
+  carryOn: (body: { session_id: string; approach?: string; model?: string; harness?: string }) =>
+    call<Session>('POST', '/api/continuation/continue', body),
+  abandonWork: (body: { item_id?: string; session_id?: string; reason: string }) =>
+    call<{ abandoned: boolean }>('POST', '/api/continuation/abandon', body),
   /** One prompt: the work item and the session that starts on it. */
   compose: (c: {
     channel: string
@@ -326,6 +342,12 @@ export const api = {
       outputs?: ReviewOutputs
     },
   ) => call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/verdict`, verdict),
+  /** Retry a publication exactly as it was approved: the node reads the
+   * title, body and outputs back from its journal, so nothing new is sent. */
+  recoverPublication: (id: string, publicationId: string) =>
+    call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/publication/recover`, {
+      publication_id: publicationId,
+    }),
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),
   /** `reason` goes back with a rejection, `notes` with a request for changes. */
   answer: (

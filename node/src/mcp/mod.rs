@@ -745,6 +745,7 @@ impl Tools {
                 recheck_authority: Some(&recheck),
                 decided_revision_id: decided_revision.as_deref(),
                 outputs: None,
+                recover: false,
             },
         )
         .await
