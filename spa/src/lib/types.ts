@@ -513,11 +513,31 @@ export interface ReviewDetails {
   /** What the agent showed of its work. Absent from a node that predates it. */
   shown_work?: ShownWork[]
   /**
+   * Who the commits are by, against the forge account approval publishes as.
+   * Null when that account's identity could not be resolved, or for a
+   * mirrored review; absent from a node that predates it.
+   */
+  authorship?: ReviewAuthorship | null
+  /**
    * Whether this node could publish it and how the latest attempt ended.
    * Null for a mirrored review (only the owner holds the credential and the
    * journal); absent from a node that predates it.
    */
   publication?: ReviewPublication | null
+}
+
+export interface ForgeIdentity {
+  name: string
+  email: string
+  login: string
+  forge: string
+}
+
+export interface ReviewAuthorship {
+  identity: ForgeIdentity
+  /** Commits not authored and committed as `identity`. Never rewritten for you. */
+  misattributed: { sha: string; author: string; author_email: string; committer_email: string }[]
+  note: string
 }
 
 export interface ReviewPublication {

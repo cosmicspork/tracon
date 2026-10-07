@@ -444,6 +444,40 @@ impl Manager {
         &self.tools.broker
     }
 
+    /// The identity a channel's commits are authored and committed as: the
+    /// account behind its bound forge credential, preferring the forge a
+    /// managed clone came from, else the host's own global Git identity.
+    /// Bounded in time, so a forge that does not answer delays a launch by
+    /// seconds rather than holding it.
+    pub async fn commit_identity(
+        &self,
+        channel: &str,
+        repo: &std::path::Path,
+    ) -> Option<crate::forge::Identity> {
+        let prefer = repo
+            .strip_prefix(crate::forge::managed_root(&Config::state_dir()))
+            .ok()
+            .and_then(|rest| rest.components().next())
+            .map(|host| {
+                if host.as_os_str().to_string_lossy().contains("gitlab") {
+                    crate::forge::Forge::Gitlab
+                } else {
+                    crate::forge::Forge::Github
+                }
+            });
+        let forge = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::forge::identity_for(&self.tools.broker, channel, &self.node_id, prefer),
+        )
+        .await
+        .ok()
+        .flatten();
+        match forge {
+            Some(identity) => Some(identity),
+            None => crate::forge::host_identity(&self.cfg.publish.git).await,
+        }
+    }
+
     pub fn previews(&self) -> &Arc<crate::http::preview::PreviewTokens> {
         &self.previews
     }
@@ -1886,6 +1920,9 @@ impl Manager {
         // its MCP servers from the config file, not from anything at launch.
         wiring.mcp_servers = mcp_servers.clone();
 
+        // Whose name the session's commits carry: the account behind the
+        // channel's bound forge credential, else the host's own Git identity.
+        let identity = self.commit_identity(&spec.channel, &repo).await;
         let scratch = materialize::scratch_for(
             id,
             &snapshot,
@@ -1894,6 +1931,7 @@ impl Manager {
             adapter.as_ref(),
             &wiring,
             &orientation,
+            identity.as_ref(),
         )?;
         self.backend
             .import_volume(&scratch.volume, &scratch.dir)
