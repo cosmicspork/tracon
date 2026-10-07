@@ -2,6 +2,7 @@
   // A plain session is the default: its first message is queued after the
   // harness starts. Creating durable work items and plans is explicit.
   import ModelPicker from './ModelPicker.svelte'
+  import PreparationPreview from './PreparationPreview.svelte'
   import ReadinessLine from './ReadinessLine.svelte'
   import RepoPicker from './RepoPicker.svelte'
   import { api, ApiError } from '../lib/api'
@@ -274,6 +275,7 @@
             targetId={selectedNode.id}
             onselect={selectLocalRepository}
           />
+          {#if repo && !workspaceId}<PreparationPreview {repo} />{/if}
         </div>
       {:else}
         <div class="field">

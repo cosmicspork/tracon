@@ -1614,6 +1614,30 @@ export interface OwnerDetail {
   reason?: string
 }
 
+/** Something a repository asks of preparation that the node does not do, and
+    where the same work belongs. */
+export interface PreparationIncompatibility {
+  source: string
+  item: string
+  reason: string
+  instead: string | null
+  blocking: boolean
+}
+
+/** What preparing a checkout would do, read before launch. */
+export interface PreparationPreview {
+  repo: string
+  image: string
+  image_source: string
+  devcontainer_image: string | null
+  lockfiles: string[]
+  install: string | null
+  prepare: string[]
+  egress: string[]
+  incompatible: PreparationIncompatibility[]
+  ready: boolean
+}
+
 /** What one path (investigate, verify, publish) needs that the repository or
     channel lacks. `missing` stops a session on that path; `notes` do not. */
 export interface ReadinessGap {
