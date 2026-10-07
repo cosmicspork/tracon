@@ -58,8 +58,6 @@ Needed for daily use, but not blocking it today.
 
 **Sessions and accounting**
 
-- [ ] Preview preparation and explain incompatibility before launch, without turning
-      unsupported scripts or devcontainer features into silent host execution.
 - [ ] **Keep a session's build output.** Every run builds a compiled project from nothing —
       `just check` took 4m47s in session `01a10447` (2026-10-03), most of it compiling.
       Give sessions a persistent per-repository build cache (Cargo's `target/`, a bundler's

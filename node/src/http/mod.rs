@@ -300,6 +300,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/workspaces/{id}/export", post(api::export_workspace))
         .route("/api/workspaces/{id}/prepare", post(api::prepare_workspace))
+        .route("/api/preparation", get(api::preparation_preview))
         .route(
             "/api/workspaces/{id}/download",
             get(api::download_workspace),

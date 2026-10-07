@@ -577,7 +577,14 @@ the session's container (its end, a kill, a restart's reconciliation) finds and 
 its services first. A session's pause stops neither the harness container nor its
 services today; both run until the session ends. A runtime that cannot share a
 namespace (the local and Kubernetes runners) reports that it cannot run one rather than
-starting it somewhere the session cannot reach. A grant is one client's: the node serves its own
+starting it somewhere the session cannot reach. What a repository asks of
+preparation and does not get is said before launch: `GET /api/preparation` (shown under
+the repository in the composer) reads the checkout and names the install it would run,
+the entry's `prepare` commands and the image, then every devcontainer field the node
+will not honour (hooks, `initializeCommand` on the host, features, mounts, privileges,
+environment, a `build`) and every install script a scripts-off install skips, each with
+where that work belongs instead. Those that would stop preparation are told apart from
+those it passes over, and none of them is ever run to find out: the preview reads files. A grant is one client's: the node serves its own
 CONNECT proxy behind a second forward in the gateway, each preparation and session
 presents the token it was issued as proxy credentials, and each is filtered
 by its own host set — so nothing one may reach is reachable by another, none waits for
