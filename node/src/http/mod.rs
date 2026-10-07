@@ -1078,6 +1078,7 @@ pub(crate) async fn verify_node(
     id: &str,
     identity: Option<&proto::keys::Identity>,
 ) -> Result<NodeRow> {
+    backend.recover(cfg).await;
     let report = backend.check_all(cfg, false).await;
     let failed = report.first_failure().cloned();
     let ready = failed.is_none();
