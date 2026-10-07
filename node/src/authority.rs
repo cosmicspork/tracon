@@ -530,6 +530,15 @@ pub async fn publish_review(
                 ));
             }
             ctx.manager.publish_queue().await;
+            // The session is answerable for the change now; it says so where
+            // the operator looks for it, not only on the review.
+            if let Some(session_id) = review.session_id.as_deref() {
+                ctx.manager.record_event(
+                    session_id,
+                    crate::session::state::event_kind::PUBLISHED,
+                    serde_json::json!({ "url": published, "review_id": review.id }),
+                );
+            }
             let submitter = match review.session_id.as_deref() {
                 Some(id) => ctx
                     .store

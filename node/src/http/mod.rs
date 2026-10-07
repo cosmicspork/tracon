@@ -254,6 +254,7 @@ pub fn router(state: AppState) -> Router {
             post(api::disconnect_provider),
         )
         .route("/api/nodes", get(api::list_nodes))
+        .route("/api/awake", get(api::awake))
         .route(
             "/api/nodes/{id}/providers/{name}/connect",
             post(api::node_connect_provider),
@@ -854,6 +855,11 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     // requests behind, and no answer can reach a harness that is gone. Left
     // alone they sit in the queue as decisions the operator cannot make, which
     // is exactly what the attention count must not contain.
+    // The machine stays awake while a session works, and a suspend that
+    // happens anyway is noticed and recorded.
+    let awake = crate::awake::Awake::new(state.manager.clone());
+    crate::awake::install(awake.clone());
+    tokio::spawn(awake.clone().run());
     {
         let store = store.clone();
         let manager = state.manager.clone();
@@ -863,6 +869,8 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
             loop {
                 tick.tick().await;
+                // A deadline is judged only after a suspend has moved it on.
+                awake.catch_up().await;
                 // An approval waits for the operator until it expires; the
                 // caller is not blocked on it, so nothing else would end it.
                 manager.expire_approvals().await;
@@ -908,6 +916,20 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                     continue;
                 }
                 manager.publish_queue().await;
+            }
+        });
+    }
+
+    // A session whose work is published and which has gone quiet is put
+    // away rather than left holding its container and its way out.
+    if cfg.session.suspend_published_after_secs > 0 {
+        let manager = state.manager.clone();
+        let idle = std::time::Duration::from_secs(cfg.session.suspend_published_after_secs);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                manager.suspend_idle_published(idle).await;
             }
         });
     }
@@ -1081,6 +1103,7 @@ pub(crate) async fn verify_node(
     id: &str,
     identity: Option<&proto::keys::Identity>,
 ) -> Result<NodeRow> {
+    backend.recover(cfg).await;
     let report = backend.check_all(cfg, false).await;
     let failed = report.first_failure().cloned();
     let ready = failed.is_none();

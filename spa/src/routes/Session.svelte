@@ -53,6 +53,7 @@
   const repeating = $derived(repetitionHint(store.events))
   let questions = $state<OperatorQuestion[]>([])
   let shownWork = $state<ShownWorkItem[]>([])
+  let publications = $state<{ review_id: string; url: string }[]>([])
   async function refreshQuestions() {
     const result = await api.session(id)
     questions = result.questions
@@ -61,6 +62,7 @@
     toolchain = result.toolchain
     exhaustion = result.exhaustion ?? null
     shownWork = result.shown_work ?? []
+    publications = result.publications ?? []
   }
 
   /** What the header says about the baked language toolchain. Nothing at all
@@ -256,6 +258,7 @@
     if (session.harness_id === 'external') return 'a harness you run yourself'
     if (isTerminal(session.state)) return `session ${session.state.replace('_', ' ')}`
     if (session.state === 'paused') return 'paused'
+    if (session.state === 'suspended') return 'suspended; continue it to carry on'
     if (session.state === 'starting') return 'starting'
     if (session.state === 'waiting_on_check') return `running ${checkCommand ?? 'the checks'}`
     if (busy) return 'a turn is running'
@@ -408,6 +411,12 @@
       >
     </div>
   {/if}
+  {#each publications as p (p.review_id)}
+    <div class="banner ok">
+      published <a class="lnk" href={p.url} target="_blank" rel="noreferrer">{p.url}</a>
+      <b>· from review <a class="lnk" href="/reviews/{p.review_id}">{p.review_id.slice(0, 8)}</a></b>
+    </div>
+  {/each}
   {#if session.continued_from}
     <div class="banner dim">
       continues <a class="lnk" href="/sessions/{session.continued_from}"
@@ -444,6 +453,22 @@
     <div class="banner dim">
       {session.harness_id === 'external' ? 'broker access paused' : 'paused'}
       <b>· {session.harness_id === 'external' ? 'the external host process continues; Tracon cannot control it' : 'new prompts, tools, and model requests are fenced until resume or stop'}</b>
+    </div>
+  {:else if session.state === 'suspended'}
+    <div class="banner dim">
+      suspended <b>· its work is published and it went idle; container stopped, egress revoked, workspace kept</b>
+      {#if continuedAs}
+        <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
+      {:else}
+        <button class="lnk" onclick={() => void carryOn()} disabled={continuing || unreachable !== null}
+          >Continue</button
+        >
+      {/if}
+    </div>
+  {:else if session.end_reason === 'continued' && continuedAs}
+    <div class="banner dim">
+      continued <b>· its work carries on in</b>
+      <a class="lnk" href="/sessions/{continuedAs.id}">{continuedAs.id.slice(0, 8)}</a>
     </div>
   {:else if session.end_reason === 'node_restart'}
     <div class="banner dim">

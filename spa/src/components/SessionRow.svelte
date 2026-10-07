@@ -38,6 +38,7 @@
       paused: external ? 'Broker access paused' : 'Paused',
       waiting_on_you: 'Waiting on you',
       waiting_on_check: 'Waiting on a check',
+      suspended: 'Suspended · published',
       closed:
         session.end_reason === 'detached'
           ? 'Detached'
@@ -49,6 +50,8 @@
               ? 'Ended · node restarted'
             : session.end_reason === 'provider_exhausted'
               ? 'Ended · provider exhausted'
+              : session.end_reason === 'continued'
+                ? 'Continued'
             : session.end_reason === 'item_close'
               ? 'Ended · item closed'
               : session.end_reason === 'phase_done'
