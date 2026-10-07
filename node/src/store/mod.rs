@@ -3050,6 +3050,33 @@ impl Store {
 
     /// Complete a publish: record the approved bytes and where they landed. Only
     /// a row this call moved into `publishing` is finished.
+    /// What a session's reviews put on the forge, oldest first: each
+    /// published review's id and where it landed.
+    pub fn session_publications(&self, session_id: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, publish_result FROM review
+             WHERE session_id=?1 AND state='approved' AND publish_result IS NOT NULL
+               AND publish_result != ''
+             ORDER BY updated_ms",
+        )?;
+        let rows = stmt
+            .query_map([session_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// When anything was last recorded on a session: what idleness is
+    /// measured from.
+    pub fn last_event_ms(&self, session_id: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row(
+            "SELECT MAX(at_ms) FROM event WHERE session_id=?1",
+            [session_id],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn finish_publish(
         &self,
         id: &str,

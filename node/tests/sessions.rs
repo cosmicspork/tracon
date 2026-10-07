@@ -2237,6 +2237,130 @@ async fn a_session_a_restart_ended_can_be_continued_once() {
     assert!(answer.to_string().contains(new_id), "{answer}");
 }
 
+fn published_review(id: &str, session: &str) -> tracon::store::ReviewRow {
+    tracon::store::ReviewRow {
+        id: id.into(),
+        session_id: Some(session.into()),
+        node_id: "n1".into(),
+        channel: "personal".into(),
+        kind: "pr".into(),
+        title: format!("feat: {id}"),
+        body: String::new(),
+        edited_title: None,
+        edited_body: None,
+        provider: "github".into(),
+        target: "{}".into(),
+        diff: "+x".into(),
+        files: "[]".into(),
+        head_sha: "abc1234567890".into(),
+        base_ref: "main".into(),
+        added: 1,
+        removed: 0,
+        state: "approved".into(),
+        verdict_reason: None,
+        publish_result: Some(format!("https://github.test/me/repo/pull/{id}")),
+        claimed_ms: None,
+        created_ms: now_ms(),
+        created_mono_ms: 0,
+        resolved_mono_ms: None,
+        updated_ms: now_ms(),
+        checks_json: None,
+        review_session_id: None,
+        ai_verdict_json: None,
+        revision_patch: None,
+        lane: None,
+    }
+}
+
+/// An idle, published session is put away rather than left holding its
+/// container: the row says `suspended`, which is not an end, and the harness
+/// is closed.
+#[tokio::test]
+async fn an_idle_published_session_is_suspended_not_ended() {
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    assert!(rig.await_state("running").await);
+    rig.commands
+        .send(Command::Suspend { idle_ms: 1_800_000 })
+        .await
+        .unwrap();
+    assert!(rig.await_state("suspended").await);
+    let s = rig.store.get_session(&rig.session_id).unwrap().unwrap();
+    assert_eq!(s.end_reason, None, "suspending is not ending");
+    assert_eq!(s.turn_active, 0);
+    assert!(rig.kinds().contains(&"session_suspended".to_string()));
+}
+
+/// A suspend that arrives while a turn is running is ignored: the session is
+/// not idle any more.
+#[tokio::test]
+async fn a_busy_session_is_not_suspended() {
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    let _answer = rig.request_permission().await;
+    assert!(rig.await_state("waiting_on_you").await);
+    rig.commands
+        .send(Command::Suspend { idle_ms: 1_800_000 })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let s = rig.store.get_session(&rig.session_id).unwrap().unwrap();
+    assert_eq!(s.state, "waiting_on_you");
+}
+
+/// A suspended session is carried on as a new one, told where its work was
+/// published; the suspended one then ends, naming why. A restart leaves it be.
+#[tokio::test]
+async fn a_suspended_session_is_continued_with_its_publications() {
+    state::isolate();
+    let h = Harness::new(10_000).await;
+    let id = insert_running_session(&h.store, 10_000);
+    h.store
+        .insert_review(&published_review("rv-1", &id))
+        .unwrap();
+    assert_eq!(
+        h.store.session_publications(&id).unwrap(),
+        vec![(
+            "rv-1".to_string(),
+            "https://github.test/me/repo/pull/rv-1".to_string()
+        )]
+    );
+    h.store
+        .update_session(&id, tracon::store::SessionPatch::state("suspended"))
+        .unwrap();
+
+    let cleaned = tracon::session::reconcile_after_restart(
+        &h.store,
+        "n1",
+        &tracon::runner::local::LocalBackend,
+    )
+    .await;
+    assert!(
+        !cleaned.contains(&id),
+        "a restart leaves a suspended session be"
+    );
+
+    let (status, row) = h
+        .call("POST", &format!("/api/sessions/{id}/continue"), None)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    let new_id = row["id"].as_str().unwrap();
+    let note = h
+        .store
+        .get_session(new_id)
+        .unwrap()
+        .unwrap()
+        .draft
+        .unwrap_or_default();
+    assert!(
+        note.contains("https://github.test/me/repo/pull/rv-1"),
+        "{note}"
+    );
+    let old = h.store.get_session(&id).unwrap().unwrap();
+    assert_eq!(old.state, "closed");
+    assert_eq!(old.end_reason.as_deref(), Some("continued"));
+}
+
 #[tokio::test]
 async fn closing_the_work_item_ends_the_session_after_its_turn() {
     state::isolate();

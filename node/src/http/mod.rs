@@ -909,6 +909,20 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         });
     }
 
+    // A session whose work is published and which has gone quiet is put
+    // away rather than left holding its container and its way out.
+    if cfg.session.suspend_published_after_secs > 0 {
+        let manager = state.manager.clone();
+        let idle = std::time::Duration::from_secs(cfg.session.suspend_published_after_secs);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                manager.suspend_idle_published(idle).await;
+            }
+        });
+    }
+
     // What waits on the operator, pushed to the phones subscribed here. Every
     // node delivers for its own devices; a channel opts out by binding.
     tokio::spawn(crate::notify::run(

@@ -1580,6 +1580,11 @@ async fn publishing_closes_the_item_the_session_holds() {
     assert_eq!(closed.state, "closed");
     assert_eq!(closed.closed_by_session.as_deref(), Some("s1"));
     assert!(f.event_kinds("s1").contains(&"work_closed".to_string()));
+    // And the session says where its work went, not only the review.
+    assert!(f.event_kinds("s1").contains(&"published".to_string()));
+    let published = f.store.session_publications("s1").unwrap();
+    assert_eq!(published.len(), 1, "{published:?}");
+    assert_eq!(published[0].0, id);
 }
 
 /// An edited diff is a request for changes carrying a patch. What matters is

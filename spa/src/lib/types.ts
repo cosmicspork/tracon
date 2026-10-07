@@ -221,6 +221,7 @@ export type SessionState =
   | 'paused'
   | 'waiting_on_you'
   | 'waiting_on_check'
+  | 'suspended'
   | 'closed'
   | 'killed_budget'
   | 'failed'
