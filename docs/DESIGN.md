@@ -214,3 +214,9 @@ operator's information, not the model's.
     `CLAUDE.md` under a worktree are read by the harness, and that is accepted rather
     than fought: instruction content grants no permission, so such a file can ask for
     something and never approve it. No screen implies those files were filtered out.
+13. **A verdict is never out of reach, and never disabled without a reason.** The
+    verdict bar stays on screen however long the review. Request changes and Reject
+    each open a labelled composer for the reason the agent will read, instead of
+    sitting greyed out until a field elsewhere is filled; an action that cannot be
+    taken says why beside it (files changed since submit, a publication to
+    reconcile, a verdict already on its way).

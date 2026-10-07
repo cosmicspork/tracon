@@ -242,9 +242,6 @@ hit on a real task.
 - [ ] Show changes since the last reviewed revision beside the full base diff, and what
       changed in response to each comment, so the operator does not reread the entire
       change to find the one concern that remains unresolved.
-- [ ] Keep verdicts reachable in long reviews, open a labelled reason composer for Request
-      changes and Reject rather than disabling a button, and explain unavailable actions
-      inline.
 - [ ] Trim criteria binding to what is produced. #290 lets a criterion point at a
       `scenario` or an `observation`; neither is produced by anything now that versioned
       scenarios and trial capture are dropped. Remove those link kinds, keep `check` and
