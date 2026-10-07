@@ -330,6 +330,12 @@ export const api = {
       outputs?: ReviewOutputs
     },
   ) => call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/verdict`, verdict),
+  /** Retry a publication exactly as it was approved: the node reads the
+   * title, body and outputs back from its journal, so nothing new is sent. */
+  recoverPublication: (id: string, publicationId: string) =>
+    call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/publication/recover`, {
+      publication_id: publicationId,
+    }),
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),
   /** `reason` goes back with a rejection, `notes` with a request for changes. */
   answer: (

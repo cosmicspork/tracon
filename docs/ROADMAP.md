@@ -51,14 +51,6 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 Every item here was found on the 2026-09-20, 2026-09-28, 2026-09-30 or 2026-10-03 live
 runs, or in the daily desktop use since.
 
-- [ ] **Publication recovery.** Show credential and binding readiness before offering
-      publication and link missing forge access to the right settings, without implying
-      remote permission from token presence. A failed publish needs a durable, visible
-      outcome and a remedy: distinguish definitely-not-attempted, failed, in-progress,
-      uncertain and published, and reconcile uncertain external effects before retrying.
-      Expose an explicit recovery action backed by the publication journal, not a
-      misleading second approval. Adding a credential never retries automatically;
-      changed revisions or prose need fresh authorization.
 - [ ] **Make tracon invisible in what it publishes.** A commit, branch, pull request or
       forge request should read as the operator's own work through their harness, with
       nothing naming tracon. Authorship comes from the bound forge credential, not the
