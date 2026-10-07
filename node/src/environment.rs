@@ -393,6 +393,51 @@ pub fn scoped_egress(backend: &dyn Backend, hosts: &[String]) -> Result<ScopedEg
     })
 }
 
+/// The lockfiles preparation recognises, in the order it prefers them, and the
+/// command each is installed with. Every one runs with the package manager's
+/// own scripts turned off: an install hook is repository code.
+pub(crate) const LOCKFILES: &[(&str, &str)] = &[
+    ("Cargo.lock", "cargo fetch --locked"),
+    ("package-lock.json", "npm ci --ignore-scripts"),
+    ("npm-shrinkwrap.json", "npm ci --ignore-scripts"),
+    ("bun.lock", "bun install --frozen-lockfile --ignore-scripts"),
+    (
+        "bun.lockb",
+        "bun install --frozen-lockfile --ignore-scripts",
+    ),
+    (
+        "pnpm-lock.yaml",
+        "pnpm install --frozen-lockfile --ignore-scripts",
+    ),
+    (
+        "yarn.lock",
+        "yarn install --frozen-lockfile --ignore-scripts",
+    ),
+    (
+        "composer.lock",
+        "composer install --no-interaction --no-scripts --prefer-dist",
+    ),
+];
+
+/// The `devcontainer.json` fields that would run repository code, grant the
+/// container something of the host's, or install into it. None is honoured,
+/// and none is partially honoured.
+pub(crate) const UNSAFE_DEVCONTAINER_KEYS: &[&str] = &[
+    "privileged",
+    "capAdd",
+    "mounts",
+    "workspaceMount",
+    "runArgs",
+    "initializeCommand",
+    "onCreateCommand",
+    "updateContentCommand",
+    "postCreateCommand",
+    "postStartCommand",
+    "features",
+    "containerEnv",
+    "remoteEnv",
+];
+
 /// Inspect normal project conventions without executing repository-controlled
 /// commands. `devcontainer.json` supplies an image only when it is a plain,
 /// pinned image configuration; setup hooks, mounts, sockets, privilege, and
@@ -411,28 +456,7 @@ pub fn inspect(
     };
     let mut inputs = Vec::new();
     let mut command = None;
-    for (file, prepare) in [
-        ("Cargo.lock", "cargo fetch --locked"),
-        ("package-lock.json", "npm ci --ignore-scripts"),
-        ("npm-shrinkwrap.json", "npm ci --ignore-scripts"),
-        ("bun.lock", "bun install --frozen-lockfile --ignore-scripts"),
-        (
-            "bun.lockb",
-            "bun install --frozen-lockfile --ignore-scripts",
-        ),
-        (
-            "pnpm-lock.yaml",
-            "pnpm install --frozen-lockfile --ignore-scripts",
-        ),
-        (
-            "yarn.lock",
-            "yarn install --frozen-lockfile --ignore-scripts",
-        ),
-        (
-            "composer.lock",
-            "composer install --no-interaction --no-scripts --prefer-dist",
-        ),
-    ] {
+    for &(file, prepare) in LOCKFILES {
         let path = workspace.join(file);
         if path.is_file() {
             inputs.push(DependencyInput {
@@ -562,21 +586,7 @@ fn inspect_devcontainer(workspace: &Path) -> Result<Option<String>, EnvironmentE
     let object = value
         .as_object()
         .ok_or_else(|| EnvironmentError::Devcontainer("top level must be an object".into()))?;
-    for unsafe_key in [
-        "privileged",
-        "capAdd",
-        "mounts",
-        "workspaceMount",
-        "runArgs",
-        "initializeCommand",
-        "onCreateCommand",
-        "updateContentCommand",
-        "postCreateCommand",
-        "postStartCommand",
-        "features",
-        "containerEnv",
-        "remoteEnv",
-    ] {
+    for &unsafe_key in UNSAFE_DEVCONTAINER_KEYS {
         if object.get(unsafe_key).is_some_and(non_empty) {
             return Err(EnvironmentError::UnsafeDevcontainer(unsafe_key));
         }
@@ -592,7 +602,7 @@ fn inspect_devcontainer(workspace: &Path) -> Result<Option<String>, EnvironmentE
     }
 }
 
-fn non_empty(value: &Value) -> bool {
+pub(crate) fn non_empty(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(false) => false,
@@ -603,7 +613,7 @@ fn non_empty(value: &Value) -> bool {
     }
 }
 
-fn approved_image(
+pub(crate) fn approved_image(
     environment: &RepoEnvironment,
     cfg: &Config,
     selected: Option<&str>,

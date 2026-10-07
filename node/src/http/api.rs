@@ -814,6 +814,7 @@ pub async fn import_transfer(
         parent_session: None,
         continued_from: None,
         harness: None,
+        on_exhaustion: None,
     };
     if let Err(error) = s.manager.preflight(&preflight_spec) {
         let detail = error.to_string();
@@ -882,6 +883,7 @@ pub async fn import_transfer(
         parent_session: None,
         continued_from: None,
         harness: None,
+        on_exhaustion: None,
     };
     let session = match s.manager.create(spec).await {
         Ok(session) => session,
@@ -994,6 +996,39 @@ pub async fn forge_repos(
     )
     .await;
     Ok(Json(json!({ "forges": out })))
+}
+
+#[derive(Deserialize)]
+pub struct ReadinessQuery {
+    channel: String,
+    repo: String,
+    work_item: Option<String>,
+}
+
+/// Whether a repository is ready to investigate, to verify and to publish
+/// from, with what each path lacks, before a session is spent finding out.
+pub async fn readiness(
+    State(s): State<AppState>,
+    Query(q): Query<ReadinessQuery>,
+) -> ApiResult<Json<crate::readiness::Readiness>> {
+    let repo = q.repo.trim();
+    if repo.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "repo is required",
+        ));
+    }
+    Ok(Json(
+        crate::readiness::readiness(
+            &s.manager,
+            &s.tools,
+            &s.node_id,
+            &q.channel,
+            repo,
+            q.work_item.as_deref().filter(|id| !id.is_empty()),
+        )
+        .await,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1173,6 +1208,33 @@ pub async fn export_workspace(
 ) -> ApiResult<Json<serde_json::Value>> {
     let _snapshot = s.manager.snapshot_workspace_or_session(&id).await?;
     Ok(Json(json!({ "workspace_id": id, "exported": true })))
+}
+
+#[derive(Deserialize)]
+pub struct PreparationQuery {
+    repo: String,
+}
+
+/// What preparing a checkout on this node would do, and what in it the node
+/// would not do, before a session is launched on it. Reads files; runs
+/// nothing, builds nothing.
+pub async fn preparation_preview(
+    State(s): State<AppState>,
+    Query(q): Query<PreparationQuery>,
+) -> ApiResult<Json<crate::preparation::PreparationPreview>> {
+    let repo = std::path::Path::new(q.repo.trim());
+    if !repo.is_absolute() || !repo.is_dir() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "repo must be an absolute path to a directory on this node",
+        ));
+    }
+    let environment = crate::environment::environment_for(&s.cfg, s.store(), Some(repo));
+    Ok(Json(crate::preparation::preview(
+        &s.cfg,
+        repo,
+        &environment,
+    )))
 }
 
 /// Prepare lockfile dependencies in a separate, credential-free runtime. The
@@ -1375,6 +1437,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         parent_session: None,
         continued_from: None,
         harness: c.harness,
+        on_exhaustion: None,
         branch: c.branch,
         work_item_id: Some(item.id.clone()),
         model: c.model,
@@ -1440,15 +1503,36 @@ pub async fn get_session(
         .first_event_payload(&id, crate::session::state::event_kind::SESSION_STARTED)?
         .and_then(|payload| payload.get("toolchain").cloned())
         .filter(|toolchain| !toolchain.is_null());
+    // The policy this session runs under on exhaustion, and its latest one:
+    // what it waits for, when, or what carried it on.
+    let exhaustion = s.store().exhaustion(&id)?;
     Ok(Json(json!({
         "session": row,
         "waiting": waiting,
         "questions": questions,
+        "publications": s.store().session_publications(&id).unwrap_or_default()
+            .into_iter()
+            .map(|(review_id, url)| json!({ "review_id": review_id, "url": url }))
+            .collect::<Vec<_>>(),
         "usage": usage,
         "ceiling": ceiling,
+        "exhaustion": exhaustion,
         "toolchain": toolchain,
         "shown_work": s.store().shown_work_for_session(&id)?,
     })))
+}
+
+/// What the session came to, read from what was recorded: what changed, what
+/// the node verified, what needs a decision, what is uncertain, and the cost.
+pub async fn session_outcome(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::outcome::Outcome>> {
+    let session = s
+        .store()
+        .get_session(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such session".into()))?;
+    Ok(Json(crate::outcome::outcome(s.store(), session)?))
 }
 
 /// What this session may do, and what it would still have to ask about.
@@ -1778,6 +1862,84 @@ pub async fn continue_session(
     Ok((StatusCode::CREATED, Json(json!(row))))
 }
 
+/// One piece of work in one view: an item's attempts, or a plain session's
+/// lineage, with what it was for, what was decided, what is in the way, what
+/// to do next, where it lives and what it showed.
+pub async fn work_continuation(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    continuation(&s, crate::continuation::Subject::Item(id))
+}
+
+/// The same, reached from any session: the item it worked on, or else the
+/// lineage it belongs to.
+pub async fn session_continuation(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    continuation(&s, crate::continuation::Subject::Session(id))
+}
+
+fn continuation(
+    s: &AppState,
+    subject: crate::continuation::Subject,
+) -> ApiResult<Json<serde_json::Value>> {
+    let view = crate::continuation::view(s.store(), &subject)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such work".into()))?;
+    Ok(Json(json!(view)))
+}
+
+/// Carry the work on from an ended attempt, as it was or with a changed
+/// approach, model or harness.
+pub async fn carry_on(
+    State(s): State<AppState>,
+    Json(body): Json<crate::continuation::CarryOn>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let row = crate::continuation::carry_on(&s.manager, body).await?;
+    Ok((StatusCode::CREATED, Json(json!(row))))
+}
+
+#[derive(Deserialize)]
+pub struct AbandonBody {
+    #[serde(default)]
+    item_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    reason: String,
+}
+
+/// Abandon the work: the item closes, or a plain lineage is stopped and put
+/// away. Reversible: the item can be reopened, the sessions restored.
+pub async fn abandon_work(
+    State(s): State<AppState>,
+    Json(body): Json<AbandonBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let subject = match (body.item_id, body.session_id) {
+        (Some(id), None) => crate::continuation::Subject::Item(id),
+        (None, Some(id)) => crate::continuation::Subject::Session(id),
+        _ => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "name exactly one of item_id or session_id".into(),
+            ))
+        }
+    };
+    crate::continuation::abandon(&s.manager, &subject, &body.reason).await?;
+    Ok(Json(json!({ "abandoned": true })))
+}
+
+/// Whether this node is holding its machine awake, why, and the last
+/// suspend it noticed.
+pub async fn awake() -> Json<crate::awake::Status> {
+    Json(
+        crate::awake::current()
+            .map(|a| a.status())
+            .unwrap_or_default(),
+    )
+}
+
 #[derive(Deserialize)]
 pub struct DraftBody {
     text: String,
@@ -2049,6 +2211,18 @@ pub async fn get_review(
     // attempt is visible here — including the `uncertain` one an operator has
     // to verify on the forge — rather than only in the log.
     let publications = s.store().publications_for_review(&id)?;
+    // Whether this node could publish it, and how the latest attempt ended,
+    // with the remedy. Node-local: only the owner holds the credential and
+    // the journal, and only the owner can retry.
+    let publication = match remote_owner {
+        Some(_) => serde_json::Value::Null,
+        None => json!({
+            "readiness": crate::authority::publication_readiness(&s.tools.broker, &r, &s.node_id),
+            "latest": publications
+                .first()
+                .map(|row| crate::authority::publication_view(s.store(), &r, row)),
+        }),
+    };
     // What the agent showed of its work, each marked stale once the candidate
     // moved past the commit it was shown at. Node-local, like the checks: a
     // mirror never had the workspace it was read from.
@@ -2079,6 +2253,24 @@ pub async fn get_review(
         )
         .unwrap_or_default()),
     };
+    // Who the commits are by, against the account approval would publish as,
+    // so a commit the forge would not attribute to it is named before anyone
+    // approves. Node-local: the worktree is here.
+    let authorship = match (remote_owner.as_ref(), worktree_of(&s, &r)) {
+        (None, Some(worktree)) => {
+            crate::review::authorship(
+                &s.tools.broker,
+                &r.provider,
+                &r.channel,
+                &s.node_id,
+                &worktree,
+                &format!("origin/{}", r.base_ref),
+                &r.head_sha,
+            )
+            .await
+        }
+        _ => None,
+    };
     Ok(Json(json!({
         "review": r,
         "remote_owner": remote_owner,
@@ -2091,7 +2283,9 @@ pub async fn get_review(
         "evidence": evidence,
         "legacy_check_events": legacy_check_events,
         "publications": publications,
+        "publication": publication,
         "shown_work": shown_work,
+        "authorship": authorship,
     })))
 }
 
@@ -2539,6 +2733,7 @@ pub(crate) async fn decide_local(
                     // bytes published under this approval.
                     decided_revision_id: decided_revision.as_deref(),
                     outputs: b.outputs.as_ref(),
+                    recover: false,
                 },
             )
             .await
@@ -2580,6 +2775,113 @@ pub(crate) async fn decide_local(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("{other:?} is not a verdict"),
         )),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RecoverBody {
+    /// The publication record the operator is retrying, as the review screen
+    /// showed it. A retry is of a recorded attempt, not of the review.
+    pub publication_id: String,
+}
+
+/// Retry a publication exactly as it was approved: the recorded revision,
+/// commit, target, title, body and outputs, read back from the journal. It
+/// is not a second approval and takes no prose from the caller; anything
+/// that changed since is refused with what to do instead. An uncertain
+/// attempt is resumed by looking at the forge before anything is repeated.
+pub async fn recover_publication(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<RecoverBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    if r.node_id != s.node_id {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this review is published by the node that owns it; retry it there".into(),
+        ));
+    }
+    let row = s
+        .store()
+        .publication(&b.publication_id)?
+        .filter(|row| row.review_id == id)
+        .ok_or(ApiError(
+            StatusCode::NOT_FOUND,
+            "no such publication for this review".into(),
+        ))?;
+    if let Some(refusal) = crate::authority::recovery_refusal(s.store(), &r, &row) {
+        return Err(ApiError(StatusCode::CONFLICT, refusal));
+    }
+    // Checked as present just above.
+    let title = row.title.clone().unwrap_or_default();
+    let body = row.body.clone().unwrap_or_default();
+    let outputs: crate::review::publish::Outputs =
+        serde_json::from_str(row.outputs_json.as_deref().unwrap_or_default()).map_err(|e| {
+            ApiError(
+                StatusCode::CONFLICT,
+                format!("the recorded outputs are unreadable ({e}); approve it again"),
+            )
+        })?;
+    let revision = match row.revision_id.as_deref() {
+        Some(revision) => s.store().review_revision(revision)?,
+        None => None,
+    };
+    match crate::authority::publish_review(
+        &crate::authority::PublishContext {
+            store: s.store(),
+            manager: &s.manager,
+            broker: &s.tools.broker,
+            cfg: &s.cfg,
+            node_id: &s.node_id,
+        },
+        crate::authority::PublishRequest {
+            review: &r,
+            title: &title,
+            body: &body,
+            require_evidence: false,
+            recheck_authority: None,
+            decided_revision_id: row.revision_id.as_deref(),
+            outputs: Some(&outputs),
+            recover: true,
+        },
+    )
+    .await
+    {
+        Ok(crate::authority::Published {
+            url: published,
+            outputs,
+        }) => {
+            let waiting_ms = record_evidence_decision(
+                s.store(),
+                revision.as_ref(),
+                &id,
+                "approved",
+                Some("published by retrying the publication approved earlier"),
+                Some(&title),
+                Some(&body),
+                None,
+                Some(&outputs),
+            )?;
+            record_operator_decision_event(
+                &s,
+                r.session_id.as_deref(),
+                &id,
+                "approved",
+                waiting_ms,
+            );
+            Ok(Json(json!({ "state": "approved", "published": published })))
+        }
+        Err(crate::authority::PublishError::Conflict(message)) => {
+            Err(ApiError(StatusCode::CONFLICT, message))
+        }
+        Err(crate::authority::PublishError::External(message))
+        | Err(crate::authority::PublishError::Uncertain(message)) => {
+            Err(ApiError(StatusCode::BAD_GATEWAY, message))
+        }
     }
 }
 
@@ -2697,7 +2999,19 @@ const LANE_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 /// one could register with, which are stopped, and the lanes that called in
 /// the last day. The CLI prints the line to register with; the interface
 /// shows the same.
-pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+#[derive(Deserialize, Default)]
+pub struct ExternalQuery {
+    /// Also resolve each channel's forge identity. Asked for by `tracon
+    /// external show`, not by the interface's polling, since it may ask the
+    /// forge.
+    #[serde(default)]
+    pub identities: bool,
+}
+
+pub async fn external(
+    State(s): State<AppState>,
+    Query(q): Query<ExternalQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
     let rows = s.store().channel_list()?;
     // Listed on their own rather than folded into `channels`, which callers
     // read as names: a stopped channel is still one a harness registers with.
@@ -2738,11 +3052,28 @@ pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::V
         row["running"] = json!(running);
         lanes.push(row);
     }
+    // What a harness the operator runs should commit as on each channel, so
+    // its work reads as theirs on the forge. The node launches nothing for
+    // it, so this is offered, to apply as repository-local config.
+    let mut identities = serde_json::Map::new();
+    for channel in channels.iter().filter(|_| q.identities) {
+        if let Some(identity) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::forge::identity_for(&s.tools.broker, channel, &s.node_id, None),
+        )
+        .await
+        .ok()
+        .flatten()
+        {
+            identities.insert(channel.clone(), json!(identity));
+        }
+    }
     Ok(Json(json!({
         "enabled": s.cfg.external.enabled,
         "channels": channels,
         "lanes": lanes,
         "stopped": stopped,
+        "identities": identities,
     })))
 }
 

@@ -509,6 +509,7 @@ async fn a_restore_puts_the_database_back_and_says_what_it_does_not() {
         &OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION),
         &Default::default(),
         "# Orientation",
+        None,
     )
     .expect("the restored session relaunches");
     assert!(scratch.dir.join(materialize::OPENCODE_RUN).is_dir());
