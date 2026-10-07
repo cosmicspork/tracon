@@ -58,13 +58,6 @@ Needed for daily use, but not blocking it today.
 
 **Sessions and accounting**
 
-- [ ] **Keep a session's build output.** Every run builds a compiled project from nothing —
-      `just check` took 4m47s in session `01a10447` (2026-10-03), most of it compiling.
-      Give sessions a persistent per-repository build cache (Cargo's `target/`, a bundler's
-      cache, the dependencies a session added) that survives the session. Required checks
-      keep starting from the trusted base cache: a directory the agent wrote must not be
-      able to make the review gate pass. A node-built cache of the default branch for
-      checks is the follow-on.
 - [ ] **Help set up a repository once: the skill.** The draft, trial and proposal
       tools exist (`repo_setup_*`). What remains: a built-in setup skill shipped through
       channel manifests for managed harnesses, and optional free-text notes on how to run
@@ -108,15 +101,6 @@ hit on a real task.
 
 **Review and publication**
 
-- [ ] Read a mirrored review from its owner. A review is mirrored to every node on its
-      channel and its verdict is forwarded to the owner, but its worktree, candidate,
-      checks, criteria and forge intent stay there, so a phone served by another node (the
-      homelab node, reviewing #338 and #339 on 2026-10-04) read none of them and called the
-      change stale. The node now says the review is held elsewhere and leaves approval to
-      the owner's own staleness check; the phone still decides without the checks, the
-      evidence or what approval sends to the forge. Fetch that detail from the owner over
-      the mesh, as candidate evidence already is, bounded and refused for a third node, and
-      say plainly when the owner is unreachable rather than showing an empty review.
 - [ ] What ships under the operator's name is reviewed: the branch name and the commits.
       Today the candidate is the tree, the review shows the diff and the forge prose, and
       the commits and branch are pushed as the agent wrote them (the default branch even
@@ -348,9 +332,11 @@ servers reaching the v2 session runner.
 - A run's dependency cache and each check's tree are copies. Where the runtime's storage
   has no reflinks they are full copies, made once per run and once per check. The base
   cache they start from is filled when the node builds a repository's image; an entry
-  that names a hand-pinned `image` has none, so its runs prepare from empty. A run keeps
-  no build output: every run of a compiled project's checks builds from nothing (three
-  minutes for tracon's own test build, 2026-10-01).
+  that names a hand-pinned `image` has none, so its runs prepare from empty. A check run
+  keeps no build output: every run of a compiled project's checks builds from nothing
+  (three minutes for tracon's own test build, 2026-10-01). Sessions keep theirs, but only
+  Cargo's is moved out of the tree; a bundler's cache inside `node_modules` lives and goes
+  with the workspace.
 - Per-client egress — a session's, a preparation's — is the Podman
   backend's. The Kubernetes backend issues no grants, so a `[[repo]]` entry that names
   `egress` cannot prepare there. A grant filters by host, not by method: a registry that

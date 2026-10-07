@@ -406,8 +406,11 @@ image it got, and why when it is not the repository's: a base the harness binary
 run on (a musl image, one with no Git) leaves the session in the harness image rather
 than failing to start. A repository with no image yet builds one at its first session,
 which waits; one whose Dockerfile changed starts on the image it has and is rebuilt behind
-the session. Each workspace gets its own dependency cache at `/cache`, started as a copy of
-the repository's base cache, which no check reads. The layer is root, like every run here, so a tool the Dockerfile installed under
+the session. Sessions keep a build cache at `/cache`, one per repository and channel, that
+outlives each session: what a session fetched and, through `CARGO_TARGET_DIR=/cache/target`,
+what it compiled are there for the next one. It starts as a copy of the repository's base
+cache, and no check reads it. Two sessions on one repository share it, so a second
+`cargo build` waits for the first's lock. The layer is root, like every run here, so a tool the Dockerfile installed under
 another user's home has to be readable and executable by others. OpenCode sessions, and
 sessions on Kubernetes, stay in the harness image.
 
