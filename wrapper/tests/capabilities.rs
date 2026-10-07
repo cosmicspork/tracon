@@ -47,7 +47,7 @@ fn capabilities() -> Vec<(String, Value)> {
 }
 
 /// The permission identifiers a capability grants, including the objects that
-/// carry a scope (`{"identifier": "opener:allow-open-url", "allow": […]}`).
+/// carry a scope (`{"identifier": "…", "allow": […]}`).
 fn granted(capability: &Value) -> BTreeSet<String> {
     capability["permissions"]
         .as_array()
@@ -107,11 +107,11 @@ fn the_opencode_window_is_declared_and_nothing_opens_it_at_launch() {
     // node returns, checked by `opencode::boot_url` before the window exists.
     assert!(opencode.get("url").is_none());
 
+    // The main window is built by the app at startup (`build_main_window`),
+    // with the handler that answers its links, so it is not created from here.
     let main = window(&config, "main");
-    assert!(
-        main.get("create").is_none(),
-        "the main window is still the one the app opens on"
-    );
+    assert_eq!(main["create"], Value::Bool(false));
+    assert_eq!(main["url"], "setup.html", "the main window opens on setup");
 }
 
 #[test]
@@ -187,32 +187,20 @@ fn no_other_capability_reaches_the_opencode_window() {
     }
 }
 
+/// No window reaches the system browser through a plugin command. A link
+/// meant for a new window is answered by the app's own handlers, in Rust, and
+/// the host's launcher is started from there (`src/launcher.rs`); a grant here
+/// would be a second way out that skips them.
 #[test]
-fn the_system_browser_is_the_main_windows_grant_and_only_over_https() {
-    let mut found = 0;
+fn no_window_holds_an_opener_grant() {
     for (id, capability) in capabilities() {
-        for permission in capability["permissions"].as_array().expect("permissions") {
-            let identifier = permission
-                .as_str()
-                .or_else(|| permission["identifier"].as_str())
-                .expect("an identifier");
-            if !identifier.starts_with("opener:") {
-                continue;
-            }
-            found += 1;
-            assert_eq!(id, "node-interface");
-            assert_eq!(windows_of(&capability), vec!["main".to_string()]);
-            let allowed = permission["allow"].as_array().expect("a scoped opener");
-            for entry in allowed {
-                let url = entry["url"].as_str().expect("a url scope");
-                assert!(
-                    url.starts_with("https://") || url.starts_with("http://"),
-                    "the opener is scoped to `{url}`"
-                );
-            }
+        for permission in granted(&capability) {
+            assert!(
+                !permission.starts_with("opener:"),
+                "`{id}` grants `{permission}`"
+            );
         }
     }
-    assert_eq!(found, 1, "the opener is granted in exactly one place");
 }
 
 #[test]

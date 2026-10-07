@@ -67,6 +67,9 @@ pub enum Frame {
     Promotions {
         waiting: Vec<crate::store::PromotionRow>,
     },
+    /// Whether this node is holding its machine awake, and the last suspend
+    /// it noticed. This node's alone; never forwarded.
+    Awake(Value),
 }
 
 impl Frame {
@@ -85,6 +88,7 @@ impl Frame {
             Frame::Providers { .. } => "providers",
             Frame::Changes { .. } => "changes",
             Frame::Promotions { .. } => "promotions",
+            Frame::Awake(_) => "awake",
         }
     }
 

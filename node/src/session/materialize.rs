@@ -339,6 +339,7 @@ pub fn probe_mounts(
 /// Build configuration for a single session. `repo` is deliberately ignored:
 /// workspaces are independently staged before launch and their Git directory is
 /// never exposed by a same-path host mount.
+#[allow(clippy::too_many_arguments)]
 pub fn scratch_for(
     session_id: &str,
     _worktree: &Path,
@@ -347,6 +348,7 @@ pub fn scratch_for(
     adapter: &dyn HarnessAdapter,
     wiring: &Wiring,
     orientation: &str,
+    identity: Option<&crate::forge::Identity>,
 ) -> std::io::Result<Scratch> {
     // Before anything is staged: the tree about to be written holds this
     // session's harness database, and re-staging it under a live harness is
@@ -358,9 +360,17 @@ pub fn scratch_for(
     let volume = workspace::scratch_volume_name(session_id);
 
     std::fs::write(dir.join("orientation.md"), orientation)?;
+    // Commits made in here are authored and committed as the operator's own
+    // forge identity, so what is published reads as their work. With none,
+    // Git asks for one rather than inventing a name.
     std::fs::write(
         dir.join("gitconfig"),
-        "[user]\n\tname = tracon\n\temail = tracon@localhost\n[safe]\n\tdirectory = /work\n[advice]\n\tdetachedHead = false\n",
+        format!(
+            "{}[safe]\n\tdirectory = /work\n[advice]\n\tdetachedHead = false\n",
+            identity
+                .map(crate::forge::Identity::gitconfig)
+                .unwrap_or_default()
+        ),
     )?;
     let orientation_path = format!("{}/orientation.md", state_target(home, adapter.layout()));
 
@@ -406,6 +416,42 @@ pub fn remove(session_id: &str) {
 mod tests {
     use super::*;
 
+    /// The session's commits are the operator's: the gitconfig names the
+    /// forge identity it was given, and nothing names tracon.
+    #[test]
+    fn the_harness_commits_as_the_given_identity() {
+        let identity = crate::forge::Identity {
+            name: "Ada \"the\" Lovelace".into(),
+            email: "1+ada@users.noreply.github.com".into(),
+            login: "ada".into(),
+            forge: "github",
+        };
+        let session = "test-materialize-identity";
+        release_state(session);
+        let scratch = scratch_for(
+            session,
+            Path::new("/ignored"),
+            Path::new("/ignored"),
+            PODMAN_HARNESS_HOME,
+            &crate::adapter::claude::ClaudeAdapter::new("2.1.247"),
+            &Wiring::default(),
+            "# Orientation",
+            Some(&identity),
+        )
+        .unwrap();
+        let config = std::fs::read_to_string(scratch.dir.join("gitconfig")).unwrap();
+        assert!(
+            config.contains("name = \"Ada \\\"the\\\" Lovelace\""),
+            "{config}"
+        );
+        assert!(
+            config.contains("email = \"1+ada@users.noreply.github.com\""),
+            "{config}"
+        );
+        assert!(!config.contains("tracon"), "{config}");
+        remove(session);
+    }
+
     #[test]
     fn materialized_files_are_runtime_volume_mounts() {
         let scratch = scratch_for(
@@ -416,6 +462,7 @@ mod tests {
             &crate::adapter::claude::ClaudeAdapter::new("2.1.247"),
             &Wiring::default(),
             "# Orientation",
+            None,
         )
         .unwrap();
         assert!(scratch.mounts.iter().all(|mount| !mount.volume.is_empty()));
@@ -436,6 +483,7 @@ mod tests {
             &adapter,
             &Wiring::default(),
             "# Orientation for the sealed dir",
+            None,
         )
         .unwrap();
         let root = state_target(PODMAN_HARNESS_HOME, adapter.layout());
@@ -531,6 +579,7 @@ mod tests {
             &adapter,
             &Wiring::default(),
             "# Orientation",
+            None,
         )
         .unwrap();
         assert!(
@@ -559,6 +608,7 @@ mod tests {
                 &crate::adapter::claude::ClaudeAdapter::new("2.1.247"),
                 &Wiring::default(),
                 "# Orientation",
+                None,
             )
         };
         staged().expect("the first staging takes the fence");

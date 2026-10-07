@@ -645,7 +645,7 @@ impl Client<'_> {
             .bearer_auth(self.token)
             .header("accept", "application/vnd.github+json")
             .header("x-github-api-version", "2022-11-28")
-            .header("user-agent", "tracon")
+            .header("user-agent", crate::forge::USER_AGENT)
     }
 
     async fn get(&self, url: &str) -> Result<Value, String> {

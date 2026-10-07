@@ -547,7 +547,7 @@ pub fn sanitize_git(root: &Path) -> Result<(), WorkspaceError> {
     std::fs::create_dir_all(git.join("info"))?;
     std::fs::write(
         git.join("config"),
-        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\thooksPath = /dev/null\n\tfsmonitor =\n[user]\n\tname = tracon\n\temail = tracon@localhost\n",
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\thooksPath = /dev/null\n\tfsmonitor =\n",
     )?;
     Ok(())
 }

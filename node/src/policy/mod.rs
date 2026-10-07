@@ -687,6 +687,25 @@ mod tests {
     }
 
     #[test]
+    fn the_browser_runs_unattended_and_any_other_service_is_asked() {
+        let p = Policy::shipped();
+        let browser = serde_json::json!({ "name": "browser" });
+        let database = serde_json::json!({ "name": "postgres" });
+        assert_eq!(
+            p.decide(&tool("service_start", &browser, "")).verdict,
+            Verdict::Allow
+        );
+        assert_eq!(
+            p.decide(&tool("service_start", &database, "")).verdict,
+            Verdict::Ask
+        );
+        assert_eq!(
+            p.decide(&tool("service_status", &database, "")).verdict,
+            Verdict::Allow
+        );
+    }
+
+    #[test]
     fn globs_match_only_what_they_say() {
         assert!(glob("note-*", "note-personal"));
         assert!(!glob("note-*", "notes-personal"));
