@@ -483,7 +483,9 @@ impl Tools {
             | github::PR_MERGE
             | github::PR_THREADS
             | github::PR_REPLY
-            | github::PR_FOR_BRANCH => {
+            | github::PR_FOR_BRANCH
+            | github::RUN_LOGS
+            | github::RUN_RERUN => {
                 github::call(
                     &self.broker,
                     &self.http,

@@ -104,11 +104,51 @@ async fn stub(
             "html_url": "https://github.test/owner/name/actions/runs/900",
             "created_at": "2026-09-10T00:00:00Z"
         }] })),
+        ("GET", "/repos/owner/name/actions/runs/900") => ok(json!({
+            "id": 900, "name": "ci", "status": "completed", "conclusion": "failure",
+            "event": "push", "head_branch": "main", "head_sha": "abc123", "run_attempt": 1,
+            "html_url": "https://github.test/owner/name/actions/runs/900",
+            "created_at": "2026-09-10T00:00:00Z"
+        })),
+        ("GET", "/repos/owner/name/actions/runs/900/jobs") => {
+            ok(json!({ "total_count": 2, "jobs": [
+            { "id": 31, "name": "test", "status": "completed", "conclusion": "failure",
+              "html_url": "https://github.test/j31", "steps": [
+                { "name": "checkout", "conclusion": "success" },
+                { "name": "cargo test", "conclusion": "failure" } ] },
+            { "id": 32, "name": "lint", "status": "completed", "conclusion": "success",
+              "html_url": "https://github.test/j32", "steps": [] }
+        ] }))
+        }
+        ("POST", "/repos/owner/name/actions/runs/900/rerun-failed-jobs") => {
+            (axum::http::StatusCode::CREATED, Json(json!({})))
+        }
         _ => (
             axum::http::StatusCode::NOT_FOUND,
             Json(json!({ "message": "Not Found" })),
         ),
     }
+}
+
+/// What reached the log storage GitHub redirects to: its authorization header.
+static STORAGE_AUTH: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+async fn job_logs() -> axum::response::Redirect {
+    axum::response::Redirect::temporary("/storage/job-31.log")
+}
+
+async fn storage(headers: HeaderMap) -> String {
+    STORAGE_AUTH.lock().unwrap().push(
+        headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string(),
+    );
+    format!(
+        "{}error: test failed, to rerun pass `-p node`\n",
+        "noise\n".repeat(5000)
+    )
 }
 
 async fn rig() -> (Tools, Seen) {
@@ -120,6 +160,11 @@ async fn rig_with_bodies() -> (Tools, Seen, Bodies) {
     let seen = Seen::default();
     let bodies = Bodies::default();
     let app = Router::new()
+        .route(
+            "/repos/owner/name/actions/jobs/31/logs",
+            axum::routing::get(job_logs),
+        )
+        .route("/storage/job-31.log", axum::routing::get(storage))
         .route("/{*path}", any(stub))
         .with_state((seen.clone(), bodies.clone()));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -395,5 +440,70 @@ async fn pr_for_branch_finds_the_open_pull_request() {
     assert_eq!(
         seen.lock().unwrap()[0].1,
         "/repos/owner/name/pulls?state=open&head=owner:feat/thing&per_page=10"
+    );
+}
+
+/// GitHub's CI reads as GitLab's do: a run's jobs say which step failed, and
+/// the end of a failed job's log is one read away, bounded the same way.
+#[tokio::test]
+async fn a_failed_run_is_read_down_to_the_end_of_its_log() {
+    state::isolate();
+    let (t, _) = rig().await;
+    let c = ctx("work");
+    let (err, v) = call(
+        &t,
+        &c,
+        "run_status",
+        json!({ "repo": "owner/name", "run_id": 900 }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["run"]["conclusion"], "failure");
+    assert_eq!(v["jobs"][0]["id"], 31);
+    assert_eq!(v["jobs"][0]["failed_steps"], json!(["cargo test"]));
+    assert_eq!(v["more_jobs"], false);
+
+    let (err, v) = call(
+        &t,
+        &c,
+        "run_logs",
+        json!({ "repo": "owner/name", "job_id": 31, "kib": 1 }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["truncated"], true);
+    let log = v["log"].as_str().unwrap();
+    assert!(log.len() <= 1024, "{}", log.len());
+    assert!(log.ends_with("error: test failed, to rerun pass `-p node`\n"));
+    assert!(
+        STORAGE_AUTH.lock().unwrap().iter().all(|a| a.is_empty()),
+        "the token is not handed to the log storage GitHub redirects to"
+    );
+}
+
+/// Rerunning a run's failed jobs is asked, and then runs once.
+#[tokio::test]
+async fn rerunning_failed_jobs_waits_on_the_operator() {
+    state::isolate();
+    let (mut t, seen) = rig().await;
+    let c = ctx("work");
+    let args = json!({ "repo": "owner/name", "run_id": 900 });
+    let (err, v) = call(&t, &c, "run_rerun", args.clone()).await;
+    assert!(err);
+    assert!(v.as_str().unwrap_or_default().contains("approval"), "{v}");
+    assert!(seen.lock().unwrap().is_empty(), "nothing reached GitHub");
+
+    t.policy = allowing(r#""run_rerun""#);
+    let (err, v) = call(&t, &c, "run_rerun", args).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["run_id"], 900);
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        (seen[0].0.as_str(), seen[0].1.as_str()),
+        (
+            "POST",
+            "/repos/owner/name/actions/runs/900/rerun-failed-jobs"
+        )
     );
 }

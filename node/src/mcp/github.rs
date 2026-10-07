@@ -1,7 +1,9 @@
 //! GitHub, as narrow tools: a pull request's state with its checks and
 //! reviews, its review threads, one comment on it, one reply to a thread, the
-//! open pull request for a branch, and the Actions runs for a branch or a
-//! commit. Opening a
+//! open pull request for a branch, the Actions runs for a branch or an exact
+//! commit with each run's jobs, the end of a job's log, and rerunning a run's
+//! failed jobs (asked) — what GitLab's pipeline tools give an agent, so CI is
+//! diagnosed and retried the same way on either forge. Opening a
 //! pull request is the review path (`review::publish`); merging is
 //! `pr_merge`, which runs only with current scoped authority for the exact
 //! head SHA. Marking ready is not a tool. The token never leaves the node.
@@ -18,6 +20,13 @@ pub const PR_MERGE: &str = "pr_merge";
 pub const PR_THREADS: &str = "pr_threads";
 pub const PR_REPLY: &str = "pr_reply";
 pub const PR_FOR_BRANCH: &str = "pr_for_branch";
+pub const RUN_LOGS: &str = "run_logs";
+pub const RUN_RERUN: &str = "run_rerun";
+
+/// How much of a job's log `run_logs` returns, in KiB, unless asked: the same
+/// limits as GitLab's `job_trace`.
+const LOG_KIB: u64 = 16;
+const LOG_KIB_MAX: u64 = 64;
 
 /// One page of threads, and of comments in each: a review is read in one
 /// call, and a pull request with more than this says so rather than
@@ -84,15 +93,47 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": RUN_STATUS,
-            "description": "The latest GitHub Actions runs for a branch or a commit.",
+            "description": "GitHub Actions runs: the latest for a branch, every run at an exact \
+                            commit SHA (never resolved against a branch), or one run by id with \
+                            its jobs (id, name, status, conclusion, the steps that failed). Pass a \
+                            failed job's id to run_logs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repo": { "type": "string", "description": "owner/name" },
                     "branch": { "type": "string" },
-                    "sha": { "type": "string" },
+                    "sha": { "type": "string", "description": "An exact commit SHA." },
+                    "run_id": { "type": "integer", "description": "One run, with its jobs." },
                 },
                 "required": ["repo"],
+            },
+        }),
+        json!({
+            "name": RUN_LOGS,
+            "description": "The end of a GitHub Actions job's log, for reading why it failed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": { "type": "string", "description": "owner/name" },
+                    "job_id": { "type": "integer", "description": "From run_status with run_id." },
+                    "kib": { "type": "integer", "description": "How much of the end, in KiB (16 unless you say, at most 64)." },
+                },
+                "required": ["repo", "job_id"],
+            },
+        }),
+        json!({
+            "name": RUN_RERUN,
+            "description": "Rerun a GitHub Actions run's failed jobs, as the web UI's \"Re-run \
+                            failed jobs\" does. The operator is asked before this runs: the call \
+                            returns `awaiting_operator` with an `approval_id` at once, and \
+                            approval_status reports the outcome.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": { "type": "string", "description": "owner/name" },
+                    "run_id": { "type": "integer" },
+                },
+                "required": ["repo", "run_id"],
             },
         }),
         json!({
@@ -375,6 +416,40 @@ pub async fn call(
                 .map_err(mutation_outcome_error)?;
             Ok(json!({ "merged": v["merged"], "sha": v["sha"], "message": v["message"] }))
         }
+        RUN_STATUS if args.get("run_id").is_some() => {
+            let run = positive(args, "run_id")?;
+            let r = gh.get(&format!("{base}/actions/runs/{run}")).await?;
+            let jobs = gh
+                .get(&format!("{base}/actions/runs/{run}/jobs?per_page=100"))
+                .await?;
+            Ok(json!({
+                "run": run_summary(&r),
+                "jobs": jobs_summary(&jobs),
+                "more_jobs": jobs["total_count"].as_u64().unwrap_or(0)
+                    > jobs["jobs"].as_array().map_or(0, |j| j.len() as u64),
+            }))
+        }
+        RUN_LOGS => {
+            let job = positive(args, "job_id")?;
+            let kib = args
+                .get("kib")
+                .and_then(Value::as_u64)
+                .unwrap_or(LOG_KIB)
+                .clamp(1, LOG_KIB_MAX);
+            let log = gh.text(&format!("{base}/actions/jobs/{job}/logs")).await?;
+            let (tail, truncated) = tail(&log, (kib * 1024) as usize);
+            Ok(json!({ "job_id": job, "truncated": truncated, "log": tail }))
+        }
+        RUN_RERUN => {
+            let run = positive(args, "run_id")?;
+            if let Some(recheck) = before_mutation {
+                recheck()?;
+            }
+            gh.post_empty(&format!("{base}/actions/runs/{run}/rerun-failed-jobs"))
+                .await
+                .map_err(mutation_outcome_error)?;
+            Ok(json!({ "run_id": run, "rerun": "failed jobs" }))
+        }
         RUN_STATUS => {
             let filter = match (
                 args.get("branch").and_then(Value::as_str),
@@ -389,18 +464,7 @@ pub async fn call(
                 .await?;
             let runs: Vec<Value> = v["workflow_runs"]
                 .as_array()
-                .map(|a| {
-                    a.iter()
-                        .map(|r| {
-                            json!({
-                                "id": r["id"], "name": r["name"], "status": r["status"],
-                                "conclusion": r["conclusion"], "event": r["event"],
-                                "branch": r["head_branch"], "sha": r["head_sha"],
-                                "url": r["html_url"], "created_at": r["created_at"],
-                            })
-                        })
-                        .collect()
-                })
+                .map(|a| a.iter().map(run_summary).collect())
                 .unwrap_or_default();
             Ok(json!({ "runs": runs }))
         }
@@ -426,6 +490,59 @@ fn repo(args: &Value) -> Result<&str, String> {
             ok(parts.next()) && ok(parts.next()) && parts.next().is_none()
         })
         .ok_or_else(|| "repo is required, as owner/name".to_string())
+}
+
+fn positive(args: &Value, key: &str) -> Result<i64, String> {
+    args.get(key)
+        .and_then(Value::as_i64)
+        .filter(|n| *n > 0)
+        .ok_or_else(|| format!("{key} is required"))
+}
+
+fn run_summary(r: &Value) -> Value {
+    json!({
+        "id": r["id"], "name": r["name"], "status": r["status"],
+        "conclusion": r["conclusion"], "event": r["event"],
+        "branch": r["head_branch"], "sha": r["head_sha"],
+        "attempt": r["run_attempt"],
+        "url": r["html_url"], "created_at": r["created_at"],
+    })
+}
+
+/// A run's jobs as someone diagnosing it reads them: which failed, and in
+/// which step.
+fn jobs_summary(v: &Value) -> Vec<Value> {
+    v["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|j| {
+            let failed_steps: Vec<&Value> = j["steps"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|s| s["conclusion"] == "failure")
+                .map(|s| &s["name"])
+                .collect();
+            json!({
+                "id": j["id"], "name": j["name"], "status": j["status"],
+                "conclusion": j["conclusion"], "failed_steps": failed_steps,
+                "url": j["html_url"],
+            })
+        })
+        .collect()
+}
+
+/// The last `max` bytes of a log, cut on a character boundary.
+fn tail(log: &str, max: usize) -> (&str, bool) {
+    if log.len() <= max {
+        return (log, false);
+    }
+    let mut start = log.len() - max;
+    while !log.is_char_boundary(start) {
+        start += 1;
+    }
+    (&log[start..], true)
 }
 
 fn number(args: &Value) -> Result<i64, String> {
@@ -561,6 +678,68 @@ impl Client<'_> {
         Ok(v)
     }
 
+    /// A body that is text, not JSON: a job's log. GitHub answers with a
+    /// redirect to short-lived storage that needs no token, so the redirect
+    /// is followed here, without one — whatever host it names.
+    async fn text(&self, url: &str) -> Result<String, String> {
+        static NO_REDIRECT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let direct = NO_REDIRECT.get_or_init(|| {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("a client with no redirect policy builds")
+        });
+        let first = direct
+            .get(url)
+            .bearer_auth(self.token)
+            .header("accept", "application/vnd.github+json")
+            .header("x-github-api-version", "2022-11-28")
+            .header("user-agent", "tracon")
+            .send()
+            .await
+            .map_err(|e| format!("github: {e}"))?;
+        let res = if first.status().is_redirection() {
+            let location = first
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|l| l.to_str().ok())
+                .ok_or("github redirected the log to nowhere")?;
+            let target = first
+                .url()
+                .join(location)
+                .map_err(|e| format!("github redirected the log somewhere unreadable: {e}"))?;
+            self.http
+                .get(target)
+                .header("user-agent", "tracon")
+                .send()
+                .await
+                .map_err(|e| format!("github: {e}"))?
+        } else {
+            first
+        };
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!("github answered {status} for the log"));
+        }
+        Ok(body)
+    }
+
+    /// A POST with no body whose success is the status alone (201 or 204).
+    async fn post_empty(&self, url: &str) -> Result<(), String> {
+        let res = self
+            .request(reqwest::Method::POST, url)
+            .send()
+            .await
+            .map_err(|e| format!("github: {e}"))?;
+        let status = res.status();
+        if !status.is_success() {
+            let v: Value = res.json().await.unwrap_or(Value::Null);
+            return Err(format!("github answered {status}: {}", v["message"]));
+        }
+        Ok(())
+    }
+
     async fn put(&self, url: &str, body: &Value) -> Result<Value, String> {
         read(
             self.request(reqwest::Method::PUT, url)
@@ -634,6 +813,22 @@ mod tests {
             graphql_url("https://ghe.example/api/v3"),
             "https://ghe.example/api/graphql"
         );
+    }
+
+    #[test]
+    fn a_runs_jobs_say_which_step_failed() {
+        let jobs = jobs_summary(&json!({ "jobs": [
+            { "id": 1, "name": "test", "status": "completed", "conclusion": "failure",
+              "steps": [
+                { "name": "checkout", "conclusion": "success" },
+                { "name": "cargo test", "conclusion": "failure" },
+              ] },
+            { "id": 2, "name": "lint", "status": "completed", "conclusion": "success", "steps": [] },
+        ] }));
+        assert_eq!(jobs[0]["failed_steps"], json!(["cargo test"]));
+        assert_eq!(jobs[1]["failed_steps"], json!([]));
+        assert_eq!(tail("abcdef", 3), ("def", true));
+        assert_eq!(tail("ab", 3), ("ab", false));
     }
 
     #[test]
