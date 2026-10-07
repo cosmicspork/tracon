@@ -1165,6 +1165,25 @@ impl Store {
         })
     }
 
+    /// Every check the node ran for a session: the runs it started, and the
+    /// runs on candidates it owns (a review session may run checks on them).
+    pub fn check_runs_for_session(&self, session_id: &str) -> Result<Vec<CheckRunRow>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        let mut stmt = conn.prepare(
+            "SELECT * FROM check_run
+             WHERE session_id=?1
+                OR candidate_id IN (SELECT id FROM candidate WHERE owner_session_id=?1)
+             ORDER BY started_ms ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map([session_id], CheckRunRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// Legacy check events have no immutable candidate identity. Keep them
     /// discoverable by their session rather than pretending an association.
     pub fn legacy_check_runs_for_session(&self, session_id: &str) -> Result<Vec<CheckRunRow>> {

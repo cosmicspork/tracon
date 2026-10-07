@@ -41,6 +41,7 @@ import type {
   RecallHit,
   RecentRepo,
   SessionAuthority,
+  SessionOutcome,
   Session,
   SessionUsage,
   ReviewDetails,
@@ -220,6 +221,8 @@ export const api = {
       Read-only: the node answers it by running its own policy and grants. */
   sessionAuthority: (id: string) =>
     call<SessionAuthority>('GET', `/api/sessions/${id}/authority`),
+  /** What the session came to: changed, verified, pending, uncertain, cost. */
+  sessionOutcome: (id: string) => call<SessionOutcome>('GET', `/api/sessions/${id}/outcome`),
   /** Mint a single-use capability for this session's OpenCode view. The URL
       that comes back carries it in a fragment and belongs in exactly one
       place: an iframe's `src`, or the desktop window. Never log it. */
