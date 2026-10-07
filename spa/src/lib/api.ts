@@ -15,6 +15,7 @@ import type {
   CeilingInfo as Ceiling,
   CredentialSummary,
   StorageItem,
+  DataInventory,
   Document,
   EnrollStatus,
   Event,
@@ -304,6 +305,8 @@ export const api = {
   unarchiveSession: (id: string) => call<Session>('POST', `/api/sessions/${id}/unarchive`),
   archiveEnded: () => call<{ archived: number }>('POST', '/api/sessions/archive-ended'),
   /** Runtime storage whose owner is over; removed only with `apply`. Loopback only. */
+  /** What the serving node holds, kind by kind, and where each is deleted. */
+  data: () => call<DataInventory>('GET', '/api/maintenance/data'),
   storageSweep: (apply: boolean, caches: boolean) =>
     call<{ applied: boolean; items: StorageItem[] }>('POST', '/api/maintenance/storage', { apply, caches }),
   /** A channel keeps its work and takes no new sessions. */

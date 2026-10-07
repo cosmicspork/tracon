@@ -9,7 +9,8 @@
 //! reported as orphaned instead of silently following a changed requirement.
 //!
 //! *What points at a criterion lives in the document.* An indented line under
-//! it naming a check, a scenario or an observation (`corpus::brief::Link`). The
+//! it naming a check (`corpus::brief::Link`); a retired `scenario` or
+//! `observation` link an older brief holds is shown and counts for nothing. The
 //! brief travels with the channel, is hand-editable, round-trips, and needs no
 //! second store — and the standing of a link is already enforced one level up:
 //! a session may write `inferred` and is refused `decided`. So "an agent may
@@ -133,14 +134,14 @@ pub struct LinkView {
     pub refs: Vec<Ref>,
     /// For a check: `passed`, `failed`, `running`, `interrupted`, `cancelled`,
     /// or absent when this candidate has no run of it. Never present for a
-    /// scenario or an observation — neither produces a result.
+    /// retired link kind, which produces no result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
     /// The run the outcome came from, so the operator can open it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
     /// Why this link contributes no result, said plainly. A check the operator
-    /// never configured, or a scenario this node holds no record of.
+    /// never configured, or a retired link kind.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unresolved: Option<String>,
 }
@@ -451,12 +452,14 @@ fn resolve_link(
                 view.run_id = Some(run.id.clone());
             }
         }
-        "scenario" => {
-            view.unresolved = Some("this node holds no scenario records yet".into());
+        // Written before scenarios and observations were retired: nothing
+        // produces either, so it settles nothing, and says so.
+        kind => {
+            view.unresolved = Some(format!(
+                "{kind} links are retired and settle nothing; judge this criterion, or point a \
+                 configured check at it"
+            ));
         }
-        // An observation is context for a person's judgement. It resolves to
-        // nothing on purpose: it is not a result and must not read as one.
-        _ => {}
     }
     view
 }
@@ -986,24 +989,20 @@ mod tests {
     }
 
     #[test]
-    fn a_scenario_is_honestly_unresolved_and_an_observation_is_not_a_result() {
-        let scenario = resolve_link(
-            0,
-            &link(Provenance::Decided, "scenario", "overnight-happy-path"),
-            &[],
-            &[],
-        );
-        assert_eq!(
-            scenario.unresolved.as_deref(),
-            Some("this node holds no scenario records yet")
-        );
-        let observed = resolve_link(
-            1,
-            &link(Provenance::Observed, "observation", "two leads gave up"),
-            &[],
-            &[],
-        );
-        assert!(observed.outcome.is_none() && observed.unresolved.is_none());
+    fn a_retired_link_kind_says_so_and_settles_nothing() {
+        for kind in crate::corpus::brief::RETIRED_LINK_KINDS {
+            let retired = resolve_link(
+                0,
+                &link(Provenance::Decided, kind, "overnight-happy-path"),
+                &[],
+                &[],
+            );
+            assert!(retired.outcome.is_none());
+            assert!(
+                retired.unresolved.as_deref().unwrap().contains("retired"),
+                "{retired:?}"
+            );
+        }
     }
 
     #[test]
