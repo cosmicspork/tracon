@@ -1444,6 +1444,10 @@ pub async fn get_session(
         "session": row,
         "waiting": waiting,
         "questions": questions,
+        "publications": s.store().session_publications(&id).unwrap_or_default()
+            .into_iter()
+            .map(|(review_id, url)| json!({ "review_id": review_id, "url": url }))
+            .collect::<Vec<_>>(),
         "usage": usage,
         "ceiling": ceiling,
         "toolchain": toolchain,
@@ -1776,6 +1780,16 @@ pub async fn continue_session(
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
     let row = s.manager.continue_interrupted(&id).await?;
     Ok((StatusCode::CREATED, Json(json!(row))))
+}
+
+/// Whether this node is holding its machine awake, why, and the last
+/// suspend it noticed.
+pub async fn awake() -> Json<crate::awake::Status> {
+    Json(
+        crate::awake::current()
+            .map(|a| a.status())
+            .unwrap_or_default(),
+    )
 }
 
 #[derive(Deserialize)]

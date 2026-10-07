@@ -92,6 +92,16 @@ export interface CredentialSummary {
   env_keys: string[]
 }
 
+/** Whether this node holds its machine awake, from `/api/awake` and the `awake` stream event. */
+export interface AwakeState {
+  held: boolean
+  reason: string | null
+  /** `logind` or `caffeinate`; null where the host offers neither. */
+  method: string | null
+  error: string | null
+  last_suspend: { woke_ms: number; asleep_ms: number } | null
+}
+
 /** Hub reachability, from `/api/mesh` and the `mesh` stream event. */
 export interface MeshState {
   hub: { state: 'disabled' } | { state: 'connected' } | { state: 'unreachable'; since_ms: number }
@@ -221,6 +231,7 @@ export type SessionState =
   | 'paused'
   | 'waiting_on_you'
   | 'waiting_on_check'
+  | 'suspended'
   | 'closed'
   | 'killed_budget'
   | 'failed'
@@ -1248,6 +1259,7 @@ export type Frame =
   | { type: 'providers'; providers: ProviderInfo[] }
   | { type: 'promotions'; waiting: Promotion[] }
   | { type: 'changes'; channel: string; changes: { table: string; id: string; op: string }[] }
+  | ({ type: 'awake' } & AwakeState)
 
 export const TERMINAL_STATES: SessionState[] = ['closed', 'killed_budget', 'failed']
 

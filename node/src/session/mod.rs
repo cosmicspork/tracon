@@ -134,6 +134,26 @@ fn handoff_note(old: &SessionRow, harness: &str) -> String {
     handoff(old, &why)
 }
 
+/// What a session carrying on a suspended, published one is told: where its
+/// work landed, and that what brings it back (a CI failure, a review comment)
+/// is on the forge to read.
+fn published_note(old: &SessionRow, published: &[(String, String)]) -> String {
+    let landed = published
+        .iter()
+        .map(|(_, url)| format!("- {url}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let why = format!(
+        "This session continues session {}, whose work was published and which was then \
+         suspended while it sat idle. It published:\n\n{landed}\n\n\
+         It is being carried on because something there needs an answer: a CI failure, a \
+         review comment, or a change the operator asked for. Read the change on the forge \
+         first. You inherit none of the earlier session's context",
+        old.id,
+    );
+    handoff(old, &why)
+}
+
 /// What a session carrying on after a node restart is told. Same harness,
 /// same workspace, but none of the interrupted conversation: the harness
 /// process that held it is gone with the node.
@@ -493,9 +513,10 @@ impl Manager {
     /// continuation of the same one is refused and names the first.
     pub async fn continue_interrupted(&self, id: &str) -> Result<SessionRow, SessionError> {
         let old = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
-        if old.end_reason.as_deref() != Some(state::EndReason::NodeRestart.as_str()) {
+        let suspended = old.state == SessionState::Suspended.as_str();
+        if !suspended && old.end_reason.as_deref() != Some(state::EndReason::NodeRestart.as_str()) {
             return Err(SessionError::Rejected(
-                "only a session a node restart ended can be continued this way".into(),
+                "only a session a node restart ended, or a suspended one, can be continued".into(),
             ));
         }
         if old.harness_id == external::HARNESS_ID {
@@ -538,7 +559,11 @@ impl Manager {
             work_item_id: old.work_item_id.clone(),
             model: old.model.clone(),
             budget_tokens: Some(old.budget_tokens),
-            initial_prompt: Some(restart_note(&old)),
+            initial_prompt: Some(if suspended {
+                published_note(&old, &self.store.session_publications(&old.id)?)
+            } else {
+                restart_note(&old)
+            }),
             node_id: Some(old.node_id.clone()),
             phase: reopen_phase(&old.phase),
             review_id: None,
@@ -548,7 +573,77 @@ impl Manager {
             continued_from: Some(old.id.clone()),
             harness,
         };
-        self.create(spec).await
+        let row = self.create(spec).await?;
+        // A suspended session's work now lives in the new one; the operator
+        // asked for that, so the old one ends, saying where it went.
+        if suspended {
+            let closed = self.store.update_session_if(
+                &old.id,
+                SessionState::Suspended.as_str(),
+                SessionPatch {
+                    state: Some(SessionState::Closed.as_str().into()),
+                    end_reason: Some(state::EndReason::Continued.as_str().into()),
+                    ..Default::default()
+                },
+            )?;
+            if closed {
+                self.record_event(
+                    &old.id,
+                    ek::STATE,
+                    json!({ "state": "closed", "end_reason": "continued", "continued_as": row.id }),
+                );
+                if let Ok(Some(old)) = self.store.get_session(&old.id) {
+                    self.bus.publish(Frame::Session(Box::new(old)));
+                }
+            }
+        }
+        Ok(row)
+    }
+
+    /// Put away every live session here whose work is published and which has
+    /// sat idle for `idle`: no turn, nothing waiting, nothing recorded. Its
+    /// supervisor stops the harness and container and its egress grant goes
+    /// with it; the workspace stays, and so does the row, as `suspended`.
+    pub async fn suspend_idle_published(&self, idle: Duration) {
+        let ids: Vec<String> = self.live.lock().await.keys().cloned().collect();
+        let now = now_ms();
+        for id in ids {
+            let Ok(Some(row)) = self.store.get_session(&id) else {
+                continue;
+            };
+            if row.state != SessionState::Running.as_str() || row.turn_active != 0 {
+                continue;
+            }
+            if self
+                .store
+                .session_publications(&id)
+                .map(|p| p.is_empty())
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            let waiting = self
+                .store
+                .open_permissions()
+                .unwrap_or_default()
+                .iter()
+                .any(|p| p.session_id.as_deref() == Some(id.as_str()));
+            if waiting {
+                continue;
+            }
+            let last = self
+                .store
+                .last_event_ms(&id)
+                .ok()
+                .flatten()
+                .unwrap_or(row.updated_ms)
+                .max(row.updated_ms);
+            let idle_ms = now - last;
+            if idle_ms < idle.as_millis() as i64 {
+                continue;
+            }
+            let _ = self.send(&id, Command::Suspend { idle_ms }).await;
+        }
     }
 
     /// Register an adapter under its own id. Node-spawned sessions on that
@@ -2981,6 +3076,10 @@ pub async fn reconcile_after_restart(
     };
     for s in sessions {
         if s.node_id != self_node_id || state::SessionState::from_stored(&s.state).is_terminal() {
+            continue;
+        }
+        // Already put away: nothing of it was running to be lost.
+        if s.state == state::SessionState::Suspended.as_str() {
             continue;
         }
         for p in store.open_permissions().unwrap_or_default() {
