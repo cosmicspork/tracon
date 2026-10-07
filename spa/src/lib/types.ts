@@ -642,12 +642,18 @@ export interface BriefEntry {
   links?: BriefLink[]
 }
 
-/** What a brief line says would settle it. */
-export type LinkKind = 'check' | 'scenario' | 'observation'
+/** What a brief line says would settle it: a configured check. */
+export type LinkKind = 'check'
+
+/**
+ * Link kinds an older brief may still hold. Nothing produces them; they are
+ * read, shown as retired, and settle nothing.
+ */
+export type RetiredLinkKind = 'scenario' | 'observation'
 
 export interface BriefLink {
   provenance: Provenance
-  kind: LinkKind
+  kind: LinkKind | RetiredLinkKind
   value: string
   refs: BriefRef[]
 }
@@ -710,7 +716,7 @@ export interface CriterionLink {
   index: number
   provenance: Provenance
   standard: Standard
-  kind: LinkKind
+  kind: LinkKind | RetiredLinkKind
   value: string
   refs: BriefRef[]
   /** For a check: `passed`, `failed`, `running`, `interrupted`, `cancelled`. */
