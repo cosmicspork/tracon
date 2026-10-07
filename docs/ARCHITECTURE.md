@@ -564,7 +564,14 @@ starts; every check then runs on its own copy of the prepared tree with the cach
 read-only. That cache is the run's own, copied from the repository's base cache and
 removed with the run. The base is written by one thing only — a preparation of the
 default branch, made when the repository's image is built — so a candidate's install,
-which may run the candidate's own scripts, can reach its own evidence and nobody else's. A grant is one client's: the node serves its own
+which may run the candidate's own scripts, can reach its own evidence and nobody else's. What a repository asks of
+preparation and does not get is said before launch: `GET /api/preparation` (shown under
+the repository in the composer) reads the checkout and names the install it would run,
+the entry's `prepare` commands and the image, then every devcontainer field the node
+will not honour (hooks, `initializeCommand` on the host, features, mounts, privileges,
+environment, a `build`) and every install script a scripts-off install skips, each with
+where that work belongs instead. Those that would stop preparation are told apart from
+those it passes over, and none of them is ever run to find out: the preview reads files. A grant is one client's: the node serves its own
 CONNECT proxy behind a second forward in the gateway, each preparation and session
 presents the token it was issued as proxy credentials, and each is filtered
 by its own host set — so nothing one may reach is reachable by another, none waits for

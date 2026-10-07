@@ -41,6 +41,7 @@ import type {
   RecallHit,
   RecentRepo,
   SessionAuthority,
+  PreparationPreview,
   RepoReadiness,
   SessionOutcome,
   Session,
@@ -222,6 +223,9 @@ export const api = {
       Read-only: the node answers it by running its own policy and grants. */
   sessionAuthority: (id: string) =>
     call<SessionAuthority>('GET', `/api/sessions/${id}/authority`),
+  /** What preparing `repo` would do and what in it the node would not do. */
+  preparationPreview: (repo: string) =>
+    call<PreparationPreview>('GET', `/api/preparation?repo=${encodeURIComponent(repo)}`),
   /** What investigating, verifying and publishing from `repo` would lack. */
   readiness: (channel: string, repo: string, workItem?: string | null) =>
     call<RepoReadiness>(
