@@ -1094,9 +1094,35 @@ export interface PhaseBinding {
 }
 
 /** Free-form on the wire; these are the keys the node and the interface read. */
+export type ExhaustionPolicy = 'pause' | 'fallback' | 'fallback_then_wait'
+
+/** What a session does when its provider is exhausted. */
+export interface ExhaustionChoice {
+  policy: ExhaustionPolicy
+  /** `provider/model`; required by the two fallback policies. */
+  fallback?: string
+}
+
+/** A session's exhaustion policy and its latest exhaustion, as the node keeps it. */
+export interface SessionExhaustion {
+  policy: ExhaustionPolicy
+  fallback: string | null
+  provider: string | null
+  model: string | null
+  reason: string | null
+  reset_ms: number | null
+  next_wake_ms: number | null
+  boundary_seq: number | null
+  /** waiting · falling_back · held, then resumed · continued · operator · abandoned. */
+  outcome: string | null
+  note: string | null
+  continued_by: string | null
+}
+
 export interface ChannelBindings {
   phases?: Record<string, PhaseBinding>
   ceiling_tokens_per_day?: number
+  exhaustion?: ExhaustionChoice
   [key: string]: unknown
 }
 

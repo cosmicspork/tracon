@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { modelLabel, modelPatch, phaseDefaults } from './bindings'
+import { exhaustionDefaults, exhaustionPatch, modelLabel, modelPatch, phaseDefaults } from './bindings'
 
 const bound = {
   phases: {
@@ -38,4 +38,23 @@ test('choosing nothing removes the binding', () => {
   expect(modelPatch('plan', 'm/a')).toEqual({ 'phases.plan.model': 'm/a' })
   expect(modelPatch('execute', '')).toEqual({ 'phases.execute.model': null })
   expect(modelPatch('execute', '   ')).toEqual({ 'phases.execute.model': null })
+})
+
+test('a channel pauses on exhaustion unless it says otherwise', () => {
+  expect(exhaustionDefaults({})).toEqual({ policy: 'pause', fallback: undefined })
+  expect(exhaustionDefaults(undefined)).toEqual({ policy: 'pause', fallback: undefined })
+  expect(exhaustionDefaults({ exhaustion: { policy: 'fallback', fallback: 'b/m' } })).toEqual({
+    policy: 'fallback',
+    fallback: 'b/m',
+  })
+  expect(exhaustionDefaults({ exhaustion: { policy: 'later' } } as never).policy).toBe('pause')
+})
+
+test('a fallback policy is only written with its model', () => {
+  expect(exhaustionPatch('pause', 'b/m')).toEqual({ exhaustion: null })
+  expect(exhaustionPatch('fallback', '')).toBe(null)
+  expect(exhaustionPatch('fallback_then_wait', undefined)).toBe(null)
+  expect(exhaustionPatch('fallback_then_wait', ' b/m ')).toEqual({
+    exhaustion: { policy: 'fallback_then_wait', fallback: 'b/m' },
+  })
 })
