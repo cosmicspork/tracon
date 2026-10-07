@@ -245,6 +245,15 @@ run commands. So a workspace carrying one is refused at launch, as one carrying
 `.claude/settings…` path or into `.git/` mid-session. Ignored files never reach a
 workspace, so a checkout's own gitignored settings are unaffected.
 
+**The ledger records a decision for every tool call, whichever harness asked.**
+OpenCode asks the node before each call; Claude Code lets reads and searches through
+on its own rules and never sends a `can_use_tool` for them. The Claude adapter notices
+a call whose result arrives without an ask and reports it, normalized exactly as an
+ask would have been, and the supervisor records the `policy_allowed` the node's policy
+gives it, marked `decided_by: harness`. The call has already run, so nothing is asked;
+if the policy would have asked or denied, the record says the harness let it through
+and what the policy would have done, rather than naming a rule that did not apply.
+
 ### Model auth
 
 **Model credentials are brokered like every other credential.** The harness holds

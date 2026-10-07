@@ -111,10 +111,6 @@ Needed for daily use, but not blocking it today.
 
 **Sessions and accounting**
 
-- [ ] Record a policy decision for every Claude Code tool call. Calls Claude Code allows
-      by its own rules (reads, searches) never reach `can_use_tool`, so they leave no
-      `policy_allowed` event, while the same calls under OpenCode do; the ledger should
-      not depend on which harness ran.
 - [ ] Choose a provider-exhaustion policy, per channel with a per-run override: pause and
       resume after reset, fall back to a named provider, or fall back then wait,
       defaulting to pause. Distinguish exhaustion from throttling, auth failure and

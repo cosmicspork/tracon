@@ -802,6 +802,10 @@ impl Supervisor {
                     );
                 }
             }
+            HarnessEvent::Decided(request) => {
+                self.flush_chunks();
+                self.on_decided(request);
+            }
             HarnessEvent::Models(_) => {}
             HarnessEvent::Exited { code } => {
                 self.record(ek::ERROR, None, json!({ "harness_exit_code": code }));
@@ -818,6 +822,110 @@ impl Supervisor {
         for (kind, id, text) in pending {
             self.record(kind, id, json!({ "text": text }));
         }
+    }
+
+    /// What the node answers for a harness's request without the operator:
+    /// its policy, then the operator's required checks and the grants made
+    /// earlier in this session, which only ever turn an ask into an allow.
+    fn decide(
+        &self,
+        request: &PermissionRequest,
+    ) -> (crate::policy::Decision, Option<crate::policy::SessionGrant>) {
+        let subject = crate::policy::Request {
+            channel: &self.channel,
+            action: &request.action,
+            kind: request.kind.as_deref(),
+            resource: request.resource.as_deref(),
+            command: request.command.as_deref(),
+            arguments: None,
+        };
+        let mut decision = self.policy.read().decide(&subject);
+        let grant = crate::policy::session_grant(&subject);
+        if decision.verdict == crate::policy::Verdict::Ask {
+            let check = request.kind.as_deref() == Some("execute")
+                && request
+                    .command
+                    .as_deref()
+                    .is_some_and(|c| self.checks.iter().any(|k| k == c.trim()));
+            if check {
+                decision = crate::policy::Decision {
+                    verdict: crate::policy::Verdict::Allow,
+                    rule_id: Some("operator-checks".into()),
+                    reason: Some(
+                        "One of the operator's required checks, exactly as configured.".into(),
+                    ),
+                };
+            } else if grant.as_ref().is_some_and(|g| self.grants.contains(&g.key)) {
+                decision = crate::policy::Decision {
+                    verdict: crate::policy::Verdict::Allow,
+                    rule_id: Some("session-grant".into()),
+                    reason: Some("The operator allowed this for the rest of the session.".into()),
+                };
+            }
+        }
+        (decision, grant)
+    }
+
+    /// A tool call the harness ran on its own permission rules, never asking
+    /// the node: Claude Code lets reads and searches through without a
+    /// `can_use_tool`, where OpenCode asks for every one. The ledger records
+    /// the decision the node's policy makes for it all the same, so what a
+    /// session's log says was allowed does not depend on which harness ran.
+    /// The call has already run; when the policy would not have allowed it,
+    /// the record says so rather than pretending it did.
+    fn on_decided(&mut self, request: PermissionRequest) {
+        let (verdict, rule, reason) = if node_tool(&request.action) {
+            (
+                crate::policy::Verdict::Allow,
+                Some("node-tool".to_string()),
+                Some(
+                    "The node's own tool; it is decided when the call reaches the node."
+                        .to_string(),
+                ),
+            )
+        } else {
+            let (decision, _) = self.decide(&request);
+            (decision.verdict, decision.rule_id, decision.reason)
+        };
+        let policy = match verdict {
+            crate::policy::Verdict::Allow => "allow",
+            crate::policy::Verdict::Deny => "deny",
+            crate::policy::Verdict::Ask => "ask",
+        };
+        let (rule, reason) = match verdict {
+            crate::policy::Verdict::Allow => (rule, reason),
+            _ => {
+                tracing::warn!(
+                    session = %self.session_id,
+                    action = %request.action,
+                    policy,
+                    "the harness ran a tool call the node's policy would not have allowed"
+                );
+                (
+                    Some("harness".to_string()),
+                    Some(format!(
+                        "The harness ran this by its own rules without asking; the node's policy would have {}.",
+                        if policy == "deny" { "denied it" } else { "asked" }
+                    )),
+                )
+            }
+        };
+        self.record(
+            ek::POLICY_ALLOWED,
+            None,
+            json!({
+                "title": request.title,
+                "action": request.action,
+                "kind": request.kind,
+                "resource": request.resource,
+                "command": request.command,
+                "rule": rule,
+                "reason": reason,
+                "tool_call_id": request.tool_call_id,
+                "decided_by": "harness",
+                "policy": policy,
+            }),
+        );
     }
 
     async fn on_permission(
@@ -857,38 +965,7 @@ impl Supervisor {
             );
             return;
         }
-        let subject = crate::policy::Request {
-            channel: &self.channel,
-            action: &request.action,
-            kind: request.kind.as_deref(),
-            resource: request.resource.as_deref(),
-            command: request.command.as_deref(),
-            arguments: None,
-        };
-        let mut decision = self.policy.read().decide(&subject);
-        let grant = crate::policy::session_grant(&subject);
-        if decision.verdict == crate::policy::Verdict::Ask {
-            let check = request.kind.as_deref() == Some("execute")
-                && request
-                    .command
-                    .as_deref()
-                    .is_some_and(|c| self.checks.iter().any(|k| k == c.trim()));
-            if check {
-                decision = crate::policy::Decision {
-                    verdict: crate::policy::Verdict::Allow,
-                    rule_id: Some("operator-checks".into()),
-                    reason: Some(
-                        "One of the operator's required checks, exactly as configured.".into(),
-                    ),
-                };
-            } else if grant.as_ref().is_some_and(|g| self.grants.contains(&g.key)) {
-                decision = crate::policy::Decision {
-                    verdict: crate::policy::Verdict::Allow,
-                    rule_id: Some("session-grant".into()),
-                    reason: Some("The operator allowed this for the rest of the session.".into()),
-                };
-            }
-        }
+        let (decision, grant) = self.decide(&request);
         match decision.verdict {
             crate::policy::Verdict::Allow | crate::policy::Verdict::Deny => {
                 let allow = decision.verdict == crate::policy::Verdict::Allow;
