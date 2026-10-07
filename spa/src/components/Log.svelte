@@ -170,6 +170,12 @@
             {e.payload.text}
           </div>
         </details>
+      {:else if e.kind === 'host_suspended'}
+        <div class="mark wait">
+          the machine slept for {Math.max(1, Math.round(Number(e.payload.asleep_ms) / 60_000))} min{e.payload.turn_active
+            ? ' in the middle of a turn'
+            : ''} · waiting cards kept their time{e.payload.inhibitor_held ? ' · it was asked to stay awake' : ''}
+        </div>
       {:else if e.kind === 'state'}
         <div class="sys">→ {e.payload.state}</div>
       {:else if e.kind === 'error'}
