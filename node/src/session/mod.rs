@@ -2,6 +2,7 @@
 //! inside the boundary, and hand it to a supervisor.
 
 pub mod chunks;
+pub mod exhaustion;
 pub mod external;
 pub mod ingest;
 pub mod materialize;
@@ -85,6 +86,10 @@ pub struct NewSession {
     /// the node holds an image for every supported one.
     #[serde(default)]
     pub harness: Option<String>,
+    /// What this run does if its provider is exhausted, over the channel's
+    /// `exhaustion` binding. Absent: the channel's, else pause.
+    #[serde(default)]
+    pub on_exhaustion: Option<exhaustion::Choice>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -143,6 +148,24 @@ fn restart_note(old: &SessionRow) -> String {
          stopped or restarted in the middle of its work. You inherit none of its context",
         old.id,
     );
+    handoff(old, &why)
+}
+
+fn exhausted_note(old: &SessionRow, fallback: Option<&str>) -> String {
+    let why = match fallback {
+        Some(model) => format!(
+            "This session continues session {}, whose provider was exhausted, on another \
+             model ({model}). It stopped at a safe point between turns. You inherit none of \
+             its context",
+            old.id,
+        ),
+        None => format!(
+            "This session continues session {}, which stopped when its provider was \
+             exhausted. It stopped at a safe point between turns. You inherit none of its \
+             context",
+            old.id,
+        ),
+    };
     handoff(old, &why)
 }
 
@@ -446,24 +469,48 @@ impl Manager {
             parent_session: Some(old.id.clone()),
             continued_from: Some(old.id.clone()),
             harness: Some(harness.to_string()),
+            on_exhaustion: None,
         };
         self.create(spec).await
     }
 
-    /// Carry on the work a node restart interrupted.
+    /// Carry on the work a node restart interrupted, or that a provider's
+    /// exhaustion ended.
     ///
-    /// The harness process that held the conversation went with the node, so
-    /// this is a new session, like `reopen`: same channel, workspace, branch,
-    /// work item and harness, the lineage on the row, and a handoff note that
-    /// says what was lost. Offered once per interrupted session; a second
+    /// The harness process that held the conversation is gone, so this is a
+    /// new session, like `reopen`: same channel, workspace, branch, work item,
+    /// model and harness, the lineage on the row, and a handoff note that says
+    /// what was lost. Offered once per interrupted session; a second
     /// continuation of the same one is refused and names the first.
     pub async fn continue_interrupted(&self, id: &str) -> Result<SessionRow, SessionError> {
         let old = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
-        if old.end_reason.as_deref() != Some(state::EndReason::NodeRestart.as_str()) {
-            return Err(SessionError::Rejected(
-                "only a session a node restart ended can be continued this way".into(),
-            ));
-        }
+        let note = match old.end_reason.as_deref() {
+            Some(r) if r == state::EndReason::NodeRestart.as_str() => restart_note(&old),
+            Some(r) if r == state::EndReason::ProviderExhausted.as_str() => {
+                exhausted_note(&old, None)
+            }
+            _ => {
+                return Err(SessionError::Rejected(
+                    "only a session a node restart or an exhausted provider ended can be \
+                     continued this way"
+                        .into(),
+                ))
+            }
+        };
+        let choice = self.store.exhaustion(id)?.map(|row| row.choice());
+        self.continue_work(&old, None, note, choice).await
+    }
+
+    /// The continuation itself: `model` replaces the old session's (a
+    /// fallback), and the harness then follows the new model's credential.
+    async fn continue_work(
+        &self,
+        old: &SessionRow,
+        model: Option<String>,
+        note: String,
+        choice: Option<exhaustion::Choice>,
+    ) -> Result<SessionRow, SessionError> {
+        let id = old.id.as_str();
         if old.harness_id == external::HARNESS_ID {
             return Err(SessionError::Rejected(
                 "an external agent's work runs outside this node; start it again where it runs"
@@ -494,17 +541,20 @@ impl Manager {
             .strip_prefix("workspace://")
             .unwrap_or(&old.id)
             .to_string();
-        let harness = crate::adapter::KNOWN
-            .contains(&old.harness_id.as_str())
-            .then(|| old.harness_id.clone());
+        let harness = match &model {
+            Some(_) => None,
+            None => crate::adapter::KNOWN
+                .contains(&old.harness_id.as_str())
+                .then(|| old.harness_id.clone()),
+        };
         let spec = NewSession {
             channel: old.channel.clone(),
             repo_path: old.repo_path.clone(),
             branch: Some(old.branch.clone()),
             work_item_id: old.work_item_id.clone(),
-            model: old.model.clone(),
+            model: model.unwrap_or_else(|| old.model.clone()),
             budget_tokens: Some(old.budget_tokens),
-            initial_prompt: Some(restart_note(&old)),
+            initial_prompt: Some(note),
             node_id: Some(old.node_id.clone()),
             phase: reopen_phase(&old.phase),
             review_id: None,
@@ -513,6 +563,7 @@ impl Manager {
             parent_session: Some(old.id.clone()),
             continued_from: Some(old.id.clone()),
             harness,
+            on_exhaustion: choice,
         };
         self.create(spec).await
     }
@@ -1084,6 +1135,8 @@ impl Manager {
             return Err(SessionError::ChannelArchived(spec.channel.clone()));
         }
         let phase_bindings = &bindings["phases"][spec.phase.as_str()];
+        let on_exhaustion = exhaustion::resolve(spec.on_exhaustion.as_ref(), &bindings)
+            .map_err(SessionError::Rejected)?;
         let (model, model_source) = self.resolve_model(&spec, &bindings)?;
         spec.model = model;
         let budget = spec
@@ -1287,6 +1340,7 @@ impl Manager {
             manifest_digest: None,
         };
         self.store.insert_session(&row)?;
+        self.store.exhaustion_choose(&id, &on_exhaustion)?;
         // A plain session has no work item to retain its first instruction.
         // Keep it as a draft before asynchronous setup, and let on_prompt
         // clear it only after the supervisor accepts it.
@@ -2562,6 +2616,8 @@ impl Manager {
         if !bindings["archived"].is_null() {
             return Err(SessionError::ChannelArchived(spec.channel.clone()));
         }
+        exhaustion::resolve(spec.on_exhaustion.as_ref(), &bindings)
+            .map_err(SessionError::Rejected)?;
         let (model, _) = self.resolve_model(spec, &bindings)?;
         self.resolve_harness(&NewSession {
             model,
@@ -2653,6 +2709,231 @@ impl Manager {
                 .await
                 .map(|_| ()),
             Err(e) => Err(e),
+        }
+    }
+
+    /// The gateway saw this session's provider refuse a call as exhausted.
+    /// Decide under the session's policy — whether its fallback could take
+    /// the work is a question for here, where the channel's bindings and the
+    /// credentials are — and hand the decision to its supervisor, which
+    /// records it and fences the session.
+    pub async fn provider_exhausted(&self, id: &str, seen: crate::store::exhaustion::Exhausted) {
+        let Ok(Some(row)) = self.store.get_session(id) else {
+            return;
+        };
+        if !matches!(
+            SessionState::from_stored(&row.state),
+            SessionState::Running | SessionState::WaitingOnYou
+        ) {
+            return;
+        }
+        let choice = self
+            .store
+            .exhaustion(id)
+            .ok()
+            .flatten()
+            .map(|r| r.choice())
+            .unwrap_or_default();
+        let usable = match choice.fallback.as_deref() {
+            _ if choice.policy == exhaustion::Policy::Pause => Ok(()),
+            None => Err("no fallback model is set".to_string()),
+            Some(f) if f == row.model => Err(format!("the session is already on {f}")),
+            Some(f) if !self.model_usable(&row.channel, f, &self.bindings(&row.channel)) => Err(
+                format!("{f} has no provider or credential this channel may use"),
+            ),
+            Some(_) => Ok(()),
+        };
+        let decision = exhaustion::decide(&choice, seen.reset_ms, usable);
+        let _ = self.send(id, Command::Exhausted { seen, decision }).await;
+    }
+
+    /// What would refuse an exhausted session going back to work now: the
+    /// same checks that would refuse it starting, read again, because the
+    /// wait may have been hours and anything could have changed in it.
+    fn resume_check(&self, row: &SessionRow) -> Result<(), String> {
+        let bindings = self.bindings(&row.channel);
+        if !bindings["archived"].is_null() {
+            return Err(format!("channel {} is archived", row.channel));
+        }
+        if let Ok(Some(node)) = self.store.get_node(&self.node_id) {
+            if node.state != "ready" {
+                return Err(format!(
+                    "the node is not ready: {}",
+                    node.failed_detail
+                        .or(node.failed_check)
+                        .unwrap_or_else(|| "boundary check failed".into())
+                ));
+            }
+            if let Some(h) = node
+                .harnesses()
+                .into_iter()
+                .find(|h| h.id == row.harness_id)
+            {
+                if h.mismatch() {
+                    return Err(format!(
+                        "the harness is {} where {} is pinned",
+                        h.found.unwrap_or_default(),
+                        h.pinned
+                    ));
+                }
+            }
+        }
+        if !self.model_usable(&row.channel, &row.model, &bindings) {
+            return Err(format!(
+                "{} no longer has a provider or credential this channel may use",
+                row.model
+            ));
+        }
+        let ceiling = crate::metrics::ceiling(&self.store, &bindings, &row.channel);
+        if ceiling.at() {
+            return Err(ceiling.reason());
+        }
+        if row.budget_tokens > 0 && row.tokens_used >= row.budget_tokens {
+            return Err("the session has spent its budget".into());
+        }
+        Ok(())
+    }
+
+    /// Act on every exhaustion that is due: wake a session whose provider's
+    /// reset has come, carry one on to its fallback. Each only from its
+    /// recorded safe boundary, and each settled exactly once. Run from the
+    /// node's periodic tick.
+    pub async fn wake_exhausted(&self) {
+        let Ok(due) = self.store.exhaustion_due(now_ms()) else {
+            return;
+        };
+        for row in due {
+            let Ok(Some(session)) = self.store.get_session(&row.session_id) else {
+                continue;
+            };
+            if session.node_id != self.node_id {
+                continue;
+            }
+            let current = SessionState::from_stored(&session.state);
+            let ended = |reasons: &[state::EndReason]| {
+                current.is_terminal()
+                    && reasons
+                        .iter()
+                        .any(|r| session.end_reason.as_deref() == Some(r.as_str()))
+            };
+            let outcome = row.outcome.as_deref().unwrap_or_default();
+            if outcome == exhaustion::FALLING_BACK {
+                if !ended(&[
+                    state::EndReason::ProviderExhausted,
+                    state::EndReason::NodeRestart,
+                ]) {
+                    continue;
+                }
+                let fallback = row.fallback.clone().unwrap_or_default();
+                let note = exhausted_note(&session, Some(&fallback));
+                let result = self
+                    .continue_work(&session, Some(fallback), note, Some(row.choice()))
+                    .await;
+                self.settle_continuation(&row.session_id, result);
+                continue;
+            }
+            // Waiting, and the provider's reset has come.
+            if current == SessionState::Paused {
+                if let Err(why) = self.resume_check(&session) {
+                    self.hold_exhaustion(&row.session_id, &why);
+                    continue;
+                }
+                let (ack, wait) = oneshot::channel();
+                let sent = self
+                    .send(
+                        &row.session_id,
+                        Command::Resume {
+                            source: supervisor::PauseSource::Wake,
+                            reason: "the provider's limit has reset".into(),
+                            ack,
+                        },
+                    )
+                    .await;
+                let resumed = match sent {
+                    Ok(()) => wait.await.unwrap_or_else(|_| Err("session stopped".into())),
+                    Err(e) => Err(e.to_string()),
+                };
+                match resumed {
+                    Ok(()) => {
+                        if self
+                            .store
+                            .exhaustion_settle(&row.session_id, exhaustion::RESUMED, None, None)
+                            .unwrap_or(false)
+                        {
+                            self.record_event(
+                                &row.session_id,
+                                ek::EXHAUSTION_WAKE,
+                                json!({ "outcome": exhaustion::RESUMED }),
+                            );
+                        }
+                        let _ = self
+                            .prompt(
+                                &row.session_id,
+                                "The provider's limit has reset and the node resumed this \
+                                 session. Your last turn was cut off when the provider \
+                                 refused it; check what of it landed before carrying on."
+                                    .into(),
+                            )
+                            .await;
+                    }
+                    // Not this session's moment (a turn still settling): the
+                    // next tick tries again.
+                    Err(e) => {
+                        tracing::info!(session = %row.session_id, error = %e, "exhausted session not resumed yet");
+                    }
+                }
+            } else if ended(&[state::EndReason::NodeRestart]) {
+                // The node restarted while it waited: carry it on, on the same
+                // model, once the reset has come.
+                let note = exhausted_note(&session, None);
+                let result = self
+                    .continue_work(&session, None, note, Some(row.choice()))
+                    .await;
+                self.settle_continuation(&row.session_id, result);
+            } else if current.is_terminal()
+                && self
+                    .store
+                    .exhaustion_settle(&row.session_id, exhaustion::ABANDONED, None, None)
+                    .unwrap_or(false)
+            {
+                self.record_event(
+                    &row.session_id,
+                    ek::EXHAUSTION_WAKE,
+                    json!({ "outcome": exhaustion::ABANDONED,
+                            "note": "The session ended before its provider reset." }),
+                );
+            }
+        }
+    }
+
+    fn settle_continuation(&self, id: &str, result: Result<SessionRow, SessionError>) {
+        match result {
+            Ok(next) => {
+                if self
+                    .store
+                    .exhaustion_settle(id, exhaustion::CONTINUED, None, Some(&next.id))
+                    .unwrap_or(false)
+                {
+                    self.record_event(
+                        id,
+                        ek::EXHAUSTION_WAKE,
+                        json!({ "outcome": exhaustion::CONTINUED, "continued_by": next.id,
+                                "model": next.model }),
+                    );
+                }
+            }
+            Err(e) => self.hold_exhaustion(id, &e.to_string()),
+        }
+    }
+
+    fn hold_exhaustion(&self, id: &str, why: &str) {
+        let note = format!("The node did not carry on: {why}.");
+        if self.store.exhaustion_hold(id, &note).unwrap_or(false) {
+            self.record_event(
+                id,
+                ek::EXHAUSTION_WAKE,
+                json!({ "outcome": exhaustion::HELD, "note": note }),
+            );
         }
     }
 

@@ -647,6 +647,7 @@ pub async fn handle(
         }
     };
     let status = upstream.status();
+    let called_model = model.clone();
     let mut out = Response::builder().status(status.as_u16());
     for (k, v) in upstream.headers() {
         if matches!(
@@ -678,12 +679,22 @@ pub async fn handle(
     // still reaches the harness byte for byte.
     let inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>> =
         if status.is_client_error() || status.is_server_error() {
+            let headers = upstream.headers().clone();
             let body = upstream.bytes().await.unwrap_or_else(|e| {
                 tracing::warn!(provider, error = %e, "error body from upstream was cut short");
                 Bytes::new()
             });
             if let Some(session_id) = &session_id {
-                note_provider_error(&s, session_id, &provider, status, &body);
+                note_provider_error(
+                    &s,
+                    session_id,
+                    &provider,
+                    called_model.as_deref(),
+                    status,
+                    &headers,
+                    &body,
+                )
+                .await;
             }
             Box::pin(tokio_stream::once(Ok(body)))
         } else {
@@ -730,16 +741,21 @@ fn note_refusal(s: &AppState, session_id: &str, provider: &str, method: &Method,
 /// learns nothing from attempt 40 that attempt 20 did not already say.
 const MAX_PROVIDER_ERRORS_PER_TURN: i64 = 20;
 
-/// Record one failed upstream attempt on the session that made the call. The
-/// session state is untouched: the harness has not given up, and this is
-/// informational.
-fn note_provider_error(
+/// Record one failed upstream attempt on the session that made the call, and
+/// what kind of refusal it was. Throttling, an outage and an auth failure
+/// leave the session as it is: the harness is retrying, and this is
+/// informational. Exhaustion does not clear by retrying, so it goes to the
+/// session's exhaustion policy, ahead of the per-turn cap on the log.
+async fn note_provider_error(
     s: &AppState,
     session_id: &str,
     provider: &str,
+    model: Option<&str>,
     status: StatusCode,
+    headers: &reqwest::header::HeaderMap,
     body: &[u8],
 ) {
+    use crate::session::exhaustion;
     let attempt = s
         .manager
         .store()
@@ -747,20 +763,42 @@ fn note_provider_error(
         .unwrap_or(0)
         + 1;
     let message = short_error(status, body);
-    tracing::warn!(provider, status = status.as_u16(), attempt, %message, "provider refused a session's model call");
-    if attempt > MAX_PROVIDER_ERRORS_PER_TURN {
-        return;
+    let cause = exhaustion::classify(status.as_u16(), headers, body);
+    let reset_ms = exhaustion::reset_ms(headers, now_ms());
+    tracing::warn!(provider, status = status.as_u16(), attempt, cause = cause.as_str(), %message, "provider refused a session's model call");
+    if attempt <= MAX_PROVIDER_ERRORS_PER_TURN {
+        s.manager.record_event(
+            session_id,
+            ek::PROVIDER_ERROR,
+            json!({
+                "provider": provider,
+                "status": status.as_u16(),
+                "message": message,
+                "attempt": attempt,
+                "cause": cause.as_str(),
+                "reset_ms": reset_ms,
+            }),
+        );
     }
-    s.manager.record_event(
-        session_id,
-        ek::PROVIDER_ERROR,
-        json!({
-            "provider": provider,
-            "status": status.as_u16(),
-            "message": message,
-            "attempt": attempt,
-        }),
-    );
+    if cause == exhaustion::Cause::Exhausted {
+        s.manager
+            .provider_exhausted(
+                session_id,
+                crate::store::exhaustion::Exhausted {
+                    provider: provider.to_string(),
+                    // The model as the call named it, under the provider
+                    // it went to: what was refused, whatever the session's
+                    // alias for it.
+                    model: model
+                        .map(|m| format!("{provider}/{m}"))
+                        .unwrap_or_else(|| provider.to_string()),
+                    status: status.as_u16(),
+                    reason: message,
+                    reset_ms,
+                },
+            )
+            .await;
+    }
 }
 
 /// One short line for the transcript out of a provider's error body. Both

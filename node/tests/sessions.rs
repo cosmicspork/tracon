@@ -235,6 +235,7 @@ async fn an_explicit_model_the_channel_cannot_authenticate_is_refused_by_create_
             parent_session: None,
             continued_from: None,
             harness: None,
+            on_exhaustion: None,
         })
         .expect_err("preflight refuses an unauthenticatable model")
         .to_string();
@@ -2733,6 +2734,7 @@ async fn orientation_setup(
                 parent_session: None,
                 continued_from: None,
                 harness: None,
+                on_exhaustion: None,
             },
             launch_with.unwrap_or_else(|| adapter.clone()),
         )
@@ -2867,6 +2869,7 @@ async fn an_execute_session_starts_on_its_plan_without_a_nudge() {
                 parent_session: None,
                 continued_from: None,
                 harness: None,
+                on_exhaustion: None,
             },
             adapter.clone(),
         )
@@ -3415,6 +3418,7 @@ async fn a_harness_that_never_starts_fails_the_session_visibly_and_removes_the_h
                 parent_session: None,
                 continued_from: None,
                 harness: None,
+                on_exhaustion: None,
             },
             Arc::new(StallingAdapter),
         )
@@ -3798,4 +3802,375 @@ async fn a_workspace_that_would_configure_the_harness_is_refused_before_launch()
     assert!(reason.contains("Remove or rename"), "{reason}");
 
     tracon::session::materialize::remove(&row.id);
+}
+
+fn exhausted(reset_ms: Option<i64>) -> tracon::store::exhaustion::Exhausted {
+    tracon::store::exhaustion::Exhausted {
+        provider: "m".into(),
+        model: "m/a".into(),
+        status: 429,
+        reason: "usage limit reached".into(),
+        reset_ms,
+    }
+}
+
+fn decision(
+    policy: tracon::session::exhaustion::Policy,
+    outcome: &'static str,
+    next_wake_ms: Option<i64>,
+) -> tracon::session::exhaustion::Decision {
+    tracon::session::exhaustion::Decision {
+        policy,
+        outcome,
+        fallback: (policy != tracon::session::exhaustion::Policy::Pause).then(|| "m/b".into()),
+        next_wake_ms,
+        note: None,
+    }
+}
+
+/// An exhausted provider fences the session like a pause, says why and what
+/// happens next, and records the safe boundary once nothing of a turn is in
+/// flight. A second refused call changes nothing; the operator resuming takes
+/// the exhaustion over, so the node will not wake it behind their back.
+#[tokio::test]
+async fn an_exhausted_provider_pauses_the_session_at_a_recorded_boundary() {
+    use tracon::session::exhaustion::{Choice, Policy, OPERATOR, WAITING};
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    rig.store
+        .exhaustion_choose(&rig.session_id, &Choice::default())
+        .unwrap();
+    let reset = 1_791_374_400_000;
+    for _ in 0..2 {
+        rig.commands
+            .send(Command::Exhausted {
+                seen: exhausted(Some(reset)),
+                decision: decision(Policy::Pause, WAITING, Some(reset)),
+            })
+            .await
+            .unwrap();
+    }
+    assert!(rig.await_state("paused").await);
+    assert!(rig.await_events("exhaustion_boundary", 1).await);
+    let events = rig.store.events_after(&rig.session_id, 0, 200).unwrap();
+    let decided: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == "provider_exhausted")
+        .collect();
+    assert_eq!(decided.len(), 1, "the second refusal changes nothing");
+    let p = &decided[0].payload;
+    assert_eq!(p["policy"], "pause");
+    assert_eq!(p["outcome"], "waiting");
+    assert_eq!(p["model"], "m/a");
+    assert_eq!(p["reason"], "usage limit reached");
+    assert_eq!(p["next_wake_ms"], reset);
+    let paused = events.iter().find(|e| e.kind == "session_paused").unwrap();
+    assert_eq!(paused.payload["source"], "exhausted");
+    let session = rig.store.get_session(&rig.session_id).unwrap().unwrap();
+    let why = session.last_error.unwrap_or_default();
+    assert!(
+        why.contains("m is exhausted (usage limit reached)"),
+        "{why}"
+    );
+    assert!(why.contains("resets at 2026-10-07 12:00 UTC"), "{why}");
+    let row = rig.store.exhaustion(&rig.session_id).unwrap().unwrap();
+    assert_eq!(row.outcome.as_deref(), Some(WAITING));
+    assert!(row.boundary_seq.is_some());
+
+    // The operator resumes it first: theirs now.
+    let (ack, done) = oneshot::channel();
+    rig.commands
+        .send(Command::Resume {
+            source: tracon::session::supervisor::PauseSource::Operator,
+            reason: "go on".into(),
+            ack,
+        })
+        .await
+        .unwrap();
+    assert_eq!(done.await.unwrap(), Ok(()));
+    let row = rig.store.exhaustion(&rig.session_id).unwrap().unwrap();
+    assert_eq!(row.outcome.as_deref(), Some(OPERATOR));
+    assert!(rig.store.exhaustion_due(i64::MAX).unwrap().is_empty());
+}
+
+/// The boundary is the fenced turn settling, not the refusal: while the turn
+/// is still winding down there is no boundary to resume or continue from.
+#[tokio::test]
+async fn the_boundary_waits_for_the_fenced_turn_to_settle() {
+    use tracon::session::exhaustion::{Choice, Policy, WAITING};
+    state::isolate();
+    let rig =
+        Rig::start_with_handle(100_000, Duration::from_secs(60), Arc::new(BlockingHandle)).await;
+    rig.store
+        .exhaustion_choose(&rig.session_id, &Choice::default())
+        .unwrap();
+    rig.open_turn().await;
+    rig.commands
+        .send(Command::Exhausted {
+            seen: exhausted(Some(5)),
+            decision: decision(Policy::Pause, WAITING, Some(5)),
+        })
+        .await
+        .unwrap();
+    assert!(rig.await_state("paused").await);
+    let row = rig.store.exhaustion(&rig.session_id).unwrap().unwrap();
+    assert_eq!(row.boundary_seq, None);
+    assert!(rig.store.exhaustion_due(i64::MAX).unwrap().is_empty());
+
+    rig.close_turn(10).await;
+    assert!(rig.await_events("exhaustion_boundary", 1).await);
+    let row = rig.store.exhaustion(&rig.session_id).unwrap().unwrap();
+    let turn_end = rig
+        .store
+        .events_after(&rig.session_id, 0, 200)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "turn_end")
+        .map(|e| e.seq)
+        .max()
+        .unwrap();
+    assert!(row.boundary_seq.unwrap() >= turn_end, "{row:?}");
+    assert_eq!(rig.store.exhaustion_due(i64::MAX).unwrap().len(), 1);
+}
+
+/// Bound for a fallback, the session ends at its boundary as
+/// `provider_exhausted`, for a continuation to pick up.
+#[tokio::test]
+async fn a_session_bound_for_its_fallback_ends_at_its_boundary() {
+    use tracon::session::exhaustion::{Choice, Policy, FALLING_BACK};
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    rig.store
+        .exhaustion_choose(
+            &rig.session_id,
+            &Choice {
+                policy: Policy::Fallback,
+                fallback: Some("m/b".into()),
+            },
+        )
+        .unwrap();
+    rig.commands
+        .send(Command::Exhausted {
+            seen: exhausted(None),
+            decision: decision(Policy::Fallback, FALLING_BACK, None),
+        })
+        .await
+        .unwrap();
+    assert!(rig.await_state("closed").await);
+    let s = rig.store.get_session(&rig.session_id).unwrap().unwrap();
+    assert_eq!(s.end_reason.as_deref(), Some("provider_exhausted"));
+    let row = rig.store.exhaustion(&rig.session_id).unwrap().unwrap();
+    assert_eq!(row.outcome.as_deref(), Some(FALLING_BACK));
+    assert!(row.boundary_seq.is_some());
+}
+
+/// A live session, exhausted, through the manager: the node decides under
+/// the session's policy, wakes it once the provider's reset has passed (and
+/// only once what would refuse it has been checked again), carries it on to
+/// its fallback, and holds one whose fallback is spent for the operator.
+#[tokio::test]
+async fn the_node_wakes_an_exhausted_session_or_carries_it_on() {
+    use tracon::session::exhaustion::{Choice, Policy};
+    let Orientation {
+        store,
+        manager,
+        adapter,
+        row,
+        ..
+    } = orientation_setup("exhausted-wake", None, 0, false).await;
+    manager.set_default_adapter(adapter.clone());
+    let wait = |id: String, want: &'static str| {
+        let store = store.clone();
+        async move {
+            for _ in 0..300 {
+                if store.get_session(&id).unwrap().unwrap().state == want {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            false
+        }
+    };
+    let settled = |id: String| {
+        let store = store.clone();
+        async move {
+            for _ in 0..300 {
+                let s = store.get_session(&id).unwrap().unwrap();
+                if s.state == "running" && s.turn_active == 0 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("{id} never went idle");
+        }
+    };
+    settled(row.id.clone()).await;
+
+    // Paused, then woken once the reset has passed. Nothing is due before.
+    let past = now_ms() - 1;
+    manager
+        .provider_exhausted(&row.id, exhausted(Some(past)))
+        .await;
+    assert!(wait(row.id.clone(), "paused").await);
+    for _ in 0..300 {
+        if store
+            .exhaustion(&row.id)
+            .unwrap()
+            .unwrap()
+            .boundary_seq
+            .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    manager.wake_exhausted().await;
+    assert!(wait(row.id.clone(), "running").await);
+    let ex = store.exhaustion(&row.id).unwrap().unwrap();
+    assert_eq!(ex.outcome.as_deref(), Some("resumed"));
+    let kinds: Vec<_> = store
+        .events_after(&row.id, 0, 500)
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.kind, e.payload))
+        .collect();
+    assert!(kinds
+        .iter()
+        .any(|(k, p)| k == "session_resumed" && p["source"] == "wake"));
+    assert!(kinds
+        .iter()
+        .any(|(k, p)| k == "exhaustion_wake" && p["outcome"] == "resumed"));
+    settled(row.id.clone()).await;
+
+    // A wake that would be refused holds it for the operator instead.
+    manager
+        .provider_exhausted(&row.id, exhausted(Some(past)))
+        .await;
+    assert!(wait(row.id.clone(), "paused").await);
+    store
+        .update_session(
+            &row.id,
+            tracon::store::SessionPatch {
+                tokens_used: Some(row.budget_tokens),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for _ in 0..300 {
+        if store
+            .exhaustion(&row.id)
+            .unwrap()
+            .unwrap()
+            .boundary_seq
+            .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    manager.wake_exhausted().await;
+    let ex = store.exhaustion(&row.id).unwrap().unwrap();
+    assert_eq!(ex.outcome.as_deref(), Some("held"), "{ex:?}");
+    assert!(ex.note.unwrap().contains("spent its budget"));
+    assert_eq!(store.get_session(&row.id).unwrap().unwrap().state, "paused");
+    store
+        .update_session(
+            &row.id,
+            tracon::store::SessionPatch {
+                tokens_used: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    // Bound for a fallback: carried on to it as a continuation.
+    manager.resume(&row.id, "operator".into()).await.unwrap();
+    settled(row.id.clone()).await;
+    store
+        .exhaustion_choose(
+            &row.id,
+            &Choice {
+                policy: Policy::Fallback,
+                fallback: Some("m/b".into()),
+            },
+        )
+        .unwrap();
+    manager.provider_exhausted(&row.id, exhausted(None)).await;
+    assert!(wait(row.id.clone(), "closed").await);
+    manager.wake_exhausted().await;
+    let ex = store.exhaustion(&row.id).unwrap().unwrap();
+    assert_eq!(ex.outcome.as_deref(), Some("continued"), "{ex:?}");
+    let next = ex.continued_by.unwrap();
+    let next_row = store.get_session(&next).unwrap().unwrap();
+    assert_eq!(next_row.model, "m/b");
+    assert_eq!(next_row.continued_from.as_deref(), Some(row.id.as_str()));
+    let handoff = first_prompt(&store, &next).await;
+    assert!(handoff.contains("provider was exhausted"), "{handoff}");
+    assert!(handoff.contains("m/b"), "{handoff}");
+    // The continuation keeps the policy, and has no further fallback: the
+    // next exhaustion holds it for the operator rather than waking it.
+    assert_eq!(
+        store.exhaustion(&next).unwrap().unwrap().choice().policy,
+        Policy::Fallback
+    );
+    settled(next.clone()).await;
+    manager
+        .provider_exhausted(&next, exhausted(Some(past)))
+        .await;
+    assert!(wait(next.clone(), "paused").await);
+    let ex = store.exhaustion(&next).unwrap().unwrap();
+    assert_eq!(ex.outcome.as_deref(), Some("held"));
+    assert!(ex.note.unwrap().contains("already on m/b"));
+    assert_eq!(ex.next_wake_ms, None);
+    tracon::session::materialize::remove(&row.id);
+    tracon::session::materialize::remove(&next);
+}
+
+/// A run names its own policy over the channel's; a fallback policy without
+/// a fallback is refused before anything starts.
+#[tokio::test]
+async fn a_fallback_policy_without_a_fallback_is_refused_at_create() {
+    state::isolate();
+    let h = Harness::new(0).await;
+    let (status, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(json!({
+                "channel": "personal",
+                "repo_path": "/nonexistent/repo",
+                "on_exhaustion": { "policy": "fallback_then_wait" },
+            })),
+        )
+        .await;
+    assert!(status.is_client_error(), "{status} {body}");
+    assert!(
+        body.to_string().contains("needs a fallback model"),
+        "{body}"
+    );
+    h.store
+        .channel_put(
+            "personal",
+            b"k",
+            r#"{"exhaustion":{"policy":"fallback","fallback":"m/b"}}"#,
+        )
+        .unwrap();
+    let (status, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(json!({
+                "channel": "personal",
+                "repo_path": "/nonexistent/repo",
+                "on_exhaustion": { "policy": "pause" },
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap();
+    assert_eq!(
+        h.store.exhaustion(id).unwrap().unwrap().policy,
+        "pause",
+        "the run's choice wins over the channel's"
+    );
 }

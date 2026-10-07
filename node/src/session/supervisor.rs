@@ -97,6 +97,12 @@ pub enum Command {
         payload: serde_json::Value,
         tokens: i64,
     },
+    /// The gateway saw the provider refuse this session's call as exhausted,
+    /// and the manager decided what happens under the session's policy.
+    Exhausted {
+        seen: crate::store::exhaustion::Exhausted,
+        decision: crate::session::exhaustion::Decision,
+    },
 }
 
 /// Why a pause occurred. The state transition is authoritative; this is
@@ -105,6 +111,10 @@ pub enum Command {
 pub enum PauseSource {
     Operator,
     Watchdog,
+    /// The provider was exhausted.
+    Exhausted,
+    /// The node woke a session its provider's reset had come round for.
+    Wake,
 }
 
 impl PauseSource {
@@ -112,6 +122,8 @@ impl PauseSource {
         match self {
             Self::Operator => "operator",
             Self::Watchdog => "watchdog",
+            Self::Exhausted => "exhausted",
+            Self::Wake => "wake",
         }
     }
 }
@@ -382,6 +394,12 @@ impl Supervisor {
                         Some(Command::Resume { source, reason, ack }) => {
                             let _ = ack.send(self.resume(source, &reason).await);
                         }
+                        Some(Command::Exhausted { seen, decision }) => {
+                            if self.on_exhausted(seen, decision).await {
+                                killed_by_us = true;
+                                break;
+                            }
+                        }
                         Some(Command::PauseQuiesceTimeout { turn_id }) => {
                             if self.paused_turn == Some(turn_id) && self.is_paused() {
                                 killed_by_us = true;
@@ -410,6 +428,10 @@ impl Supervisor {
                                     let _ = self.on_harness_event(event).await;
                                 }
                                 self.paused_turn = None;
+                                if self.reach_boundary().await {
+                                    killed_by_us = true;
+                                    break;
+                                }
                                 continue;
                             }
                             if turn_timeout {
@@ -556,7 +578,7 @@ impl Supervisor {
             None,
             json!({ "source": source.as_str(), "reason": reason }),
         );
-        if source == PauseSource::Watchdog {
+        if matches!(source, PauseSource::Watchdog | PauseSource::Exhausted) {
             let _ = self.store.update_session(
                 &self.session_id,
                 SessionPatch {
@@ -598,6 +620,26 @@ impl Supervisor {
             return Err("waiting for the paused turn to finish".into());
         }
         self.consecutive_failures = 0;
+        // The operator resuming an exhausted session takes it over: the node
+        // will not wake it again, or carry it on, behind their back.
+        if source == PauseSource::Operator
+            && self
+                .store
+                .exhaustion_settle(
+                    &self.session_id,
+                    crate::session::exhaustion::OPERATOR,
+                    None,
+                    None,
+                )
+                .unwrap_or(false)
+        {
+            self.record(
+                ek::EXHAUSTION_WAKE,
+                None,
+                json!({ "outcome": crate::session::exhaustion::OPERATOR,
+                        "note": "Resumed by the operator before the node acted." }),
+            );
+        }
         self.set_state(SessionState::Running, None);
         self.record(
             ek::SESSION_RESUMED,
@@ -605,6 +647,86 @@ impl Supervisor {
             json!({ "source": source.as_str(), "reason": reason }),
         );
         Ok(())
+    }
+
+    /// The provider is exhausted. Record the decision, then fence the session
+    /// like any pause; once nothing of the fenced turn is still in flight,
+    /// that is the safe boundary the work resumes or continues from. A second
+    /// refused call arriving after the fence changes nothing. `true` when the
+    /// session ended here to be carried on elsewhere.
+    async fn on_exhausted(
+        &mut self,
+        seen: crate::store::exhaustion::Exhausted,
+        decision: crate::session::exhaustion::Decision,
+    ) -> bool {
+        let state = self
+            .store
+            .get_session(&self.session_id)
+            .ok()
+            .flatten()
+            .map(|row| SessionState::from_stored(&row.state));
+        if !matches!(
+            state,
+            Some(SessionState::Running) | Some(SessionState::WaitingOnYou)
+        ) {
+            return false;
+        }
+        if let Err(e) = self
+            .store
+            .exhaustion_decided(&self.session_id, &seen, &decision)
+        {
+            tracing::error!(session = %self.session_id, error = %e, "could not record an exhaustion");
+            return false;
+        }
+        self.record(
+            ek::PROVIDER_EXHAUSTED,
+            None,
+            json!({
+                "policy": decision.policy.as_str(),
+                "outcome": decision.outcome,
+                "provider": seen.provider,
+                "model": seen.model,
+                "status": seen.status,
+                "reason": seen.reason,
+                "reset_ms": seen.reset_ms,
+                "next_wake_ms": decision.next_wake_ms,
+                "fallback": decision.fallback,
+                "note": decision.note,
+            }),
+        );
+        let reason = exhausted_reason(&seen, &decision);
+        if self.pause(PauseSource::Exhausted, &reason).await.is_err() {
+            return self.is_terminal();
+        }
+        if self.paused_turn.is_none() {
+            return self.reach_boundary().await;
+        }
+        false
+    }
+
+    /// Write the safe boundary of a pending exhaustion once its fenced turn
+    /// has settled, and end the session if it is to be carried on to its
+    /// fallback. `true` when it ended.
+    async fn reach_boundary(&mut self) -> bool {
+        let Ok(Some(row)) = self.store.exhaustion(&self.session_id) else {
+            return false;
+        };
+        if !row.pending() || row.boundary_seq.is_some() {
+            return false;
+        }
+        let Ok(seq) = self.store.exhaustion_boundary(&self.session_id) else {
+            return false;
+        };
+        self.record(
+            ek::EXHAUSTION_BOUNDARY,
+            None,
+            json!({ "boundary_seq": seq, "outcome": row.outcome }),
+        );
+        if row.outcome.as_deref() == Some(crate::session::exhaustion::FALLING_BACK) {
+            self.shutdown(EndReason::ProviderExhausted).await;
+            return true;
+        }
+        false
     }
 
     async fn watchdog_pause_if_needed(&mut self) -> bool {
@@ -1428,6 +1550,31 @@ async fn until_silent<F: std::future::Future>(
         if let Ok(done) = tokio::time::timeout(wait, &mut turn).await {
             return Ok(done);
         }
+    }
+}
+
+/// The pause reason an exhausted session shows: what refused, and what
+/// happens next.
+fn exhausted_reason(
+    seen: &crate::store::exhaustion::Exhausted,
+    decision: &crate::session::exhaustion::Decision,
+) -> String {
+    use crate::session::exhaustion as x;
+    let what = format!("{} is exhausted ({})", seen.provider, seen.reason);
+    let next = match decision.outcome {
+        x::WAITING => format!(
+            "it resumes when the provider's limit resets at {}",
+            decision.next_wake_ms.map(x::utc).unwrap_or_default()
+        ),
+        x::FALLING_BACK => format!(
+            "it continues on {}",
+            decision.fallback.as_deref().unwrap_or("the fallback")
+        ),
+        _ => "it waits for you".into(),
+    };
+    match &decision.note {
+        Some(note) => format!("{what}; {next}. {note}"),
+        None => format!("{what}; {next}."),
     }
 }
 

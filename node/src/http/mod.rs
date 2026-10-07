@@ -866,6 +866,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                 // An approval waits for the operator until it expires; the
                 // caller is not blocked on it, so nothing else would end it.
                 manager.expire_approvals().await;
+                // A session waiting out its provider's limit is woken here,
+                // and one bound for its fallback is carried on.
+                manager.wake_exhausted().await;
                 let stale = store
                     .stale_claims(grace.as_millis() as i64)
                     .unwrap_or_default();

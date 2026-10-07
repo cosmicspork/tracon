@@ -2,6 +2,7 @@
 // interface can say what the node said, not "request failed".
 
 import type {
+  SessionExhaustion,
   ExternalEvent,
   ExternalView,
   AuthorityGrant,
@@ -205,6 +206,8 @@ export const api = {
       usage: SessionUsage
       ceiling: Ceiling
       toolchain: ToolchainStatus | null
+      /** Absent from a node that predates exhaustion policies. */
+      exhaustion?: SessionExhaustion | null
       /** Absent from a node that predates `show_work`. */
       shown_work?: ShownWork[]
     }>('GET', `/api/sessions/${id}`),

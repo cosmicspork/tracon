@@ -1350,6 +1350,7 @@ async fn spawn_review_session(
         parent_session: None,
         continued_from: None,
         harness: None,
+        on_exhaustion: None,
         model,
         budget_tokens: bindings["phases"]["review"]["budget_tokens"].as_i64(),
         initial_prompt: None,

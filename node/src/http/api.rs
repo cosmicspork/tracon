@@ -814,6 +814,7 @@ pub async fn import_transfer(
         parent_session: None,
         continued_from: None,
         harness: None,
+        on_exhaustion: None,
     };
     if let Err(error) = s.manager.preflight(&preflight_spec) {
         let detail = error.to_string();
@@ -882,6 +883,7 @@ pub async fn import_transfer(
         parent_session: None,
         continued_from: None,
         harness: None,
+        on_exhaustion: None,
     };
     let session = match s.manager.create(spec).await {
         Ok(session) => session,
@@ -1375,6 +1377,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         parent_session: None,
         continued_from: None,
         harness: c.harness,
+        on_exhaustion: None,
         branch: c.branch,
         work_item_id: Some(item.id.clone()),
         model: c.model,
@@ -1440,12 +1443,16 @@ pub async fn get_session(
         .first_event_payload(&id, crate::session::state::event_kind::SESSION_STARTED)?
         .and_then(|payload| payload.get("toolchain").cloned())
         .filter(|toolchain| !toolchain.is_null());
+    // The policy this session runs under on exhaustion, and its latest one:
+    // what it waits for, when, or what carried it on.
+    let exhaustion = s.store().exhaustion(&id)?;
     Ok(Json(json!({
         "session": row,
         "waiting": waiting,
         "questions": questions,
         "usage": usage,
         "ceiling": ceiling,
+        "exhaustion": exhaustion,
         "toolchain": toolchain,
         "shown_work": s.store().shown_work_for_session(&id)?,
     })))

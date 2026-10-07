@@ -47,13 +47,13 @@
   import { remedy } from '../lib/refusal'
   import { nodeHarnesses } from '../lib/nodes'
   import type { HarnessState } from '../lib/types'
-  import { modelPatch, phaseDefaults } from '../lib/bindings'
+  import { exhaustionDefaults, exhaustionPatch, modelPatch, phaseDefaults } from '../lib/bindings'
   import { modelSummary, recentModelValues } from '../lib/models'
   import { changedSubset, hashToken, loginUrl, mintToken } from '../lib/settings'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { UpdateStatus } from '../lib/desktop-update'
-  import type { AuthorityGrant, BoundaryCheck, EnrollStatus, NodeConfig, PolicyRule } from '../lib/types'
+  import type { AuthorityGrant, BoundaryCheck, EnrollStatus, ExhaustionChoice, ExhaustionPolicy, NodeConfig, PolicyRule } from '../lib/types'
 
   const local = $derived(store.node?.loopback ?? false)
   const origin = typeof location === 'undefined' ? '' : location.origin
@@ -354,6 +354,23 @@
       await api.deleteChannel(name)
       deleting = ''
       await store.refetch()
+    })
+  }
+  // A fallback policy picked before its model: held here until the model is
+  // chosen, because the node refuses sessions on a fallback with no model.
+  let exhaustionDraft = $state<Record<string, ExhaustionChoice>>({})
+  function bindExhaustion(channel: string, choice: ExhaustionChoice) {
+    const patch = exhaustionPatch(choice.policy, choice.fallback)
+    if (patch === null) {
+      exhaustionDraft[channel] = choice
+      return
+    }
+    return act('binding', async () => {
+      await api.createChannel(channel)
+      await api.putChannelBindings(channel, patch)
+      await store.refetch()
+      delete exhaustionDraft[channel]
+      savedChannel = channel
     })
   }
   function bindModel(channel: string, phase: 'plan' | 'execute', model: string) {
@@ -814,6 +831,7 @@
         {#each open_channels as c (c.name)}
           {@const plan = phaseDefaults(c.bindings, 'plan')}
           {@const execute = phaseDefaults(c.bindings, 'execute')}
+          {@const exh = exhaustionDraft[c.name] ?? exhaustionDefaults(c.bindings)}
           <div class="ch">
             <span class="nm">{c.name}</span>
             {#each [['plan', plan], ['execute', execute]] as const as [ph, b] (ph)}
@@ -832,6 +850,35 @@
             <div class="end">
               {#if savedChannel === c.name}<small>saved · handed to members</small>{/if}
               <button class="lnk" disabled={busy !== ''} onclick={() => archiveChannel(c.name, true)}>Archive</button>
+            </div>
+            <div class="exh">
+              <label>
+                <span>When a provider is exhausted</span>
+                <select
+                  value={exh.policy}
+                  disabled={busy !== ''}
+                  onchange={(e) =>
+                    bindExhaustion(c.name, { policy: e.currentTarget.value as ExhaustionPolicy, fallback: exh.fallback })}
+                >
+                  <option value="pause">pause, resume when its limit resets</option>
+                  <option value="fallback">fall back, else wait for you</option>
+                  <option value="fallback_then_wait">fall back, else resume when its limit resets</option>
+                </select>
+              </label>
+              {#if exh.policy !== 'pause'}
+                <label>
+                  <span>Fallback model</span>
+                  <ModelPicker
+                    value={exh.fallback ?? ''}
+                    {models}
+                    recent={recentModels}
+                    none="choose the model to carry on with"
+                    disabled={busy !== ''}
+                    onchange={(v) => bindExhaustion(c.name, { policy: exh.policy, fallback: v })}
+                  />
+                </label>
+                {#if !exh.fallback}<small class="note">not saved until a fallback model is chosen</small>{/if}
+              {/if}
             </div>
           </div>
         {/each}
@@ -1394,6 +1441,36 @@
     color: var(--ok);
     font: 11.5px var(--mono);
   }
+  .ch .exh {
+    grid-column: 2 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    align-items: end;
+  }
+  .ch .exh label {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    flex: 1 1 220px;
+  }
+  .ch .exh label > span {
+    font: 11px var(--mono);
+    color: var(--ink2);
+  }
+  .ch .exh select {
+    background: var(--s2);
+    color: var(--ink);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font: 13px var(--sans);
+    max-width: 100%;
+  }
+  .ch .exh .note {
+    color: var(--dim);
+    font: 11.5px var(--mono);
+  }
   .ch.off {
     grid-template-columns: minmax(100px, 180px) minmax(0, 1fr) auto;
     color: var(--dim);
@@ -1664,6 +1741,9 @@
     }
     .ch .end {
       justify-content: flex-start;
+    }
+    .ch .exh {
+      grid-column: auto;
     }
     .hub {
       grid-template-columns: 3px minmax(0, 1fr);
