@@ -1274,7 +1274,20 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX shown_work_session ON shown_work(session_id, created_ms);
     CREATE INDEX shown_work_review ON shown_work(review_id, created_ms);
     "#,
-    // 55: what a session does when its provider is exhausted, and what it
+    // 55: what a publication was authorized to say, and whether any attempt
+    // at it got as far as the forge. Recovery retries exactly the authorized
+    // title, body and outputs from here — a retry is not a fresh approval, so
+    // it must not carry new prose — and an attempt refused before it spoke
+    // to the forge is told apart from one the forge refused. Rows from before
+    // this have neither: their prose is unknown, so they need a fresh
+    // approval, and whether they reached the forge is assumed.
+    r#"
+    ALTER TABLE publication ADD COLUMN title TEXT;
+    ALTER TABLE publication ADD COLUMN body TEXT;
+    ALTER TABLE publication ADD COLUMN outputs_json TEXT;
+    ALTER TABLE publication ADD COLUMN forge_contacted INTEGER NOT NULL DEFAULT 1;
+    "#,
+    // 56: what a session does when its provider is exhausted, and what it
     // did. The policy is chosen once, when the session is made; the rest is
     // the latest exhaustion, written when it is decided and again at the
     // safe boundary, the wake and the outcome. Node-local: the node that runs

@@ -512,6 +512,52 @@ export interface ReviewDetails {
   legacy_check_events: CandidateCheckRun[]
   /** What the agent showed of its work. Absent from a node that predates it. */
   shown_work?: ShownWork[]
+  /**
+   * Whether this node could publish it and how the latest attempt ended.
+   * Null for a mirrored review (only the owner holds the credential and the
+   * journal); absent from a node that predates it.
+   */
+  publication?: ReviewPublication | null
+}
+
+export interface ReviewPublication {
+  readiness: PublicationReadiness
+  latest: PublicationView | null
+}
+
+/**
+ * What the node can tell without asking the forge. `ready` means a token is
+ * bound to this channel here, never that it may push: only the forge knows.
+ */
+export interface PublicationReadiness {
+  ready: boolean
+  provider?: string
+  credential?: string
+  project?: string
+  problem?: string | null
+  note?: string
+  /** Where the missing binding is fixed. */
+  settings: string
+}
+
+export type PublicationOutcome = 'not_attempted' | 'in_progress' | 'failed' | 'uncertain' | 'published'
+
+export interface PublicationView {
+  id: string
+  outcome: PublicationOutcome
+  note: string | null
+  url: string | null
+  attempts: number
+  updated_ms: number
+  provider: string
+  project: string
+  branch: string
+  /** What to do about it, in a sentence. Empty when there is nothing to do. */
+  remedy: string
+  /** A retry of exactly what was approved is allowed now. */
+  recoverable: boolean
+  /** Why it is not, when the outcome would otherwise allow one. */
+  refusal: string | null
 }
 
 /**
