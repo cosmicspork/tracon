@@ -453,6 +453,7 @@ impl Tools {
             }
             jira::ISSUE
             | jira::ISSUE_SEARCH
+            | jira::ISSUE_TRANSITIONS
             | jira::ISSUE_COMMENT
             | jira::ISSUE_UPDATE
             | jira::ISSUE_CREATE

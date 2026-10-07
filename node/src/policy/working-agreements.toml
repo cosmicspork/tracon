@@ -19,7 +19,7 @@
 # A denial wins over any allow, whatever the order. An action no rule names —
 # a brokered write, a tool whose kind the node does not know — is asked.
 
-version = 16
+version = 17
 
 # --- 1. The harness and Git's internals stay the node's ---------------------
 # The harness's own configuration is the node's to write, not the session's.
@@ -137,6 +137,7 @@ matches = [
     "run_logs",
     "issue",
     "issue_search",
+    "issue_transitions",
 ]
 
 # Writing to the forge or the tracker — a comment, an edited field, a new

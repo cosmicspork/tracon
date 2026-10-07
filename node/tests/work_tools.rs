@@ -58,6 +58,19 @@ async fn stub(
             Json(json!({ "id": "1042", "key": "WRK-9" })),
         );
     }
+    if path == "/rest/api/2/issue/WRK-1/transitions" && method == "GET" {
+        return (
+            axum::http::StatusCode::OK,
+            Json(json!({ "expand": "transitions", "transitions": [
+                { "id": "21", "name": "Start progress", "hasScreen": false,
+                  "to": { "name": "In Progress", "id": "3",
+                          "statusCategory": { "key": "indeterminate", "name": "In Progress" } } },
+                { "id": "31", "name": "Done",
+                  "to": { "name": "Done", "id": "10001",
+                          "statusCategory": { "key": "done", "name": "Done" } } },
+            ] })),
+        );
+    }
     // Cloud's search; a query marked `legacy` plays a Data Center that lacks it.
     if path == "/rest/api/3/search/jql" && uri.query().unwrap_or("").contains("legacy") {
         return (
@@ -294,6 +307,7 @@ async fn the_forge_and_tracker_tools_are_offered_to_the_bound_channel_and_node()
         "pipeline_run",
         "issue",
         "issue_search",
+        "issue_transitions",
         "issue_comment",
     ] {
         assert!(work.contains(&n.to_string()), "{n} missing from {work:?}");
@@ -574,6 +588,30 @@ async fn a_search_returns_one_compact_row_per_issue() {
         paths(&seen)[1..],
         ["GET /rest/api/3/search/jql", "GET /rest/api/2/search"]
     );
+}
+
+#[tokio::test]
+async fn an_issues_transitions_are_read_without_asking_and_change_nothing() {
+    state::isolate();
+    let (mut t, seen, _) = rig().await;
+    t.policy = tracon::policy::Policy::shipped_shared();
+    let c = ctx("work", "n1");
+    let (err, v) = call(&t, &c, "issue_transitions", json!({ "key": "WRK-1" })).await;
+    assert!(!err, "{v}");
+    assert_eq!(
+        v,
+        json!({ "key": "WRK-1", "transitions": [
+            { "id": "21", "name": "Start progress", "to": "In Progress", "category": "In Progress" },
+            { "id": "31", "name": "Done", "to": "Done", "category": "Done" },
+        ] })
+    );
+    assert_eq!(
+        paths(&seen),
+        vec!["GET /rest/api/2/issue/WRK-1/transitions"]
+    );
+    let (err, v) = call(&t, &c, "issue_transitions", json!({ "key": "WRK 1/../x" })).await;
+    assert!(err, "{v}");
+    assert_eq!(paths(&seen).len(), 1, "a bad key reaches no URL");
 }
 
 #[tokio::test]

@@ -115,10 +115,6 @@ hit on a real task.
 - [ ] Follow a GitHub run the agent reran (`run_rerun`) the way a GitLab pipeline the
       agent started is followed, once the item above lands: a `run_wait` read, the
       job results recorded on the session, and a push when the run finishes or fails.
-- [ ] Discover Jira transitions: `issue_transitions` lists an issue's currently available
-      transitions (id, name, destination status) through the brokered token, so an
-      authorized `issue_transition` never rests on an out-of-band `acli` lookup or an id
-      copied from another project. Discovery stays a read; the transition keeps its grant.
 
 **Node data**
 
