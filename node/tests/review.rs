@@ -1583,6 +1583,11 @@ async fn publishing_closes_the_item_the_session_holds() {
     assert_eq!(closed.state, "closed");
     assert_eq!(closed.closed_by_session.as_deref(), Some("s1"));
     assert!(f.event_kinds("s1").contains(&"work_closed".to_string()));
+    // And the session says where its work went, not only the review.
+    assert!(f.event_kinds("s1").contains(&"published".to_string()));
+    let published = f.store.session_publications("s1").unwrap();
+    assert_eq!(published.len(), 1, "{published:?}");
+    assert_eq!(published[0].0, id);
 }
 
 /// An edited diff is a request for changes carrying a patch. What matters is
@@ -3688,4 +3693,236 @@ async fn a_retry_with_the_same_or_no_base_is_already_submitted() {
     assert_eq!(review_id(&absent), id);
     assert_eq!(absent["already_submitted"], json!(true), "{absent}");
     assert_eq!(f.store.review_revisions(&id).unwrap().len(), 1);
+}
+
+/// What a review says about publishing before anyone approves it: whether a
+/// forge token is bound here, where to bind one, and never that the token may
+/// push — only the forge knows that.
+#[tokio::test]
+async fn a_review_says_whether_a_forge_token_is_bound_before_approval() {
+    state::isolate();
+    let f = fixture(test_name!(), WITHOUT_GH).await;
+    let id = f.submit().await;
+    let (status, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let readiness = &body["publication"]["readiness"];
+    assert_eq!(readiness["ready"], false, "{readiness}");
+    assert!(
+        readiness["problem"]
+            .as_str()
+            .unwrap()
+            .contains("no GitHub token"),
+        "{readiness}"
+    );
+    assert!(
+        readiness["settings"]
+            .as_str()
+            .unwrap()
+            .ends_with("#connections"),
+        "{readiness}"
+    );
+    assert!(body["publication"]["latest"].is_null(), "{body}");
+
+    let f = fixture(&format!("{}-bound", test_name!()), WITH_GH).await;
+    let id = f.submit().await;
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let readiness = &body["publication"]["readiness"];
+    assert_eq!(readiness["ready"], true, "{readiness}");
+    assert!(
+        readiness["note"]
+            .as_str()
+            .unwrap()
+            .contains("only known when GitHub answers"),
+        "a bound token is not reported as permission: {readiness}"
+    );
+}
+
+/// Refused before it spoke to the forge: that is a different outcome from
+/// the forge refusing, and the operator is told which.
+#[tokio::test]
+async fn a_publication_refused_before_the_forge_is_reported_as_not_attempted() {
+    state::isolate();
+    let f = fixture(test_name!(), WITHOUT_GH).await;
+    let id = f.submit().await;
+    let (status, _) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let latest = &body["publication"]["latest"];
+    assert_eq!(latest["outcome"], "not_attempted", "{latest}");
+    assert_eq!(latest["recoverable"], true, "{latest}");
+    assert!(
+        latest["remedy"]
+            .as_str()
+            .unwrap()
+            .contains("Nothing reached"),
+        "{latest}"
+    );
+}
+
+/// A publication the forge did not keep is retried exactly as approved: the
+/// operator's own title goes out again, nothing new is taken from the retry,
+/// and the review is settled as published.
+#[tokio::test]
+async fn a_failed_publication_is_retried_as_it_was_approved() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let stub = f.dir.join("bin/git-remote-stub");
+    let working = std::fs::read(&stub).unwrap();
+    git_that_swallows_pushes(&f);
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "title": "the operator's title" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let latest = body["publication"]["latest"].clone();
+    assert_eq!(latest["outcome"], "failed", "{latest}");
+    assert_eq!(latest["recoverable"], true, "{latest}");
+
+    std::fs::write(&stub, working).unwrap();
+    f.forget_logs();
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/publication/recover"),
+            Some(json!({ "publication_id": latest["id"], "title": "smuggled" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    assert!(gh.contains("the operator's title"), "{gh}");
+    assert!(!gh.contains("smuggled"), "{gh}");
+    assert_eq!(f.publication(&id).state, "opened");
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "approved");
+
+    let (status, _) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/publication/recover"),
+            Some(json!({ "publication_id": latest["id"] })),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a landed publication is not retried"
+    );
+}
+
+/// An attempt whose outcome is unknown holds its claim, so approving again is
+/// refused; the recovery action is the way out, and it looks at the forge
+/// before repeating anything.
+#[tokio::test]
+async fn an_uncertain_publication_is_recovered_by_looking_first() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let head = review.head_sha.clone();
+    let revision = f
+        .store
+        .latest_review_revision(&id)
+        .unwrap()
+        .map(|revision| revision.id);
+    sh(
+        &f.dir.join("wt"),
+        &format!("git push -q origin {head}:refs/heads/feat/x"),
+    );
+    let publication = f.publication_id(&id);
+    f.store
+        .publication_begin(&tracon::store::PublicationBegin {
+            id: &publication,
+            review_id: &id,
+            revision_id: revision.as_deref(),
+            candidate_id: &tracon::store::candidate_id(&head, "work"),
+            channel: "work",
+            node_id: "n1",
+            provider: "github",
+            project: "owner/name",
+            base: "main",
+            branch: "feat/x",
+            head_sha: &head,
+            instance: "a-process-that-is-no-longer-running",
+        })
+        .unwrap();
+    f.store.publication_pushed(&publication, &head).unwrap();
+    f.store.publication_opening(&publication).unwrap();
+    assert!(f.store.begin_publish(&id, revision.as_deref()).unwrap());
+    std::fs::rename(f.dir.join("origin.git"), f.dir.join("origin.gone")).unwrap();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(f.publication(&id).state, "uncertain");
+    let (status, _) = f.approve(&id).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "approving again is not how an unknown outcome is settled"
+    );
+
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let latest = &body["publication"]["latest"];
+    assert_eq!(latest["outcome"], "uncertain", "{latest}");
+    assert_eq!(latest["recoverable"], true, "{latest}");
+
+    std::fs::rename(f.dir.join("origin.gone"), f.dir.join("origin.git")).unwrap();
+    gh_that_lists(&f, "[]");
+    f.forget_logs();
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/publication/recover"),
+            Some(json!({ "publication_id": publication })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !f.git_log().contains("push origin"),
+        "the push that landed is not repeated: {}",
+        f.git_log()
+    );
+    assert_eq!(f.publication(&id).state, "opened");
+}
+
+/// A resubmission after a failed attempt is new bytes: retrying the old
+/// approval would publish something nobody approved, so it is refused.
+#[tokio::test]
+async fn a_retry_is_refused_once_a_newer_revision_arrives() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    git_that_swallows_pushes(&f);
+    let (status, _) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let publication = f.store.publications_for_review(&id).unwrap()[0].id.clone();
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo more >> a.txt && git add -A && git commit -qm second",
+    );
+    let mut resubmit = f.submit_args();
+    resubmit["review_id"] = json!(id);
+    let again = f.tool("s1", "submit_review", resubmit).await;
+    assert_eq!(again["state"], "new", "{again}");
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/publication/recover"),
+            Some(json!({ "publication_id": publication })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("newer revision"),
+        "{body}"
+    );
 }
