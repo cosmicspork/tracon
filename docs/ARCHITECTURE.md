@@ -564,7 +564,14 @@ starts; every check then runs on its own copy of the prepared tree with the cach
 read-only. That cache is the run's own, copied from the repository's base cache and
 removed with the run. The base is written by one thing only — a preparation of the
 default branch, made when the repository's image is built — so a candidate's install,
-which may run the candidate's own scripts, can reach its own evidence and nobody else's. A grant is one client's: the node serves its own
+which may run the candidate's own scripts, can reach its own evidence and nobody else's. What a repository asks of
+preparation and does not get is said before launch: `GET /api/preparation` (shown under
+the repository in the composer) reads the checkout and names the install it would run,
+the entry's `prepare` commands and the image, then every devcontainer field the node
+will not honour (hooks, `initializeCommand` on the host, features, mounts, privileges,
+environment, a `build`) and every install script a scripts-off install skips, each with
+where that work belongs instead. Those that would stop preparation are told apart from
+those it passes over, and none of them is ever run to find out: the preview reads files. A grant is one client's: the node serves its own
 CONNECT proxy behind a second forward in the gateway, each preparation and session
 presents the token it was issued as proxy credentials, and each is filtered
 by its own host set — so nothing one may reach is reachable by another, none waits for
@@ -893,6 +900,21 @@ binding can waive that), and closing the item ends the session that held it.
 Context rot is mitigated by mechanism where the workflow opts in, not by a line
 in a markdown file a plain session never claimed to follow.
 
+**Coming back to work is one view, item or not.** An item's attempts are the
+sessions that held it. A plain session's attempts are its lineage, meaning what it
+continued and what continued it, so it gets the same view without being made into
+an item. The view (`/api/work/{id}/continuation`, `/api/sessions/{id}/continuation`)
+gathers what the work was for (the item, or the first prompt), each attempt and how
+it ended, what the operator decided (answered permissions and questions, and the plan
+and brief), what is in the way, the workspace the latest attempt left, and the
+reviews and shown work. It also gives the one next action. Every part of that is
+read from recorded state, and the next action follows fixed rules over those records,
+so it cannot claim more than they say. It offers three verbs. Continue carries the
+work on from the last ended attempt's workspace. Change approach does the same and
+hands the operator's new direction, in their own words, to the next attempt.
+Abandon closes the item, or stops a plain lineage and puts it away, and records the
+reason. Abandon deletes nothing.
+
 ### The product brief
 
 An item may point at one document that says what the work is for: intended user,
@@ -1026,6 +1048,18 @@ as the session's `model_source`, so a silent default is never undocumented.
 Only an explicit model unusable for the channel's bound provider is a validation
 failure at spawn; an empty one never is.
 
+**What a session needs depends on what it is for.** Investigating, verifying and
+publishing ask different things of a repository, and `GET /api/readiness` (the line
+under the composer) says what each lacks before a session is spent finding out. An
+investigation needs a node that would start it and a checkout to start it in, and
+nothing else: no checks, no forge credential, no brief. Verifying adds required
+checks and an image they can run in, since without them nothing the node runs can
+vouch for the result. Publishing adds an `origin` on a forge the node publishes to
+and that forge's credential bound to the channel; a work item with no brief is noted
+there, since its review will have no requirements to judge against, but not held
+against it. The answer only reads: it builds no image, calls no forge and starts no
+session.
+
 Budgets are denominated in tokens (dollars are derived where a provider binding
 carries a price) and enforced by killing the session, checked at turn end because
 that is when harnesses report usage — a property of the protocol stated honestly in
@@ -1081,6 +1115,21 @@ Anything checkable deterministically is checked deterministically, between phase
 in a container with no credentials. Model supervision is reserved for judgment with
 no test: a cheap model watching an expensive one mostly pays twice to learn what
 the test suite would have reported.
+
+**What a session came to is read, not written.** Its outcome record
+(`GET /api/sessions/{id}/outcome`, the Outcome panel on the session) answers five
+questions from rows other paths recorded: what changed (its reviews, their files
+and line counts, how often the workspace moved), what the node verified (every
+check it ran for the session, marked current only on the commit the latest review
+stands at), what needs a decision (open permissions, unanswered questions,
+undecided reviews and reports), what is uncertain (an unsettled dispatch, unmetered
+or mismatched turns, a check still running or only run on an earlier commit, stale
+shown work, a publication that may or may not have reached the forge), and the cost
+from the turn ledger. The agent's own words appear only as claims, each beside what
+backs it, and the only thing that backs one is a passing check the node ran on the
+commit the claim was made at. A report has no commit, so nothing backs it; a review
+that describes a new commit as green is unbacked until a check runs there. However
+well the summary reads, prose never becomes verification.
 
 ## Metrics
 

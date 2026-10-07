@@ -58,18 +58,6 @@ Needed for daily use, but not blocking it today.
 
 **Sessions and accounting**
 
-- [ ] A work-level continuation view carrying intent, decisions, attempts, blockers, next
-      action, workspace, lineage and evidence, with continue / change approach / abandon.
-      Plain sessions gain it without being forced into a work item.
-- [ ] A concise outcome record derived from recorded state: what changed, what was
-      verified, what needs a decision, what is uncertain, and cost. Narrative summary
-      cannot turn a claim into verification.
-- [ ] Distinguish ready-to-investigate, ready-to-verify and ready-to-publish. Surface
-      missing project checks or publication prerequisites before spending a session on
-      that path; do not require forge credentials or a product brief for an
-      investigation.
-- [ ] Preview preparation and explain incompatibility before launch, without turning
-      unsupported scripts or devcontainer features into silent host execution.
 - [ ] **Service sidecars, the browser first.** A `[[service]]` catalogue in `node.toml` —
       a digest-pinned image, its port, a readiness probe — from which a session asks for a
       service by name (`service_start`, which blocks until the probe passes or a bounded

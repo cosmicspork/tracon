@@ -2,6 +2,7 @@
 // interface can say what the node said, not "request failed".
 
 import type {
+  Continuation,
   SessionExhaustion,
   ExternalEvent,
   ExternalView,
@@ -40,6 +41,9 @@ import type {
   RecallHit,
   RecentRepo,
   SessionAuthority,
+  PreparationPreview,
+  RepoReadiness,
+  SessionOutcome,
   Session,
   SessionUsage,
   ReviewDetails,
@@ -219,6 +223,19 @@ export const api = {
       Read-only: the node answers it by running its own policy and grants. */
   sessionAuthority: (id: string) =>
     call<SessionAuthority>('GET', `/api/sessions/${id}/authority`),
+  /** What preparing `repo` would do and what in it the node would not do. */
+  preparationPreview: (repo: string) =>
+    call<PreparationPreview>('GET', `/api/preparation?repo=${encodeURIComponent(repo)}`),
+  /** What investigating, verifying and publishing from `repo` would lack. */
+  readiness: (channel: string, repo: string, workItem?: string | null) =>
+    call<RepoReadiness>(
+      'GET',
+      `/api/readiness?channel=${encodeURIComponent(channel)}&repo=${encodeURIComponent(repo)}${
+        workItem ? `&work_item=${encodeURIComponent(workItem)}` : ''
+      }`,
+    ),
+  /** What the session came to: changed, verified, pending, uncertain, cost. */
+  sessionOutcome: (id: string) => call<SessionOutcome>('GET', `/api/sessions/${id}/outcome`),
   /** Mint a single-use capability for this session's OpenCode view. The URL
       that comes back carries it in a fragment and belongs in exactly one
       place: an iframe's `src`, or the desktop window. Never log it. */
@@ -260,6 +277,14 @@ export const api = {
   }) => call<Session>('POST', '/api/sessions', spec),
   /** Carry on a session a node restart cut off, as a new session on its workspace. */
   continueSession: (id: string) => call<Session>('POST', `/api/sessions/${id}/continue`),
+  /** One piece of work in one view: an item's attempts, or a plain session's lineage. */
+  workContinuation: (id: string) => call<Continuation>('GET', `/api/work/${id}/continuation`),
+  sessionContinuation: (id: string) => call<Continuation>('GET', `/api/sessions/${id}/continuation`),
+  /** Carry the work on from an ended attempt; an `approach` changes how. */
+  carryOn: (body: { session_id: string; approach?: string; model?: string; harness?: string }) =>
+    call<Session>('POST', '/api/continuation/continue', body),
+  abandonWork: (body: { item_id?: string; session_id?: string; reason: string }) =>
+    call<{ abandoned: boolean }>('POST', '/api/continuation/abandon', body),
   /** One prompt: the work item and the session that starts on it. */
   compose: (c: {
     channel: string

@@ -287,6 +287,9 @@ pub mod event_kind {
     /// `bytes_out`, `duration_ms`, `reason`, and `output` only when output
     /// capture was deliberately turned on).
     pub const PTY_CLOSED: &str = "pty_closed";
+    /// The operator abandoned the work this session was the latest attempt
+    /// at (`reason`, `summary`): its item closed, or its lineage put away.
+    pub const ABANDONED: &str = "abandoned";
 }
 
 #[cfg(test)]

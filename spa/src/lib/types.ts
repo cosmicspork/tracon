@@ -1005,6 +1005,68 @@ export interface SessionAuthority {
   grants: AuthorityGrant[]
 }
 
+/** What a session came to, read from what was recorded. The agent's words
+    are only ever `claims`; a claim is backed only by a check the node ran on
+    the commit it was made at. */
+export interface SessionOutcome {
+  session_id: string
+  channel: string
+  state: string
+  end_reason: string | null
+  head_sha: string | null
+  changed: {
+    reviews: {
+      id: string
+      kind: string
+      title: string
+      state: string
+      head_sha: string
+      added: number
+      removed: number
+      files: number
+    }[]
+    files: string[]
+    added: number
+    removed: number
+    workspace_changes: number
+  }
+  verified: OutcomeCheck[]
+  claims: OutcomeClaim[]
+  needs_decision: { kind: 'permission' | 'question' | 'review' | 'report'; id: string; title: string; since_ms: number }[]
+  uncertain: string[]
+  cost: {
+    tokens_used: number
+    budget_tokens: number
+    cost_usd: number | null
+    gateway_tokens: number
+    charged_tokens: number
+    unmetered_turns: number
+    mismatched_turns: number
+  }
+}
+
+export interface OutcomeCheck {
+  check_id: string
+  command: string | null
+  outcome: string
+  source_outcome: string | null
+  head_sha: string | null
+  passed: boolean
+  failed: boolean
+  current: boolean
+  finished_ms: number | null
+}
+
+export interface OutcomeClaim {
+  source: 'review' | 'report' | 'shown_work'
+  id: string
+  title: string
+  text: string
+  head_sha: string | null
+  backed_by: string[]
+  backed: boolean
+}
+
 export interface CeilingInfo {
   usage_today: number
   ceiling: number | null
@@ -1539,4 +1601,108 @@ export interface ExternalEvent {
   ref_id: string | null
   payload: Record<string, unknown>
   at_ms: number
+}
+
+/** Something a repository asks of preparation that the node does not do, and
+    where the same work belongs. */
+export interface PreparationIncompatibility {
+  source: string
+  item: string
+  reason: string
+  instead: string | null
+  blocking: boolean
+}
+
+/** What preparing a checkout would do, read before launch. */
+export interface PreparationPreview {
+  repo: string
+  image: string
+  image_source: string
+  devcontainer_image: string | null
+  lockfiles: string[]
+  install: string | null
+  prepare: string[]
+  egress: string[]
+  incompatible: PreparationIncompatibility[]
+  ready: boolean
+}
+
+/** What one path (investigate, verify, publish) needs that the repository or
+    channel lacks. `missing` stops a session on that path; `notes` do not. */
+export interface ReadinessGap {
+  key: string
+  message: string
+}
+
+export interface PathReadiness {
+  purpose: 'investigate' | 'verify' | 'publish'
+  ready: boolean
+  missing: ReadinessGap[]
+  notes: ReadinessGap[]
+}
+
+export interface RepoReadiness {
+  channel: string
+  repo: string
+  investigate: PathReadiness
+  verify: PathReadiness
+  publish: PathReadiness
+}
+
+/** One attempt at a piece of work: a session that held the item, or one in a plain session's lineage. */
+export interface ContinuationAttempt {
+  id: string
+  phase: string
+  model: string
+  harness: string
+  state: string
+  end_reason: string | null
+  last_error: string | null
+  tokens_used: number
+  created_ms: number
+  continued_from: string | null
+  parent_session: string | null
+  archived: boolean
+}
+
+export type NextActionKind =
+  | 'done'
+  | 'start'
+  | 'watch'
+  | 'answer'
+  | 'resume'
+  | 'unblock'
+  | 'execute'
+  | 'continue'
+  | 'change_approach'
+
+/** The work-level continuation view, as the node derives it from recorded state. */
+export interface Continuation {
+  kind: 'item' | 'session'
+  id: string
+  channel: string
+  intent: { title: string; body: string; source: 'item' | 'prompt' | 'none' }
+  attempts: ContinuationAttempt[]
+  blockers: string[]
+  next: { kind: NextActionKind; text: string; session_id: string | null }
+  workspace: { id: string; branch: string; session_id: string } | null
+  decisions: {
+    plan: string | null
+    brief: string | null
+    answered: { session_id: string; kind: 'permission' | 'question'; asked: string; answer: string; at_ms: number }[]
+  }
+  evidence: {
+    reviews: {
+      id: string
+      session_id: string | null
+      title: string
+      state: string
+      verdict_reason: string | null
+      publish_result: string | null
+      head_sha: string
+      created_ms: number
+    }[]
+    shown: { id: string; session_id: string | null; title: string; head_sha: string; stale: boolean; created_ms: number }[]
+  }
+  actions: { continue_from: string | null; abandon: boolean }
 }
