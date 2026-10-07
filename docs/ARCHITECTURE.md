@@ -645,7 +645,16 @@ change at that commit whose text differs, or more than one that matches, is not
 guessed between. A comment is recognised the same way, by its approved text.
 A forge that cannot be reached, or an answer that does not settle which change
 is this publication's, is recorded as `uncertain` rather than reported as
-either success or failure. Every Git
+either success or failure. The review screen shows the latest record as one of
+not attempted (refused before anything spoke to the forge), in progress,
+failed, uncertain or published, with its remedy, and says before approval
+whether a forge token is bound to the channel on this node — a binding, never
+a claim that the token may push. The remedy is **Retry publication**, not a
+second approval: it re-sends the title, body and outputs the record holds for
+that revision, commit and target, and an uncertain attempt looks at the forge
+before repeating anything. A newer revision, a moved branch, another target
+or new prose needs a fresh approval, and binding a credential never retries
+on its own. Every Git
 command that can reach a forge — clone, fetch, ls-remote, push — is built in one
 place with a brokered credential or none: an ambient host helper, an askpass
 program, or an `ssh-agent` identity can never answer for the node, and there is

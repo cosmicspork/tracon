@@ -2063,6 +2063,18 @@ pub async fn get_review(
     // attempt is visible here — including the `uncertain` one an operator has
     // to verify on the forge — rather than only in the log.
     let publications = s.store().publications_for_review(&id)?;
+    // Whether this node could publish it, and how the latest attempt ended,
+    // with the remedy. Node-local: only the owner holds the credential and
+    // the journal, and only the owner can retry.
+    let publication = match remote_owner {
+        Some(_) => serde_json::Value::Null,
+        None => json!({
+            "readiness": crate::authority::publication_readiness(&s.tools.broker, &r, &s.node_id),
+            "latest": publications
+                .first()
+                .map(|row| crate::authority::publication_view(s.store(), &r, row)),
+        }),
+    };
     // What the agent showed of its work, each marked stale once the candidate
     // moved past the commit it was shown at. Node-local, like the checks: a
     // mirror never had the workspace it was read from.
@@ -2123,6 +2135,7 @@ pub async fn get_review(
         "evidence": evidence,
         "legacy_check_events": legacy_check_events,
         "publications": publications,
+        "publication": publication,
         "shown_work": shown_work,
         "authorship": authorship,
     })))
@@ -2572,6 +2585,7 @@ pub(crate) async fn decide_local(
                     // bytes published under this approval.
                     decided_revision_id: decided_revision.as_deref(),
                     outputs: b.outputs.as_ref(),
+                    recover: false,
                 },
             )
             .await
@@ -2613,6 +2627,113 @@ pub(crate) async fn decide_local(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("{other:?} is not a verdict"),
         )),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RecoverBody {
+    /// The publication record the operator is retrying, as the review screen
+    /// showed it. A retry is of a recorded attempt, not of the review.
+    pub publication_id: String,
+}
+
+/// Retry a publication exactly as it was approved: the recorded revision,
+/// commit, target, title, body and outputs, read back from the journal. It
+/// is not a second approval and takes no prose from the caller; anything
+/// that changed since is refused with what to do instead. An uncertain
+/// attempt is resumed by looking at the forge before anything is repeated.
+pub async fn recover_publication(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<RecoverBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    if r.node_id != s.node_id {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this review is published by the node that owns it; retry it there".into(),
+        ));
+    }
+    let row = s
+        .store()
+        .publication(&b.publication_id)?
+        .filter(|row| row.review_id == id)
+        .ok_or(ApiError(
+            StatusCode::NOT_FOUND,
+            "no such publication for this review".into(),
+        ))?;
+    if let Some(refusal) = crate::authority::recovery_refusal(s.store(), &r, &row) {
+        return Err(ApiError(StatusCode::CONFLICT, refusal));
+    }
+    // Checked as present just above.
+    let title = row.title.clone().unwrap_or_default();
+    let body = row.body.clone().unwrap_or_default();
+    let outputs: crate::review::publish::Outputs =
+        serde_json::from_str(row.outputs_json.as_deref().unwrap_or_default()).map_err(|e| {
+            ApiError(
+                StatusCode::CONFLICT,
+                format!("the recorded outputs are unreadable ({e}); approve it again"),
+            )
+        })?;
+    let revision = match row.revision_id.as_deref() {
+        Some(revision) => s.store().review_revision(revision)?,
+        None => None,
+    };
+    match crate::authority::publish_review(
+        &crate::authority::PublishContext {
+            store: s.store(),
+            manager: &s.manager,
+            broker: &s.tools.broker,
+            cfg: &s.cfg,
+            node_id: &s.node_id,
+        },
+        crate::authority::PublishRequest {
+            review: &r,
+            title: &title,
+            body: &body,
+            require_evidence: false,
+            recheck_authority: None,
+            decided_revision_id: row.revision_id.as_deref(),
+            outputs: Some(&outputs),
+            recover: true,
+        },
+    )
+    .await
+    {
+        Ok(crate::authority::Published {
+            url: published,
+            outputs,
+        }) => {
+            let waiting_ms = record_evidence_decision(
+                s.store(),
+                revision.as_ref(),
+                &id,
+                "approved",
+                Some("published by retrying the publication approved earlier"),
+                Some(&title),
+                Some(&body),
+                None,
+                Some(&outputs),
+            )?;
+            record_operator_decision_event(
+                &s,
+                r.session_id.as_deref(),
+                &id,
+                "approved",
+                waiting_ms,
+            );
+            Ok(Json(json!({ "state": "approved", "published": published })))
+        }
+        Err(crate::authority::PublishError::Conflict(message)) => {
+            Err(ApiError(StatusCode::CONFLICT, message))
+        }
+        Err(crate::authority::PublishError::External(message))
+        | Err(crate::authority::PublishError::Uncertain(message)) => {
+            Err(ApiError(StatusCode::BAD_GATEWAY, message))
+        }
     }
 }
 
