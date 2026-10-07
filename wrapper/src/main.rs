@@ -14,6 +14,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod launcher;
 mod node;
 mod opencode;
 mod prefs;
@@ -253,7 +254,6 @@ fn main() {
             show_window(app);
         }))
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -286,6 +286,7 @@ fn main() {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            build_main_window(&handle)?;
             let target = updater::Target::detect(&app.env());
             if let Some(target) = target.clone() {
                 // Off the runtime: an update leaves a whole bundle behind, and
@@ -527,6 +528,45 @@ fn on_cmd_q(app: &tauri::AppHandle) {
     set_dock_policy(app, false, hide_dock);
 }
 
+/// The main window, built here rather than by Tauri from `tauri.conf.json`
+/// (where it is declared with `"create": false`) so it can answer a link meant
+/// for a new window. The interface opens an external page — a published pull
+/// request, a provider's sign-in, the Podman docs — as a `_blank` link or
+/// `window.open`; no second window is ever made for it, and an `https` link is
+/// handed to the host's browser by [`launcher`]. Nothing else leaves the app.
+fn build_main_window(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .cloned()
+        .ok_or("no `main` window is declared in tauri.conf.json")?;
+    tauri::WebviewWindowBuilder::from_config(app, &config)?
+        .on_new_window(|target, _features| {
+            if browser_link(&target) {
+                if let Err(e) = launcher::open(&target) {
+                    eprintln!("tracon: could not open a link in the browser: {e}");
+                }
+            } else {
+                eprintln!(
+                    "tracon: the window refused to open a `{}` link",
+                    target.scheme()
+                );
+            }
+            tauri::webview::NewWindowResponse::Deny
+        })
+        .build()?;
+    Ok(())
+}
+
+/// What the main window may send to the browser: `https`, with no credentials
+/// in the URL. The scope the opener plugin was granted, kept.
+fn browser_link(target: &tauri::Url) -> bool {
+    target.scheme() == "https" && target.username().is_empty() && target.password().is_none()
+}
+
 /// Raise the window: the one thing every path back to it wants.
 pub fn show_window(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
@@ -594,5 +634,20 @@ fn open_at_if(app: &tauri::AppHandle, path: &str, show: bool) {
     }
     if show {
         show_window(app);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_main_window_sends_only_plain_https_links_to_the_browser() {
+        let link = |s: &str| browser_link(&tauri::Url::parse(s).unwrap());
+        assert!(link("https://github.com/cosmicspork/tracon/pull/1"));
+        assert!(!link("http://example.com/"));
+        assert!(!link("https://user:pass@example.com/"));
+        assert!(!link("file:///etc/passwd"));
+        assert!(!link("javascript:alert(1)"));
     }
 }

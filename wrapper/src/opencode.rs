@@ -30,7 +30,6 @@ use std::sync::{Arc, Mutex};
 use tauri::utils::config::WindowConfig;
 use tauri::webview::{NewWindowFeatures, NewWindowResponse};
 use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_opener::OpenerExt;
 
 /// The window's label, and the one a capability may name.
 pub const WINDOW_LABEL: &str = "opencode";
@@ -184,35 +183,6 @@ pub fn boot_url(body: &serde_json::Value, node_origin: &str) -> Result<Url, Stri
     Ok(url)
 }
 
-/// Let a link the page meant for a new tab reach the window's own handlers.
-///
-/// The opener plugin injects a click interceptor into every webview this app
-/// builds: it cancels a `target="_blank"` or modified click and invokes
-/// `plugin:opener|open_url` instead. In this window that invoke is refused —
-/// which is the point — and the click has already been cancelled, so the link
-/// would do nothing at all. This runs first, in the capture phase, and stops
-/// the event before that listener sees it, on exactly the clicks that listener
-/// would have taken. The click then happens natively and `on_new_window`
-/// decides, in Rust. The page's own router is untouched: it does not handle
-/// `_blank` or modified clicks either.
-const LET_LINKS_THROUGH: &str = r#"(function () {
-  window.addEventListener('click', function (event) {
-    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.altKey) return
-    var anchor = event.composedPath().find(function (node) {
-      return node instanceof Node && node.nodeName && node.nodeName.toUpperCase() === 'A'
-    })
-    if (!anchor || !anchor.href) return
-    if (anchor.target !== '_blank' && !event.ctrlKey && !event.shiftKey) return
-    try {
-      var scheme = new URL(anchor.href).protocol
-      if (['http:', 'https:', 'mailto:', 'tel:'].indexOf(scheme) === -1) return
-    } catch (_) {
-      return
-    }
-    event.stopImmediatePropagation()
-  }, true)
-})()"#;
-
 /// Ask the node for a boot URL for this session's OpenCode UI and open the
 /// window on it.
 ///
@@ -273,17 +243,15 @@ fn open(app: &tauri::AppHandle, url: Url) -> Result<(), String> {
     let mut config = window_config(app)?;
     config.url = WebviewUrl::External(url);
 
-    let nav_app = app.clone();
     let nav_allowed = allowed.clone();
     let new_app = app.clone();
     let new_allowed = allowed.clone();
     let window = WebviewWindowBuilder::from_config(app, &config)
         .map_err(|e| e.to_string())?
-        .initialization_script(LET_LINKS_THROUGH)
         .on_navigation(move |target| match route(target, &nav_allowed.get()) {
             Route::Allow => true,
             Route::External(href) => {
-                open_externally(&nav_app, &href);
+                open_externally(&href);
                 false
             }
             Route::Refuse => {
@@ -301,7 +269,7 @@ fn open(app: &tauri::AppHandle, url: Url) -> Result<(), String> {
                         let _ = window.navigate(target);
                     }
                 }
-                Route::External(href) => open_externally(&new_app, &href),
+                Route::External(href) => open_externally(&href),
                 Route::Refuse => refused(&target),
             }
             NewWindowResponse::Deny
@@ -327,10 +295,13 @@ fn window_config(app: &tauri::AppHandle) -> Result<WindowConfig, String> {
 }
 
 /// Hand an off-origin `http(s)` link to the system browser. A Rust call, not
-/// a command: the window is granted no opener permission and could not make
-/// this happen by itself.
-fn open_externally(app: &tauri::AppHandle, href: &str) {
-    if let Err(e) = app.opener().open_url(href, None::<&str>) {
+/// a command: the window is granted no IPC and could not make this happen by
+/// itself.
+fn open_externally(href: &str) {
+    let opened = Url::parse(href)
+        .map_err(|e| e.to_string())
+        .and_then(|url| crate::launcher::open(&url));
+    if let Err(e) = opened {
         eprintln!("tracon: could not open a link in the browser: {e}");
     }
 }
@@ -475,15 +446,5 @@ mod tests {
         assert!(!valid_session_id("a/b"));
         assert!(!valid_session_id("a?b=c"));
         assert!(!valid_session_id("a#b"));
-    }
-
-    #[test]
-    fn the_click_script_only_takes_clicks_the_opener_plugin_would_have_eaten() {
-        // The plugin's own listener returns on these; if this script stopped
-        // the event for anything more, the page's router would break.
-        assert!(LET_LINKS_THROUGH.contains("event.defaultPrevented"));
-        assert!(LET_LINKS_THROUGH.contains("anchor.target !== '_blank'"));
-        assert!(LET_LINKS_THROUGH.contains("stopImmediatePropagation"));
-        assert!(!LET_LINKS_THROUGH.contains("preventDefault()"));
     }
 }
