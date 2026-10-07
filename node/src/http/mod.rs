@@ -130,6 +130,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/admin/maintenance/restart", post(admin::restart))
         .route("/api/maintenance/storage", post(admin::storage))
+        .route("/api/maintenance/data", get(admin::data))
         .route("/api/admin/maintenance/install", post(admin::install))
         .route("/api/admin/maintenance/uninstall", post(admin::uninstall))
         .route("/api/admin/policy", get(policy_admin::status))
@@ -956,6 +957,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         cfg.clone(),
         state.node_id.clone(),
     ));
+
+    // Requests this node published, followed on their forge until they close.
+    tokio::spawn(crate::follow::run(state.tools.clone()));
 
     // This node's own vector index. Derived state, rebuilt from the corpus, so
     // it starts after everything that writes the corpus and never gates it.

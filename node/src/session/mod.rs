@@ -1562,6 +1562,12 @@ impl Manager {
         Ok(row)
     }
 
+    /// [`Self::record`], for what the node learns about a session from
+    /// outside it: a published request moving on its forge.
+    pub fn record_new_event(&self, e: NewEvent) {
+        self.record(e)
+    }
+
     /// Persist a lifecycle event and publish it on the stream, so a client
     /// watching live sees the same log a reload rebuilds.
     fn record(&self, e: NewEvent) {
@@ -1980,11 +1986,16 @@ impl Manager {
         let mut cache_env = Vec::new();
         let runner: Arc<dyn Runner> = match &image.image {
             Some(session_image) => {
-                // The session's own dependency cache: the agent installs into
-                // it, so no check ever reads it. It starts as a copy of the
-                // repository's base cache, so a first `cargo build` does not
-                // begin by fetching what the default branch already needs.
-                let cache = crate::environment::session_cache_volume(&workspace.id);
+                // The repository's session cache: the agent installs and
+                // builds into it, so no check ever reads it, and the next
+                // session on the repository finds what this one compiled. It
+                // starts as a copy of the repository's base cache, so a first
+                // `cargo build` does not begin by fetching what the default
+                // branch already needs.
+                let cache = crate::environment::session_cache_volume(
+                    &environment.cache_volume,
+                    &spec.channel,
+                );
                 if !self.backend.volume_exists(&cache).await {
                     if let Err(error) = self
                         .backend
@@ -1996,6 +2007,7 @@ impl Manager {
                 }
                 mounts.push(crate::runner::Mount::volume(cache, "/cache", false));
                 cache_env = crate::environment::cache_env();
+                cache_env.extend(crate::environment::session_build_env());
                 self.backend.runner_in(adapter.id(), session_image, mounts)
             }
             None => self.backend.runner_for(adapter.id(), mounts),

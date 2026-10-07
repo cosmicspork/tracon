@@ -16,6 +16,7 @@
   let on = $state(false)
   let busy = $state(false)
   let note = $state('')
+  let failed = $state(false)
   let testNote = $state('')
   const supported = push.supported()
   const needsInstall = push.needsInstall()
@@ -35,10 +36,12 @@
   async function act(f: () => Promise<unknown>, done: string | (() => string) = '') {
     busy = true
     note = ''
+    failed = false
     try {
       await f()
       note = typeof done === 'function' ? done() : done
     } catch (e) {
+      failed = true
       note = e instanceof Error ? e.message : String(e)
     } finally {
       busy = false
@@ -80,7 +83,7 @@
       {/if}
     {/if}
   </div>
-  {#if note}<span class="note">{note}</span>{/if}
+  {#if note}<span class="note" class:crit={failed}>{note}</span>{/if}
 </Card>
 
 <Card title="Registered devices" note={`Push subscriptions registered on ${servingNode}. Forgetting one stops only that device; shared channel settings are unchanged.`}>
@@ -147,6 +150,9 @@
   .note {
     font: 12.5px var(--mono);
     color: var(--wait);
+  }
+  .note.crit {
+    color: var(--crit);
   }
   @media (max-width: 700px) {
     .dev {

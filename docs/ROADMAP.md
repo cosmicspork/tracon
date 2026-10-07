@@ -58,13 +58,6 @@ Needed for daily use, but not blocking it today.
 
 **Sessions and accounting**
 
-- [ ] **Keep a session's build output.** Every run builds a compiled project from nothing —
-      `just check` took 4m47s in session `01a10447` (2026-10-03), most of it compiling.
-      Give sessions a persistent per-repository build cache (Cargo's `target/`, a bundler's
-      cache, the dependencies a session added) that survives the session. Required checks
-      keep starting from the trusted base cache: a directory the agent wrote must not be
-      able to make the review gate pass. A node-built cache of the default branch for
-      checks is the follow-on.
 - [ ] **Help set up a repository once: the skill.** The draft, trial and proposal
       tools exist (`repo_setup_*`). What remains: a built-in setup skill shipped through
       channel manifests for managed harnesses, and optional free-text notes on how to run
@@ -108,38 +101,10 @@ hit on a real task.
 
 **Review and publication**
 
-- [ ] Read a mirrored review from its owner. A review is mirrored to every node on its
-      channel and its verdict is forwarded to the owner, but its worktree, candidate,
-      checks, criteria and forge intent stay there, so a phone served by another node (the
-      homelab node, reviewing #338 and #339 on 2026-10-04) read none of them and called the
-      change stale. The node now says the review is held elsewhere and leaves approval to
-      the owner's own staleness check; the phone still decides without the checks, the
-      evidence or what approval sends to the forge. Fetch that detail from the owner over
-      the mesh, as candidate evidence already is, bounded and refused for a third node, and
-      say plainly when the owner is unreachable rather than showing an empty review.
-- [ ] Follow a published pull or merge request after it opens: subscribe to its CI runs,
-      draft/ready and open/merged/closed transitions, review verdicts and new comments or
-      threads, and record each as an event on the review and its work item. Notify through
-      the existing push channel with the change named ("CI failed on `node`", "marked
-      ready", "2 new comments"), and let a session that is still attached pick the change
-      up through the forge tools (#297, #298) rather than the operator relaying it. Polling
-      through the brokered token first; webhooks only where the node is reachable. A
-      subscription ends when the request closes, and it never merges, approves or retries
-      anything on its own.
-- [ ] What ships under the operator's name is reviewed: the branch name and the commits.
-      Today the candidate is the tree, the review shows the diff and the forge prose, and
-      the commits and branch are pushed as the agent wrote them (the default branch even
-      names tracon). Three steps: list the commits and the branch beside the diff;
-      treat commit message and branch name as publication prose like the forge
-      description — proposed by the agent, edited by the operator, bound by hash under the
-      publish grant — with the node squashing the candidate into one commit carrying the
-      approved message on the approved branch by default (`publish.commits = squash |
-      keep` per channel or repository; `keep` edits each message), which leaves the tree
-      and therefore the candidate, its evidence and the verdict unchanged; and a
-      deterministic subject-and-branch check (conventional type, imperative subject,
-      kebab branch, no ticket keys) whose rules come from the channel or the repository's
-      own guidelines, so a bad message fails before the card reaches the operator. Record
-      the "reviewed tree, not reviewed bytes" reframing in ARCHITECTURE and DESIGN.
+- [ ] Edit each commit's message under `publish.commits = keep`. Squash (the default)
+      already ships one commit of the reviewed tree with the approved message and
+      branch; `keep` lists the agent's commits and checks their subjects but pushes
+      them as written.
 - [ ] Durable review drafts: unsent feedback and publication prose survive navigation,
       reconnect and device changes with explicit saved/conflict state. Desktop diff drafts
       remain revision-keyed. The acceptance test is the reconnect: leave feedback, switch
@@ -147,45 +112,14 @@ hit on a real task.
 - [ ] Show changes since the last reviewed revision beside the full base diff, and what
       changed in response to each comment, so the operator does not reread the entire
       change to find the one concern that remains unresolved.
-- [ ] Keep verdicts reachable in long reviews, open a labelled reason composer for Request
-      changes and Reject rather than disabling a button, and explain unavailable actions
-      inline.
-- [ ] Trim criteria binding to what is produced. #290 lets a criterion point at a
-      `scenario` or an `observation`; neither is produced by anything now that versioned
-      scenarios and trial capture are dropped. Remove those link kinds, keep `check` and
-      the operator's judgement, and say so in the brief format.
 
 **Forge and tracker**
 
-- [ ] Give GitHub the CI tools GitLab has: a run's job log tail (`run_logs`, the
-      `job_trace` limits), rerunning a run's failed jobs (`run_rerun`, asked), and the
-      runs at an exact commit. An agent on a GitHub project should diagnose and retry CI
-      the way it can on GitLab, without the operator's token or a host CLI.
-- [ ] Follow a pipeline the agent started. On 2026-10-06 an external session ran a
-      staging pipeline on a work repository's default branch after its merge request
-      merged (`pipeline_run`, approved), then had no brokered way to see it through:
-      `pipeline_status` is a snapshot, so the choices were calling it in a loop or
-      polling with a host `glab` outside the broker's log. Add `pipeline_wait`, a read
-      that holds up to 45 s like `review_status` and returns as soon as a job or the
-      pipeline changes state, with the job list, so a failed job leads straight to
-      `job_trace`. Let `pipeline_run`, `job_play` and `deploy` subscribe the session to
-      the pipeline they start: record each job result as an event on the session and its
-      work item, and notify through the push channel when the pipeline finishes, fails
-      or stops at a manual job. Share the polling with following a merge request, so a
-      pipeline outlives the request that triggered it. Following never retries, cancels
-      or plays a job on its own; GitHub runs follow once the item above lands.
+- [ ] Follow a GitHub run the agent reran (`run_rerun`) the way a GitLab pipeline the
+      agent started is followed, once the item above lands: a `run_wait` read, the
+      job results recorded on the session, and a push when the run finishes or fails.
 
 **Node data**
-
-- [ ] **Data management in Settings.** Retention is decided: the node keeps everything
-      and the operator deletes by hand. Give that a pane — what the node holds per kind
-      (sessions, events, candidates and evidence, documents, memories, workspaces, harness
-      state), how much it weighs, and delete for the kinds that have a real delete, with
-      the propagation each one does or does not have stated. A storage figure belongs on
-      the Nodes screen too. Tombstones stay undecided until replication makes them matter.
-- [ ] Explain browser push enrollment failures by stage: unavailable API, denied
-      permission, service-worker failure, push-service registration failure, node storage
-      error; never report a device as registered after a failed enrollment.
 
 **OpenCode, contingent on the spike above**
 
@@ -363,9 +297,11 @@ servers reaching the v2 session runner.
 - A run's dependency cache and each check's tree are copies. Where the runtime's storage
   has no reflinks they are full copies, made once per run and once per check. The base
   cache they start from is filled when the node builds a repository's image; an entry
-  that names a hand-pinned `image` has none, so its runs prepare from empty. A run keeps
-  no build output: every run of a compiled project's checks builds from nothing (three
-  minutes for tracon's own test build, 2026-10-01).
+  that names a hand-pinned `image` has none, so its runs prepare from empty. A check run
+  keeps no build output: every run of a compiled project's checks builds from nothing
+  (three minutes for tracon's own test build, 2026-10-01). Sessions keep theirs, but only
+  Cargo's is moved out of the tree; a bundler's cache inside `node_modules` lives and goes
+  with the workspace.
 - Per-client egress — a session's, a preparation's — is the Podman
   backend's. The Kubernetes backend issues no grants, so a `[[repo]]` entry that names
   `egress` cannot prepare there. A grant filters by host, not by method: a registry that

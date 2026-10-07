@@ -240,10 +240,28 @@ pub fn harness_image(cfg: &Config) -> String {
     }
 }
 
-/// A workspace's own dependency cache, mounted writable into its sessions.
-/// What an agent installs lands here and nowhere a check reads.
-pub fn session_cache_volume(workspace_id: &str) -> String {
-    crate::workspace::volume_name(workspace_id).replacen("tracon-workspace-", "tracon-cache-w-", 1)
+/// A repository's session build cache, one per channel, mounted writable
+/// into every session that channel runs on it: the dependencies a session
+/// fetched and the build output it compiled, kept for the next session. What
+/// an agent writes lands here and nowhere a check reads; checks start from
+/// the base cache (`RepoEnvironment::cache_volume`) every time.
+///
+/// Keyed on the base cache's name, which already names the repository, and
+/// on the channel, so what one channel's agent left is not built on by
+/// another's.
+pub fn session_cache_volume(base_cache: &str, channel: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(base_cache.as_bytes());
+    hash.update([0]);
+    hash.update(channel.as_bytes());
+    format!("tracon-cache-r-{}", &hex::encode(hash.finalize())[..24])
+}
+
+/// Where a session keeps its build output, under the cache mount, so it
+/// outlives the session. Only a session gets these: a check's cache is
+/// read-only and its build starts from nothing it did not prepare.
+pub fn session_build_env() -> Vec<(String, String)> {
+    vec![("CARGO_TARGET_DIR".to_string(), "/cache/target".to_string())]
 }
 
 /// Where each package manager keeps what it fetched, under the cache mount.
@@ -762,5 +780,29 @@ mod tests {
             app.cache_volume,
             environment_for(&cfg, &store, Some(Path::new("/src/app"))).cache_volume
         );
+    }
+
+    #[test]
+    fn a_session_build_cache_is_the_repositorys_and_the_channels() {
+        let mine = session_cache_volume("tracon-cache-base-app", "personal");
+        // The next session on the same repository and channel finds it.
+        assert_eq!(
+            mine,
+            session_cache_volume("tracon-cache-base-app", "personal")
+        );
+        assert!(mine.starts_with("tracon-cache-r-"));
+        // Another repository, or another channel's agent, starts its own.
+        assert_ne!(
+            mine,
+            session_cache_volume("tracon-cache-base-notes", "personal")
+        );
+        assert_ne!(mine, session_cache_volume("tracon-cache-base-app", "work"));
+        // Build output goes under the cache, and only a session is told so:
+        // a check's cache is read-only and shared names would point its
+        // build at it.
+        assert!(session_build_env()
+            .iter()
+            .all(|(name, value)| value.starts_with("/cache/")
+                && !cache_env().iter().any(|(shared, _)| shared == name)));
     }
 }

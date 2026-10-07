@@ -498,6 +498,12 @@ export interface ReviewDetails {
    * `intent` is null; a verdict is forwarded to it. Null for a local review.
    */
   remote_owner?: string | null
+  /**
+   * For a mirrored review, whether its owner's detail was read: `fetched`
+   * fills `stale`, `evidence`, `criteria` and `intent` from the owner;
+   * `moved` and `unreachable` leave them empty, with the reason.
+   */
+  owner_detail?: OwnerDetail | null
   stale: string[]
   /** Pinned to the revision at submit time; never the live work item. */
   requirements: PinnedRequirements | null
@@ -614,6 +620,16 @@ export interface ReviewOutputs {
   description?: { title: string; body: string }
   comment?: string
   draft?: boolean
+  /** The message the squashed commit carries. */
+  commit?: string
+  /** The operator's rename of a new change's branch. */
+  branch?: string
+}
+
+/** One commit the agent made, listed beside the diff. */
+export interface ReviewCommit {
+  sha: string
+  subject: string
 }
 
 export interface ReviewIntent {
@@ -622,6 +638,13 @@ export interface ReviewIntent {
   lease?: string
   /** The push replaces `lease` rather than fast-forwarding it. */
   rewrite?: boolean
+  /**
+   * The commit the reviewed tree is squashed onto. Absent: the agent's
+   * commits are pushed as written.
+   */
+  squash_onto?: string
+  /** The agent's commits beyond the base, oldest first. */
+  commits?: ReviewCommit[]
 }
 
 export interface ReviewRevisionRef {
@@ -719,12 +742,18 @@ export interface BriefEntry {
   links?: BriefLink[]
 }
 
-/** What a brief line says would settle it. */
-export type LinkKind = 'check' | 'scenario' | 'observation'
+/** What a brief line says would settle it: a configured check. */
+export type LinkKind = 'check'
+
+/**
+ * Link kinds an older brief may still hold. Nothing produces them; they are
+ * read, shown as retired, and settle nothing.
+ */
+export type RetiredLinkKind = 'scenario' | 'observation'
 
 export interface BriefLink {
   provenance: Provenance
-  kind: LinkKind
+  kind: LinkKind | RetiredLinkKind
   value: string
   refs: BriefRef[]
 }
@@ -787,7 +816,7 @@ export interface CriterionLink {
   index: number
   provenance: Provenance
   standard: Standard
-  kind: LinkKind
+  kind: LinkKind | RetiredLinkKind
   value: string
   refs: BriefRef[]
   /** For a check: `passed`, `failed`, `running`, `interrupted`, `cancelled`. */
@@ -1564,6 +1593,23 @@ export interface CandidateDetail {
 }
 
 /** One runtime volume or state directory, and what a storage sweep makes of it. */
+/** One kind of data a node holds (`GET /api/maintenance/data`). */
+export interface Holding {
+  kind: string
+  label: string
+  unit: string
+  count: number
+  bytes: number
+  delete: { path: string; label: string } | null
+  propagation: string
+}
+
+export interface DataInventory {
+  database_bytes: number
+  total_bytes: number
+  holdings: Holding[]
+}
+
 export interface StorageItem {
   kind: 'volume' | 'directory'
   name: string
@@ -1601,6 +1647,11 @@ export interface ExternalEvent {
   ref_id: string | null
   payload: Record<string, unknown>
   at_ms: number
+}
+
+export interface OwnerDetail {
+  state: 'fetched' | 'moved' | 'unreachable'
+  reason?: string
 }
 
 /** Something a repository asks of preparation that the node does not do, and

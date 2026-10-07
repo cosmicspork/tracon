@@ -406,8 +406,11 @@ image it got, and why when it is not the repository's: a base the harness binary
 run on (a musl image, one with no Git) leaves the session in the harness image rather
 than failing to start. A repository with no image yet builds one at its first session,
 which waits; one whose Dockerfile changed starts on the image it has and is rebuilt behind
-the session. Each workspace gets its own dependency cache at `/cache`, started as a copy of
-the repository's base cache, which no check reads. The layer is root, like every run here, so a tool the Dockerfile installed under
+the session. Sessions keep a build cache at `/cache`, one per repository and channel, that
+outlives each session: what a session fetched and, through `CARGO_TARGET_DIR=/cache/target`,
+what it compiled are there for the next one. It starts as a copy of the repository's base
+cache, and no check reads it. Two sessions on one repository share it, so a second
+`cargo build` waits for the first's lock. The layer is root, like every run here, so a tool the Dockerfile installed under
 another user's home has to be readable and executable by others. OpenCode sessions, and
 sessions on Kubernetes, stay in the harness image.
 
@@ -455,9 +458,15 @@ own grant, are refused each other's hosts, and never wait for one
 another. And the image's default user has to be able to write `/work` and `/cache`, which
 under rootless Podman means it runs as root.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
-a request for changes. Approval publishes exactly the reviewed bytes with the brokered
+a request for changes. Approval publishes exactly the reviewed tree with the brokered
 credential; if the branch moved since submit, approval is refused and the changed files
-are named.
+are named. The tree is what was reviewed; the commit message and branch it ships with are
+prose you edit beside the diff, where the agent's own commits are listed. By default the
+node pushes one commit holding the reviewed tree with the approved message on the
+approved branch; `commits = "keep"` (in `[publish]`, a repository's entry, or the
+channel's `publish.commits` binding) pushes the agent's commits as written instead.
+Subject and branch rules (`style`) are off unless configured, and a submission that
+breaks them is refused before it reaches you.
 
 A review either opens a new pull or merge request or updates one the branch
 already has (`change`, named at first submit). The review's title and body are the
@@ -479,7 +488,12 @@ review threads (file, line, resolved or outdated) and conversation with
 `pr_threads` / `mr_discussions`, finds a branch's open change with `pr_for_branch` /
 `mr_for_branch`, and sees each reviewer's latest verdict in `pr_status`, all
 unattended. Replying to a thread, and resolving it, is `pr_reply` / `mr_reply`,
-which you are asked about like any other comment. `tracon provenance <sha>`
+which you are asked about like any other comment. CI reads the same on either
+forge: a run's jobs and the step that failed (`run_status` with `run_id` /
+`pipeline_status`), the runs at an exact commit (`run_status` with `sha` /
+`pipeline_list_by_sha`), and the end of a job's log (`run_logs` / `job_trace`, 16 KiB
+unless asked, at most 64) are unattended; rerunning a run's failed jobs (`run_rerun`)
+or playing a job (`job_play`) is asked. `tracon provenance <sha>`
 answers, later, which model, which prompts, which approval and which policy shipped
 a commit.
 
@@ -894,6 +908,13 @@ gh = "gh"
 glab = "glab"
 git = "git"
 forge_timeout_secs = 15             # how long one gh or glab call may run
+commits = "squash"                  # one commit of the reviewed tree; "keep" pushes the agent's commits
+# [publish.style]                   # every rule off unless set; a repository entry may carry its own
+# conventional = true               # type(scope): subject, types from `types` or the usual set
+# imperative = true                 # "add", not "added" or "adds"
+# max_subject = 72
+# kebab_branch = true               # feat/lowercase-words
+# no_ticket_keys = true             # no PROJ-123 in the subject or branch
 
 [mesh]
 # hub_url = "https://hub.example.com"   # set by tracon mesh init / enroll

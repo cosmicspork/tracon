@@ -218,8 +218,8 @@ const QUIET: &str = "Nobody is woken for something that can wait";
 
 /// A brief whose success criteria carry a link of every kind the node reads, so
 /// one document exercises every resolution: a configured check, a command the
-/// operator never configured, a scenario, an observation, and a criterion with
-/// nothing under it at all.
+/// operator never configured, the retired scenario and observation kinds an
+/// older brief may still hold, and a criterion with nothing under it at all.
 fn brief_markdown() -> String {
     format!(
         "# Brief: Overnight alert triage\n\n\
@@ -267,14 +267,16 @@ async fn what_points_at_a_criterion_lives_in_the_brief_beside_it() {
         triage["links"][0]["unresolved"].is_null(),
         "`just check` is a check the operator configured: {triage}"
     );
-    assert_eq!(
-        triage["links"][1]["unresolved"], "this node holds no scenario records yet",
-        "a scenario is not a record this node holds yet, and says so: {triage}"
-    );
-    assert!(
-        triage["links"][2]["outcome"].is_null() && triage["links"][2]["unresolved"].is_null(),
-        "an observation is context for a person, not a result: {triage}"
-    );
+    for retired in [1, 2] {
+        let link = &triage["links"][retired];
+        assert!(
+            link["outcome"].is_null()
+                && link["unresolved"]
+                    .as_str()
+                    .is_some_and(|why| why.contains("retired")),
+            "a retired link is still read, and settles nothing: {triage}"
+        );
+    }
     // Nothing has run, so the criterion says that rather than reading as covered.
     assert_eq!(triage["coverage"], "no_result_yet");
 
@@ -681,8 +683,8 @@ async fn an_agent_proposes_what_good_means_and_the_operator_decides_it() {
         TRIAGE,
         LinkInput {
             provenance: Some("observed".into()),
-            kind: "observation".into(),
-            value: "two leads gave up".into(),
+            kind: "check".into(),
+            value: "just check".into(),
             refs: vec![],
         },
         None,
@@ -690,6 +692,17 @@ async fn an_agent_proposes_what_good_means_and_the_operator_decides_it() {
     )
     .expect_err("an observation points at something");
     assert!(bare.to_string().contains("points at something"), "{bare}");
+
+    // A retired kind is refused for new links, and says why.
+    let (st, v) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/work/{id}/criteria/{}/links", key_for(TRIAGE)),
+        Some(json!({ "kind": "scenario", "value": "overnight-happy-path" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v.to_string().contains("retired"), "{v}");
 
     // A kind the node does not read is refused rather than guessed at.
     let (st, v) = call(

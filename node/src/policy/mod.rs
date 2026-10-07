@@ -874,9 +874,11 @@ mod tests {
             "issue_search",
             "issue_transitions",
             "pipeline_status",
+            "pipeline_wait",
             "job_trace",
             "pr_status",
             "run_status",
+            "run_logs",
             "pr_threads",
             "pr_for_branch",
             "mr_discussions",
@@ -887,6 +889,7 @@ mod tests {
         }
         for name in [
             "pipeline_run",
+            "run_rerun",
             "pr_comment",
             "mr_comment",
             "pr_reply",

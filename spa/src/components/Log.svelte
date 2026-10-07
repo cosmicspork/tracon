@@ -127,6 +127,18 @@
         <div class="mark ok">plan written · <a href="/docs/{e.payload.channel ?? ''}/{e.payload.slug}">{e.payload.slug}</a> · ends the phase</div>
       {:else if e.kind === 'work_shown'}
         <div class="mark ok">work shown · {e.payload.title} · at {String(e.payload.head_sha ?? '').slice(0, 12)}{e.payload.files ? ` · ${e.payload.files} ${e.payload.files === 1 ? 'file' : 'files'}` : ''} · in tracon only</div>
+      {:else if e.kind === 'forge_follow'}
+        {@const changes = Array.isArray(e.payload.changes) ? (e.payload.changes as string[]) : []}
+        {@const url = typeof e.payload.url === 'string' ? e.payload.url : null}
+        {#if changes.length}
+          <div class="mark">on the forge · {changes.join(' · ')}{#if url} · <a href={url} target="_blank" rel="noopener">open</a>{/if}</div>
+        {/if}
+      {:else if e.kind === 'pipeline_follow'}
+        {@const changes = Array.isArray(e.payload.changes) ? (e.payload.changes as string[]) : []}
+        {@const url = typeof e.payload.url === 'string' ? e.payload.url : null}
+        {#if changes.length}
+          <div class="mark" class:crit={e.payload.status === 'failed'}>pipeline {e.payload.pipeline_id} · {changes.join(' · ')}{#if url} · <a href={url} target="_blank" rel="noopener">open</a>{/if}</div>
+        {/if}
       {:else if e.kind === 'work_closed'}
         <div class="mark">work closed{e.payload.summary ? ` · ${e.payload.summary}` : ''}</div>
       {:else if e.kind === 'review_verdict'}
