@@ -105,10 +105,6 @@ hit on a real task.
       already ships one commit of the reviewed tree with the approved message and
       branch; `keep` lists the agent's commits and checks their subjects but pushes
       them as written.
-- [ ] Durable review drafts: unsent feedback and publication prose survive navigation,
-      reconnect and device changes with explicit saved/conflict state. Desktop diff drafts
-      remain revision-keyed. The acceptance test is the reconnect: leave feedback, switch
-      device or reconnect, find it intact.
 
 **Forge and tracker**
 

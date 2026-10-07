@@ -2672,7 +2672,97 @@ pub async fn release_review(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Record a verdict; what the operator had written toward it stops being a
+/// draft once it is recorded.
 pub async fn decide_review(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<VerdictBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let decided = decide_review_inner(State(s.clone()), Path(id.clone()), Json(b)).await?;
+    if let Err(error) = s.store().clear_review_draft(&id) {
+        tracing::warn!(%error, review = %id, "could not clear a decided review's draft");
+    }
+    Ok(decided)
+}
+
+#[derive(Deserialize)]
+pub struct ReviewDraftBody {
+    /// The version this device last saw; 0 when it has seen none.
+    #[serde(default)]
+    pub base_version: i64,
+    #[serde(default)]
+    pub revision_id: Option<String>,
+    pub draft: serde_json::Value,
+}
+
+/// The operator's unsent words on a review, whichever device wrote them.
+pub async fn get_review_draft(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if s.store().get_review(&id)?.is_none() {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such review".into()));
+    }
+    Ok(Json(json!({ "draft": s.store().review_draft(&id)? })))
+}
+
+/// Save a draft on top of the version this device last saw. A save on any
+/// other version is a 409 carrying what is there now, so the device can say
+/// so and let the operator choose rather than overwrite it.
+pub async fn put_review_draft(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<ReviewDraftBody>,
+) -> Response {
+    match s.store().get_review(&id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return ApiError(StatusCode::NOT_FOUND, "no such review".into()).into_response()
+        }
+        Err(error) => return ApiError::from(error).into_response(),
+    }
+    if !b.draft.is_object() {
+        return ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a draft is an object".into(),
+        )
+        .into_response();
+    }
+    if b.draft.to_string().len() > crate::store::review_draft::MAX_BYTES {
+        return ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "a review draft is kept up to {} KiB",
+                crate::store::review_draft::MAX_BYTES / 1024
+            ),
+        )
+        .into_response();
+    }
+    match s
+        .store()
+        .save_review_draft(&id, b.revision_id.as_deref(), b.base_version, &b.draft)
+    {
+        Ok(crate::store::review_draft::Saved::Saved {
+            version,
+            updated_ms,
+        }) => Json(json!({ "version": version, "updated_ms": updated_ms })).into_response(),
+        Ok(crate::store::review_draft::Saved::Conflict(current)) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": {
+                    "code": 409,
+                    "message": "this draft was changed on another device since you loaded it",
+                },
+                "draft": current,
+            })),
+        )
+            .into_response(),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+async fn decide_review_inner(
     State(s): State<AppState>,
     Path(id): Path<String>,
     Json(b): Json<VerdictBody>,

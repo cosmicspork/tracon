@@ -31,6 +31,8 @@
   import { baseFromDiff, buildPatch, fileSection } from '../lib/patch'
   import { isNarrativeReport } from '../lib/reports'
   import { leaveAfterVerdict } from '../lib/verdict-nav'
+  import { ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
+  import type { ReviewDraftFields } from '../lib/types'
   import { composerLabel, unavailable } from '../lib/verdicts'
   import { COVERAGE, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
 
@@ -77,6 +79,13 @@
   let busy = $state(false)
   let error = $state<string | null>(null)
   let loaded = $state(false)
+  /** Unsent words, held by the node so another device or a reload finds them. */
+  let draftSync: ReviewDraftSync | null = null
+  let draftState = $state<DraftState>('clean')
+  /** The draft on the screen was written against an earlier revision. */
+  let draftFromEarlier = $state(false)
+  /** What another device saved, while the two disagree. */
+  let draftTheirs = $state<ReviewDraftFields | null>(null)
   /** The route this review was opened from; a verdict goes back to it. */
   let openedFrom: string | null = null
   const report = $derived(review && isNarrativeReport(review) ? review : null)
@@ -95,9 +104,13 @@
     void id
     loaded = false
     openedFrom = router.previous
-    api
-      .review(id)
-      .then((d) => {
+    draftSync?.stop()
+    draftSync = null
+    draftState = 'clean'
+    draftFromEarlier = false
+    draftTheirs = null
+    Promise.all([api.review(id), api.reviewDraft(id).catch(() => ({ draft: null }))])
+      .then(([d, held]) => {
         review = d.review
         revision = d.revision
         stale = d.stale
@@ -129,6 +142,17 @@
         } catch {
           branchName = ''
         }
+        // What the operator left here, on this device or another, comes back
+        // over what the agent submitted.
+        if (held.draft) {
+          applyDraft(held.draft.draft)
+          draftFromEarlier = !!held.draft.revision_id && held.draft.revision_id !== d.revision?.id
+        }
+        draftSync = new ReviewDraftSync(id, d.revision?.id, (state) => {
+          draftState = state
+          draftTheirs = state === 'conflict' ? (draftSync?.conflict?.draft ?? {}) : null
+        })
+        draftSync.loaded(held.draft, draftFields())
         loaded = true
       })
       .catch((e) => {
@@ -143,6 +167,50 @@
   })
 
   let decided = $state(false)
+
+  function draftFields(): ReviewDraftFields {
+    return {
+      reason,
+      title,
+      body,
+      describe,
+      descTitle,
+      descBody,
+      commenting,
+      comment,
+      message,
+      branch: branchName,
+    }
+  }
+
+  function applyDraft(d: ReviewDraftFields) {
+    if (d.reason !== undefined) reason = d.reason
+    if (d.title !== undefined) title = d.title
+    if (d.body !== undefined) body = d.body
+    if (d.describe !== undefined) describe = d.describe
+    if (d.descTitle !== undefined) descTitle = d.descTitle
+    if (d.descBody !== undefined) descBody = d.descBody
+    if (d.commenting !== undefined) commenting = d.commenting
+    if (d.comment !== undefined) comment = d.comment
+    if (d.message !== undefined) message = d.message
+    if (d.branch !== undefined) branchName = d.branch
+  }
+
+  // Every change to what the operator is writing is saved to the node after
+  // a pause; `draftSync` skips what it already sent.
+  $effect(() => {
+    const fields = draftFields()
+    if (loaded) draftSync?.edit(fields)
+  })
+
+  function takeTheirs() {
+    if (!draftSync) return
+    applyDraft(draftSync.takeTheirs())
+  }
+
+  function keepMine() {
+    void draftSync?.keepMine(draftFields())
+  }
 
   // Editing the diff, desktop only. The phone directs; it does not edit.
   let editing = $state(false)
@@ -347,6 +415,7 @@
     if (!review || publishing) return
     busy = true
     error = null
+    draftSync?.stop()
     try {
       decided = true
       const res = await api.decideReview(id, {
@@ -386,6 +455,9 @@
       })
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
+      // Nothing was decided, so what was written is still a draft.
+      draftSync?.resume()
+      draftSync?.edit(draftFields())
       // A refused approval may have left a publication record; show how it
       // ended and what can be done, not only the error.
       if (verdict === 'approve') await reread()
@@ -908,6 +980,19 @@
     <div class="banner crit">refused <b>· {error}</b></div>
   {/if}
 
+  {#if draftState === 'conflict'}
+    <div class="banner crit draft-conflict">
+      changed on another device <b>· {draftTheirs?.reason ? `it says “${draftTheirs.reason}”` : 'its draft differs from this one'}</b>
+      <button class="btn" onclick={takeTheirs}>Use theirs</button>
+      <button class="btn" onclick={keepMine}>Keep mine</button>
+    </div>
+  {/if}
+  <div class="draft-state" aria-live="polite">
+    {#if draftState === 'saving'}saving draft…
+    {:else if draftState === 'saved'}draft saved{draftFromEarlier ? ' · written against an earlier revision' : ''}
+    {:else if draftState === 'unsaved'}draft not saved · the node could not be reached; it saves on your next edit
+    {/if}
+  </div>
   {#if readiness && !readiness.ready}
     <div class="note">
       Cannot publish from here yet: {readiness.problem}.
@@ -1443,6 +1528,18 @@
   }
   .files .bad {
     color: var(--crit);
+  }
+  .draft-state {
+    min-height: 1.2em;
+    font: 12px var(--mono);
+    color: var(--dim);
+    margin: 8px 0 -4px;
+  }
+  .draft-conflict {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
   }
   .since {
     margin: 12px 0;

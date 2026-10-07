@@ -50,6 +50,8 @@ import type {
   ReviewDetails,
   ShownWork,
   ReviewOutputs,
+  ReviewDraft,
+  ReviewDraftFields,
   TransferImport,
   TransferInboxItem,
   TransferStage,
@@ -81,6 +83,13 @@ export class DocConflict extends Error {
     public body: string,
   ) {
     super('the document changed since it was read')
+  }
+}
+
+/** Another device saved the review draft first; `current` is what it saved. */
+export class ReviewDraftConflict extends Error {
+  constructor(public current: ReviewDraft | null) {
+    super('this draft was changed on another device since you loaded it')
   }
 }
 
@@ -330,6 +339,29 @@ export const api = {
       'GET',
       `/api/external/${encodeURIComponent(channel)}/events?after=${after}`,
     ),
+  reviewDraft: (id: string) => call<{ draft: ReviewDraft | null }>('GET', `/api/reviews/${id}/draft`),
+  /** Save on top of `baseVersion`; throws `ReviewDraftConflict` when another device got there first. */
+  saveReviewDraft: async (
+    id: string,
+    body: { base_version: number; revision_id?: string; draft: ReviewDraftFields },
+  ): Promise<{ version: number; updated_ms: number }> => {
+    const res = await fetch(`/api/reviews/${id}/draft`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const text = await res.text()
+    let json: { error?: { message?: string }; draft?: ReviewDraft | null; version?: number; updated_ms?: number } | null =
+      null
+    try {
+      json = text ? JSON.parse(text) : null
+    } catch {
+      json = null
+    }
+    if (res.status === 409) throw new ReviewDraftConflict(json?.draft ?? null)
+    if (!res.ok) throw new ApiError(res.status, json?.error?.message ?? (text || `${res.status} ${res.statusText}`))
+    return { version: json?.version ?? 0, updated_ms: json?.updated_ms ?? 0 }
+  },
   saveDraft: (id: string, text: string) => call<void>('PUT', `/api/sessions/${id}/draft`, { text }),
   /** The unsent prompt the node is holding for this session. */
   draft: (id: string) =>

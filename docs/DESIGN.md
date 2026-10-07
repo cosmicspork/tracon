@@ -53,9 +53,11 @@ listed with it.
 
 6. **Nothing is lost when the client dies.** Sessions live in the node, so the
    interface never holds state the node does not have. Unsent prompt drafts are held
-   by the node per session; diff edits are the one desktop-only exception, in local
-   storage keyed by review id and head sha so a resubmission cannot resurrect edits
-   against a diff that no longer exists.
+   by the node per session, and a review's unsent feedback and edited prose per
+   review, saved against a version so two devices are told when they disagree rather
+   than the last one silently winning; diff edits are the one desktop-only exception,
+   in local storage keyed by review id and revision so a resubmission cannot resurrect
+   edits against a diff that no longer exists.
    *Decides:* reconnect is silent and resumes where the node is, draft included; the
    login QR's token rides the URL fragment and is stripped before anything renders.
 
@@ -175,9 +177,11 @@ operator's information, not the model's.
 
 ## Decisions
 
-1. **Drafts.** The node holds unsent prompt drafts per session. Diff edits live in
-   desktop local storage until submitted; losing one costs a re-edit on the machine
-   least likely to be evicted.
+1. **Drafts.** The node holds unsent prompt drafts per session, and each review's
+   unsent reason and edited prose until a verdict clears them; the review screen says
+   whether its draft is saved, and when another device saved first it shows both and
+   asks which to keep. Diff edits live in desktop local storage until submitted;
+   losing one costs a re-edit on the machine least likely to be evicted.
 2. **Claim grace.** A claim releases 60 seconds after its client disconnects: a
    dropped socket does not zero the attention count; a closed laptop does.
 3. **One node mode.** A node enforces or refuses to run harnesses. No advisory
