@@ -3686,3 +3686,58 @@ async fn a_retry_with_the_same_or_no_base_is_already_submitted() {
     assert_eq!(absent["already_submitted"], json!(true), "{absent}");
     assert_eq!(f.store.review_revisions(&id).unwrap().len(), 1);
 }
+
+// ---- what changed since the last verdict ----
+
+/// A resubmission after a request for changes shows the diff since the
+/// revision the operator decided on, and which files answered the feedback.
+#[tokio::test]
+async fn a_resubmission_shows_what_changed_since_the_last_verdict() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let (_, first) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert!(first["since_reviewed"].is_null(), "nothing was decided yet");
+    let reviewed = first["revision"]["id"].as_str().unwrap().to_string();
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "revise", "reason": "add the missing file" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo new > b.txt && git add -A && git commit -qm 'add b'",
+    );
+    let mut again = f.submit_args();
+    again["review_id"] = json!(id);
+    assert_eq!(f.tool("s1", "submit_review", again).await["state"], "new");
+
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let since = &detail["since_reviewed"];
+    assert_eq!(since["revision_id"], json!(reviewed), "{since}");
+    assert!(since["unavailable"].is_null(), "{since}");
+    let files: Vec<_> = since["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        files,
+        ["b.txt"],
+        "only what changed since, not the whole change"
+    );
+    assert!(since["diff"].as_str().unwrap().contains("+new"), "{since}");
+    assert!(
+        !detail["review"]["diff"].as_str().unwrap().is_empty(),
+        "the full diff is still there beside it"
+    );
+    let response = &since["responses"][0];
+    assert_eq!(response["reason"], "add the missing file");
+    assert_eq!(response["answered_by"], detail["revision"]["id"]);
+    assert_eq!(response["files"][0]["path"], "b.txt");
+}

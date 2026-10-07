@@ -239,9 +239,6 @@ hit on a real task.
       reconnect and device changes with explicit saved/conflict state. Desktop diff drafts
       remain revision-keyed. The acceptance test is the reconnect: leave feedback, switch
       device or reconnect, find it intact.
-- [ ] Show changes since the last reviewed revision beside the full base diff, and what
-      changed in response to each comment, so the operator does not reread the entire
-      change to find the one concern that remains unresolved.
 - [ ] Keep verdicts reachable in long reviews, open a labelled reason composer for Request
       changes and Reject rather than disabling a button, and explain unavailable actions
       inline.

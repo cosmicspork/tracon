@@ -466,6 +466,36 @@ export interface CandidateCheckRun {
   metadata_json: string
 }
 
+/** One file changed between two revisions; null counts for a binary file. */
+export interface FileChange {
+  path: string
+  added: number | null
+  removed: number | null
+}
+
+/** Feedback given on a revision, and what the revision after it changed. */
+export interface FeedbackResponse {
+  revision_id: string
+  decision: string
+  source: string
+  reason: string | null
+  sent_edit: boolean
+  decided_ms: number
+  answered_by: string | null
+  files: FileChange[] | null
+}
+
+/** The last revision a verdict was given on, against the one on the screen. */
+export interface SinceReviewed {
+  revision_id: string
+  head_sha: string
+  created_ms: number
+  diff: string | null
+  files: FileChange[] | null
+  unavailable: string | null
+  responses: FeedbackResponse[]
+}
+
 export interface ReviewDetails {
   review: Review
   /**
@@ -501,6 +531,8 @@ export interface ReviewDetails {
   legacy_check_events: CandidateCheckRun[]
   /** What the agent showed of its work. Absent from a node that predates it. */
   shown_work?: ShownWork[]
+  /** What changed since the operator last decided; null on a first revision. */
+  since_reviewed?: SinceReviewed | null
 }
 
 /**

@@ -588,6 +588,14 @@ requirements or prose; a verdict from a tab that read the revision it replaced
 is refused and the review waits for a fresh reading. Unchanged code may reuse
 its checks, never an unseen human decision.
 
+Because every decision names its revision, a resubmission can show what answered
+it. Beside the full diff against the base, the review carries the diff from the last
+revision a verdict was given on to the one on the screen, and each piece of feedback
+given on the way with the files the next revision changed. Both are read from Git in
+the review's worktree between the two revisions' commits; when the worktree no longer
+holds the earlier commit (a rewritten branch), the review says so rather than
+approximating it, and a rebase between revisions shows what the base brought in too.
+
 **The node vouches for the revision and the checks; what an agent shows is its own
 account.** The candidate's tree, the required checks run against it and every decision
 bound to it are records the node made. An attached demonstration — commands, output,

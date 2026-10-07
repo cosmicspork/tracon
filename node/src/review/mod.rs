@@ -10,6 +10,7 @@
 pub mod checks;
 pub mod publish;
 pub mod report;
+pub mod since;
 
 use std::path::{Component, Path, PathBuf};
 

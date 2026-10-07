@@ -21,6 +21,7 @@
     type ReviewIntent,
     type ReviewOutputs,
     type ReviewRevisionRef,
+    type SinceReviewed,
     type ShownWork as ShownWorkItem,
     type Verdict,
   } from '../lib/types'
@@ -48,6 +49,9 @@
   let criterionNote = $state('')
   let criteriaError = $state<string | null>(null)
   let surroundingCode = $state<ReviewContext[]>([])
+  /** What changed since your last verdict, and which diff is showing. */
+  let sinceReviewed = $state<SinceReviewed | null>(null)
+  let diffView = $state<'since' | 'full'>('full')
   let reason = $state('')
   let title = $state('')
   let body = $state('')
@@ -81,6 +85,10 @@
         requirements = d.requirements
         criteria = d.criteria
         surroundingCode = d.surrounding_code
+        sinceReviewed = d.since_reviewed ?? null
+        // A resubmission opens on what answered your feedback; the full diff
+        // is one tap away.
+        diffView = sinceReviewed?.diff ? 'since' : 'full'
         title = d.review.edited_title ?? d.review.title
         body = d.review.edited_body ?? d.review.body
         intent = d.intent ?? { forge: {} }
@@ -663,7 +671,49 @@
       {/if}
     {/if}
   {:else}
-    <Diff diff={review.diff} perFile={surface.phone} />
+    {#if sinceReviewed}
+      <section class="since">
+        <div class="h4">
+          Since your last verdict
+          <b>{sinceReviewed.head_sha.slice(0, 8)} → {review.head_sha.slice(0, 8)}</b>
+        </div>
+        {#each sinceReviewed.responses as r, i (i)}
+          <div class="response">
+            <span class="said">{r.source === 'operator' ? 'You' : r.source} · {r.decision === 'revise' ? 'asked' : r.decision}{r.sent_edit ? ' · with an edit' : ''}</span>
+            <q>{r.reason || '(no reason given)'}</q>
+            <span class="answer">
+              {#if !r.answered_by}
+                not answered yet
+              {:else if r.files === null}
+                answered · the files it changed can no longer be read
+              {:else if r.files.length === 0}
+                answered with no change to the files
+              {:else}
+                answered in {r.files.map((f) => f.path).join(', ')}
+              {/if}
+            </span>
+          </div>
+        {/each}
+        {#if sinceReviewed.unavailable}
+          <p class="note dim">{sinceReviewed.unavailable}</p>
+        {/if}
+        {#if sinceReviewed.diff}
+          <div class="tabs" role="tablist">
+            <button role="tab" class:on={diffView === 'since'} aria-selected={diffView === 'since'} onclick={() => (diffView = 'since')}>
+              Since last verdict · {sinceReviewed.files?.length ?? 0} files
+            </button>
+            <button role="tab" class:on={diffView === 'full'} aria-selected={diffView === 'full'} onclick={() => (diffView = 'full')}>
+              Full change · {files.length} files
+            </button>
+          </div>
+        {/if}
+      </section>
+    {/if}
+    {#if diffView === 'since' && sinceReviewed?.diff}
+      <Diff diff={sinceReviewed.diff} perFile={surface.phone} />
+    {:else}
+      <Diff diff={review.diff} perFile={surface.phone} />
+    {/if}
   {/if}
 
   {#if remoteOwner}
@@ -1160,6 +1210,41 @@
   }
   .files .bad {
     color: var(--crit);
+  }
+  .since {
+    margin: 12px 0;
+  }
+  .since .response {
+    display: grid;
+    gap: 2px;
+    padding: 6px 0;
+    border-top: 1px solid var(--rule);
+    font-size: 13px;
+  }
+  .since .said,
+  .since .answer {
+    color: var(--dim);
+    font: 12px var(--mono);
+  }
+  .since q {
+    quotes: none;
+  }
+  .tabs {
+    display: flex;
+    gap: 6px;
+    margin: 10px 0 6px;
+  }
+  .tabs button {
+    font: 12px var(--mono);
+    padding: 4px 10px;
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    background: var(--s1);
+    color: var(--dim);
+  }
+  .tabs button.on {
+    color: inherit;
+    border-color: currentColor;
   }
   .decide {
     display: flex;
