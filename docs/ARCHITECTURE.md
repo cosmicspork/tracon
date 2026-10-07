@@ -660,6 +660,19 @@ place with a brokered credential or none: an ambient host helper, an askpass
 program, or an `ssh-agent` identity can never answer for the node, and there is
 no setting that would let one.
 
+What is published reads as the operator's own work. A session's commits are
+authored and committed as the account behind the channel's bound forge token,
+resolved once per token from the forge's `/user` (GitHub: the profile name and
+`<id>+<login>@users.noreply.github.com`; GitLab: the name and the commit
+address) and written into the harness's gitconfig; the workspace's own Git
+config carries no identity. With no forge token bound, the host's global Git
+identity is used, never a name for tracon. Forge API calls name only the HTTP
+library as their user agent, and the node adds no trailers of its own, so a
+harness's own (Claude Code's `Co-Authored-By`) pass through untouched. A
+harness the operator runs is offered the identity by `tracon external show`,
+and `submit_review` and the review screen name any commit not authored and
+committed as that account. Rewriting one is never done silently.
+
 ## Workspaces
 
 **Nothing is bind-mounted into the boundary.** A session's Git history is seeded
