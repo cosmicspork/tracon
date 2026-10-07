@@ -997,6 +997,39 @@ pub async fn forge_repos(
 }
 
 #[derive(Deserialize)]
+pub struct ReadinessQuery {
+    channel: String,
+    repo: String,
+    work_item: Option<String>,
+}
+
+/// Whether a repository is ready to investigate, to verify and to publish
+/// from, with what each path lacks, before a session is spent finding out.
+pub async fn readiness(
+    State(s): State<AppState>,
+    Query(q): Query<ReadinessQuery>,
+) -> ApiResult<Json<crate::readiness::Readiness>> {
+    let repo = q.repo.trim();
+    if repo.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "repo is required",
+        ));
+    }
+    Ok(Json(
+        crate::readiness::readiness(
+            &s.manager,
+            &s.tools,
+            &s.node_id,
+            &q.channel,
+            repo,
+            q.work_item.as_deref().filter(|id| !id.is_empty()),
+        )
+        .await,
+    ))
+}
+
+#[derive(Deserialize)]
 pub struct JiraSearchQuery {
     channel: String,
     jql: String,

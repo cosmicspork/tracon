@@ -1436,3 +1436,25 @@ export interface ExternalEvent {
   payload: Record<string, unknown>
   at_ms: number
 }
+
+/** What one path (investigate, verify, publish) needs that the repository or
+    channel lacks. `missing` stops a session on that path; `notes` do not. */
+export interface ReadinessGap {
+  key: string
+  message: string
+}
+
+export interface PathReadiness {
+  purpose: 'investigate' | 'verify' | 'publish'
+  ready: boolean
+  missing: ReadinessGap[]
+  notes: ReadinessGap[]
+}
+
+export interface RepoReadiness {
+  channel: string
+  repo: string
+  investigate: PathReadiness
+  verify: PathReadiness
+  publish: PathReadiness
+}

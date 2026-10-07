@@ -38,6 +38,7 @@ import type {
   RecallHit,
   RecentRepo,
   SessionAuthority,
+  RepoReadiness,
   Session,
   SessionUsage,
   ReviewDetails,
@@ -212,6 +213,14 @@ export const api = {
       Read-only: the node answers it by running its own policy and grants. */
   sessionAuthority: (id: string) =>
     call<SessionAuthority>('GET', `/api/sessions/${id}/authority`),
+  /** What investigating, verifying and publishing from `repo` would lack. */
+  readiness: (channel: string, repo: string, workItem?: string | null) =>
+    call<RepoReadiness>(
+      'GET',
+      `/api/readiness?channel=${encodeURIComponent(channel)}&repo=${encodeURIComponent(repo)}${
+        workItem ? `&work_item=${encodeURIComponent(workItem)}` : ''
+      }`,
+    ),
   /** Mint a single-use capability for this session's OpenCode view. The URL
       that comes back carries it in a fragment and belongs in exactly one
       place: an iframe's `src`, or the desktop window. Never log it. */
