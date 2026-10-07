@@ -622,6 +622,14 @@ requirements or prose; a verdict from a tab that read the revision it replaced
 is refused and the review waits for a fresh reading. Unchanged code may reuse
 its checks, never an unseen human decision.
 
+Because every decision names its revision, a resubmission can show what answered
+it. Beside the full diff against the base, the review carries the diff from the last
+revision a verdict was given on to the one on the screen, and each piece of feedback
+given on the way with the files the next revision changed. Both are read from Git in
+the review's worktree between the two revisions' commits; when the worktree no longer
+holds the earlier commit (a rewritten branch), the review says so rather than
+approximating it, and a rebase between revisions shows what the base brought in too.
+
 **An agent may draft a repository's entry; only the operator makes it one.** The
 `repo_setup_*` tools read the default branch's commit, never a session's workspace, so
 nothing a session wrote shapes the draft. A trial prepares that commit with a volume and

@@ -2265,6 +2265,16 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         )
         .unwrap_or_default()),
     };
+    // What changed since the operator last decided, beside the full diff.
+    // Read from the owner's worktree, so a mirror has none.
+    let since_reviewed = match (&remote_owner, revision.as_ref()) {
+        (None, Some(revision)) => {
+            let worktree = worktree_of(s, r);
+            crate::review::since::since_reviewed(s.store(), worktree.as_deref(), &id, revision)
+                .await?
+        }
+        _ => None,
+    };
     // Who the commits are by, against the account approval would publish as,
     // so a commit the forge would not attribute to it is named before anyone
     // approves. Node-local: the worktree is here.
@@ -2288,6 +2298,7 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         "remote_owner": remote_owner,
         "revision": revision_ref,
         "intent": intent,
+        "since_reviewed": since_reviewed,
         "stale": stale,
         "requirements": requirements,
         "criteria": criteria,

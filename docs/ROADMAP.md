@@ -105,9 +105,6 @@ hit on a real task.
       already ships one commit of the reviewed tree with the approved message and
       branch; `keep` lists the agent's commits and checks their subjects but pushes
       them as written.
-- [ ] Show changes since the last reviewed revision beside the full base diff, and what
-      changed in response to each comment, so the operator does not reread the entire
-      change to find the one concern that remains unresolved.
 
 **Forge and tracker**
 

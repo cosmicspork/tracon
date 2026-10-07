@@ -11,6 +11,7 @@ pub mod checks;
 pub mod prose;
 pub mod publish;
 pub mod report;
+pub mod since;
 
 use std::path::{Component, Path, PathBuf};
 
