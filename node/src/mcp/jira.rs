@@ -15,6 +15,7 @@ pub const ISSUE_UPDATE: &str = "issue_update";
 pub const ISSUE_CREATE: &str = "issue_create";
 pub const ISSUE_SEARCH: &str = "issue_search";
 pub const ISSUE_TRANSITION: &str = "issue_transition";
+pub const ISSUE_TRANSITIONS: &str = "issue_transitions";
 
 /// What a search row carries: enough to pick an issue, not to read it.
 const SEARCH_FIELDS: &str = "summary,status,assignee,priority,issuetype,parent";
@@ -100,8 +101,20 @@ pub fn definitions() -> Vec<Value> {
             },
         }),
         json!({
+            "name": ISSUE_TRANSITIONS,
+            "description": "The transitions a Jira issue offers right now: each one's id, name, \
+                            and the status it leads to. The id is what issue_transition takes; \
+                            ids differ between projects and workflows, so read them here.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "key": { "type": "string", "description": "e.g. WRK-123" } },
+                "required": ["key"],
+            },
+        }),
+        json!({
             "name": ISSUE_TRANSITION,
-            "description": "Transition a Jira issue using a concrete transition id. Requires current scoped authority for that issue.",
+            "description": "Transition a Jira issue using a concrete transition id, as \
+                            issue_transitions lists them. Requires current scoped authority for that issue.",
             "inputSchema": { "type": "object", "properties": {
                 "key": { "type": "string" }, "transition_id": { "type": "string" },
                 "operation_id": { "type": "string" }
@@ -307,6 +320,36 @@ pub async fn call(
             }
             let key = v["key"].as_str().unwrap_or_default().to_string();
             Ok(json!({ "key": key, "id": v["id"], "url": format!("{url}/browse/{key}") }))
+        }
+        ISSUE_TRANSITIONS => {
+            let key = issue_key(args.get("key"), "key")?;
+            let res = http
+                .get(format!("{url}/rest/api/2/issue/{key}/transitions"))
+                .basic_auth(email, Some(token))
+                .send()
+                .await
+                .map_err(|e| format!("jira: {e}"))?;
+            let status = res.status();
+            let v: Value = res.json().await.unwrap_or(Value::Null);
+            if !status.is_success() {
+                return Err(refusal("jira answered", status, &v));
+            }
+            let transitions: Vec<Value> = v["transitions"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|t| {
+                            json!({
+                                "id": t["id"],
+                                "name": t["name"],
+                                "to": t["to"]["name"],
+                                "category": t["to"]["statusCategory"]["name"],
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(json!({ "key": key, "transitions": transitions }))
         }
         ISSUE_TRANSITION => {
             let key = issue_key(args.get("key"), "key")?;

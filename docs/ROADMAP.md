@@ -269,10 +269,6 @@ hit on a real task.
       or stops at a manual job. Share the polling with following a merge request, so a
       pipeline outlives the request that triggered it. Following never retries, cancels
       or plays a job on its own; GitHub runs follow once the item above lands.
-- [ ] Discover Jira transitions: `issue_transitions` lists an issue's currently available
-      transitions (id, name, destination status) through the brokered token, so an
-      authorized `issue_transition` never rests on an out-of-band `acli` lookup or an id
-      copied from another project. Discovery stays a read; the transition keeps its grant.
 
 **Node data**
 

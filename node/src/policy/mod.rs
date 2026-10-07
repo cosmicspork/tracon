@@ -853,6 +853,7 @@ mod tests {
         let none = serde_json::json!({});
         for name in [
             "issue_search",
+            "issue_transitions",
             "pipeline_status",
             "job_trace",
             "pr_status",
