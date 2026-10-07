@@ -30,6 +30,9 @@ pub struct Config {
     /// one repository's environment.
     #[serde(skip)]
     pub live_repo: LiveRepos,
+    /// Services a session may ask for by name (`service_start`): each a
+    /// digest-pinned image run beside the session in its network namespace.
+    pub service: Vec<Service>,
     /// Model providers the gateway fronts, by name.
     pub providers: std::collections::BTreeMap<String, Provider>,
     pub memory: Memory,
@@ -188,6 +191,79 @@ pub fn immutable_image(value: &str) -> Result<(), String> {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err("must be pinned as image@sha256:<64 lowercase hex>".into());
+    }
+    Ok(())
+}
+
+/// One entry of the `[[service]]` catalogue: something a session may start
+/// beside itself by name, never by image or command. The operator chooses
+/// the image and how it runs; the session chooses only whether it wants it,
+/// and the policy bundle decides whether it may have it (`service_start` with
+/// `name`), so a browser can run unattended while a database is asked.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct Service {
+    /// What a session asks for: `browser`, `postgres`.
+    pub name: String,
+    /// Pinned by digest, as a repository image is: what ran is what was named.
+    pub image: String,
+    /// The image's arguments, when its own entrypoint needs them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
+    /// The port the service listens on, on the session's loopback.
+    pub port: u16,
+    /// An HTTP path that answers 2xx once the service is ready (`/json/version`
+    /// for a CDP browser). Absent: ready once the port accepts a connection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready: Option<String>,
+    /// How long the service may take to become ready before it is reported
+    /// as failed. Zero takes the default.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub timeout_secs: u64,
+}
+
+impl Service {
+    pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
+
+    pub fn timeout_secs(&self) -> u64 {
+        match self.timeout_secs {
+            0 => Self::DEFAULT_TIMEOUT_SECS,
+            n => n,
+        }
+    }
+}
+
+/// A service name is what a container name and a policy argument are built
+/// from, so it is held to what both can carry.
+pub fn validate_services(services: &[Service]) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for service in services {
+        let name = &service.name;
+        if name.is_empty()
+            || name.len() > 32
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            || name.starts_with('-')
+        {
+            return Err(format!(
+                "service {name:?}: name must be 1-32 lowercase letters, digits or '-'"
+            ));
+        }
+        if !seen.insert(name) {
+            return Err(format!("service {name}: named twice"));
+        }
+        immutable_image(&service.image).map_err(|e| format!("service {name}: image {e}"))?;
+        if service.port == 0 {
+            return Err(format!("service {name}: port is required"));
+        }
+        if let Some(path) = &service.ready {
+            if !path.starts_with('/') || path.chars().any(|c| c.is_whitespace() || c == '\'') {
+                return Err(format!(
+                    "service {name}: ready must be an HTTP path starting with '/'"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -562,6 +638,14 @@ pub struct Repo {
     /// them from it for as long as it runs.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub session_egress: bool,
+    /// How this repository's commits reach the forge, in place of the
+    /// channel's and `[publish] commits`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commits: Option<Commits>,
+    /// This repository's commit-subject and branch rules, in place of the
+    /// channel's and `[publish] style`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<crate::review::prose::Style>,
 }
 
 /// The hosts each egress preset stands for. A preset is the registry and the
@@ -850,6 +934,25 @@ pub struct Publish {
     /// How long one `gh` or `glab` call may run. Git itself is not bounded:
     /// a large push may take as long as it takes.
     pub forge_timeout_secs: u64,
+    /// How a candidate's commits reach the forge, unless the channel's
+    /// `publish.commits` binding or the repository's entry says otherwise.
+    pub commits: Commits,
+    /// The commit-subject and branch rules a submission is held to, unless
+    /// the channel's `publish.style` binding or the repository's entry says
+    /// otherwise. Every rule is off by default.
+    pub style: crate::review::prose::Style,
+}
+
+/// How a candidate's commits reach the forge.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Commits {
+    /// One commit holding exactly the reviewed tree, carrying the approved
+    /// message. The tree is the candidate, so nothing reviewed changes.
+    #[default]
+    Squash,
+    /// The agent's commits as it wrote them.
+    Keep,
 }
 
 /// How the node runs the consulta sidecar. It stays a Python process because
@@ -1229,6 +1332,7 @@ impl Default for Config {
             runtime: Runtime::default(),
             repo: Vec::new(),
             live_repo: LiveRepos::default(),
+            service: Vec::new(),
             providers: default_providers(),
             memory: Memory::default(),
             ui: Ui::default(),
@@ -1291,6 +1395,8 @@ impl Default for Config {
                 glab: "glab".into(),
                 git: "git".into(),
                 forge_timeout_secs: 15,
+                commits: Commits::Squash,
+                style: Default::default(),
             },
             session: SessionDefaults {
                 budget_tokens: 0,
@@ -1589,6 +1695,8 @@ impl Config {
                     .map_err(|error| format!("{}: {error}", path.display()))?;
                 validate_repos(&config.repo)
                     .map_err(|error| format!("{}: {error}", path.display()))?;
+                validate_services(&config.service)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
                 Ok(config)
             }
             Err(_) => Ok(Self::default()),
@@ -1841,6 +1949,63 @@ mod tests {
         );
     }
     use super::*;
+
+    #[test]
+    fn a_service_is_named_safely_and_pinned() {
+        let pinned = "img@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let ok = Service {
+            name: "browser".into(),
+            image: pinned.into(),
+            port: 9222,
+            ready: Some("/json/version".into()),
+            ..Service::default()
+        };
+        assert!(validate_services(std::slice::from_ref(&ok)).is_ok());
+        assert_eq!(ok.timeout_secs(), Service::DEFAULT_TIMEOUT_SECS);
+        for (bad, why) in [
+            (
+                Service {
+                    name: "Browser".into(),
+                    ..ok.clone()
+                },
+                "name",
+            ),
+            (
+                Service {
+                    name: "a b".into(),
+                    ..ok.clone()
+                },
+                "name",
+            ),
+            (
+                Service {
+                    image: "chrome:latest".into(),
+                    ..ok.clone()
+                },
+                "pinned",
+            ),
+            (
+                Service {
+                    port: 0,
+                    ..ok.clone()
+                },
+                "port",
+            ),
+            (
+                Service {
+                    ready: Some("json".into()),
+                    ..ok.clone()
+                },
+                "ready",
+            ),
+        ] {
+            let err = validate_services(&[bad]).unwrap_err();
+            assert!(err.contains(why), "{err}");
+        }
+        assert!(validate_services(&[ok.clone(), ok])
+            .unwrap_err()
+            .contains("twice"));
+    }
 
     /// The README's `node.toml` reference is checked, not trusted: every key it
     /// names must exist, and the values it shows as defaults must be them.

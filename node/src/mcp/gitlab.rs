@@ -19,6 +19,7 @@ pub const CREDENTIAL: &str = "glab";
 pub const MR_STATUS: &str = "mr_status";
 pub const MR_COMMENT: &str = "mr_comment";
 pub const PIPELINE_STATUS: &str = "pipeline_status";
+pub const PIPELINE_WAIT: &str = "pipeline_wait";
 pub const PIPELINE_LIST_BY_SHA: &str = "pipeline_list_by_sha";
 pub const JOB_TRACE: &str = "job_trace";
 pub const JOB_PLAY: &str = "job_play";
@@ -125,6 +126,24 @@ pub fn definitions() -> Vec<Value> {
                     "ref": { "type": "string", "description": "A branch or tag; the latest pipeline for it." },
                 },
                 "required": ["project"],
+            },
+        }),
+        json!({
+            "name": PIPELINE_WAIT,
+            "description": "Wait for a pipeline to move: returns as soon as it or one of its jobs \
+                            changes state, when it has finished, or after wait_secs (at most 45), \
+                            with the same status and jobs as pipeline_status and a `state` token. \
+                            Pass that token back as `since` so a change between calls is not \
+                            missed. A failed job's log is job_trace.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "group/project path or numeric id." },
+                    "pipeline_id": { "type": "integer" },
+                    "since": { "type": "string", "description": "The `state` an earlier call returned." },
+                    "wait_secs": { "type": "integer", "description": "How long to hold, at most 45 (the default)." },
+                },
+                "required": ["project", "pipeline_id"],
             },
         }),
         json!({
@@ -395,33 +414,33 @@ pub async fn call(
                 }
                 (None, None) => return Err("pipeline_id or ref is required".into()),
             };
-            let p = get(http, token, &format!("{project_url}/pipelines/{id}")).await?;
-            let jobs = get(
-                http,
-                token,
-                &format!("{project_url}/pipelines/{id}/jobs?per_page=100"),
-            )
-            .await
-            .unwrap_or(Value::Null);
-            let jobs: Vec<Value> = jobs
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .map(|j| {
-                            json!({ "id": j["id"], "name": j["name"], "stage": j["stage"], "status": j["status"] })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Ok(json!({
-                "id": p["id"],
-                "ref": p["ref"],
-                "sha": p["sha"],
-                "status": p["status"],
-                "source": p["source"],
-                "web_url": p["web_url"],
-                "jobs": jobs,
-            }))
+            pipeline(http, token, &project_url, id).await
+        }
+        PIPELINE_WAIT => {
+            let id = args
+                .get("pipeline_id")
+                .and_then(Value::as_i64)
+                .filter(|id| *id > 0)
+                .ok_or("pipeline_id is required")?;
+            let since = args.get("since").and_then(Value::as_str);
+            let until = tokio::time::Instant::now()
+                + std::time::Duration::from_secs(super::wait::wait_secs(args));
+            let mut baseline: Option<String> = since.map(str::to_string);
+            loop {
+                let mut now = pipeline(http, token, &project_url, id).await?;
+                let state = state_token(&now);
+                let changed = baseline.as_deref().is_some_and(|b| b != state);
+                let done = now["status"].as_str().is_some_and(finished);
+                let left = until.saturating_duration_since(tokio::time::Instant::now());
+                if changed || done || left.is_zero() {
+                    now["state"] = Value::from(state);
+                    now["changed"] = Value::from(changed);
+                    now["finished"] = Value::from(done);
+                    return Ok(now);
+                }
+                baseline.get_or_insert(state);
+                tokio::time::sleep(left.min(WAIT_EVERY)).await;
+            }
         }
         PIPELINE_LIST_BY_SHA => {
             let sha = args
@@ -498,7 +517,9 @@ pub async fn call(
                     v["message"]
                 ));
             }
-            Ok(json!({ "id": v["id"], "status": v["status"], "web_url": v["web_url"] }))
+            Ok(
+                json!({ "id": v["id"], "status": v["status"], "web_url": v["web_url"], "pipeline_id": v["pipeline"]["id"] }),
+            )
         }
         PIPELINE_RUN => {
             let r = args
@@ -610,6 +631,72 @@ pub async fn call(
         }
         other => Err(format!("no gitlab tool named {other}")),
     }
+}
+
+/// How often `pipeline_wait` reads the pipeline while it holds.
+const WAIT_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// A pipeline's status and its jobs, as `pipeline_status` returns them.
+pub(crate) async fn pipeline(
+    http: &reqwest::Client,
+    token: &str,
+    project_url: &str,
+    id: i64,
+) -> Result<Value, String> {
+    let p = get(http, token, &format!("{project_url}/pipelines/{id}")).await?;
+    let jobs = get(
+        http,
+        token,
+        &format!("{project_url}/pipelines/{id}/jobs?per_page=100"),
+    )
+    .await
+    .unwrap_or(Value::Null);
+    let jobs: Vec<Value> = jobs
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|j| {
+                    json!({ "id": j["id"], "name": j["name"], "stage": j["stage"], "status": j["status"] })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(json!({
+        "id": p["id"],
+        "ref": p["ref"],
+        "sha": p["sha"],
+        "status": p["status"],
+        "source": p["source"],
+        "web_url": p["web_url"],
+        "jobs": jobs,
+    }))
+}
+
+/// A pipeline status GitLab will not change on its own. `manual` is not one
+/// of them for GitLab, but nothing moves until someone plays the job, so a
+/// wait or a follow stops there too.
+pub fn finished(status: &str) -> bool {
+    matches!(
+        status,
+        "success" | "failed" | "canceled" | "skipped" | "manual"
+    )
+}
+
+/// What `pipeline_wait` compares: the pipeline's status and each job's.
+fn state_token(pipeline: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let mut seen = format!("{}", pipeline["status"]);
+    let mut jobs: Vec<(i64, String)> = pipeline["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|j| (j["id"].as_i64().unwrap_or(0), j["status"].to_string()))
+        .collect();
+    jobs.sort();
+    for (id, status) in jobs {
+        seen.push_str(&format!(";{id}={status}"));
+    }
+    hex::encode(&Sha256::digest(seen.as_bytes())[..8])
 }
 
 async fn merge_request(

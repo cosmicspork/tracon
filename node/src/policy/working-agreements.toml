@@ -19,7 +19,7 @@
 # A denial wins over any allow, whatever the order. An action no rule names —
 # a brokered write, a tool whose kind the node does not know — is asked.
 
-version = 13
+version = 16
 
 # --- 1. The harness and Git's internals stay the node's ---------------------
 # The harness's own configuration is the node's to write, not the session's.
@@ -128,11 +128,13 @@ matches = [
     "mr_discussions",
     "mr_for_branch",
     "pipeline_status",
+    "pipeline_wait",
     "job_trace",
     "pr_status",
     "pr_threads",
     "pr_for_branch",
     "run_status",
+    "run_logs",
     "issue",
     "issue_search",
 ]
@@ -187,3 +189,23 @@ reason = "Keeping working notes current changes nothing the operator has not agr
 kinds = ["tool"]
 matches = ["doc_write"]
 args = { slug = ["note-*", "repo-*", "meeting-*", "inbox-*"] }
+
+# A catalogue service is the operator's image, run beside the session in its
+# network and nowhere else, so the service itself is the authority, by name. A
+# headless browser reaches only what the session already does and runs
+# unattended; anything else in the catalogue (a database, a cache) is asked
+# until a rule names it. Asking whether a service is ready changes nothing.
+[[rule]]
+id = "unattended-browser"
+verdict = "allow"
+reason = "A headless browser beside the session reaches only what the session already can."
+kinds = ["tool"]
+matches = ["service_start"]
+args = { name = ["browser"] }
+
+[[rule]]
+id = "service-status"
+verdict = "allow"
+reason = "Reading whether a service is ready changes nothing."
+kinds = ["tool"]
+matches = ["service_status"]

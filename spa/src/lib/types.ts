@@ -498,6 +498,12 @@ export interface ReviewDetails {
    * `intent` is null; a verdict is forwarded to it. Null for a local review.
    */
   remote_owner?: string | null
+  /**
+   * For a mirrored review, whether its owner's detail was read: `fetched`
+   * fills `stale`, `evidence`, `criteria` and `intent` from the owner;
+   * `moved` and `unreachable` leave them empty, with the reason.
+   */
+  owner_detail?: OwnerDetail | null
   stale: string[]
   /** Pinned to the revision at submit time; never the live work item. */
   requirements: PinnedRequirements | null
@@ -614,6 +620,16 @@ export interface ReviewOutputs {
   description?: { title: string; body: string }
   comment?: string
   draft?: boolean
+  /** The message the squashed commit carries. */
+  commit?: string
+  /** The operator's rename of a new change's branch. */
+  branch?: string
+}
+
+/** One commit the agent made, listed beside the diff. */
+export interface ReviewCommit {
+  sha: string
+  subject: string
 }
 
 /** What the operator has written on a review and not sent yet. */
@@ -626,6 +642,9 @@ export interface ReviewDraftFields {
   descBody?: string
   commenting?: boolean
   comment?: string
+  /** The commit message and branch the change ships under. */
+  message?: string
+  branch?: string
 }
 
 /** A review draft as the node holds it. */
@@ -643,6 +662,13 @@ export interface ReviewIntent {
   lease?: string
   /** The push replaces `lease` rather than fast-forwarding it. */
   rewrite?: boolean
+  /**
+   * The commit the reviewed tree is squashed onto. Absent: the agent's
+   * commits are pushed as written.
+   */
+  squash_onto?: string
+  /** The agent's commits beyond the base, oldest first. */
+  commits?: ReviewCommit[]
 }
 
 export interface ReviewRevisionRef {
@@ -740,12 +766,18 @@ export interface BriefEntry {
   links?: BriefLink[]
 }
 
-/** What a brief line says would settle it. */
-export type LinkKind = 'check' | 'scenario' | 'observation'
+/** What a brief line says would settle it: a configured check. */
+export type LinkKind = 'check'
+
+/**
+ * Link kinds an older brief may still hold. Nothing produces them; they are
+ * read, shown as retired, and settle nothing.
+ */
+export type RetiredLinkKind = 'scenario' | 'observation'
 
 export interface BriefLink {
   provenance: Provenance
-  kind: LinkKind
+  kind: LinkKind | RetiredLinkKind
   value: string
   refs: BriefRef[]
 }
@@ -808,7 +840,7 @@ export interface CriterionLink {
   index: number
   provenance: Provenance
   standard: Standard
-  kind: LinkKind
+  kind: LinkKind | RetiredLinkKind
   value: string
   refs: BriefRef[]
   /** For a check: `passed`, `failed`, `running`, `interrupted`, `cancelled`. */
@@ -1024,6 +1056,68 @@ export interface SessionAuthority {
   actions: ActionStanding[]
   unattended_commands: UnattendedCommands[]
   grants: AuthorityGrant[]
+}
+
+/** What a session came to, read from what was recorded. The agent's words
+    are only ever `claims`; a claim is backed only by a check the node ran on
+    the commit it was made at. */
+export interface SessionOutcome {
+  session_id: string
+  channel: string
+  state: string
+  end_reason: string | null
+  head_sha: string | null
+  changed: {
+    reviews: {
+      id: string
+      kind: string
+      title: string
+      state: string
+      head_sha: string
+      added: number
+      removed: number
+      files: number
+    }[]
+    files: string[]
+    added: number
+    removed: number
+    workspace_changes: number
+  }
+  verified: OutcomeCheck[]
+  claims: OutcomeClaim[]
+  needs_decision: { kind: 'permission' | 'question' | 'review' | 'report'; id: string; title: string; since_ms: number }[]
+  uncertain: string[]
+  cost: {
+    tokens_used: number
+    budget_tokens: number
+    cost_usd: number | null
+    gateway_tokens: number
+    charged_tokens: number
+    unmetered_turns: number
+    mismatched_turns: number
+  }
+}
+
+export interface OutcomeCheck {
+  check_id: string
+  command: string | null
+  outcome: string
+  source_outcome: string | null
+  head_sha: string | null
+  passed: boolean
+  failed: boolean
+  current: boolean
+  finished_ms: number | null
+}
+
+export interface OutcomeClaim {
+  source: 'review' | 'report' | 'shown_work'
+  id: string
+  title: string
+  text: string
+  head_sha: string | null
+  backed_by: string[]
+  backed: boolean
 }
 
 export interface CeilingInfo {
@@ -1523,6 +1617,23 @@ export interface CandidateDetail {
 }
 
 /** One runtime volume or state directory, and what a storage sweep makes of it. */
+/** One kind of data a node holds (`GET /api/maintenance/data`). */
+export interface Holding {
+  kind: string
+  label: string
+  unit: string
+  count: number
+  bytes: number
+  delete: { path: string; label: string } | null
+  propagation: string
+}
+
+export interface DataInventory {
+  database_bytes: number
+  total_bytes: number
+  holdings: Holding[]
+}
+
 export interface StorageItem {
   kind: 'volume' | 'directory'
   name: string
@@ -1560,4 +1671,113 @@ export interface ExternalEvent {
   ref_id: string | null
   payload: Record<string, unknown>
   at_ms: number
+}
+
+export interface OwnerDetail {
+  state: 'fetched' | 'moved' | 'unreachable'
+  reason?: string
+}
+
+/** Something a repository asks of preparation that the node does not do, and
+    where the same work belongs. */
+export interface PreparationIncompatibility {
+  source: string
+  item: string
+  reason: string
+  instead: string | null
+  blocking: boolean
+}
+
+/** What preparing a checkout would do, read before launch. */
+export interface PreparationPreview {
+  repo: string
+  image: string
+  image_source: string
+  devcontainer_image: string | null
+  lockfiles: string[]
+  install: string | null
+  prepare: string[]
+  egress: string[]
+  incompatible: PreparationIncompatibility[]
+  ready: boolean
+}
+
+/** What one path (investigate, verify, publish) needs that the repository or
+    channel lacks. `missing` stops a session on that path; `notes` do not. */
+export interface ReadinessGap {
+  key: string
+  message: string
+}
+
+export interface PathReadiness {
+  purpose: 'investigate' | 'verify' | 'publish'
+  ready: boolean
+  missing: ReadinessGap[]
+  notes: ReadinessGap[]
+}
+
+export interface RepoReadiness {
+  channel: string
+  repo: string
+  investigate: PathReadiness
+  verify: PathReadiness
+  publish: PathReadiness
+}
+
+/** One attempt at a piece of work: a session that held the item, or one in a plain session's lineage. */
+export interface ContinuationAttempt {
+  id: string
+  phase: string
+  model: string
+  harness: string
+  state: string
+  end_reason: string | null
+  last_error: string | null
+  tokens_used: number
+  created_ms: number
+  continued_from: string | null
+  parent_session: string | null
+  archived: boolean
+}
+
+export type NextActionKind =
+  | 'done'
+  | 'start'
+  | 'watch'
+  | 'answer'
+  | 'resume'
+  | 'unblock'
+  | 'execute'
+  | 'continue'
+  | 'change_approach'
+
+/** The work-level continuation view, as the node derives it from recorded state. */
+export interface Continuation {
+  kind: 'item' | 'session'
+  id: string
+  channel: string
+  intent: { title: string; body: string; source: 'item' | 'prompt' | 'none' }
+  attempts: ContinuationAttempt[]
+  blockers: string[]
+  next: { kind: NextActionKind; text: string; session_id: string | null }
+  workspace: { id: string; branch: string; session_id: string } | null
+  decisions: {
+    plan: string | null
+    brief: string | null
+    answered: { session_id: string; kind: 'permission' | 'question'; asked: string; answer: string; at_ms: number }[]
+  }
+  evidence: {
+    reviews: {
+      id: string
+      session_id: string | null
+      title: string
+      state: string
+      verdict_reason: string | null
+      publish_result: string | null
+      head_sha: string
+      created_ms: number
+    }[]
+    shown: { id: string; session_id: string | null; title: string; head_sha: string; stale: boolean; created_ms: number }[]
+  }
+  actions: { continue_from: string | null; abandon: boolean }
 }

@@ -209,6 +209,25 @@ impl Store {
         Ok(rows)
     }
 
+    /// The commits this node pushed as `sha` to `project` on `channel`,
+    /// whichever review pushed them: what a squash was made from.
+    pub fn publications_that_pushed(
+        &self,
+        channel: &str,
+        project: &str,
+        sha: &str,
+    ) -> Result<Vec<PublicationRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM publication WHERE channel=?1 AND project=?2 AND pushed_sha=?3 \
+             ORDER BY created_ms DESC",
+        )?;
+        let rows = stmt
+            .query_map([channel, project, sha], PublicationRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// What this publication was authorized to send, written with each
     /// attempt. A recovery reads it back rather than taking prose from the
     /// caller, so retrying can never publish words nobody approved.
@@ -240,6 +259,39 @@ impl Store {
     }
 
     /// The branch was pushed and the remote was then observed to hold it.
+    /// This node's opened publications: the requests the node follows on the
+    /// forge until they close.
+    pub fn publications_opened(&self, node_id: &str) -> Result<Vec<PublicationRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM publication WHERE state='opened' AND node_id=?1 ORDER BY created_ms",
+        )?;
+        let rows = stmt
+            .query_map([node_id], PublicationRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// The payload of the newest `kind` event a session recorded about
+    /// `ref_id`.
+    pub fn latest_event_payload(
+        &self,
+        session_id: &str,
+        kind: &str,
+        ref_id: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let conn = self.conn.lock().unwrap();
+        let payload: Option<String> = conn
+            .query_row(
+                "SELECT payload FROM event WHERE session_id=?1 AND kind=?2 AND ref_id=?3
+                 ORDER BY seq DESC LIMIT 1",
+                params![session_id, kind, ref_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(payload.and_then(|p| serde_json::from_str(&p).ok()))
+    }
+
     pub fn publication_pushed(&self, id: &str, sha: &str) -> Result<()> {
         self.publication_set(id, "pushed", Some(sha), None, None)
     }

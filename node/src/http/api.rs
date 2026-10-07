@@ -999,6 +999,39 @@ pub async fn forge_repos(
 }
 
 #[derive(Deserialize)]
+pub struct ReadinessQuery {
+    channel: String,
+    repo: String,
+    work_item: Option<String>,
+}
+
+/// Whether a repository is ready to investigate, to verify and to publish
+/// from, with what each path lacks, before a session is spent finding out.
+pub async fn readiness(
+    State(s): State<AppState>,
+    Query(q): Query<ReadinessQuery>,
+) -> ApiResult<Json<crate::readiness::Readiness>> {
+    let repo = q.repo.trim();
+    if repo.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "repo is required",
+        ));
+    }
+    Ok(Json(
+        crate::readiness::readiness(
+            &s.manager,
+            &s.tools,
+            &s.node_id,
+            &q.channel,
+            repo,
+            q.work_item.as_deref().filter(|id| !id.is_empty()),
+        )
+        .await,
+    ))
+}
+
+#[derive(Deserialize)]
 pub struct JiraSearchQuery {
     channel: String,
     jql: String,
@@ -1175,6 +1208,33 @@ pub async fn export_workspace(
 ) -> ApiResult<Json<serde_json::Value>> {
     let _snapshot = s.manager.snapshot_workspace_or_session(&id).await?;
     Ok(Json(json!({ "workspace_id": id, "exported": true })))
+}
+
+#[derive(Deserialize)]
+pub struct PreparationQuery {
+    repo: String,
+}
+
+/// What preparing a checkout on this node would do, and what in it the node
+/// would not do, before a session is launched on it. Reads files; runs
+/// nothing, builds nothing.
+pub async fn preparation_preview(
+    State(s): State<AppState>,
+    Query(q): Query<PreparationQuery>,
+) -> ApiResult<Json<crate::preparation::PreparationPreview>> {
+    let repo = std::path::Path::new(q.repo.trim());
+    if !repo.is_absolute() || !repo.is_dir() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "repo must be an absolute path to a directory on this node",
+        ));
+    }
+    let environment = crate::environment::environment_for(&s.cfg, s.store(), Some(repo));
+    Ok(Json(crate::preparation::preview(
+        &s.cfg,
+        repo,
+        &environment,
+    )))
 }
 
 /// Prepare lockfile dependencies in a separate, credential-free runtime. The
@@ -1460,6 +1520,19 @@ pub async fn get_session(
         "toolchain": toolchain,
         "shown_work": s.store().shown_work_for_session(&id)?,
     })))
+}
+
+/// What the session came to, read from what was recorded: what changed, what
+/// the node verified, what needs a decision, what is uncertain, and the cost.
+pub async fn session_outcome(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::outcome::Outcome>> {
+    let session = s
+        .store()
+        .get_session(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such session".into()))?;
+    Ok(Json(crate::outcome::outcome(s.store(), session)?))
 }
 
 /// What this session may do, and what it would still have to ask about.
@@ -1789,6 +1862,74 @@ pub async fn continue_session(
     Ok((StatusCode::CREATED, Json(json!(row))))
 }
 
+/// One piece of work in one view: an item's attempts, or a plain session's
+/// lineage, with what it was for, what was decided, what is in the way, what
+/// to do next, where it lives and what it showed.
+pub async fn work_continuation(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    continuation(&s, crate::continuation::Subject::Item(id))
+}
+
+/// The same, reached from any session: the item it worked on, or else the
+/// lineage it belongs to.
+pub async fn session_continuation(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    continuation(&s, crate::continuation::Subject::Session(id))
+}
+
+fn continuation(
+    s: &AppState,
+    subject: crate::continuation::Subject,
+) -> ApiResult<Json<serde_json::Value>> {
+    let view = crate::continuation::view(s.store(), &subject)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such work".into()))?;
+    Ok(Json(json!(view)))
+}
+
+/// Carry the work on from an ended attempt, as it was or with a changed
+/// approach, model or harness.
+pub async fn carry_on(
+    State(s): State<AppState>,
+    Json(body): Json<crate::continuation::CarryOn>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let row = crate::continuation::carry_on(&s.manager, body).await?;
+    Ok((StatusCode::CREATED, Json(json!(row))))
+}
+
+#[derive(Deserialize)]
+pub struct AbandonBody {
+    #[serde(default)]
+    item_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    reason: String,
+}
+
+/// Abandon the work: the item closes, or a plain lineage is stopped and put
+/// away. Reversible: the item can be reopened, the sessions restored.
+pub async fn abandon_work(
+    State(s): State<AppState>,
+    Json(body): Json<AbandonBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let subject = match (body.item_id, body.session_id) {
+        (Some(id), None) => crate::continuation::Subject::Item(id),
+        (None, Some(id)) => crate::continuation::Subject::Session(id),
+        _ => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "name exactly one of item_id or session_id".into(),
+            ))
+        }
+    };
+    crate::continuation::abandon(&s.manager, &subject, &body.reason).await?;
+    Ok(Json(json!({ "abandoned": true })))
+}
+
 /// Whether this node is holding its machine awake, why, and the last
 /// suspend it noticed.
 pub async fn awake() -> Json<crate::awake::Status> {
@@ -2000,18 +2141,30 @@ pub async fn get_review(
             "shown_work": [],
         })));
     }
-    // A review mirrored from another node is shown here but owned there: its
-    // worktree, candidate and checks never leave the owner, and a verdict is
-    // forwarded to it, where staleness is checked again before anything is
-    // published. Reading them here would only report their absence as if it
-    // were a finding about the change.
+    s.manager.publish_queue().await;
+    let mut detail = review_detail(&s, &r).await?;
+    if r.node_id != s.node_id {
+        read_from_owner(&s, &r, &mut detail).await;
+    }
+    Ok(Json(detail))
+}
+
+/// A code review as this node holds it.
+///
+/// A review mirrored from another node is shown here but owned there: its
+/// worktree, candidate and checks never leave the owner, and a verdict is
+/// forwarded to it, where staleness is checked again before anything is
+/// published. Reading them here would only report their absence as if it
+/// were a finding about the change, so they are left empty for
+/// [`read_from_owner`] to fill.
+async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<serde_json::Value> {
+    let id = r.id.clone();
     let remote_owner = (r.node_id != s.node_id).then(|| r.node_id.clone());
     let stale = if remote_owner.is_some() {
         Vec::new()
     } else {
-        staleness_of(&s, &r).await
+        staleness_of(s, r).await
     };
-    s.manager.publish_queue().await;
     let revision = s.store().latest_review_revision(&id)?;
     let evidence = match (&remote_owner, revision.as_ref()) {
         (None, Some(revision)) => Some(s.store().candidate_evidence(&revision.candidate_id)?),
@@ -2051,7 +2204,7 @@ pub async fn get_review(
         let candidate = revision
             .as_ref()
             .map(|revision| revision.candidate_id.as_str());
-        match criteria_json(&s, item, candidate) {
+        match criteria_json(s, item, candidate) {
             Ok(view) => view,
             Err(crate::corpus::criteria::CriteriaError::MissingItem(_))
             | Err(crate::corpus::criteria::CriteriaError::Brief(
@@ -2076,10 +2229,10 @@ pub async fn get_review(
     let publication = match remote_owner {
         Some(_) => serde_json::Value::Null,
         None => json!({
-            "readiness": crate::authority::publication_readiness(&s.tools.broker, &r, &s.node_id),
+            "readiness": crate::authority::publication_readiness(&s.tools.broker, r, &s.node_id),
             "latest": publications
                 .first()
-                .map(|row| crate::authority::publication_view(s.store(), &r, row)),
+                .map(|row| crate::authority::publication_view(s.store(), r, row)),
         }),
     };
     // What the agent showed of its work, each marked stale once the candidate
@@ -2087,7 +2240,7 @@ pub async fn get_review(
     // mirror never had the workspace it was read from.
     let shown_work = match remote_owner {
         Some(_) => Vec::new(),
-        None => s.store().shown_work_for_review(&r)?,
+        None => s.store().shown_work_for_review(r)?,
     };
     // The identity a verdict from this screen must name. The commit is not
     // it: a resubmission may carry the same one with different requirements
@@ -2115,7 +2268,7 @@ pub async fn get_review(
     // Who the commits are by, against the account approval would publish as,
     // so a commit the forge would not attribute to it is named before anyone
     // approves. Node-local: the worktree is here.
-    let authorship = match (remote_owner.as_ref(), worktree_of(&s, &r)) {
+    let authorship = match (remote_owner.as_ref(), worktree_of(s, r)) {
         (None, Some(worktree)) => {
             crate::review::authorship(
                 &s.tools.broker,
@@ -2130,7 +2283,7 @@ pub async fn get_review(
         }
         _ => None,
     };
-    Ok(Json(json!({
+    Ok(json!({
         "review": r,
         "remote_owner": remote_owner,
         "revision": revision_ref,
@@ -2145,7 +2298,140 @@ pub async fn get_review(
         "publication": publication,
         "shown_work": shown_work,
         "authorship": authorship,
-    })))
+    }))
+}
+
+/// What a mirrored review is read with from its owner: the owner and the
+/// channel both named, so the owner can refuse a relay through a third node
+/// or a lookup across channels.
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewDetailRequest {
+    review_id: String,
+    channel: String,
+    owner: String,
+}
+
+/// The fields of a review only its owner can fill: what the checks, the
+/// worktree and the revision's own requests say.
+const OWNER_FIELDS: &[&str] = &[
+    "stale",
+    "evidence",
+    "criteria",
+    "shown_work",
+    "intent",
+    "requirements",
+    "surrounding_code",
+    "publications",
+];
+
+/// Fill a mirrored review's detail from the node that owns it, over the
+/// mesh, as candidate evidence is read. `owner_detail` says how that went:
+/// `fetched`, `moved` when the owner holds a newer revision than this node
+/// has mirrored (its evidence would be about another attempt), or
+/// `unreachable` with the reason, so an empty review is never shown as if
+/// it were the change's own.
+async fn read_from_owner(
+    s: &AppState,
+    r: &crate::store::ReviewRow,
+    detail: &mut serde_json::Value,
+) {
+    let fetched = async {
+        let mesh = s
+            .mesh
+            .as_ref()
+            .ok_or("this node has no mesh connection to the node that holds it")?;
+        if !mesh.peer_reachable(&r.node_id) {
+            return Err("the node that holds it is unreachable; reload when it returns".into());
+        }
+        let request = serde_json::to_value(ReviewDetailRequest {
+            review_id: r.id.clone(),
+            channel: r.channel.clone(),
+            owner: r.node_id.clone(),
+        })
+        .map_err(|error| error.to_string())?;
+        mesh.command(
+            &r.node_id,
+            proto::frame::Command::ReviewDetail { request },
+            std::time::Duration::from_secs(15),
+        )
+        .await
+        .map_err(|error| error.to_string())
+    };
+    let state = match fetched.await {
+        Err(reason) => json!({ "state": "unreachable", "reason": reason }),
+        Ok(owned) => {
+            let mirrored = detail["revision"]["id"].as_str().map(str::to_string);
+            let held = owned["revision"]["id"].as_str().map(str::to_string);
+            if mirrored.is_some() && mirrored != held {
+                json!({
+                    "state": "moved",
+                    "reason": "the node that holds it has a newer revision than this node has \
+                               mirrored; reload once it arrives",
+                })
+            } else {
+                for field in OWNER_FIELDS {
+                    if let Some(value) = owned.get(*field) {
+                        detail[*field] = value.clone();
+                    }
+                }
+                if mirrored.is_none() {
+                    detail["revision"] = owned["revision"].clone();
+                }
+                json!({ "state": "fetched" })
+            }
+        }
+    };
+    detail["owner_detail"] = state;
+}
+
+/// A peer reading a review this node owns. The sender and this node must
+/// both be on the review's channel, and this node must be the owner it was
+/// asked of: a review mirrored here from a third node is that node's to
+/// answer for.
+pub async fn forwarded_review_detail(
+    s: &AppState,
+    sender: &str,
+    request: serde_json::Value,
+) -> ApiResult<serde_json::Value> {
+    let request: ReviewDetailRequest = serde_json::from_value(request).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!("review detail request is malformed: {error}"),
+        )
+    })?;
+    if request.owner != s.node_id {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "the review's owner does not match this node",
+        ));
+    }
+    let members = s.store().nodes_in_channel(&request.channel)?;
+    if !members.iter().any(|id| id == sender) || !members.iter().any(|id| id == &s.node_id) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "sender and receiver must belong to the review's channel",
+        ));
+    }
+    let r = s
+        .store()
+        .get_review(&request.review_id)?
+        .filter(|r| r.channel == request.channel && r.node_id == s.node_id)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "no review this node holds on that channel",
+            )
+        })?;
+    if r.kind == crate::store::reports::KIND {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "a report has no detail held on its node",
+        ));
+    }
+    let detail = review_detail(s, &r).await?;
+    crate::http::evidence::within_mesh_limit(&detail, "the review's detail")?;
+    Ok(detail)
 }
 
 /// Where a review's diff was captured: the operator's worktree for a harness
@@ -5329,6 +5615,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
             C::EvidenceCandidates { query } => {
                 crate::http::evidence::forwarded_candidates(self, sender, query)
             }
+            C::ReviewDetail { request } => forwarded_review_detail(self, sender, request).await,
             C::Create { spec, work_item } => {
                 async {
                     let spec: NewSession = serde_json::from_value(spec).map_err(|error| {

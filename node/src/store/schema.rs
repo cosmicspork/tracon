@@ -1312,7 +1312,30 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX exhaustion_outcome ON exhaustion(outcome);
     "#,
-    // 57: what the operator has written on a review and not yet sent — the
+    // 57: pipelines an agent started, followed until they finish. A row is the
+    // subscription: who started it (a session, or an external lane on its
+    // channel), which pipeline, and what the node saw of it last. Node-local:
+    // the node that brokered the call is the one holding the credential.
+    r#"
+    CREATE TABLE pipeline_follow (
+        id           TEXT PRIMARY KEY,
+        node_id      TEXT NOT NULL,
+        channel      TEXT NOT NULL,
+        session_id   TEXT,
+        lane         TEXT,
+        provider     TEXT NOT NULL,
+        project      TEXT NOT NULL,
+        pipeline_id  INTEGER NOT NULL,
+        started_by   TEXT NOT NULL,
+        web_url      TEXT,
+        snapshot     TEXT,
+        done         INTEGER NOT NULL DEFAULT 0,
+        created_ms   INTEGER NOT NULL,
+        changed_ms   INTEGER NOT NULL
+    );
+    CREATE INDEX pipeline_follow_open ON pipeline_follow(node_id, done);
+    "#,
+    // 58: what the operator has written on a review and not yet sent — the
     // reason, the edited prose — held by the node so it survives a reload, a
     // reconnect and a change of device. `version` is the compare-and-set two
     // devices write against; `revision_id` is what it was written against.

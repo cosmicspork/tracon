@@ -179,6 +179,81 @@ impl RunSpec {
     }
 }
 
+impl RunSpec {
+    /// `podman run` for a service beside a session: detached, in the
+    /// session container's network namespace (so no network or host entry of
+    /// its own), with the same dropped privileges and the same proxy
+    /// environment the session has. The service is reached on the session's
+    /// loopback and reaches only what the session's network does.
+    pub fn sidecar_args(&self, sidecar: &super::Sidecar) -> Vec<String> {
+        let proxy = format!("http://{}:{}", self.gateway_host, self.proxy_port);
+        let direct = super::no_proxy(&self.gateway_host);
+        let mut a: Vec<String> = vec![
+            "run".into(),
+            "-d".into(),
+            "--rm".into(),
+            "--name".into(),
+            sidecar.name.clone(),
+            "--network".into(),
+            format!("container:{}", sidecar.session_container),
+            "--cap-drop=ALL".into(),
+            "--security-opt=no-new-privileges".into(),
+            "--init".into(),
+            "--stop-timeout".into(),
+            self.stop_timeout_secs.to_string(),
+        ];
+        if self.selinux_label_disable {
+            a.push("--security-opt".into());
+            a.push("label=disable".into());
+        }
+        for (k, v) in [
+            ("HTTPS_PROXY", proxy.as_str()),
+            ("HTTP_PROXY", proxy.as_str()),
+            ("NO_PROXY", direct.as_str()),
+            ("no_proxy", direct.as_str()),
+        ] {
+            a.push("-e".into());
+            a.push(format!("{k}={v}"));
+        }
+        a.push(sidecar.image.clone());
+        a.extend(sidecar.command.iter().cloned());
+        a
+    }
+
+    /// `podman run` for one readiness probe: a throwaway container of the
+    /// harness image (which carries curl and bash) in the same namespace,
+    /// asking the service's port on loopback, never through the proxy.
+    pub fn probe_args(&self, sidecar: &super::Sidecar) -> Vec<String> {
+        let probe = match &sidecar.ready {
+            Some(path) => format!(
+                "curl -fsS --noproxy '*' --max-time 2 -o /dev/null 'http://127.0.0.1:{}{}'",
+                sidecar.port, path
+            ),
+            None => format!("exec 3<>/dev/tcp/127.0.0.1/{}", sidecar.port),
+        };
+        let mut a: Vec<String> = vec![
+            "run".into(),
+            "--rm".into(),
+            "--network".into(),
+            format!("container:{}", sidecar.session_container),
+            "--cap-drop=ALL".into(),
+            "--security-opt=no-new-privileges".into(),
+        ];
+        if self.selinux_label_disable {
+            a.push("--security-opt".into());
+            a.push("label=disable".into());
+        }
+        a.extend([
+            "--entrypoint".into(),
+            "bash".into(),
+            self.image.clone(),
+            "-c".into(),
+            probe,
+        ]);
+        a
+    }
+}
+
 pub struct PodmanRunner {
     spec: RunSpec,
 }
@@ -274,6 +349,34 @@ impl Runner for PodmanRunner {
         Ok(())
     }
 
+    async fn start_sidecar(&self, sidecar: &super::Sidecar) -> Result<(), RunnerError> {
+        let out = Command::new(&self.spec.podman_bin)
+            .args(self.spec.sidecar_args(sidecar))
+            .output()
+            .await?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // Asked twice: the first is still running, which is what was wanted.
+        if stderr.contains("already in use") {
+            return Ok(());
+        }
+        Err(RunnerError::Other(format!(
+            "start service {}: {}",
+            sidecar.name,
+            stderr.trim()
+        )))
+    }
+
+    async fn probe_sidecar(&self, sidecar: &super::Sidecar) -> Result<bool, RunnerError> {
+        let out = Command::new(&self.spec.podman_bin)
+            .args(self.spec.probe_args(sidecar))
+            .output()
+            .await?;
+        Ok(out.status.success())
+    }
+
     /// Two node processes can share a container runtime, so a capture's
     /// container carries this process's id. `kill` has to be given the same
     /// name back.
@@ -317,6 +420,40 @@ mod tests {
 
     fn spec() -> RunSpec {
         RunSpec::from_config(&Config::default(), false)
+    }
+
+    #[test]
+    fn a_sidecar_joins_the_session_namespace_with_the_gate_and_nothing_more() {
+        let sidecar = crate::runner::Sidecar {
+            name: "tracon-h-s1-svc-browser".into(),
+            session_container: "tracon-h-s1".into(),
+            image: "img@sha256:abc".into(),
+            command: vec!["--remote-debugging-port=9222".into()],
+            port: 9222,
+            ready: Some("/json/version".into()),
+        };
+        let a = spec().sidecar_args(&sidecar);
+        let line = a.join(" ");
+        assert!(line.starts_with("run -d --rm --name tracon-h-s1-svc-browser"));
+        assert!(line.contains("--network container:tracon-h-s1"));
+        assert!(line.contains("--cap-drop=ALL") && line.contains("no-new-privileges"));
+        assert!(
+            !line.contains("--add-host")
+                && !line.contains("--publish")
+                && !line.contains("--mount")
+        );
+        assert!(line.ends_with("img@sha256:abc --remote-debugging-port=9222"));
+
+        let probe = spec().probe_args(&sidecar);
+        assert!(probe.contains(&"container:tracon-h-s1".to_string()));
+        assert!(probe.last().unwrap().contains(
+            "--noproxy '*' --max-time 2 -o /dev/null 'http://127.0.0.1:9222/json/version'"
+        ));
+        let tcp = spec().probe_args(&crate::runner::Sidecar {
+            ready: None,
+            ..sidecar
+        });
+        assert_eq!(tcp.last().unwrap(), "exec 3<>/dev/tcp/127.0.0.1/9222");
     }
 
     #[test]

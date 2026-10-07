@@ -3548,8 +3548,53 @@ impl tracon::boundary::Backend for RecordingBackend {
         self.inner.harness_home()
     }
     async fn reconcile(&self, names: &[String]) {
+        self.killed.lock().unwrap().extend(names.iter().cloned());
         self.inner.reconcile(names).await
     }
+}
+
+/// A node that restarts under a session removes the services the session
+/// started beside it as well as its container: nothing else would, once the
+/// session is closed.
+#[tokio::test]
+async fn a_restart_removes_a_sessions_services_with_its_container() {
+    state::isolate();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    store.ensure_peer_node("n1").unwrap();
+    let id = insert_running_session(&store, 10_000);
+    store
+        .update_session(
+            &id,
+            tracon::store::SessionPatch {
+                container_name: Some("tracon-h-x".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store
+        .append_event(&tracon::store::NewEvent {
+            session_id: id.clone(),
+            work_item_id: None,
+            kind: tracon::session::state::event_kind::SERVICE.into(),
+            ref_id: None,
+            payload: json!({ "name": "browser", "container": "tracon-h-x-svc-browser", "state": "ready" }),
+            at_ms: now_ms(),
+            mono_ms: 0,
+        })
+        .unwrap();
+    let killed: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let backend = RecordingBackend {
+        inner: tracon::runner::local::LocalBackend,
+        killed: killed.clone(),
+    };
+    tracon::session::reconcile_after_restart(&store, "n1", &backend).await;
+    assert_eq!(
+        killed.lock().unwrap().clone(),
+        vec![
+            "tracon-h-x-svc-browser".to_string(),
+            "tracon-h-x".to_string()
+        ]
+    );
 }
 
 /// Poll until `f` holds, bounded by *real* time. This test pauses the clock so

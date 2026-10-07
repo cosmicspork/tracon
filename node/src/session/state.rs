@@ -116,6 +116,13 @@ pub mod event_kind {
     /// it (`status`, `repo`). Minutes, once per repository; the start event
     /// that follows says which image the session got.
     pub const REPO_IMAGE: &str = "repo_image";
+    /// What the node saw a published request do on its forge since it last
+    /// looked: CI, draft and ready, reviews, comments, merged or closed.
+    pub const FORGE_FOLLOW: &str = "forge_follow";
+    /// What a pipeline the session started did since the node last looked:
+    /// following it began, a job finished, the pipeline finished, failed or
+    /// stopped at a manual job.
+    pub const PIPELINE_FOLLOW: &str = "pipeline_follow";
     /// The session asked for a host its repository does not open to it
     /// (`host`). Once per host: the agent saw a 403 from a package manager,
     /// and this is where the operator sees what it wanted.
@@ -280,6 +287,14 @@ pub mod event_kind {
     /// `bytes_out`, `duration_ms`, `reason`, and `output` only when output
     /// capture was deliberately turned on).
     pub const PTY_CLOSED: &str = "pty_closed";
+    /// A catalogue service beside the session changed state (`name`,
+    /// `container`, `state` — `started`, `ready`, `failed` or `stopped` —
+    /// and `detail` for a failure). The events are also how everything that
+    /// removes a session's container finds the services to remove with it.
+    pub const SERVICE: &str = "service";
+    /// The operator abandoned the work this session was the latest attempt
+    /// at (`reason`, `summary`): its item closed, or its lineage put away.
+    pub const ABANDONED: &str = "abandoned";
 }
 
 #[cfg(test)]

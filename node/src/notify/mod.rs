@@ -71,6 +71,9 @@ pub enum Kind {
     /// screen. Its own kind, not a flag on another, because it lands somewhere
     /// else and a burst of them collapses on its own terms.
     Opencode,
+    /// A published request moved on its forge: CI, ready, reviews, comments,
+    /// merged or closed.
+    Forge,
 }
 
 impl Kind {
@@ -82,6 +85,7 @@ impl Kind {
             Kind::Promotion => "promo",
             Kind::Operator => "operator",
             Kind::Opencode => "opencode",
+            Kind::Forge => "forge",
         }
     }
 
@@ -100,6 +104,8 @@ impl Kind {
             (Kind::Operator, _) => "operator notifications",
             (Kind::Opencode, 1) => "OpenCode session",
             (Kind::Opencode, _) => "OpenCode sessions",
+            (Kind::Forge, 1) => "published change moved",
+            (Kind::Forge, _) => "published changes moved",
         };
         format!("{n} {noun} waiting")
     }
@@ -148,7 +154,7 @@ impl Notification {
     fn ttl_secs(&self) -> u32 {
         match self.kind {
             Kind::Permission | Kind::Operator | Kind::Opencode => TTL_ITEM_SECS,
-            Kind::Review | Kind::Report | Kind::Promotion => TTL_REVIEW_SECS,
+            Kind::Review | Kind::Report | Kind::Promotion | Kind::Forge => TTL_REVIEW_SECS,
         }
     }
 
@@ -169,6 +175,32 @@ impl Notification {
             // Per session, not per event: a second nudge about the same
             // session replaces the first rather than stacking.
             tag: format!("tracon-opencode-{session_id}"),
+        }
+    }
+
+    /// What a published request did on its forge, landing on its review.
+    /// One per review: a later change replaces an earlier banner.
+    pub fn forge(review_id: &str, title: String, body: String) -> Self {
+        Self {
+            kind: Kind::Forge,
+            title,
+            body,
+            path: format!("/reviews/{review_id}"),
+            tag: format!("tracon-forge-{review_id}"),
+        }
+    }
+
+    /// What a pipeline an agent started did, landing on the session that
+    /// started it (or the sessions list, for a harness the operator runs).
+    /// One per pipeline: a later push replaces an earlier banner.
+    pub fn pipeline(session_id: Option<&str>, title: String, body: String, tag: &str) -> Self {
+        Self {
+            kind: Kind::Forge,
+            title,
+            body,
+            path: session_id
+                .map_or_else(|| "/sessions".to_string(), |id| format!("/sessions/{id}")),
+            tag: format!("tracon-pipeline-{tag}"),
         }
     }
 
@@ -239,6 +271,14 @@ pub fn enabled(bindings: &serde_json::Value) -> bool {
 pub fn legacy(bindings: &serde_json::Value) -> bool {
     let notify = &bindings["notify"];
     notify["sink"].is_string() || notify["node"].is_string()
+}
+
+/// Whether pushes about `channel` go out: a channel says so in its bindings.
+pub fn channel_pushes(store: &Arc<Store>, channel: &str) -> bool {
+    Gate {
+        store: store.clone(),
+    }
+    .pushes(channel)
 }
 
 impl Gate {

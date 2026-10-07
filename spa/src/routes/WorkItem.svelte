@@ -1,6 +1,7 @@
 <script lang="ts">
   import BriefPanel from '../components/BriefPanel.svelte'
   import ContextPanel from '../components/ContextPanel.svelte'
+  import ContinuationPanel from '../components/ContinuationPanel.svelte'
   import CriteriaPanel from '../components/CriteriaPanel.svelte'
   import EvidenceLinks from '../components/EvidenceLinks.svelte'
   import { api } from '../lib/api'
@@ -148,6 +149,8 @@
   {#if item.body.trim()}
     <div class="body">{item.body}</div>
   {/if}
+
+  <ContinuationPanel itemId={item.id} showIntent={false} onchange={load} />
 
   <BriefPanel {item} {brief} onchange={load} />
   <CriteriaPanel {item} {criteria} onchange={load} />
