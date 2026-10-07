@@ -836,6 +836,21 @@ binding can waive that), and closing the item ends the session that held it.
 Context rot is mitigated by mechanism where the workflow opts in, not by a line
 in a markdown file a plain session never claimed to follow.
 
+**Coming back to work is one view, item or not.** An item's attempts are the
+sessions that held it. A plain session's attempts are its lineage, meaning what it
+continued and what continued it, so it gets the same view without being made into
+an item. The view (`/api/work/{id}/continuation`, `/api/sessions/{id}/continuation`)
+gathers what the work was for (the item, or the first prompt), each attempt and how
+it ended, what the operator decided (answered permissions and questions, and the plan
+and brief), what is in the way, the workspace the latest attempt left, and the
+reviews and shown work. It also gives the one next action. Every part of that is
+read from recorded state, and the next action follows fixed rules over those records,
+so it cannot claim more than they say. It offers three verbs. Continue carries the
+work on from the last ended attempt's workspace. Change approach does the same and
+hands the operator's new direction, in their own words, to the next attempt.
+Abandon closes the item, or stops a plain lineage and puts it away, and records the
+reason. Abandon deletes nothing.
+
 ### The product brief
 
 An item may point at one document that says what the work is for: intended user,

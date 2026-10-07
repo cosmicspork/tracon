@@ -1778,6 +1778,74 @@ pub async fn continue_session(
     Ok((StatusCode::CREATED, Json(json!(row))))
 }
 
+/// One piece of work in one view: an item's attempts, or a plain session's
+/// lineage, with what it was for, what was decided, what is in the way, what
+/// to do next, where it lives and what it showed.
+pub async fn work_continuation(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    continuation(&s, crate::continuation::Subject::Item(id))
+}
+
+/// The same, reached from any session: the item it worked on, or else the
+/// lineage it belongs to.
+pub async fn session_continuation(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    continuation(&s, crate::continuation::Subject::Session(id))
+}
+
+fn continuation(
+    s: &AppState,
+    subject: crate::continuation::Subject,
+) -> ApiResult<Json<serde_json::Value>> {
+    let view = crate::continuation::view(s.store(), &subject)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such work".into()))?;
+    Ok(Json(json!(view)))
+}
+
+/// Carry the work on from an ended attempt, as it was or with a changed
+/// approach, model or harness.
+pub async fn carry_on(
+    State(s): State<AppState>,
+    Json(body): Json<crate::continuation::CarryOn>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let row = crate::continuation::carry_on(&s.manager, body).await?;
+    Ok((StatusCode::CREATED, Json(json!(row))))
+}
+
+#[derive(Deserialize)]
+pub struct AbandonBody {
+    #[serde(default)]
+    item_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    reason: String,
+}
+
+/// Abandon the work: the item closes, or a plain lineage is stopped and put
+/// away. Reversible: the item can be reopened, the sessions restored.
+pub async fn abandon_work(
+    State(s): State<AppState>,
+    Json(body): Json<AbandonBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let subject = match (body.item_id, body.session_id) {
+        (Some(id), None) => crate::continuation::Subject::Item(id),
+        (None, Some(id)) => crate::continuation::Subject::Session(id),
+        _ => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "name exactly one of item_id or session_id".into(),
+            ))
+        }
+    };
+    crate::continuation::abandon(&s.manager, &subject, &body.reason).await?;
+    Ok(Json(json!({ "abandoned": true })))
+}
+
 #[derive(Deserialize)]
 pub struct DraftBody {
     text: String,

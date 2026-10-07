@@ -4,6 +4,7 @@
   import PermissionCard from '../components/PermissionCard.svelte'
   import SessionAuthorityPanel from '../components/SessionAuthorityPanel.svelte'
   import ShownWork from '../components/ShownWork.svelte'
+  import ContinuationPanel from '../components/ContinuationPanel.svelte'
   import TransferExport from '../components/TransferExport.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
@@ -489,6 +490,12 @@
   <!-- Opened by the "why is this asked" link on a permission card, so the
        answer is one tap from the request rather than a screen away. -->
   <SessionAuthorityPanel {id} open={router.hash === '#authority'} />
+
+  <!-- Once an attempt has ended, what matters is the work it was part of:
+       how it stands across every attempt, and what to do next. -->
+  {#if isTerminal(session.state)}
+    <ContinuationPanel sessionId={id} />
+  {/if}
 
   {#if error}
     <div class="banner crit">refused <b>· {error}</b></div>
