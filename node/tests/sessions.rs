@@ -1286,6 +1286,64 @@ async fn an_unanswered_request_is_denied_by_default() {
     );
     assert!(rig.store.open_permissions().unwrap().is_empty());
 }
+/// A card's deadline counts only time the node was awake. The wall clock
+/// running past it, as it does across a suspend, does not deny it: the
+/// supervisor judges on its monotonic clock.
+#[tokio::test]
+async fn a_request_is_not_denied_because_the_wall_clock_ran_past_its_deadline() {
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    let _answer = rig.request_permission().await;
+    assert!(rig.await_state("waiting_on_you").await);
+    assert_eq!(rig.store.open_permissions().unwrap().len(), 1);
+    // The wall-clock deadline is now behind us, as after a long suspend.
+    rig.store.extend_open_permissions("n1", -120_000).unwrap();
+    assert!(rig.store.open_permissions().unwrap()[0].expires_ms < now_ms());
+    // Past the supervisor's expiry tick.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(
+        rig.store.open_permissions().unwrap().len(),
+        1,
+        "only awake time counts towards a card's deadline"
+    );
+}
+
+/// A suspend the node notices is recorded on the sessions it caught, and the
+/// cards that were waiting keep the time they had left.
+#[tokio::test]
+async fn a_noticed_suspend_is_recorded_and_moves_waiting_deadlines_on() {
+    state::isolate();
+    let h = Harness::new(10_000).await;
+    let id = insert_running_session(&h.store, 10_000);
+    let mut row = permission_row("p-asleep", &id);
+    row.node_id = "n1".into();
+    let before = row.expires_ms;
+    h.store.insert_permission(&row).unwrap();
+
+    let awake = tracon::awake::Awake::new(h.manager.clone());
+    awake.suspended(Duration::from_secs(19 * 60)).await;
+
+    let after = h
+        .store
+        .open_permissions()
+        .unwrap()
+        .into_iter()
+        .find(|p| p.id == "p-asleep")
+        .unwrap();
+    assert_eq!(after.expires_ms, before + 19 * 60 * 1000);
+    let events = h.store.events_after(&id, 0, 100).unwrap();
+    let suspended = events
+        .iter()
+        .find(|e| e.kind == "host_suspended")
+        .expect("the interruption is on the session");
+    assert_eq!(suspended.payload["asleep_ms"], 19 * 60 * 1000);
+    let status = awake.status();
+    assert_eq!(
+        status.last_suspend.map(|s| s.asleep_ms),
+        Some(19 * 60 * 1000)
+    );
+}
+
 #[tokio::test]
 async fn pause_fences_prompts_and_pending_permissions_until_resume() {
     state::isolate();

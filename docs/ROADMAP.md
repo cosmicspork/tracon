@@ -87,17 +87,9 @@ runs, or in the daily desktop use since.
       with the URL) and show it there, then suspend a published session after an idle
       period — container stopped, grant revoked, workspace kept — so a CI failure or a
       review comment can resume it. Ending it stays the operator's.
-- [ ] **Keep the machine awake while a session works.** The desktop host idle-suspended
-      for 54 minutes in the middle of execute session `01a0f4b3`'s turn (2026-09-30,
-      during the harness's context compaction) and the session simply stopped. Hold a
-      sleep inhibitor while any turn is running or a permission is waiting (logind's
-      `Inhibit` on Linux, a power assertion on macOS), release it when the node is
-      idle, show in the interface when it is held, and record a suspend that happens
-      anyway as an interruption rather than a silent gap. It happened again on
-      2026-10-03 (session `01a10447`): about 19 minutes asleep while a permission card
-      waited, and because a card's expiry is measured on the wall clock it was answered
-      "denied: unanswered" the moment the host woke, leaving the agent's work in a
-      `git stash`. A card's deadline should count only time the node was awake.
+- [ ] **Open external links through a clean Linux host launcher**: the AppImage's bundled
+      `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
+      host environment for the child only and keep the URL and origin restrictions.
 
 ## Next — the working loop, made comfortable
 

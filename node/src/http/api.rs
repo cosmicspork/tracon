@@ -1778,6 +1778,16 @@ pub async fn continue_session(
     Ok((StatusCode::CREATED, Json(json!(row))))
 }
 
+/// Whether this node is holding its machine awake, why, and the last
+/// suspend it noticed.
+pub async fn awake() -> Json<crate::awake::Status> {
+    Json(
+        crate::awake::current()
+            .map(|a| a.status())
+            .unwrap_or_default(),
+    )
+}
+
 #[derive(Deserialize)]
 pub struct DraftBody {
     text: String,
