@@ -130,6 +130,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/admin/maintenance/restart", post(admin::restart))
         .route("/api/maintenance/storage", post(admin::storage))
+        .route("/api/maintenance/data", get(admin::data))
         .route("/api/admin/maintenance/install", post(admin::install))
         .route("/api/admin/maintenance/uninstall", post(admin::uninstall))
         .route("/api/admin/policy", get(policy_admin::status))

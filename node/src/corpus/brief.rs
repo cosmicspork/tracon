@@ -25,8 +25,8 @@
 //! dependency. Nothing is copied into the brief and no second store is
 //! introduced to hold it.
 //!
-//! *A line may say what points at it.* Under a line, indented, are the checks,
-//! scenarios and observations that would settle it — the same provenance
+//! *A line may say what points at it.* Under a line, indented, are the checks
+//! that would settle it — the same provenance
 //! vocabulary one level down, so the standing of a link is carried by the
 //! machinery that already enforces it: an agent's link is `inferred`, the
 //! operator's is `decided`, and a session writing either a decision or an
@@ -206,13 +206,18 @@ impl Ref {
     }
 }
 
-/// What a line may say points at it. A `check` is a command the operator
-/// configured, and is the only kind that can produce a result on its own. A
-/// `scenario` names a customer task that would exercise the line; this node
-/// holds no scenario records yet, and says so rather than pretending. An
-/// `observation` is what someone was seen to do, and is context for a
-/// person's judgement rather than a result.
-pub const LINK_KINDS: &[&str] = &["check", "scenario", "observation"];
+/// What a line may say points at it: a `check`, a command the operator
+/// configured, which is the only thing that produces a result. Everything
+/// else that settles a criterion is the operator's judgement, recorded as a
+/// verdict rather than a link.
+pub const LINK_KINDS: &[&str] = &["check"];
+
+/// Link kinds a brief written before they were retired may still hold.
+/// Nothing produces a `scenario` or an `observation` any more, so neither can
+/// be written; one already in a file is still read as the link it is — so it
+/// round-trips and is not mistaken for a criterion of its own — and shows as
+/// retired, contributing nothing.
+pub const RETIRED_LINK_KINDS: &[&str] = &["scenario", "observation"];
 
 /// One thing a line points at, written indented under it. Its provenance is
 /// the same question as the line's, one level down: `decided` is the
@@ -222,7 +227,7 @@ pub struct Link {
     pub provenance: Provenance,
     /// One of [`LINK_KINDS`].
     pub kind: String,
-    /// The command, scenario name, or what was observed.
+    /// The command.
     pub value: String,
     #[serde(default)]
     pub refs: Vec<Ref>,
@@ -234,7 +239,7 @@ pub struct Entry {
     pub text: String,
     #[serde(default)]
     pub refs: Vec<Ref>,
-    /// What points at this line: its checks, scenarios and observations.
+    /// What points at this line: its checks.
     #[serde(default)]
     pub links: Vec<Link>,
 }
@@ -548,7 +553,7 @@ fn parse_link(line: &str) -> Option<Link> {
         return None;
     }
     let kind = kind.to_ascii_lowercase();
-    if !LINK_KINDS.contains(&kind.as_str()) {
+    if !LINK_KINDS.contains(&kind.as_str()) && !RETIRED_LINK_KINDS.contains(&kind.as_str()) {
         return None;
     }
     let (value, refs) = take_refs(value.trim());
@@ -640,7 +645,12 @@ pub enum BriefError {
     TooManyLinks,
     #[error("{0:?} is not one of {LINK_KINDS:?}")]
     LinkKind(String),
-    #[error("a link needs a value: the command, the scenario, or what was observed")]
+    #[error(
+        "{0:?} links are retired: nothing produces one. Point a configured check at the \
+         criterion, or leave it to the operator's judgement"
+    )]
+    RetiredLinkKind(String),
+    #[error("a link needs a value: the command")]
     EmptyLink,
     #[error("{0:?} is not one of {REF_KINDS:?}")]
     RefKind(String),
@@ -1034,6 +1044,9 @@ fn check(entry: EntryInput, author: &Author) -> Result<Entry, BriefError> {
 /// and must not be able to write one this would refuse.
 pub fn check_link(link: LinkInput, author: &Author) -> Result<Link, BriefError> {
     let kind = link.kind.trim().to_ascii_lowercase();
+    if RETIRED_LINK_KINDS.contains(&kind.as_str()) {
+        return Err(BriefError::RetiredLinkKind(kind));
+    }
     if !LINK_KINDS.contains(&kind.as_str()) {
         return Err(BriefError::LinkKind(link.kind));
     }

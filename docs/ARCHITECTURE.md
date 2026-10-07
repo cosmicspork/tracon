@@ -564,7 +564,12 @@ starts; every check then runs on its own copy of the prepared tree with the cach
 read-only. That cache is the run's own, copied from the repository's base cache and
 removed with the run. The base is written by one thing only — a preparation of the
 default branch, made when the repository's image is built — so a candidate's install,
-which may run the candidate's own scripts, can reach its own evidence and nobody else's. A session that needs
+which may run the candidate's own scripts, can reach its own evidence and nobody else's.
+Sessions get a cache of their own, one per repository and channel, that outlives each
+session: it starts as a copy of the base, and what an agent fetches or compiles into it
+(Cargo's output goes there through `CARGO_TARGET_DIR`) is there for the channel's next
+session on the repository. No check mounts it, so nothing an agent wrote can make the
+review gate pass; a check still prepares from the base. A session that needs
 something running beside it (a browser to drive, a database to test against) asks for
 it by name from the operator's `[[service]]` catalogue with `service_start`, which
 waits, within a tool call's budget, for the entry's readiness probe; `service_status`
@@ -680,9 +685,28 @@ memberships, verify the candidate's actual channel and owner, refuse third-node
 relays, and bound responses. Peer UI detail is read-only; it never turns a remote
 ID into a local action.
 
+**What is reviewed is the tree; the commits and the branch are prose.** The
+candidate is a tree hash recorded at capture, and every check, verdict and grant
+is about that tree. How it reaches the forge is publication prose, like the
+description: the agent proposes a commit message and a branch (`message`,
+`branch` on submit; a session on the node's placeholder branch gets one named
+from its title), the review lists the agent's own commits beside the diff, and
+the operator edits either before approving. Under `commits = "squash"`, the
+default, the publisher makes one commit holding exactly the reviewed tree, on
+the commit pinned at submit — where the branch leaves its base for a new
+branch, or what the change's branch holds for an update, including an earlier
+squash the agent never had — with the candidate head's author and dates, so a
+resumed attempt makes the identical commit. `keep` pushes the agent's commits
+as written. The message and branch are bound by the publish grant's prose hash
+and target like the description, and a deterministic check (conventional type,
+imperative subject, length, kebab branch, no tracker keys — each off unless the
+repository's entry, the channel's `publish.style` binding or `[publish] style`
+turns it on) refuses a submission that breaks it before the card reaches the
+operator, and an approval whose edits do.
+
 **Publication is two side effects the node cannot take back, so it writes down
 what it is about to do before it does it.** Approval imports the candidate into a
-fresh publisher repository, pushes the reviewed commit, reads the ref back from
+fresh publisher repository, pushes the reviewed commit (or its squash), reads the ref back from
 the forge to confirm it is actually there, and then opens the change with
 exactly the approved title and description — nothing is appended that the
 operator did not see. Each step is recorded before it is attempted, keyed on the
@@ -961,8 +985,13 @@ heard from the customer should look like one rather than like a tidy form.
 
 A success criterion is not a new record: it is a line in the brief's success
 criteria section, and what points at it is an indented line under it naming a
-`check`, a `scenario` or an `observation`. The document stays the record, so
-links travel with the channel, round-trip, and are editable by hand.
+`check`. The document stays the record, so links travel with the channel,
+round-trip, and are editable by hand. A check is the one link kind anything
+produces a result for; whatever a check cannot settle is the operator's
+judgement, recorded as a verdict rather than a link. The `scenario` and
+`observation` kinds an older brief may hold are retired: they are still read,
+so the file round-trips and they are not mistaken for criteria of their own,
+shown as retired, counted for nothing, and refused for anything new.
 
 **A criterion is named by its own text.** `sc-` and twelve hex characters of
 the SHA-256 hash of the line with only outer whitespace trimmed. Case,
@@ -980,8 +1009,7 @@ rule, so a session's link is `inferred` and a `decided` one is refused. Coverage
 follows: a criterion whose only links are somebody's proposal reads as
 `only_proposed`, not as covered, however green that proposal would go. A `check`
 resolves only against the commands the operator configured — any other is
-recorded and reported as never running — and a `scenario` says plainly that this
-node holds no such record yet.
+recorded and reported as never running.
 
 **Passing one's own checks is not the customer agreeing.** A check result raises
 a criterion as far as `checks_pass`, shown as "checks pass · unjudged".
@@ -1207,7 +1235,11 @@ Every node serves the same embedded SPA; a client is a matter of shell.
   required a matching `Origin` on everything that writes.
 - The interface talks only to the node that served it; that node mirrors peers and
   forwards commands to owners. A verdict executes on the owner, because staleness
-  and publishing need the owner's worktree and broker.
+  and publishing need the owner's worktree and broker. A mirrored review's checks,
+  evidence, criteria, staleness and forge intent are read from the owner when it is
+  opened, bounded like candidate evidence. The owner answers only for a review it holds,
+  on a channel both nodes share. An owner that cannot be read, or that has moved on to
+  a revision not yet mirrored, is said to be, rather than shown as an empty review.
 - **The attention count is actionable human decisions, and nothing else.** Everything
   parked in the operator's bay is sorted into three lanes before it is counted: what a
   person can decide now; what the agent holds (a review being revised, a request that
@@ -1262,8 +1294,13 @@ Three surfaces, three answers, and the differences are the point.
 Encrypted snapshots of the hub's volume to object storage, with a restore path that
 has been exercised — hub failure without a tested restore costs years of context.
 Retention is decided (2026-09-29): the node keeps everything, and the operator deletes
-by hand; a data-management pane that shows what is held per kind and offers those
-deletes is on the roadmap. Tombstone semantics wait until replication makes a
+by hand. Settings → Data shows what the node holds per kind (rows counted from the
+store, directories measured on disk), where each kind that has a real delete is
+deleted, and what that delete does beyond the node; the Nodes screen carries the
+serving node's total. Documents, memories and work items delete one at a time and
+replicate the delete as a tombstone; workspaces and harness state go through Runtime
+storage once their session is archived; sessions, their logs and evidence have no
+delete. Tombstone semantics wait until replication makes a
 propagated delete matter, and that decision is due before it does. Plain-text export for every kind: no format readable
 only by this binary. Documents export as plain Markdown and import back by filename
 alone; a session package is JSON that `tracon session show` renders with nothing

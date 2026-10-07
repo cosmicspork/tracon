@@ -15,6 +15,7 @@
     reviewVerdict,
     type CandidateEvidence,
     type Criteria,
+    type OwnerDetail,
     type PinnedRequirements,
     type Review,
     type ReviewAuthorship,
@@ -30,6 +31,7 @@
   import { baseFromDiff, buildPatch, fileSection } from '../lib/patch'
   import { isNarrativeReport } from '../lib/reports'
   import { leaveAfterVerdict } from '../lib/verdict-nav'
+  import { composerLabel, unavailable } from '../lib/verdicts'
   import { COVERAGE, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
 
   let { id }: { id: string } = $props()
@@ -40,6 +42,7 @@
   let stale = $state<string[]>([])
   /** The node that owns a review mirrored here; null when this node does. */
   let remoteOwner = $state<string | null>(null)
+  let ownerDetail = $state<OwnerDetail | null>(null)
   let evidence = $state<CandidateEvidence | null>(null)
   let shownWork = $state<ShownWorkItem[]>([])
   let authorship = $state<ReviewAuthorship | null>(null)
@@ -66,12 +69,27 @@
   let descBody = $state('')
   let commenting = $state(false)
   let comment = $state('')
+  /** The squashed commit's message, and what it was before you edited it. */
+  let message = $state('')
+  let proposedMessage = ''
+  /** The branch a new change is pushed to. */
+  let branchName = $state('')
   let busy = $state(false)
   let error = $state<string | null>(null)
   let loaded = $state(false)
   /** The route this review was opened from; a verdict goes back to it. */
   let openedFrom: string | null = null
   const report = $derived(review && isNarrativeReport(review) ? review : null)
+
+  /**
+   * The message a squash carries when nobody edits it, as the node derives
+   * it: the agent's, else the description's, else the review's own.
+   */
+  function proposedCommitMessage(intent: ReviewIntent, title: string, body: string): string {
+    if (intent.forge.commit !== undefined) return intent.forge.commit
+    const from = intent.forge.description ?? { title, body }
+    return from.body.trim() ? `${from.title.trim()}\n\n${from.body.trim()}` : from.title.trim()
+  }
 
   $effect(() => {
     void id
@@ -84,6 +102,7 @@
         revision = d.revision
         stale = d.stale
         remoteOwner = d.remote_owner ?? null
+        ownerDetail = d.owner_detail ?? null
         evidence = d.evidence
         shownWork = d.shown_work ?? []
         authorship = d.authorship ?? null
@@ -103,6 +122,13 @@
         descBody = intent.forge.description?.body ?? ''
         commenting = intent.forge.comment !== undefined
         comment = intent.forge.comment ?? ''
+        proposedMessage = proposedCommitMessage(intent, d.review.title, d.review.body)
+        message = proposedMessage
+        try {
+          branchName = JSON.parse(d.review.target)?.branch ?? ''
+        } catch {
+          branchName = ''
+        }
         loaded = true
       })
       .catch((e) => {
@@ -143,6 +169,18 @@
   )
   const editedFiles = $derived([...editable.entries()].filter(([, f]) => f.now !== f.head).length)
   const publishing = $derived(review?.state === 'publishing')
+  /** The verdict whose reason is being written, if one is. */
+  let composing = $state<'revise' | 'reject' | null>(null)
+  let reasonInput = $state<HTMLTextAreaElement | null>(null)
+  const conditions = $derived({ busy, publishing, stale, reason })
+  const approveBlocked = $derived(unavailable('approve', conditions))
+  const sendBlocked = $derived(composing ? unavailable(composing, conditions) : null)
+
+  /** Open the reason composer for a verdict that needs one. */
+  function compose(action: 'revise' | 'reject') {
+    composing = action
+    queueMicrotask(() => reasonInput?.focus())
+  }
 
   /** Fetch each reviewed file as submitted and rebuild what it changed from. */
   async function startEditing() {
@@ -231,10 +269,17 @@
    * before a revision could say otherwise.
    */
   const summaryOnly = $derived(change !== null || describe)
+  /** Whether the reviewed tree ships as one commit rather than the agent's. */
+  const squashing = $derived(intent.squash_onto !== undefined)
   const outputs = $derived<ReviewOutputs>({
     description: describe ? { title: descTitle, body: descBody } : undefined,
     comment: commenting && comment.trim() ? comment : undefined,
     draft: change === null ? intent.forge.draft : undefined,
+    commit:
+      squashing && (intent.forge.commit !== undefined || message.trim() !== proposedMessage)
+        ? message.trim()
+        : undefined,
+    branch: change === null && branchName.trim() && branchName.trim() !== target?.branch ? branchName.trim() : undefined,
   })
   const files = $derived.by(() => {
     try {
@@ -256,6 +301,8 @@
             description: intent.forge.description,
             comment: intent.forge.comment,
             draft: change === null ? intent.forge.draft : undefined,
+            commit: squashing ? intent.forge.commit : undefined,
+            branch: undefined,
           })),
   )
   const authoritativeChecks = $derived(evidence?.checks ?? [])
@@ -427,7 +474,7 @@
       {:else}
         new {noun}{intent.forge.draft ? ' (draft)' : ''}
       {/if}
-      → {target?.project} · {target?.branch} into {target?.base}
+      → {target?.project} · {outputs.branch ?? target?.branch} into {target?.base}
       {#if intent.rewrite}
         <span
           class="chip warn"
@@ -445,11 +492,19 @@
       <dd class="m">{review.lane ?? 'an external agent'}</dd>
     {/if}
   </dl>
-  {#if remoteOwner}
+  {#if remoteOwner && ownerDetail?.state === 'fetched'}
     <div class="banner">
       held by {nodeLabel(store.nodes, remoteOwner)}
-      <b>· its checks and evidence stay on that node, and it checks the branch for changes again when you decide</b>
+      <b>· read from it just now; it checks the branch for changes again when you decide</b>
     </div>
+  {:else if remoteOwner}
+    <div class="banner crit">
+      held by {nodeLabel(store.nodes, remoteOwner)}
+      <b>· {ownerDetail?.reason ?? 'its checks and evidence stay on that node'}; decide there, or reload once it can be read</b>
+    </div>
+  {/if}
+  {#if remoteOwner && !evidence}
+    <!-- what the owner holds could not be read; the banner above says why -->
   {:else if !evidence}
     <div class="banner crit">
       verification evidence missing <b>· this review predates immutable candidate capture</b>
@@ -569,6 +624,8 @@
               {/if}
               {#if c.duplicate}
                 <button class="lnk" disabled>Judge it</button>
+              {:else if remoteOwner}
+                <small>Judge it on {nodeLabel(store.nodes, remoteOwner)}, which holds this attempt.</small>
               {:else if judging === c.key}
                 <div class="judge">
                   <select bind:value={criterionVerdict} aria-label="your verdict">
@@ -710,6 +767,35 @@
     <div class="note">Edited. Approving publishes what is written here, not what was submitted.</div>
   {/if}
 
+  {#if intent.commits?.length || squashing}
+    <div class="h4">
+      Commits
+      <b>{squashing ? 'ships as one commit of the reviewed tree' : 'pushed as the agent wrote them'}</b>
+    </div>
+    {#if intent.commits?.length}
+      <ul class="commits">
+        {#each intent.commits as c (c.sha)}
+          <li class:squashed={squashing}><code>{c.sha.slice(0, 8)}</code> {c.subject}</li>
+        {/each}
+      </ul>
+    {/if}
+    {#if squashing && !remoteOwner}
+      <textarea
+        class="edit body mono"
+        aria-label="commit message"
+        bind:value={message}
+        use:autogrow={message}
+        disabled={busy || publishing || surface.phone}
+      ></textarea>
+    {/if}
+    {#if change === null && !remoteOwner}
+      <label class="branch">
+        Branch
+        <input class="edit mono" bind:value={branchName} disabled={busy || publishing || surface.phone} />
+      </label>
+    {/if}
+  {/if}
+
   <div class="h4">Files <b>{files.length}</b></div>
   {#if !surface.phone}
     <div class="files">
@@ -831,25 +917,39 @@
     <div class="note dim">{readiness.note}</div>
   {/if}
 
-  <div class="decide">
-    <button
-      class="btn p"
-      disabled={busy || publishing || stale.length > 0 || readiness?.ready === false}
-      onclick={() => decide('approve')}
-    >
-      Approve and publish
-    </button>
-    <input
-      bind:value={reason}
-      placeholder="What to change, or why you are rejecting — goes back to the agent"
-      disabled={busy || publishing}
-    />
-    <button class="btn" disabled={busy || publishing || !reason.trim()} onclick={() => decide('revise')}>
-      {editedFiles > 0 ? 'Send edits and request changes' : 'Request changes'}
-    </button>
-    <button class="btn d" disabled={busy || publishing || !reason.trim()} onclick={() => decide('reject')}>
-      Reject
-    </button>
+  <div class="decide" role="group" aria-label="Verdict">
+    {#if composing}
+      <label class="composer">
+        <span>{composerLabel(composing, editedFiles)}</span>
+        <textarea bind:this={reasonInput} bind:value={reason} use:autogrow={reason} disabled={busy || publishing}></textarea>
+      </label>
+      <div class="row">
+        <button
+          class="btn {composing === 'reject' ? 'd' : 'p'}"
+          disabled={sendBlocked !== null}
+          onclick={() => composing && decide(composing)}
+        >
+          {composing === 'reject' ? 'Reject' : editedFiles > 0 ? 'Send edits and request changes' : 'Request changes'}
+        </button>
+        <button class="btn" disabled={busy} onclick={() => (composing = null)}>Back</button>
+        {#if sendBlocked}<span class="why">{sendBlocked}</span>{/if}
+      </div>
+    {:else}
+      <div class="row">
+        <button
+          class="btn p"
+          disabled={approveBlocked !== null || readiness?.ready === false}
+          onclick={() => decide('approve')}
+        >
+          Approve and publish
+        </button>
+        <button class="btn" disabled={busy || publishing} onclick={() => compose('revise')}>
+          {editedFiles > 0 ? 'Send edits and request changes…' : 'Request changes…'}
+        </button>
+        <button class="btn d" disabled={busy || publishing} onclick={() => compose('reject')}>Reject…</button>
+      </div>
+      {#if approveBlocked}<p class="why">Approve: {approveBlocked}</p>{/if}
+    {/if}
   </div>
 {/if}
 
@@ -1291,6 +1391,37 @@
     background: var(--wash-wait);
     color: var(--wait);
   }
+  .commits {
+    list-style: none;
+    margin: 0 0 8px;
+    padding: 0;
+    font: 12.5px var(--mono);
+  }
+  .commits li {
+    padding: 3px 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .commits li.squashed {
+    color: var(--dim);
+  }
+  .commits code {
+    color: var(--dim);
+    margin-right: 6px;
+  }
+  .branch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0 12px;
+    font-size: 12.5px;
+    color: var(--dim);
+  }
+  .branch input {
+    flex: 1;
+    margin: 0;
+  }
   .files {
     background: var(--s1);
     border-radius: 4px;
@@ -1348,22 +1479,41 @@
     color: inherit;
     border-color: currentColor;
   }
+  /* However long the review, the verdict stays on screen. */
   .decide {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    display: grid;
+    gap: 8px;
+    background: var(--bg);
+    border-top: 1px solid var(--rule);
+    padding: 12px 0 calc(12px + env(safe-area-inset-bottom));
+  }
+  .decide .row {
     display: flex;
     gap: 10px;
     flex-wrap: wrap;
     align-items: center;
-    border-top: 1px solid var(--rule);
-    padding-top: 14px;
   }
-  .decide input {
-    flex: 1;
-    min-width: 200px;
+  .decide .composer {
+    display: grid;
+    gap: 6px;
+    font-size: 12.5px;
+    color: var(--dim);
+  }
+  .decide textarea {
+    min-height: 64px;
     background: var(--s1);
     border: 0;
     border-radius: 4px;
     color: var(--ink);
     padding: 8px 10px;
     font: 13px var(--sans);
+  }
+  .decide .why {
+    margin: 0;
+    font-size: 12px;
+    color: var(--dim);
   }
 </style>

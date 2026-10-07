@@ -80,6 +80,8 @@ pub fn definitions() -> Vec<Value> {
                             "draft": { "type": "boolean", "description": "Open the new change as a draft. Not for an existing change." },
                         },
                     },
+                    "message": { "type": "string", "description": "The commit message the change ships with. By default the node pushes one commit holding exactly the reviewed tree, carrying this message (else the description's, else title and body); a repository set to keep its commits pushes yours as written. Either way the operator sees and may edit it." },
+                    "branch": { "type": "string", "description": "The forge branch a new change is pushed to, e.g. feat/short-description. Defaults to your worktree's branch, or one named from the title when that is the node's placeholder. Fixed by the first submit of a review." },
                     "rewrite": { "type": "boolean", "description": "The branch's history was rewritten (rebase, amend), so the push replaces what the forge's branch holds: the change's head, or for a branch pushed before its change opened, whatever the branch holds now. Forced only over what it held at submit, and always approved by the operator." },
                 },
                 "required": ["title", "body", "provider", "project"],
@@ -200,7 +202,7 @@ async fn submit(
     };
     let external = session.is_none();
     let named = args.get("worktree").and_then(Value::as_str);
-    let (worktree, branch) = match (external, named) {
+    let (worktree, branch, repo_path) = match (external, named) {
         (true, Some(path)) => {
             let roots: Vec<_> = manager
                 .cfg()
@@ -212,7 +214,11 @@ async fn submit(
             let at = review::locate_worktree(path, &roots)
                 .await
                 .map_err(|e| e.to_string())?;
-            (at.worktree, at.branch)
+            (
+                at.worktree,
+                at.branch,
+                Some(std::path::PathBuf::from(at.repo)),
+            )
         }
         (true, None) => {
             return Err(
@@ -237,6 +243,7 @@ async fn submit(
                     .to_string_lossy()
                     .into_owned(),
                 session.branch.clone(),
+                Some(std::path::PathBuf::from(&session.repo_path)),
             )
         }
     };
@@ -422,7 +429,66 @@ async fn submit(
             }),
         },
     };
-    let forge = forge_arg(args)?;
+    let mut forge = forge_arg(args)?;
+    // The branch is the operator's to rename at approval, not the forge
+    // output's; the agent proposes it with `branch`.
+    forge.branch = None;
+    if let Some(message) = args.get("message").and_then(Value::as_str) {
+        forge.commit = Some(message.trim().to_string()).filter(|m| !m.is_empty());
+    }
+    let asked_branch = args
+        .get("branch")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|b| !b.is_empty());
+    if let Some(asked) = asked_branch {
+        if asked != target.branch {
+            if resubmission.is_some() {
+                return Err(format!(
+                    "this review pushes to {}; the branch is fixed by its first submit",
+                    target.branch
+                ));
+            }
+            if !review::prose::ref_name(asked) {
+                return Err(format!("{asked} is not a branch name git accepts"));
+            }
+            target.branch = asked.to_string();
+        }
+    } else if resubmission.is_none() && review::prose::placeholder_branch(&target.branch) {
+        if let Some(named) = review::prose::branch_from_title(&title) {
+            target.branch = named;
+        }
+    }
+    let (commit_mode, style) =
+        review::prose::rules(manager.cfg(), store, &ctx.channel, repo_path.as_deref());
+    let squash = commit_mode == crate::config::Commits::Squash;
+    let commits = review::commits(&worktree, &range_base)
+        .await
+        .map_err(|e| e.to_string())?;
+    // A message or branch that breaks the rules fails here, before the card
+    // reaches the operator.
+    let mut broken = Vec::new();
+    if squash {
+        broken.extend(style.check_message(&review::prose::message_for(&forge, &title, &body)));
+    } else {
+        for commit in &commits {
+            broken.extend(
+                style
+                    .check_message(&commit.subject)
+                    .into_iter()
+                    .map(|finding| format!("{:.8}: {finding}", commit.sha)),
+            );
+        }
+    }
+    if target.change.is_none() {
+        broken.extend(style.check_branch(&target.branch));
+    }
+    if !broken.is_empty() {
+        return Err(format!(
+            "what would ship breaks this repository's commit rules: {}",
+            broken.join("; ")
+        ));
+    }
     let rewrite = args
         .get("rewrite")
         .and_then(Value::as_bool)
@@ -435,7 +501,7 @@ async fn submit(
             .find_map(|publication| publication.pushed_sha),
         _ => None,
     };
-    let intent = forge_intent(
+    let mut intent = forge_intent(
         manager,
         ctx,
         &mut target,
@@ -444,8 +510,21 @@ async fn submit(
         forge,
         rewrite,
         last_pushed,
+        squash.then_some(store.as_ref()),
     )
     .await?;
+    intent.commits = commits;
+    if squash {
+        // Onto what the branch holds when the push adds to it; otherwise
+        // where the branch leaves its base, so the change is exactly the
+        // reviewed diff.
+        intent.squash_onto = Some(match (&intent.lease, intent.rewrite) {
+            (Some(lease), false) => lease.clone(),
+            _ => review::merge_base(&worktree, &range_base, &capture.head_sha)
+                .await
+                .map_err(|e| e.to_string())?,
+        });
+    }
     let intent_json = Some(serde_json::to_string(&intent).map_err(|e| e.to_string())?);
     let max_snapshot_bytes = manager.cfg().supervision.max_snapshot_bytes;
     // Capture the committed candidate before any check can execute. The
@@ -872,6 +951,7 @@ async fn forge_intent(
     forge: Outputs,
     rewrite: bool,
     last_pushed: Option<String>,
+    squashed_by: Option<&Store>,
 ) -> Result<Intent, String> {
     let provider = Provider::parse(&target.provider).ok_or_else(|| {
         format!(
@@ -912,6 +992,7 @@ async fn forge_intent(
                 forge,
                 lease: None,
                 rewrite: false,
+                ..Intent::default()
             });
         }
         // A branch can be on the forge without a change ever opening (the
@@ -939,6 +1020,7 @@ async fn forge_intent(
                 forge,
                 lease: None,
                 rewrite: false,
+                ..Intent::default()
             });
         };
         let builds_on =
@@ -947,6 +1029,7 @@ async fn forge_intent(
             forge,
             lease: Some(lease),
             rewrite: !builds_on,
+            ..Intent::default()
         });
     };
     let number = change.number;
@@ -967,7 +1050,23 @@ async fn forge_intent(
         url: state.url.clone(),
     });
     let lease = state.head_sha;
-    let builds_on = lease == head_sha || review::descends_from(worktree, head_sha, &lease).await;
+    let mut builds_on =
+        lease == head_sha || review::descends_from(worktree, head_sha, &lease).await;
+    // What the branch holds may be this node's own earlier squash, which
+    // the agent never had: building on the commit that squash was made from
+    // is building on it.
+    if let (false, Some(store)) = (builds_on, squashed_by) {
+        let pushed = store
+            .publications_that_pushed(&ctx.channel, &target.project, &lease)
+            .map_err(|e| e.to_string())?;
+        for publication in pushed {
+            let from = &publication.head_sha;
+            if from == head_sha || review::descends_from(worktree, head_sha, from).await {
+                builds_on = true;
+                break;
+            }
+        }
+    }
     if !builds_on && !rewrite {
         return Err(format!(
             "{noun} {number}'s branch holds {lease:.8}, which {head_sha:.8} does not build on. \
@@ -981,6 +1080,7 @@ async fn forge_intent(
         // A branch that builds on what the change holds is a fast-forward,
         // whatever was asked: nothing is thrown away, so nothing is forced.
         rewrite: rewrite && !builds_on,
+        ..Intent::default()
     })
 }
 
