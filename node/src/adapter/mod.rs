@@ -346,6 +346,10 @@ pub enum HarnessEvent {
         request: PermissionRequest,
         reply: oneshot::Sender<PermissionReply>,
     },
+    /// A tool call the harness let through on its own permission rules,
+    /// never asking the node. It has run (or is running); the node only
+    /// records the decision its own policy makes for it.
+    Decided(PermissionRequest),
     Models(Vec<ModelOption>),
     Other(Value),
     Exited {

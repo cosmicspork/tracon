@@ -103,6 +103,11 @@ async fn launch_prompt_permission_and_turn_result() {
         "{seen:?}"
     );
     assert!(seen.iter().any(|s| s.starts_with("tool_call:")), "{seen:?}");
+    // The read never asked, so the node is told it ran on the harness's say,
+    // ahead of its result and normalized as an ask for it would have been.
+    let read = seen.iter().position(|s| s == "decided:read");
+    let result = seen.iter().position(|s| s == "tool_update:completed");
+    assert!(read.is_some() && read < result, "{seen:?}");
 
     let HarnessEvent::Permission { request, reply } = ev else {
         unreachable!()
@@ -138,6 +143,11 @@ async fn launch_prompt_permission_and_turn_result() {
     drain_until(&mut rx, &mut after, "tool_update:completed").await;
     assert!(
         after.contains(&"tool_update:completed".to_string()),
+        "{after:?}"
+    );
+    // The call that asked is not reported again as one that did not.
+    assert!(
+        !after.iter().any(|s| s.starts_with("decided:")),
         "{after:?}"
     );
 }
