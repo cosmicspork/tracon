@@ -854,6 +854,7 @@ mod tests {
         for name in [
             "issue_search",
             "pipeline_status",
+            "pipeline_wait",
             "job_trace",
             "pr_status",
             "run_status",

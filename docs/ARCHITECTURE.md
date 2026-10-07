@@ -643,6 +643,20 @@ webhooks, which would need the node reachable from the forge. A review with no
 submitting session (a harness the operator runs) has nothing to hang the events on and
 is not followed.
 
+**A pipeline the agent started is followed for whoever started it.** A successful
+`pipeline_run`, `job_play` or `deploy` subscribes its caller to the pipeline it started
+(a `pipeline_follow` row, with what the pipeline looked like right after as the
+baseline) and says so in its result. The same two-minute tick reads it through the
+brokered credential: each job that passed, failed or was canceled is a `pipeline_follow`
+event on the session (and so its work item), or on the channel's log for a harness the
+operator runs, and the pipeline finishing, failing or stopping at a manual job is pushed
+as well. Following ends there, or after a day without movement; playing the manual job
+follows it again. It is a subscription of its own, so a pipeline outlives the merge
+request whose merge triggered it. Following never retries, cancels or plays a job. An
+agent that wants to see it through itself calls `pipeline_wait`, a read that holds up
+to 45 s like `review_status` and returns as soon as the pipeline or a job moves, with a
+`state` token to pass back so a change between calls is not missed.
+
 **Publication is two side effects the node cannot take back, so it writes down
 what it is about to do before it does it.** Approval imports the candidate into a
 fresh publisher repository, pushes the reviewed commit, reads the ref back from

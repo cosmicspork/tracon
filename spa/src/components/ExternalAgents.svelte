@@ -89,6 +89,9 @@
     const state = typeof e.payload.state === 'string' ? ` · ${e.payload.state}` : ''
     if (e.kind === 'tool_call') return title
     if (e.kind === 'tool_result') return `↳ ${title}${status}`
+    if (e.kind === 'pipeline_follow' && Array.isArray(e.payload.changes)) {
+      return `pipeline ${e.payload.pipeline_id} · ${(e.payload.changes as string[]).join(' · ')}`
+    }
     return `${e.kind.replaceAll('_', ' ')}${title ? ` · ${title}` : ''}${state}`
   }
 </script>

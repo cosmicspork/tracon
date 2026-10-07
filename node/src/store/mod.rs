@@ -31,6 +31,7 @@ pub mod metrics;
 pub mod opencode;
 pub mod opencode_state;
 pub mod operator;
+pub mod pipeline_follow;
 pub mod policy_rollouts;
 pub mod publication;
 pub mod repo_image;

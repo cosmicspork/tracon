@@ -405,6 +405,7 @@ impl Tools {
             | gitlab::MR_COMMENT
             | gitlab::MR_MERGE
             | gitlab::PIPELINE_STATUS
+            | gitlab::PIPELINE_WAIT
             | gitlab::PIPELINE_LIST_BY_SHA
             | gitlab::JOB_TRACE
             | gitlab::JOB_PLAY
@@ -498,6 +499,9 @@ impl Tools {
         };
         let result = match (name, result) {
             (review::SUBMIT, Ok(submitted)) => self.auto_publish_review(ctx, args, submitted).await,
+            (gitlab::PIPELINE_RUN | gitlab::JOB_PLAY | gitlab::DEPLOY, Ok(started)) => {
+                Ok(crate::follow::subscribe(self, ctx, name, args, started).await)
+            }
             (_, result) => result,
         };
         if let Some(ActionRecord::New(id)) = action_record {
