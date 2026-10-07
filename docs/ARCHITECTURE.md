@@ -631,6 +631,18 @@ memberships, verify the candidate's actual channel and owner, refuse third-node
 relays, and bound responses. Peer UI detail is read-only; it never turns a remote
 ID into a local action.
 
+**An opened change is followed until it closes, and following only reads.** Every
+two minutes the node reads each change it opened, using the brokered credential and the
+same status call the forge tools make. That covers CI, draft or ready, open, merged or
+closed, the review decision, and comments. It records what moved as a `forge_follow`
+event on the submitting session, so the event lands on that session's work item too, and
+pushes it named ("CI failed on `node`", "marked ready", "2 new comments"). The first
+look is a baseline, not news. A change that has merged or closed is not read again.
+Following never merges, approves, retries or comments. It polls rather than taking
+webhooks, which would need the node reachable from the forge. A review with no
+submitting session (a harness the operator runs) has nothing to hang the events on and
+is not followed.
+
 **Publication is two side effects the node cannot take back, so it writes down
 what it is about to do before it does it.** Approval imports the candidate into a
 fresh publisher repository, pushes the reviewed commit, reads the ref back from

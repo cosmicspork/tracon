@@ -101,6 +101,9 @@ pub mod event_kind {
     /// it (`status`, `repo`). Minutes, once per repository; the start event
     /// that follows says which image the session got.
     pub const REPO_IMAGE: &str = "repo_image";
+    /// What the node saw a published request do on its forge since it last
+    /// looked: CI, draft and ready, reviews, comments, merged or closed.
+    pub const FORGE_FOLLOW: &str = "forge_follow";
     /// The session asked for a host its repository does not open to it
     /// (`host`). Once per host: the agent saw a 403 from a package manager,
     /// and this is where the operator sees what it wanted.

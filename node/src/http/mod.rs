@@ -918,6 +918,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         state.node_id.clone(),
     ));
 
+    // Requests this node published, followed on their forge until they close.
+    tokio::spawn(crate::follow::run(state.tools.clone()));
+
     // This node's own vector index. Derived state, rebuilt from the corpus, so
     // it starts after everything that writes the corpus and never gates it.
     tokio::spawn(crate::embed::run(

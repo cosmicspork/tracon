@@ -212,15 +212,6 @@ hit on a real task.
       evidence or what approval sends to the forge. Fetch that detail from the owner over
       the mesh, as candidate evidence already is, bounded and refused for a third node, and
       say plainly when the owner is unreachable rather than showing an empty review.
-- [ ] Follow a published pull or merge request after it opens: subscribe to its CI runs,
-      draft/ready and open/merged/closed transitions, review verdicts and new comments or
-      threads, and record each as an event on the review and its work item. Notify through
-      the existing push channel with the change named ("CI failed on `node`", "marked
-      ready", "2 new comments"), and let a session that is still attached pick the change
-      up through the forge tools (#297, #298) rather than the operator relaying it. Polling
-      through the brokered token first; webhooks only where the node is reachable. A
-      subscription ends when the request closes, and it never merges, approves or retries
-      anything on its own.
 - [ ] What ships under the operator's name is reviewed: the branch name and the commits.
       Today the candidate is the tree, the review shows the diff and the forge prose, and
       the commits and branch are pushed as the agent wrote them (the default branch even
