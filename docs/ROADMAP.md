@@ -51,59 +51,6 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 Every item here was found on the 2026-09-20, 2026-09-28, 2026-09-30 or 2026-10-03 live
 runs, or in the daily desktop use since.
 
-- [ ] **Give the Podman gateway its own user service or cgroup**, reconciled idempotently,
-      so a node-service restart leaves it running and a stopped gateway recovers without
-      rerunning setup or weakening `KillMode`. Fail-closed boundary checks stay.
-- [ ] **Publication recovery.** Show credential and binding readiness before offering
-      publication and link missing forge access to the right settings, without implying
-      remote permission from token presence. A failed publish needs a durable, visible
-      outcome and a remedy: distinguish definitely-not-attempted, failed, in-progress,
-      uncertain and published, and reconcile uncertain external effects before retrying.
-      Expose an explicit recovery action backed by the publication journal, not a
-      misleading second approval. Adding a credential never retries automatically;
-      changed revisions or prose need fresh authorization.
-- [ ] **Make tracon invisible in what it publishes.** A commit, branch, pull request or
-      forge request should read as the operator's own work through their harness, with
-      nothing naming tracon. Authorship comes from the bound forge credential, not the
-      host or a placeholder: inside the boundary every commit is `tracon <tracon@localhost>`
-      today (hard-coded in the harness home's gitconfig and the sanitized workspace
-      config), and outside it commits carry the host's Git config, which can be a work
-      address on a personal repository. Resolve the identity once per bound credential
-      from the forge (GitHub `/user`: name and `<id>+<login>@users.noreply.github.com`;
-      GitLab `/user`: name and commit or noreply email), cache it with the binding, and
-      write it as author and committer wherever the node writes Git config. Attribution
-      is see-through: the harness's own default trailers (Claude Code's `Co-Authored-By`,
-      whatever OpenCode does) pass through untouched, and tracon adds none of its own;
-      its provenance stays in the node's ledger. Forge API calls stop sending
-      `user-agent: tracon`. For an external harness the node launches nothing, so it
-      offers the identity (in `external show` and as a tool result the harness applies as
-      repo-local config) and checks authorship at `submit_review` and publish: a commit
-      whose author is not an identity of the target forge account is named in the review,
-      and rewriting it is an operator-approved step, never silent. Still true on
-      2026-10-03: #333, published from session `01a10447`, carries a
-      `tracon@localhost` commit.
-- [ ] **Close the loop on a published session.** Once its review is approved and
-      published, session `01a10447` (2026-10-03, #333) went on sitting `running` in its
-      container, holding its egress grant, with nothing on the session naming the pull
-      request: the URL is only on the review, and the agent had ended its turn rather
-      than wait on `review_status`. Record the publication on the session (`published`,
-      with the URL) and show it there, then suspend a published session after an idle
-      period — container stopped, grant revoked, workspace kept — so a CI failure or a
-      review comment can resume it. Ending it stays the operator's.
-- [ ] **Open external links through a clean Linux host launcher**: the AppImage's bundled
-      `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
-      host environment for the child only and keep the URL and origin restrictions.
-- [ ] **Keep the machine awake while a session works.** The desktop host idle-suspended
-      for 54 minutes in the middle of execute session `01a0f4b3`'s turn (2026-09-30,
-      during the harness's context compaction) and the session simply stopped. Hold a
-      sleep inhibitor while any turn is running or a permission is waiting (logind's
-      `Inhibit` on Linux, a power assertion on macOS), release it when the node is
-      idle, show in the interface when it is held, and record a suspend that happens
-      anyway as an interruption rather than a silent gap. It happened again on
-      2026-10-03 (session `01a10447`): about 19 minutes asleep while a permission card
-      waited, and because a card's expiry is measured on the wall clock it was answered
-      "denied: unanswered" the moment the host woke, leaving the agent's work in a
-      `git stash`. A card's deadline should count only time the node was awake.
 
 ## Next — the working loop, made comfortable
 
@@ -111,60 +58,11 @@ Needed for daily use, but not blocking it today.
 
 **Sessions and accounting**
 
-- [ ] Record a policy decision for every Claude Code tool call. Calls Claude Code allows
-      by its own rules (reads, searches) never reach `can_use_tool`, so they leave no
-      `policy_allowed` event, while the same calls under OpenCode do; the ledger should
-      not depend on which harness ran.
-- [ ] Choose a provider-exhaustion policy, per channel with a per-run override: pause and
-      resume after reset, fall back to a named provider, or fall back then wait,
-      defaulting to pause. Distinguish exhaustion from throttling, auth failure and
-      outage; never invent a reset timer; record policy, reason, model and next wake;
-      recheck grants, caps and compatibility before resuming, and continue only from a
-      recorded safe boundary.
-- [ ] A work-level continuation view carrying intent, decisions, attempts, blockers, next
-      action, workspace, lineage and evidence, with continue / change approach / abandon.
-      Plain sessions gain it without being forced into a work item.
-- [ ] A concise outcome record derived from recorded state: what changed, what was
-      verified, what needs a decision, what is uncertain, and cost. Narrative summary
-      cannot turn a claim into verification.
-- [ ] Distinguish ready-to-investigate, ready-to-verify and ready-to-publish. Surface
-      missing project checks or publication prerequisites before spending a session on
-      that path; do not require forge credentials or a product brief for an
-      investigation.
-- [ ] Preview preparation and explain incompatibility before launch, without turning
-      unsupported scripts or devcontainer features into silent host execution.
-- [ ] **Service sidecars, the browser first.** A `[[service]]` catalogue in `node.toml` —
-      a digest-pinned image, its port, a readiness probe — from which a session asks for a
-      service by name (`service_start`, which blocks until the probe passes or a bounded
-      timeout, then `service_status`), never naming an image or a command. Each service is
-      its own authority under the policy bundle, so a browser can be allowed while a
-      database is asked. A sidecar shares the session's network namespace, so it reaches
-      exactly what the session's grants open and nothing of its own, and it stops and
-      suspends with the session. The first entry is a headless browser exposing CDP on the
-      session's loopback, which any harness can drive (Playwright `connectOverCDP`, a
-      browser MCP, a small screenshot helper in the harness layer) without a browser in
-      every repository's image or a node-run scenario language; the screenshots it takes
-      are what `show_work` displays. Local databases, caches and mail catchers
-      follow as entries, which is also how an application that needs services runs in a
-      session without tracon reading its compose files.
-- [ ] **Keep a session's build output.** Every run builds a compiled project from nothing —
-      `just check` took 4m47s in session `01a10447` (2026-10-03), most of it compiling.
-      Give sessions a persistent per-repository build cache (Cargo's `target/`, a bundler's
-      cache, the dependencies a session added) that survives the session. Required checks
-      keep starting from the trusted base cache: a directory the agent wrote must not be
-      able to make the review gate pass. A node-built cache of the default branch for
-      checks is the follow-on.
-- [ ] **Help set up a repository once.** Node tools that draft a `[[repo]]` entry (image,
-      checks, egress) from what the repository already holds — its devcontainer,
-      `package.json` scripts, a `just` recipe — try it in a fresh container and report
-      what failed, and propose it on a card; the node writes the entry once the operator
-      approves, never the agent. Egress asks approved while trying become suggested
-      `egress` entries. A built-in setup skill ships through channel manifests for managed
-      harnesses, and the tool descriptions carry enough for an external one. How to run an
-      application and give it data stays the agent's job on each task, with optional
-      free-text notes in the operator notes, so a recipe is set up once rather than kept
-      in step with the code. The agent proposes checks and setup; it cannot waive checks
-      or authorize its own environment.
+- [ ] **Help set up a repository once: the skill.** The draft, trial and proposal
+      tools exist (`repo_setup_*`). What remains: a built-in setup skill shipped through
+      channel manifests for managed harnesses, and optional free-text notes on how to run
+      the application and give it data, kept in the operator notes, so a recipe is set up
+      once rather than kept in step with the code.
 
 **What the boundary defeats, and what replaces it.** The harnesses offer tools the
 isolation silently breaks — the proxy answers 403, the agent sees a network error and
@@ -203,15 +101,6 @@ hit on a real task.
 
 **Review and publication**
 
-- [ ] Read a mirrored review from its owner. A review is mirrored to every node on its
-      channel and its verdict is forwarded to the owner, but its worktree, candidate,
-      checks, criteria and forge intent stay there, so a phone served by another node (the
-      homelab node, reviewing #338 and #339 on 2026-10-04) read none of them and called the
-      change stale. The node now says the review is held elsewhere and leaves approval to
-      the owner's own staleness check; the phone still decides without the checks, the
-      evidence or what approval sends to the forge. Fetch that detail from the owner over
-      the mesh, as candidate evidence already is, bounded and refused for a third node, and
-      say plainly when the owner is unreachable rather than showing an empty review.
 - [ ] Follow a published pull or merge request after it opens: subscribe to its CI runs,
       draft/ready and open/merged/closed transitions, review verdicts and new comments or
       threads, and record each as an event on the review and its work item. Notify through
@@ -221,20 +110,10 @@ hit on a real task.
       through the brokered token first; webhooks only where the node is reachable. A
       subscription ends when the request closes, and it never merges, approves or retries
       anything on its own.
-- [ ] What ships under the operator's name is reviewed: the branch name and the commits.
-      Today the candidate is the tree, the review shows the diff and the forge prose, and
-      the commits and branch are pushed as the agent wrote them (the default branch even
-      names tracon). Three steps: list the commits and the branch beside the diff;
-      treat commit message and branch name as publication prose like the forge
-      description — proposed by the agent, edited by the operator, bound by hash under the
-      publish grant — with the node squashing the candidate into one commit carrying the
-      approved message on the approved branch by default (`publish.commits = squash |
-      keep` per channel or repository; `keep` edits each message), which leaves the tree
-      and therefore the candidate, its evidence and the verdict unchanged; and a
-      deterministic subject-and-branch check (conventional type, imperative subject,
-      kebab branch, no ticket keys) whose rules come from the channel or the repository's
-      own guidelines, so a bad message fails before the card reaches the operator. Record
-      the "reviewed tree, not reviewed bytes" reframing in ARCHITECTURE and DESIGN.
+- [ ] Edit each commit's message under `publish.commits = keep`. Squash (the default)
+      already ships one commit of the reviewed tree with the approved message and
+      branch; `keep` lists the agent's commits and checks their subjects but pushes
+      them as written.
 - [ ] Durable review drafts: unsent feedback and publication prose survive navigation,
       reconnect and device changes with explicit saved/conflict state. Desktop diff drafts
       remain revision-keyed. The acceptance test is the reconnect: leave feedback, switch
@@ -245,17 +124,9 @@ hit on a real task.
 - [ ] Keep verdicts reachable in long reviews, open a labelled reason composer for Request
       changes and Reject rather than disabling a button, and explain unavailable actions
       inline.
-- [ ] Trim criteria binding to what is produced. #290 lets a criterion point at a
-      `scenario` or an `observation`; neither is produced by anything now that versioned
-      scenarios and trial capture are dropped. Remove those link kinds, keep `check` and
-      the operator's judgement, and say so in the brief format.
 
 **Forge and tracker**
 
-- [ ] Give GitHub the CI tools GitLab has: a run's job log tail (`run_logs`, the
-      `job_trace` limits), rerunning a run's failed jobs (`run_rerun`, asked), and the
-      runs at an exact commit. An agent on a GitHub project should diagnose and retry CI
-      the way it can on GitLab, without the operator's token or a host CLI.
 - [ ] Follow a pipeline the agent started. On 2026-10-06 an external session ran a
       staging pipeline on a work repository's default branch after its merge request
       merged (`pipeline_run`, approved), then had no brokered way to see it through:
@@ -276,12 +147,6 @@ hit on a real task.
 
 **Node data**
 
-- [ ] **Data management in Settings.** Retention is decided: the node keeps everything
-      and the operator deletes by hand. Give that a pane — what the node holds per kind
-      (sessions, events, candidates and evidence, documents, memories, workspaces, harness
-      state), how much it weighs, and delete for the kinds that have a real delete, with
-      the propagation each one does or does not have stated. A storage figure belongs on
-      the Nodes screen too. Tombstones stay undecided until replication makes them matter.
 **OpenCode, contingent on the spike above**
 
 - [ ] Show an OpenCode session's history in its native window. OpenCode keeps separate v1
@@ -458,9 +323,11 @@ servers reaching the v2 session runner.
 - A run's dependency cache and each check's tree are copies. Where the runtime's storage
   has no reflinks they are full copies, made once per run and once per check. The base
   cache they start from is filled when the node builds a repository's image; an entry
-  that names a hand-pinned `image` has none, so its runs prepare from empty. A run keeps
-  no build output: every run of a compiled project's checks builds from nothing (three
-  minutes for tracon's own test build, 2026-10-01).
+  that names a hand-pinned `image` has none, so its runs prepare from empty. A check run
+  keeps no build output: every run of a compiled project's checks builds from nothing
+  (three minutes for tracon's own test build, 2026-10-01). Sessions keep theirs, but only
+  Cargo's is moved out of the tree; a bundler's cache inside `node_modules` lives and goes
+  with the workspace.
 - Per-client egress — a session's, a preparation's — is the Podman
   backend's. The Kubernetes backend issues no grants, so a `[[repo]]` entry that names
   `egress` cannot prepare there. A grant filters by host, not by method: a registry that

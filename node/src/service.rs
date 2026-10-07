@@ -642,6 +642,18 @@ pub fn uninstall() -> Result<()> {
         );
     } else {
         let _ = run("systemctl", &["--user", "disable", "--now", LINUX_UNIT]);
+        // The gateway has its own unit so a node restart leaves it running;
+        // uninstalling the node takes it too.
+        let gateway = crate::boundary::podman::setup::GATEWAY_UNIT;
+        let _ = run("systemctl", &["--user", "disable", "--now", gateway]);
+        if let Some(dir) = path.parent() {
+            let unit = dir.join(gateway);
+            if unit.exists() {
+                std::fs::remove_file(&unit)
+                    .with_context(|| format!("removing {}", unit.display()))?;
+                println!("removed {}", unit.display());
+            }
+        }
     }
     if path.exists() {
         std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;

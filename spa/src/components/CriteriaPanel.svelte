@@ -9,7 +9,7 @@
   // view that lists only what is covered reads as though that were everything.
   import { api } from '../lib/api'
   import { PROVENANCE, refHref, refLabel } from '../lib/brief'
-  import { COVERAGE, LINK_KINDS, STANDARD, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
+  import { COVERAGE, STANDARD, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
   import { surface } from '../lib/surface.svelte'
   import type { Criteria, LinkKind, Provenance, Verdict, WorkView } from '../lib/types'
 
@@ -31,7 +31,7 @@
   /** The criterion whose link form or verdict form is open, by key. */
   let linking = $state<string | null>(null)
   let judging = $state<string | null>(null)
-  let kind = $state<LinkKind>('check')
+  const kind: LinkKind = 'check'
   let linkProvenance = $state<Provenance>('decided')
   let value = $state('')
   let verdict = $state<Verdict>('met')
@@ -136,7 +136,7 @@
             {/each}
 
             {#if c.links.length === 0}
-              <div class="absent">Nothing points at this. No check, scenario or observation is named.</div>
+              <div class="absent">Nothing points at this. No check is named; judge it yourself, or say which check settles it.</div>
             {:else}
               <ul class="links">
                 {#each c.links as l (l.index)}
@@ -174,9 +174,6 @@
               {:else if linking === c.key}
                 <div class="form">
                   <div class="row">
-                    <select bind:value={kind} aria-label="what would settle it">
-                      {#each LINK_KINDS as k (k)}<option value={k}>{k}</option>{/each}
-                    </select>
                     <select bind:value={linkProvenance} aria-label="who is behind this link">
                       <option value="decided">decided · you say this settles it</option>
                       <option value="observed">observed · the customer needed it</option>
@@ -184,11 +181,7 @@
                     </select>
                   </div>
                   <input
-                    placeholder={kind === 'check'
-                      ? 'the configured command, exactly'
-                      : kind === 'scenario'
-                        ? "the scenario's name"
-                        : 'what someone was seen to do'}
+                    placeholder="the configured check command, exactly"
                     bind:value
                     onkeydown={(e) => e.key === 'Enter' && addLink(c.key)}
                   />

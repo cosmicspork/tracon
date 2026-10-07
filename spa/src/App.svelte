@@ -169,6 +169,16 @@
         >{store.connected ? 'connected' : 'offline'} ·
         {#if noHub}<a href="/settings#mesh">pair a hub</a>{:else}{hubLabel}{/if}</span
       >
+      {#if store.awake?.held}
+        <span class="awake" title="Holding this machine awake ({store.awake.method}) until the work is done">keeping awake · {store.awake.reason}</span>
+      {:else if store.awake?.error}
+        <span class="warn" title={store.awake.error}>cannot keep this machine awake</span>
+      {/if}
+      {#if store.awake?.last_suspend && clock.now - store.awake.last_suspend.woke_ms < 3_600_000}
+        <span class="warn" title="Sessions that were live recorded the interruption"
+          >slept {Math.round(store.awake.last_suspend.asleep_ms / 60_000)} min · {formatAge(store.awake.last_suspend.woke_ms, clock.now)}</span
+        >
+      {/if}
     </div>
     <button class="collapse" type="button" onclick={toggleRail} title="Collapse">
       <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" /></svg>
@@ -292,6 +302,8 @@
   .foot { padding: 8px 16px; font: 11.5px var(--mono); color: var(--dim); display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: none; }
   .foot span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .foot a { color: var(--acc); text-decoration: none; }
+  .foot .awake { color: var(--acc); }
+  .foot .warn { color: var(--wait); }
   .foot a:hover { text-decoration: underline; }
   .rail button { color: var(--dim); }
   .rail button:hover { color: var(--ink); }

@@ -1,5 +1,8 @@
 <script lang="ts">
+  import { onMount } from 'svelte'
+  import { api } from '../lib/api'
   import { attention } from '../lib/attention'
+  import { formatBytes } from '../lib/data'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { nodeHarnesses, nodeReadiness } from '../lib/nodes'
@@ -24,6 +27,12 @@
       now: clock.now,
     }).count
   }
+
+  // What the serving node holds; a peer's storage is its own to report.
+  let held = $state<number | null>(null)
+  onMount(() => {
+    api.data().then((data) => (held = data.total_bytes), () => (held = null))
+  })
 
   function settingsLink(id: string): string {
     return `/settings?node=${encodeURIComponent(id)}#connections`
@@ -63,7 +72,7 @@
               {/if}
             </span>
             <span class="detail">
-              {nodeHarnesses(node).map((h) => `${h.id} ${h.found ?? h.pinned}${h.mismatch ? ' (mismatch)' : ''}`).join(' · ')} · {node.models.length} offered model{node.models.length === 1 ? '' : 's'} · {running(node.id)} running{waiting(node.id) ? ` · ${waiting(node.id)} awaiting an operator` : ''}
+              {nodeHarnesses(node).map((h) => `${h.id} ${h.found ?? h.pinned}${h.mismatch ? ' (mismatch)' : ''}`).join(' · ')} · {node.models.length} offered model{node.models.length === 1 ? '' : 's'} · {running(node.id)} running{waiting(node.id) ? ` · ${waiting(node.id)} awaiting an operator` : ''}{#if node.is_self && held !== null} · holds <a class="lnk" href="/settings#data">{formatBytes(held)}</a>{/if}
             </span>
           </span>
           <span class="actions">

@@ -116,10 +116,31 @@ fn main() {
     }
 }
 
-/// A turn: some text, a tool the harness wants to run, and then the wait for
+/// A turn: a read the harness runs unasked, some text, a tool it wants to run, and then the wait for
 /// the operator's answer. The result frame is emitted from the control
 /// response above, so the turn genuinely blocks on the decision.
 fn turn(session_id: &str) {
+    // A read first, which Claude Code allows by its own rules: it runs and
+    // answers without a `can_use_tool` ever reaching the node.
+    emit(serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg_0",
+            "role": "assistant",
+            "content": [
+                { "type": "tool_use", "id": "toolu_0", "name": "Read",
+                  "input": { "file_path": "/work/README.md" } },
+            ],
+        },
+    }));
+    emit(serde_json::json!({
+        "type": "user",
+        "message": { "role": "user", "content": [{
+            "type": "tool_result",
+            "tool_use_id": "toolu_0",
+            "content": "# readme",
+        }]},
+    }));
     emit(serde_json::json!({
         "type": "assistant",
         "message": {

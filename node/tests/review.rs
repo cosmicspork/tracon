@@ -226,6 +226,9 @@ async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> 
     // Checks run through the local runner in the worktree itself; the
     // default `just check` is not what a test fixture has.
     cfg.supervision.checks = vec!["test -f a.txt".into()];
+    // These tests hold publication to the exact reviewed commit; squashing
+    // it into one commit of the same tree has tests of its own.
+    cfg.publish.commits = tracon::config::Commits::Keep;
     tweak(&mut cfg);
     let cfg = Arc::new(cfg);
     let tools = Arc::new(Tools {
@@ -565,6 +568,9 @@ async fn a_mirrored_review_is_not_judged_by_what_this_node_lacks() {
     assert!(body["stale"].as_array().unwrap().is_empty(), "{body}");
     assert!(body["evidence"].is_null());
     assert!(body["intent"].is_null());
+    // With no mesh to ask the owner on, it says so rather than leaving an
+    // empty review to read as the change's own.
+    assert_eq!(body["owner_detail"]["state"], "unreachable", "{body}");
 
     // The node's own review is still read as before.
     let (_, body) = f.call("GET", &format!("/api/reviews/{local}"), None).await;
@@ -973,6 +979,7 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
             outputs: &Default::default(),
             lease: None,
             rewrite: false,
+            squash: None,
             resume: false,
             pushed: false,
             before_push: None,
@@ -1580,6 +1587,11 @@ async fn publishing_closes_the_item_the_session_holds() {
     assert_eq!(closed.state, "closed");
     assert_eq!(closed.closed_by_session.as_deref(), Some("s1"));
     assert!(f.event_kinds("s1").contains(&"work_closed".to_string()));
+    // And the session says where its work went, not only the review.
+    assert!(f.event_kinds("s1").contains(&"published".to_string()));
+    let published = f.store.session_publications("s1").unwrap();
+    assert_eq!(published.len(), 1, "{published:?}");
+    assert_eq!(published[0].0, id);
 }
 
 /// An edited diff is a request for changes carrying a patch. What matters is
@@ -3685,4 +3697,383 @@ async fn a_retry_with_the_same_or_no_base_is_already_submitted() {
     assert_eq!(review_id(&absent), id);
     assert_eq!(absent["already_submitted"], json!(true), "{absent}");
     assert_eq!(f.store.review_revisions(&id).unwrap().len(), 1);
+}
+
+/// What a review says about publishing before anyone approves it: whether a
+/// forge token is bound here, where to bind one, and never that the token may
+/// push — only the forge knows that.
+#[tokio::test]
+async fn a_review_says_whether_a_forge_token_is_bound_before_approval() {
+    state::isolate();
+    let f = fixture(test_name!(), WITHOUT_GH).await;
+    let id = f.submit().await;
+    let (status, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let readiness = &body["publication"]["readiness"];
+    assert_eq!(readiness["ready"], false, "{readiness}");
+    assert!(
+        readiness["problem"]
+            .as_str()
+            .unwrap()
+            .contains("no GitHub token"),
+        "{readiness}"
+    );
+    assert!(
+        readiness["settings"]
+            .as_str()
+            .unwrap()
+            .ends_with("#connections"),
+        "{readiness}"
+    );
+    assert!(body["publication"]["latest"].is_null(), "{body}");
+
+    let f = fixture(&format!("{}-bound", test_name!()), WITH_GH).await;
+    let id = f.submit().await;
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let readiness = &body["publication"]["readiness"];
+    assert_eq!(readiness["ready"], true, "{readiness}");
+    assert!(
+        readiness["note"]
+            .as_str()
+            .unwrap()
+            .contains("only known when GitHub answers"),
+        "a bound token is not reported as permission: {readiness}"
+    );
+}
+
+/// Refused before it spoke to the forge: that is a different outcome from
+/// the forge refusing, and the operator is told which.
+#[tokio::test]
+async fn a_publication_refused_before_the_forge_is_reported_as_not_attempted() {
+    state::isolate();
+    let f = fixture(test_name!(), WITHOUT_GH).await;
+    let id = f.submit().await;
+    let (status, _) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let latest = &body["publication"]["latest"];
+    assert_eq!(latest["outcome"], "not_attempted", "{latest}");
+    assert_eq!(latest["recoverable"], true, "{latest}");
+    assert!(
+        latest["remedy"]
+            .as_str()
+            .unwrap()
+            .contains("Nothing reached"),
+        "{latest}"
+    );
+}
+
+/// A publication the forge did not keep is retried exactly as approved: the
+/// operator's own title goes out again, nothing new is taken from the retry,
+/// and the review is settled as published.
+#[tokio::test]
+async fn a_failed_publication_is_retried_as_it_was_approved() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let stub = f.dir.join("bin/git-remote-stub");
+    let working = std::fs::read(&stub).unwrap();
+    git_that_swallows_pushes(&f);
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "title": "the operator's title" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let latest = body["publication"]["latest"].clone();
+    assert_eq!(latest["outcome"], "failed", "{latest}");
+    assert_eq!(latest["recoverable"], true, "{latest}");
+
+    std::fs::write(&stub, working).unwrap();
+    f.forget_logs();
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/publication/recover"),
+            Some(json!({ "publication_id": latest["id"], "title": "smuggled" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    assert!(gh.contains("the operator's title"), "{gh}");
+    assert!(!gh.contains("smuggled"), "{gh}");
+    assert_eq!(f.publication(&id).state, "opened");
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "approved");
+
+    let (status, _) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/publication/recover"),
+            Some(json!({ "publication_id": latest["id"] })),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a landed publication is not retried"
+    );
+}
+
+/// An attempt whose outcome is unknown holds its claim, so approving again is
+/// refused; the recovery action is the way out, and it looks at the forge
+/// before repeating anything.
+#[tokio::test]
+async fn an_uncertain_publication_is_recovered_by_looking_first() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let head = review.head_sha.clone();
+    let revision = f
+        .store
+        .latest_review_revision(&id)
+        .unwrap()
+        .map(|revision| revision.id);
+    sh(
+        &f.dir.join("wt"),
+        &format!("git push -q origin {head}:refs/heads/feat/x"),
+    );
+    let publication = f.publication_id(&id);
+    f.store
+        .publication_begin(&tracon::store::PublicationBegin {
+            id: &publication,
+            review_id: &id,
+            revision_id: revision.as_deref(),
+            candidate_id: &tracon::store::candidate_id(&head, "work"),
+            channel: "work",
+            node_id: "n1",
+            provider: "github",
+            project: "owner/name",
+            base: "main",
+            branch: "feat/x",
+            head_sha: &head,
+            instance: "a-process-that-is-no-longer-running",
+        })
+        .unwrap();
+    f.store.publication_pushed(&publication, &head).unwrap();
+    f.store.publication_opening(&publication).unwrap();
+    assert!(f.store.begin_publish(&id, revision.as_deref()).unwrap());
+    std::fs::rename(f.dir.join("origin.git"), f.dir.join("origin.gone")).unwrap();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(f.publication(&id).state, "uncertain");
+    let (status, _) = f.approve(&id).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "approving again is not how an unknown outcome is settled"
+    );
+
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let latest = &body["publication"]["latest"];
+    assert_eq!(latest["outcome"], "uncertain", "{latest}");
+    assert_eq!(latest["recoverable"], true, "{latest}");
+
+    std::fs::rename(f.dir.join("origin.gone"), f.dir.join("origin.git")).unwrap();
+    gh_that_lists(&f, "[]");
+    f.forget_logs();
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/publication/recover"),
+            Some(json!({ "publication_id": publication })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !f.git_log().contains("push origin"),
+        "the push that landed is not repeated: {}",
+        f.git_log()
+    );
+    assert_eq!(f.publication(&id).state, "opened");
+}
+
+/// A resubmission after a failed attempt is new bytes: retrying the old
+/// approval would publish something nobody approved, so it is refused.
+#[tokio::test]
+async fn a_retry_is_refused_once_a_newer_revision_arrives() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    git_that_swallows_pushes(&f);
+    let (status, _) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let publication = f.store.publications_for_review(&id).unwrap()[0].id.clone();
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo more >> a.txt && git add -A && git commit -qm second",
+    );
+    let mut resubmit = f.submit_args();
+    resubmit["review_id"] = json!(id);
+    let again = f.tool("s1", "submit_review", resubmit).await;
+    assert_eq!(again["state"], "new", "{again}");
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/publication/recover"),
+            Some(json!({ "publication_id": publication })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("newer revision"),
+        "{body}"
+    );
+}
+
+// ---- what ships under the operator's name ----
+
+fn squashing(c: &mut Config) {
+    c.publish.commits = tracon::config::Commits::Squash;
+}
+
+/// By default the forge gets one commit holding exactly the reviewed tree,
+/// carrying the message and on the branch the operator approved; the
+/// agent's commits are listed beside the diff and go no further.
+#[tokio::test]
+async fn a_new_change_ships_one_commit_of_the_reviewed_tree_as_approved() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    let base = f.base_sha();
+    gh_forge(&f, pull_seven(&base));
+    let wt = std::path::Path::new(&f.worktree);
+    sh(
+        wt,
+        "echo more >> a.txt && git add -A && git commit -qm 'wip: more'",
+    );
+
+    let mut args = f.submit_args();
+    args["message"] = json!("feat: the thing\n\nsquashed from two commits");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let intent = tracon::authority::revision_intent(&f.store, Some(&revision.id)).unwrap();
+    let subjects: Vec<_> = intent.commits.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(subjects, ["work", "wip: more"]);
+    assert_eq!(intent.squash_onto.as_deref(), Some(base.as_str()));
+    assert_eq!(
+        intent.forge.commit.as_deref(),
+        Some("feat: the thing\n\nsquashed from two commits")
+    );
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "outputs": {
+                "commit": "feat: the operator's thing",
+                "branch": "feat/operator-thing",
+            }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let origin = f.dir.join("origin.git");
+    let shipped = sh_out(&origin, "git rev-parse refs/heads/feat/operator-thing");
+    assert_ne!(
+        shipped, review.head_sha,
+        "the agent's commits are not what ships"
+    );
+    assert_eq!(
+        sh_out(&origin, &format!("git rev-parse {shipped}^{{tree}}")),
+        sh_out(wt, &format!("git rev-parse {}^{{tree}}", review.head_sha)),
+        "the reviewed tree is what ships"
+    );
+    assert_eq!(
+        sh_out(&origin, &format!("git rev-parse {shipped}^")),
+        base,
+        "one commit, on the base"
+    );
+    assert_eq!(
+        sh_out(&origin, &format!("git log -1 --format=%B {shipped}")),
+        "feat: the operator's thing"
+    );
+    assert!(
+        sh_out(&origin, "git branch --list feat/x").is_empty(),
+        "nothing goes to the agent's branch"
+    );
+    assert!(
+        f.gh_log().contains("--head feat/operator-thing"),
+        "{}",
+        f.gh_log()
+    );
+    let record = &f.store.publications_for_review(&id).unwrap()[0];
+    assert_eq!(record.pushed_sha.as_deref(), Some(shipped.as_str()));
+}
+
+/// The next revision of a squashed change adds one more commit on top of
+/// the squash, though the agent never had that commit.
+#[tokio::test]
+async fn an_update_to_a_squashed_change_squashes_onto_it() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    let base = f.base_sha();
+    gh_forge(&f, pull_seven(&base));
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let first = f.forge_branch();
+
+    let wt = std::path::Path::new(&f.worktree);
+    sh(
+        wt,
+        "echo more >> a.txt && git add -A && git commit -qm second",
+    );
+    gh_forge(&f, pull_seven(&first));
+    let updated = f.submit_update(json!({})).await;
+    let id = review_id(&updated);
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let intent = tracon::authority::revision_intent(&f.store, Some(&revision.id)).unwrap();
+    assert!(!intent.rewrite, "adding to the squash replaces nothing");
+    assert_eq!(intent.squash_onto.as_deref(), Some(first.as_str()));
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let second = f.forge_branch();
+    let origin = f.dir.join("origin.git");
+    assert_eq!(sh_out(&origin, &format!("git rev-parse {second}^")), first);
+    assert_eq!(
+        sh_out(&origin, &format!("git rev-parse {second}^{{tree}}")),
+        sh_out(wt, "git rev-parse HEAD^{tree}")
+    );
+}
+
+/// A message or branch that breaks the configured rules is refused when it
+/// is submitted, and again when the operator edits it in.
+#[tokio::test]
+async fn a_message_that_breaks_the_rules_never_reaches_the_operator() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        squashing(c);
+        c.publish.style = tracon::review::prose::Style::conventional();
+    })
+    .await;
+    gh_forge(&f, pull_seven(&f.base_sha()));
+
+    let mut args = f.submit_args();
+    args["message"] = json!("Added PROJ-7 thing");
+    let refused = f.tool("s1", "submit_review", args).await.to_string();
+    assert!(refused.contains("commit rules"), "{refused}");
+    assert!(refused.contains("PROJ-7"), "{refused}");
+    assert!(f.store.open_reviews().unwrap().is_empty());
+
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "outputs": { "branch": "Feature_X" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.to_string().contains("not lowercase"), "{body}");
 }
