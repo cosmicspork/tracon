@@ -166,6 +166,45 @@ pub trait Runner: Send + Sync {
         let _ = image;
         None
     }
+    /// Start a service container beside a running session, in its network
+    /// namespace, detached. A runtime that cannot share a namespace says so
+    /// rather than starting the service somewhere the session cannot reach.
+    async fn start_sidecar(&self, sidecar: &Sidecar) -> Result<(), RunnerError> {
+        let _ = sidecar;
+        Err(RunnerError::Other(SIDECARS_UNSUPPORTED.into()))
+    }
+    /// Whether the service answers yet, asked from inside the session's
+    /// network namespace. `Ok(false)` is "not yet"; an error is a probe that
+    /// could not be run at all.
+    async fn probe_sidecar(&self, sidecar: &Sidecar) -> Result<bool, RunnerError> {
+        let _ = sidecar;
+        Err(RunnerError::Other(SIDECARS_UNSUPPORTED.into()))
+    }
+}
+
+pub const SIDECARS_UNSUPPORTED: &str =
+    "this node's runtime cannot run a service beside a session; services need the podman boundary";
+
+/// A service run beside one session: the operator's catalogue entry, placed
+/// in the session's network namespace so it reaches what the session reaches
+/// and is reached on the session's loopback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sidecar {
+    /// The container's own name, from `sidecar_name`.
+    pub name: String,
+    /// The session's harness container, whose namespace it joins.
+    pub session_container: String,
+    pub image: String,
+    pub command: Vec<String>,
+    pub port: u16,
+    /// An HTTP path answering 2xx when ready; `None` is a TCP connect.
+    pub ready: Option<String>,
+}
+
+/// The container name of a session's service: derived, so everything that
+/// removes a session's container can remove its services without a lookup.
+pub fn sidecar_name(session_container: &str, service: &str) -> String {
+    format!("{session_container}-svc-{service}")
 }
 
 /// Runs a command directly on the host, with no boundary. Used by the adapter

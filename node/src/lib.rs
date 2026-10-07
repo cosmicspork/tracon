@@ -32,6 +32,7 @@ pub mod review;
 pub mod runner;
 pub mod service;
 pub mod session;
+pub mod sidecars;
 pub mod store;
 pub mod stream;
 pub mod transfers;

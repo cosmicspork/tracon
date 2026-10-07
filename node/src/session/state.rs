@@ -243,6 +243,11 @@ pub mod event_kind {
     /// `bytes_out`, `duration_ms`, `reason`, and `output` only when output
     /// capture was deliberately turned on).
     pub const PTY_CLOSED: &str = "pty_closed";
+    /// A catalogue service beside the session changed state (`name`,
+    /// `container`, `state` — `started`, `ready`, `failed` or `stopped` —
+    /// and `detail` for a failure). The events are also how everything that
+    /// removes a session's container finds the services to remove with it.
+    pub const SERVICE: &str = "service";
 }
 
 #[cfg(test)]
