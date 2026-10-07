@@ -17,6 +17,7 @@
     type Criteria,
     type PinnedRequirements,
     type Review,
+    type ReviewAuthorship,
     type ReviewContext,
     type ReviewIntent,
     type ReviewOutputs,
@@ -39,6 +40,7 @@
   let remoteOwner = $state<string | null>(null)
   let evidence = $state<CandidateEvidence | null>(null)
   let shownWork = $state<ShownWorkItem[]>([])
+  let authorship = $state<ReviewAuthorship | null>(null)
   let requirements = $state<PinnedRequirements | null>(null)
   /** The pinned item's criteria against this revision's candidate, if any. */
   let criteria = $state<Criteria | null>(null)
@@ -78,6 +80,7 @@
         remoteOwner = d.remote_owner ?? null
         evidence = d.evidence
         shownWork = d.shown_work ?? []
+        authorship = d.authorship ?? null
         requirements = d.requirements
         criteria = d.criteria
         surroundingCode = d.surrounding_code
@@ -570,6 +573,16 @@
   {#if publishing}
     <div class="banner crit">
       publication outcome requires reconciliation <b>· this review may have reached the forge; do not approve, revise, or reject it again</b>
+    </div>
+  {/if}
+
+  {#if authorship && authorship.misattributed.length > 0}
+    <div class="banner">
+      not authored as {authorship.identity.login}
+      <b
+        >· {authorship.misattributed.map((c) => `${c.sha.slice(0, 8)} by ${c.author_email}`).join(', ')} · ask the agent
+        to re-author them; nothing is rewritten for you</b
+      >
     </div>
   {/if}
 

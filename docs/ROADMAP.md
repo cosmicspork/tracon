@@ -62,26 +62,6 @@ runs, or in the daily desktop use since.
       Expose an explicit recovery action backed by the publication journal, not a
       misleading second approval. Adding a credential never retries automatically;
       changed revisions or prose need fresh authorization.
-- [ ] **Make tracon invisible in what it publishes.** A commit, branch, pull request or
-      forge request should read as the operator's own work through their harness, with
-      nothing naming tracon. Authorship comes from the bound forge credential, not the
-      host or a placeholder: inside the boundary every commit is `tracon <tracon@localhost>`
-      today (hard-coded in the harness home's gitconfig and the sanitized workspace
-      config), and outside it commits carry the host's Git config, which can be a work
-      address on a personal repository. Resolve the identity once per bound credential
-      from the forge (GitHub `/user`: name and `<id>+<login>@users.noreply.github.com`;
-      GitLab `/user`: name and commit or noreply email), cache it with the binding, and
-      write it as author and committer wherever the node writes Git config. Attribution
-      is see-through: the harness's own default trailers (Claude Code's `Co-Authored-By`,
-      whatever OpenCode does) pass through untouched, and tracon adds none of its own;
-      its provenance stays in the node's ledger. Forge API calls stop sending
-      `user-agent: tracon`. For an external harness the node launches nothing, so it
-      offers the identity (in `external show` and as a tool result the harness applies as
-      repo-local config) and checks authorship at `submit_review` and publish: a commit
-      whose author is not an identity of the target forge account is named in the review,
-      and rewriting it is an operator-approved step, never silent. Still true on
-      2026-10-03: #333, published from session `01a10447`, carries a
-      `tracon@localhost` commit.
 - [ ] **Close the loop on a published session.** Once its review is approved and
       published, session `01a10447` (2026-10-03, #333) went on sitting `running` in its
       container, holding its egress grant, with nothing on the session naming the pull
