@@ -190,6 +190,20 @@ impl Notification {
         }
     }
 
+    /// What a pipeline an agent started did, landing on the session that
+    /// started it (or the sessions list, for a harness the operator runs).
+    /// One per pipeline: a later push replaces an earlier banner.
+    pub fn pipeline(session_id: Option<&str>, title: String, body: String, tag: &str) -> Self {
+        Self {
+            kind: Kind::Forge,
+            title,
+            body,
+            path: session_id
+                .map_or_else(|| "/sessions".to_string(), |id| format!("/sessions/{id}")),
+            tag: format!("tracon-pipeline-{tag}"),
+        }
+    }
+
     /// The push behind "Send a test".
     pub fn test() -> Self {
         Self {
