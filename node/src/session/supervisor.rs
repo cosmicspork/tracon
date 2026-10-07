@@ -1017,13 +1017,19 @@ impl Supervisor {
 
     /// Deny-by-default: an unanswered request is rejected once, and the log
     /// says so at the point the harness asked.
+    /// Deny what nobody answered in time. Time is this supervisor's monotonic
+    /// clock, which does not run while the host sleeps: a card's deadline
+    /// counts only time the node was awake, so a host that wakes from a long
+    /// suspend does not wake to every waiting card already denied.
     async fn expire_permissions(&mut self) {
-        let now = now_ms();
+        let now = self.mono_ms();
+        let timeout = self.permission_timeout.as_millis() as i64;
         let due: Vec<String> = match self.store.open_permissions() {
             Ok(rows) => rows
                 .into_iter()
                 .filter(|r| {
-                    r.session_id.as_deref() == Some(self.session_id.as_str()) && r.expires_ms <= now
+                    r.session_id.as_deref() == Some(self.session_id.as_str())
+                        && now - r.created_mono_ms >= timeout
                 })
                 .map(|r| r.id)
                 .collect(),

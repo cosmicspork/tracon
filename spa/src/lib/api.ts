@@ -20,6 +20,7 @@ import type {
   HubRollups,
   ManagedRepo,
   Memory,
+  AwakeState,
   MeshState,
   ModelOption,
   NodeConfig,
@@ -132,6 +133,7 @@ export const api = {
   node: () => call<NodeInfo>('GET', '/api/node'),
   nodes: () => call<NodeInfo[]>('GET', '/api/nodes'),
   mesh: () => call<MeshState>('GET', '/api/mesh'),
+  awake: () => call<AwakeState>('GET', '/api/awake'),
   channels: () => call<ChannelInfo[]>('GET', '/api/channels'),
   /** Optional hub aggregate; never substitutes for this node's local metrics. */
   hubRollups: (channel: string) =>

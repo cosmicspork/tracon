@@ -112,6 +112,10 @@ pub mod event_kind {
     /// start another turn. `source` is telemetry only; the state is decisive.
     pub const SESSION_PAUSED: &str = "session_paused";
     pub const SESSION_RESUMED: &str = "session_resumed";
+    /// The host slept while this session was live (`asleep_ms`,
+    /// `inhibitor_held`). An interruption, not a gap: the session's waiting
+    /// cards had their deadlines moved on by the same time.
+    pub const HOST_SUSPENDED: &str = "host_suspended";
     pub const USER_PROMPT: &str = "user_prompt";
     pub const MESSAGE: &str = "message";
     pub const THOUGHT: &str = "thought";

@@ -771,6 +771,17 @@ impl Store {
 
     /// The waiting bay, ordered as DESIGN.md decided: permission requests before
     /// review approvals (reviews do not exist yet), then oldest first.
+    /// Move every open request's deadline on by `by_ms`, for the time this
+    /// node was asleep. This node's own requests only.
+    pub fn extend_open_permissions(&self, node_id: &str, by_ms: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE permission_request SET expires_ms = expires_ms + ?2
+             WHERE state='new' AND node_id=?1",
+            rusqlite::params![node_id, by_ms],
+        )?)
+    }
+
     pub fn open_permissions(&self) -> Result<Vec<PermissionRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
