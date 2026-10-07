@@ -291,6 +291,9 @@ enum SessionCommand {
         #[arg(long, default_value = "opencode")]
         harness: String,
     },
+    /// Carry on a session a node restart cut off: a new session on the same
+    /// workspace, branch and harness, opening with a handoff note.
+    Continue { id: String },
 
     /// What a session's harness state is, and every backup of it held here.
     State { id: String },
@@ -1519,6 +1522,25 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
             println!(
                 "\nThe new session opens with a handoff note: it inherits the workspace, \
                  not the old session's context."
+            );
+            Ok(())
+        }
+        SessionCommand::Continue { id } => {
+            let v = node_call(
+                Method::POST,
+                &format!("/api/sessions/{id}/continue"),
+                None,
+                None,
+            )
+            .await?;
+            println!(
+                "continued {id} as {} on {}",
+                v["id"].as_str().unwrap_or("?"),
+                v["branch"].as_str().unwrap_or("?")
+            );
+            println!(
+                "\nThe new session opens with a handoff note: it inherits the workspace, \
+                 not the interrupted session's context."
             );
             Ok(())
         }

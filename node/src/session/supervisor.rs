@@ -75,6 +75,9 @@ pub enum Command {
         turn_id: u64,
     },
     Kill,
+    /// End the session now for a reason that is not the operator's: the node
+    /// is shutting down underneath it.
+    End(EndReason),
     /// End the session once the running turn finishes (now, if none is):
     /// the work item closed, or the phase's artifact landed.
     EndAfterTurn(EndReason),
@@ -454,6 +457,11 @@ impl Supervisor {
                         Some(Command::Kill) => {
                             killed_by_us = true;
                             self.shutdown(EndReason::KilledUser).await;
+                            break;
+                        }
+                        Some(Command::End(reason)) => {
+                            killed_by_us = true;
+                            self.shutdown(reason).await;
                             break;
                         }
                         None => break,

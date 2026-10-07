@@ -69,6 +69,11 @@ pub enum EndReason {
     /// about this session, and every session on this node will end the same
     /// way until the image or the pin changes.
     Incompatible,
+    /// The node stopped or restarted while the session was live: a graceful
+    /// shutdown ended it, or the next start found its row still open. Not the
+    /// operator's stop and not the harness's failure, and the work it was
+    /// doing can be carried forward from its workspace.
+    NodeRestart,
     Error,
 }
 
@@ -82,6 +87,7 @@ impl EndReason {
             Self::PhaseDone => "phase_done",
             Self::Detached => "detached",
             Self::Incompatible => "incompatible",
+            Self::NodeRestart => "node_restart",
             Self::Error => "error",
         }
     }

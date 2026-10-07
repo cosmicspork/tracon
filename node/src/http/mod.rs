@@ -314,6 +314,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/archive-ended", post(api::archive_ended))
         .route("/api/sessions/archive-legacy", post(api::archive_legacy))
         .route("/api/sessions/{id}/reopen", post(api::reopen_session))
+        .route("/api/sessions/{id}/continue", post(api::continue_session))
         .route("/api/sessions/{id}/archive", post(api::archive_session))
         .route("/api/sessions/{id}/unarchive", post(api::unarchive_session))
         .route("/api/sessions/{id}", get(api::get_session))

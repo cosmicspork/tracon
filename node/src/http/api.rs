@@ -1768,6 +1768,16 @@ pub async fn reopen_session(
     Ok((StatusCode::CREATED, Json(json!(row))))
 }
 
+/// Carry on what a node restart interrupted: a new session on the same
+/// workspace and harness, recording the one it continues.
+pub async fn continue_session(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let row = s.manager.continue_interrupted(&id).await?;
+    Ok((StatusCode::CREATED, Json(json!(row))))
+}
+
 #[derive(Deserialize)]
 pub struct DraftBody {
     text: String,

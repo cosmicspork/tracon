@@ -211,6 +211,27 @@
     }
   }
 
+  // A node restart ended this session; the work can be carried on once, as a
+  // new session on the same workspace. Once it has been, link to that one.
+  const continuedAs = $derived(
+    [...store.sessions.values()].find((s) => s.continued_from === id),
+  )
+  let continuing = $state(false)
+  async function carryOn() {
+    if (continuing) return
+    continuing = true
+    error = null
+    try {
+      const next = await api.continueSession(id)
+      await store.refetch()
+      router.go(`/sessions/${next.id}`)
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err)
+    } finally {
+      continuing = false
+    }
+  }
+
   async function control(action: 'pause' | 'resume') {
     if (controlling) return
     controlling = true
@@ -416,6 +437,17 @@
     <div class="banner dim">
       {session.harness_id === 'external' ? 'broker access paused' : 'paused'}
       <b>· {session.harness_id === 'external' ? 'the external host process continues; Tracon cannot control it' : 'new prompts, tools, and model requests are fenced until resume or stop'}</b>
+    </div>
+  {:else if session.end_reason === 'node_restart'}
+    <div class="banner dim">
+      ended by a node restart <b>· you did not stop it; its workspace is kept</b>
+      {#if continuedAs}
+        <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
+      {:else if session.phase !== 'review'}
+        <button class="lnk" onclick={() => void carryOn()} disabled={continuing || unreachable !== null}
+          >Continue</button
+        >
+      {/if}
     </div>
   {:else if session.end_reason === 'item_close'}
     <div class="banner ok">ended at item close <b>· the work item is closed{session.work_item_id ? ` · ${session.work_item_id.slice(0, 8)}` : ''}</b></div>
