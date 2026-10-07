@@ -90,9 +90,6 @@ runs, or in the daily desktop use since.
       with the URL) and show it there, then suspend a published session after an idle
       period — container stopped, grant revoked, workspace kept — so a CI failure or a
       review comment can resume it. Ending it stays the operator's.
-- [ ] **Open external links through a clean Linux host launcher**: the AppImage's bundled
-      `xdg-open` skips KDE 6 and its library path breaks a Flatpak browser. Restore the
-      host environment for the child only and keep the URL and origin restrictions.
 - [ ] **Keep the machine awake while a session works.** The desktop host idle-suspended
       for 54 minutes in the middle of execute session `01a0f4b3`'s turn (2026-09-30,
       during the harness's context compaction) and the session simply stopped. Hold a
