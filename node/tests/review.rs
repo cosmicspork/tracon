@@ -565,6 +565,9 @@ async fn a_mirrored_review_is_not_judged_by_what_this_node_lacks() {
     assert!(body["stale"].as_array().unwrap().is_empty(), "{body}");
     assert!(body["evidence"].is_null());
     assert!(body["intent"].is_null());
+    // With no mesh to ask the owner on, it says so rather than leaving an
+    // empty review to read as the change's own.
+    assert_eq!(body["owner_detail"]["state"], "unreachable", "{body}");
 
     // The node's own review is still read as before.
     let (_, body) = f.call("GET", &format!("/api/reviews/{local}"), None).await;

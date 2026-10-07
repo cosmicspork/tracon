@@ -1204,7 +1204,11 @@ Every node serves the same embedded SPA; a client is a matter of shell.
   required a matching `Origin` on everything that writes.
 - The interface talks only to the node that served it; that node mirrors peers and
   forwards commands to owners. A verdict executes on the owner, because staleness
-  and publishing need the owner's worktree and broker.
+  and publishing need the owner's worktree and broker. A mirrored review's checks,
+  evidence, criteria, staleness and forge intent are read from the owner when it is
+  opened, bounded like candidate evidence. The owner answers only for a review it holds,
+  on a channel both nodes share. An owner that cannot be read, or that has moved on to
+  a revision not yet mirrored, is said to be, rather than shown as an empty review.
 - **The attention count is actionable human decisions, and nothing else.** Everything
   parked in the operator's bay is sorted into three lanes before it is counted: what a
   person can decide now; what the agent holds (a review being revised, a request that
