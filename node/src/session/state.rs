@@ -127,6 +127,10 @@ pub mod event_kind {
     pub const PUBLISHED: &str = "published";
     /// A published session went idle and was put away (`idle_ms`).
     pub const SESSION_SUSPENDED: &str = "session_suspended";
+    /// The host slept while this session was live (`asleep_ms`,
+    /// `inhibitor_held`). An interruption, not a gap: the session's waiting
+    /// cards had their deadlines moved on by the same time.
+    pub const HOST_SUSPENDED: &str = "host_suspended";
     pub const USER_PROMPT: &str = "user_prompt";
     pub const MESSAGE: &str = "message";
     pub const THOUGHT: &str = "thought";

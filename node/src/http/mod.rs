@@ -254,6 +254,7 @@ pub fn router(state: AppState) -> Router {
             post(api::disconnect_provider),
         )
         .route("/api/nodes", get(api::list_nodes))
+        .route("/api/awake", get(api::awake))
         .route(
             "/api/nodes/{id}/providers/{name}/connect",
             post(api::node_connect_provider),
@@ -854,6 +855,11 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     // requests behind, and no answer can reach a harness that is gone. Left
     // alone they sit in the queue as decisions the operator cannot make, which
     // is exactly what the attention count must not contain.
+    // The machine stays awake while a session works, and a suspend that
+    // happens anyway is noticed and recorded.
+    let awake = crate::awake::Awake::new(state.manager.clone());
+    crate::awake::install(awake.clone());
+    tokio::spawn(awake.clone().run());
     {
         let store = store.clone();
         let manager = state.manager.clone();
@@ -863,6 +869,8 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
             loop {
                 tick.tick().await;
+                // A deadline is judged only after a suspend has moved it on.
+                awake.catch_up().await;
                 // An approval waits for the operator until it expires; the
                 // caller is not blocked on it, so nothing else would end it.
                 manager.expire_approvals().await;

@@ -3,6 +3,7 @@
 
 pub mod adapter;
 pub mod authority;
+pub mod awake;
 pub mod boundary;
 pub mod broker;
 pub mod config;
