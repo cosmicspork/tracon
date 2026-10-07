@@ -223,3 +223,9 @@ operator's information, not the model's.
     keeps its history pushes the agent's commits as written, listed for the operator
     to read. A message or branch that breaks the repository's configured rules is
     refused at submit, so a bad one never reaches the card.
+14. **A verdict is never out of reach, and never disabled without a reason.** The
+    verdict bar stays on screen however long the review. Request changes and Reject
+    each open a labelled composer for the reason the agent will read, instead of
+    sitting greyed out until a field elsewhere is filled; an action that cannot be
+    taken says why beside it (files changed since submit, a publication to
+    reconcile, a verdict already on its way).

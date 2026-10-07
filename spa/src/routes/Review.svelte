@@ -30,6 +30,7 @@
   import { baseFromDiff, buildPatch, fileSection } from '../lib/patch'
   import { isNarrativeReport } from '../lib/reports'
   import { leaveAfterVerdict } from '../lib/verdict-nav'
+  import { composerLabel, unavailable } from '../lib/verdicts'
   import { COVERAGE, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
 
   let { id }: { id: string } = $props()
@@ -160,6 +161,18 @@
   )
   const editedFiles = $derived([...editable.entries()].filter(([, f]) => f.now !== f.head).length)
   const publishing = $derived(review?.state === 'publishing')
+  /** The verdict whose reason is being written, if one is. */
+  let composing = $state<'revise' | 'reject' | null>(null)
+  let reasonInput = $state<HTMLTextAreaElement | null>(null)
+  const conditions = $derived({ busy, publishing, stale, reason })
+  const approveBlocked = $derived(unavailable('approve', conditions))
+  const sendBlocked = $derived(composing ? unavailable(composing, conditions) : null)
+
+  /** Open the reason composer for a verdict that needs one. */
+  function compose(action: 'revise' | 'reject') {
+    composing = action
+    queueMicrotask(() => reasonInput?.focus())
+  }
 
   /** Fetch each reviewed file as submitted and rebuild what it changed from. */
   async function startEditing() {
@@ -854,25 +867,39 @@
     <div class="note dim">{readiness.note}</div>
   {/if}
 
-  <div class="decide">
-    <button
-      class="btn p"
-      disabled={busy || publishing || stale.length > 0 || readiness?.ready === false}
-      onclick={() => decide('approve')}
-    >
-      Approve and publish
-    </button>
-    <input
-      bind:value={reason}
-      placeholder="What to change, or why you are rejecting — goes back to the agent"
-      disabled={busy || publishing}
-    />
-    <button class="btn" disabled={busy || publishing || !reason.trim()} onclick={() => decide('revise')}>
-      {editedFiles > 0 ? 'Send edits and request changes' : 'Request changes'}
-    </button>
-    <button class="btn d" disabled={busy || publishing || !reason.trim()} onclick={() => decide('reject')}>
-      Reject
-    </button>
+  <div class="decide" role="group" aria-label="Verdict">
+    {#if composing}
+      <label class="composer">
+        <span>{composerLabel(composing, editedFiles)}</span>
+        <textarea bind:this={reasonInput} bind:value={reason} use:autogrow={reason} disabled={busy || publishing}></textarea>
+      </label>
+      <div class="row">
+        <button
+          class="btn {composing === 'reject' ? 'd' : 'p'}"
+          disabled={sendBlocked !== null}
+          onclick={() => composing && decide(composing)}
+        >
+          {composing === 'reject' ? 'Reject' : editedFiles > 0 ? 'Send edits and request changes' : 'Request changes'}
+        </button>
+        <button class="btn" disabled={busy} onclick={() => (composing = null)}>Back</button>
+        {#if sendBlocked}<span class="why">{sendBlocked}</span>{/if}
+      </div>
+    {:else}
+      <div class="row">
+        <button
+          class="btn p"
+          disabled={approveBlocked !== null || readiness?.ready === false}
+          onclick={() => decide('approve')}
+        >
+          Approve and publish
+        </button>
+        <button class="btn" disabled={busy || publishing} onclick={() => compose('revise')}>
+          {editedFiles > 0 ? 'Send edits and request changes…' : 'Request changes…'}
+        </button>
+        <button class="btn d" disabled={busy || publishing} onclick={() => compose('reject')}>Reject…</button>
+      </div>
+      {#if approveBlocked}<p class="why">Approve: {approveBlocked}</p>{/if}
+    {/if}
   </div>
 {/if}
 
@@ -1367,22 +1394,41 @@
   .files .bad {
     color: var(--crit);
   }
+  /* However long the review, the verdict stays on screen. */
   .decide {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    display: grid;
+    gap: 8px;
+    background: var(--bg);
+    border-top: 1px solid var(--rule);
+    padding: 12px 0 calc(12px + env(safe-area-inset-bottom));
+  }
+  .decide .row {
     display: flex;
     gap: 10px;
     flex-wrap: wrap;
     align-items: center;
-    border-top: 1px solid var(--rule);
-    padding-top: 14px;
   }
-  .decide input {
-    flex: 1;
-    min-width: 200px;
+  .decide .composer {
+    display: grid;
+    gap: 6px;
+    font-size: 12.5px;
+    color: var(--dim);
+  }
+  .decide textarea {
+    min-height: 64px;
     background: var(--s1);
     border: 0;
     border-radius: 4px;
     color: var(--ink);
     padding: 8px 10px;
     font: 13px var(--sans);
+  }
+  .decide .why {
+    margin: 0;
+    font-size: 12px;
+    color: var(--dim);
   }
 </style>
