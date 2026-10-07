@@ -85,11 +85,13 @@ fn spawn(url: &str) -> Result<(), String> {
 
 /// Markers an AppImage's runtime sets for its own use. A child that inherits
 /// them can mistake itself for part of the bundle (a second AppImage does).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const BUNDLE_MARKERS: [&str; 4] = ["APPIMAGE", "APPDIR", "OWD", "ARGV0"];
 
 /// The environment as the host would have it: each variable without the parts
 /// that point into the bundle, and dropped when nothing else is left of it.
 /// Outside an AppImage nothing points into one and this changes nothing.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn host_environment(
     vars: impl IntoIterator<Item = (OsString, OsString)>,
     appdir: Option<&Path>,
@@ -121,6 +123,7 @@ pub fn host_environment(
 
 /// Whether one entry of a variable names something inside the running bundle:
 /// under `APPDIR`, or in the directories an AppImage mounts or extracts to.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn in_bundle(entry: &[u8], appdir: Option<&Path>) -> bool {
     let text = String::from_utf8_lossy(entry);
     let path = Path::new(text.as_ref());
