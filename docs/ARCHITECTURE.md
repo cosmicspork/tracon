@@ -653,11 +653,33 @@ change at that commit whose text differs, or more than one that matches, is not
 guessed between. A comment is recognised the same way, by its approved text.
 A forge that cannot be reached, or an answer that does not settle which change
 is this publication's, is recorded as `uncertain` rather than reported as
-either success or failure. Every Git
+either success or failure. The review screen shows the latest record as one of
+not attempted (refused before anything spoke to the forge), in progress,
+failed, uncertain or published, with its remedy, and says before approval
+whether a forge token is bound to the channel on this node — a binding, never
+a claim that the token may push. The remedy is **Retry publication**, not a
+second approval: it re-sends the title, body and outputs the record holds for
+that revision, commit and target, and an uncertain attempt looks at the forge
+before repeating anything. A newer revision, a moved branch, another target
+or new prose needs a fresh approval, and binding a credential never retries
+on its own. Every Git
 command that can reach a forge — clone, fetch, ls-remote, push — is built in one
 place with a brokered credential or none: an ambient host helper, an askpass
 program, or an `ssh-agent` identity can never answer for the node, and there is
 no setting that would let one.
+
+What is published reads as the operator's own work. A session's commits are
+authored and committed as the account behind the channel's bound forge token,
+resolved once per token from the forge's `/user` (GitHub: the profile name and
+`<id>+<login>@users.noreply.github.com`; GitLab: the name and the commit
+address) and written into the harness's gitconfig; the workspace's own Git
+config carries no identity. With no forge token bound, the host's global Git
+identity is used, never a name for tracon. Forge API calls name only the HTTP
+library as their user agent, and the node adds no trailers of its own, so a
+harness's own (Claude Code's `Co-Authored-By`) pass through untouched. A
+harness the operator runs is offered the identity by `tracon external show`,
+and `submit_review` and the review screen name any commit not authored and
+committed as that account. Rewriting one is never done silently.
 
 ## Workspaces
 
