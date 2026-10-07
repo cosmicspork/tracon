@@ -288,6 +288,10 @@ impl PublishError {
 /// it happens. Implemented over the store; `publish` never writes the database
 /// itself, so the boundary this module is about stays where it is.
 pub trait Journal: Send + Sync {
+    /// About to speak to the forge. Everything before this ran on this node
+    /// alone, so an attempt that stops earlier was definitely not attempted
+    /// as far as the forge is concerned.
+    fn contacting(&self) -> Result<(), String>;
     /// The branch is on the forge and the forge was observed to hold it.
     fn pushed(&self, sha: &str) -> Result<(), String>;
     /// About to ask the forge to open the change. Recorded first: a crash
@@ -304,6 +308,9 @@ pub trait Journal: Send + Sync {
 pub struct NoJournal;
 
 impl Journal for NoJournal {
+    fn contacting(&self) -> Result<(), String> {
+        Ok(())
+    }
     fn pushed(&self, _sha: &str) -> Result<(), String> {
         Ok(())
     }
@@ -524,6 +531,7 @@ async fn attempt(
     // From here on every Git command speaks to the forge, and it does so with
     // the credential the broker bound to this channel and node — never a
     // helper the host might offer.
+    p.journal.contacting().map_err(PublishError::Broker)?;
     let token = provider.forge().token(&env).map(String::as_str);
     let credential = git_remote::brokered(provider.forge().git_user(), token);
     let refname = format!("refs/heads/{}", p.target.branch);

@@ -1228,6 +1228,10 @@ pub struct SessionDefaults {
     /// How long a claim survives a client that stopped talking. A dropped socket
     /// should not zero the attention count; a closed laptop should.
     pub claim_grace_secs: u64,
+    /// How long a session whose work is published may sit idle before it is
+    /// suspended: harness and container stopped, egress grant revoked,
+    /// workspace kept. 0 never suspends one.
+    pub suspend_published_after_secs: u64,
     /// Where worktrees are created. Outside any repo, so nothing is gitignored.
     pub worktree_root: PathBuf,
     /// How many terminal frames the gateway will hold for a browser that has
@@ -1324,6 +1328,7 @@ impl Default for Config {
                 harness_api_timeout_secs: 30,
                 default_channel: String::new(),
                 claim_grace_secs: 60,
+                suspend_published_after_secs: 1800,
                 worktree_root: default_worktree_root(),
                 pty_buffer_frames: 256,
                 pty_capture_output: false,

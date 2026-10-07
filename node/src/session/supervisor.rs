@@ -78,6 +78,11 @@ pub enum Command {
     /// End the session now for a reason that is not the operator's: the node
     /// is shutting down underneath it.
     End(EndReason),
+    /// Put an idle, published session away: harness stopped, container
+    /// removed, its egress grant revoked with the supervisor, workspace kept.
+    Suspend {
+        idle_ms: i64,
+    },
     /// End the session once the running turn finishes (now, if none is):
     /// the work item closed, or the phase's artifact landed.
     EndAfterTurn(EndReason),
@@ -463,6 +468,19 @@ impl Supervisor {
                             killed_by_us = true;
                             self.shutdown(reason).await;
                             break;
+                        }
+                        Some(Command::Suspend { idle_ms }) => {
+                            // Only an idle session is put away: a turn that
+                            // started since the manager looked keeps it.
+                            let idle = self.active_turn.is_none()
+                                && self.open.lock().await.is_empty()
+                                && self.store.get_session(&self.session_id).ok().flatten()
+                                    .is_some_and(|s| s.state == SessionState::Running.as_str() && s.turn_active == 0);
+                            if idle {
+                                killed_by_us = true;
+                                self.suspend(idle_ms).await;
+                                break;
+                            }
                         }
                         None => break,
                     },
@@ -1017,13 +1035,19 @@ impl Supervisor {
 
     /// Deny-by-default: an unanswered request is rejected once, and the log
     /// says so at the point the harness asked.
+    /// Deny what nobody answered in time. Time is this supervisor's monotonic
+    /// clock, which does not run while the host sleeps: a card's deadline
+    /// counts only time the node was awake, so a host that wakes from a long
+    /// suspend does not wake to every waiting card already denied.
     async fn expire_permissions(&mut self) {
-        let now = now_ms();
+        let now = self.mono_ms();
+        let timeout = self.permission_timeout.as_millis() as i64;
         let due: Vec<String> = match self.store.open_permissions() {
             Ok(rows) => rows
                 .into_iter()
                 .filter(|r| {
-                    r.session_id.as_deref() == Some(self.session_id.as_str()) && r.expires_ms <= now
+                    r.session_id.as_deref() == Some(self.session_id.as_str())
+                        && now - r.created_mono_ms >= timeout
                 })
                 .map(|r| r.id)
                 .collect(),
@@ -1337,6 +1361,31 @@ impl Supervisor {
         self.reject_open_permissions().await;
     }
 
+    /// Not an end: the row stays non-terminal and says `suspended`, and what
+    /// it held (the harness, its container, its egress grant, its token) goes
+    /// with this supervisor. The workspace is the runtime's and stays.
+    async fn suspend(&mut self, idle_ms: i64) {
+        let _ = self.store.update_session_unless(
+            &self.session_id,
+            SessionState::TERMINAL,
+            SessionPatch {
+                state: Some(SessionState::Suspended.as_str().into()),
+                turn_active: Some(false),
+                ..Default::default()
+            },
+        );
+        self.record(ek::SESSION_SUSPENDED, None, json!({ "idle_ms": idle_ms }));
+        self.record(
+            ek::STATE,
+            None,
+            json!({ "state": SessionState::Suspended.as_str(), "end_reason": null }),
+        );
+        self.publish_session();
+        let _ = tokio::time::timeout(CANCEL_TIMEOUT, self.handle.close()).await;
+        self.remove_container().await;
+        self.reject_open_permissions().await;
+    }
+
     async fn finish_unexpected(&mut self) {
         let Ok(Some(s)) = self.store.get_session(&self.session_id) else {
             return;
@@ -1387,6 +1436,7 @@ impl SessionState {
             "paused" => Self::Paused,
             "waiting_on_you" => Self::WaitingOnYou,
             "waiting_on_check" => Self::WaitingOnCheck,
+            "suspended" => Self::Suspended,
             "killed_budget" => Self::KilledBudget,
             "failed" => Self::Failed,
             _ => Self::Closed,

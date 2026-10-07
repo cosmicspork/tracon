@@ -92,6 +92,16 @@ export interface CredentialSummary {
   env_keys: string[]
 }
 
+/** Whether this node holds its machine awake, from `/api/awake` and the `awake` stream event. */
+export interface AwakeState {
+  held: boolean
+  reason: string | null
+  /** `logind` or `caffeinate`; null where the host offers neither. */
+  method: string | null
+  error: string | null
+  last_suspend: { woke_ms: number; asleep_ms: number } | null
+}
+
 /** Hub reachability, from `/api/mesh` and the `mesh` stream event. */
 export interface MeshState {
   hub: { state: 'disabled' } | { state: 'connected' } | { state: 'unreachable'; since_ms: number }
@@ -221,6 +231,7 @@ export type SessionState =
   | 'paused'
   | 'waiting_on_you'
   | 'waiting_on_check'
+  | 'suspended'
   | 'closed'
   | 'killed_budget'
   | 'failed'
@@ -501,6 +512,72 @@ export interface ReviewDetails {
   legacy_check_events: CandidateCheckRun[]
   /** What the agent showed of its work. Absent from a node that predates it. */
   shown_work?: ShownWork[]
+  /**
+   * Who the commits are by, against the forge account approval publishes as.
+   * Null when that account's identity could not be resolved, or for a
+   * mirrored review; absent from a node that predates it.
+   */
+  authorship?: ReviewAuthorship | null
+  /**
+   * Whether this node could publish it and how the latest attempt ended.
+   * Null for a mirrored review (only the owner holds the credential and the
+   * journal); absent from a node that predates it.
+   */
+  publication?: ReviewPublication | null
+}
+
+export interface ForgeIdentity {
+  name: string
+  email: string
+  login: string
+  forge: string
+}
+
+export interface ReviewAuthorship {
+  identity: ForgeIdentity
+  /** Commits not authored and committed as `identity`. Never rewritten for you. */
+  misattributed: { sha: string; author: string; author_email: string; committer_email: string }[]
+  note: string
+}
+
+export interface ReviewPublication {
+  readiness: PublicationReadiness
+  latest: PublicationView | null
+}
+
+/**
+ * What the node can tell without asking the forge. `ready` means a token is
+ * bound to this channel here, never that it may push: only the forge knows.
+ */
+export interface PublicationReadiness {
+  ready: boolean
+  provider?: string
+  credential?: string
+  project?: string
+  problem?: string | null
+  note?: string
+  /** Where the missing binding is fixed. */
+  settings: string
+}
+
+export type PublicationOutcome = 'not_attempted' | 'in_progress' | 'failed' | 'uncertain' | 'published'
+
+export interface PublicationView {
+  id: string
+  outcome: PublicationOutcome
+  note: string | null
+  url: string | null
+  attempts: number
+  updated_ms: number
+  provider: string
+  project: string
+  branch: string
+  /** What to do about it, in a sentence. Empty when there is nothing to do. */
+  remedy: string
+  /** A retry of exactly what was approved is allowed now. */
+  recoverable: boolean
+  /** Why it is not, when the outcome would otherwise allow one. */
+  refusal: string | null
 }
 
 /**
@@ -1245,6 +1322,7 @@ export type Frame =
   | { type: 'providers'; providers: ProviderInfo[] }
   | { type: 'promotions'; waiting: Promotion[] }
   | { type: 'changes'; channel: string; changes: { table: string; id: string; op: string }[] }
+  | ({ type: 'awake' } & AwakeState)
 
 export const TERMINAL_STATES: SessionState[] = ['closed', 'killed_budget', 'failed']
 

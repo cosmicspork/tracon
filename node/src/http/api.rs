@@ -1444,6 +1444,10 @@ pub async fn get_session(
         "session": row,
         "waiting": waiting,
         "questions": questions,
+        "publications": s.store().session_publications(&id).unwrap_or_default()
+            .into_iter()
+            .map(|(review_id, url)| json!({ "review_id": review_id, "url": url }))
+            .collect::<Vec<_>>(),
         "usage": usage,
         "ceiling": ceiling,
         "toolchain": toolchain,
@@ -1778,6 +1782,16 @@ pub async fn continue_session(
     Ok((StatusCode::CREATED, Json(json!(row))))
 }
 
+/// Whether this node is holding its machine awake, why, and the last
+/// suspend it noticed.
+pub async fn awake() -> Json<crate::awake::Status> {
+    Json(
+        crate::awake::current()
+            .map(|a| a.status())
+            .unwrap_or_default(),
+    )
+}
+
 #[derive(Deserialize)]
 pub struct DraftBody {
     text: String,
@@ -2049,6 +2063,18 @@ pub async fn get_review(
     // attempt is visible here — including the `uncertain` one an operator has
     // to verify on the forge — rather than only in the log.
     let publications = s.store().publications_for_review(&id)?;
+    // Whether this node could publish it, and how the latest attempt ended,
+    // with the remedy. Node-local: only the owner holds the credential and
+    // the journal, and only the owner can retry.
+    let publication = match remote_owner {
+        Some(_) => serde_json::Value::Null,
+        None => json!({
+            "readiness": crate::authority::publication_readiness(&s.tools.broker, &r, &s.node_id),
+            "latest": publications
+                .first()
+                .map(|row| crate::authority::publication_view(s.store(), &r, row)),
+        }),
+    };
     // What the agent showed of its work, each marked stale once the candidate
     // moved past the commit it was shown at. Node-local, like the checks: a
     // mirror never had the workspace it was read from.
@@ -2079,6 +2105,24 @@ pub async fn get_review(
         )
         .unwrap_or_default()),
     };
+    // Who the commits are by, against the account approval would publish as,
+    // so a commit the forge would not attribute to it is named before anyone
+    // approves. Node-local: the worktree is here.
+    let authorship = match (remote_owner.as_ref(), worktree_of(&s, &r)) {
+        (None, Some(worktree)) => {
+            crate::review::authorship(
+                &s.tools.broker,
+                &r.provider,
+                &r.channel,
+                &s.node_id,
+                &worktree,
+                &format!("origin/{}", r.base_ref),
+                &r.head_sha,
+            )
+            .await
+        }
+        _ => None,
+    };
     Ok(Json(json!({
         "review": r,
         "remote_owner": remote_owner,
@@ -2091,7 +2135,9 @@ pub async fn get_review(
         "evidence": evidence,
         "legacy_check_events": legacy_check_events,
         "publications": publications,
+        "publication": publication,
         "shown_work": shown_work,
+        "authorship": authorship,
     })))
 }
 
@@ -2539,6 +2585,7 @@ pub(crate) async fn decide_local(
                     // bytes published under this approval.
                     decided_revision_id: decided_revision.as_deref(),
                     outputs: b.outputs.as_ref(),
+                    recover: false,
                 },
             )
             .await
@@ -2580,6 +2627,113 @@ pub(crate) async fn decide_local(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("{other:?} is not a verdict"),
         )),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RecoverBody {
+    /// The publication record the operator is retrying, as the review screen
+    /// showed it. A retry is of a recorded attempt, not of the review.
+    pub publication_id: String,
+}
+
+/// Retry a publication exactly as it was approved: the recorded revision,
+/// commit, target, title, body and outputs, read back from the journal. It
+/// is not a second approval and takes no prose from the caller; anything
+/// that changed since is refused with what to do instead. An uncertain
+/// attempt is resumed by looking at the forge before anything is repeated.
+pub async fn recover_publication(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<RecoverBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    if r.node_id != s.node_id {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this review is published by the node that owns it; retry it there".into(),
+        ));
+    }
+    let row = s
+        .store()
+        .publication(&b.publication_id)?
+        .filter(|row| row.review_id == id)
+        .ok_or(ApiError(
+            StatusCode::NOT_FOUND,
+            "no such publication for this review".into(),
+        ))?;
+    if let Some(refusal) = crate::authority::recovery_refusal(s.store(), &r, &row) {
+        return Err(ApiError(StatusCode::CONFLICT, refusal));
+    }
+    // Checked as present just above.
+    let title = row.title.clone().unwrap_or_default();
+    let body = row.body.clone().unwrap_or_default();
+    let outputs: crate::review::publish::Outputs =
+        serde_json::from_str(row.outputs_json.as_deref().unwrap_or_default()).map_err(|e| {
+            ApiError(
+                StatusCode::CONFLICT,
+                format!("the recorded outputs are unreadable ({e}); approve it again"),
+            )
+        })?;
+    let revision = match row.revision_id.as_deref() {
+        Some(revision) => s.store().review_revision(revision)?,
+        None => None,
+    };
+    match crate::authority::publish_review(
+        &crate::authority::PublishContext {
+            store: s.store(),
+            manager: &s.manager,
+            broker: &s.tools.broker,
+            cfg: &s.cfg,
+            node_id: &s.node_id,
+        },
+        crate::authority::PublishRequest {
+            review: &r,
+            title: &title,
+            body: &body,
+            require_evidence: false,
+            recheck_authority: None,
+            decided_revision_id: row.revision_id.as_deref(),
+            outputs: Some(&outputs),
+            recover: true,
+        },
+    )
+    .await
+    {
+        Ok(crate::authority::Published {
+            url: published,
+            outputs,
+        }) => {
+            let waiting_ms = record_evidence_decision(
+                s.store(),
+                revision.as_ref(),
+                &id,
+                "approved",
+                Some("published by retrying the publication approved earlier"),
+                Some(&title),
+                Some(&body),
+                None,
+                Some(&outputs),
+            )?;
+            record_operator_decision_event(
+                &s,
+                r.session_id.as_deref(),
+                &id,
+                "approved",
+                waiting_ms,
+            );
+            Ok(Json(json!({ "state": "approved", "published": published })))
+        }
+        Err(crate::authority::PublishError::Conflict(message)) => {
+            Err(ApiError(StatusCode::CONFLICT, message))
+        }
+        Err(crate::authority::PublishError::External(message))
+        | Err(crate::authority::PublishError::Uncertain(message)) => {
+            Err(ApiError(StatusCode::BAD_GATEWAY, message))
+        }
     }
 }
 
@@ -2697,7 +2851,19 @@ const LANE_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 /// one could register with, which are stopped, and the lanes that called in
 /// the last day. The CLI prints the line to register with; the interface
 /// shows the same.
-pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+#[derive(Deserialize, Default)]
+pub struct ExternalQuery {
+    /// Also resolve each channel's forge identity. Asked for by `tracon
+    /// external show`, not by the interface's polling, since it may ask the
+    /// forge.
+    #[serde(default)]
+    pub identities: bool,
+}
+
+pub async fn external(
+    State(s): State<AppState>,
+    Query(q): Query<ExternalQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
     let rows = s.store().channel_list()?;
     // Listed on their own rather than folded into `channels`, which callers
     // read as names: a stopped channel is still one a harness registers with.
@@ -2738,11 +2904,28 @@ pub async fn external(State(s): State<AppState>) -> ApiResult<Json<serde_json::V
         row["running"] = json!(running);
         lanes.push(row);
     }
+    // What a harness the operator runs should commit as on each channel, so
+    // its work reads as theirs on the forge. The node launches nothing for
+    // it, so this is offered, to apply as repository-local config.
+    let mut identities = serde_json::Map::new();
+    for channel in channels.iter().filter(|_| q.identities) {
+        if let Some(identity) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::forge::identity_for(&s.tools.broker, channel, &s.node_id, None),
+        )
+        .await
+        .ok()
+        .flatten()
+        {
+            identities.insert(channel.clone(), json!(identity));
+        }
+    }
     Ok(Json(json!({
         "enabled": s.cfg.external.enabled,
         "channels": channels,
         "lanes": lanes,
         "stopped": stopped,
+        "identities": identities,
     })))
 }
 
