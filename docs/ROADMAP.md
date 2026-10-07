@@ -203,15 +203,6 @@ hit on a real task.
 
 **Review and publication**
 
-- [ ] Read a mirrored review from its owner. A review is mirrored to every node on its
-      channel and its verdict is forwarded to the owner, but its worktree, candidate,
-      checks, criteria and forge intent stay there, so a phone served by another node (the
-      homelab node, reviewing #338 and #339 on 2026-10-04) read none of them and called the
-      change stale. The node now says the review is held elsewhere and leaves approval to
-      the owner's own staleness check; the phone still decides without the checks, the
-      evidence or what approval sends to the forge. Fetch that detail from the owner over
-      the mesh, as candidate evidence already is, bounded and refused for a third node, and
-      say plainly when the owner is unreachable rather than showing an empty review.
 - [ ] Follow a published pull or merge request after it opens: subscribe to its CI runs,
       draft/ready and open/merged/closed transitions, review verdicts and new comments or
       threads, and record each as an event on the review and its work item. Notify through

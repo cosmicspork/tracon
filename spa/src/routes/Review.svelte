@@ -15,6 +15,7 @@
     reviewVerdict,
     type CandidateEvidence,
     type Criteria,
+    type OwnerDetail,
     type PinnedRequirements,
     type Review,
     type ReviewContext,
@@ -37,6 +38,7 @@
   let stale = $state<string[]>([])
   /** The node that owns a review mirrored here; null when this node does. */
   let remoteOwner = $state<string | null>(null)
+  let ownerDetail = $state<OwnerDetail | null>(null)
   let evidence = $state<CandidateEvidence | null>(null)
   let shownWork = $state<ShownWorkItem[]>([])
   let requirements = $state<PinnedRequirements | null>(null)
@@ -76,6 +78,7 @@
         revision = d.revision
         stale = d.stale
         remoteOwner = d.remote_owner ?? null
+        ownerDetail = d.owner_detail ?? null
         evidence = d.evidence
         shownWork = d.shown_work ?? []
         requirements = d.requirements
@@ -378,11 +381,19 @@
       <dd class="m">{review.lane ?? 'an external agent'}</dd>
     {/if}
   </dl>
-  {#if remoteOwner}
+  {#if remoteOwner && ownerDetail?.state === 'fetched'}
     <div class="banner">
       held by {nodeLabel(store.nodes, remoteOwner)}
-      <b>· its checks and evidence stay on that node, and it checks the branch for changes again when you decide</b>
+      <b>· read from it just now; it checks the branch for changes again when you decide</b>
     </div>
+  {:else if remoteOwner}
+    <div class="banner crit">
+      held by {nodeLabel(store.nodes, remoteOwner)}
+      <b>· {ownerDetail?.reason ?? 'its checks and evidence stay on that node'}; decide there, or reload once it can be read</b>
+    </div>
+  {/if}
+  {#if remoteOwner && !evidence}
+    <!-- what the owner holds could not be read; the banner above says why -->
   {:else if !evidence}
     <div class="banner crit">
       verification evidence missing <b>· this review predates immutable candidate capture</b>
@@ -502,6 +513,8 @@
               {/if}
               {#if c.duplicate}
                 <button class="lnk" disabled>Judge it</button>
+              {:else if remoteOwner}
+                <small>Judge it on {nodeLabel(store.nodes, remoteOwner)}, which holds this attempt.</small>
               {:else if judging === c.key}
                 <div class="judge">
                   <select bind:value={criterionVerdict} aria-label="your verdict">

@@ -487,6 +487,12 @@ export interface ReviewDetails {
    * `intent` is null; a verdict is forwarded to it. Null for a local review.
    */
   remote_owner?: string | null
+  /**
+   * For a mirrored review, whether its owner's detail was read: `fetched`
+   * fills `stale`, `evidence`, `criteria` and `intent` from the owner;
+   * `moved` and `unreachable` leave them empty, with the reason.
+   */
+  owner_detail?: OwnerDetail | null
   stale: string[]
   /** Pinned to the revision at submit time; never the live work item. */
   requirements: PinnedRequirements | null
@@ -1435,4 +1441,9 @@ export interface ExternalEvent {
   ref_id: string | null
   payload: Record<string, unknown>
   at_ms: number
+}
+
+export interface OwnerDetail {
+  state: 'fetched' | 'moved' | 'unreachable'
+  reason?: string
 }
