@@ -51,6 +51,14 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 Every item here was found on the 2026-09-20, 2026-09-28, 2026-09-30 or 2026-10-03 live
 runs, or in the daily desktop use since.
 
+- [ ] **An unkeyed API provider is a dead end in Connections.** Found reviewing 0.29.0
+      on the desktop, 2026-10-08. `default_providers()` seeds `openai` into every node, so
+      Connections always shows "OpenAI API · not connected · disconnected · API key only.
+      Add it under serving-node credentials." The link points at the page it is on, and
+      nothing there takes a provider key: Forge tokens is `gh` and `glab` only. #228 hid
+      these cards; #253 brought them back so a provider the operator had just added
+      stayed visible. Hide a disconnected key provider that only the defaults declare,
+      give one the operator declared an inline field for its key, and say its state once.
 
 ## Next — the working loop, made comfortable
 
@@ -113,6 +121,30 @@ hit on a real task.
       job results recorded on the session, and a push when the run finishes or fails.
 
 **Node data**
+
+**Screens and navigation.** Found reviewing 0.29.0 on the desktop, 2026-10-08.
+
+- [ ] Readiness as main banners. The composer's `✓ investigate ✓ verify ✓ publish` line
+      and its "Ready to investigate, verify and publish." go. A path that is not ready gets
+      a banner in the main column, as a failed isolation check does, naming the gap and
+      where to close it; a ready repository shows nothing.
+- [ ] Top-level navigation without Work and Nodes. Tasks, Sessions, Evidence and Usage
+      become rail entries instead of tabs under Work (`/metrics` becomes `/usage`). Nodes
+      leaves the rail: on one node it is a single row and a pointer to Settings, and its
+      remaining facts (harness version mismatch, whether a node can run, running and
+      waiting counts, last seen) move into Settings → Mesh beside the members. A serving
+      node that cannot run says so in a banner. The phone's bottom bar keeps five slots
+      (Home, Tasks, Sessions, Documents, More) and More holds Memories, which it lacks
+      today, Evidence, Usage and Settings.
+- [ ] Document editing fills the page: the editor takes the height below the header with
+      Save and Cancel pinned, rather than a 60vh textarea with a resize handle.
+- [ ] Regroup Settings' nine sections. Maintenance has become a catch-all (node
+      configuration, the operator token, runtime setup, your own harness, session transfer,
+      the boundary, service and recovery). A likely shape: General; Connections; Channels
+      and repositories; Access and devices (operator token, administrator access,
+      notifications, your own harness); Permissions and policies; Mesh (hub, members, the
+      node list above); System (node configuration, runtime, service, data held, sweep).
+      Session transfer moves to Sessions as an import.
 
 **OpenCode, contingent on the spike above**
 
