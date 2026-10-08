@@ -13,6 +13,7 @@
   let editingId = $state<string | null>(null)
   let draft = $state('')
   let busy = $state(false)
+  let confirmingId = $state<string | null>(null)
 
   const channels = $derived(store.channels.map((c) => c.name))
 
@@ -55,6 +56,7 @@
 
   function edit(m: Memory) {
     editingId = m.id
+    confirmingId = null
     draft = m.body
     error = null
   }
@@ -80,11 +82,14 @@
     }
   }
 
-  async function retire(id: string) {
+  // A delete is a tombstone in the channel's corpus: it reaches every node
+  // that shares the channel and nothing brings the memory back.
+  async function remove(id: string) {
     busy = true
     error = null
     try {
-      await api.retireMemory(id)
+      await api.deleteMemory(id)
+      confirmingId = null
       if (editingId === id) editingId = null
       load()
     } catch (e) {
@@ -141,10 +146,18 @@
               {formatAge(m.updated_ms, clock.now)}</small
             >
           </span>
-          <span class="act">
-            <button class="lnk" disabled={busy} onclick={() => edit(m)}>Edit</button>
-            <button class="lnk d" disabled={busy} onclick={() => retire(m.id)}>Retire</button>
-          </span>
+          {#if confirmingId === m.id}
+            <span class="act confirm">
+              <span>Delete this memory from {channel}? There is no undo.</span>
+              <button class="btn d" disabled={busy} onclick={() => remove(m.id)}>{busy ? 'Deleting…' : 'Delete'}</button>
+              <button class="lnk" disabled={busy} onclick={() => (confirmingId = null)}>Cancel</button>
+            </span>
+          {:else}
+            <span class="act">
+              <button class="lnk" disabled={busy} onclick={() => edit(m)}>Edit</button>
+              <button class="lnk d" disabled={busy} onclick={() => (confirmingId = m.id)}>Delete</button>
+            </span>
+          {/if}
         {/if}
       </div>
     {/each}
@@ -242,6 +255,14 @@
     align-items: center;
     white-space: nowrap;
   }
+  .btn.d { background: var(--crit); color: var(--bg); }
+  .act.confirm {
+    white-space: normal;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    font: 12.5px var(--sans);
+    color: var(--ink2);
+  }
   .empty {
     color: var(--ink2);
   }
@@ -252,6 +273,9 @@
     }
     .act {
       grid-column: 2;
+    }
+    .act.confirm {
+      justify-content: flex-start;
     }
   }
 </style>
