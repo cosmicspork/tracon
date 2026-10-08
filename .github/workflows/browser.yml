@@ -1,0 +1,69 @@
+name: browser
+
+# The `browser` catalogue service's image. Built and smoke-tested on every PR
+# that touches it (Dependabot's upstream bumps included), and published on
+# merge, apart from tracon's releases: a Chrome fix should not wait for one.
+# Nodes pin it by digest, so a publish changes nothing until an operator pins it.
+on:
+  pull_request:
+    paths:
+      - containers/browser/**
+      - .github/workflows/browser.yml
+  push:
+    branches: [main]
+    paths:
+      - containers/browser/**
+      - .github/workflows/browser.yml
+  # Republish from main, e.g. after a failed push.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Podman, as the node runs it; the smoke test mirrors the node's own
+      # sidecar arguments.
+      - name: Build
+        run: podman build -t localhost/tracon-browser:ci containers/browser
+
+      - name: Smoke test
+        run: containers/browser/smoke.sh localhost/tracon-browser:ci
+
+      - name: Publish
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          version=$(sed -nE 's|^FROM .*/headless-shell:([^@]+)@.*|\1|p' containers/browser/Containerfile)
+          [ -n "$version" ] || { echo "no headless-shell tag in the Containerfile" >&2; exit 1; }
+          image=ghcr.io/cosmicspork/tracon-browser
+          echo "$GH_TOKEN" | podman login ghcr.io -u "$ACTOR" --password-stdin
+          podman push --digestfile digest localhost/tracon-browser:ci "$image:$version"
+          podman push localhost/tracon-browser:ci "$image:latest"
+          digest=$(cat digest)
+          {
+            echo "### tracon-browser $version"
+            echo
+            echo '```toml'
+            echo '[[service]]'
+            echo 'name = "browser"'
+            echo "image = \"$image@$digest\""
+            echo 'port = 9222'
+            echo 'ready = "/json/version"'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

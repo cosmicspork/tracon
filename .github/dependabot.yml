@@ -11,3 +11,13 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+
+  # The browser service's base image, weekly and on its own: Chrome ships
+  # security fixes too often for the monthly batch. `browser.yml` smoke-tests
+  # each bump; merging it publishes the image.
+  - package-ecosystem: docker
+    directory: /containers/browser
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
