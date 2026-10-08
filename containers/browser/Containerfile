@@ -1,0 +1,30 @@
+# The `browser` catalogue service: chromedp's headless-shell, started as a
+# sidecar that answers on the session's loopback and nowhere else.
+#
+# Upstream's entrypoint (`/headless-shell/run.sh`) runs socat on 0.0.0.0:9222
+# in front of Chrome. A sidecar shares the session's network namespace, which
+# sits on the shared internal network, so that would hand the browser to every
+# other container there. This image starts Chrome itself, bound to loopback.
+#
+# Dependabot moves the tag and digest together; `browser.yml` rejects a build
+# that listens beyond loopback before anything is published.
+FROM docker.io/chromedp/headless-shell:156.0.8078.17@sha256:e45d36d818636b955eb47cc1b40b91068be4aebc3490bcad239c1849f16eff1f
+
+LABEL org.opencontainers.image.source="https://github.com/cosmicspork/tracon" \
+      org.opencontainers.image.description="Headless Chrome for tracon's browser service, on loopback only"
+
+# The sidecar already drops every capability; not being root is the rest.
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin browser
+USER browser
+WORKDIR /home/browser
+
+# --no-sandbox: Chrome's sandbox needs namespaces a capability-less container
+# cannot make; the container is the sandbox. --disable-dev-shm-usage: podman's
+# default /dev/shm is 64 MB, which Chrome otherwise warns about and can crash on.
+ENTRYPOINT ["/headless-shell/headless-shell", \
+            "--no-sandbox", \
+            "--disable-dev-shm-usage", \
+            "--use-gl=angle", \
+            "--use-angle=swiftshader", \
+            "--remote-debugging-address=127.0.0.1", \
+            "--remote-debugging-port=9222"]
