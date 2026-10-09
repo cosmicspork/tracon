@@ -32,6 +32,38 @@
 * **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
 * **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
 
+## [0.30.0](https://github.com/cosmicspork/tracon/compare/v0.29.0...v0.30.0) (2026-10-09)
+
+
+### Features
+
+* **session:** name the session's forge repository and default the forge tools and submit_review to it ([#416](https://github.com/cosmicspork/tracon/issues/416)) ([134a98f](https://github.com/cosmicspork/tracon/commit/134a98fe33a7b4d4661c24609cf5bcd838f353cc))
+* **spa:** render a session's messages as Markdown ([#415](https://github.com/cosmicspork/tracon/issues/415)) ([454c2cd](https://github.com/cosmicspork/tracon/commit/454c2cdf1b507e654935f63e3bf7601c915f108a))
+
+
+### Bug Fixes
+
+* **approvals:** title gated tools in words and give service_start a schema ([#427](https://github.com/cosmicspork/tracon/issues/427)) ([a8aab85](https://github.com/cosmicspork/tracon/commit/a8aab85820f87d87985919656527aef2ea22feb0))
+* **boundary:** clone volumes without copying SELinux labels ([#412](https://github.com/cosmicspork/tracon/issues/412)) ([de5d815](https://github.com/cosmicspork/tracon/commit/de5d8155ca1b1b50e571d1a731dccfc835ee2a7d))
+* **harness:** pin Claude Code 2.1.295 ([#434](https://github.com/cosmicspork/tracon/issues/434)) ([43952c2](https://github.com/cosmicspork/tracon/commit/43952c2879919421238f9109487b0935cb567895))
+* **mcp:** return ask_operator within the wait budget and let question_status wait ([#425](https://github.com/cosmicspork/tracon/issues/425)) ([6db39e8](https://github.com/cosmicspork/tracon/commit/6db39e8f2944ed21083840d92bcbef1680cbb568))
+* **mcp:** skip question_status in the asked-tool title guard ([#430](https://github.com/cosmicspork/tracon/issues/430)) ([52ba2a9](https://github.com/cosmicspork/tracon/commit/52ba2a9acf1afc84ee79f540eab74be220565224))
+* **node:** read a process's start time from /proc on Linux ([#413](https://github.com/cosmicspork/tracon/issues/413)) ([33fcef2](https://github.com/cosmicspork/tracon/commit/33fcef2926a7a63b3c678baebddb15d8e6c4babb))
+* **providers:** hide the unkeyed built-in API provider and take a declared one's key in place ([#432](https://github.com/cosmicspork/tracon/issues/432)) ([a32256a](https://github.com/cosmicspork/tracon/commit/a32256a8b0d4d6739d0135db6f9681488927ffbf))
+* **review:** keep the base a squashed update merged as a second parent ([#429](https://github.com/cosmicspork/tracon/issues/429)) ([7983cd1](https://github.com/cosmicspork/tracon/commit/7983cd1737b1dfb4f0c23db35c0e2a05de359790))
+* **review:** let a published review update the change it opened ([#428](https://github.com/cosmicspork/tracon/issues/428)) ([e09cd92](https://github.com/cosmicspork/tracon/commit/e09cd9253b5ee982d40a9fe60b0fc9a1c93b2088))
+* **review:** run submit_review's checks on the node and let review_status wait ([#417](https://github.com/cosmicspork/tracon/issues/417)) ([12af162](https://github.com/cosmicspork/tracon/commit/12af1629eff25276203e49980f5b7a92a79d3e23))
+* **review:** say what a failed check failed on, ahead of its tail ([#433](https://github.com/cosmicspork/tracon/issues/433)) ([ae2809d](https://github.com/cosmicspork/tracon/commit/ae2809da4e76765b0ead66490afb5da07ca361ad))
+* **spa:** confirm memory deletes and trim home prose ([#408](https://github.com/cosmicspork/tracon/issues/408)) ([bf52a73](https://github.com/cosmicspork/tracon/commit/bf52a73a0b6ee69ca0388f25b59be36d97d05ff4))
+* **spa:** give every session event kind a readable log line ([#420](https://github.com/cosmicspork/tracon/issues/420)) ([4fa235d](https://github.com/cosmicspork/tracon/commit/4fa235d39befa6532ae99da1c7263ab986250adc))
+* **spa:** keep policy records from splitting a run of tool calls ([#411](https://github.com/cosmicspork/tracon/issues/411)) ([56f4169](https://github.com/cosmicspork/tracon/commit/56f416943f5bc6e050c6feb4fba8fe3a747171e7))
+* **spa:** keep the permission card's title and answers on a phone ([#421](https://github.com/cosmicspork/tracon/issues/421)) ([072eaa0](https://github.com/cosmicspork/tracon/commit/072eaa0d9572f24932172dfe1c423cebc5db9d65))
+* **spa:** keep the review verdict bar in view on a phone and show a decided review as decided ([#424](https://github.com/cosmicspork/tracon/issues/424)) ([953762f](https://github.com/cosmicspork/tracon/commit/953762fbb82afcea28694b2d217a0b99fb51521b))
+* **spa:** list context documents and any kind the list does not name ([#419](https://github.com/cosmicspork/tracon/issues/419)) ([342282b](https://github.com/cosmicspork/tracon/commit/342282bec705dd4b7e9fb305812041f04621b566))
+* **spa:** show declared models, keep repository commits and style, untick a failed push enrolment ([#423](https://github.com/cosmicspork/tracon/issues/423)) ([70efbe6](https://github.com/cosmicspork/tracon/commit/70efbe69b5b30ed7675cd9bceebf1ed368cb8bf0))
+* **spa:** tell loading and failed lists apart from empty ones ([#426](https://github.com/cosmicspork/tracon/issues/426)) ([5733c95](https://github.com/cosmicspork/tracon/commit/5733c95b1d942600e2eca5c7223a8db51c88e58e))
+* **work:** execute a written plan on Continue and offer only planning before one ([#422](https://github.com/cosmicspork/tracon/issues/422)) ([67a0989](https://github.com/cosmicspork/tracon/commit/67a0989f92d4f858a53b481c86d9e10b9221fa6b))
+
 ## [0.29.0](https://github.com/cosmicspork/tracon/compare/v0.28.0...v0.29.0) (2026-10-07)
 
 
