@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     groupLog,
+    policyLine,
     groupOpen,
     groupSummary,
     providerErrorLine,
@@ -194,6 +195,10 @@
         <div class="mark crit">{e.payload.error ?? JSON.stringify(e.payload)}</div>
       {:else if e.kind === 'tool_result'}
         <div class="sys">{toolLine(e, e, undefined)}</div>
+      {:else if e.kind === 'policy_denied'}
+        <div class="mark crit">{policyLine(e)}</div>
+      {:else if e.kind === 'policy_allowed'}
+        <div class="mark wait">{policyLine(e)}</div>
       {:else if e.kind !== 'usage' && e.kind !== 'plan'}
         <div class="sys">{e.kind}</div>
       {/if}

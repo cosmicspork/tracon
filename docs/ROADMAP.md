@@ -145,6 +145,16 @@ hit on a real task.
       notifications, your own harness); Permissions and policies; Mesh (hub, members, the
       node list above); System (node configuration, runtime, service, data held, sweep).
       Session transfer moves to Sessions as an import.
+- [ ] A session's tool calls as a transcript you scan, opened on demand. A run already
+      folds every call between two things the operator reads (a message, a prompt, a
+      card, a refusal, the end of a turn), and records nobody reads no longer split it.
+      What remains: opened, each call is one line with its path or command (from
+      `raw_input`), its status and duration, consecutive reads merged under one head, and
+      a call opens again to its output. A failed call's first error line shows without
+      opening anything; while a call runs, its line shows the tail of its output; folded,
+      the run says how long it took; one key opens or folds every run on the screen.
+      The design follows oh-my-pi's transcript (MIT, a terminal and React UI keyed to its
+      own tools); the code is tracon's own.
 
 **OpenCode, contingent on the spike above**
 

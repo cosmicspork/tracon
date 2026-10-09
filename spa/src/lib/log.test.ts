@@ -7,6 +7,7 @@ import {
   orientationLine,
   groupOpen,
   groupSummary,
+  policyLine,
   providerErrorLine,
   repetitionHint,
   repetitionLine,
@@ -63,6 +64,43 @@ test('summary counts by kind and reports failures', () => {
     ev('tool_result', 'c', { status: 'failed' }),
   ])
   expect(groupSummary(log[0].tools!)).toBe('Read 2 files, ran 1 shell command · 1 failed')
+})
+
+test("a call's policy allow does not split the run, and names what the call did", () => {
+  // Claude Code's order since every call got a policy record: call, the
+  // harness's own allow, result. The asked path's allow has no call id.
+  const log = groupLog([
+    ev('tool_call', 'a', { kind: 'other' }),
+    ev('policy_allowed', null, { decided_by: 'harness', policy: 'allow', kind: 'read', tool_call_id: 'a' }),
+    ev('tool_result', 'a', { status: 'completed' }),
+    ev('tool_call', 'b', { kind: 'other' }),
+    ev('policy_allowed', null, { kind: 'execute', rule: 'boundary-shell' }),
+    ev('usage'),
+    ev('tool_result', 'b', { status: 'failed' }),
+    ev('tool_call', 'c', { kind: 'other' }),
+    ev('policy_allowed', null, { kind: null, rule: 'node-tool' }),
+    ev('tool_result', 'c', { status: 'completed' }),
+  ])
+  expect(log.map((l) => l.kind)).toEqual(['tools'])
+  expect(log[0].tools!.length).toBe(3)
+  expect(groupSummary(log[0].tools!)).toBe('Read 1 file, ran 1 shell command, called 1 tool · 1 failed')
+})
+
+test('a call the policy would have asked about stays in view', () => {
+  const log = groupLog([
+    ev('tool_call', 'a', { kind: 'other' }),
+    ev('policy_allowed', null, { decided_by: 'harness', policy: 'ask', rule: 'harness', title: 'Bash: git push' }),
+    ev('tool_result', 'a', { status: 'completed' }),
+    ev('tool_call', 'b', { kind: 'other' }),
+  ])
+  expect(log.map((l) => l.kind)).toEqual(['tools', 'leaf', 'tools'])
+  expect(policyLine(log[1].event!)).toBe('ran without asking · the policy would have asked (harness) · Bash: git push')
+})
+
+test('a policy refusal reads as one', () => {
+  expect(policyLine(ev('policy_denied', null, { title: 'Write: .git/config', reason: 'Git internals are the node’s.' }))).toBe(
+    'refused by policy · Write: .git/config · Git internals are the node’s.',
+  )
 })
 
 test('an orphan tool_result is kept as a leaf', () => {
