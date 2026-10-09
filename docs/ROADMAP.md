@@ -65,69 +65,19 @@ reproduces one.
 
 **0.29.0 screen audit, for a patch release**
 
-- [ ] Review on a phone: the sticky verdict bar sits under the tab bar, hiding Reject and
-      the composer's Send; draft and refusal notices render below the diff, out of sight
-      of the sticky composer; findings collapse to one word per line; a long evidence path
-      widens the page. On every width Approve is disabled without a reason when
-      publication is not ready, and an approved, published review still reads as pending,
-      with live verdicts and no link to the pull request (`review-phone-bar-in-view`,
-      `review-not-ready`, `review-approved`, `review-long-content`).
-- [ ] Session log: events 0.29.0 added (`service`, `published`, `session_suspended`,
-      `provider_exhausted`, `exhaustion_boundary`, `exhaustion_wake`, `session_paused`)
-      and older ones (`session_resumed`, `approval_settled`, `candidate_verified`,
-      `review_decision`) print as bare kind names (`sessions-running-working`,
-      `sessions-suspended`, `sessions-exhausted-held`).
-- [ ] Settings editors: declared models always show 0 (`structuredClone` on a `$state`
-      proxy throws), the repositories table reads as unsaved straight after load and a
-      save drops `commits` and `style` from `node.toml`, and the push toggle stays on
-      after enrolment fails (`settings-connections`, `settings-repositories`,
-      `settings-devices-denied`).
-- [ ] Gated tools added in 0.29.0 present as raw JSON: a Jira transition approval shows a
-      `transition_id` and not the status it moves to; `pr_merge`, `run_rerun`,
-      `service_start` and `repo_setup_propose` have no prose title, on Home and in push
-      notifications too; `service_start` has no input schema
-      (`approvals-issue-transition`, `approvals-run-rerun`, `approvals-service-start`).
-- [ ] Continue after a plan session starts another plan session where Next says to
-      execute, and Next offers execute on an unplanned item whose Execute is disabled
-      (`work-item-planned`, `work-item-new`).
-- [ ] The permission card loses its title on a phone and its actions run off-screen,
-      which blocks approving from the phone (`home-permission-request-open`,
-      `sessions-waiting-egress`).
 - [ ] Work, Documents, Sessions, Usage and Home show their empty state while loading and
       beside a load error, and a failed queue load hides pending decisions with no error
       at all (`work-loading`, `docs-list-error`, `home-queue-error`).
-- [ ] `context-*` documents never appear in the Documents list (`docs-list`).
 
 **The first live session on 0.29.0** (2026-10-08, README screenshots through the browser
 service; `note-tracon-dogfood` has the detail)
 
-- [ ] **Nothing a session calls may wait on a person past the wait budget.** Claude Code's
-      HTTP MCP client ended `submit_review` calls at 5–5½ minutes although the node writes
-      a 20-minute `timeout` into its MCP config (`MCP_CALL_TIMEOUT_MS`); #417 bounded
-      `submit_review`. `ask_operator` still blocks until the operator answers
-      (`wait_for_question`), and `request_egress` waits for the answer, so a question left
-      longer than the client's limit comes back to the agent as "The operation timed out"
-      while the card stays open. Return within `MAX_WAIT_SECS` with `still_waiting` and a
-      handle, as `review_status` does, and find which limit the client actually applies so
-      the comment in `adapter/claude.rs` says what is true.
 - [ ] **A failed check says what failed.** `just check` exited 101 on a failing test, and
       the `check_result` tail (the last 4 KiB of the log) held only `Compiling …` lines; the
       test's name reached neither the agent nor the review, and the agent spent a full
       `cargo test` finding it. Keep the lines that carry the failure (a test runner's
       failure summary, the last error) beside the tail, and check the order the log is
       assembled in, since a stream appended after another hides the first one's end.
-- [ ] **A review can update the pull request it opened.** Twice (#414, #416), resubmitting
-      an approved, published review was refused both ways: without `change`, "pull request
-      N is already open …; pass change: N to update it"; with `change: N`, "a review updates
-      the change it was first submitted for". Publication seems never to write the opened
-      number back to the review's target. The fallback, a new review with `change`, also
-      needs the worktree's branch to match the forge branch, which the first submit's
-      `branch` may have renamed without saying so.
-- [ ] **Squashing an update keeps the target it merged.** An update whose reviewed revision
-      merges `main` (to resolve a conflict) is pushed as one commit on the old head, which
-      drops the `main` parent, so the forge still reports the conflict (#414). When the
-      reviewed revision has the target as an ancestor, parent the squash on it too, or
-      offer rebase onto the target as the update.
 
 ## Next — the working loop, made comfortable
 
@@ -412,6 +362,11 @@ work that does not need it, and nothing on it may be described elsewhere as prov
 - [ ] **A private repository end to end**, through preparation, agent work, checks in the
       project's toolchain image, and authorized publication to GitHub, with nothing in the
       published result naming tracon.
+- [ ] **The 0.29.0 live-session fixes, live** (#425, #428, #429): a resubmitted, published
+      review updating the pull request it opened, with and without `change`; an update
+      whose revision merged `main` clearing GitHub's conflict; and an `ask_operator` left
+      past 45 s in a node-started Claude Code session, answered and read back through
+      `question_status`. Each is proven against a fake forge or by test only.
 - [ ] **The normal workflow, proven as a workflow**: client disconnect and reconnect,
       interrupted execution, retained drafts, a node restart, and recovery through
       completion, with what actually ran, what stayed uncertain, and where the operator
