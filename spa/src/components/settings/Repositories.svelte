@@ -2,7 +2,7 @@
   import Card from './Card.svelte'
   import { api } from '../../lib/api'
   import { store } from '../../lib/store.svelte'
-  import { acceptsUploads, blankForm, buildLine, problems, toEntry, toForm, words, type RepoForm } from '../../lib/repos'
+  import { acceptsUploads, blankForm, buildLine, canonical, problems, toEntry, toForm, words, type RepoForm } from '../../lib/repos'
   import type { RepoEnvironments, RepoImageBuild } from '../../lib/types'
 
   const local = $derived(store.node?.loopback ?? false)
@@ -13,7 +13,7 @@
   let error = $state('')
   let note = $state('')
 
-  const saved = $derived(JSON.stringify(loaded?.entries.map((item) => item.entry) ?? []))
+  const saved = $derived(canonical(loaded?.entries.map((item) => item.entry) ?? []))
   const dirty = $derived(JSON.stringify(forms.map(toEntry)) !== saved)
   const invalid = $derived(problems(forms))
   const presets = $derived(loaded?.presets ?? [])

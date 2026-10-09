@@ -492,7 +492,7 @@ const REPO_ENV = {
   ],
   entries: [
     {
-      entry: { path: 'github.com/op/orbit', dockerfile: '.devcontainer/Dockerfile', checks: ['cargo nextest run --workspace', 'bun run --cwd spa check'], timeout_secs: 1800, prepare: ['cargo fetch --locked', 'bun install --frozen-lockfile --cwd spa'], egress: ['crates', 'npm'], session_egress: true },
+      entry: { path: 'github.com/op/orbit', dockerfile: '.devcontainer/Dockerfile', checks: ['cargo nextest run --workspace', 'bun run --cwd spa check'], timeout_secs: 1800, prepare: ['cargo fetch --locked', 'bun install --frozen-lockfile --cwd spa'], egress: ['crates', 'npm'], session_egress: true, commits: 'keep', style: { conventional: true, max_subject: 72 } },
       builds: [build({}), build({ id: 'b-2', kind: 'session:claude', image: 'localhost/tracon-repo-orbit-claude@sha256:9a0f…' })],
     },
     {
@@ -808,7 +808,7 @@ export default [
 
   // --- Repositories ----------------------------------------------------------
   S('repositories', '/settings#repositories', 'Repositories: two entries, built images', {
-    note: 'Dockerfile entry with base and session images ready and sessions given egress; a pinned image entry with a long digest.',
+    note: 'Dockerfile entry with base and session images ready and sessions given egress, and `commits`/`style` the editor does not show; a pinned image entry with a long digest. Nothing is unsaved, so there is no Save button.',
   }),
   S('repositories-builds', '/settings#repositories', 'Repositories: failed, building and warning builds', {
     note: 'Three entries (collapsed by default) — expanded here: failed build with output open, a building one, missing-tool warnings, the github upload caution.',

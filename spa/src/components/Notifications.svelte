@@ -49,7 +49,14 @@
     }
   }
 
-  const toggle = () => act(() => (on ? push.disable() : push.enable()), on ? '' : 'On. A test reports push-service acceptance, not device display.')
+  async function toggle(event: Event) {
+    const box = event.currentTarget as HTMLInputElement
+    await act(() => (on ? push.disable() : push.enable()), on ? '' : 'On. A test reports push-service acceptance, not device display.')
+    // `checked={on}` only writes to the box when `on` changes. A failed
+    // enrolment leaves `on` false, so the tick the click put there stays
+    // unless it is taken back here; the note says why.
+    box.checked = on
+  }
   const test = () =>
     act(async () => {
       const attempts = (await api.testPush()).sent

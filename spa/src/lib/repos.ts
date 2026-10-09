@@ -21,6 +21,10 @@ export interface RepoForm {
   /** Presets and host names, separated by spaces or commas. */
   egress: string
   sessionEgress: boolean
+  /** What the entry says that this form does not edit (`commits`, `style`),
+   *  carried back as it came: the table is saved whole, so a key left out
+   *  here is a key removed from node.toml. */
+  kept: Partial<RepoEntry>
 }
 
 export function lines(text: string): string[] {
@@ -47,22 +51,25 @@ export function blankForm(): RepoForm {
     prepare: '',
     egress: '',
     sessionEgress: false,
+    kept: {},
   }
 }
 
 export function toForm(entry: RepoEntry): RepoForm {
+  const { path, image, dockerfile, context, checks, timeout_secs, prepare, egress, session_egress, ...kept } = entry
   return {
-    path: entry.path,
-    source: entry.dockerfile ? 'dockerfile' : entry.image ? 'image' : 'harness',
-    image: entry.image ?? '',
-    dockerfile: entry.dockerfile ?? '',
-    context: entry.context ?? '',
-    ownChecks: entry.checks !== undefined && entry.checks !== null,
-    checks: (entry.checks ?? []).join('\n'),
-    timeout: entry.timeout_secs ? String(entry.timeout_secs) : '',
-    prepare: entry.prepare.join('\n'),
-    egress: entry.egress.join(' '),
-    sessionEgress: entry.session_egress === true,
+    path,
+    source: dockerfile ? 'dockerfile' : image ? 'image' : 'harness',
+    image: image ?? '',
+    dockerfile: dockerfile ?? '',
+    context: context ?? '',
+    ownChecks: checks !== undefined && checks !== null,
+    checks: (checks ?? []).join('\n'),
+    timeout: timeout_secs ? String(timeout_secs) : '',
+    prepare: prepare.join('\n'),
+    egress: egress.join(' '),
+    sessionEgress: session_egress === true,
+    kept,
   }
 }
 
@@ -71,6 +78,7 @@ export function toForm(entry: RepoEntry): RepoForm {
 /// Dockerfile must not come back as an entry that names both.
 export function toEntry(form: RepoForm): RepoEntry {
   const entry: RepoEntry = {
+    ...form.kept,
     path: form.path.trim(),
     prepare: lines(form.prepare),
     egress: words(form.egress),
@@ -105,6 +113,13 @@ export function problems(forms: RepoForm[]): string[] {
     seen.add(path)
   }
   return found
+}
+
+/// The table as the form would save it, for comparing with what is loaded:
+/// the node's JSON orders an entry's keys its own way and states some things
+/// the form says differently, so both sides go through the same round trip.
+export function canonical(entries: RepoEntry[]): string {
+  return JSON.stringify(entries.map((entry) => toEntry(toForm(entry))))
 }
 
 /// The entries in `egress` that reach a host an upload could go to. Said

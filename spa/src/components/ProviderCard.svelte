@@ -47,12 +47,14 @@
   // The declared-models editor's own local copy: edited freely, saved on
   // request. Re-seeded whenever the node's own config changes under it
   // (a fresh load elsewhere on the page, or this card's own save landing).
+  // `config` is the page's `$state`, so its models are a proxy that
+  // `structuredClone` refuses; a snapshot is the plain copy.
   let models = $state<ModelDecl[]>([])
   let modelsBusy = $state(false)
   let modelsError = $state('')
   let modelsSaved = $state(false)
   $effect(() => {
-    models = config ? structuredClone(config.models) : []
+    models = config ? $state.snapshot(config.models) : []
     modelsSaved = false
   })
   const modelsValid = $derived.by(() => {
@@ -526,7 +528,10 @@
       font-size: 16px;
     }
     .mrow {
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    }
+    .mrow input:not([type='checkbox']) {
+      min-width: 0;
     }
     .mrow.mhead {
       display: none;
